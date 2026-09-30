@@ -302,6 +302,40 @@ On the Java 25/26 images `-XX:+ZGenerational` is **not** set because it is obsol
 
 See [startup-performance.md](../code/startup-performance.md) for the startup-time measurements under each collector.
 
+### Image Server Jar (`mockserver-netty-docker`)
+
+**Outcome:** the published server images (`docker/local` — the standard image — plus `-graaljs`, `-clustered`, `-aot`, and `-http3` on top of the standard image) are built from `mockserver-netty-docker-<version>.jar`, a build-internal jar that is never published. It is the `mockserver-netty-no-dependencies` library jar with one change: JNA sits at `com.sun.jna` instead of `shaded_package.com.sun.jna`. `libjnidispatch` binds its JNI entry points to the unrelocated class names, so only unrelocated JNA loads, and with it the `SO_ORIGINAL_DST` and eBPF original-destination lookups for transparent proxying (see [service-mesh.md](service-mesh.md)). The library jar on Maven Central keeps JNA relocated, because users embed it next to their own JNA (Testcontainers, docker-java).
+
+```mermaid
+flowchart LR
+    NETTY["mockserver-netty
++ dependencies"] -->|"shade: relocate to shaded_package
+(JNA included)"| LIB["mockserver-netty-no-dependencies
+library jar, Maven Central"]
+    LIB -->|"shade: move shaded_package.com.sun.jna
+back to com.sun.jna, nothing else"| IMG["mockserver-netty-docker
+image jar, never published"]
+    IMG --> JP["jarprep
+(refuses relocated JNA)"]
+    JP --> IMAGES["published images"]
+```
+
+| Build | Where the image jar comes from |
+|---|---|
+| Reactor (`./mvnw install`, CI `:maven: build`) | `mockserver/mockserver-netty-docker/target/`, derived from the reactor's library jar; uploaded as a build artifact for the snapshot push |
+| Release (`scripts/release/components/docker.sh`) | `mvn -pl mockserver-netty-docker package -Dmockserver.docker.baseVersion=<release>`, derived from the **released** library jar on Maven Central (the release tree is already at the next SNAPSHOT), and the build fails unless that jar's SHA-1 matches Central's `.sha1`, so a stale copy in the Maven cache volume cannot be used; a dry-run before the jar is on Central builds from the checkout |
+| Local (`build-local-mockserver-image.sh`, `docker/local/local_docker_build.sh`) | the reactor output, or `~/.m2` after `./mvnw install` |
+
+**Why derive rather than re-shade.** Re-running the full shade over `mockserver-netty` with JNA excluded would duplicate ~40 relocations and every filter, and could drift from the library jar. Deriving it from the library jar keeps every other entry byte-identical by construction: the only entries that differ are JNA's classes and the MockServer classes that reference JNA. The release derives from the jar users download, so the image ships exactly those bytes plus the JNA move. A classifier on `mockserver-netty-no-dependencies` was rejected: its jar would match the `mockserver-netty-no-dependencies-*.jar` globs several scripts use, and a classifier is deployed to Central with its module.
+
+**Guards (fail closed):**
+- `mockserver-netty-no-dependencies/src/packaging/assert-jna-relocation.sh` runs at `package` in both modules. For the library jar it requires `shaded_package/com/sun/jna/Native.class` and both linux `libjnidispatch.so` natives under the relocated prefix, and no `com/sun/jna/` entry. For the image jar it requires `com/sun/jna/Native.class` and `com/sun/jna/linux-x86-64/` + `linux-aarch64/libjnidispatch.so`, no relocated JNA entry and no remaining `shaded_package.com.sun.jna` reference in any entry, the same file list as the library jar after the prefix move, and (by CRC) no changed entry whose library copy did not reference relocated JNA.
+- `mockserver-jarprep.sh` refuses a shaded jar that still has `shaded_package/com/sun/jna/Native.class`, and fails unless `deps.jar` has `com/sun/jna/Native.class`, so an image build fed the library jar fails.
+- `docker-validate-sync.sh` checks that jarprep keeps that refusal, and that the release, snapshot and local scripts that stage a published image's jar stage `mockserver-netty-docker` and never a local `mockserver-netty-no-dependencies/target` build.
+- `.buildkite/scripts/steps/docker-transparent-proxy-verify.sh <image>` proves it in a built image: both JNA resolvers report support in the image JVM, and an iptables-REDIRECTed request with a wrong `Host` header reaches its original destination. It fails unless conntrack is unreadable to MockServer in that network namespace, so the lookup can only have come from `SO_ORIGINAL_DST`. It needs `NET_ADMIN`, so it is a local check.
+
+JNA unrelocated in the image is safe: nothing else in the image brings JNA. A jar a user adds under `/libs` comes after `/mockserver-deps.jar` on the classpath, so MockServer's JNA wins; a `/libs` jar built against a different JNA version could then fail.
+
 ### Image Download Size
 
 **Outcome:** every published server image (`docker/local` — the standard image — plus `-graaljs`, `-clustered` and `-aot`) and the `docker/Dockerfile` reference run the MockServer jar through one shared script, `docker/jarprep/mockserver-jarprep.sh`, before it enters the image. The script drops every native binary the container's architecture cannot load, stores the jar uncompressed, and splits it into `/mockserver.jar` (MockServer's own `org/mockserver/**` classes) and `/mockserver-deps.jar` (everything else), each on its own layer. Each image downloads about 38 MB less (measured). When a release changes no dependency, an upgrade also reuses the ~46 MB dependency layer and re-downloads about 84 MB less (calculated from measured layer sizes); a release that bumps any dependency re-downloads that layer, as most releases do.
@@ -309,7 +343,7 @@ See [startup-performance.md](../code/startup-performance.md) for the startup-tim
 ```mermaid
 flowchart LR
     JAR["server jar
-(shaded, or assembly for docker/Dockerfile)"] --> TRIM["drop natives for other
+(mockserver-netty-docker, or assembly for docker/Dockerfile)"] --> TRIM["drop natives for other
 platforms and architectures"]
     TRIM --> SPLIT["split and store uncompressed
 sorted entries, fixed timestamps"]
@@ -335,15 +369,15 @@ The MockServer jar layer shrinks from 94.5 MB to 45.7 MB (deps) + 10.9 MB (own) 
 | Step | Detail |
 |---|---|
 | Arch | The arch the build stage *runs on* (`uname -m`) is authoritative; a non-empty `TARGETARCH` must agree, and every jarprep stage declares `ARG TARGETARCH` bare (see [Platform ARGs and native libraries](#platform-args-and-native-libraries)). After the trim, every kept `.so` must have this arch's ELF `e_machine` (62 = x86-64, 183 = AArch64), and at least one must survive. |
-| Jar flavour | Detected from the jar: the **shaded** `mockserver-netty-no-dependencies` jar (what the published images ship) relocates dependencies under `shaded_package/`, including JNA, carries the epoll `.so` as `libshaded_1package_netty_transport_native_epoll_<arch>.so` (the name relocated Netty loads) and has no tcnative natives; the **assembly** `jar-with-dependencies` (what `docker/Dockerfile` and the container smoke tests use) does none of this. Anything else fails the build. |
+| Jar flavour | Detected from the jar: the **shaded** `mockserver-netty-docker` jar (what the published images ship, see [Image Server Jar](#image-server-jar-mockserver-netty-docker)) relocates dependencies under `shaded_package/` except JNA, carries the epoll `.so` as `libshaded_1package_netty_transport_native_epoll_<arch>.so` (the name relocated Netty loads) and has no tcnative natives; the **assembly** `jar-with-dependencies` (what `docker/Dockerfile` and the container smoke tests use) does none of this. A shaded jar with relocated JNA (the `mockserver-netty-no-dependencies` library jar) is refused, as is anything else. |
 | Trim | Netty's `META-INF/native/` keeps the `*<arch>.so` suffix (never `linux_<arch>`, which would drop the epoll `.so`); zstd-jni, snappy, JNA and lz4-java keep their `linux/<arch>` directory. |
 | Split | `own.jar` = `org/mockserver/**` plus `META-INF/MANIFEST.MF` first (the shaded manifest carries the MockServer version, so it must not sit in `deps.jar`); `deps.jar` = everything else. The manifest gains `Class-Path: mockserver-deps.jar`, so `java -jar /mockserver.jar` still runs, but it does not use the AppCDS archive or AOT cache: those record the ENTRYPOINT's `-cp`, and under `-jar` the JVM logs `shared class paths mismatch` and starts without them. Both are built from a sorted entry list with fixed timestamps, so identical dependency bytes give an identical layer digest. |
-| Fail closed | One assertion per native family (epoll under the flavour's name, zstd, snappy, JNA, lz4) for this arch; for the assembly jar also tcnative present. Entry counts, the split predicate and the manifest `Class-Path` are checked. The assembly jar's quiche natives are dropped (jars up to 8.0.0 still bundle them; HTTP/3 ships in `-http3`); the shaded jar's quiche `.so` for this arch is kept, because the `-http3` layer copies it out of the base image's jars. |
-| Drift | `.buildkite/scripts/steps/docker-validate-sync.sh` fails if an image context's copy of the script differs from `docker/jarprep/`; if a Dockerfile stops running it or stops COPYing both `/jarprep/own.jar` and `/jarprep/deps.jar` from the jarprep stage; if its runtime stage COPYs `mockserver-netty-jar-with-dependencies.jar`; if an ENTRYPOINT stops using `-cp /mockserver.jar:/mockserver-deps.jar:/libs/*`; or if an AppCDS/AOT training command (`-XX:ArchiveClassesAtExit` / `-XX:AOTCacheOutput`) runs anything but `-cp /mockserver.jar:/mockserver-deps.jar org.mockserver.cli.Main`. |
+| Fail closed | One assertion per native family (epoll under the flavour's name, zstd, snappy, JNA, lz4) for this arch, plus unrelocated JNA classes (`com/sun/jna/Native.class`) and no relocated ones; for the assembly jar also tcnative present. Entry counts, the split predicate and the manifest `Class-Path` are checked. The assembly jar's quiche natives are dropped (jars up to 8.0.0 still bundle them; HTTP/3 ships in `-http3`); the shaded jar's quiche `.so` for this arch is kept, because the `-http3` layer copies it out of the base image's jars. |
+| Drift | `.buildkite/scripts/steps/docker-validate-sync.sh` fails if an image context's copy of the script differs from `docker/jarprep/`; if a Dockerfile stops running it or stops COPYing both `/jarprep/own.jar` and `/jarprep/deps.jar` from the jarprep stage; if its runtime stage COPYs `mockserver-netty-jar-with-dependencies.jar`; if an ENTRYPOINT stops using `-cp /mockserver.jar:/mockserver-deps.jar:/libs/*`; if an AppCDS/AOT training command (`-XX:ArchiveClassesAtExit` / `-XX:AOTCacheOutput`) runs anything but `-cp /mockserver.jar:/mockserver-deps.jar org.mockserver.cli.Main`; or if the script stops refusing relocated JNA, or a staging script stops staging `mockserver-netty-docker`. |
 
 **Classpath order is fixed.** The AppCDS archive (standard image) and the AOT cache (`-aot`) record the training classpath, so the training run and the ENTRYPOINT both use `/mockserver.jar:/mockserver-deps.jar` in that order (reversed, `-Xshare:on` aborts with `shared class paths mismatch`). The union of the two jars is the trimmed jar's entry set, so class loading is unchanged. `docker/root`, `docker/snapshot` and `docker/root-snapshot` still ship the single fat jar; no pipeline publishes them. `docker/webhook` ships a separate 14 MB webhook jar with no native binaries.
 
-**Native libraries:** which natives load is unchanged by the trim, verified on arm64 and amd64 by loading each family in the image JVM. In the published (shaded-jar) images epoll loads (under its relocated name), as do snappy, lz4-java and zstd-jni; tcnative is absent (JDK TLS provider), quiche loads only in `-http3` (which installs it under the relocated name in `/usr/lib`), and JNA does not load (its relocated classes cannot bind the stock `jnidispatch`). The `docker/Dockerfile` reference image (assembly jar) loads epoll, BoringSSL and JNA, including BoringSSL under `--read-only` (`docker-build-verify.sh`).
+**Native libraries:** which natives load is unchanged by the trim, verified on arm64 and amd64 by loading each family in the image JVM. In the published (shaded-jar) images epoll loads (under its relocated name), as do snappy, lz4-java and zstd-jni; tcnative is absent (JDK TLS provider), quiche loads only in `-http3` (which installs it under the relocated name in `/usr/lib`), and JNA loads (the image jar keeps it unrelocated, so the stock `jnidispatch` binds). The `docker/Dockerfile` reference image (assembly jar) loads epoll, BoringSSL and JNA, including BoringSSL under `--read-only` (`docker-build-verify.sh`).
 
 ### Heap Cap
 
@@ -524,7 +558,7 @@ See [CI/CD](ci-cd.md) for full pipeline details.
   This checks that the markers are present. It cannot prove the check actually runs: for example, a loop over no files still passes.
 - **`.buildkite/scripts/steps/docker-build-verify.sh`** builds the reference image *without* `--build-arg TARGETARCH`, as the pushes do. It then reads the ELF machine of the image's `/usr/lib` tcnative `.so` and asserts that both `OpenSsl.isAvailable` and `Epoll.isAvailable` are true in the image JVM.
 
-**Where the `/usr/lib` tcnative `.so` matters.** It is the native-TLS fallback when `docker run --read-only` stops Netty extracting the jar's own copy. That applies to `docker/Dockerfile`, which runs the unshaded jar-with-dependencies. The released 8.0.0 reference Dockerfile, built for arm64, fell back to JDK TLS under `--read-only`. The pushed `graaljs` and `clustered` images run the shaded `mockserver-netty-no-dependencies` jar. Its relocated netty cannot load the stock tcnative `.so`, so those images use JDK TLS on both arches, whichever arch of `.so` they carry.
+**Where the `/usr/lib` tcnative `.so` matters.** It is the native-TLS fallback when `docker run --read-only` stops Netty extracting the jar's own copy. That applies to `docker/Dockerfile`, which runs the unshaded jar-with-dependencies. The released 8.0.0 reference Dockerfile, built for arm64, fell back to JDK TLS under `--read-only`. The pushed `graaljs` and `clustered` images run the shaded `mockserver-netty-docker` jar. Its relocated netty cannot load the stock tcnative `.so`, so those images use JDK TLS on both arches, whichever arch of `.so` they carry.
 
 ## Local Docker Operations
 

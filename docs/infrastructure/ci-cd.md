@@ -133,7 +133,11 @@ state visible rather than a silent green), and runs + asserts them only when
 `RUN_TRANSPARENT_PROXY_E2E=true` on an agent with the docker CLI, the socket, and
 NET_ADMIN/`--privileged` support. The suites themselves skip cleanly (never error)
 when the daemon refuses the privileged container, via
-`DockerCliTestSupport.containerStartRejected(...)`.
+`DockerCliTestSupport.containerStartRejected(...)`. The suites run the unshaded
+jar-with-dependencies unless `-Dmockserver.e2e.jar=<path>` names another jar. The
+image-level equivalent, `.buildkite/scripts/steps/docker-transparent-proxy-verify.sh
+<image>`, is not wired into any pipeline for the same NET_ADMIN reason; run it locally
+after changing the image jar or JNA (see [docker.md](docker.md#image-server-jar-mockserver-netty-docker)).
 
 **Why the cloud suites are a separate step, not `-s` on `java-build.sh`:**
 `run-in-docker.sh` withholds the Docker socket from PR builds and `exit 0`s the
@@ -451,7 +455,7 @@ A single transient failure from `repo.maven.apache.org` (a `Connection reset` / 
 
 These pipelines run independently from the Java pipeline and do not have access to Java build artifacts. To test against the HEAD-built MockServer (not a stale `:snapshot` from Docker Hub), both scripts source a shared helper:
 
-- **Helper:** `.buildkite/scripts/build-local-mockserver-image.sh` — builds the `mockserver-netty-no-dependencies` shaded JAR from the Maven reactor (skipped if the JAR already exists), copies it into `docker/local/`, and runs `docker build` to produce a local image tagged `mockserver-under-test:local` (configurable via `MOCKSERVER_IMAGE` env var).
+- **Helper:** `.buildkite/scripts/build-local-mockserver-image.sh` — builds the `mockserver-netty-docker` JAR (the shaded server jar with JNA unrelocated, which the published images ship) from the Maven reactor (skipped if the JAR already exists), copies it into `docker/local/`, and runs `docker build` to produce a local image tagged `mockserver-under-test:local` (configurable via `MOCKSERVER_IMAGE` env var).
 
 The test fixtures (`conftest.py` for Python, `integration_spec.rb` for Ruby) also respect the `MOCKSERVER_IMAGE` env var when launching a container in standalone/local mode.
 

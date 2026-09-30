@@ -121,6 +121,7 @@
         <module>mockserver-proxy-war</module>
         <module>mockserver-netty</module>
         <module>mockserver-netty-no-dependencies</module>
+        <module>mockserver-netty-docker</module>
         <module>mockserver-junit-rule</module>
         <module>mockserver-junit-rule-no-dependencies</module>
         <module>mockserver-junit-jupiter</module>

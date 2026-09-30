@@ -10,9 +10,9 @@ set -euo pipefail
 # For the copy smoke test to exercise what the download path ships, it MUST be fed the
 # SAME artifact: the default mockserver-netty jar-with-dependencies.
 #
-# NOT the shaded mockserver-netty-no-dependencies jar: jarprep would detect it as shaded
-# (relocated netty, no tcnative) and skip the tcnative assertion. That jar is what
-# docker/local consumes, exercised by java-docker-push-snapshot.sh, not here. This
+# NOT a shaded jar: jarprep refuses the mockserver-netty-no-dependencies library jar (relocated
+# JNA), and would detect the mockserver-netty-docker jar docker/local consumes as shaded (relocated
+# netty, no tcnative) and skip the tcnative assertion; java-docker-push-snapshot.sh covers that. This
 # matches how helm-integration-test.sh already stages the default fat jar for docker/clustered.
 echo "--- :buildkite: Downloading default fat JAR artifact"
 buildkite-agent artifact download --step "${CONTAINER_TEST_JARS_STEP:-container-test-jars}" "mockserver/mockserver-netty/target/mockserver-netty-*-jar-with-dependencies.jar" .

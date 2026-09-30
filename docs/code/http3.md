@@ -28,7 +28,7 @@ to listen on.
 | Maven / Gradle | `org.mock-server:mockserver-netty` brings `io.netty:netty-codec-native-quic` for every platform transitively; add it explicitly only if you exclude it or manage Netty yourself (same version as the rest of Netty) |
 
 **Why the published images need their own variant.** Every published image (standard, `-graaljs`,
-`-clustered`, `-aot`) runs the SHADED `mockserver-netty-no-dependencies` jar, which relocates Netty
+`-clustered`, `-aot`) runs the SHADED `mockserver-netty-docker` jar (the `mockserver-netty-no-dependencies` jar with JNA unrelocated), which relocates Netty
 to `shaded_package.io.netty`. Netty's `NativeLibraryLoader` then asks for a prefixed library —
 `libshaded_1package_netty_quiche42_linux_<arch>.so` — while every published native (inside the shaded
 jar itself, or in `netty-codec-native-quic`) is named `libnetty_quiche42_linux_<arch>.so`. So no

@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "--- :buildkite: Downloading shaded JAR artifact"
-buildkite-agent artifact download "mockserver/mockserver-netty-no-dependencies/target/mockserver-netty-no-dependencies-*.jar" .
+# The images ship the mockserver-netty-docker jar (the shaded jar with JNA unrelocated), not the
+# mockserver-netty-no-dependencies library jar, whose relocated JNA cannot load (jarprep refuses it).
+echo "--- :buildkite: Downloading the image JAR artifact"
+buildkite-agent artifact download "mockserver/mockserver-netty-docker/target/mockserver-netty-docker-*.jar" .
 
 shopt -s nullglob
 SHADED_JAR=""
-for f in mockserver/mockserver-netty-no-dependencies/target/mockserver-netty-no-dependencies-*.jar; do
+for f in mockserver/mockserver-netty-docker/target/mockserver-netty-docker-*.jar; do
   case "$(basename "$f")" in
     *-sources.jar|*-javadoc.jar|original-*) continue ;;
   esac
@@ -15,7 +17,7 @@ for f in mockserver/mockserver-netty-no-dependencies/target/mockserver-netty-no-
 done
 shopt -u nullglob
 if [ -z "$SHADED_JAR" ]; then
-  echo "Error: shaded JAR not found after artifact download"
+  echo "Error: image JAR (mockserver-netty-docker-*.jar) not found after artifact download"
   exit 1
 fi
 

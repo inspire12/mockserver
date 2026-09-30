@@ -25,51 +25,49 @@ skip_unless_release_type "docker" full,post-maven,docker-only
 log_step "Publish Docker images $RELEASE_VERSION (dry-run=$DRY_RUN)"
 sync_to_origin_master
 
-# ---- Locate or fetch shaded JAR -------------------------------------------
-# Since the cbc7f92f8 refactor the shaded jar is the main artifact of the
-# mockserver-netty-no-dependencies sibling module, not a classifier on
-# mockserver-netty. Filter out -sources/-javadoc siblings.
+# ---- Derive the image JAR -------------------------------------------------
+# The images ship the mockserver-netty-docker jar: the RELEASED mockserver-netty-no-dependencies jar
+# with JNA moved back to com.sun.jna (libjnidispatch cannot load relocated JNA). It is never
+# published, so derive it here from the library jar on Maven Central, pinned to RELEASE_VERSION by
+# -Dmockserver.docker.baseVersion (the tree is at master's in-dev version, see the install below).
 cd "$REPO_ROOT"
-find_local_shaded() {
-  find mockserver/mockserver-netty-no-dependencies/target \
-    -name 'mockserver-netty-no-dependencies-*.jar' \
-    ! -name '*-sources.jar' \
-    ! -name '*-javadoc.jar' \
-    ! -name 'original-*' \
-    -print -quit 2>/dev/null || true
-}
-SHADED_JAR=$(find_local_shaded)
-if [[ -z "$SHADED_JAR" ]]; then
-  log_info "Local shaded JAR not found — downloading from Maven Central"
-  mkdir -p mockserver/mockserver-netty-no-dependencies/target
-  SHADED_JAR="mockserver/mockserver-netty-no-dependencies/target/mockserver-netty-no-dependencies-${RELEASE_VERSION}.jar"
-  CENTRAL_URL="https://repo1.maven.org/maven2/org/mock-server/mockserver-netty-no-dependencies/${RELEASE_VERSION}/mockserver-netty-no-dependencies-${RELEASE_VERSION}.jar"
-  if is_dry_run && ! curl -sf -I "$CENTRAL_URL" >/dev/null 2>&1; then
-    log_dry "skip: download $RELEASE_VERSION JAR (not yet on Maven Central — would normally wait)"
-    # Use a locally-built shaded jar as a stand-in for local docker build test.
-    SHADED_JAR=$(find_local_shaded)
-    if [[ -z "$SHADED_JAR" ]]; then
-      # `package` (not `install`) is sufficient here: the shaded jar is consumed
-      # by file path (find_local_shaded), with no subsequent Maven resolution of
-      # a mock-server SNAPSHOT — unlike the infinispan path below, which needs
-      # `install` so dependency:copy-dependencies can resolve mockserver-core.
-      log_dry "no local JAR available — running 'mvn package' to produce one"
-      in_maven -w /build/mockserver \
-        -- mvn -DskipTests -pl mockserver-netty-no-dependencies -am package
-      SHADED_JAR=$(find_local_shaded)
-    fi
-  else
-    curl -fsSL --max-time 300 --connect-timeout 30 --retry 3 --retry-delay 5 \
-      -o "$SHADED_JAR" \
-      "$CENTRAL_URL"
+CENTRAL_URL="https://repo1.maven.org/maven2/org/mock-server/mockserver-netty-no-dependencies/${RELEASE_VERSION}/mockserver-netty-no-dependencies-${RELEASE_VERSION}.jar"
+DOCKER_JAR_DIR="mockserver/mockserver-netty-docker/target"
+rm -f "$DOCKER_JAR_DIR"/mockserver-netty-docker-*.jar
+if curl -sf -I --max-time 30 --retry 3 --retry-delay 5 "$CENTRAL_URL" >/dev/null 2>&1; then
+  log_info "Deriving the image JAR from the released mockserver-netty-no-dependencies $RELEASE_VERSION"
+  in_maven -w /build/mockserver \
+    -- mvn -B -DskipTests -pl mockserver-netty-docker package \
+      "-Dmockserver.docker.baseVersion=$RELEASE_VERSION"
+  SHADED_JAR="$DOCKER_JAR_DIR/mockserver-netty-docker-${RELEASE_VERSION}.jar"
+  # The derive resolved the library jar through the persistent m2 cache volume; a stale or corrupt
+  # copy there must not become the image, so it has to match Central's published checksum.
+  CENTRAL_SHA1="$(curl -fsSL --max-time 30 --retry 3 --retry-delay 5 "${CENTRAL_URL}.sha1" | awk '{ print $1 }')"
+  [[ "$CENTRAL_SHA1" =~ ^[0-9a-f]{40}$ ]] || { log_error "No valid SHA-1 at ${CENTRAL_URL}.sha1"; exit 1; }
+  M2_JAR="/root/.m2/repository/org/mock-server/mockserver-netty-no-dependencies/${RELEASE_VERSION}/mockserver-netty-no-dependencies-${RELEASE_VERSION}.jar"
+  CACHED_SHA1="$(in_docker "$MAVEN_IMAGE" -v mockserver-m2-cache:/root/.m2 -- sha1sum "$M2_JAR" \
+    | grep -E "^[0-9a-f]{40}  $M2_JAR\$" | awk '{ print $1 }' || true)"
+  if [[ "$CACHED_SHA1" != "$CENTRAL_SHA1" ]]; then
+    log_error "The mockserver-netty-no-dependencies $RELEASE_VERSION jar the image JAR was derived from has SHA-1 '${CACHED_SHA1:-unreadable}', but Maven Central publishes $CENTRAL_SHA1"
+    exit 1
   fi
+  log_info "Derived from the released library jar (SHA-1 $CENTRAL_SHA1, matches Maven Central)"
+elif is_dry_run; then
+  # `package` (not `install`): the jar is consumed by file path, never resolved by Maven again.
+  log_dry "skip: $RELEASE_VERSION is not on Maven Central yet - deriving the image JAR from this checkout"
+  in_maven -w /build/mockserver \
+    -- mvn -DskipTests -pl mockserver-netty-docker -am package
+  SHADED_JAR=$(find "$DOCKER_JAR_DIR" -name 'mockserver-netty-docker-*.jar' ! -name 'original-*' -print -quit 2>/dev/null || true)
+else
+  log_error "mockserver-netty-no-dependencies $RELEASE_VERSION is not on Maven Central ($CENTRAL_URL)"
+  exit 1
 fi
-[[ -n "$SHADED_JAR" && -f "$SHADED_JAR" ]] || { log_error "No shaded JAR available"; exit 1; }
+[[ -n "$SHADED_JAR" && -f "$SHADED_JAR" ]] || { log_error "No image JAR (mockserver-netty-docker) available"; exit 1; }
 log_info "Using JAR: $SHADED_JAR"
 cp "$SHADED_JAR" docker/local/mockserver-netty-jar-with-dependencies.jar
 cp "$SHADED_JAR" docker/graaljs/mockserver-netty-jar-with-dependencies.jar
 cp "$SHADED_JAR" docker/clustered/mockserver-netty-jar-with-dependencies.jar
-# The experimental -aot variant consumes the shaded jar from its build context via
+# The experimental -aot variant consumes the image jar from its build context via
 # `--build-arg source=copy` (its `copy` stage COPYs mockserver-netty-jar-with-dependencies.jar),
 # so it needs the same staged copy as graaljs/clustered.
 cp "$SHADED_JAR" docker/aot/mockserver-netty-jar-with-dependencies.jar

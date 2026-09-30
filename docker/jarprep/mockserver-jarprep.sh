@@ -46,20 +46,24 @@ case "$TARGETARCH" in
     ;;
 esac
 
-# The shaded jar relocates dependencies under shaded_package/ (JNA included), renames the epoll .so to
-# the name relocated netty loads, and strips the tcnative natives; the assembly jar does none of this.
+# The shaded (mockserver-netty-docker) jar relocates dependencies under shaded_package/, renames the
+# epoll .so to the name relocated netty loads, and strips the tcnative natives; the assembly jar does
+# none of this. Both carry JNA unrelocated: libjnidispatch cannot bind to relocated JNA classes, so the
+# mockserver-netty-no-dependencies library jar (which relocates it) is refused.
 if unzip -Z1 "$JAR" 'shaded_package/io/netty/channel/epoll/Epoll.class' >/dev/null 2>&1; then
+  if unzip -Z1 "$JAR" 'shaded_package/com/sun/jna/Native.class' >/dev/null 2>&1; then
+    fail "$JAR relocates JNA (the mockserver-netty-no-dependencies library jar), so SO_ORIGINAL_DST and eBPF lookups cannot load - stage the mockserver-netty-docker jar"
+  fi
   FLAVOUR=shaded
-  JNA_ROOT="shaded_package/com/sun/jna/"
   EPOLL_SO="libshaded_1package_netty_transport_native_epoll_$ARCH.so"
 elif unzip -Z1 "$JAR" 'io/netty/channel/epoll/Epoll.class' >/dev/null 2>&1; then
   FLAVOUR=assembly
-  JNA_ROOT="com/sun/jna/"
   EPOLL_SO="libnetty_transport_native_epoll_$ARCH.so"
 else
   echo "ERROR: $JAR is neither the assembly nor the shaded MockServer server jar" >&2
   exit 1
 fi
+JNA_ROOT="com/sun/jna/"
 KEEP_JNA="${JNA_ROOT}${JNA_ARCH}/"
 echo "jarprep: $JAR is the $FLAVOUR jar; keeping linux $TARGETARCH natives only"
 
@@ -161,6 +165,10 @@ echo "$DEPS_LIST" | grep -qx "META-INF/native/$EPOLL_SO" || fail "no netty epoll
 echo "$DEPS_LIST" | grep -q "^${KEEP_ZSTD}libzstd-jni" || fail "no zstd native for $TARGETARCH survived the trim"
 echo "$DEPS_LIST" | grep -q "^${KEEP_SNAPPY}libsnappyjava" || fail "no snappy native for $TARGETARCH survived the trim"
 echo "$DEPS_LIST" | grep -q "^${KEEP_JNA}libjnidispatch" || fail "no JNA native for $TARGETARCH survived the trim"
+echo "$DEPS_LIST" | grep -qx "${JNA_ROOT}Native.class" || fail "no unrelocated JNA (${JNA_ROOT}Native.class) in deps.jar"
+if echo "$DEPS_LIST" | grep -q '^shaded_package/com/sun/jna/'; then
+  fail "deps.jar carries relocated JNA, which cannot load its native"
+fi
 echo "$DEPS_LIST" | grep -q "^${KEEP_LZ4}liblz4-java" || fail "no lz4 native for $TARGETARCH survived the trim"
 unzip -p "$OUT/own.jar" META-INF/MANIFEST.MF | tr -d '\r' \
   | awk '$0 == "" { exit } $0 == "Class-Path: mockserver-deps.jar" { found = 1 } END { exit !found }' \

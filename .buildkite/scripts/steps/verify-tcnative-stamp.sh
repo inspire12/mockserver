@@ -13,7 +13,8 @@
 # mockserver-netty-no-dependencies/src/packaging/stamp-tcnative-version.sh).
 #
 # TWO jars carry that stamp, each feeding a different Docker `source` mode:
-#   * the maven-shade  mockserver-netty-no-dependencies jar         (source=copy)
+#   * the maven-shade  mockserver-netty-no-dependencies jar         (its stamp reaches the
+#                      source=copy images unchanged, via the mockserver-netty-docker jar)
 #   * the maven-assembly mockserver-netty-<ver>-jar-with-dependencies.jar
 #                                                                   (source=download, the default)
 # The stamp was once added to only ONE of the two — silently breaking the default

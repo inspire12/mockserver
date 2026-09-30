@@ -128,7 +128,7 @@ These are the **native** transport property names. Maven 3.9 defaults to the nat
 
 ### Modules
 
-The project comprises 25 Maven modules:
+The project comprises 26 Maven reactor modules (the table also lists the standalone examples project):
 
 | Module | Packaging | Purpose |
 |--------|-----------|---------|
@@ -143,6 +143,7 @@ The project comprises 25 Maven modules:
 | `mockserver-proxy-war` | war | Proxy-only WAR deployment |
 | `mockserver-netty` | jar (+fat, shaded) | Netty server, CLI, dashboard, proxy relay |
 | `mockserver-netty-no-dependencies` | jar (shaded) | Netty server with all dependencies shaded |
+| `mockserver-netty-docker` | jar (shaded, not published) | The no-dependencies jar with JNA unrelocated; the published Docker images are built from it |
 | `mockserver-junit-rule` | jar | JUnit 4 `@Rule` integration |
 | `mockserver-junit-rule-no-dependencies` | jar (shaded) | JUnit 4 rule, shaded |
 | `mockserver-junit-jupiter` | jar | JUnit 5 `@ExtendWith` integration |
@@ -194,7 +195,7 @@ The tcnative **native `.so`** is not shipped in the shaded server jar — the na
 
 The stamp must be present in **whichever jar the Dockerfile actually consumes**, and there are two, fed by the `source` build arg:
 
-- **`source=copy`** (release, snapshot, and the container-integration-test images — `--build-arg source=copy`) COPYs the shaded **`mockserver-netty-no-dependencies-<ver>.jar`** (maven-shade output). That module stamps its shade output.
+- **`source=copy`** (release and snapshot images — `--build-arg source=copy`) COPYs the shaded **`mockserver-netty-docker-<ver>.jar`**, which is the `mockserver-netty-no-dependencies` shade output with JNA unrelocated, so it carries that module's stamp unchanged. (The container-integration-test images copy the assembly jar instead.)
 - **`source=download`** (the Dockerfiles' **default**, the public reference path a user gets from a plain `docker build`) downloads the **`mockserver-netty-<ver>-jar-with-dependencies.jar`** assembly artifact from Sonatype/Maven Central. That is the `mockserver-netty` module's maven-**assembly** output — a *different* jar that does not depend on the no-dependencies module — so `mockserver-netty` stamps its own `target/classes` at `prepare-package` (reusing the same script) and the assembly's `useProjectArtifact=true` unpack carries the stamp into the jar-with-dependencies.
 
 Both stampings derive from the same netty-bom-governed resolution, so the two jars can never carry different versions. The read-back line each Dockerfile runs:

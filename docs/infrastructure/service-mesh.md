@@ -145,7 +145,15 @@ The default chain for REDIRECT-based transparent proxy is: **SO_ORIGINAL_DST →
 Requirements:
 - Linux OS
 - Netty epoll transport (`EpollSocketChannel`) — the NIO transport does not expose a raw file descriptor
-- JNA loadable at runtime (`com.sun.jna.Native`)
+- JNA loadable at runtime (`com.sun.jna.Native`) — JNA must be **unrelocated**: `libjnidispatch` binds its JNI entry points to the `com.sun.jna` class names, so relocated JNA cannot initialise
+
+Where JNA loads:
+
+| Artifact | JNA | SO_ORIGINAL_DST / eBPF lookups |
+|---|---|---|
+| `mockserver/mockserver` images (`-graaljs`, `-clustered`, `-aot`, `-http3`) | unrelocated (built from the build-internal `mockserver-netty-docker` jar) | work on epoll |
+| `mockserver-netty` jar-with-dependencies, the unshaded module | unrelocated | work on epoll |
+| `mockserver-netty-no-dependencies` (library jar on Maven Central) | relocated to `shaded_package.com.sun.jna`, so it cannot clash with an embedding app's own JNA (Testcontainers, docker-java) | fall back to conntrack |
 
 ### Conntrack (Fallback)
 
@@ -163,11 +171,12 @@ With `transparentProxyTproxy=true`, iptables uses `-j TPROXY` instead of `-j RED
 - `CompositeOriginalDestinationResolverTest` verifies chain ordering and null fall-through
 - `SoOriginalDstEndToEndIntegrationTest`, `TproxyEndToEndIntegrationTest` and `EbpfOriginalDestinationEndToEndIntegrationTest` are the privileged end-to-end suites. They spin up a sibling Linux container via the Docker CLI (not Testcontainers) with `--cap-add=NET_ADMIN` (SO_ORIGINAL_DST / TPROXY) or `--privileged` (eBPF) to set up iptables/BPF rules. They are Docker-gated via `DockerCliTestSupport.isDockerAvailable()` (a `docker info` probe), and additionally SKIP cleanly when the kernel lacks the required module (`xt_TPROXY`/BPF) or when the daemon refuses to start the privileged container (`DockerCliTestSupport.containerStartRejected(...)` — e.g. a user-namespace-remapped daemon rejecting `--privileged`).
 - **CI collection:** these three suites are named `*EndToEndIntegrationTest` so Maven Failsafe (`**/*IntegrationTest.java`) collects them. Prior to this they were named `*EndToEndIT`, which matches neither Surefire (`**/*Test.java`) nor Failsafe, so they were never executed on any build. A capable CI step must supply the Docker socket AND run on a daemon that permits `NET_ADMIN`/`--privileged` containers; on the user-namespace-remapped elastic-ci-stack agents the `--privileged` eBPF suite is rejected and SKIPS. See `docs/infrastructure/ci-cd.md` (transparent-proxy end-to-end step).
+- `.buildkite/scripts/steps/docker-transparent-proxy-verify.sh <image>` proves a built image end to end: in the image's own JVM both JNA-based resolvers report platform support, and an iptables-REDIRECTed request sent with a deliberately wrong `Host` header still reaches its original destination. TPROXY and eBPF are off and the script fails unless conntrack is unreadable to MockServer, so only `SO_ORIGINAL_DST` can have found it. The iptables/curl and origin sidecars share the MockServer container's network namespace, since the image is distroless. It needs `NET_ADMIN`, so it is run locally, not in CI. Setting the `mockserver.e2e.jar` system property points the three Java suites above at another jar, such as the `mockserver-netty-docker` jar.
 - The `TransparentProxyHandler` is tested with an `EmbeddedChannel` to verify `REMOTE_SOCKET` attribute setting and graceful fallback
 
 ## Limitations
 
 - **SO_ORIGINAL_DST requires Linux + epoll**: On macOS or Windows, or with NIO transport, the resolver returns null and conntrack (also Linux-only) is tried next. Both fall through to dns-intent on non-Linux hosts.
-- **Published images and the shaded jar fall back to conntrack**: the `mockserver/mockserver` images and `mockserver-netty-no-dependencies` relocate JNA, so the SO_ORIGINAL_DST and eBPF lookups cannot run there even on epoll and the lookup falls back to conntrack (plan item 42 in `docs/plans/performance-programme.md`).
+- **The `mockserver-netty-no-dependencies` library jar falls back to conntrack**: it relocates JNA so that it can sit next to an embedding app's own JNA, so the SO_ORIGINAL_DST and eBPF lookups cannot run from it even on epoll. The published images do not have this limitation: they are built from the `mockserver-netty-docker` jar, which carries JNA unrelocated (see [docker.md](docker.md)).
 - **Conntrack lookup is O(n) with a cap**: The `/proc/net/nf_conntrack` scan is capped at 200,000 lines. If the table exceeds this, MockServer falls back to Host-header resolution via dns-intent.
 - **iptables required without the webhook**: Without the admission webhook, an init container or external mechanism must configure traffic redirection. With the webhook enabled, iptables rules are injected automatically into opted-in pods.

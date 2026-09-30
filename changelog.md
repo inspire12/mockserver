@@ -243,6 +243,17 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   `--enable-native-access=ALL-UNNAMED`, so images on Java 24 or later no longer print four
   `WARNING: A restricted method in java.lang.System has been called` lines at start-up when a native
   library loads.
+- **Transparent proxying in the Docker images now reads the original destination from the socket
+  (`SO_ORIGINAL_DST`), and the eBPF strategy can run there.** Both use JNA, which the shaded jar the
+  images were built from renames, and renamed JNA cannot load its native library. Every image fell back
+  to the conntrack table scan, or, where conntrack is unavailable, to the `Host` header, so a request
+  with a missing or wrong `Host` header went to the wrong place. The images (`mockserver/mockserver`,
+  `-graaljs`, `-clustered`, `-aot` and `-http3`) are now built from a jar that is identical except that
+  it keeps JNA's own name; the build fails if it does not, and an image build refuses the renamed jar.
+  The `mockserver-netty-no-dependencies` jar on Maven Central still renames JNA, so it cannot clash with
+  the JNA your application or Testcontainers brings; run from it, MockServer still falls back to
+  conntrack. With a read-only root filesystem JNA cannot unpack its library and the images fall back as
+  before.
 - **MockServer could start on a port another application was already using on 127.0.0.1, so requests
   to localhost reached that application instead of MockServer.** Some operating systems, macOS among
   them, let MockServer's listener share a port with another application's 127.0.0.1-only listener and

@@ -243,7 +243,9 @@ PROXY UNKNOWN\r\n</code></pre>
 
 <h3>Strategy 3: SO_ORIGINAL_DST getsockopt</h3>
 
-<p>With the native (epoll) transport on Linux, MockServer reads the pre-REDIRECT destination via the <code class="inline code">SO_ORIGINAL_DST</code> socket option — an O(1) alternative to the conntrack table scan. Requires the native transport and the <code class="inline code">CAP_NET_ADMIN</code> capability.</p>
+<p>With the native (epoll) transport on Linux, MockServer reads the pre-REDIRECT destination via the <code class="inline code">SO_ORIGINAL_DST</code> socket option — an O(1) alternative to the conntrack table scan. It works in the <code class="inline code">mockserver/mockserver</code> Docker images and with the <code class="inline code">mockserver-netty</code> jar-with-dependencies. <code class="inline code">CAP_NET_ADMIN</code> is needed by whatever installs the iptables rule (for example the init container), not by the MockServer container itself.</p>
+
+<p>The <code class="inline code">mockserver-netty-no-dependencies</code> jar cannot use this strategy or the eBPF one. It is built for embedding in other applications, so it renames the JNA library these strategies use, which keeps it from clashing with your application's own copy of JNA. Run from that jar, MockServer uses conntrack instead.</p>
 
 <h3>Strategy 4: Linux Conntrack</h3>
 
@@ -278,9 +280,9 @@ PROXY UNKNOWN\r\n</code></pre>
         <tr><th>Context</th><th>Resolution Strategy</th><th>Notes</th></tr>
     </thead>
     <tbody>
-        <tr><td>Kubernetes sidecar with iptables REDIRECT</td><td>Conntrack, then Host header</td><td>Standard sidecar pattern</td></tr>
+        <tr><td>Kubernetes sidecar with iptables REDIRECT</td><td>SO_ORIGINAL_DST, then conntrack, then Host header</td><td>Standard sidecar pattern</td></tr>
         <tr><td>Behind AWS NLB / HAProxy (PROXY protocol)</td><td>PROXY protocol v1 / v2</td><td>Automatic detection, no config needed</td></tr>
-        <tr><td>OS-level transparent proxy</td><td>Conntrack, then Host header</td><td>iptables on host</td></tr>
+        <tr><td>OS-level transparent proxy</td><td>SO_ORIGINAL_DST, then conntrack, then Host header</td><td>iptables on host</td></tr>
         <tr><td>Cloud route-based interception</td><td>Host header fallback</td><td>When original-dst is not available</td></tr>
     </tbody>
 </table>
@@ -293,7 +295,7 @@ PROXY UNKNOWN\r\n</code></pre>
     <li><strong>Conntrack lookup is O(n) with a cap</strong> -- the <code class="inline code">/proc/net/nf_conntrack</code> file is parsed per connection, capped at 200,000 lines. If the conntrack table exceeds this limit, MockServer falls back to Host-header resolution. For high-throughput production use, consider a dedicated transparent proxy.</li>
     <li><strong>Linux only for conntrack</strong> -- original-destination resolution via conntrack requires Linux. On other OSes, the transparent proxy falls back to Host-header resolution.</li>
     <li><strong>iptables not automatic without the webhook</strong> -- without the <a href="#admission_webhook">admission webhook</a>, an init container or external mechanism must configure traffic redirection manually. With the webhook enabled, iptables rules are injected automatically.</li>
-    <li><strong>SO_ORIGINAL_DST and TPROXY need the native transport</strong> -- these kernel-level strategies require the native (epoll) transport on Linux and <code class="inline code">CAP_NET_ADMIN</code>. The eBPF socket-metadata strategy is also available (it reads a pinned BPF map populated by an external BPF program; requires <code class="inline code">CAP_BPF</code>).</li>
+    <li><strong>SO_ORIGINAL_DST and TPROXY need the native transport</strong> -- these kernel-level strategies require the native (epoll) transport on Linux, and <code class="inline code">CAP_NET_ADMIN</code> for the iptables rules. TPROXY also needs <code class="inline code">CAP_NET_ADMIN</code> in the MockServer container itself, because MockServer binds its listening socket with <code class="inline code">IP_TRANSPARENT</code>; SO_ORIGINAL_DST does not. SO_ORIGINAL_DST and eBPF are not available from the <code class="inline code">mockserver-netty-no-dependencies</code> jar, which falls back to conntrack. The eBPF socket-metadata strategy is also available (it reads a pinned BPF map populated by an external BPF program; requires <code class="inline code">CAP_BPF</code>).</li>
 </ul>
 
 <a id="related" class="anchor" href="#related">&nbsp;</a>

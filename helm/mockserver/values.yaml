@@ -342,7 +342,7 @@ affinity: {}
 # Sidecar / transparent proxy mode
 #
 # When `transparentProxy` is enabled MockServer reads the original destination of
-# intercepted connections (Linux iptables REDIRECT + nf_conntrack) and forwards
+# intercepted connections (Linux iptables REDIRECT, via SO_ORIGINAL_DST or nf_conntrack) and forwards
 # there, with a graceful Host-header fallback. This requires Linux nodes and the
 # NET_ADMIN capability, and is a no-op on non-Linux hosts. The optional iptables
 # init container redirects outbound TCP to MockServer so application traffic is

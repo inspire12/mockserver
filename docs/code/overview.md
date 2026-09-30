@@ -13,6 +13,7 @@ mockserver-monorepo/
 │   ├── mockserver-client-java-no-dependencies/        # ↑ shaded, zero transitive deps
 │   ├── mockserver-netty/           # Netty-based HTTP server (main artifact)
 │   ├── mockserver-netty-no-dependencies/              # ↑ shaded, zero transitive deps
+│   ├── mockserver-netty-docker/                       # ↑ with JNA unrelocated: the Docker images' jar (not published)
 │   ├── mockserver-war/             # WAR-packaged mock server
 │   ├── mockserver-proxy-war/       # WAR-packaged proxy
 │   ├── mockserver-junit-rule/      # JUnit 4 integration
@@ -89,6 +90,8 @@ Everything published to Maven Central under `org.mock-server` is produced by a m
 | `mockserver/mockserver-maven-plugin/` | `mockserver-maven-plugin` | Maven plugin (`pre-integration-test` / `post-integration-test` hooks). Inherits its version from `mockserver/pom.xml` and uses `${project.version}` for internal mockserver-* dependency refs, but is NOT a child module of `mockserver/pom.xml` — built and deployed by the dedicated `:java: Maven Plugin` step in `.buildkite/release-pipeline.yml`, separately from the main reactor. |
 
 The `*-no-dependencies` form is a real sibling module (e.g. `mockserver/mockserver-netty-no-dependencies/pom.xml`) — *not* a classifier on the source artifactId. Each sibling module is a thin pom that pulls in the source module as its single compile dependency, then runs `maven-shade-plugin` with `<shadedArtifactAttached>false</shadedArtifactAttached>` so the shaded jar IS the module's main artifact. This structure lets `central-publishing-maven-plugin` upload everything to Maven Central via the standard bundle flow under each artifact's natural coordinates. Before 6.0.0, the shaded jars were renamed at deploy time via `gpg:sign-and-deploy-file` and published under both `<classifier>shaded</classifier>` and the `-no-dependencies` artifactId; that dual-publish path was removed when the deploy mechanism switched to Sonatype Central Portal in 6.0.0.
+
+`mockserver-netty-docker/` is build-internal and never published: it re-shades the `mockserver-netty-no-dependencies` jar with JNA moved back to `com.sun.jna` so that JNA's native loads, and the published Docker images are built from it (see [docker.md](../infrastructure/docker.md#image-server-jar-mockserver-netty-docker)).
 
 ## High-Level Architecture
 

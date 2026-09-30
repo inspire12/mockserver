@@ -71,11 +71,13 @@ steps:
       # Download + extract to browse the rich coverage UI.
       - "mockserver/jacoco-html-reports.tar.gz"
       - "mockserver/mockserver-netty-no-dependencies/target/mockserver-netty-no-dependencies-*.jar"
+      # The images' jar (the shaded jar with JNA unrelocated), consumed by java-docker-push-snapshot.sh.
+      - "mockserver/mockserver-netty-docker/target/mockserver-netty-docker-*.jar"
       # The DEFAULT fat jar (assembly output), kept as a published build output. The
       # container-tests step no longer consumes THIS copy - ":maven: container-test jars"
       # builds its own so the tests can run alongside this step, and container-tests-run.sh
       # downloads from that step by key. It is not interchangeable with the shaded
-      # no-dependencies jar above (docker/local's), for which jarprep skips the tcnative check.
+      # mockserver-netty-docker jar above (docker/local's), for which jarprep skips the tcnative check.
       # The glob matches only the plain jar-with-dependencies, not the classifier variants.
       - "mockserver/mockserver-netty/target/mockserver-netty-*-jar-with-dependencies.jar"
       - "mockserver/mockserver-k8s-webhook/target/mockserver-k8s-webhook-*-jar-with-dependencies.jar"

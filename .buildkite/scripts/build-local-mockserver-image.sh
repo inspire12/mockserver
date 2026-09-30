@@ -13,8 +13,8 @@
 #   # afterwards $MOCKSERVER_IMAGE is set to the locally-built tag
 #
 # The script:
-#   1. Builds the shaded JAR (mockserver-netty-no-dependencies) via Maven
-#      — skipped if the JAR already exists (e.g. from a prior build step)
+#   1. Builds the image JAR (mockserver-netty-docker: the shaded jar with JNA
+#      unrelocated) via Maven — skipped if the JAR already exists
 #   2. Copies the JAR into docker/local/ as the Dockerfile expects
 #   3. Runs `docker build` to produce a local image
 #
@@ -31,9 +31,9 @@ MOCKSERVER_IMAGE="${MOCKSERVER_IMAGE:-mockserver-under-test:local}"
 
 # ── Step 1: Locate or build the shaded JAR ───────────────────────────
 _find_shaded_jar() {
-  local jar_dir="$_BLM_REPO_ROOT/mockserver/mockserver-netty-no-dependencies/target"
+  local jar_dir="$_BLM_REPO_ROOT/mockserver/mockserver-netty-docker/target"
   shopt -s nullglob
-  for f in "$jar_dir"/mockserver-netty-no-dependencies-*.jar; do
+  for f in "$jar_dir"/mockserver-netty-docker-*.jar; do
     case "$(basename "$f")" in
       *-sources.jar|*-javadoc.jar|original-*) continue ;;
     esac
@@ -47,12 +47,12 @@ _find_shaded_jar() {
 
 SHADED_JAR=""
 if SHADED_JAR=$(_find_shaded_jar); then
-  echo "--- :package: Using existing shaded JAR: $SHADED_JAR"
+  echo "--- :package: Using existing image JAR: $SHADED_JAR"
 elif [[ "${SKIP_JAR_BUILD:-}" == "true" ]]; then
-  echo "Error: SKIP_JAR_BUILD=true but no shaded JAR found" >&2
+  echo "Error: SKIP_JAR_BUILD=true but no image JAR (mockserver-netty-docker) found" >&2
   exit 1
 else
-  echo "--- :java: Building shaded JAR from source (this may take a few minutes)"
+  echo "--- :java: Building image JAR from source (this may take a few minutes)"
   # Run Maven inside the CI Docker image so no JDK is needed on the host.
   # run-in-docker.sh mounts the repo at /build; the JAR lands on the shared
   # volume at the same host path, visible to _find_shaded_jar afterward.
@@ -68,15 +68,15 @@ else
     -i mockserver/mockserver:maven \
     -w /build/mockserver \
     --cache maven \
-    -- ./mvnw package -pl mockserver-netty-no-dependencies -am \
+    -- ./mvnw package -pl mockserver-netty-docker -am \
       -DskipTests -Djacoco.skip=true -Dmaven.javadoc.skip=true \
       -Dmaven.gitcommitid.skip=true -P '!build-ui' \
       -q --batch-mode --no-transfer-progress
   if ! SHADED_JAR=$(_find_shaded_jar); then
-    echo "Error: Maven build completed but shaded JAR not found" >&2
+    echo "Error: Maven build completed but image JAR not found" >&2
     exit 1
   fi
-  echo "--- :package: Built shaded JAR: $SHADED_JAR"
+  echo "--- :package: Built image JAR: $SHADED_JAR"
 fi
 
 # ── Step 2: Copy JAR into docker/local/ build context ────────────────

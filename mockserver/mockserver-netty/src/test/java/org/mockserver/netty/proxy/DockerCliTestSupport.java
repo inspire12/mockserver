@@ -137,11 +137,17 @@ final class DockerCliTestSupport {
     }
 
     /**
-     * Finds the MockServer fat JAR in the build output directory.
+     * Finds the MockServer fat JAR in the build output directory, or the jar named by the
+     * {@code mockserver.e2e.jar} system property (e.g. the shaded mockserver-netty-docker jar the
+     * images ship, whose JNA must load from a shaded jar).
      *
      * @return path to the fat JAR, or {@code null} if not found
      */
     static Path findFatJar() {
+        String override = System.getProperty("mockserver.e2e.jar", "");
+        if (!override.isEmpty()) {
+            return Paths.get(override);
+        }
         try {
             Path targetDir = Paths.get("target");
             if (!Files.isDirectory(targetDir)) {

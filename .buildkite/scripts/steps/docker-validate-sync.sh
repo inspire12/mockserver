@@ -327,6 +327,46 @@ if [ -f "$JARPREP_SCRIPT" ]; then
   done
 fi
 
+# The published images must ship the mockserver-netty-docker jar (JNA unrelocated): libjnidispatch
+# cannot bind to the library jar's relocated JNA, so SO_ORIGINAL_DST and eBPF lookups would silently
+# fall back to conntrack. jarprep refuses the library jar at build time, and every script that stages
+# a published image's jar must stage the image jar, never a local library-jar build.
+if [ -f "$JARPREP_SCRIPT" ]; then
+  # The exact un-negated test, then `fail` as its only statement: an `if !`, an extra condition or a
+  # statement before the fail would all leave the refusal unbound.
+  refusal="$(grep -v '^[[:space:]]*#' "$JARPREP_SCRIPT" | grep -v '^[[:space:]]*$' | awk -v want="if unzip -Z1 \"\$JAR\" 'shaded_package/com/sun/jna/Native.class' >/dev/null 2>&1; then" '
+    state == 1 { state = ($1 == "fail") ? 2 : -1; next }
+    state == 2 { print ($1 == "fi" ? "bound" : "unbound"); exit }
+    { line = $0; sub(/^[[:space:]]+/, "", line) }
+    line == want { state = 1 }')"
+  if [ "$refusal" != "bound" ]; then
+    echo "FAIL: docker/jarprep/mockserver-jarprep.sh must refuse a jar with relocated JNA (if unzip -Z1 \"\$JAR\" 'shaded_package/com/sun/jna/Native.class' ...; then followed by fail)"
+    errors=$((errors + 1))
+  fi
+  if [ "$(grep -cxF 'JNA_ROOT="com/sun/jna/"' "$JARPREP_SCRIPT")" -ne 1 ] \
+     || ! grep -qF 'grep -qx "${JNA_ROOT}Native.class" || fail' "$JARPREP_SCRIPT"; then
+    echo "FAIL: docker/jarprep/mockserver-jarprep.sh must set JNA_ROOT=\"com/sun/jna/\" once and fail unless deps.jar has \${JNA_ROOT}Native.class"
+    errors=$((errors + 1))
+  fi
+fi
+IMAGE_JAR_STAGERS=(
+  "scripts/release/components/docker.sh"
+  ".buildkite/scripts/steps/java-docker-push-snapshot.sh"
+  ".buildkite/scripts/build-local-mockserver-image.sh"
+  "docker/local/local_docker_build.sh"
+)
+for stager in "${IMAGE_JAR_STAGERS[@]}"; do
+  code="$(grep -v '^[[:space:]]*#' "$REPO_ROOT/$stager" 2>/dev/null || true)"
+  if ! grep -qF 'mockserver-netty-docker' <<<"$code"; then
+    echo "FAIL: $stager must stage the mockserver-netty-docker jar (JNA unrelocated) into the image context"
+    errors=$((errors + 1))
+  fi
+  if grep -qF 'mockserver-netty-no-dependencies/target' <<<"$code"; then
+    echo "FAIL: $stager stages a local mockserver-netty-no-dependencies build, whose relocated JNA cannot load - stage mockserver-netty-docker"
+    errors=$((errors + 1))
+  fi
+done
+
 if [ $errors -gt 0 ]; then
   echo ""
   echo "FAILED: $errors Dockerfile sync issue(s) found"
