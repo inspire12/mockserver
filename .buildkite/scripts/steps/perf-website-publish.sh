@@ -74,6 +74,11 @@ set -euo pipefail
 #   * newest run is invalid (validity.valid
 #     != true) or missing the sweep/knee    -> exit non-zero, touch NOTHING.
 #   * transform yields no headline           -> exit non-zero, touch NOTHING.
+#   * headline is a lower bound below the
+#     committed one                          -> exit non-zero, touch NOTHING; unless the run
+#                                               also carries a new hardware matrix, when the
+#                                               patch refreshes hw_matrix ONLY and carries
+#                                               every other committed figure forward.
 # In every refuse-to-publish case the COMMITTED page is left exactly as it was
 # (last good figures still shown), and the step is loud (non-zero + annotation)
 # so the producer problem is fixed rather than silently papering the page.
@@ -329,9 +334,26 @@ echo "--- trigger: ${REASON_STR}"
 # HOLD: a headline capped by the load generator or a non-CPU limit (headline.lower_bound)
 # must not replace a higher committed one; nor one whose committed ceiling is missing or not
 # a number (fail closed). A lower bound that matches or raises it publishes, marked "at least".
+# The hold covers the headline only: when this run also carries a new hardware matrix, the
+# patch refreshes hw_matrix alone and keeps every other committed figure byte-for-byte.
+HEADLINE_HELD=false
 if jq -e '.headline.lower_bound == true' "$WORK/candidate.json" >/dev/null 2>&1 && [ -f "$DATA_FILE" ]; then
   OLD_HC="$(jq -r '.headline.healthy_ceiling_rps | if type == "number" then . else "invalid" end' "$DATA_FILE" 2>/dev/null || echo invalid)"
-  if [ "$OLD_HC" = invalid ] || awk -v n="$HC" -v o="$OLD_HC" 'BEGIN{exit !(n+0 < o+0)}'; then
+  if [ "$OLD_HC" != invalid ] && [ "$HW_ORIGIN" = "this run" ] && [ "$OLD_HW" != "$NEW_HW" ] \
+     && awk -v n="$HC" -v o="$OLD_HC" 'BEGIN{exit !(n+0 < o+0)}'; then
+    HELD_REASON="$(jq -r '.headline.lower_bound_reason' "$WORK/candidate.json")"
+    jq --slurpfile new "$WORK/candidate.json" '.hw_matrix = $new[0].hw_matrix' "$DATA_FILE" > "$WORK/candidate.held.json" \
+      || fail "HELD-HEADLINE MERGE FAILED" "Could not carry the committed figures forward around the new hardware matrix."
+    mv "$WORK/candidate.held.json" "$WORK/candidate.json"
+    HEADLINE_HELD=true
+    REASON_STR="${REASON_STR}headline held (a ${HC} req/s lower bound against a committed ${OLD_HC}); "
+    HC="$(jq -r '.headline.healthy_ceiling_rps' "$WORK/candidate.json")"
+    PK="$(jq -r '.headline.peak_achieved_rps' "$WORK/candidate.json")"
+    BEH="$(jq -r 'if .behaviours == null then "withheld (run carries none / pre-fix)" else "\(.behaviours | length) arms" end' "$WORK/candidate.json")"
+    annotate "warning" ":raised_hand: **Website perf publish: headline HELD, hardware-size figures refreshed.** The latest run \`${NEWEST_KEY}\` gives a lower-bound healthy ceiling (${HELD_REASON}) below the committed ${OLD_HC} req/s, so the committed headline, ladder and behaviours are carried forward unchanged; only \`hw_matrix\` (the \"Throughput by hardware size\" table and chart) is refreshed from this run's matrix."
+    if [ "$DRY_RUN" = "true" ] && [ -n "${PERF_PUBLISH_OUT:-}" ]; then cp "$WORK/candidate.json" "$PERF_PUBLISH_OUT"; fi
+    echo "HELD: headline ${OLD_HC} carried forward; hw_matrix refreshed"
+  elif [ "$OLD_HC" = invalid ] || awk -v n="$HC" -v o="$OLD_HC" 'BEGIN{exit !(n+0 < o+0)}'; then
     annotate "error" ":raised_hand: **Website perf publish: HELD — new headline is a lower bound set by the load generator or a non-CPU limit (#31 multi-k6 needed)**
 
 The latest run \`${NEWEST_KEY}\` gives a healthy ceiling of ${HC} req/s against a committed ${OLD_HC} req/s, but $(jq -r '.headline.lower_bound_reason' "$WORK/candidate.json"). Publishing it could report the rig's limit as a drop in MockServer's throughput, so the committed figures were left unchanged and no patch was emitted. **This hold also withholds a real server regression whose limit is not CPU (a lock, one saturated thread).** Check the compare step's \`rig_valid_peak_achieved_rps\` trend and \`saturation.client_limited_from_rps\`: a fall that starts at a lower rung than before points at the server. Expect this hold on every daily run until more client capacity (multi-process k6, programme item 31) measures past the client knee."
@@ -363,39 +385,60 @@ if [ -n "$("$GIT_BIN" -C "$REPO_ROOT" status --porcelain 2>/dev/null)" ]; then
 fi
 mkdir -p "$(dirname "$DATA_FILE")" "$CHART_DATA_DIR"
 cp "$WORK/candidate.json" "$DATA_FILE"
-# Chart data the committed renderer reads (perf-sweep.json + perf-result.json).
-# The chart plots only rungs the run judged rig-valid, matching the published table -
-# a rung excluded by derive_saturation measured the load generator, not the server, so
-# plotting it would draw a curve the run declined to stand behind. An artifact with no
-# saturation.ladder carries no rig-validity to filter on, so all points are kept.
-jq --argjson lower_bound "$(jq '.headline.lower_bound == true' "$WORK/candidate.json")" \
-   '((.saturation.ladder // []) | map(select(.rig_valid == true) | .offered_rps)) as $rv
-    | (((.saturation.ladder // []) | length) == 0) as $no_rig_info
-    | {proto: (.sweep.proto // "http"), headline_lower_bound: $lower_bound,
-       points: [ (.sweep.points // [])[] | select($no_rig_info or (.offered_rps | IN($rv[]))) ]}' \
-  "$WORK/run.json" > "$CHART_DATA_DIR/perf-sweep.json"
-# The full run record is copied verbatim - it carries its own rig_valid flags and
-# exclusion reasons, so it stays complete rather than filtered.
-cp "$WORK/run.json" "$CHART_DATA_DIR/perf-result.json"
-# The hardware-size chart plots exactly the published table (fresh or carried forward).
-if jq -e '.hw_matrix != null' "$WORK/candidate.json" >/dev/null 2>&1; then
+if [ "$HEADLINE_HELD" = true ]; then
+  # Only the hardware-size chart changes; the headline chart data and PNGs stay as committed.
   jq '.hw_matrix' "$WORK/candidate.json" > "$CHART_DATA_DIR/perf-hw-matrix.json"
-fi
-# Regenerate the PNGs if the renderer's toolchain is present (best-effort: whoever
-# applies the patch / CI can rerun it; a missing matplotlib must not fail the step).
-if command -v python3 >/dev/null 2>&1 && python3 -c "import matplotlib" >/dev/null 2>&1; then
-  # PNGs live in images/ (the renderer's default --out), one level ABOVE the data dir.
-  python3 "$RENDER" --data "$CHART_DATA_DIR" --out "$IMAGES_DIR" || echo "WARNING: chart render failed — data files refreshed, PNGs left for whoever applies the patch" >&2
+  if command -v python3 >/dev/null 2>&1 && python3 -c "import matplotlib" >/dev/null 2>&1; then
+    mkdir -p "$WORK/hw-chart-data" "$WORK/hw-chart-out"
+    cp "$CHART_DATA_DIR/perf-hw-matrix.json" "$WORK/hw-chart-data/"
+    if python3 "$RENDER" --data "$WORK/hw-chart-data" --out "$WORK/hw-chart-out"; then
+      cp "$WORK/hw-chart-out/perf_hw_matrix.png" "$IMAGES_DIR/perf_hw_matrix.png"
+    else
+      echo "WARNING: hardware chart render failed — chart data refreshed, PNG left for whoever applies the patch" >&2
+    fi
+  fi
 else
-  echo "--- matplotlib absent — chart data refreshed; PNGs regenerate when the patch is applied" >&2
+  # Chart data the committed renderer reads (perf-sweep.json + perf-result.json).
+  # The chart plots only rungs the run judged rig-valid, matching the published table -
+  # a rung excluded by derive_saturation measured the load generator, not the server, so
+  # plotting it would draw a curve the run declined to stand behind. An artifact with no
+  # saturation.ladder carries no rig-validity to filter on, so all points are kept.
+  jq --argjson lower_bound "$(jq '.headline.lower_bound == true' "$WORK/candidate.json")" \
+     '((.saturation.ladder // []) | map(select(.rig_valid == true) | .offered_rps)) as $rv
+      | (((.saturation.ladder // []) | length) == 0) as $no_rig_info
+      | {proto: (.sweep.proto // "http"), headline_lower_bound: $lower_bound,
+         points: [ (.sweep.points // [])[] | select($no_rig_info or (.offered_rps | IN($rv[]))) ]}' \
+    "$WORK/run.json" > "$CHART_DATA_DIR/perf-sweep.json"
+  # The full run record is copied verbatim - it carries its own rig_valid flags and
+  # exclusion reasons, so it stays complete rather than filtered.
+  cp "$WORK/run.json" "$CHART_DATA_DIR/perf-result.json"
+  # The hardware-size chart plots exactly the published table (fresh or carried forward).
+  if jq -e '.hw_matrix != null' "$WORK/candidate.json" >/dev/null 2>&1; then
+    jq '.hw_matrix' "$WORK/candidate.json" > "$CHART_DATA_DIR/perf-hw-matrix.json"
+  fi
+  # Regenerate the PNGs if the renderer's toolchain is present (best-effort: whoever
+  # applies the patch / CI can rerun it; a missing matplotlib must not fail the step).
+  if command -v python3 >/dev/null 2>&1 && python3 -c "import matplotlib" >/dev/null 2>&1; then
+    # PNGs live in images/ (the renderer's default --out), one level ABOVE the data dir.
+    python3 "$RENDER" --data "$CHART_DATA_DIR" --out "$IMAGES_DIR" || echo "WARNING: chart render failed — data files refreshed, PNGs left for whoever applies the patch" >&2
+  else
+    echo "--- matplotlib absent — chart data refreshed; PNGs regenerate when the patch is applied" >&2
+  fi
 fi
 
 WORK_BRANCH="perf/website-figures-$(date -u +%Y%m%d-%H%M%S)"
 COMMIT_MSG="docs(perf): refresh published performance figures from ${NEWEST_KEY##*/}"
+if [ "$HEADLINE_HELD" = true ]; then
+  COMMIT_MSG="docs(perf): refresh the hardware-size figures from ${NEWEST_KEY##*/} (headline held)"
+fi
 
 "$GIT_BIN" -C "$REPO_ROOT" checkout -b "$WORK_BRANCH" || fail "GIT BRANCH FAILED" "Could not create local branch \`${WORK_BRANCH}\`."
 # Stage the data file, the chart source data, and any regenerated PNGs in images/.
-"$GIT_BIN" -C "$REPO_ROOT" add "$IMAGES_DIR"/*.png 2>/dev/null || true
+if [ "$HEADLINE_HELD" = true ]; then
+  "$GIT_BIN" -C "$REPO_ROOT" add "$IMAGES_DIR/perf_hw_matrix.png" 2>/dev/null || true
+else
+  "$GIT_BIN" -C "$REPO_ROOT" add "$IMAGES_DIR"/*.png 2>/dev/null || true
+fi
 "$GIT_BIN" -C "$REPO_ROOT" add "$DATA_FILE" "$CHART_DATA_DIR"
 "$GIT_BIN" -C "$REPO_ROOT" -c user.name="mockserver-perf-bot" -c user.email="ci@mock-server.com" commit -m "$COMMIT_MSG" \
   || fail "GIT COMMIT FAILED" "Nothing to commit or commit failed on \`${WORK_BRANCH}\`."
@@ -430,7 +473,7 @@ annotate "success" ":memo: **Website perf figures refreshed — patch emitted as
 
 - **Source run:** \`${NEWEST_KEY}\`
 - **Trigger:** ${REASON_STR%; } (largest headline move ${MAX_MOVE}%, window ${MOVE_PCT}%)
-- **Healthy ceiling:** $(jq -r 'if .headline.lower_bound == true then "at least \(.headline.healthy_ceiling_rps) req/s (headline, a lower bound: \(.headline.lower_bound_reason)) · no overload peak (no higher rate measured validly)" else "\(.headline.healthy_ceiling_rps) req/s (headline) · **peak achieved:** \(.headline.peak_achieved_rps) req/s (labelled degraded)" end' "$WORK/candidate.json")
+- **Healthy ceiling:** $([ "$HEADLINE_HELD" = true ] && echo "HELD — the committed ${HC} req/s is carried forward; this run's headline was a lower bound below it. ")$(jq -r 'if .headline.lower_bound == true then "at least \(.headline.healthy_ceiling_rps) req/s (headline, a lower bound: \(.headline.lower_bound_reason)) · no overload peak (no higher rate measured validly)" else "\(.headline.healthy_ceiling_rps) req/s (headline) · **peak achieved:** \(.headline.peak_achieved_rps) req/s (labelled degraded)" end' "$WORK/candidate.json")
 - **Per-behaviour percentiles:** ${BEH}
 - **Throughput by hardware size:** ${HW_ORIGIN}
 

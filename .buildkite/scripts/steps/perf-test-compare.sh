@@ -974,7 +974,10 @@ def latfam: if IN("serving_percore.*.healthy_ceiling_rps", "serving_percore.*.rp
             elif IN("serving_hw_matrix.*.healthy_ceiling_rps",
                     "serving_hw_matrix.*.healthy_ceiling_p50_ms") then "serving_hw_matrix"
             else null end;
-def latfp($f): (.[$f].sweep.latency_settle_s // null);
+# The hardware matrix also keys on its load client (single k6 or multi-k6): the two measure
+# different ceilings, so they never share a baseline. A block without .client was single-k6.
+def latfp($f): (.[$f].sweep.latency_settle_s // null) as $s
+  | if $f == "serving_hw_matrix" and $s != null then "\($s)|\(.[$f].client // "single")" else $s end;
 def latpresent($f): (((.[$f] // {}).points // []) | length) > 0;
 
 # JMH methodology fingerprint of the HEAD run (item 15c baseline-discontinuity guard).
@@ -1074,7 +1077,9 @@ def latpresent($f): (((.[$f] // {}).points // []) | length) > 0;
     head_jmh_present: ($headjmh != null),
     head_k6fp_present: (($headarms | length) > 0),
     sweep_latency_reset: ([ $headmetrics[] | .bkey | latfam | select(. != null) ] | unique
-      | map({family: ., head_settle_s: $headlat[.], comparable: $bmapLat[.].comparable, other: $bmapLat[.].other})
+      | map({family: ., head_settle_s: $headlat[.], comparable: $bmapLat[.].comparable, other: $bmapLat[.].other,
+             head_window: ($headlat[.] | if type == "string" then (split("|") | "settle \(.[0])s, \(.[1]) client")
+                                          else "settle \(. // "none")s" end)})
       | map(select(.other > 0))) } as $meta
 | if ($missing | length) > 0
   then ($meta + { missing:$missing, rows:[], count:0, gating_count:0, nongating_count:0 })
@@ -1215,7 +1220,7 @@ fi
 # exclusion"): shown only while the matching history is still below MIN_BASELINE.
 SWEEPLAT_NOTE="$(printf '%s' "$RESULT_CMP" | jq -r --argjson minb "$MIN_BASELINE" '
   (.sweep_latency_reset // [])[] | select(.comparable < $minb)
-  | "\n\n:information_source: **sweep latency baseline reset — \(.family).** \(.other) baseline run(s) measured its p50-gated healthy-ceiling metrics under a different sweep latency window (this run: settle \(.head_settle_s // "none")s; no settle = rung onset included). Those metrics compare only against runs with the same window — \(.comparable) so far — and stay `:new: new` (not flagged) until \($minb) exist. Notify-only; this never blocks the build."')"
+  | "\n\n:information_source: **sweep latency baseline reset — \(.family).** \(.other) baseline run(s) measured its p50-gated healthy-ceiling metrics under a different sweep latency window (this run: \(.head_window); no settle = rung onset included). Those metrics compare only against runs with the same window — \(.comparable) so far — and stay `:new: new` (not flagged) until \($minb) exist. Notify-only; this never blocks the build."')"
 
 # --- 5. render annotation -----------------------------------------------------
 # The Status column distinguishes the two kinds of flagged regression:

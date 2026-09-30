@@ -95,10 +95,12 @@ if ! command -v buildkite-agent >/dev/null 2>&1; then
   exit 0
 fi
 
-# PERF_SERVING_HW_MATRIX=true (a manual-build opt-in) adds ~45 min to the run step.
+# PERF_SERVING_HW_MATRIX=true (a manual-build opt-in) adds six multi-k6 points of ~10 min each
+# (20 rungs x 20 s, a 3-rung cross-check, SUT and Prometheus start-up): ~60 min on the 70-min
+# base, with ~30 min margin.
 PERF_RUN_TIMEOUT=70
 if [ "${PERF_SERVING_HW_MATRIX:-false}" = "true" ]; then
-  PERF_RUN_TIMEOUT=130
+  PERF_RUN_TIMEOUT=160
   echo "--- :straight_ruler: PERF_SERVING_HW_MATRIX=true — run step timeout ${PERF_RUN_TIMEOUT}m"
 fi
 # PERF_SERVING_RW_MULTIK6=true (item 31, opt-in) adds ~12 min; +20 leaves margin.

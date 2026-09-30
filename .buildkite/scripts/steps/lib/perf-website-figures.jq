@@ -116,7 +116,8 @@ def commafy: (. // 0 | floor | tostring) | gsub("(?<=\\d)(?=(\\d{3})+$)"; ",");
 | ((.serving_hw_matrix.sweep.rates // "") | tostring) as $hw_all_rates
 | def memdisp: if . == null then null
     elif test("^[0-9]+[gG]$") then (sub("[gG]$"; "") + " GB")
-    elif test("^[0-9]+[mM]$") then (sub("[mM]$"; "") + " MB")
+    elif test("^[0-9]+[mM]$") then (sub("[mM]$"; "") | tonumber
+      | if . >= 1024 and (. % 512) == 0 then "\(. / 1024) GB" else "\(.) MB" end)
     else . end;
   def mib: if . == null then null else (. / 1048576 | round) end;
   # the rungs this point was offered: its ladder, else its rate list, else the matrix ladder.
@@ -128,15 +129,16 @@ def commafy: (. // 0 | floor | tostring) | gsub("(?<=\\d)(?=(\\d{3})+$)"; ",");
   def reason($r): ((.lower_bound_reasons // []) | index($r)) != null;
   def hwnote: [
       (if .control == true then "control: same cores, more memory" else empty end),
-      (if .status == "oom_killed" then "ran out of memory (container killed)\(if .died_at_offered_rps != null then " at about \(.died_at_offered_rps | commafy) req/s" elif .died_before_sweep == true then " before the test load started" else "" end)"
+      (if .status == "oom_killed" then "ran out of memory (container killed)\(if .died_at_offered_rps != null then " at about \(.died_at_offered_rps | commafy) req/s" elif .died_before_sweep == true then " before or during warm-up" else "" end)"
        elif .status == "sut_died" then "server stopped during the test"
        elif .status == "java_out_of_memory" then "Java heap ran out during the test"
        elif .status == "no_healthy_ceiling" then "no stable rate found"
        else empty end),
-      (if reason("client_cpu_limited") then "may have been limited by the load generator — lower bound"
+      (if reason("client_cpu_limited") or reason("client_limit_at_or_below_ceiling") then "may have been limited by the load generator — lower bound"
        elif reason("ladder_top_reached") then "above the highest rate tested — lower bound"
-       elif reason("server_cpu_not_saturated") then "server CPU not saturated, may have been limited by the load generator — lower bound"
+       elif reason("server_cpu_not_saturated") then "MockServer's CPU was not saturated, so the limit may be elsewhere (load generator or load path) — lower bound"
        elif reason("cpu_unverified") then "CPU use not measured, so the limit is unconfirmed — lower bound"
+       elif reason("overload_not_measured") then "no rate above this one was measured cleanly — lower bound"
        else empty end) ] | join("; ");
   def history: {
       entry_cap: (.resolved.max_log_entries // null),
@@ -148,6 +150,8 @@ def commafy: (. // 0 | floor | tostring) | gsub("(?<=\\d)(?=(\\d{3})+$)"; ",");
       binding_bound: (.event_log_binding_bound // null),
       body_bytes: (.retention.body_bytes // null) };
   ([ $hwp[] | select(.status == "measured" and .healthy_ceiling_rps != null) ]) as $hwok
+# Scaling is stated against the 1-core point, and only when that point is itself not a lower bound.
+| ([ $hwok[] | select(.cores == 1 and (.control | not) and (.lower_bound | not)) ] | first | .rps_per_core // null) as $rpc1
 | ([ $hwok[] | select((.lower_bound | not) and (.control | not)) | {cores, rpc: (.healthy_ceiling_rps / .cores)} ]
    | sort_by(.cores)) as $pcpts
 | ([ $pcpts[] | .rpc ]) as $percore
@@ -169,6 +173,11 @@ def commafy: (. // 0 | floor | tostring) | gsub("(?<=\\d)(?=(\\d{3})+$)"; ",");
       sweep_latency_settle_s: (.serving_hw_matrix.sweep.latency_settle_s // null),
       cpus_physically_verified: ([ $hwp[] | .cpus_physically_verified == true ] | all),
       other_containers_paused: $hw_paused,
+      # The rig, for the page's method sentence (null when the run predates the field).
+      host_physical_cores: (.serving_hw_matrix.host_physical_cores // null),
+      client: (.serving_hw_matrix.client // null),
+      k6_processes: ((.serving_hw_matrix.client_placement.k6_cpusets // null) | if . == null then null else length end),
+      k6_physical_cores: (.serving_hw_matrix.client_placement.k6_physical_cores // null),
       note: ("Each row is a fresh MockServer container pinned to that many CPU cores"
              + (if ([ $hwp[] | .cpus_physically_verified == true ] | all) and $hw_paused
                 then " (each on its own physical core, with no other test container on it)" else "" end)
@@ -189,6 +198,16 @@ def commafy: (. // 0 | floor | tostring) | gsub("(?<=\\d)(?=(\\d{3})+$)"; ",");
         healthy_ceiling_p50_ms: (if .healthy_ceiling_p50_ms == null then null else (.healthy_ceiling_p50_ms | round3) end),
         healthy_ceiling_p95_ms: (if .healthy_ceiling_p95_ms == null then null else (.healthy_ceiling_p95_ms | round3) end),
         rps_per_core: .rps_per_core,
+        rps_per_core_display: (if .rps_per_core == null then null else (.rps_per_core | commafy) end),
+        scaling_vs_1core: (if .rps_per_core == null or $rpc1 == null or .status != "measured" then null
+                           else (.rps_per_core / $rpc1 | round2) end),
+        scaling_vs_1core_display: (if .rps_per_core == null or $rpc1 == null or .status != "measured" then null
+                                   else (.rps_per_core / $rpc1 * 100 | round) as $n
+                                        | "\($n / 100 | floor).\($n % 100 + 100 | tostring | .[1:])" end),
+        peak_achieved_rps: (if .status != "measured" then null
+                            else (.rig_valid_peak_achieved_rps // null | if . == null or . == 0 then null else round2 end) end),
+        peak_display: (if .status != "measured" then null
+                       else (.rig_valid_peak_achieved_rps // null | if . == null or . == 0 then null else commafy end) end),
         lower_bound: (.lower_bound == true),
         lower_bound_reasons: (.lower_bound_reasons // []),
         oom_killed: (.oom_killed == true),
@@ -197,7 +216,7 @@ def commafy: (. // 0 | floor | tostring) | gsub("(?<=\\d)(?=(\\d{3})+$)"; ",");
       } ],
     skipped: [ (.serving_hw_matrix.skipped // []) | sort_by(.cores, (.memory_limit_bytes // 0)) | .[] | {
         key: (.key // ((.cores | tostring) + "c")), cores: .cores,
-        memory_display: (.memory_limit | memdisp), type: .type, reason: .reason,
+        memory_display: (.memory_limit | memdisp), type: .type, status: (.status // null), reason: .reason,
         oom_killed: (.oom_killed == true) } ],
     # From points that are neither controls nor lower bounds. scaling: "linear" when the
     # per-core rate stays within 20%; otherwise "falling"/"rising" only when it moves one

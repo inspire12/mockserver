@@ -3714,7 +3714,8 @@ if [ "${PERF_SERVING_PERCORE:-false}" = "true" ]; then
 fi
 
 # --- item 27: throughput by hardware size (cores x container memory) ----------
-# lib/perf-percore.sh in hw_matrix mode; opt-in (~45 min), manual builds only, notify-only.
+# lib/perf-percore.sh in hw_matrix mode (multi-k6 client per point); opt-in (~50 min), manual
+# builds only, notify-only.
 # Every other container of this run is paused, and its samplers stopped, for the matrix:
 # the idle main SUT and upstream sit on the cores the points use. cleanup() resumes them.
 SERVING_HW_MATRIX_JSON='{}'
@@ -3749,12 +3750,21 @@ if [ "${PERF_SERVING_HW_MATRIX:-false}" = "true" ]; then
   echo "--- item 27 hardware matrix (opt-in; PERF_SERVING_HW_MATRIX=true, matrix=${PERF_HW_MATRIX:-default})"
   pause_rig
   if MOCKSERVER_IMAGE="$MOCKSERVER_IMAGE" PERF_PERCORE_REPO_ROOT="$REPO_ROOT" PERF_PERCORE_MODE=hw_matrix \
-       PERF_HW_MATRIX_RIG_PAUSED="$RIG_PAUSE_COMPLETE" bash "$SCRIPT_DIR/lib/perf-percore.sh" "$OUT_DIR/serving-hw-matrix.json"; then
+       PERF_HW_MATRIX_RIG_PAUSED="$RIG_PAUSE_COMPLETE" PERF_HW_MATRIX_DEBUG_DIR="$OUT_DIR/serving-hw-matrix-work" \
+       bash "$SCRIPT_DIR/lib/perf-percore.sh" "$OUT_DIR/serving-hw-matrix.json"; then
     SERVING_HW_MATRIX_JSON="$(cat "$OUT_DIR/serving-hw-matrix.json" 2>/dev/null || echo '{}')"
     jq -e . >/dev/null 2>&1 <<<"$SERVING_HW_MATRIX_JSON" || SERVING_HW_MATRIX_JSON='{}'
     echo "--- serving_hw_matrix: points=$(jq -r '(.points|length)//0' <<<"$SERVING_HW_MATRIX_JSON") skipped=$(jq -r '(.skipped|length)//0' <<<"$SERVING_HW_MATRIX_JSON") $(jq -r '[(.points // [])[] | "\(.key)=\(.healthy_ceiling_rps // "none")(\(.status))"] | join(" ")' <<<"$SERVING_HW_MATRIX_JSON")"
   else
     echo "WARNING: hardware matrix profile failed — result carries no serving_hw_matrix points this run (notify-only)" >&2
+  fi
+  # Per-point multi-k6 work files (rw results, k6 logs, CPU samples), valid or not.
+  if [ -d "$OUT_DIR/serving-hw-matrix-work" ]; then
+    if ! tar czf "$REPO_ROOT/serving-hw-matrix-work.tgz" -C "$OUT_DIR" serving-hw-matrix-work 2>/dev/null; then
+      echo "WARNING: could not archive $OUT_DIR/serving-hw-matrix-work — no work-files artifact this run" >&2
+    elif command -v buildkite-agent >/dev/null 2>&1; then
+      bk_upload_artifact "serving-hw-matrix-work.tgz"
+    fi
   fi
   resume_rig
 fi

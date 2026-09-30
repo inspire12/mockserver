@@ -72,6 +72,10 @@ set -euo pipefail
 # over PERF_HW_MATRIX ("cores:memory[:control]") and emits `serving_hw_matrix`. Each point
 # also sets a container memory limit (no swap, no -Xmx, as in a user's container) and
 # records resolved heap/log bounds, peak memory, OOM state and any lower-bound reasons.
+# By default (PERF_HW_MATRIX_CLIENT=multik6) each point is driven by
+# mockserver-performance-test/scripts/rw-multi-k6-sweep.sh against that point's SUT, from one
+# fixed client placement, and its rig validity and lower-bound reasons come from derive_saturation
+# (lib/perf-hw-matrix-rw.jq), not the single-k6 85%-of-pin rule below.
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -139,18 +143,72 @@ K6_RESERVE="${PERF_PERCORE_RESERVE_CORES:-1}"
 # feasible core counts - cheap for the first curve this item can actually interpret. The extra
 # resolution is concentrated in the 2k-8k region where the ceilings actually cluster.
 SWEEP_RATES="${PERF_PERCORE_SWEEP_RATES:-500,1000,1500,2000,3000,4000,5000,6000,7000,8000,10000,12000,16000,32000}"
-# The matrix ladder spaces rungs 6-17% apart from 8,000 req/s up and 12-100% below
-# that, so a ceiling is only resolved to one rung (the memory verdict allows for it).
+# The single-client matrix ladder spaces rungs 6-17% apart from 8,000 req/s up and 12-100%
+# below that, so a ceiling is only resolved to one rung (the memory verdict allows for it).
 # Each point offers only rates up to MAX_RPS_PER_CORE x cores (0 = no cap); a ceiling
 # on a point's top rung is flagged ladder_top_reached (a lower bound).
-if [ "$MODE" = hw_matrix ]; then
+if [ "$MODE" = hw_matrix ] && [ "${PERF_HW_MATRIX_CLIENT:-multik6}" = single ]; then
   SWEEP_RATES="${PERF_HW_MATRIX_SWEEP_RATES:-1000,2000,3000,4000,5000,6000,7000,8000,9000,10000,11000,12000,14000,16000,18000,20000,22000,24000,26000,28000,32000,36000,40000,44000,48000,52000,56000,60000,64000,68000,72000}"
 fi
 HW_MAX_RPS_PER_CORE="${PERF_HW_MATRIX_MAX_RPS_PER_CORE:-20000}"
-HW_MATRIX_SPEC="${PERF_HW_MATRIX:-1:512m,2:1g,2:2g:control,4:2g,6:2g,8:2g}"
-HW_WARMUP_RPS_PER_CORE="${PERF_HW_MATRIX_WARMUP_RPS_PER_CORE:-1000}"
+HW_MATRIX_SPEC="${PERF_HW_MATRIX:-1:512m,2:1g,2:2g:control,3:1536m,4:2g,6:2g}"
+# multik6 (default): each point is driven by scripts/rw-multi-k6-sweep.sh (N k6 processes merged
+# in Prometheus) from one fixed placement; single: the one-k6 sweep percore mode uses.
+HW_CLIENT="${PERF_HW_MATRIX_CLIENT:-multik6}"
+case "$HW_CLIENT" in
+  multik6|single) ;;
+  *) echo "ERROR: PERF_HW_MATRIX_CLIENT='$HW_CLIENT' (expected multik6 or single)" >&2; exit 2 ;;
+esac
+[ "$MODE" = hw_matrix ] || HW_CLIENT=single
+if [ "$HW_CLIENT" = multik6 ]; then
+  HW_WARMUP_RPS_PER_CORE="${PERF_HW_MATRIX_WARMUP_RPS_PER_CORE:-4000}"
+else
+  HW_WARMUP_RPS_PER_CORE="${PERF_HW_MATRIX_WARMUP_RPS_PER_CORE:-1000}"
+fi
+# multik6 ladder per point: HW_LADDER_RUNGS rates spaced geometrically from LO to HI x cores x
+# RPS_PER_CORE_REF, rounded to 100 (17 rungs over 0.5-1.6x are ~7.5% apart), below them the
+# ANCHORS fractions (at least 1,000 req/s): the healthy-ceiling rule takes its flat-region p50
+# from the lowest four rungs, so the anchors keep that baseline near-unloaded at every size.
+# An explicit PERF_HW_MATRIX_SWEEP_RATES is offered to every point unchanged instead.
+HW_RPS_PER_CORE_REF="${PERF_HW_MATRIX_RPS_PER_CORE_REF:-16000}"
+HW_LADDER_LO="${PERF_HW_MATRIX_LADDER_LO:-0.5}"
+HW_LADDER_HI="${PERF_HW_MATRIX_LADDER_HI:-1.6}"
+HW_LADDER_RUNGS="${PERF_HW_MATRIX_LADDER_RUNGS:-17}"
+HW_LADDER_ANCHORS="${PERF_HW_MATRIX_LADDER_ANCHORS-0.1,0.2,0.3}"
+HW_XCHECK_MAX_RPS="${PERF_HW_MATRIX_XCHECK_MAX_RPS:-40000}"
+HW_P99_MAX_MS="${PERF_HW_MATRIX_P99_MAX_MS:-10}"
+if [ "$HW_CLIENT" = multik6 ]; then
+  for _v in HW_RPS_PER_CORE_REF HW_LADDER_RUNGS HW_XCHECK_MAX_RPS; do
+    [[ "${!_v}" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: $_v='${!_v}' must be a positive integer" >&2; exit 2; }
+  done
+  [ "$HW_LADDER_RUNGS" -ge 2 ] || { echo "ERROR: PERF_HW_MATRIX_LADDER_RUNGS must be at least 2" >&2; exit 2; }
+  if ! awk -v lo="$HW_LADDER_LO" -v hi="$HW_LADDER_HI" 'BEGIN{exit !(lo+0 > 0 && hi+0 > lo+0)}'; then
+    echo "ERROR: PERF_HW_MATRIX_LADDER_LO/HI ($HW_LADDER_LO/$HW_LADDER_HI) must satisfy 0 < LO < HI" >&2; exit 2
+  fi
+  if ! [[ "$HW_LADDER_ANCHORS" =~ ^([0-9.]+(,[0-9.]+)*)?$ ]] \
+     || ! awk -v a="$HW_LADDER_ANCHORS" -v lo="$HW_LADDER_LO" 'BEGIN{n=split(a, f, ","); for(i=1;i<=n;i++) if(!(f[i]+0 > 0 && f[i]+0 < lo+0)) exit 1}'; then
+    echo "ERROR: PERF_HW_MATRIX_LADDER_ANCHORS='$HW_LADDER_ANCHORS' must be comma-separated fractions above 0 and below LO ($HW_LADDER_LO), or empty" >&2; exit 2
+  fi
+fi
+# The rates one point is offered (multik6), comma-separated and strictly increasing.
+hw_point_rates() { # cores
+  if [ -n "${PERF_HW_MATRIX_SWEEP_RATES:-}" ]; then echo "$PERF_HW_MATRIX_SWEEP_RATES"; return; fi
+  awk -v c="$1" -v ref="$HW_RPS_PER_CORE_REF" -v lo="$HW_LADDER_LO" -v hi="$HW_LADDER_HI" -v n="$HW_LADDER_RUNGS" \
+      -v anchors="$HW_LADDER_ANCHORS" 'BEGIN{
+    base = c * ref * lo; r = (hi / lo) ^ (1 / (n - 1)); out = ""; prev = 0
+    na = split(anchors, a, ",")
+    for (i = 1; i <= na; i++) { v = int(c * ref * a[i] / 100 + 0.5) * 100; if (v < 1000) v = 1000
+      if (v <= prev || v >= base) continue; out = out (out == "" ? "" : ",") v; prev = v }
+    for (i = 0; i < n; i++) { v = int(base * r ^ i / 100 + 0.5) * 100
+      if (v <= prev) continue; out = out (out == "" ? "" : ",") v; prev = v }
+    print out }'
+}
 SWEEP_STEP="${PERF_PERCORE_SWEEP_STEP:-12s}"
 SWEEP_GAP="${PERF_PERCORE_SWEEP_GAP:-4s}"
+if [ "$HW_CLIENT" = multik6 ]; then
+  SWEEP_STEP="${PERF_HW_MATRIX_STEP:-15s}"
+  SWEEP_GAP="${PERF_HW_MATRIX_GAP:-5s}"
+fi
 # Empty by default: sweep.js then sizes a fixed pool per rung. If set, both must be
 # set and equal (sweep.js refuses a pre/max VU ramp — the Finding-3 invariant).
 SWEEP_PRE_VUS="${PERF_PERCORE_SWEEP_PRE_VUS:-}"
@@ -251,8 +309,41 @@ to_secs() {
 STEP_S="$(to_secs "$SWEEP_STEP")"
 GAP_S="$(to_secs "$SWEEP_GAP")"
 
+# --- multik6 placement: ONE layout for every point and rung, so client capacity is constant.
+# On the c5.12xlarge (48 logical cpus, siblings N / N+24): the SUT on physical cores 0..C-1
+# (siblings idle), four k6 processes on four physical cores each (both hyperthreads) across
+# 7-22, Prometheus on 23; cores C..6 stay idle (the paused main SUT and upstream sit there).
+# Any other host gets a logical-id layout above the matrix's largest point; it is not
+# hyperthread-aware (the physical-disjointness proof below still refuses an overlapping point), so
+# set PERF_HW_MATRIX_K6_CPUSETS / PERF_HW_MATRIX_PROM_CPUS for a sibling-aware layout there.
+HW_MAX_POINT_CORES=0
+for _c in "${P_CORES[@]}"; do [ "$_c" -gt "$HW_MAX_POINT_CORES" ] && HW_MAX_POINT_CORES="$_c"; done
+HW_K6_SETS=(); HW_PROM_CPUS=""
+if [ "$HW_CLIENT" = multik6 ]; then
+  if [ "$HOST_CORES" -eq 48 ]; then
+    _def_k6="7-10,31-34;11-14,35-38;15-18,39-42;19-22,43-46"; _def_prom="23,47"
+  else
+    _def_prom="$(( HOST_CORES - 1 ))"; _first=$(( HW_MAX_POINT_CORES + 1 )); _avail=$(( HOST_CORES - 1 - _first ))
+    _n=4; [ "$_avail" -lt "$_n" ] && _n="$_avail"; _def_k6=""
+    if [ "$_n" -ge 1 ]; then
+      _w=$(( _avail / _n ))
+      for ((i=0; i<_n; i++)); do
+        _s=$(( _first + i * _w )); _e=$(( _s + _w - 1 ))
+        _def_k6="${_def_k6:+$_def_k6;}$([ "$_w" -eq 1 ] && echo "$_s" || echo "$_s-$_e")"
+      done
+    fi
+  fi
+  IFS=';' read -ra HW_K6_SETS <<< "${PERF_HW_MATRIX_K6_CPUSETS:-$_def_k6}"
+  HW_PROM_CPUS="${PERF_HW_MATRIX_PROM_CPUS:-$_def_prom}"
+  if [ "${#HW_K6_SETS[@]}" -lt 1 ] || [ -z "$HW_PROM_CPUS" ]; then
+    echo "ERROR: no room for the multik6 client on ${HOST_CORES} cpus (largest point ${HW_MAX_POINT_CORES} cores); set PERF_HW_MATRIX_K6_CPUSETS and PERF_HW_MATRIX_PROM_CPUS" >&2
+    exit 2
+  fi
+fi
+HW_K6_SPEC="$(IFS=';'; echo "${HW_K6_SETS[*]:-}")"
+
 if [ "$MODE" = hw_matrix ]; then
-  echo "--- item 27 hardware matrix: host_cores=$HOST_CORES matrix=$HW_MATRIX_SPEC k6=[${K6_MIN_CORES}..${K6_MAX_CORES}] image=$MOCKSERVER_IMAGE" >&2
+  echo "--- item 27 hardware matrix: host_cores=$HOST_CORES matrix=$HW_MATRIX_SPEC client=$HW_CLIENT$([ "$HW_CLIENT" = multik6 ] && echo " k6=${HW_K6_SPEC} prometheus=${HW_PROM_CPUS}" || echo " k6=[${K6_MIN_CORES}..${K6_MAX_CORES}]") image=$MOCKSERVER_IMAGE" >&2
 else
   echo "--- item 18 serving per-core: host_cores=$HOST_CORES ladder=$CORE_LADDER k6=[${K6_MIN_CORES}..${K6_MAX_CORES}] image=$MOCKSERVER_IMAGE" >&2
 fi
@@ -324,8 +415,13 @@ select_cpusets() {
 # The SUT container's end state: still running, OOM-killed, exit code, restarts, when it
 # stopped (epoch, null while running) and how many OutOfMemoryError lines it logged.
 sut_state_json() {
-  local st fa fa_epoch oome
-  st="$(docker inspect --format '{{.State.Running}};{{.State.OOMKilled}};{{.State.ExitCode}};{{.RestartCount}};{{.State.FinishedAt}}' "$SERVER" 2>/dev/null || echo 'unknown;unknown;;;')"
+  local st fa fa_epoch oome name="$SERVER"
+  [ "${PERF_HW_MATRIX_TEST_FAULT:-}" = sut_inspect ] && name="${SERVER}-missing" # degrade test only
+  # A failed inspect prints an empty line, which would otherwise parse as running=false (a dead SUT).
+  if ! st="$(docker inspect --format '{{.State.Running}};{{.State.OOMKilled}};{{.State.ExitCode}};{{.RestartCount}};{{.State.FinishedAt}}' "$name" 2>/dev/null)" \
+     || [ -z "${st//[[:space:]]/}" ]; then
+    st='unknown;unknown;;;'
+  fi
   fa="$(cut -d';' -f5 <<<"$st")"; fa_epoch=""
   case "$fa" in ""|0001-*) ;; *)
     fa_epoch="$(date -u -d "$fa" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%S' "${fa%%.*}" +%s 2>/dev/null || echo '')" ;;
@@ -356,12 +452,153 @@ resolved_bounds_json() {
             num(h), num(e), num(b), num(f), num(r) }' <<<"$m"
 }
 
+# --- sample BOTH the k6 CLIENT and the SUT CPU during the measured sweep -----
+# The SUT CPU is the decisive datum for attributing a falling peak: if the SUT
+# sat WELL BELOW its C-core pin (C*100%) while achieved throughput fell, the
+# server had spare CPU and the limit is the load path / virtualization, NOT the
+# server; if it sat AT ~C*100% the server itself was the ceiling. Both are read
+# from ONE `docker stats --no-stream` call (two container names) so the sampler
+# adds one probe per interval, not two, and the k6 and SUT samples share a
+# timestamp. A name not yet running just yields no line (handled by the awk).
+# The SUT's memory use and retained log entries ride the same interval, so a point
+# records how close it ran to its memory limit and whether the log filled.
+start_point_sampler() {
+  # docker stats fails outright on a missing name, so the k6 container is named only when one runs.
+  local names="$SERVER"
+  [ "$HW_CLIENT" = single ] && names="$K6_NAME $SERVER"
+  CPU_LOG="$WORK/cpu-${PKEY}.csv"
+  echo "ts,k6_cpu_pct,sut_cpu_pct,sut_mem_bytes,retained_entries,retained_bytes" > "$CPU_LOG"
+  ( while true; do
+      # Stamped on return (performance-measurement.md, sweep.js).
+      # shellcheck disable=SC2086  # $names is one or two container names
+      stats="$(docker stats --no-stream --format '{{.Name}} {{.CPUPerc}} {{.MemUsage}}' $names 2>/dev/null || echo '')"
+      ts="$(date -u +%s)"
+      k6c="$(printf '%s\n' "$stats" | awk -v n="$K6_NAME" '$1==n{gsub(/%/,"",$2); print $2}')"
+      sutc="$(printf '%s\n' "$stats" | awk -v n="$SERVER" '$1==n{gsub(/%/,"",$2); print $2}')"
+      sutm="$(printf '%s\n' "$stats" | awk -v n="$SERVER" '
+        function tob(s,  n, u) { n = s; sub(/[A-Za-z]+$/, "", n); u = s; sub(/^[0-9.]+/, "", u)
+          if (u == "KiB" || u == "kB" || u == "KB") return n * 1024
+          if (u == "MiB" || u == "MB") return n * 1048576
+          if (u == "GiB" || u == "GB") return n * 1073741824
+          return n }
+        $1==n { printf "%.0f", tob($3) }')"
+      retl="$(curl -s --max-time 1 "$METRICS_URL" 2>/dev/null | awk '
+        /^mock_server_event_log_retained_entries / { e = sprintf("%.0f", $2) }
+        /^mock_server_event_log_retained_bytes /   { b = sprintf("%.0f", $2) }
+        END { printf "%s,%s", e, b }' || true)"
+      printf '%s,%s,%s,%s,%s\n' "$ts" "${k6c:-}" "${sutc:-}" "${sutm:-}" "${retl:-,}" >> "$CPU_LOG"
+      sleep "$SWEEP_SAMPLE_INTERVAL"
+    done ) & SAMPLER_PID=$!
+}
+
+cpusets_logically_overlap() { # spec_a spec_b
+  local a b
+  for a in $(expand_cpuset "$1"); do
+    for b in $(expand_cpuset "$2"); do [ "$a" = "$b" ] && return 0; done
+  done
+  return 1
+}
+
+# Record the current point as a harness failure (never a point, never silently dropped).
+skip_point_failure() { # reason
+  echo "ERROR: $LBL: $1" >&2
+  SKIPPED+=("$(jq -c --arg r "$1" --argjson st "${STATE_JSON:-null}" '. + {reason:$r, type:"failure", sut_state:$st}' <<<"$POINT_META")")
+}
+# PERF_HW_MATRIX_TEST_FAULT (degrade tests only): sut_inspect makes the SUT state unreadable;
+# point_jq makes the point assembly fail.
+case "${PERF_HW_MATRIX_TEST_FAULT:-}" in
+  ""|sut_inspect|point_jq) ;;
+  *) echo "ERROR: PERF_HW_MATRIX_TEST_FAULT='$PERF_HW_MATRIX_TEST_FAULT' (expected sut_inspect or point_jq)" >&2; exit 2 ;;
+esac
+
+# One multik6 point against the running $SERVER: scripts/rw-multi-k6-sweep.sh in its existing-SUT
+# mode, mapped into the point schema by lib/perf-hw-matrix-rw.jq. Sets AGG, STATE_JSON,
+# DIED_AT_RPS, DIED_BEFORE_SWEEP, HC_RPS and MAXLOG_USED; returns 1 after recording a skip.
+measure_point_multik6() {
+  local rw_dir="$WORK/rw-${PKEY}" rw_rc=0 xrates rw hc50 hc99 fae valid died warm
+  local point_jq="$SCRIPT_DIR/perf-hw-matrix-rw.jq"
+  [ "${PERF_HW_MATRIX_TEST_FAULT:-}" = point_jq ] && point_jq="$point_jq.missing"
+  [ -n "${PERF_HW_MATRIX_DEBUG_DIR:-}" ] && rw_dir="$PERF_HW_MATRIX_DEBUG_DIR/$PKEY"
+  mkdir -p "$rw_dir"
+  xrates="${PERF_HW_MATRIX_XCHECK_RATES:-$(tr ',' '\n' <<<"$POINT_RATES" | awk -v cap="$HW_XCHECK_MAX_RPS" '$1+0 <= cap' | head -3 | paste -sd, -)}"
+  xrates="${xrates:-8000,16000,24000}"
+  start_point_sampler
+  PERF_RW_REPO_ROOT="$REPO_ROOT" PERF_RW_NETWORK="$NETWORK" PERF_RW_TARGET_URL="http://mockserver:1080" \
+    PERF_RW_TARGET_CURL_URL="http://${HOSTPORT}" PERF_RW_SUT_CONTAINER="$SERVER" PERF_RW_SERVER_CPUS="$SCPU" \
+    PERF_RW_K6_CPUSETS="$HW_K6_SPEC" PERF_RW_PROCS="${#HW_K6_SETS[@]}" PERF_RW_PROM_CPUS="$HW_PROM_CPUS" \
+    PERF_RW_UPSTREAM_CPUS="" PERF_RW_IMAGE="$MOCKSERVER_IMAGE" PERF_RW_K6_IMAGE="$K6_IMAGE" \
+    PERF_RW_RATES="$POINT_RATES" PERF_RW_STEP="$SWEEP_STEP" PERF_RW_GAP="$SWEEP_GAP" PERF_RW_SETTLE_S="$SWEEP_SETTLE_S" \
+    PERF_RW_WARMUP_RATE="$POINT_WARMUP_RATE" PERF_RW_WARMUP_DURATION="$WARMUP_DURATION" \
+    PERF_RW_XCHECK=true PERF_RW_XCHECK_RATES="$xrates" PERF_RW_P99_MAX_MS="$HW_P99_MAX_MS" \
+    PERF_RW_DEBUG_DIR="$rw_dir" \
+    bash "$REPO_ROOT/mockserver-performance-test/scripts/rw-multi-k6-sweep.sh" "$rw_dir/rw-result.json" >&2 || rw_rc=$?
+  kill "$SAMPLER_PID" >/dev/null 2>&1 || true
+  wait "$SAMPLER_PID" 2>/dev/null || true
+
+  STATE_JSON="$(sut_state_json)"
+  docker rm -f "$SERVER" >/dev/null 2>&1 || true
+  if [ "$(jq -r '.running' <<<"$STATE_JSON" 2>/dev/null)" != true ] && [ "$(jq -r '.running' <<<"$STATE_JSON" 2>/dev/null)" != false ]; then
+    skip_point_failure "could not read the SUT's state after the sweep (docker inspect failed)"; return 1
+  fi
+  died=false
+  if [ "$(jq -r '.running' <<<"$STATE_JSON")" != true ] || [ "$(jq -r '.java_oom_errors' <<<"$STATE_JSON")" != 0 ]; then
+    died=true
+    echo "WARNING: SUT did not survive the sweep cleanly at $LBL: $STATE_JSON" >&2
+  fi
+  rw="$(jq -c 'select(type == "object")' "$rw_dir/rw-result.json" 2>/dev/null || true)"
+  [ -n "$rw" ] || rw="$(jq -nc --argjson rc "$rw_rc" '{valid:false, invalid_reasons:["the multi-k6 harness wrote no result (exit \($rc))"]}')"
+  valid="$(jq -r '.valid == true' <<<"$rw")"
+  # An invalid measurement is not a point. A SUT that died stays a point: its status is the result.
+  if [ "$valid" != true ] && [ "$died" != true ]; then
+    echo "ERROR: multi-k6 measurement INVALID at $LBL (exit $rw_rc): $(jq -r '(.invalid_reasons // []) | join("; ")' <<<"$rw")" >&2
+    SKIPPED+=("$(jq -c --argjson rw "$rw" --argjson st "$STATE_JSON" --argjson res "$RESOLVED_JSON" --argjson rc "$rw_rc" '
+      . + {type:"failure", status:"invalid_measurement",
+           reason:("multi-k6 measurement failed its own validity checks: " + (($rw.invalid_reasons // []) | map(split(":")[0]) | join(", "))),
+           invalid_reasons:($rw.invalid_reasons // []), rw_exit_code:$rc, oom_killed:($st.oom_killed == true), sut_state:$st, resolved:$res}' <<<"$POINT_META")")
+    return 1
+  fi
+
+  hc50=null; hc99=null
+  if [ "$valid" = true ]; then
+    hc50="$(jq -c --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson lat_mult 3 --argjson keep 0.95 --arg fix_date "2026-09-16" \
+      -f "$FIGURES_JQ" <<<"$rw" 2>/dev/null | jq -c '.headline')" || hc50=null
+    hc99="$(jq -c '.headline // null' <<<"$rw")"
+  fi
+  MAXLOG_USED="$(jq -r '.max_log_entries // empty' <<<"$RESOLVED_JSON")"
+  MAXLOG_USED="${MAXLOG_USED:-$ASSUMED_MAX_LOG_ENTRIES}"
+  AGG="$(jq -c --argjson cores "$C" --argjson hc50 "${hc50:-null}" --argjson hc99 "${hc99:-null}" \
+    --argjson p99_max_ms "$HW_P99_MAX_MS" --argjson maxlog "$MAXLOG_USED" --argjson body "$BODY_BYTES" \
+    -f "$point_jq" <<<"$rw")" || AGG=""
+  [ -n "$AGG" ] || { skip_point_failure "assembling the point from the multi-k6 result failed"; return 1; }
+  HC_RPS="$(jq -r '.healthy_ceiling_rps // "null"' <<<"$AGG")"
+
+  # The rung the SUT stopped in, from its FinishedAt against the measured rung starts.
+  DIED_AT_RPS=null; DIED_BEFORE_SWEEP=false
+  fae="$(jq -r '.finished_at_epoch // empty' <<<"$STATE_JSON")"
+  if [ -n "$fae" ] && [ "$(jq -r '.running' <<<"$STATE_JSON")" != true ]; then
+    DIED_AT_RPS="$(jq -r --argjson t "$fae" '[(.rung_windows // [])[] | select(.start_epoch_ms != null and .start_epoch_ms / 1000 <= $t) | .offered_rps] | last // "null"' <<<"$rw")"
+    [ "$DIED_AT_RPS" = null ] && DIED_BEFORE_SWEEP=true
+  fi
+
+  warm="$(jq -c '{drive_p50_ms:(.points[0].p50_ms // null), drive_achieved_rps:(.points[0].achieved_rps // null)}' "$rw_dir/warmup.json" 2>/dev/null || echo '{}')"
+  AGG="$(jq -c --arg scpu "$SCPU" --arg kcpu "$HW_K6_SPEC" --argjson k6c "$k6w" --argjson avail "$AVAIL" \
+    --argjson warm "$warm" --argjson wrate "$POINT_WARMUP_RATE" --argjson rc "$rw_rc" --arg xrates "$xrates" '
+    .server_cpus=$scpu | .k6_cpus=$kcpu | .k6_cores=$k6c | .available_processors=$avail
+    | .measurement += {rw_exit_code:$rc, cross_check_rates:$xrates}
+    | (.ladder[0].p50_ms // null) as $r1 | (.ladder[1].p50_ms // null) as $r2
+    | .warmup = ($warm + {drive_rate:$wrate, first_rung_p50_ms:$r1, second_rung_p50_ms:$r2,
+                          first_rung_slower_than_second:(($r1 != null) and ($r2 != null) and ($r1 > $r2))})' <<<"$AGG")" || AGG=""
+  [ -n "$AGG" ] || { skip_point_failure "adding the placement and warm-up to the point failed"; return 1; }
+  return 0
+}
+
 POINTS=()     # per-point aggregate JSON objects
 SKIPPED=()    # {cores, reason, type, ...} for every requested-but-unmeasured point
 MAX_MEASURED=0
 
 for PI in "${!P_CORES[@]}"; do
   C="${P_CORES[$PI]}"; MEM="${P_MEM[$PI]}"; IS_CONTROL="${P_CONTROL[$PI]}"
+  AGG=""; STATE_JSON=null
   MEM_BYTES="$(mem_to_bytes "$MEM")"
   if [ "$MODE" = hw_matrix ]; then
     PKEY="${C}c-${MEM}"; LBL="C=$C mem=$MEM"; [ "$IS_CONTROL" = true ] && LBL="$LBL (control)"
@@ -380,6 +617,7 @@ for PI in "${!P_CORES[@]}"; do
     POINT_RATES="$(tr ',' '\n' <<<"$SWEEP_RATES" | awk -v cap="$(( HW_MAX_RPS_PER_CORE * C ))" '$1+0 <= cap' | paste -sd, -)"
     [ -n "$POINT_RATES" ] || POINT_RATES="$SWEEP_RATES"
   fi
+  [ "$HW_CLIENT" = multik6 ] && POINT_RATES="$(hw_point_rates "$C")"
   POINT_WARMUP_RATE="$WARMUP_RATE"
   if [ "$MODE" = hw_matrix ] && [ -z "${PERF_PERCORE_WARMUP_RATE:-}" ]; then
     POINT_WARMUP_RATE=$(( HW_WARMUP_RPS_PER_CORE * C ))
@@ -390,13 +628,34 @@ for PI in "${!P_CORES[@]}"; do
   # prerequisite: at C=16 on a <18-core box this is false and the point is skipped
   # with a reason rather than measured wrong (shared cores) or silently omitted.
   read -r SCPU KCPU k6w <<<"$(select_cpusets "$C")"
-  if [ "$C" -gt "$HOST_CORES" ] || [ "$SCPU" = "-" ] || [ "$KCPU" = "-" ] || [ "$k6w" -lt "$K6_MIN_CORES" ]; then
+  if [ "$HW_CLIENT" = multik6 ]; then
+    # The client placement is fixed; a point whose SUT cores reach into it cannot be measured.
+    KCPU="$HW_K6_SPEC"; k6w="$(expand_cpuset "${HW_K6_SPEC//;/,}" | wc -w | tr -d ' ')"
+    reason=""
+    if [ "$C" -gt "$HOST_CORES" ] || [ "$SCPU" = "-" ]; then
+      reason="needs ${C} SUT cores; host has ${HOST_CORES} logical / ${HOST_PHYS_CORES} physical"
+    elif cpusets_logically_overlap "$SCPU" "${HW_K6_SPEC//;/,},${HW_PROM_CPUS}"; then
+      reason="SUT cpus ${SCPU} reach into the fixed client placement (k6 ${HW_K6_SPEC}, Prometheus ${HW_PROM_CPUS})"
+    fi
+    if [ -n "$reason" ]; then
+      echo "--- $LBL SKIPPED: $reason" >&2
+      SKIPPED+=("$(jq -c --arg r "$reason" '. + {reason:$r, type:"infeasible"}' <<<"$POINT_META")")
+      continue
+    fi
+    _pairs=(server "$SCPU" prometheus "$HW_PROM_CPUS")
+    for i in "${!HW_K6_SETS[@]}"; do _pairs+=("k6_$i" "${HW_K6_SETS[$i]}"); done
+    if ! cpusets_physically_disjoint "${_pairs[@]}" >&2; then
+      SKIPPED+=("$(jq -c '. + {reason:"server, Prometheus and k6 cpusets share a physical core", type:"failure"}' <<<"$POINT_META")")
+      continue
+    fi
+  elif [ "$C" -gt "$HOST_CORES" ] || [ "$SCPU" = "-" ] || [ "$KCPU" = "-" ] || [ "$k6w" -lt "$K6_MIN_CORES" ]; then
     reason="needs ${C} SUT cores + >=${K6_MIN_CORES} disjoint client cores + ${K6_RESERVE} reserved; host has ${HOST_CORES} logical / ${HOST_PHYS_CORES} physical"
     echo "--- $LBL SKIPPED: $reason" >&2
     SKIPPED+=("$(jq -c --arg r "$reason" '. + {reason:$r, type:"infeasible"}' <<<"$POINT_META")")
     continue
   fi
-  if ! cpusets_physically_disjoint server "$SCPU" k6 "$KCPU" >&2; then
+  # multik6 proved its own placement above; its KCPU is ';'-separated, which this check cannot parse.
+  if [ "$HW_CLIENT" = single ] && ! cpusets_physically_disjoint server "$SCPU" k6 "$KCPU" >&2; then
     SKIPPED+=("$(jq -c '. + {reason:"server and k6 cpusets share a physical core", type:"failure"}' <<<"$POINT_META")")
     continue
   fi
@@ -467,6 +726,9 @@ for PI in "${!P_CORES[@]}"; do
   BODY_BYTES="$(curl -s --max-time 5 "http://${HOSTPORT}/simple" 2>/dev/null | wc -c | tr -d ' ' || true)"
   BODY_BYTES="${BODY_BYTES:-6}"
 
+  if [ "$HW_CLIENT" = multik6 ]; then
+    measure_point_multik6 || continue
+  else # ---- single-k6 client: percore mode, and hw_matrix with PERF_HW_MATRIX_CLIENT=single ----
   # --- warm-up drive (NEVER measured): remove the JIT/first-touch transient so
   # the sweep's first rung is not systematically slow. ------------------------
   WARMUP_JSON="$WORK/warmup-${PKEY}.json"
@@ -480,38 +742,7 @@ for PI in "${!P_CORES[@]}"; do
   WARMUP_P50="$(jq -r '(.points[0].p50_ms) // null' "$WARMUP_JSON" 2>/dev/null || echo null)"
   WARMUP_ACH="$(jq -r '(.points[0].achieved_rps) // null' "$WARMUP_JSON" 2>/dev/null || echo null)"
 
-  # --- sample BOTH the k6 CLIENT and the SUT CPU during the measured sweep -----
-  # The SUT CPU is the decisive datum for attributing a falling peak: if the SUT
-  # sat WELL BELOW its C-core pin (C*100%) while achieved throughput fell, the
-  # server had spare CPU and the limit is the load path / virtualization, NOT the
-  # server; if it sat AT ~C*100% the server itself was the ceiling. Both are read
-  # from ONE `docker stats --no-stream` call (two container names) so the sampler
-  # adds one probe per interval, not two, and the k6 and SUT samples share a
-  # timestamp. A name not yet running just yields no line (handled by the awk).
-  # The SUT's memory use and retained log entries ride the same interval, so a point
-  # records how close it ran to its memory limit and whether the log filled.
-  CPU_LOG="$WORK/cpu-${PKEY}.csv"
-  echo "ts,k6_cpu_pct,sut_cpu_pct,sut_mem_bytes,retained_entries,retained_bytes" > "$CPU_LOG"
-  ( while true; do
-      # Stamped on return (performance-measurement.md, sweep.js).
-      stats="$(docker stats --no-stream --format '{{.Name}} {{.CPUPerc}} {{.MemUsage}}' "$K6_NAME" "$SERVER" 2>/dev/null || echo '')"
-      ts="$(date -u +%s)"
-      k6c="$(printf '%s\n' "$stats" | awk -v n="$K6_NAME" '$1==n{gsub(/%/,"",$2); print $2}')"
-      sutc="$(printf '%s\n' "$stats" | awk -v n="$SERVER" '$1==n{gsub(/%/,"",$2); print $2}')"
-      sutm="$(printf '%s\n' "$stats" | awk -v n="$SERVER" '
-        function tob(s,  n, u) { n = s; sub(/[A-Za-z]+$/, "", n); u = s; sub(/^[0-9.]+/, "", u)
-          if (u == "KiB" || u == "kB" || u == "KB") return n * 1024
-          if (u == "MiB" || u == "MB") return n * 1048576
-          if (u == "GiB" || u == "GB") return n * 1073741824
-          return n }
-        $1==n { printf "%.0f", tob($3) }')"
-      retl="$(curl -s --max-time 1 "$METRICS_URL" 2>/dev/null | awk '
-        /^mock_server_event_log_retained_entries / { e = sprintf("%.0f", $2) }
-        /^mock_server_event_log_retained_bytes /   { b = sprintf("%.0f", $2) }
-        END { printf "%s,%s", e, b }' || true)"
-      printf '%s,%s,%s,%s,%s\n' "$ts" "${k6c:-}" "${sutc:-}" "${sutm:-}" "${retl:-,}" >> "$CPU_LOG"
-      sleep "$SWEEP_SAMPLE_INTERVAL"
-    done ) & SAMPLER_PID=$!
+  start_point_sampler
 
   SWEEP_JSON="$WORK/sweep-${PKEY}.json"
   T0="$(date -u +%s)"
@@ -568,9 +799,6 @@ for PI in "${!P_CORES[@]}"; do
     CPU_MAP="$(jq -c --arg k "$r" --argjson v "${maxcpu:-null}" '. + {($k): $v}' <<<"$CPU_MAP")"
     SUT_CPU_MAP="$(jq -c --arg k "$r" --argjson v "${maxsut:-null}" '. + {($k): $v}' <<<"$SUT_CPU_MAP")"
   done
-  MEM_PEAK="$(awk -F',' 'NR>1 && $4!="" { n++; if($4+0>m) m=$4+0 } END{ if(n>0) printf "%.0f", m; }' "$CPU_LOG" 2>/dev/null || echo '')"
-  RETAINED_PEAK="$(awk -F',' 'NR>1 && $5!="" { n++; if($5+0>m) m=$5+0 } END{ if(n>0) printf "%.0f", m; }' "$CPU_LOG" 2>/dev/null || echo '')"
-  RETAINED_BYTES_PEAK="$(awk -F',' 'NR>1 && $6!="" { n++; if($6+0>m) m=$6+0 } END{ if(n>0) printf "%.0f", m; }' "$CPU_LOG" 2>/dev/null || echo '')"
   # The rung the SUT stopped in, from its FinishedAt against the ladder schedule.
   DIED_AT_RPS=null; DIED_BEFORE_SWEEP=false
   _fae="$(jq -r '.finished_at_epoch // empty' <<<"$STATE_JSON")"
@@ -771,10 +999,17 @@ for PI in "${!P_CORES[@]}"; do
         first_rung_p50_ms:$r1, second_rung_p50_ms:$r2,
         first_rung_slower_than_second:(($r1 != null) and ($r2 != null) and ($r1 > $r2))
       }' <<<"$AGG")"
+  fi # ---- end single-k6 client ----
+  MEM_PEAK="$(awk -F',' 'NR>1 && $4!="" { n++; if($4+0>m) m=$4+0 } END{ if(n>0) printf "%.0f", m; }' "$CPU_LOG" 2>/dev/null || echo '')"
+  RETAINED_PEAK="$(awk -F',' 'NR>1 && $5!="" { n++; if($5+0>m) m=$5+0 } END{ if(n>0) printf "%.0f", m; }' "$CPU_LOG" 2>/dev/null || echo '')"
+  RETAINED_BYTES_PEAK="$(awk -F',' 'NR>1 && $6!="" { n++; if($6+0>m) m=$6+0 } END{ if(n>0) printf "%.0f", m; }' "$CPU_LOG" 2>/dev/null || echo '')"
 
   # Memory, survival and lower-bound labelling. A ceiling is a LOWER BOUND when its rung
   # was client-limited, the SUT never neared its CPU pin, it is the top rung offered, or
   # the CPU samples needed to rule the first two out are missing (cpu_unverified).
+  if [ "$(jq -r '.running' <<<"$STATE_JSON" 2>/dev/null)" != true ] && [ "$(jq -r '.running' <<<"$STATE_JSON" 2>/dev/null)" != false ]; then
+    skip_point_failure "could not read the SUT's state after the sweep (docker inspect failed)"; continue
+  fi
   AGG="$(jq -c --argjson meta "$POINT_META" --argjson resolved "$RESOLVED_JSON" --argjson state "$STATE_JSON" \
     --argjson mempeak "${MEM_PEAK:-null}" --argjson retpeak "${RETAINED_PEAK:-null}" --argjson died_at "$DIED_AT_RPS" \
     --argjson retbpeak "${RETAINED_BYTES_PEAK:-null}" \
@@ -819,16 +1054,20 @@ for PI in "${!P_CORES[@]}"; do
     | .client_headroom_frac_at_ceiling = (if .healthy_ceiling_client_cpu_pct == null then null
                                           else frac(.client_pin_pct - .healthy_ceiling_client_cpu_pct; .client_pin_pct) end)
     # A SUT that did not survive has no ceiling to bound; its status says what happened.
-    | .lower_bound_reasons = if ($died or $jvm_oom) then [] else [
+    # multik6 points carry derive_saturation-based candidates (lib/perf-hw-matrix-rw.jq).
+    | .lower_bound_reasons = if ($died or $jvm_oom) then []
+        elif has("lower_bound_candidates") then .lower_bound_candidates else [
         (if .client_limited_at_ceiling == true then "client_cpu_limited" else empty end),
         (if $hc != null and .peak_limited_by == "load_path_or_virtualization" then "server_cpu_not_saturated" else empty end),
         (if $hc != null and $hc == $top then "ladder_top_reached" else empty end),
         (if $hc != null and (.peak_limited_by == null or .healthy_ceiling_client_cpu_pct == null)
          then "cpu_unverified" else empty end) ] end
+    | del(.lower_bound_candidates)
     | .lower_bound = ((.lower_bound_reasons | length) > 0)
     | .status = (if $state.oom_killed == true then "oom_killed" elif $died then "sut_died"
                  elif $jvm_oom then "java_out_of_memory" elif $hc == null then "no_healthy_ceiling"
-                 else "measured" end)' <<<"$AGG")"
+                 else "measured" end)' <<<"$AGG")" || AGG=""
+  [ -n "$AGG" ] || { skip_point_failure "labelling the point's memory, survival and lower bounds failed"; continue; }
 
   echo "    $LBL  status=$(jq -r '.status' <<<"$AGG") heap=$(jq -r '.resolved.max_heap_bytes' <<<"$AGG") mem_peak=$(jq -r '.container_memory_peak_frac_of_limit' <<<"$AGG") lower_bound=$(jq -r '.lower_bound_reasons | join("+")' <<<"$AGG")" >&2
   echo "    C=$C  healthy_ceiling=${HC_RPS} rps_per_core=$(jq -r '.rps_per_core' <<<"$AGG") peak=$(jq -r '.rig_valid_peak_achieved_rps' <<<"$AGG") sut_cpu@peak=$(jq -r '.sut_cpu_at_peak_pct' <<<"$AGG")%/$(jq -r '.sut_pin_pct' <<<"$AGG")% peak_limited_by=$(jq -r '.peak_limited_by' <<<"$AGG")" >&2
@@ -856,7 +1095,11 @@ jq -nc \
   --argjson k6_reserve "$K6_RESERVE" \
   --argjson rig_paused "$([ "${PERF_HW_MATRIX_RIG_PAUSED:-false}" = true ] && echo true || echo false)" \
   --arg ladder "$CORE_LADDER" \
-  --arg rates "$SWEEP_RATES" \
+  --arg rates "$([ "$HW_CLIENT" = multik6 ] || echo "$SWEEP_RATES")" \
+  --arg client "$HW_CLIENT" --arg k6sets "$HW_K6_SPEC" --arg promcpus "$HW_PROM_CPUS" \
+  --argjson k6phys "$(phys_core_count "${HW_K6_SPEC//;/,}")" --arg anchors "$HW_LADDER_ANCHORS" \
+  --arg ref "$HW_RPS_PER_CORE_REF" --arg lo "$HW_LADDER_LO" --arg hi "$HW_LADDER_HI" --arg rungs "$HW_LADDER_RUNGS" \
+  --arg explicit_rates "${PERF_HW_MATRIX_SWEEP_RATES:-}" \
   --arg step "$SWEEP_STEP" --arg gap "$SWEEP_GAP" --argjson settle "$SWEEP_SETTLE_S" '
   {
     attempted:true,
@@ -875,9 +1118,21 @@ jq -nc \
   + if $mode == "hw_matrix" then {
       matrix:$matrix,
       matrix_requested:$requested,
-      # each point offers only the rates up to this many rps per core (0 = the full ladder).
-      sweep_max_rps_per_core:$per_core_cap,
-      k6_reserve_cores:$k6_reserve,
+      client:$client
+    }
+    + (if $client == "multik6" then {
+        # Every point: the same N k6 processes and Prometheus on fixed cpusets; its own rates in .points[].sweep_rates.
+        client_placement:{k6_cpusets:($k6sets | split(";")), k6_physical_cores:$k6phys, prometheus_cpus:$promcpus},
+        ladder:(if $explicit_rates != "" then {explicit:$explicit_rates}
+                else {rps_per_core_ref:($ref | tonumber), lo:($lo | tonumber), hi:($hi | tonumber), rungs:($rungs | tonumber),
+                      anchors:($anchors | split(",") | map(tonumber)),
+                      rule:"anchors x cores x rps_per_core_ref (at least 1000), then geometric from lo to hi x cores x rps_per_core_ref, rounded to 100"} end)
+      } else {
+        # each point offers only the rates up to this many rps per core (0 = the full ladder).
+        sweep_max_rps_per_core:$per_core_cap,
+        k6_reserve_cores:$k6_reserve
+      } end)
+    + {
       # true only when the caller (perf-test-run.sh) paused every other container on the
       # rig, so nothing else could run on a point cores during its sweep.
       other_containers_paused:$rig_paused,

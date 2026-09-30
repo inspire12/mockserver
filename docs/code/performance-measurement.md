@@ -31,7 +31,7 @@ regressions hide and stale claims get published.
 | `soak.js` | Sustained load over hours | Weekly (Sunday 08:00 UTC schedule, perf queue) and on demand in any build whose message contains `[perf-soak]` | Yes, for that build — k6 thresholds and a result-presence check; never compared or baselined |
 | `scripts/perf/bench_startup.py` | Launch-to-ready variant matrix | Never runs in CI | Never |
 | `inject` (`run-inject.sh`) | Load-injection ceiling | Opt-in | Never in daily pipeline |
-| Hardware matrix (`lib/perf-percore.sh`, `PERF_SERVING_HW_MATRIX=true`) | Healthy ceiling per cores × container memory, for the public sizing table | Opt-in, manual build only | No — notify-only; only a wholesale producer failure reds (presence gate) |
+| Hardware matrix (`lib/perf-percore.sh` driving `rw-multi-k6-sweep.sh` per point, `PERF_SERVING_HW_MATRIX=true`) | Healthy ceiling per cores × container memory, for the public sizing table | Opt-in, manual build only | No — notify-only; only a wholesale producer failure reds (presence gate) |
 | `perf-test-allocprofile.sh` (deep JFR) | Allocation per request, peak direct memory, top allocation sites over the load window, retained-heap histogram, and the CPU / lock / GC profile of the ceiling rungs alone | Daily (perf queue), separate step | No — `soft_fail`, never baselined; an under-sized recording is reported INVALID |
 
 ## The Daily Pipeline
@@ -230,7 +230,9 @@ minimum it judges on; the diag sampler gives 2–4 per 12 s window), `partial` (
 so the test was off for them) or `off`. Only the main ERROR ladder has a server CPU
 log. The INFO-arm and HTTPS/h2 path-coverage ladders run against SUTs the sampler does not watch, so
 they, and any run with an unpinned SUT, read `off` and only the k6 CPU test applies.
-`lib/perf-percore.sh` (per-core, hardware matrix) keeps its own 85%-of-pin rule.
+`lib/perf-percore.sh`'s per-core mode keeps its own 85%-of-pin rule; its hardware-matrix mode
+takes rig validity and lower-bound reasons from `derive_saturation` (see
+[Hardware matrix](#hardware-matrix--throughput-by-cores-and-memory-item-27)).
 
 **Published figures from a client-limited run.** `perf-website-figures.jq` publishes rig-valid
 rungs only. When no rung above the healthy ceiling is rig-valid (or there is none), no overload
@@ -952,9 +954,12 @@ the injector. This step is opt-in and does not run as part of the daily pipeline
 ### Hardware matrix — throughput by cores and memory (item 27)
 
 **Outcome.** One manual build measures the healthy ceiling of a single MockServer container at
-several sizes and publishes it as the "Throughput by hardware size" table on `performance.html`.
-Default matrix: 1 core / 512 MB, 2 / 1 GB, 2 / 2 GB (control), 4 / 2 GB, 6 / 2 GB, 8 / 2 GB. It
-is never part of the daily run.
+several sizes and publishes it as the "Throughput by hardware size" table and chart on
+`performance.html`, with per-core throughput and scaling against the 1-core size. Default matrix:
+1 core / 512 MB, 2 / 1 GB, 2 / 2 GB (control), 3 / 1.5 GB, 4 / 2 GB, 6 / 2 GB (memory grows from
+512 MB at 1 core to 2 GB at 4 cores and above). Each point is driven by four k6 processes merged
+in Prometheus (`rw-multi-k6-sweep.sh`), so a point is limited by MockServer rather than a single
+k6 up to about 56–64k req/s. It is never part of the daily run.
 
 **Trigger** (the message must contain `[perf-run]`, or the guard does not dispatch an API build):
 
@@ -963,68 +968,108 @@ bk build create -p mockserver-performance-test -b master -c HEAD \
   -m "[perf-run] hardware matrix (item 27)" -e PERF_SERVING_HW_MATRIX=true -y
 ```
 
-The build runs the normal regression chain plus the matrix (about 45 extra minutes); the guard
-raises the run step's timeout from 70 to 130 minutes only when `PERF_SERVING_HW_MATRIX=true`.
-Avoid the 04:00 UTC daily slot and the Sunday 08:00 soak (the `perf` queue has one agent).
-`PERF_HW_MATRIX` overrides the points, as comma-separated `cores:memory[:control]` entries.
+The build runs the normal regression chain plus the matrix (about 10 minutes per point, 60 in
+all); the guard raises the run step's timeout from 70 to 160 minutes only when
+`PERF_SERVING_HW_MATRIX=true`. Avoid the 04:00 UTC daily slot and the Sunday 08:00 soak (the
+`perf` queue has one agent). `PERF_HW_MATRIX` overrides the points, as comma-separated
+`cores:memory[:control]` entries.
 
 ```mermaid
 flowchart LR
-  run["perf-test-run.sh\nPERF_SERVING_HW_MATRIX=true"] --> pc["lib/perf-percore.sh\nPERF_PERCORE_MODE=hw_matrix"]
-  pc --> res["result.json .serving_hw_matrix\n+ serving-hw-matrix.json artifact"]
-  res --> cmp["perf-test-compare.sh\nnotify-only metrics + presence gate"]
-  cmp --> pub["perf-website-publish.sh\nhw_matrix in perf_figures.json\n+ perf-hw-matrix.json chart data"]
+  run["perf-test-run.sh\nPERF_SERVING_HW_MATRIX=true\npause_rig"] --> pc["lib/perf-percore.sh\nhw_matrix: SUT lifecycle per point"]
+  pc --> rw["rw-multi-k6-sweep.sh\nexisting-SUT mode"]
+  rw --> map["lib/perf-hw-matrix-rw.jq\nrw result -> point"]
+  map --> res["result.json .serving_hw_matrix\n+ serving-hw-matrix.json, -work.tgz"]
+  res --> cmp["perf-test-compare.sh\nnotify-only + presence gate"]
+  cmp --> pub["perf-website-publish.sh\nhw_matrix in perf_figures.json"]
 ```
 
-**What each point is.** A fresh SUT on the GraalJS snapshot image, pinned with `--cpuset-cpus` to C
-logical CPUs on C distinct physical cores, with `--memory` and `--memory-swap` both set to the
-point's limit and no `-Xmx`, so the GraalJS image's `MaxRAMPercentage=45` sizes the heap and the
-event-log bounds follow the heap exactly as in a user's container. Log level is `ERROR`, as in
-the rest of the rig. k6 takes one thread on each remaining physical core (never the SUT's
-hyperthread siblings), minus one reserved core; where sysfs topology is unreadable (a macOS
-run) it falls back to logical ids and the point records `cpus_physically_verified: false`.
-For the whole matrix `perf-test-run.sh` pauses every other container of the run (the idle main
-SUT on cores 0–5, the upstream on core 6) and stops the samplers that scrape them, then resumes
-them (also from `cleanup()`). `other_containers_paused` is true only when at least one container
-was listed and every listed one paused; a failed pause is logged as a warning. The page claims
-"each on its own physical core, with no other test container on it" only when that and the
-topology proof both hold.
-Each point runs the pin proof, a warm-up, then the sweep up to `20,000 × cores` req/s
-(`PERF_HW_MATRIX_MAX_RPS_PER_CORE`) on a ladder whose rungs are 6–17% apart from 8,000 req/s up
-and 12–100% below that, so every ceiling is resolved only to one rung. The healthy ceiling comes
-from `lib/perf-website-figures.jq`, as for every other ceiling.
+**Placement** (identical for every point and rung, so client capacity is constant). On the
+c5.12xlarge (48 logical cpus, siblings at N and N+24):
 
-**What each point records** (beyond the `serving_percore` per-point fields): `memory_limit`,
-`control`, the SUT's own `resolved` heap ceiling and event-log bounds (`max_heap_bytes`,
-`max_log_entries`, `max_event_log_bytes`, read from `/mockserver/metrics`), peak container
-memory as a fraction of the limit, peak retained log entries and bytes with each bound's
-utilisation (`event_log_filled` is true when EITHER bound reached 95%; with small bodies the byte
-bound binds first), `sut_state` (running, OOM-killed,
-exit code, restarts, `OutOfMemoryError` count), `status` (`measured`, `oom_killed`, `sut_died`,
-`java_out_of_memory`, `no_healthy_ceiling`), `died_at_offered_rps` / `died_before_sweep`, the
-k6 headroom at the ceiling, and `lower_bound` with its reasons:
+| Role | cpus |
+|---|---|
+| SUT (C cores) | physical cores 0..C-1, one thread each; their siblings stay idle |
+| four k6 processes | `7-10,31-34`, `11-14,35-38`, `15-18,39-42`, `19-22,43-46` (both hyperthreads) |
+| Prometheus | `23,47` |
+| main SUT and upstream | paused by `perf-test-run.sh`'s `pause_rig` for the whole matrix |
+| cores C to 6 | idle |
+
+A point whose SUT cpus would reach into the client placement (C ≥ 8 here) is skipped as
+`infeasible`. This layout is used only on a host with exactly 48 logical cpus. Any other host gets
+a logical-id layout above the largest point that is not hyperthread-aware: the physical-disjointness
+proof still refuses a point that overlaps, but on such a host set `PERF_HW_MATRIX_K6_CPUSETS`
+(`;`-separated) and `PERF_HW_MATRIX_PROM_CPUS` to a sibling-aware layout.
+`PERF_HW_MATRIX_CLIENT=single` restores the old single-k6 sweep for comparison.
+
+**What each point is.** `lib/perf-percore.sh` keeps the SUT lifecycle: the pin proof, a fresh
+SUT on the GraalJS snapshot image pinned with `--cpuset-cpus`, `--memory` and `--memory-swap` both
+set to the point's limit and no `-Xmx` (so `MaxRAMPercentage=45` sizes the heap and the event-log
+bounds follow it, as in a user's container), log level `ERROR`, the resolved bounds from
+`/mockserver/metrics`, a memory and event-log sampler, and the OOM and survival state. It then
+runs `rw-multi-k6-sweep.sh` against that SUT in its existing-SUT mode (`PERF_RW_NETWORK`,
+`PERF_RW_TARGET_URL`, `PERF_RW_SUT_CONTAINER`, and `PERF_RW_SERVER_CPUS` set to the SUT's cpuset,
+so `server_headroom_test` is active). The rw harness warms the SUT up (4,000 req/s per core for
+8 s), runs its same-requests cross-check on the point's lowest three rungs at or below
+40,000 req/s (so every size has on-ladder counterparts), then the main ladder. The ladder is three
+anchor rungs at 0.1, 0.2 and 0.3 × `cores × 16,000` req/s (at least 1,000), then 17 rungs spaced
+geometrically from 0.5× to 1.6×, about 7.5% apart, all rounded to 100: 20 rungs, 1,600 to
+25,600 req/s at 1 core and 9,600 to 153,600 at 6. The anchors exist because the healthy-ceiling
+rule takes its flat-region p50 from the lowest four rungs; without them that baseline would sit at
+half the expected ceiling. The top reaches 1.6× so 1–3 cores are unlikely to stop at
+`ladder_top_reached`. Knobs: `PERF_HW_MATRIX_RPS_PER_CORE_REF`, `_LADDER_ANCHORS` (empty for
+none), `_LADDER_LO`, `_LADDER_HI`, `_LADDER_RUNGS`, `_XCHECK_MAX_RPS`;
+`PERF_HW_MATRIX_SWEEP_RATES` offers one explicit list to every point. Steps are 15 s with 5 s
+gaps and a 3 s settle.
+
+**Mapping.** `lib/perf-hw-matrix-rw.jq` turns the rw result into the point fields the rest of
+the pipeline already reads. The published `healthy_ceiling_rps` is the p50 rule
+(`lib/perf-website-figures.jq` without a p99 bound), as for the page headline; the p99 ≤ 10 ms
+ceiling the rw harness computes is recorded as `healthy_ceiling_p99_bounded` only (programme
+item 44 decides any switch). `rig_valid_peak_achieved_rps` and the per-rung rig validity come
+from the rw result's `saturation` block. An rw result with `valid: false` is not a point: it is
+a `failure` skip with `status: "invalid_measurement"` and the harness's reasons, which the compare
+presence gate counts as a rig failure. So is a point whose SUT state cannot be read afterwards
+(`docker inspect` failed) or whose assembly fails; a point is never dropped silently
+(`PERF_HW_MATRIX_TEST_FAULT=sut_inspect|point_jq` exercises both). A SUT that died stays a point
+with its OOM status. `measurement.cross_run_agrees` is null when no rung had a single-process
+counterpart.
+
+**Lower-bound reasons**, all from `derive_saturation` (the local 85%-of-pin rule is not used in
+this mode). A point's ceiling is a lower bound when any of these holds:
 
 | Reason | Meaning |
 |---|---|
-| `client_cpu_limited` | k6 was at ≥85% of its CPU pin (or erroring) on the ceiling rung |
+| `client_cpu_limited` | the first rung above the ceiling is client-limited with k6 over its CPU ceiling (`k6_saturated`), or client-limited when the samples to split k6 from server CPU are missing |
+| `server_cpu_not_saturated` | the SUT never reached 85% of its C-core pin on any rung (`peak_limited_by: load_path_or_virtualization`), or the first rung above the ceiling is client-short while the SUT was under 85% |
+| `overload_not_measured` | the first rung above the ceiling is rig-invalid for a reason other than the client (errors, drops with an idle VU pool), so no overload was measured |
+| `cpu_unverified` | `saturation.server_headroom_test` is not `active` |
 | `ladder_top_reached` | the ceiling is the highest rate offered to this point |
-| `server_cpu_not_saturated` | the SUT never reached 85% of its CPU pin on any rung, so the load path may have been the limit |
-| `cpu_unverified` | the SUT or k6 CPU samples needed to rule out the first two are missing |
+| `client_limit_at_or_below_ceiling` | the ceiling is at or above `saturation.client_limited_from_rps` |
 
-`client_cpu_limited` uses `lib/perf-percore.sh`'s own 85%-of-pin rule, not `derive_saturation`'s
-server-headroom test (see [Client-limited rungs](#sweepjs--throughput-vs-latency-knee)), so it misses
-a k6 client that saturates below 85% and an unflagged point can still be client-limited;
-`server_cpu_not_saturated` usually catches that case from the server side.
+A ceiling with none of these is a measured server limit: the SUT reached 85% of its pin on some
+rung and the rung above the ceiling was measured validly.
 
-An OOM-killed SUT is kept (the container runs without `--rm`) and reported with its status; a
-SUT killed while starting is a `failure` skip with `oom_killed: true`. Neither is dropped.
+**What each point records** (beyond the `serving_percore` per-point fields): `memory_limit`,
+`control`, the SUT's `resolved` heap ceiling and event-log bounds, peak container memory as a
+fraction of the limit, peak retained log entries and bytes with each bound's utilisation
+(`event_log_filled` is true when EITHER bound reached 95%), `sut_state`, `status` (`measured`,
+`oom_killed`, `sut_died`, `java_out_of_memory`, `no_healthy_ceiling`), `died_at_offered_rps` /
+`died_before_sweep` (from the rw result's measured rung starts; "before the sweep" includes the
+warm-up and cross-check phases), `sweep_rates`, `saturation`
+(`client_limited_from_rps`, `server_headroom_test`, the CPU ceilings), and `measurement`
+(validity, cross-check verdicts, k6 CPU per request, the cross-check rates). Every point's rw
+work files go into the `serving-hw-matrix-work.tgz` artifact.
 
 **Publishing.** `perf-website-figures.jq` turns `.serving_hw_matrix` into `hw_matrix`, and
 emits null (so the committed table is kept) unless at least one point is `measured` with a
 healthy ceiling; compare likewise reds a matrix whose points all lack a ceiling and none was
 OOM-killed. `hw_matrix` holds:
 
-- display rows with plain-language notes and each point's request-log caps and peak;
+- display rows with plain-language notes, each point's request-log caps and peak, and
+  `rps_per_core_display`, `scaling_vs_1core` (rps per core ÷ that of the 1-core point, null when
+  the 1-core point is a lower bound) and `peak_display` (the rig-valid peak), and memory shown as MB below 1 GB and GB (e.g. "1.5 GB")
+from 1 GB;
 - a per-core figure from points that are neither controls nor lower bounds, with `scaling`:
   `linear` (per-core rate within 20% across sizes), `falling` or `rising` (moves one way at
   every step), `mixed`, or `single`; with none, `per_core_unavailable` says why;
@@ -1033,15 +1078,22 @@ OOM-killed. `hw_matrix` holds:
   otherwise `inconclusive` with a reason. Each ceiling can move a rung between runs, so a gap
   of up to two rungs is treated as noise.
 
-The page scopes every statement to "this run" and states only what the data supports. Daily
-runs carry no matrix, so the publish step keeps the committed `hw_matrix` and emits a refresh
-only when a newer matrix run appears. With no data the page shows "Not yet measured".
+The page marks lower bounds with ≥ in the ceiling, per-core, scaling and peak columns, and the
+chart hatches them and draws a dashed ideal-linear line (1-core rate × cores). Daily runs carry
+no matrix, so the publish step keeps the committed `hw_matrix`. A matrix run's own headline is
+usually a client-limited lower bound: the publish hold covers the headline only, so when a new
+matrix arrives with a held headline the patch refreshes `hw_matrix` (and `perf-hw-matrix.json`
+and `perf_hw_matrix.png`) alone and carries every other committed figure forward. With no data
+the page shows "Not yet measured". `perf-test-compare.sh` keys the matrix's p50-gated metrics
+on the load client as well as the sweep settle, so multi-k6 points never share a baseline with
+single-k6 ones. `.buildkite/scripts/test/perf-hw-matrix-test.sh` (run by
+`perf-test-lint.sh`) checks the reasons, the display fields and the hold split on fixtures.
 
-**Limits.** A single k6 process tops out near the rig-valid peak of the main run (59.6–59.9k
-req/s before item 26's harness regression, fixed in `caf82e7af`, confirmation run pending), so
-the 6- and 8-core points are likely to be labelled lower bounds; run the matrix after that
-confirmation. The per-core profile (`PERF_SERVING_PERCORE=true`) shares this script and the same
-k6 placement but not the pausing; its output shape is unchanged apart from added fields.
+**Limits.** The four k6 processes top out around 56–64k req/s, so the 4- and 6-core points are
+likely to be lower bounds (`client_cpu_limited` or `client_limit_at_or_below_ceiling`). Off
+Linux (Docker Desktop) the cpusets are logical ids and the physical-core proof is skipped, so a
+local run checks the wiring, not the placement. The per-core profile
+(`PERF_SERVING_PERCORE=true`) still uses the single-k6 sweep and its own rule.
 
 ### Allocation profile step
 

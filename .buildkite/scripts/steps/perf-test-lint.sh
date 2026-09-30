@@ -54,6 +54,9 @@ else
   echo "  shellcheck absent on this agent — skipping (bash -n above still runs)" >&2
 fi
 
+echo "--- hardware-matrix fixture checks (item 27: lower-bound reasons, page fields, publish hold)"
+bash "$REPO_ROOT/.buildkite/scripts/test/perf-hw-matrix-test.sh"
+
 echo "--- byte-compiling the SSE fidelity reader (item 12)"
 # The reader is pure-stdlib python3 run on the perf agent by perf-test-run.sh; a
 # syntax error would only surface mid-run, so compile it here. Skip (do not fail)
