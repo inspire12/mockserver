@@ -221,7 +221,7 @@ public class ExpectationExportSerializer {
                 respNode.put("description",
                     response.getReasonPhrase() != null ? response.getReasonPhrase() : "OK");
             }
-            addOpenApiBody(respNode, response.getBody(), response.getBodyAsString(),
+            addOpenApiBody(respNode, response.getBody(), response.getBodyAsText(),
                 response.getFirstHeader("content-type"));
         } else if (responses.isEmpty()) {
             ObjectNode okNode = responses.putObject("200");
@@ -486,7 +486,7 @@ public class ExpectationExportSerializer {
         }
 
         // Body
-        String requestBody = req.getBodyAsString();
+        String requestBody = req.getBodyAsText();
         if (requestBody != null && !requestBody.isEmpty()) {
             ObjectNode body = request.putObject("body");
             body.put("mode", "raw");
@@ -504,7 +504,7 @@ public class ExpectationExportSerializer {
             resp.put("name", "Example response");
             resp.put("status", response.getReasonPhrase() != null ? response.getReasonPhrase() : "OK");
             resp.put("code", response.getStatusCode() != null ? response.getStatusCode() : 200);
-            String bodyString = response.getBodyAsString();
+            String bodyString = response.getBodyAsText();
             if (bodyString != null) {
                 resp.put("body", bodyString);
             }
@@ -641,7 +641,7 @@ public class ExpectationExportSerializer {
             out.append("}\n");
         }
 
-        String requestBody = req.getBodyAsString();
+        String requestBody = req.getBodyAsText();
         if (requestBody != null && !requestBody.isEmpty()) {
             String mode = detectContentType(requestBody).contains("json") ? "json" : "text";
             out.append("\nbody:").append(mode).append(" {\n");
@@ -659,7 +659,7 @@ public class ExpectationExportSerializer {
             out.append("\ndocs {\n  Expected response: ")
                 .append(response.getStatusCode() != null ? response.getStatusCode() : 200)
                 .append('\n');
-            String bodyString = response.getBodyAsString();
+            String bodyString = response.getBodyAsText();
             if (bodyString != null && !bodyString.isEmpty()) {
                 out.append("  Body: ").append(bodyString.replace("\n", " ")).append('\n');
             }

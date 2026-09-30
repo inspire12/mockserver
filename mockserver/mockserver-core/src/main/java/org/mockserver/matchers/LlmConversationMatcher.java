@@ -223,7 +223,7 @@ public class LlmConversationMatcher {
             if (messages.isEmpty()) {
                 String bodySample = "";
                 if (request != null) {
-                    String bodyStr = request.getBodyAsString();
+                    String bodyStr = request.getBodyAsText();
                     if (bodyStr != null) {
                         bodySample = bodyStr.substring(0, Math.min(bodyStr.length(), 256));
                     }

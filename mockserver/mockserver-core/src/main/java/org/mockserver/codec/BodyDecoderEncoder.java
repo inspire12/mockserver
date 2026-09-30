@@ -4,9 +4,15 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import org.mockserver.model.*;
 
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
 import java.nio.charset.Charset;
+import java.nio.charset.CharsetDecoder;
+import java.nio.charset.CoderResult;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
 
-import static org.apache.commons.lang3.StringUtils.isNotBlank;
+import static org.apache.commons.lang3.StringUtils.isBlank;
 import static org.mockserver.model.JsonBody.DEFAULT_MATCH_TYPE;
 
 @SuppressWarnings("rawtypes")
@@ -120,17 +126,59 @@ public class BodyDecoderEncoder {
                     bodyBytes,
                     mediaType
                 );
+            } else if (isBlank(contentTypeHeader)) {
+                // No Content-Type: keep a String view only when the bytes are valid UTF-8, so it
+                // re-encodes to exactly the bytes received. Anything else stays binary; decoding it
+                // would turn each malformed byte into U+FFFD (3 bytes), corrupting forwarded bodies.
+                String text = decodeIfValidUtf8(bodyBytes);
+                if (text != null) {
+                    return new StringBody(text, bodyBytes, false, null);
+                }
+                return new BinaryBody(bodyBytes, null);
             } else if (mediaType.isString()) {
                 return new StringBody(
                     new String(bodyBytes, mediaType.getCharsetOrDefault()),
                     bodyBytes,
                     false,
-                    isNotBlank(contentTypeHeader) ? mediaType : null
+                    mediaType
                 );
             } else {
                 return new BinaryBody(bodyBytes, mediaType);
             }
         }
         return null;
+    }
+
+    /**
+     * The bytes decoded as UTF-8, or {@code null} when they are not valid UTF-8 and so could not be
+     * re-encoded to the same bytes.
+     */
+    public static String decodeIfValidUtf8(byte[] bytes) {
+        String decoded = new String(bytes, StandardCharsets.UTF_8);
+        // the lenient decode replaces every malformed sequence with U+FFFD, so its absence proves the
+        // bytes are valid; a U+FFFD that was genuinely encoded in the input needs the strict check
+        if (decoded.indexOf('\uFFFD') < 0) {
+            return decoded;
+        }
+        return isValidUtf8(bytes) ? decoded : null;
+    }
+
+    private static boolean isValidUtf8(byte[] bytes) {
+        CharsetDecoder decoder = StandardCharsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT);
+        ByteBuffer in = ByteBuffer.wrap(bytes);
+        // validate through a small reused buffer rather than a second copy the size of the body
+        CharBuffer out = CharBuffer.allocate(8192);
+        CoderResult result;
+        do {
+            out.clear();
+            result = decoder.decode(in, out, true);
+            if (result.isError()) {
+                return false;
+            }
+        } while (result.isOverflow());
+        out.clear();
+        return !decoder.flush(out).isError();
     }
 }

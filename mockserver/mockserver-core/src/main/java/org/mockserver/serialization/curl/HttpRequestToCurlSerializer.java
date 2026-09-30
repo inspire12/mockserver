@@ -6,6 +6,7 @@ import io.netty.handler.codec.http.cookie.DefaultCookie;
 import org.apache.commons.lang3.Strings;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.mappers.MockServerHttpRequestToFullHttpRequest;
+import org.mockserver.model.BinaryBody;
 import org.mockserver.model.Header;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.NottableString;
@@ -66,7 +67,8 @@ public class HttpRequestToCurlSerializer {
                 }
                 curlString.append(getCookieHeader(request));
                 // read without caching: the request is usually already retained in the event log
-                String body = request.getBody() != null ? request.getBody().toStringWithoutCaching() : null;
+                String body = request.getBody() instanceof BinaryBody ? request.getBodyAsText()
+                    : request.getBody() != null ? request.getBody().toStringWithoutCaching() : null;
                 if (isNotBlank(body)) {
                     curlString.append(" --data ").append(singleQuote(body));
                 }

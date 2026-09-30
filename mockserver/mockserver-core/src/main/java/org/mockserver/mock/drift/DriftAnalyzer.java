@@ -157,8 +157,8 @@ public class DriftAnalyzer {
     }
 
     private void collectJsonSchema(List<DriftRecord> collected, String expectationId, HttpResponse stubResponse, HttpResponse realResponse, long now) {
-        String stubBody = stubResponse.getBodyAsString();
-        String realBody = realResponse.getBodyAsString();
+        String stubBody = stubResponse.getBodyAsText();
+        String realBody = realResponse.getBodyAsText();
         if (!isJson(stubBody) || !isJson(realBody)) {
             return;
         }

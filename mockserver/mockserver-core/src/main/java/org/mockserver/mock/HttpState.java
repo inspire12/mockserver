@@ -2287,7 +2287,7 @@ public class HttpState {
                         // body verbatim to preserve the exact schema the user submitted.
                         List<Expectation> upsertedExpectations = add(
                             new org.mockserver.graphql.GraphQLExpectationGenerator()
-                                .generate(request.getBodyAsString(), path)
+                                .generate(request.getBodyAsText(), path)
                                 .toArray(new Expectation[0])
                         );
                         responseWriter.writeResponse(request, response()
@@ -7899,7 +7899,7 @@ public class HttpState {
                 return response().withStatusCode(NOT_IMPLEMENTED.code())
                     .withBody(errorJson(org.mockserver.async.AsyncApiControlPlaneRegistry.NOT_AVAILABLE), MediaType.JSON_UTF_8);
             }
-            String body = request.getBodyAsString();
+            String body = request.getBodyAsText();
             if (body == null || body.isBlank()) {
                 return response().withStatusCode(BAD_REQUEST.code())
                     .withBody("{\"error\":\"request body must contain an AsyncAPI spec (JSON/YAML) or {spec, brokerConfig}\"}", MediaType.JSON_UTF_8);
@@ -7922,7 +7922,7 @@ public class HttpState {
                 return response().withStatusCode(NOT_IMPLEMENTED.code())
                     .withBody(errorJson(org.mockserver.async.AsyncApiControlPlaneRegistry.NOT_AVAILABLE), MediaType.JSON_UTF_8);
             }
-            String body = request.getBodyAsString();
+            String body = request.getBodyAsText();
             if (body == null || body.isBlank()) {
                 return response().withStatusCode(BAD_REQUEST.code())
                     .withBody("{\"error\":\"request body must contain an AsyncAPI spec (JSON/YAML) or {spec, channelPathPrefix}\"}", MediaType.JSON_UTF_8);
@@ -8011,7 +8011,7 @@ public class HttpState {
 
     private HttpResponse handlePactVerify(HttpRequest request) {
         try {
-            String body = request.getBodyAsString();
+            String body = request.getBodyAsText();
             if (body == null || body.isBlank()) {
                 return response().withStatusCode(BAD_REQUEST.code())
                     .withBody("{\"error\":\"Pact contract JSON must not be empty\"}", MediaType.JSON_UTF_8);
@@ -8042,7 +8042,7 @@ public class HttpState {
                 return response().withStatusCode(NOT_IMPLEMENTED.code())
                     .withBody(errorJson(org.mockserver.async.AsyncApiControlPlaneRegistry.NOT_AVAILABLE), MediaType.JSON_UTF_8);
             }
-            String body = request.getBodyAsString();
+            String body = request.getBodyAsText();
             if (body == null || body.isBlank()) {
                 return response().withStatusCode(BAD_REQUEST.code())
                     .withBody("{\"error\":\"verification request body must not be empty\"}", MediaType.JSON_UTF_8);

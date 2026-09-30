@@ -195,7 +195,7 @@ public class BaselineDiffer {
         diffHeaderNames(diffs, baseline, current);
 
         // body — structural (value-insensitive) JSON shape comparison
-        diffBodyShape(diffs, baseline.getBodyAsString(), current.getBodyAsString());
+        diffBodyShape(diffs, baseline.getBodyAsText(), current.getBodyAsText());
 
         return diffs;
     }

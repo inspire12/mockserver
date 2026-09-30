@@ -82,6 +82,37 @@ public class Http3RequestBridgeTest {
     }
 
     @Test
+    public void shouldKeepNonUtf8BodyWithNoContentTypeByteIdenticalFromBothOverloads() {
+        byte[] body = new byte[64 * 1024];
+        new java.util.Random(7).nextBytes(body);
+
+        HttpRequest fromBytes = Http3RequestBridge.toHttpRequest("POST", "/upload", "https", "localhost", new ArrayList<>(), body);
+        ByteBuf buffer = Unpooled.wrappedBuffer(body);
+        HttpRequest fromBuffer;
+        try {
+            fromBuffer = Http3RequestBridge.toHttpRequest("POST", "/upload", "https", "localhost", new ArrayList<>(), buffer);
+        } finally {
+            buffer.release();
+        }
+
+        assertThat(fromBytes.getBodyAsRawBytes(), is(body));
+        assertThat(fromBuffer.getBodyAsRawBytes(), is(body));
+        assertThat(fromBytes.getBody().getType(), is(org.mockserver.model.Body.Type.BINARY));
+        assertThat(fromBuffer.getBody().getType(), is(org.mockserver.model.Body.Type.BINARY));
+    }
+
+    @Test
+    public void shouldKeepUtf8BodyWithNoContentTypeAsStringWithItsOwnBytes() {
+        byte[] body = "{\"name\":\"şarəs\"}".getBytes(StandardCharsets.UTF_8);
+
+        HttpRequest request = Http3RequestBridge.toHttpRequest("POST", "/api", "https", "localhost", new ArrayList<>(), body);
+
+        assertThat(request.getBody().getType(), is(org.mockserver.model.Body.Type.STRING));
+        assertThat(request.getBodyAsString(), is("{\"name\":\"şarəs\"}"));
+        assertThat(request.getBodyAsRawBytes(), is(body));
+    }
+
+    @Test
     public void shouldTagProtocolAsHttp3() {
         HttpRequest request = Http3RequestBridge.toHttpRequest(
             "POST", "/api", "https", "example.com",

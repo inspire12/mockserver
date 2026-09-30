@@ -225,7 +225,7 @@ public class BreakpointMatcher {
             }
         }
         if (responseBodyPattern != null) {
-            String body = response.getBodyAsString();
+            String body = response.getBodyAsText();
             if (body == null || !responseBodyPattern.matcher(body).find()) {
                 return false;
             }

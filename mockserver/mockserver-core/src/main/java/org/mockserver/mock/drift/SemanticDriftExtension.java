@@ -76,9 +76,9 @@ public class SemanticDriftExtension {
         StringBuilder sb = new StringBuilder();
         sb.append("You are an API compatibility expert. Classify each API drift as BREAKING, WARNING, or INFORMATIONAL.\n\n");
         sb.append("STUB RESPONSE: status=").append(stub != null ? stub.getStatusCode() : "unknown")
-            .append(", body=").append(truncate(redactor.redactText(stub != null ? stub.getBodyAsString() : null))).append("\n");
+            .append(", body=").append(truncate(redactor.redactText(stub != null ? stub.getBodyAsText() : null))).append("\n");
         sb.append("REAL RESPONSE: status=").append(real != null ? real.getStatusCode() : "unknown")
-            .append(", body=").append(truncate(redactor.redactText(real != null ? real.getBodyAsString() : null))).append("\n\n");
+            .append(", body=").append(truncate(redactor.redactText(real != null ? real.getBodyAsText() : null))).append("\n\n");
         sb.append("DRIFT RECORDS:\n");
         for (int i = 0; i < records.size(); i++) {
             DriftRecord r = records.get(i);

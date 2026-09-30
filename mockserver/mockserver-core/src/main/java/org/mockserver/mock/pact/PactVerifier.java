@@ -299,7 +299,7 @@ public class PactVerifier {
      * If both parse as JSON, uses structural equality; otherwise uses string equality.
      */
     private String compareBody(JsonNode pactBody, HttpResponse mockResponse) {
-        String mockBodyStr = mockResponse.getBodyAsString();
+        String mockBodyStr = mockResponse.getBodyAsText();
 
         if (pactBody.isNull() || pactBody.isMissingNode()) {
             // Pact expects no body — skip body comparison

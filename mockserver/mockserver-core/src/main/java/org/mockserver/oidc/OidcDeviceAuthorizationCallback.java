@@ -56,7 +56,7 @@ public class OidcDeviceAuthorizationCallback implements ExpectationResponseCallb
                 .withBody("{\"error\":\"server_error\",\"error_description\":\"no OIDC provider registered for this device endpoint\"}");
         }
 
-        Map<String, String> form = parseFormBody(request.getBodyAsString());
+        Map<String, String> form = parseFormBody(request.getBodyAsText());
         String scope = emptyToNull(form.get("scope"));
 
         String deviceCode = "mock-device-code-" + UUIDService.getUUID();

@@ -89,7 +89,7 @@ public class GrpcForwardTranslator {
             return request;
         }
         try {
-            String bodyString = request.getBodyAsString();
+            String bodyString = request.getBodyAsText();
             GrpcJsonMessageConverter converter = store.getConverter();
             byte[] framed;
             if (bodyString == null || bodyString.isEmpty()) {

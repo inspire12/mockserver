@@ -137,7 +137,7 @@ public class LlmPromptRedactor {
         if (body != null && body.getType() == Body.Type.BINARY) {
             return Optional.empty();
         }
-        String bodyString = request.getBodyAsString();
+        String bodyString = request.getBodyAsText();
         if (bodyString == null || bodyString.isEmpty()) {
             return Optional.empty();
         }

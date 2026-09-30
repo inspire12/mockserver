@@ -3,8 +3,11 @@ package org.mockserver.model;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import org.mockserver.serialization.Base64Converter;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Objects;
+
+import static org.apache.commons.lang3.StringUtils.isBlank;
 
 /**
  * @author jamesdbloom
@@ -38,6 +41,19 @@ public class BinaryBody extends BodyWithContentType<byte[]> {
     @JsonIgnore
     public byte[] getRawBytes() {
         return bytes;
+    }
+
+    /**
+     * The string body matchers and the control plane read for {@code body}. A binary body that arrived
+     * with no Content-Type (bytes that are not valid UTF-8; no content type on the body or the message)
+     * is read as lenient UTF-8, as such a body always was; every other body uses its normal string form,
+     * which for a binary body is base64.
+     */
+    public static String matchableString(Body<?> body, String contentTypeHeader) {
+        if (body instanceof BinaryBody && ((BinaryBody) body).getContentType() == null && body.getRawBytes() != null && isBlank(contentTypeHeader)) {
+            return new String(body.getRawBytes(), StandardCharsets.UTF_8);
+        }
+        return body != null ? body.toString() : null;
     }
 
     @Override

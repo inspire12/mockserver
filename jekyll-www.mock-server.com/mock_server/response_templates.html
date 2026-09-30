@@ -690,6 +690,7 @@ System.out.println("httpResponse = " + httpResponse);</code></pre>
     </li>
     <li><strong>body</strong>
         <p><code class="inline_code">request.body</code> returns the <strong>raw request body as a string</strong>. To access individual fields within a JSON body, use <a href="#jsonpath_section">JsonPath</a> (Mustache), <code class="inline_code">$json.parse()</code> (Velocity), or <code class="inline_code">JSON.parse()</code> (JavaScript) as shown in the examples below.</p>
+        <p>A binary body is given as base64 text, here, in callbacks and in WASM rules. That includes a body sent without a <code class="inline_code">Content-Type</code> header that is not valid UTF-8 (for example text in another character set). To receive such a body as text, send a <code class="inline_code">Content-Type</code> header with a <code class="inline_code">charset</code>, for example <code class="inline_code">text/plain; charset=ISO-8859-1</code>.</p>
         <table>
             <tr>
                 <td style="padding-left: 20px; width: 100px">mustache:</td>

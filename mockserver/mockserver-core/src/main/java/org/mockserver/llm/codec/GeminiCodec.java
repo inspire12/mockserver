@@ -228,7 +228,7 @@ public class GeminiCodec implements ProviderCodec {
     @Override
     public ParsedConversation decode(HttpRequest request) {
         try {
-            String body = request != null ? request.getBodyAsString() : null;
+            String body = request != null ? request.getBodyAsText() : null;
             if (body == null || body.isEmpty()) {
                 return ParsedConversation.empty();
             }

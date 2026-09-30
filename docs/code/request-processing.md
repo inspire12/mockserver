@@ -1027,6 +1027,73 @@ Key behavioural points:
 - `FORWARD_REPLACE` (`overrideHttpResponse`) disables streaming **only when the response modification needs the full response body**: a body/schema response override, a JSON body patch/merge-patch modifier, or a response template. In those cases `HttpOverrideForwardedRequestActionHandler` passes `disableStreaming=true` through `HttpForwardAction.sendRequest` to `NettyHttpClient.sendRequest`, which sets the `DISABLE_RESPONSE_STREAMING` channel attribute; `StreamingAwareHttpObjectAggregator.channelRead` then always delegates to the standard `HttpObjectAggregator` path so the response is fully aggregated regardless of `streamingResponsesEnabled`. A **header-only** modification (status / headers / cookies with no body change — decided by `HttpOverrideForwardedRequestActionHandler.isHeaderOnlyResponseModification`) is instead applied to the streamed response **head** while the body chunks are relayed untouched, so streaming is preserved — e.g. adding a CORS or trace header to an SSE / LLM upstream no longer breaks the stream.
 - WAR deployments (`ctx == null`) always use the buffered path.
 
+### Bodies with No Content-Type
+
+A body that arrives with no `Content-Type` is forwarded byte-identical on every path, because the
+decoder keeps its raw bytes whenever a String view could not reproduce them.
+
+| Received bytes | Decoded as | Matchers and control plane read | Retrieve requests / request-responses show | Dashboard and log entries show |
+|---|---|---|---|---|
+| Valid UTF-8 (JSON, text, …) | `StringBody` (no content type), raw bytes kept | the UTF-8 text | the text, as before | the text, as before |
+| Not valid UTF-8 (binary, Latin-1 text, …) | `BinaryBody` (no content type), raw bytes kept | the lenient UTF-8 decode (malformed bytes become U+FFFD), as before | `{"type":"BINARY","base64Bytes":…}` with no `contentType` | a base64 string (the log-entry body rendering); with `redactSecretsInLog` on it is redacted first, see below |
+
+The rule lives in `BodyDecoderEncoder.bytesToBody`, which every inbound request (HTTP/1.1, HTTP/2,
+servlet) and every forwarded or proxied upstream response goes through; the HTTP/3 request bridge
+calls it for bodies with no `Content-Type` too. The streamed-response capture
+(`HttpActionHandler.setCapturedStreamingBody`) uses a similar but looser sniff for display only: it also
+rejects control bytes and tolerates one replacement character from a truncated tail, which a
+byte-identical forward cannot. Previously every such body became a
+`StringBody` decoded as UTF-8, and `bodyToBytes` re-encoded that String on the way out, so each
+malformed byte turned into U+FFFD (three bytes): 1,000,000 random bytes left MockServer as ~1.8–2 MB,
+and the String copies cost two to three times the body in heap.
+
+`bodyToBytes` needed no change: a `BinaryBody` is written from its raw bytes, and a valid-UTF-8
+String re-encodes to exactly the bytes it was decoded from.
+
+**Matching and the data-plane readers do not change.** The readers below interpret an inbound,
+forwarded or recorded body as text through `HttpRequest.getBodyAsText()` /
+`HttpResponse.getBodyAsText()` (both delegate to `BinaryBody.matchableString`). For a `BinaryBody` that
+has no content type of its own, on a message with no `Content-Type` header, that returns the lenient
+UTF-8 text such a body was always read as; any other body, including a user-authored
+`binary(bytes, MediaType.PNG)`, keeps its usual string form:
+
+- request and response body matching (`BodyMatching`), LLM conversation matching and every LLM codec's
+  decode, the embeddings and rerank request readers, `LlmProviderSniffer` and the LLM optimisation reports;
+- secret redaction (`FixtureRedactor`, behind `redactSecretsInLog` and the fixture exports): both the
+  field masking and the fail-closed "unparseable body" check, and the collection of body-field values
+  that are scrubbed from log messages. On every log surface — retrieve of requests and
+  request-responses, the JSON log-entry retrieve (`LogEntrySerializer`), the dashboard
+  (`DashboardLogEntryDTO`), and log messages and their arguments (console included) — `LogEntry` redacts
+  a `BinaryBody` *before* `updateBody` renders it as base64, since base64 would hide its fields; other
+  bodies are rendered first so a JSON body keeps its tree form. With redaction on and body fields
+  configured, a JSON-parseable body the redactor rewrites comes back as text (the masked JSON), not as
+  base64 or the `BINARY` shape;
+- the control-plane endpoints (expectations, GraphQL, AsyncAPI, Pact, configuration, bind) and the
+  built-in CRUD, OIDC, SCIM and SAML handlers, and the HTTP/3 MCP endpoint (which then reads the body
+  exactly as the TCP MCP path's raw UTF-8 decode does);
+- OpenAPI request/response validation and runtime expressions, GraphQL response synthesis, breakpoint
+  response conditions, response body patches (`HttpResponseModifier`), drift and diff analysis, load
+  response extraction, the curl rendering of a request, and the OpenAPI/Postman/Pact exports of
+  recorded traffic.
+
+The request matcher checks for a `BinaryBody` before looking up the `Content-Type` header, so other
+bodies keep their exact previous cost; during a matching scan the lenient decode is done once and
+shared by every candidate expectation through the scan-scoped `ParsedBodyCache`, so nothing is
+retained on the logged request. Response matching reads a user-defined `binary(bytes)` response with
+no content type and no `Content-Type` header the same way (as lenient text rather than base64).
+
+**The exceptions are callbacks, templates, WASM and the log/HAR renderings**, which keep a binary
+body's usual form (base64): `HttpRequest.getBodyAsString()` in Java callbacks, the `request.body`
+template value, the body handed to WASM response shapers, the body shown in log messages
+(`LogEntry.updateBody`) and HAR exports (which mark it `encoding: base64`). Code generation
+(`HttpResponseToJavaSerializer`) and user-authored template bodies also keep base64, since a binary
+body there was written by the user. `LlmPromptRedactor.redactBodyForPrompt` omits every `BINARY` body
+from the stub-generation prompt, so a non-UTF-8 body with no `Content-Type` is now left out of that
+prompt where it used to be sent as lossy text — the safe direction for a body that may hold secrets.
+A body whose `Content-Type` declares JSON or XML without a charset is still decoded as UTF-8; if its
+bytes are not valid UTF-8 they are still re-encoded lossily (out of scope: that content is malformed
+for its declared type).
+
 ### ProxyPass (Reverse Proxy)
 
 The `proxyPass` configuration property allows MockServer to act as a reverse proxy, mapping incoming path prefixes to upstream servers with automatic path rewriting. This is evaluated in `HttpActionHandler.handleProxyPass()` after expectation matching and CORS, but before the speculative proxy attempt.

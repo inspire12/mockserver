@@ -78,7 +78,7 @@ public abstract class AbstractLlmClient implements LlmClient {
      */
     protected JsonNode readBody(HttpResponse response) {
         try {
-            return OBJECT_MAPPER.readTree(response.getBodyAsString());
+            return OBJECT_MAPPER.readTree(response.getBodyAsText());
         } catch (Exception e) {
             throw new IllegalStateException("failed to parse " + provider() + " response body", e);
         }

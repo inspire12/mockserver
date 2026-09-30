@@ -211,7 +211,7 @@ public class HttpLlmResponseActionHandler {
         if (provider != Provider.OPENAI_RESPONSES) {
             return;
         }
-        String requestBody = request != null ? request.getBodyAsString() : null;
+        String requestBody = request != null ? request.getBodyAsText() : null;
         // decode() returns the fully-chained conversation (prior turns already prepended
         // when the request carried a previous_response_id), so the stored record captures
         // the entire dialogue as of this turn.
@@ -871,7 +871,7 @@ public class HttpLlmResponseActionHandler {
 
     private String extractInputFromRequest(HttpRequest request) {
         if (request.getBody() != null) {
-            String bodyString = request.getBody().toString();
+            String bodyString = request.getBodyAsText();
             try {
                 JsonNode bodyNode = OBJECT_MAPPER.readTree(bodyString);
                 JsonNode inputNode = bodyNode.get("input");
@@ -897,7 +897,7 @@ public class HttpLlmResponseActionHandler {
     private List<String> extractDocumentsFromRequest(HttpRequest request) {
         List<String> documents = new ArrayList<>();
         if (request.getBody() != null) {
-            String bodyString = request.getBody().toString();
+            String bodyString = request.getBodyAsText();
             try {
                 JsonNode bodyNode = OBJECT_MAPPER.readTree(bodyString);
                 JsonNode docsNode = bodyNode.get("documents");

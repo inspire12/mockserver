@@ -1,11 +1,20 @@
 package org.mockserver.dashboard.model;
 
 import org.junit.Test;
+import org.mockserver.codec.BodyDecoderEncoder;
 import org.mockserver.configuration.Configuration;
+import org.mockserver.dashboard.serializers.DashboardLogEntryDTOGroupSerializer;
+import org.mockserver.dashboard.serializers.DashboardLogEntryDTOSerializer;
+import org.mockserver.dashboard.serializers.DescriptionSerializer;
+import org.mockserver.dashboard.serializers.ThrowableSerializer;
 import org.mockserver.fixture.FixtureRedactor;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
+import org.mockserver.serialization.ObjectMapperFactory;
+
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
@@ -60,6 +69,32 @@ public class DashboardLogEntryDTORedactionTest {
             request, not(containsString("secret-api-key")));
         assertThat("Set-Cookie must be masked in the dashboard view",
             response, not(containsString("secret-session-value")));
+    }
+
+    @Test
+    public void shouldRedactNonUtf8BodyWithoutContentTypeInDashboardEntry() throws Exception {
+        // such a body is kept as binary, which the dashboard renders as base64: it must be redacted first
+        Configuration configuration = Configuration.configuration().redactSecretsInLog(true).fixtureBodyRedactFields("password");
+        byte[] requestBytes = "{\"user\":\"José\",\"password\":\"hunter2-request\"}".getBytes(StandardCharsets.ISO_8859_1);
+        byte[] responseBytes = "{\"user\":\"José\",\"password\":\"hunter2-response\"}".getBytes(StandardCharsets.ISO_8859_1);
+        HttpRequest httpRequest = HttpRequest.request("/login").withBody(new BodyDecoderEncoder().bytesToBody(requestBytes, null));
+        HttpResponse httpResponse = HttpResponse.response().withBody(new BodyDecoderEncoder().bytesToBody(responseBytes, null));
+        LogEntry logEntry = new LogEntry()
+            .setType(LogEntry.LogMessageType.FORWARDED_REQUEST)
+            .setHttpRequest(httpRequest)
+            .setHttpResponse(httpResponse)
+            .setMessageFormat("returning response:{}for forwarded request:{}")
+            .setArguments(httpResponse, httpRequest);
+
+        String json = ObjectMapperFactory.createObjectMapper(true, false,
+            new DashboardLogEntryDTOSerializer(), new DashboardLogEntryDTOGroupSerializer(), new DescriptionSerializer(), new ThrowableSerializer()
+        ).writeValueAsString(new DashboardLogEntryDTO(logEntry, configuration));
+
+        assertThat(json, containsString(FixtureRedactor.REDACTED_PLACEHOLDER));
+        for (String leaked : new String[]{"hunter2-request", "hunter2-response",
+            Base64.getEncoder().encodeToString(requestBytes), Base64.getEncoder().encodeToString(responseBytes)}) {
+            assertThat(json, not(containsString(leaked)));
+        }
     }
 
     @Test

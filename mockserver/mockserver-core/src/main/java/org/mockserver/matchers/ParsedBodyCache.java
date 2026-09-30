@@ -4,7 +4,11 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.jayway.jsonpath.spi.json.JsonProvider;
+import org.mockserver.model.Body;
+import org.mockserver.model.BinaryBody;
 import org.mockserver.serialization.ObjectMapperFactory;
+
+import java.util.Objects;
 
 /**
  * A request body parsed once for one candidate scan and shared by that scan's JSON and JSONPath body
@@ -36,6 +40,9 @@ public final class ParsedBodyCache {
     private Class<?> jsonPathDocumentProvider;
     private Object jsonPathDocument;
     private int parses;
+    private Body<?> textKey;
+    private String textKeyContentType;
+    private String text;
 
     private ParsedBodyCache(Thread owner) {
         this.owner = owner;
@@ -90,6 +97,23 @@ public final class ParsedBodyCache {
     }
 
     /**
+     * {@link BinaryBody#matchableString} for {@code body}, decoded once per scan rather than once per
+     * candidate: a binary body sent with no Content-Type is decoded as UTF-8 on every read.
+     */
+    String matchableString(Body<?> body, String contentTypeHeader) {
+        if (body == textKey && Objects.equals(contentTypeHeader, textKeyContentType)) {
+            return text;
+        }
+        String matchable = BinaryBody.matchableString(body, contentTypeHeader);
+        if (owner != null && body instanceof BinaryBody) {
+            textKey = body;
+            textKeyContentType = contentTypeHeader;
+            text = matchable;
+        }
+        return matchable;
+    }
+
+    /**
      * The number of parses this cache has performed; visible for tests.
      */
     int parses() {
@@ -100,7 +124,8 @@ public final class ParsedBodyCache {
      * Whether the cache holds no body; visible for tests.
      */
     boolean isEmpty() {
-        return jsonTreeKey == null && jsonTree == null && jsonPathDocumentKey == null && jsonPathDocument == null && jsonPathDocumentProvider == null;
+        return jsonTreeKey == null && jsonTree == null && jsonPathDocumentKey == null && jsonPathDocument == null && jsonPathDocumentProvider == null
+            && textKey == null && text == null;
     }
 
     /**
@@ -112,5 +137,8 @@ public final class ParsedBodyCache {
         jsonPathDocumentKey = null;
         jsonPathDocumentProvider = null;
         jsonPathDocument = null;
+        textKey = null;
+        textKeyContentType = null;
+        text = null;
     }
 }

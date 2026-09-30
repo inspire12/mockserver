@@ -206,7 +206,7 @@ public final class LlmProviderSniffer {
      */
     public static Optional<Provider> sniffByBodyShape(HttpRequest request, org.mockserver.model.HttpResponse response) {
         // Response markers are the most distinctive — check them first.
-        String resBody = response != null ? safeBody(response.getBodyAsString()) : null;
+        String resBody = response != null ? safeBody(response.getBodyAsText()) : null;
         if (resBody != null) {
             // OpenAI Chat Completions: object "chat.completion" / "chat.completion.chunk".
             // Require the JSON value's opening quote so a stray substring can't match.
@@ -247,7 +247,7 @@ public final class LlmProviderSniffer {
         if (anthropicVersion != null && !anthropicVersion.isEmpty()) {
             return Optional.of(Provider.ANTHROPIC);
         }
-        String reqBody = safeBody(request.getBodyAsString());
+        String reqBody = safeBody(request.getBodyAsText());
         if (reqBody == null) {
             return Optional.empty();
         }
@@ -537,7 +537,7 @@ public final class LlmProviderSniffer {
             return null;
         }
         try {
-            String body = response.getBodyAsString();
+            String body = response.getBodyAsText();
             if (body == null || body.isEmpty()) {
                 return null;
             }
@@ -565,7 +565,7 @@ public final class LlmProviderSniffer {
             return null;
         }
         try {
-            String body = request.getBodyAsString();
+            String body = request.getBodyAsText();
             if (body == null || body.isEmpty()) {
                 return null;
             }

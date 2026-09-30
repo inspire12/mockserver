@@ -218,7 +218,7 @@ public class OpenApiRuntimeExpressionResolver {
      * Resolves a JSON Pointer against the triggering request body.
      */
     private static String resolveBodyJsonPointer(String pointer, HttpRequest triggeringRequest) {
-        String bodyStr = triggeringRequest.getBodyAsString();
+        String bodyStr = triggeringRequest.getBodyAsText();
         if (bodyStr == null || bodyStr.isEmpty()) {
             return "";
         }

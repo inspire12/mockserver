@@ -9,12 +9,14 @@ import org.junit.Test;
 import org.mockserver.model.*;
 
 import java.util.Arrays;
+import java.util.Random;
 
 import static io.netty.handler.codec.http.HttpHeaderNames.CONTENT_TYPE;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.nio.charset.StandardCharsets.UTF_16;
 import static org.hamcrest.core.Is.is;
 import static org.hamcrest.core.IsNot.not;
+import static org.hamcrest.core.IsNull.nullValue;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertSame;
@@ -193,6 +195,65 @@ public class BodyDecoderEncoderTest {
 
         // then
         assertThat(result, is(exact("bytes")));
+    }
+
+    @Test
+    public void shouldKeepValidUtf8BodyWithNoContentTypeAsStringAndReEncodeItByteIdentical() {
+        // given - multi-byte characters, a NUL, and a U+FFFD that was genuinely encoded (EF BF BD)
+        byte[] wireBytes = "{\"name\":\"şarəs 我说 \u0000 \uFFFD\"}".getBytes(UTF_8);
+
+        // when
+        BodyWithContentType body = new BodyDecoderEncoder().bytesToBody(wireBytes, null);
+        byte[] reEncoded = new BodyDecoderEncoder().bodyToBytes(body, null);
+
+        // then
+        assertThat(body.getType(), is(Body.Type.STRING));
+        assertThat(body.getContentType(), is(nullValue()));
+        assertThat(body.toString(), is(new String(wireBytes, UTF_8)));
+        assertThat(reEncoded, is(wireBytes));
+    }
+
+    @Test
+    public void shouldKeepInvalidUtf8BodyWithNoContentTypeAsBinaryAndReEncodeItByteIdentical() {
+        // given - random bytes are (overwhelmingly) not valid UTF-8; decoding them as a String used to
+        // replace each malformed byte with U+FFFD and re-encode it as 3 bytes, roughly doubling the body
+        byte[] wireBytes = new byte[1_000_000];
+        new Random(43).nextBytes(wireBytes);
+
+        // when
+        BodyWithContentType body = new BodyDecoderEncoder().bytesToBody(wireBytes, null);
+        byte[] reEncoded = new BodyDecoderEncoder().bodyToBytes(body, null);
+
+        // then
+        assertThat(reEncoded.length, is(wireBytes.length));
+        assertThat(reEncoded, is(wireBytes));
+        assertThat(body.getType(), is(Body.Type.BINARY));
+        assertThat(body.getContentType(), is(nullValue()));
+    }
+
+    @Test
+    public void shouldKeepLatin1TextWithNoContentTypeAsBinary() {
+        // given - "café" in ISO-8859-1: the lone 0xE9 is not valid UTF-8
+        byte[] wireBytes = "café".getBytes(DEFAULT_TEXT_HTTP_CHARACTER_SET);
+
+        // when
+        BodyWithContentType body = new BodyDecoderEncoder().bytesToBody(wireBytes, "");
+
+        // then
+        assertThat(new BodyDecoderEncoder().bodyToBytes(body, ""), is(wireBytes));
+        assertThat(body, is(binary(wireBytes)));
+    }
+
+    @Test
+    public void shouldDecodeOnlyValidUtf8() {
+        assertThat(BodyDecoderEncoder.decodeIfValidUtf8("plain ascii".getBytes(UTF_8)), is("plain ascii"));
+        assertThat(BodyDecoderEncoder.decodeIfValidUtf8("şarəs \uFFFD".getBytes(UTF_8)), is("şarəs \uFFFD"));
+        assertThat(BodyDecoderEncoder.decodeIfValidUtf8(new byte[0]), is(""));
+        // lone continuation byte, truncated sequence, overlong '/', and an encoded surrogate
+        assertThat(BodyDecoderEncoder.decodeIfValidUtf8(new byte[]{'a', (byte) 0x80}), is(nullValue()));
+        assertThat(BodyDecoderEncoder.decodeIfValidUtf8(new byte[]{'a', (byte) 0xE6, (byte) 0x88}), is(nullValue()));
+        assertThat(BodyDecoderEncoder.decodeIfValidUtf8(new byte[]{(byte) 0xC0, (byte) 0xAF}), is(nullValue()));
+        assertThat(BodyDecoderEncoder.decodeIfValidUtf8(new byte[]{(byte) 0xED, (byte) 0xA0, (byte) 0x80}), is(nullValue()));
     }
 
     @Test

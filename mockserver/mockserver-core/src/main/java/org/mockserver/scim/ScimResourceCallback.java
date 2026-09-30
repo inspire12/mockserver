@@ -59,7 +59,7 @@ public class ScimResourceCallback extends ScimResourceCallbackBase {
 
     private HttpResponse put(HttpRequest request, Provider provider, ScimShaper.ResourceType type,
                              CrudDataStore store, String id) {
-        ObjectNode payload = parseObject(request.getBodyAsString());
+        ObjectNode payload = parseObject(request.getBodyAsText());
         if (payload == null) {
             return scimError(400, "request body must be a JSON object", "invalidSyntax");
         }
@@ -89,7 +89,7 @@ public class ScimResourceCallback extends ScimResourceCallbackBase {
         if (!provider.isEnforcePatch()) {
             return scimError(501, "PATCH is not supported", null);
         }
-        ObjectNode patchOp = parseObject(request.getBodyAsString());
+        ObjectNode patchOp = parseObject(request.getBodyAsText());
         if (patchOp == null) {
             return scimError(400, "request body must be a JSON object", "invalidSyntax");
         }

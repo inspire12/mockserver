@@ -2315,7 +2315,7 @@ public class McpToolRegistry {
                     HttpResponse httpResponse = sendHttpRequest(httpRequest, remoteAddress, isSecure);
                     int statusCode = httpResponse.getStatusCode() != null ? httpResponse.getStatusCode() : 0;
                     if (statusCode == 0) {
-                        return McpContractTest.ExchangeResult.transportError(httpResponse.getBodyAsString());
+                        return McpContractTest.ExchangeResult.transportError(httpResponse.getBodyAsText());
                     }
                     return new McpContractTest.ExchangeResult(
                         statusCode,
@@ -2400,7 +2400,7 @@ public class McpToolRegistry {
      * "data:" field(s). Returns null when the body is empty or not valid JSON.
      */
     private JsonNode parseJsonRpcBody(HttpResponse response) {
-        String body = response.getBodyAsString();
+        String body = response.getBodyAsText();
         if (body == null || body.trim().isEmpty()) {
             return null;
         }
@@ -2498,7 +2498,7 @@ public class McpToolRegistry {
             }
 
             // Set body
-            String bodyString = request.getBodyAsString();
+            String bodyString = request.getBodyAsText();
             if (bodyString != null && !bodyString.isEmpty()) {
                 connection.setDoOutput(true);
                 try (java.io.OutputStream os = connection.getOutputStream()) {
@@ -3936,7 +3936,7 @@ public class McpToolRegistry {
             return null;
         }
         try {
-            JsonNode body = objectMapper.readTree(httpRequest.getBodyAsString());
+            JsonNode body = objectMapper.readTree(httpRequest.getBodyAsText());
             JsonNode model = body.path("model");
             return model.isTextual() ? model.asText() : null;
         } catch (Exception e) {
@@ -4349,7 +4349,7 @@ public class McpToolRegistry {
             for (Expectation exp : expectations) {
                 if (exp.getHttpRequest() instanceof HttpRequest && exp.getHttpResponse() != null) {
                     exchanges.add(new DriftDetector.RecordedExchange(
-                        (HttpRequest) exp.getHttpRequest(), exp.getHttpResponse().getBodyAsString()));
+                        (HttpRequest) exp.getHttpRequest(), exp.getHttpResponse().getBodyAsText()));
                 } else if (exp.getHttpSseResponse() != null) {
                     skippedSse++;
                 }
@@ -4573,7 +4573,7 @@ public class McpToolRegistry {
             return;
         }
         HttpRequest request = (HttpRequest) expectation.getHttpRequest();
-        String bodyString = request.getBodyAsString();
+        String bodyString = request.getBodyAsText();
         if (bodyString == null || bodyString.isEmpty()) {
             return;
         }

@@ -279,7 +279,7 @@ public class HttpRequestHandler extends SimpleChannelInboundHandler<HttpRequest>
                     if (!httpState.controlPlaneRequestAuthenticated(request, responseWriter)) {
                         return;
                     }
-                    PortBinding requestedPortBindings = portBindingSerializer.deserialize(request.getBodyAsString());
+                    PortBinding requestedPortBindings = portBindingSerializer.deserialize(request.getBodyAsText());
                     if (requestedPortBindings != null) {
                         try {
                             List<Integer> actualPortBindings = server.bindServerPorts(requestedPortBindings.getPorts());
@@ -336,7 +336,7 @@ public class HttpRequestHandler extends SimpleChannelInboundHandler<HttpRequest>
                         responseWriter.writeResponse(request, OK, configurationSerializer.serialize(configuration), "application/json");
                     } else {
                         try {
-                            ConfigurationDTO configurationDTO = ObjectMapperFactory.createObjectMapper().readValue(request.getBodyAsString(), ConfigurationDTO.class);
+                            ConfigurationDTO configurationDTO = ObjectMapperFactory.createObjectMapper().readValue(request.getBodyAsText(), ConfigurationDTO.class);
                             synchronized (configuration) {
                                 // audit (but do not block) a runtime TLS-posture downgrade BEFORE applying,
                                 // while the configuration still holds the pre-change values to compare against
@@ -695,8 +695,9 @@ public class HttpRequestHandler extends SimpleChannelInboundHandler<HttpRequest>
         httpState.getScheduler().submit(() -> {
             try {
                 com.fasterxml.jackson.databind.ObjectMapper mapper = ObjectMapperFactory.createObjectMapper();
-                com.fasterxml.jackson.databind.JsonNode body = request.getBodyAsString() == null || request.getBodyAsString().trim().isEmpty()
-                    ? mapper.createObjectNode() : mapper.readTree(request.getBodyAsString());
+                String bodyText = request.getBodyAsText();
+                com.fasterxml.jackson.databind.JsonNode body = bodyText == null || bodyText.trim().isEmpty()
+                    ? mapper.createObjectNode() : mapper.readTree(bodyText);
 
                 org.mockserver.llm.analysis.LlmOptimisationReportService.Filter beforeFilter = filterFromNode(body.path("before"));
                 org.mockserver.llm.analysis.LlmOptimisationReportService.Filter afterFilter = filterFromNode(body.path("after"));

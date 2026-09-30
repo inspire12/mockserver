@@ -598,7 +598,7 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
                     result = buildUnauthorizedResult();
                     break;
                 }
-                String body = request.getBodyAsString();
+                String body = request.getBodyAsText();
                 result = mcpRequestProcessor.handlePost(body, mcpSessionId, authenticationResult.getScopes());
                 break;
             case "DELETE":

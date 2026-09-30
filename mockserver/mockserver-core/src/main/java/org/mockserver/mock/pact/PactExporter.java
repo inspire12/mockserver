@@ -144,7 +144,7 @@ public class PactExporter {
             node.set("headers", headers);
         }
         if (request.getBody() != null) {
-            setBody(node, request.getBody(), request.getBodyAsString(), rules);
+            setBody(node, request.getBody(), request.getBodyAsText(), rules);
         }
         return node;
     }
@@ -157,7 +157,7 @@ public class PactExporter {
             node.set("headers", headers);
         }
         if (response.getBody() != null) {
-            setBody(node, response.getBody(), response.getBodyAsString(), rules);
+            setBody(node, response.getBody(), response.getBodyAsText(), rules);
         }
         return node;
     }

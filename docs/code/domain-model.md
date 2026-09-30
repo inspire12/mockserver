@@ -358,6 +358,11 @@ classDiagram
 
 Body `Type` enum: `BINARY`, `FILE`, `JSON`, `JSON_SCHEMA`, `JSON_PATH`, `PARAMETERS`, `REGEX`, `STRING`, `XML`, `XML_SCHEMA`, `XPATH`, `JSON_RPC`, `GRAPHQL`, `LOG_EVENT`, `WASM`, `MULTIPART`, `ALL_OF`
 
+A body decoded from the wire with no `Content-Type` is a `StringBody` when its bytes are valid UTF-8
+and a `BinaryBody` (no content type) otherwise, so the raw bytes always survive a forward; string
+matchers read the latter through `BinaryBody.matchableString`. See
+[request-processing.md](request-processing.md#bodies-with-no-content-type).
+
 #### AllOfBody (Composite Body Matcher)
 
 `AllOfBody` (`org.mockserver.model`, type `ALL_OF`) is a composite request-body matcher that matches only when **all** of its component body matchers match the *same* request body — e.g. a body required to satisfy a `jsonPath`, a `jsonSchema` and a `regex` matcher at once. It composes the existing matcher implementations without changing any of their individual semantics.

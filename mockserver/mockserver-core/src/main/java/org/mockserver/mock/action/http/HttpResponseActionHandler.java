@@ -159,7 +159,7 @@ public class HttpResponseActionHandler {
      * body unset rather than failing the request.
      */
     private void synthesizeGraphQLResponse(HttpResponse response, HttpRequest httpRequest, String graphQLSchema) {
-        String requestBody = httpRequest.getBodyAsString();
+        String requestBody = httpRequest.getBodyAsText();
         if (!isNotBlank(requestBody)) {
             return;
         }

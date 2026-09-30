@@ -28,7 +28,7 @@ public class OidcRevocationCallback implements ExpectationResponseCallback {
 
     @Override
     public HttpResponse handle(HttpRequest request) {
-        Map<String, String> form = parseFormBody(request.getBodyAsString());
+        Map<String, String> form = parseFormBody(request.getBodyAsText());
         String token = form.get("token");
         if (token != null && !token.isEmpty()) {
             OidcAuthorizationStore.getInstance().revokeToken(token);

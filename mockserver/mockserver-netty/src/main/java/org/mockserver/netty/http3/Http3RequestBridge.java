@@ -8,6 +8,7 @@ import io.netty.handler.codec.http3.DefaultHttp3HeadersFrame;
 import io.netty.handler.codec.http3.Http3DataFrame;
 import io.netty.handler.codec.http3.Http3Headers;
 import io.netty.handler.codec.http3.Http3HeadersFrame;
+import org.mockserver.codec.BodyDecoderEncoder;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.model.Protocol;
@@ -27,6 +28,9 @@ import static org.mockserver.model.NottableString.string;
  * can be unit-tested without the native QUIC transport.
  */
 public final class Http3RequestBridge {
+
+    // stateless; shares the server-wide rule for a body sent with no Content-Type
+    private static final BodyDecoderEncoder NO_CONTENT_TYPE_DECODER = new BodyDecoderEncoder();
 
     private Http3RequestBridge() {
         // utility class
@@ -59,7 +63,9 @@ public final class Http3RequestBridge {
         // for everything else
         if (body != null && body.length > 0) {
             String contentType = findContentType(headers);
-            if (isTextContentType(contentType)) {
+            if (contentType == null || contentType.isBlank()) {
+                request.withBody(NO_CONTENT_TYPE_DECODER.bytesToBody(body, null));
+            } else if (isTextContentType(contentType)) {
                 java.nio.charset.Charset charset = extractCharset(contentType);
                 request.withBody(new String(body, charset));
             } else {
@@ -107,7 +113,11 @@ public final class Http3RequestBridge {
 
         if (body != null && body.isReadable()) {
             String contentType = findContentType(headers);
-            if (isTextContentType(contentType)) {
+            if (contentType == null || contentType.isBlank()) {
+                byte[] bytes = new byte[body.readableBytes()];
+                body.getBytes(body.readerIndex(), bytes);
+                request.withBody(NO_CONTENT_TYPE_DECODER.bytesToBody(bytes, null));
+            } else if (isTextContentType(contentType)) {
                 java.nio.charset.Charset charset = extractCharset(contentType);
                 // decode straight from the buffer -- no intermediate byte[] for a single-component
                 // buffer. Non-destructive: toString(index, length, charset) does not advance the
@@ -387,10 +397,6 @@ public final class Http3RequestBridge {
      * stored as a string body rather than binary.
      */
     private static boolean isTextContentType(String contentType) {
-        if (contentType == null || contentType.isEmpty()) {
-            // no content-type: assume text to maximise expectation matching compatibility
-            return true;
-        }
         String lower = contentType.toLowerCase(Locale.ROOT);
         return lower.startsWith("text/")
             || lower.contains("json")

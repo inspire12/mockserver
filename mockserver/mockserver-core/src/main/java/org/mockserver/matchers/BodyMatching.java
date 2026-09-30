@@ -2,6 +2,7 @@ package org.mockserver.matchers;
 
 import org.mockserver.codec.JsonSchemaBodyDecoder;
 import org.mockserver.logging.MockServerLogger;
+import org.mockserver.model.BinaryBody;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
 
@@ -52,9 +53,22 @@ public class BodyMatching {
      */
     public static BodySource of(HttpRequest request) {
         return new BodySource() {
+            private String bodyAsString;
+
             @Override
             public String getBodyAsString() {
-                return request.getBodyAsString();
+                if (bodyAsString == null) {
+                    if (!(request.getBody() instanceof BinaryBody)) {
+                        // only a binary body can need the text view, so other bodies skip the header lookup
+                        bodyAsString = request.getBodyAsString();
+                    } else {
+                        ParsedBodyCache cache = request.parsedBodyCacheForCurrentThread();
+                        bodyAsString = cache != null
+                            ? cache.matchableString(request.getBody(), request.getFirstHeader("Content-Type"))
+                            : request.getBodyAsText();
+                    }
+                }
+                return bodyAsString;
             }
 
             @Override
@@ -99,9 +113,14 @@ public class BodyMatching {
      */
     public static BodySource of(HttpResponse response) {
         return new BodySource() {
+            private String bodyAsString;
+
             @Override
             public String getBodyAsString() {
-                return response.getBodyAsString();
+                if (bodyAsString == null) {
+                    bodyAsString = response.getBody() instanceof BinaryBody ? response.getBodyAsText() : response.getBodyAsString();
+                }
+                return bodyAsString;
             }
 
             @Override

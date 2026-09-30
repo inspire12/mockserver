@@ -40,7 +40,7 @@ public class TrafficDiffEngine {
         addDiff(diffs, "path", nottableStringValue(expected.getPath()), nottableStringValue(actual.getPath()));
 
         // body
-        addDiff(diffs, "body", expected.getBodyAsString(), actual.getBodyAsString());
+        addDiff(diffs, "body", expected.getBodyAsText(), actual.getBodyAsText());
 
         // headers (case-insensitive keys)
         diffMultiValueEntries(diffs, "header", expected.getHeaderList(), actual.getHeaderList());

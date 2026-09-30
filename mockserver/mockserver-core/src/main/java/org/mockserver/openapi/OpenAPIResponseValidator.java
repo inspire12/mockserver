@@ -113,7 +113,7 @@ public class OpenAPIResponseValidator {
             return;
         }
 
-        String bodyString = response.getBodyAsString();
+        String bodyString = response.getBodyAsText();
         if (isBlank(bodyString)) {
             return;
         }

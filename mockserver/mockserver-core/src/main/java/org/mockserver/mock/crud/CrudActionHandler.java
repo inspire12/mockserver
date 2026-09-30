@@ -82,7 +82,7 @@ public class CrudActionHandler {
 
     public HttpResponse handleCreate(HttpRequest request) {
         try {
-            String body = request.getBodyAsString();
+            String body = request.getBodyAsText();
             if (body == null || body.isEmpty()) {
                 return response()
                     .withStatusCode(400)
@@ -113,7 +113,7 @@ public class CrudActionHandler {
                     .withStatusCode(400)
                     .withBody("{\"error\":\"missing id\"}", MediaType.JSON_UTF_8);
             }
-            String body = request.getBodyAsString();
+            String body = request.getBodyAsText();
             if (body == null || body.isEmpty()) {
                 return response()
                     .withStatusCode(400)
@@ -144,7 +144,7 @@ public class CrudActionHandler {
                     .withStatusCode(400)
                     .withBody("{\"error\":\"missing id\"}", MediaType.JSON_UTF_8);
             }
-            String body = request.getBodyAsString();
+            String body = request.getBodyAsText();
             if (body == null || body.isEmpty()) {
                 return response()
                     .withStatusCode(400)

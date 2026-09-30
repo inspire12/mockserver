@@ -32,7 +32,7 @@ public final class LoadResponseExtractor {
         if (response == null || isBlank(expression)) {
             return null;
         }
-        String body = response.getBodyAsString();
+        String body = response.getBodyAsText();
         if (isBlank(body)) {
             return null;
         }
@@ -60,7 +60,7 @@ public final class LoadResponseExtractor {
         if (response == null || isBlank(pattern)) {
             return null;
         }
-        String body = response.getBodyAsString();
+        String body = response.getBodyAsText();
         if (isBlank(body)) {
             return null;
         }

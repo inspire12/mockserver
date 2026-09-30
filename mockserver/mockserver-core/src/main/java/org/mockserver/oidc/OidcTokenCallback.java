@@ -37,7 +37,7 @@ public class OidcTokenCallback implements ExpectationResponseCallback {
 
     @Override
     public HttpResponse handle(HttpRequest request) {
-        Map<String, String> form = parseFormBody(request.getBodyAsString());
+        Map<String, String> form = parseFormBody(request.getBodyAsText());
         String grantType = form.get("grant_type");
 
         OidcAuthorizationStore store = OidcAuthorizationStore.getInstance();

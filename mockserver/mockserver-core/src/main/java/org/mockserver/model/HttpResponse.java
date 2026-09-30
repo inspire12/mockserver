@@ -241,6 +241,16 @@ public class HttpResponse extends Action<HttpResponse> implements HttpMessage<Ht
     }
 
     /**
+     * The body as text: the same as {@link #getBodyAsString()}, except that a binary body with no
+     * Content-Type (bytes that are not valid UTF-8) is decoded as lenient UTF-8 rather than returned
+     * as base64, as such a body always was.
+     */
+    @JsonIgnore
+    public String getBodyAsText() {
+        return BinaryBody.matchableString(body, getFirstHeader(CONTENT_TYPE.toString()));
+    }
+
+    /**
      * Provide an inline <a href="https://json-schema.org">JSON Schema</a> (a plain JSON Schema object,
      * <b>not</b> a full OpenAPI document) from which a schema-valid response body is generated at
      * response time. The same example-generation engine used for OpenAPI responses is reused, so the

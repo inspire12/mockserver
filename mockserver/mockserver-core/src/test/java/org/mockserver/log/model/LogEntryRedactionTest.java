@@ -5,12 +5,14 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.ClassRule;
 import org.junit.Test;
+import org.mockserver.codec.BodyDecoderEncoder;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.configuration.ConfigurationProperties;
 import org.mockserver.fixture.FixtureRedactor;
 import org.mockserver.log.MockServerEventLog;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.mock.HttpState;
+import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.model.RequestDefinition;
 import org.mockserver.scheduler.Scheduler;
@@ -21,6 +23,7 @@ import org.mockserver.verify.Verification;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
+import static java.nio.charset.StandardCharsets.ISO_8859_1;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
@@ -169,6 +172,85 @@ public class LogEntryRedactionTest {
         String json = requests.get(0).toString();
         assertThat(json, containsString(FixtureRedactor.REDACTED_PLACEHOLDER));
         assertThat(json, not(containsString("super-secret-token")));
+    }
+
+    @Test
+    public void shouldRedactSensitiveFieldInNonUtf8BodyWithoutContentTypeWhenFlagOn() {
+        // given - a Latin-1 JSON body with no Content-Type is kept as binary; redaction must still read it
+        // as text, or its base64 form hides the field name and value from the masking
+        ConfigurationProperties.redactSecretsInLog(true);
+        String originalFields = ConfigurationProperties.fixtureBodyRedactFields();
+        ConfigurationProperties.fixtureBodyRedactFields("password");
+        try {
+            MockServerEventLog eventLog = newEventLog();
+            eventLog.add(new LogEntry()
+                .setType(RECEIVED_REQUEST)
+                .setHttpRequest(request("/login")
+                    .withBody(new BodyDecoderEncoder().bytesToBody("{\"user\":\"José\",\"password\":\"hunter2-secret\"}".getBytes(ISO_8859_1), null))));
+
+            // when
+            List<RequestDefinition> requests = retrieveRequests(eventLog, request("/login"));
+
+            // then
+            assertThat(requests, hasSize(1));
+            String retrievedBody = ((HttpRequest) requests.get(0)).getBodyAsText();
+            assertThat(retrievedBody, containsString(FixtureRedactor.REDACTED_PLACEHOLDER));
+            assertThat(retrievedBody, not(containsString("hunter2-secret")));
+        } finally {
+            ConfigurationProperties.fixtureBodyRedactFields(originalFields);
+        }
+    }
+
+    @Test
+    public void shouldRedactNonUtf8BodyWithoutContentTypeOnEveryLogEntrySurfaceWhenFlagOn() throws Exception {
+        // given - such a body is kept as binary, which the log renders as base64: it must be redacted before
+        // that rendering, or the secret leaks base64-encoded to the dashboard, the JSON log and log messages
+        ConfigurationProperties.redactSecretsInLog(true);
+        String originalFields = ConfigurationProperties.fixtureBodyRedactFields();
+        ConfigurationProperties.fixtureBodyRedactFields("password");
+        try {
+            byte[] requestBytes = "{\"user\":\"José\",\"password\":\"hunter2-request\"}".getBytes(ISO_8859_1);
+            byte[] responseBytes = "{\"user\":\"José\",\"password\":\"hunter2-response\"}".getBytes(ISO_8859_1);
+            HttpRequest httpRequest = request("/login").withBody(new BodyDecoderEncoder().bytesToBody(requestBytes, null));
+            HttpResponse httpResponse = response().withBody(new BodyDecoderEncoder().bytesToBody(responseBytes, null));
+            LogEntry logEntry = new LogEntry()
+                .setType(FORWARDED_REQUEST)
+                .setHttpRequest(httpRequest)
+                .setHttpResponse(httpResponse)
+                .setMessageFormat("returning response:{}for forwarded request:{}")
+                .setArguments(httpResponse, httpRequest);
+
+            // when
+            java.util.Map<String, String> surfaces = new java.util.LinkedHashMap<>();
+            surfaces.put("updated request", logEntry.getHttpUpdatedRequests(null)[0].toString());
+            surfaces.put("updated response", logEntry.getHttpUpdatedResponse(null).toString());
+            surfaces.put("serialized log entry", ObjectMapperFactory.createObjectMapper().writeValueAsString(logEntry));
+            surfaces.put("message", logEntry.getMessage());
+            surfaces.put("arguments", java.util.Arrays.toString(logEntry.getArguments(null)));
+
+            // then - every surface is checked so a failure names each one that leaks
+            List<String> leaks = new java.util.ArrayList<>();
+            for (java.util.Map.Entry<String, String> surface : surfaces.entrySet()) {
+                leaks.addAll(bodySecretLeaks(surface.getKey(), surface.getValue(), requestBytes, responseBytes));
+            }
+            assertThat(leaks, is(java.util.Collections.emptyList()));
+        } finally {
+            ConfigurationProperties.fixtureBodyRedactFields(originalFields);
+        }
+    }
+
+    private static List<String> bodySecretLeaks(String surface, String rendered, byte[] requestBytes, byte[] responseBytes) {
+        List<String> leaks = new java.util.ArrayList<>();
+        if (!rendered.contains(FixtureRedactor.REDACTED_PLACEHOLDER)) {
+            leaks.add(surface + ": no redaction placeholder");
+        }
+        for (String secret : new String[]{"hunter2-request", "hunter2-response",
+            java.util.Base64.getEncoder().encodeToString(requestBytes), java.util.Base64.getEncoder().encodeToString(responseBytes)}) {
+            if (rendered.contains(secret)) {
+                leaks.add(surface + ": contains " + (secret.startsWith("hunter2") ? secret : "base64 of the original body"));
+            }
+        }
+        return leaks;
     }
 
     @Test

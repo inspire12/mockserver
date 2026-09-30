@@ -81,7 +81,7 @@ public class DriftDetector {
                     continue;
                 }
                 JsonNode recorded = parse(exchange.recordedResponseBody());
-                JsonNode live = parse(liveResponse.getBodyAsString());
+                JsonNode live = parse(liveResponse.getBodyAsText());
                 if (recorded == null || live == null) {
                     results.add(couldNotCheck(i, "recorded or live response body was not JSON"));
                     continue;

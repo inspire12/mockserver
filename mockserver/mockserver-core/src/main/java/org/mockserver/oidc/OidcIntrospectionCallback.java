@@ -49,7 +49,7 @@ public class OidcIntrospectionCallback implements ExpectationResponseCallback {
         OidcAuthorizationStore store = OidcAuthorizationStore.getInstance();
         OidcAuthorizationStore.Provider provider = store.providerForIntrospectPath(request.getPath().getValue());
 
-        Map<String, String> form = parseFormBody(request.getBodyAsString());
+        Map<String, String> form = parseFormBody(request.getBodyAsText());
         String token = emptyToNull(form.get("token"));
 
         // RFC 7662 §2.1: `token` is REQUIRED. A request without one is an invalid_request, not an

@@ -205,7 +205,7 @@ public class HttpResponseModifier extends ObjectWithJsonToString {
         if (jsonPatch == null && jsonMergePatch == null) {
             return;
         }
-        String bodyString = response.getBodyAsString();
+        String bodyString = response.getBodyAsText();
         if (bodyString == null || bodyString.isEmpty()) {
             return;
         }

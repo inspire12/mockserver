@@ -1175,6 +1175,16 @@ public class HttpRequest extends RequestDefinition implements HttpMessage<HttpRe
         return null;
     }
 
+    /**
+     * The body as text: the same as {@link #getBodyAsString()}, except that a binary body received
+     * with no Content-Type (bytes that are not valid UTF-8) is decoded as lenient UTF-8 rather than
+     * returned as base64, as such a body always was.
+     */
+    @JsonIgnore
+    public String getBodyAsText() {
+        return BinaryBody.matchableString(body, getFirstHeader(CONTENT_TYPE.toString()));
+    }
+
     @JsonIgnore
     public String getBodyAsJsonOrXmlString() {
         if (body != null) {
@@ -1183,7 +1193,7 @@ public class HttpRequest extends RequestDefinition implements HttpMessage<HttpRe
                 // assume the Content-Type header was forgotten so should be parsed as json
                 return new String(body.toString().getBytes(MediaType.parse(getFirstHeader(CONTENT_TYPE.toString())).getCharsetOrDefault()), StandardCharsets.UTF_8);
             } else {
-                return getBodyAsString();
+                return getBodyAsText();
             }
         } else {
             return null;

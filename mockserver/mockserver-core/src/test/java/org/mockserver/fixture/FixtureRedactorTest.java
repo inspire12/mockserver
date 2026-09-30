@@ -567,6 +567,40 @@ public class FixtureRedactorTest {
     }
 
     @Test
+    public void shouldRedactSensitiveFieldInNonUtf8BodyWithoutContentType() {
+        // a Latin-1 body with no Content-Type is kept as binary; redaction reads it as text, not base64
+        FixtureRedactor passwordRedactor = new FixtureRedactor(FixtureRedactor.defaultSensitiveHeaders(), Collections.singletonList("password"));
+        HttpRequest request = request("/login").withBody(latin1WithoutContentType("{\"user\":\"José\",\"password\":\"hunter2-secret\"}"));
+        HttpResponse response = response().withBody(latin1WithoutContentType("{\"user\":\"José\",\"password\":\"hunter2-response\"}"));
+
+        String redactedRequestBody = ((HttpRequest) passwordRedactor.redactRequestDefinition(request)).getBodyAsText();
+        String redactedResponseBody = passwordRedactor.redactResponseObject(response).getBodyAsText();
+        List<String> values = passwordRedactor.sensitiveValues(new RequestDefinition[]{request}, response);
+
+        assertThat(redactedRequestBody.contains(REDACTED_PLACEHOLDER), is(true));
+        assertThat(redactedRequestBody.contains("hunter2-secret"), is(false));
+        assertThat(redactedResponseBody.contains(REDACTED_PLACEHOLDER), is(true));
+        assertThat(redactedResponseBody.contains("hunter2-response"), is(false));
+        assertThat(values, hasItems("hunter2-secret", "hunter2-response"));
+    }
+
+    @Test
+    public void shouldFailClosedOnUnparseableNonUtf8BodyWithoutContentType() {
+        FixtureRedactor passwordRedactor = new FixtureRedactor(FixtureRedactor.defaultSensitiveHeaders(), Collections.singletonList("password"));
+        HttpRequest request = request("/login").withBody(latin1WithoutContentType("{\"user\":\"José\",\"password\":\"hunter2-secret\""));
+
+        String redactedBody = ((HttpRequest) passwordRedactor.redactRequestDefinition(request)).getBodyAsText();
+
+        assertThat(redactedBody, is(FixtureRedactor.UNPARSEABLE_BODY_PLACEHOLDER));
+    }
+
+    private static BodyWithContentType<?> latin1WithoutContentType(String text) {
+        BodyWithContentType<?> body = new org.mockserver.codec.BodyDecoderEncoder().bytesToBody(text.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1), null);
+        assertThat(body.getType(), is(Body.Type.BINARY));
+        return body;
+    }
+
+    @Test
     public void shouldCollectEveryRequestAndResponseCredentialBeforeAnyBodyFieldValue() {
         HttpRequest request = request("/api").withBody(json("{\"password\":\"request-body-value\"}"));
         HttpResponse first = response().withBody(json("{\"password\":\"response-body-value\"}"));

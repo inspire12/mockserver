@@ -88,7 +88,7 @@ public class SseAwareExpectationConverter {
         }
 
         // Parse the SSE body, using per-chunk timing if available
-        String body = response.getBodyAsString();
+        String body = response.getBodyAsText();
         if (body == null || body.isEmpty()) {
             return expectation;
         }

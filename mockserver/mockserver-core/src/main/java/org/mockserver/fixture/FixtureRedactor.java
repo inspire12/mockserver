@@ -300,7 +300,7 @@ public class FixtureRedactor {
             redacted.withCookies(redactCookies(redacted.getCookieList()));
         }
         redactQueryStringIfNeeded(redacted);
-        redactBodyIfNeeded(redacted.getBody(), redacted::withBody);
+        redactBodyIfNeeded(redacted.getBody(), request.getFirstHeader("Content-Type"), redacted::withBody);
         return redacted;
     }
 
@@ -344,7 +344,7 @@ public class FixtureRedactor {
         if (sensitiveHeaders.contains("Set-Cookie") && !redacted.getCookieList().isEmpty()) {
             redacted.withCookies(redactCookies(redacted.getCookieList()));
         }
-        redactBodyIfNeeded(redacted.getBody(), redacted::withBody);
+        redactBodyIfNeeded(redacted.getBody(), response.getFirstHeader("Content-Type"), redacted::withBody);
         return redacted;
     }
 
@@ -399,7 +399,7 @@ public class FixtureRedactor {
                             }
                         }
                     }
-                    addBodyFieldValues(bodyValues, request.getBody());
+                    addBodyFieldValues(bodyValues, request.getBody(), request.getFirstHeader("Content-Type"));
                 }
             }
         }
@@ -409,7 +409,7 @@ public class FixtureRedactor {
                 if (sensitiveHeaders.contains("Set-Cookie")) {
                     addCookieValues(cookieValues, response.getCookieList());
                 }
-                addBodyFieldValues(bodyValues, response.getBody());
+                addBodyFieldValues(bodyValues, response.getBody(), response.getFirstHeader("Content-Type"));
             }
         }
         values.removeIf(value -> value.length() < MIN_SCRUBBED_VALUE_LENGTH);
@@ -498,11 +498,11 @@ public class FixtureRedactor {
         }
     }
 
-    private void addBodyFieldValues(Set<String> values, Body<?> body) {
+    private void addBodyFieldValues(Set<String> values, Body<?> body, String contentTypeHeader) {
         if (sensitiveBodyFields.isEmpty() || body == null) {
             return;
         }
-        String bodyString = body.toStringWithoutCaching();
+        String bodyString = bodyText(body, contentTypeHeader);
         if (bodyString == null || bodyString.isEmpty() || !mentionsSensitiveBodyField(bodyString)) {
             return;
         }
@@ -641,13 +641,11 @@ public class FixtureRedactor {
      * fixtures (captured traffic) bodies are already string bodies, so this does
      * not change match semantics.
      */
-    private void redactBodyIfNeeded(Body<?> body, java.util.function.Consumer<String> setter) {
+    private void redactBodyIfNeeded(Body<?> body, String contentTypeHeader, java.util.function.Consumer<String> setter) {
         if (sensitiveBodyFields.isEmpty() || body == null) {
             return;
         }
-        // the clone shares the original's body, which may be retained in the event log: a caching read
-        // would re-attach a decoded copy to it
-        String bodyString = body.toStringWithoutCaching();
+        String bodyString = bodyText(body, contentTypeHeader);
         if (bodyString == null || bodyString.isEmpty()) {
             return;
         }
@@ -677,6 +675,15 @@ public class FixtureRedactor {
         if (mentionsSensitiveBodyField(bodyString)) {
             setter.accept(UNPARSEABLE_BODY_PLACEHOLDER);
         }
+    }
+
+    /**
+     * The body as the text a reader sees: a binary body sent with no Content-Type as lenient UTF-8 (base64
+     * would hide its field names and values from redaction), anything else read without caching, because
+     * the clone shares the original's body, which may be retained in the event log.
+     */
+    private static String bodyText(Body<?> body, String contentTypeHeader) {
+        return body instanceof BinaryBody ? BinaryBody.matchableString(body, contentTypeHeader) : body.toStringWithoutCaching();
     }
 
     /**

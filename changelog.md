@@ -213,6 +213,26 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   request's headers, so the request reached matching with no method or path and an empty body, and the
   body already received was leaked. Trailers are now ignored, as request trailers already are over HTTP/1.1
   and HTTP/2.
+- **A binary body with no `Content-Type` is no longer corrupted when MockServer forwards or proxies it.**
+  Such a body was decoded as UTF-8 text and re-encoded on the way out, so every invalid byte became a
+  three-byte replacement character: 1,000,000 random bytes arrived as about 1.8–2 MB, a 49 MiB response as
+  over 100 MB, and the text copies cost two to three times the body in heap. This hit forwarded and proxied
+  responses and requests on HTTP/1.1, HTTP/2 and HTTP/3, through expectations, absolute-URI proxying and
+  `CONNECT` tunnels, and the recorded copies in the request log, the retrieve and verify APIs and the
+  dashboard. A body with no `Content-Type` is now kept as text only when it is valid UTF-8, and otherwise
+  as a `BINARY` body holding the exact bytes, so bytes in equal bytes out.
+  Matching and the data-plane readers do not change:
+  text and JSON sent without a `Content-Type`, including text in another character set, are still read
+  as the same text by body and LLM conversation matching, secret redaction (`redactSecretsInLog`
+  still masks their configured body fields in retrieved requests, the JSON log, the dashboard and log
+  messages, returning the masked body as text), the control-plane and built-in CRUD, OIDC, SCIM and SAML
+  endpoints, OpenAPI validation, breakpoints, drift analysis, curl rendering and exports
+  (`HttpRequest.getBodyAsText()` and `HttpResponse.getBodyAsText()` give that text). The exceptions are
+  callbacks, templates, WASM, log messages and HAR exports: for those non-UTF-8 bodies,
+  `getBodyAsString()` in callbacks, the `request.body` template value, the body given to WASM response
+  shapers and the body shown in log messages and HAR are now base64, retrieve returns the existing
+  `BINARY` shape (base64) instead of text with replacement characters, and such a body is now left out
+  of the `generateExpectation` LLM prompt rather than sent.
 - **arm64 Docker images now carry the arm64 native TLS library.** The Dockerfiles defaulted the target
   architecture to amd64, and that default overrode the one Docker supplies, so an arm64 build copied the
   x86_64 build of `netty-tcnative` into `/usr/lib`. This affects the published arm64 `-graaljs` and

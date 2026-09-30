@@ -301,7 +301,7 @@ public class LlmOptimisationBriefRenderer {
             return;
         }
         try {
-            JsonNode body = OBJECT_MAPPER.readTree(redactedRequest.getBodyAsString());
+            JsonNode body = OBJECT_MAPPER.readTree(redactedRequest.getBodyAsText());
             JsonNode tools = body.path("tools");
             if (tools.isArray() && tools.size() > 0) {
                 md.append("**Tool definitions:**\n\n```json\n");

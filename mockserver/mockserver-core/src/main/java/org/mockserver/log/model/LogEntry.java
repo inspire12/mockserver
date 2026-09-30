@@ -466,8 +466,7 @@ public class LogEntry implements EventTranslator<LogEntry> {
         org.mockserver.fixture.FixtureRedactor redactor = logRedactor(configuration);
         return Arrays
             .stream(httpRequests)
-            .map(this::updateBody)
-            .map(requestDefinition -> redactor == null ? requestDefinition : redactor.redactRequestDefinition(requestDefinition))
+            .map(requestDefinition -> updateBodyRedacted(requestDefinition, redactor))
             .toArray(RequestDefinition[]::new);
     }
 
@@ -637,9 +636,7 @@ public class LogEntry implements EventTranslator<LogEntry> {
         if (httpResponse == null) {
             return null;
         }
-        HttpResponse updated = updateBody(httpResponse);
-        org.mockserver.fixture.FixtureRedactor redactor = logRedactor(configuration);
-        return redactor == null ? updated : redactor.redactResponseObject(updated);
+        return updateBodyRedacted(httpResponse, logRedactor(configuration));
     }
 
     @JsonIgnore
@@ -1029,9 +1026,9 @@ public class LogEntry implements EventTranslator<LogEntry> {
             // nested deeper than the values were collected from: fail closed
             return org.mockserver.fixture.FixtureRedactor.REDACTED_PLACEHOLDER;
         } else if (argument instanceof HttpRequest) {
-            return redactor.redactRequestDefinition(updateBody((HttpRequest) argument));
+            return updateBodyRedacted((HttpRequest) argument, redactor);
         } else if (argument instanceof HttpResponse) {
-            return redactor.redactResponseObject(updateBody((HttpResponse) argument));
+            return updateBodyRedacted((HttpResponse) argument, redactor);
         } else if (argument instanceof DeferredLogArgument) {
             return redaction.scrub(((DeferredLogArgument) argument).render(redactor));
         } else if (argument instanceof SensitiveLogValue) {
@@ -1382,6 +1379,28 @@ public class LogEntry implements EventTranslator<LogEntry> {
      */
     static org.mockserver.fixture.FixtureRedactor alwaysOnLogRedactor() {
         return redactorFor(bodyRedactFields(null));
+    }
+
+    // updateBody renders a BinaryBody as base64, which would hide its fields from the redactor, so a binary
+    // body is redacted first; every other body is rendered first so a JSON body keeps its tree rendering.
+    private RequestDefinition updateBodyRedacted(RequestDefinition requestDefinition, org.mockserver.fixture.FixtureRedactor redactor) {
+        if (redactor == null) {
+            return updateBody(requestDefinition);
+        }
+        if (requestDefinition instanceof HttpRequest && ((HttpRequest) requestDefinition).getBody() instanceof BinaryBody) {
+            return updateBody(redactor.redactRequestDefinition(requestDefinition));
+        }
+        return redactor.redactRequestDefinition(updateBody(requestDefinition));
+    }
+
+    private HttpResponse updateBodyRedacted(HttpResponse httpResponse, org.mockserver.fixture.FixtureRedactor redactor) {
+        if (redactor == null) {
+            return updateBody(httpResponse);
+        }
+        if (httpResponse != null && httpResponse.getBody() instanceof BinaryBody) {
+            return updateBody(redactor.redactResponseObject(httpResponse));
+        }
+        return redactor.redactResponseObject(updateBody(httpResponse));
     }
 
     // Both updateBody forms read without caching: they render retained, released entries on retrieve and

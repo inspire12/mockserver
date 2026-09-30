@@ -319,7 +319,7 @@ public class OpenAPIRequestValidator {
             return;
         }
 
-        String bodyString = request.getBodyAsString();
+        String bodyString = request.getBodyAsText();
         if (isBlank(bodyString)) {
             if (requestBody.getRequired() != null && requestBody.getRequired()) {
                 errors.add("request body is required but was empty");

@@ -100,7 +100,7 @@ public class SamlSsoCallback implements ExpectationResponseCallback {
             return value;
         }
         // fall back to application/x-www-form-urlencoded body parameters (HTTP-POST binding)
-        String body = request.getBodyAsString();
+        String body = request.getBodyAsText();
         if (body != null && !body.isEmpty()) {
             for (String pair : body.split("&")) {
                 int eq = pair.indexOf('=');

@@ -440,6 +440,8 @@ $client-&gt;when(
     <li><strong><a href="#button_match_request_by_not_matching_body_with_xpath">negated matcher</a></strong></li>
 </ul>
 
+<p><strong>Bodies sent without a <span class="inline_code">Content-Type</span> header</strong> are kept exactly as they were sent, so MockServer forwards and proxies them byte for byte. If the body is valid UTF-8 text (for example JSON or plain text), it is treated as text, so string, regex, JSON and XML matchers work on it as usual. Otherwise (for example an image, a compressed file, or text in another character set) it is treated as binary: <a href="#button_match_request_by_binary_body">binary</a> matchers compare its exact bytes, text matchers still see it decoded as UTF-8, and the retrieve API and dashboard show it as a <span class="inline_code">BINARY</span> body (base64), and <a href="/mock_server/response_templates.html">response templates</a>, callbacks and WASM rules receive it as base64 text. To have a body treated as text in a specific character set, send a <span class="inline_code">Content-Type</span> header with a <span class="inline_code">charset</span>, for example <span class="inline_code">text/plain; charset=ISO-8859-1</span>.</p>
+
 <a id="graphql_body_matching" class="anchor" href="#graphql_body_matching">&nbsp;</a>
 
 <h4>GraphQL Body Matching</h4>

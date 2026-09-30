@@ -88,7 +88,7 @@ public class ScimCollectionCallback extends ScimResourceCallbackBase {
     }
 
     private HttpResponse create(HttpRequest request, Provider provider, ScimShaper.ResourceType type) {
-        ObjectNode payload = parseObject(request.getBodyAsString());
+        ObjectNode payload = parseObject(request.getBodyAsText());
         if (payload == null) {
             return scimError(400, "request body must be a JSON object", "invalidSyntax");
         }

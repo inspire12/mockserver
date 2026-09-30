@@ -247,7 +247,7 @@ public class LlmOptimisationReportBuilder {
             return;
         }
         try {
-            JsonNode body = OBJECT_MAPPER.readTree(request.getBodyAsString());
+            JsonNode body = OBJECT_MAPPER.readTree(request.getBodyAsText());
             JsonNode tools = body.path("tools");
             if (!tools.isArray() || tools.size() == 0) {
                 return;
