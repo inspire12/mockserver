@@ -72,7 +72,7 @@ fi
 
 # Publish to crates.io inside the container. HARD-fail on a real publish error,
 # with retry to ride out transient registry/network blips. The token is passed
-# via -e (run-in-docker redacts -e values in its logged command).
+# via in_docker --secret-env.
 # --allow-dirty: the version bump above leaves Cargo.toml/Cargo.lock uncommitted
 # (cargo refuses a dirty tree otherwise); those edits ARE the release version we
 # intend to publish, and they're committed separately by the version-bump step.
@@ -80,11 +80,11 @@ fi
 # eventually-consistent pre-check above missing it) already shipped this version,
 # `cargo publish` exits 101 with "already exists on crates.io index" — that is the
 # desired end state, so treat it as success while still HARD-failing on any other
-# error. The token is passed via -e (run-in-docker redacts -e values), so it never
+# error. The token is passed via --secret-env, not the command, so it never
 # reaches the captured output.
 log_info "Publishing to crates.io from $RUST_IMAGE"
 retry 3 5 -- run_idempotent 'already (exists|uploaded)' -- in_docker "$RUST_IMAGE" \
-  -e "CARGO_REGISTRY_TOKEN=$CARGO_TOKEN" \
+  --secret-env "CARGO_REGISTRY_TOKEN=$CARGO_TOKEN" \
   -w /build/mockserver-testcontainers/rust -- cargo publish --allow-dirty
 
 # Confirm the crate appears in the crates.io API. Indexing is eventually-consistent

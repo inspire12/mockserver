@@ -106,8 +106,8 @@ trap 'rm -f "$KEY_FILE"' EXIT
 #    arm64 and amd64 hosts; the release pins linux-amd64 for its amd64 agents.
 #    The binary is SHA256-pinned (cosign v2.4.3 official checksums).
 in_docker "$HELM_IMAGE" --entrypoint sh -w /build \
-  -e "GHCR_USERNAME=$GHCR_USERNAME" -e "GHCR_TOKEN=$GHCR_TOKEN" \
-  -e "COSIGN_PASSWORD=$COSIGN_PASSWORD" \
+  -e "GHCR_USERNAME=$GHCR_USERNAME" --secret-env "GHCR_TOKEN=$GHCR_TOKEN" \
+  --secret-env "COSIGN_PASSWORD=$COSIGN_PASSWORD" \
   -e "COSIGN_KEY_FILE=/build/.tmp/cosign-key-test.$$" \
   -e "DO_SIGN=$DO_SIGN" -e "TAGS=$TAGS" -e "CHART_REPO=$CHART_REPO" \
   -- -ec '

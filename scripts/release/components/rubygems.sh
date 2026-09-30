@@ -93,7 +93,7 @@ else
   GEM_HOST_API_KEY=$(load_secret "mockserver-build/rubygems" "api_key")
   in_docker "$RUBY_IMAGE" \
     -w /build/mockserver-client-ruby \
-    -e "GEM_HOST_API_KEY=$GEM_HOST_API_KEY" \
+    --secret-env "GEM_HOST_API_KEY=$GEM_HOST_API_KEY" \
     -e "VERSION=$VERSION" \
     -- bash -ec '
       set +x

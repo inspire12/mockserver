@@ -342,8 +342,7 @@ retry() {
 # not waste attempts re-publishing something that will never change. Output is
 # captured (so it can be inspected) and re-echoed, so the log still shows it. Do
 # NOT pass secrets in the command BODY — they would be captured here; pass them
-# via `-e` to in_docker, which keeps them out of stdout/stderr (and the banner
-# redacts -e values), exactly as the publish components already do.
+# via in_docker --secret-env, exactly as the publish components already do.
 run_idempotent() {
   local marker="$1"; shift
   [[ "${1:-}" == "--" ]] && shift
@@ -361,7 +360,14 @@ run_idempotent() {
 
 # Run a command inside a Docker container with the repo mounted at /build.
 # Usage:
-#   in_docker IMAGE [-w WORKDIR] [-v VOL:DST] [-e KEY=VAL] -- CMD ARGS...
+#   in_docker IMAGE [-w WORKDIR] [-v VOL:DST] [-e KEY=VAL] [--secret-env NAME[=VALUE]] -- CMD ARGS...
+#
+# --secret-env passes a credential WITHOUT `docker run -e` (release-principles §7):
+# VALUE (or, with no =VALUE, the environment variable NAME) goes to a 0600 file
+# under .tmp/secret-env.*, removed on return or interrupt, and a sh loader running
+# as PID 1 exports it into CMD's own environment, so it is not in `docker inspect`,
+# /proc/1/environ or the docker argv. The loader replaces the image entrypoint, so
+# for an image whose entrypoint is the tool (gh) pass --entrypoint.
 #
 # Wraps the existing run-in-docker.sh which logs the docker command for
 # local reproduction. The wrapper script redacts secrets in its log banner.
@@ -391,7 +397,80 @@ in_docker() {
       -e "CURL_CA_BUNDLE=/etc/ssl/local-ca.pem"
     )
   fi
-  "$REPO_ROOT/.buildkite/scripts/run-in-docker.sh" -i "$1" "${ca_args[@]+"${ca_args[@]}"}" "${@:2}"
+  local image="$1"; shift
+  local -a orig=("$@") opts=() secrets=() entry=()
+  while [[ $# -gt 0 && "$1" != "--" ]]; do
+    case "$1" in
+      --secret-env|--entrypoint)
+        [[ $# -ge 2 ]] || { echo "--- :x: in_docker: $1 needs a value" >&2; return 2; }
+        if [[ "$1" == --secret-env ]]; then secrets+=("$2"); else entry=("$2"); fi
+        shift 2 ;;
+      *) opts+=("$1"); shift ;;
+    esac
+  done
+  if [[ ${#secrets[@]} -eq 0 ]]; then
+    "$REPO_ROOT/.buildkite/scripts/run-in-docker.sh" -i "$image" "${ca_args[@]+"${ca_args[@]}"}" "${orig[@]+"${orig[@]}"}"
+    return
+  fi
+  if [[ "${1:-}" != "--" ]]; then
+    echo "--- :x: in_docker: --secret-env needs an explicit -- before the command" >&2
+    return 2
+  fi
+  shift
+  : "${secret_env_loader:?in_docker: secret_env_loader is not defined (export it with in_docker)}"
+  # A subshell, so the trap removes the staged secrets however the call ends.
+  (
+    dir=""
+    trap '[ -n "$dir" ] && rm -rf -- "$dir"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    mkdir -p "$REPO_ROOT/.tmp"
+    dir="$(mktemp -d "$REPO_ROOT/.tmp/secret-env.XXXXXX")" || exit 2
+    for spec in "${secrets[@]}"; do
+      name="${spec%%=*}"
+      if [[ "$spec" == *=* ]]; then value="${spec#*=}"; else value="${!name:-}"; fi
+      if [[ ! "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ || -z "$value" ]]; then
+        echo "--- :x: in_docker: --secret-env '$name' needs a valid name and a non-empty value" >&2
+        exit 2
+      fi
+      ( umask 077; printf '%s' "$value" > "$dir/$name" ) || exit 2
+    done
+    local secret_names=() spec
+    for spec in "${secrets[@]}"; do secret_names+=("${spec%%=*}"); done
+    banner="<in_docker --secret-env loader, secrets: ${secret_names[*]}>${entry[0]+ ${entry[0]}} $*"
+    "$REPO_ROOT/.buildkite/scripts/run-in-docker.sh" -i "$image" "${ca_args[@]+"${ca_args[@]}"}" "${opts[@]+"${opts[@]}"}" \
+      --entrypoint sh --banner-command "$banner" \
+      -- -c "$secret_env_loader" sh "/build/.tmp/${dir##*/}" "${entry[@]+"${entry[@]}"}" "$@"
+  )
+}
+
+# Runs as the container's PID 1 (sh): exports each secret file as NAME=value, then
+# runs the command as a CHILD, never via exec, so PID 1's environment (what
+# /proc/1/environ and `docker inspect` show) never holds a secret. PID 1 has no
+# default signal handling, so it forwards TERM/INT to the child and exits with the
+# child's exact status (128+N when the child was killed by signal N).
+# shellcheck disable=SC2089  # shell source run by sh -c, not an argument list
+secret_env_loader='
+d="$1"; shift
+for f in "$d"/*; do
+  [ -f "$f" ] || { echo "in_docker: no secret files in $d" >&2; exit 2; }
+  v="$(cat "$f")" || exit 2
+  export "${f##*/}=$v"
+done
+unset d f v
+exec 3<&0
+"$@" <&3 3<&- &
+c=$!
+trap '"'"'kill -TERM "$c" 2>/dev/null'"'"' TERM INT
+wait "$c"; rc=$?
+while kill -0 "$c" 2>/dev/null; do wait "$c"; rc=$?; done
+exit "$rc"
+'
+
+# Removes secret directories an interrupted in_docker could not clean up. Only
+# for entry points that run nothing else concurrently in this checkout.
+sweep_stale_secret_env() {
+  find "$REPO_ROOT/.tmp" -maxdepth 1 -name 'secret-env.*' -exec rm -rf {} + 2>/dev/null || true
 }
 
 # Remove bind-mounted node_modules dir(s) from INSIDE a container, as the
@@ -448,8 +527,21 @@ in_maven() {
   in_docker "$MAVEN_IMAGE" \
     "${docker_opts[@]+"${docker_opts[@]}"}" \
     -v mockserver-m2-cache:/root/.m2 \
-    -- bash -ec "${ca_install_prelude}exec${quoted}"
+    -- bash -ec "${ca_install_prelude}${maven_packaging_prelude}exec${quoted}"
 }
+
+# Installs `unzip`, which the src/packaging/assert-*.sh assertions bound to
+# package/verify shell out to, and which the maven:*-eclipse-temurin image does
+# not ship. Every $MAVEN_IMAGE run that invokes mvn must start with it (enforced
+# by .buildkite/scripts/steps/check-release-maven-prelude.sh). Fails the
+# container closed rather than letting a build reach an assertion that cannot run.
+maven_packaging_prelude='
+if ! command -v unzip >/dev/null 2>&1; then
+  { apt-get -o Acquire::Retries=3 update -qq >/dev/null \
+      && apt-get -o Acquire::Retries=3 install -y -qq --no-install-recommends unzip >/dev/null; } \
+    || { echo "cannot install unzip (the src/packaging/assert-*.sh packaging assertions need it)" >&2; exit 1; }
+fi
+'
 
 # Emit a shell snippet that installs the host's corp CA bundle into the
 # container's OS trust store AND the JDK truststore. Designed to be the
@@ -651,16 +743,16 @@ release_gate() {
   # function, so export it for the child gate script to resolve GATE_GH_CMD.
   #
   # Token handling: the gate script decides and annotates on the HOST; only the
-  # gh call is delegated into Docker. The token reaches the container through the
-  # GH_TOKEN *environment* variable via docker's `-e GH_TOKEN` passthrough
-  # (run-in-docker.sh forwards and REDACTS `-e` values), so — unlike a value-form
-  # `-e GH_TOKEN=…` — it never appears on any argv. GH_TOKEN is exported into the
-  # child's environment below and inherited all the way down to `docker run`.
-  # The gate script never returns non-zero, but tolerate it defensively so it
-  # can never abort the release.
+  # gh call is delegated into Docker. The token is exported as GH_TOKEN to the
+  # gate script, and in_docker --secret-env GH_TOKEN stages it as a file, so it
+  # is on no argv and not in `docker inspect`. The child script needs in_docker's
+  # helpers too, hence the exports. The gate script never returns non-zero, but
+  # tolerate it defensively so it can never abort the release.
   export -f in_docker
+  # shellcheck disable=SC2090  # exported as sh -c source text for the child script
+  export secret_env_loader
   GH_TOKEN="$token" \
-  GATE_GH_CMD="in_docker $GH_IMAGE -e GH_TOKEN --" \
+  GATE_GH_CMD="in_docker $GH_IMAGE --entrypoint gh --secret-env GH_TOKEN --" \
     "$DEPENDABOT_RELEASE_GATE" "$action" || true
   unset token
 }

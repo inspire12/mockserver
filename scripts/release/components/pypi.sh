@@ -89,7 +89,7 @@ else
   in_docker "$PYTHON_IMAGE" \
     -w /build/mockserver-client-python \
     -e "TWINE_USERNAME=__token__" \
-    -e "TWINE_PASSWORD=$PYPI_TOKEN" \
+    --secret-env "TWINE_PASSWORD=$PYPI_TOKEN" \
     -- bash -ec '
       pip install --quiet --no-cache-dir twine
       set +x

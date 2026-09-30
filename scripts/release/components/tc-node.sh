@@ -80,12 +80,12 @@ fi
 
 # Publish to npm inside the container. HARD-fail on a real publish error, with
 # retry to ride out transient registry/network blips. The token is passed via
-# -e (run-in-docker redacts -e values in its logged command) and dereferenced
+# in_docker --secret-env and dereferenced
 # INSIDE the single-quoted sh -c body so the literal token never lands in the
 # logged command args (run-in-docker does NOT redact the command body).
 log_info "Publishing to npm from $NODE_IMAGE"
 retry 3 5 -- in_docker "$NODE_IMAGE" \
-  -e "NPM_TOKEN=$NPM_TOKEN" \
+  --secret-env "NPM_TOKEN=$NPM_TOKEN" \
   -w /build/mockserver-testcontainers/node -- \
   sh -c '
     printf "//registry.npmjs.org/:_authToken=%s\nregistry=https://registry.npmjs.org/\nalways-auth=true\n" "$NPM_TOKEN" > .npmrc

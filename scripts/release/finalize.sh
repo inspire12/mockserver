@@ -81,11 +81,9 @@ if is_dry_run; then
 else
   SONATYPE_USERNAME=$(load_secret "mockserver-build/sonatype" "username")
   SONATYPE_PASSWORD=$(load_secret "mockserver-build/sonatype" "password")
-  in_docker "$MAVEN_IMAGE" \
-    -w /build/mockserver \
-    -v mockserver-m2-cache:/root/.m2 \
-    -e "SONATYPE_USERNAME=$SONATYPE_USERNAME" \
-    -e "SONATYPE_PASSWORD=$SONATYPE_PASSWORD" \
+  in_maven -w /build/mockserver \
+    --secret-env "SONATYPE_USERNAME=$SONATYPE_USERNAME" \
+    --secret-env "SONATYPE_PASSWORD=$SONATYPE_PASSWORD" \
     -- mvn -T 1C clean deploy -DskipTests \
          -Djava.security.egd=file:/dev/./urandom \
          --settings .buildkite-settings.xml

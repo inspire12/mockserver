@@ -83,7 +83,7 @@ else
   log_info "Creating release mockserver-$RELEASE_VERSION"
   create_output=$(in_docker "$GH_IMAGE" \
     -w /build \
-    -e "GITHUB_TOKEN=$GITHUB_TOKEN" \
+    --entrypoint gh --secret-env "GITHUB_TOKEN=$GITHUB_TOKEN" \
     -- release create "mockserver-$RELEASE_VERSION" \
          --title "MockServer $RELEASE_VERSION" \
          --notes-file ".tmp/changelog-extract.md" \

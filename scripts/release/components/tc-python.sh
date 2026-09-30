@@ -8,8 +8,7 @@
 #
 # Build + twine check + twine upload all run in the pinned $PYTHON_IMAGE via
 # in_docker (mirroring pypi.sh) — no host python/twine required. The PyPI token
-# is passed via `-e TWINE_PASSWORD=...` (redacted by run-in-docker), never in
-# the command body.
+# is passed as TWINE_PASSWORD via in_docker --secret-env, never in the command body.
 #
 # Dry-run: build + twine check, skip upload.
 
@@ -100,7 +99,7 @@ PYPI_TOKEN=$(load_secret "mockserver-build/pypi" "token")
 retry 3 5 -- in_docker "$PYTHON_IMAGE" \
   -w /build/mockserver-testcontainers/python \
   -e "TWINE_USERNAME=__token__" \
-  -e "TWINE_PASSWORD=$PYPI_TOKEN" \
+  --secret-env "TWINE_PASSWORD=$PYPI_TOKEN" \
   -- bash -ec '
     pip install --quiet --no-cache-dir twine
     set +x

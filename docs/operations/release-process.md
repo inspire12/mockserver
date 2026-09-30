@@ -472,6 +472,47 @@ TERRAFORM_IMAGE=hashicorp/terraform:1.15
 
 Override any of them by exporting the corresponding env var. Change them in `_lib.sh` to update for everyone.
 
+### Maven runs install `unzip` first
+
+**Every container that runs `mvn` in a release script starts with `${maven_packaging_prelude}` from `_lib.sh`, which installs `unzip` and fails the step if it cannot.** The `src/packaging/assert-*.sh` assertions bound to `package`/`verify` run `unzip` over the built jars, and `maven:3.9.9-eclipse-temurin-17` does not include it. Without the prelude, `mvn install` and both deploys fail in the release. A dry-run skips the raw deploy payloads entirely, so it can pass while they would fail: those payloads must carry the prelude themselves.
+
+| Call | How it gets the prelude |
+|---|---|
+| `in_maven …` (maven-central build, maven-plugin, docker, javadoc, binary, finalize SNAPSHOT deploy) | Built into `in_maven` |
+| Raw `in_docker "$MAVEN_IMAGE" … bash -ec '…'` (the GPG-signed deploys in `maven-central.sh` and `maven-plugin.sh`) | The payload starts with `"${maven_packaging_prelude}"'…'` |
+
+`.buildkite/scripts/steps/check-release-maven-prelude.sh` (the `mockserver-infra` pipeline) enforces this over `scripts/release/**` and `.buildkite/scripts/release-*.sh`. It fails if:
+
+- a containerized `mvn` run (`in_docker`, `run-in-docker.sh`, `docker run` or `docker container run`) has no expanding reference to the prelude before `mvn` (a reference inside single quotes never expands, so it does not count);
+- `in_maven` loses the prelude;
+- the prelude, run against a stub `apt-get`, stops installing `unzip`, calls apt when `unzip` is already present, or exits 0 when apt fails.
+
+On every run it also checks its own detection against `check-release-maven-prelude.fixture`. It cannot see `mvn` inside a heredoc payload (`bash -s <<EOF`), a command held in a variable (`sh -c "$CMD"`), or a wrapper function that forwards `"$@"` to `in_docker`; write `mvn` literally in the `in_docker` call, or use `in_maven`.
+
+We install `unzip` into the public image instead of switching `MAVEN_IMAGE` to the CI image `mockserver/mockserver:maven`, which already has it. That image is re-pushed under the same mutable tag, either by its own pipeline or locally with the `docker-build-push` skill, which can bake a corporate root CA into it. It also uses Ubuntu's OpenJDK rather than Temurin, so a release would no longer be pinned to a known toolchain. The deploy step already ran `apt-get` in this image, so the prelude adds no new network dependency. If a packaging script starts using another tool the image lacks, add it to the prelude.
+
+### Credentials reach containers through `--secret-env`, never `-e`
+
+**Every release step that hands a credential to a container uses `in_docker … --secret-env NAME=VALUE`, not `-e NAME=VALUE`** (release-principles §7). `in_docker` writes each value to a `0600` file in a private `.tmp/secret-env.*` directory. It replaces the entrypoint with a small `sh` loader that runs as the container's PID 1, exports the files as environment variables, and runs the real command as its child. The secret is therefore not in `docker inspect`, not in the container's `/proc/1/environ`, and not on the host `docker run` command line; only the command's own processes see it.
+
+- **Cleanup.** The staging and the `docker run` happen in a subshell whose `trap` removes the directory when the call returns, fails, or is interrupted (INT/TERM). A `kill -9` of the release script cannot run a trap, so `release-runner.sh` and `release.sh` also remove any leftover `.tmp/secret-env.*` before they start.
+- **Cancellation.** PID 1 in a container ignores signals it has no handler for, so the loader forwards TERM/INT to the command and exits with the command's exact status (143 for a command killed by SIGTERM). Cancelling a release step stops Maven or terraform promptly.
+- **Usage.** `--secret-env NAME` (no value) takes the value from the environment variable `NAME`; the Dependabot release gate uses this for `GH_TOKEN`. `--secret-env` requires an explicit `--` before the command and a non-empty value; either mistake fails the step. Because the loader replaces the image entrypoint, pass `--entrypoint` for an image whose entrypoint is the tool itself (`--entrypoint gh` for `GH_IMAGE`, `--entrypoint /bin/terraform` for `TERRAFORM_IMAGE`). The `run-in-docker.sh` banner then shows `<in_docker --secret-env loader, secrets: NAME …>` and the command, not a reproduce line, because the staged directory no longer exists after the run.
+
+**Credentials still on a command line** (follow-ups; none goes through `docker run -e`):
+
+| Where | How the credential is passed |
+|---|---|
+| `tc-dotnet.sh`, `client-dotnet.sh` | `dotnet nuget push --api-key` inside the container; dotnet has no environment-variable alternative |
+| `sdkman.sh` | `curl -H "Consumer-Key: …" -H "Consumer-Token: …"` on the host |
+| `swaggerhub.sh` (`sh_api_call`) | `curl -H "Authorization: …"` on the host |
+| `postman-collection.sh` | `curl -H "X-Api-Key: …"` on the host |
+| `mcp.sh` | `mcp-publisher login dns --private-key …` on the host (the CLI accepts the key only as a flag) |
+| `winget.sh`, `chocolatey.sh` | `wingetcreate --token` / `choco push --api-key` on the host; Windows-only, so they skip on the Linux release agents |
+| `.buildkite/scripts/steps/java-deploy-snapshot.sh` (CI, not the release) | `run-in-docker.sh -e SONATYPE_USERNAME=… -e SONATYPE_PASSWORD=…` for the snapshot deploy |
+
+The `curl` cases can move to a `0600` config file read with `curl -K`, as `check-release-credentials.sh` already does.
+
 ## Common operations
 
 ### Retry semantics — what a Buildkite Retry actually reruns

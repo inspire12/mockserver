@@ -100,6 +100,10 @@ rm -f "$RELEASE_OUTPUTS_FILE"
 SCRIPT_ARG="--execute"
 [[ "$DRY_RUN" == "true" ]] && SCRIPT_ARG="--dry-run"
 
+# A cancelled earlier job on this agent may have left staged credentials behind
+# (scripts/release/_lib.sh in_docker --secret-env); nothing else runs here now.
+find "$REPO_ROOT/.tmp" -maxdepth 1 -name 'secret-env.*' -exec rm -rf {} + 2>/dev/null || true
+
 set +e
 "$SCRIPT" "$SCRIPT_ARG"
 exit_code=$?

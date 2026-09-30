@@ -141,7 +141,7 @@ else
   # mean this ran before `github` — an ordering bug to surface, not paper over).
   in_docker "$GH_IMAGE" \
     -w /build \
-    -e "GITHUB_TOKEN=$GITHUB_TOKEN" \
+    --entrypoint gh --secret-env "GITHUB_TOKEN=$GITHUB_TOKEN" \
     -- release upload "mockserver-$RELEASE_VERSION" --clobber "${ASSETS[@]}"
 fi
 

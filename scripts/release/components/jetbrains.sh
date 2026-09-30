@@ -11,6 +11,7 @@
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source-path=SCRIPTDIR source=../_lib.sh
 source "$SCRIPT_DIR/_lib.sh"
 
 while [[ $# -gt 0 ]]; do
@@ -64,8 +65,8 @@ fi
 
 # --- JetBrains Marketplace (publishPlugin) ---
 # The upload token EXISTS (mockserver-release/jetbrains, key: token). A
-# genuinely-missing secret is a hard failure now. The token is passed via -e
-# (redacted in the logged command) and read by the build INSIDE the
+# genuinely-missing secret is a hard failure now. The token is passed via
+# in_docker --secret-env and read by the build INSIDE the
 # single-quoted bash -ec body straight from the JETBRAINS_TOKEN environment
 # variable — the literal token never lands in the logged command args
 # (run-in-docker does NOT redact the command body). build.gradle.kts reads it
@@ -83,7 +84,7 @@ fi
 # success while still HARD-failing on any other publish error.
 log_info "Publishing to JetBrains Marketplace from $MAVEN_IMAGE"
 retry 3 5 -- run_idempotent 'already contains version|already exists' -- in_docker "$MAVEN_IMAGE" \
-  -e "JETBRAINS_TOKEN=$JETBRAINS_TOKEN" \
+  --secret-env "JETBRAINS_TOKEN=$JETBRAINS_TOKEN" \
   -w /build/mockserver-jetbrains -- \
   bash -ec "${ca_install_prelude}"'./gradlew publishPlugin'
 

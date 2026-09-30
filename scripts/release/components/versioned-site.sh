@@ -49,16 +49,19 @@ tf() {
   local -a env_args=()
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
-    line="${line#export }"
-    env_args+=(-e "$line")
+    env_args+=(--secret-env "${line#export }")
   done <<< "$aws_env"
   env_args+=(-e "AWS_DEFAULT_REGION=${AWS_REGION:-eu-west-2}")
   env_args+=(-e "AWS_REGION=${AWS_REGION:-eu-west-2}")
   # The provider assumes the website-account role; the backend stays on the
   # build-account creds materialised above.
   env_args+=(-e "TF_VAR_website_role_arn=${WEBSITE_ROLE_ARN:-}")
-  env_args+=(-e "TF_VAR_role_external_id=${ROLE_EXTERNAL_ID:-}")
-  in_docker "$TERRAFORM_IMAGE" -w /build "${env_args[@]}" -- "$@"
+  if [[ -n "${ROLE_EXTERNAL_ID:-}" ]]; then
+    env_args+=(--secret-env "TF_VAR_role_external_id=$ROLE_EXTERNAL_ID")
+  else
+    env_args+=(-e "TF_VAR_role_external_id=")
+  fi
+  in_docker "$TERRAFORM_IMAGE" -w /build --entrypoint /bin/terraform "${env_args[@]}" -- "$@"
 }
 
 TF_DIR="$REPO_ROOT/terraform/website"

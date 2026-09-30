@@ -87,18 +87,18 @@ if [[ -z "$NUGET_API_KEY" || "$NUGET_API_KEY" == "null" ]]; then
   exit 1
 fi
 
-# Push from inside the container. The API key is passed ONLY via `-e` (which
-# run-in-docker redacts in its logged banner) and dereferenced INSIDE the
-# container by a single-quoted `sh -c` body — so the literal key never appears
-# in COMMAND_ARGS (which run-in-docker does NOT redact). The non-secret nupkg
-# path is also passed via -e to keep the command body fully literal.
+# Push from inside the container. The API key is passed ONLY via in_docker
+# --secret-env and dereferenced INSIDE the container by a single-quoted `sh -c`
+# body, so the literal key never appears in COMMAND_ARGS (which run-in-docker
+# does NOT redact). dotnet has no env-var alternative to --api-key, so the key
+# is still on the in-container dotnet argv. Non-secret nupkg path passed via -e.
 # HARD-fail on push error, with retry for transient registry blips.
 # --skip-duplicate makes retry idempotent (a half-succeeded first attempt won't
 # fail the retry).
 log_info "Pushing MockServerClient $RELEASE_VERSION to NuGet.org"
 retry 3 5 -- in_docker "$DOTNET_IMAGE" -w "$MODULE_DIR" \
   -e "NUPKG=./artifacts/MockServerClient.${RELEASE_VERSION}.nupkg" \
-  -e "NUGET_API_KEY=$NUGET_API_KEY" -- \
+  --secret-env "NUGET_API_KEY=$NUGET_API_KEY" -- \
   sh -c 'dotnet nuget push "$NUPKG" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate'
 
 # NuGet indexing is eventually-consistent: a freshly-pushed package can take

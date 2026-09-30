@@ -40,11 +40,12 @@
 # GH RUNNER — how the `gh` call is executed, resolved once at startup in order:
 #   1. $GATE_GH_CMD  — an explicit runner override (word-split into a command
 #      prefix). The release wiring in scripts/release/_lib.sh sets this to the
-#      containerised form `in_docker "$GH_IMAGE" -e GH_TOKEN --`, because the
-#      release-queue AMI installs NO host `gh` (its bootstrap installs no
-#      packages), so a bare host `gh` would leave the gate permanently inert.
-#      The token travels via the GH_TOKEN *environment* variable (docker `-e
-#      GH_TOKEN` passthrough) and so never appears on any argv.
+#      containerised form `in_docker "$GH_IMAGE" --entrypoint gh --secret-env
+#      GH_TOKEN --`, because the release-queue AMI installs NO host `gh` (its
+#      bootstrap installs no packages), so a bare host `gh` would leave the gate
+#      permanently inert. The token is staged as a 0600 file and exported only
+#      into gh's own process, so it never appears on any argv, in `docker
+#      inspect` or in the container's PID 1 environment.
 #   2. host `gh` on PATH — the standalone / local path (run it directly).
 #   3. neither — NO runner. This is itself a write failure: it takes the SAME
 #      loud INERT path with a REASON that names the missing runner, so it can be
@@ -56,7 +57,7 @@
 #   GH_TOKEN=... dependabot-release-gate.sh set     # at release start
 #   GH_TOKEN=... dependabot-release-gate.sh clear    # at finalize + failure trap
 #   GH_TOKEN=... dependabot-release-gate.sh status   # print current value
-#   GATE_GH_CMD='in_docker <image> -e GH_TOKEN --' … # containerised runner
+#   GATE_GH_CMD='in_docker <image> --entrypoint gh --secret-env GH_TOKEN --' … # containerised runner
 #
 # REPO defaults to this repository; override via the REPO env var.
 set -uo pipefail

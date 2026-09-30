@@ -74,10 +74,9 @@ fi
 
 # --- VS Code Marketplace (vsce) ---
 # The vsce PAT EXISTS (mockserver-release/vsce, key: token). A genuinely-missing
-# secret is a hard failure now. The token is passed via -e (redacted in the
-# logged command) and dereferenced INSIDE the single-quoted sh -c body so the
-# literal token never lands in the logged command args (run-in-docker does NOT
-# redact the command body). HARD-fail on a real publish error, with retry for
+# secret is a hard failure now. The token reaches the container via --secret-env
+# and vsce reads it from VSCE_PAT (ovsx from OVSX_PAT), so it is on no command
+# line. HARD-fail on a real publish error, with retry for
 # transient blips. Runs independently of the Open VSX publish below — each
 # registry hard-fails on its own error.
 VSCE_PAT=$(load_secret "mockserver-release/vsce" "token")
@@ -91,9 +90,9 @@ fi
 # HARD-failing on any other publish error.
 log_info "Publishing to VS Code Marketplace from $NODE_IMAGE"
 retry 3 5 -- run_idempotent 'already exists|already published' -- in_docker "$NODE_IMAGE" \
-  -e "VSCE_PAT=$VSCE_PAT" \
+  --secret-env "VSCE_PAT=$VSCE_PAT" \
   -w /build/mockserver-vscode -- \
-  sh -c 'npm i -g @vscode/vsce && vsce publish -p "$VSCE_PAT"'
+  sh -c 'npm i -g @vscode/vsce && vsce publish'
 
 # --- Open VSX (ovsx) ---
 # The ovsx PAT EXISTS (mockserver-release/ovsx, key: token). Same hard-fail +
@@ -107,9 +106,9 @@ fi
 # "already exists" when the version is already on Open VSX — treat as success.
 log_info "Publishing to Open VSX from $NODE_IMAGE"
 retry 3 5 -- run_idempotent 'already exists|already published' -- in_docker "$NODE_IMAGE" \
-  -e "OVSX_PAT=$OVSX_PAT" \
+  --secret-env "OVSX_PAT=$OVSX_PAT" \
   -w /build/mockserver-vscode -- \
-  sh -c 'npm i -g ovsx && ovsx publish -p "$OVSX_PAT"'
+  sh -c 'npm i -g ovsx && ovsx publish'
 
 # Commit version bump.
 git_commit_and_push "release: publish mockserver-vscode $RELEASE_VERSION" \

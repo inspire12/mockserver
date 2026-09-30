@@ -112,7 +112,7 @@ publish_one() {
   npm_token=$(load_secret "mockserver-release/npm-token" "token")
   in_docker "$NODE_IMAGE" \
     -w "/build/$pkg" \
-    -e "NPM_TOKEN=$npm_token" \
+    --secret-env "NPM_TOKEN=$npm_token" \
     -- bash -ec '
       set +x
       cat > /tmp/.npmrc <<NPMRC

@@ -29,6 +29,18 @@ steps:
         - exit_status: 255  # agent forced shutdown
           limit: 2
 
+  - label: ":package: release scripts install unzip before mvn"
+    command: ".buildkite/scripts/steps/check-release-maven-prelude.sh"
+    timeout_in_minutes: 5
+    agents:
+      queue: "trigger"
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
   - label: ":docker: validate Dockerfile sync"
     command: ".buildkite/scripts/steps/docker-validate-sync.sh"
     timeout_in_minutes: 5

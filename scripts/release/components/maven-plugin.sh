@@ -11,6 +11,7 @@
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source-path=SCRIPTDIR source=../_lib.sh
 source "$SCRIPT_DIR/_lib.sh"
 
 while [[ $# -gt 0 ]]; do
@@ -96,9 +97,9 @@ trap '_mp_cleanup_secrets; rm -f "$DEPLOY_LOG"' EXIT
 in_docker "$MAVEN_IMAGE" \
   -w /build/mockserver/mockserver-maven-plugin \
   -v mockserver-m2-cache:/root/.m2 \
-  -- bash -ec '
-    apt-get update -qq >/dev/null
-    apt-get install -y -qq gnupg >/dev/null
+  -- bash -ec "${maven_packaging_prelude}"'
+    command -v gpg >/dev/null 2>&1 || { apt-get -o Acquire::Retries=3 update -qq >/dev/null \
+      && apt-get -o Acquire::Retries=3 install -y -qq gnupg >/dev/null; }
     set +x
     base64 -d < /build/.tmp/gpg-key-plugin.'$$' | gpg --batch --import
     mkdir -p ~/.gnupg

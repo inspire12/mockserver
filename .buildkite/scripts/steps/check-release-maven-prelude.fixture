@@ -1,0 +1,76 @@
+# Detector fixture for check-release-maven-prelude.sh, run on every build.
+# `#@flag` = the block starting on the next line MUST be reported; `#@pass` = it
+# must be accepted. Blocks with no mvn are ignored and carry no marker. Never run.
+#@flag
+in_docker "$MAVEN_IMAGE" -w /build/mockserver -- mvn clean install
+#@pass
+in_docker "$MAVEN_IMAGE" -w /build/mockserver -- bash -ec "${maven_packaging_prelude}exec mvn clean install"
+#@flag
+in_docker "$MAVEN_IMAGE" \
+  -w /build/mockserver \
+  -v mockserver-m2-cache:/root/.m2 \
+  -- mvn -T 1C clean deploy -DskipTests
+#@flag
+in_docker "$MAVEN_IMAGE" \
+  -w /build/mockserver \
+  -- bash -ec '
+    apt-get update -qq >/dev/null
+    base64 -d < /build/.tmp/key.'$$' | gpg --batch --import
+    mvn deploy -P release -DskipTests
+  ' 2>&1 | tee "$LOG"
+#@pass
+in_docker "$MAVEN_IMAGE" \
+  -w /build/mockserver \
+  -- bash -ec "${maven_packaging_prelude}"'
+    # a comment naming ${maven_packaging_prelude} is not a prelude
+    base64 -d < /build/.tmp/key.'$$' | gpg --batch --import
+    mvn deploy -P release -DskipTests
+  ' 2>&1 | tee "$LOG"
+#@flag
+in_docker "$MAVEN_IMAGE" \
+  -- bash -ec '
+    # ${maven_packaging_prelude}
+    mvn deploy
+  '
+#@flag
+in_docker "$MAVEN_IMAGE" -- bash -ec 'mvn verify'"${maven_packaging_prelude}"
+#@flag
+retry 3 5 -- in_docker "$OTHER_IMAGE" -w /build -- ./mvnw package
+#@flag
+"$REPO_ROOT/.buildkite/scripts/run-in-docker.sh" -i maven:3.9.9-eclipse-temurin-17 -- mvn install
+#@flag
+docker run --rm "$MAVEN_IMAGE" mvn verify # ${maven_packaging_prelude}
+log_error "mvn deploy failed (in_docker exit $rc)"
+# in_docker "$MAVEN_IMAGE" -- mvn install
+in_docker "$MAVEN_IMAGE" -w /build -- sh -c 'git subtree split --prefix x'
+in_maven() {
+  local quoted=" mvn"
+#@flag
+  in_docker "$MAVEN_IMAGE" \
+    -v mockserver-m2-cache:/root/.m2 \
+    -- bash -ec "${ca_install_prelude}exec${quoted}"
+}
+in_maven() {
+  local quoted=" mvn"
+#@pass
+  in_docker "$MAVEN_IMAGE" \
+    -v mockserver-m2-cache:/root/.m2 \
+    -- bash -ec "${ca_install_prelude}${maven_packaging_prelude}exec${quoted}"
+}
+#@flag
+in_docker "$MAVEN_IMAGE" -- bash -ec '${maven_packaging_prelude}mvn deploy'
+#@flag
+in_docker "$MAVEN_IMAGE" \
+  -- bash -ec '
+    ${maven_packaging_prelude}
+    mvn deploy
+  '
+#@flag
+docker container run --rm "$MAVEN_IMAGE" mvn verify
+#@flag
+out="$(in_docker "$MAVEN_IMAGE" -- mvn -q help:evaluate)"
+#@pass
+in_docker "$MAVEN_IMAGE" --secret-env TOKEN -w /build -- bash -ec "${maven_packaging_prelude}exec mvn deploy"
+in_maven -w /build/mockserver -- mvn install
+#@flag
+in_docker "$MAVEN_IMAGE" -- bash -ec "\${maven_packaging_prelude}exec mvn deploy"

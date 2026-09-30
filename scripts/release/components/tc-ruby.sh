@@ -13,8 +13,8 @@
 # own version.rb from RELEASE_VERSION.
 #
 # Build + gem push run in the pinned $RUBY_IMAGE via in_docker (no host ruby/gem
-# required). The RubyGems API key is passed via `-e GEM_HOST_API_KEY=...`
-# (redacted by run-in-docker) and dereferenced inside the single-quoted body, so
+# required). The RubyGems API key is passed as GEM_HOST_API_KEY via in_docker
+# --secret-env and dereferenced inside the single-quoted body, so
 # the literal key never lands in the logged command args.
 #
 # Failure policy: a real build/push failure aborts the step (set -e). The one
@@ -125,7 +125,7 @@ fi
 log_info "Push to RubyGems"
 in_docker "$RUBY_IMAGE" \
   -w /build/mockserver-testcontainers/ruby \
-  -e "GEM_HOST_API_KEY=$GEM_HOST_API_KEY" \
+  --secret-env "GEM_HOST_API_KEY=$GEM_HOST_API_KEY" \
   -e "GEM_NAME=$GEM_NAME" \
   -e "VERSION=$VERSION" \
   -- bash -ec '

@@ -27,6 +27,7 @@ CACHE_TYPES=()
 #    a capability a step needs.
 HARDEN=false
 CAP_ADDS=()
+BANNER_COMMAND=""
 
 usage() {
   cat <<EOF
@@ -47,6 +48,7 @@ Options:
   --network NAME           Docker network to connect to
   --harden                 Add no-new-privileges + cap-drop=ALL (agents already userns-remap)
   --cap-add CAP            With --harden, add a Linux capability back
+  --banner-command TEXT    Show TEXT instead of the command in the logged banner
   -h, --help               Show this help
 
 Environment:
@@ -77,6 +79,7 @@ while [[ $# -gt 0 ]]; do
     --network)    NETWORK="$2"; shift 2 ;;
     --harden)     HARDEN=true; shift ;;
     --cap-add)    CAP_ADDS+=("$2"); shift 2 ;;
+    --banner-command) BANNER_COMMAND="$2"; shift 2 ;;
     -h|--help)    usage ;;
     --)           shift; COMMAND_ARGS=("$@"); break ;;
     *)            COMMAND_ARGS=("$@"); break ;;
@@ -275,18 +278,32 @@ done
 FULL_CMD="docker run ${DISPLAY_ARGS[*]} $IMAGE ${DISPLAY_CMD_ARGS[*]}"
 
 # Log to stderr so callers can still capture the wrapped command's stdout.
-{
-  echo "┌──────────────────────────────────────────────────────────────────"
-  echo "│ Docker Command (copy to reproduce locally):"
-  echo "│"
-  echo "│   $FULL_CMD"
-  echo "│"
-  echo "│ Or from repo root:"
-  echo "│   cd $(pwd) && $FULL_CMD"
-  echo "│"
-  echo "└──────────────────────────────────────────────────────────────────"
-  echo ""
-} >&2
+# --banner-command replaces the command for a wrapped call (in_docker --secret-env)
+# whose real command points at a staged directory that is gone after the run.
+if [[ -n "$BANNER_COMMAND" ]]; then
+  {
+    echo "┌──────────────────────────────────────────────────────────────────"
+    echo "│ Docker Command (credentials staged by the caller; not reproducible verbatim):"
+    echo "│"
+    echo "│   docker run ${DISPLAY_ARGS[*]} $IMAGE $BANNER_COMMAND"
+    echo "│"
+    echo "└──────────────────────────────────────────────────────────────────"
+    echo ""
+  } >&2
+else
+  {
+    echo "┌──────────────────────────────────────────────────────────────────"
+    echo "│ Docker Command (copy to reproduce locally):"
+    echo "│"
+    echo "│   $FULL_CMD"
+    echo "│"
+    echo "│ Or from repo root:"
+    echo "│   cd $(pwd) && $FULL_CMD"
+    echo "│"
+    echo "└──────────────────────────────────────────────────────────────────"
+    echo ""
+  } >&2
+fi
 
 # ---------------------------------------------------------------------------
 # Transient Maven Central failure -> Buildkite retry signal (CI only)

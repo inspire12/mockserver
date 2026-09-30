@@ -149,6 +149,8 @@ log rather than hidden behind an `Assume`.
 
 The `mockserver-infra` pipeline (`pipeline-infra.yml`) runs lightweight validation
 steps in Docker: opencode config lint, the **AI eval gate**, shell-script lint,
+the release-script **Maven `unzip` prelude guard** (`check-release-maven-prelude.sh`,
+`trigger` queue, no Docker; see [release-process.md](../operations/release-process.md#maven-runs-install-unzip-first)),
 Dockerfile sync, Helm chart validation, and **API-collection validation**. The collection step
 (`collections-validate.sh`) regenerates the Postman and Bruno collections from the
 OpenAPI spec and fails if the committed `examples/postman/**` or `examples/bruno/**`

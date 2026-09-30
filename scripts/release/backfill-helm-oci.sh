@@ -68,7 +68,7 @@ done
 
 in_docker "$HELM_IMAGE" --entrypoint sh -w /build \
   -e "GHCR_USERNAME=$GHCR_USERNAME" \
-  -e "GHCR_TOKEN=$GHCR_TOKEN" \
+  --secret-env "GHCR_TOKEN=$GHCR_TOKEN" \
   -e "REL_PATHS=$REL_PATHS" \
   -- -ec '
     set +x

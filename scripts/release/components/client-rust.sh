@@ -71,14 +71,14 @@ fi
 
 # Publish to crates.io inside the container. HARD-fail on a real publish error,
 # with retry to ride out transient registry/network blips. The token is passed
-# via -e (run-in-docker redacts -e values in its logged command).
+# via in_docker --secret-env.
 # run_idempotent absorbs a duplicate publish: if a prior build already shipped
 # this version, `cargo publish` exits 101 with "already exists on crates.io
 # index" — the desired end state, so treat it as success while still HARD-failing
-# on any other error. Token via -e (redacted), so it never reaches captured output.
+# on any other error. The token is never in the command, so never in captured output.
 log_info "Publishing to crates.io from $RUST_IMAGE"
 retry 3 5 -- run_idempotent 'already (exists|uploaded)' -- in_docker "$RUST_IMAGE" \
-  -e "CARGO_REGISTRY_TOKEN=$CARGO_TOKEN" \
+  --secret-env "CARGO_REGISTRY_TOKEN=$CARGO_TOKEN" \
   -w /build/mockserver-client-rust -- cargo publish --allow-dirty
 
 # Confirm the crate appears in the crates.io API. Indexing is eventually-consistent
