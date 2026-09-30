@@ -34,7 +34,9 @@ PROM_IMAGE="${PERF_RW_PROM_IMAGE:-prom/prometheus:v3.1.0@sha256:6559acbd5d770b15
 K6_DIR="$REPO_ROOT/mockserver-performance-test/k6"
 HOST_CORES="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 0)"
 
-RATES="${PERF_RW_RATES:-500,1000,2000,4000,8000,16000,24000,32000,36000,40000,44000,48000,64000}"
+# Own ladder, not the published one: split over N processes the client knee moves up, so it
+# keeps the published rungs to 48k (comparable rung for rung) and continues past 64k.
+RATES="${PERF_RW_RATES:-500,1000,2000,4000,8000,16000,24000,32000,36000,40000,44000,48000,56000,64000,72000,80000,96000}"
 SWEEP_STEP="${PERF_RW_STEP:-15s}"
 SWEEP_GAP="${PERF_RW_GAP:-5s}"
 SETTLE_S="${PERF_RW_SETTLE_S:-3}"
@@ -153,6 +155,12 @@ cpu_count() { local c; c="$(expand_cpuset "$1" | wc -w | tr -d ' ')"; echo "${c:
 RUN_ID="${BUILDKITE_BUILD_ID:-local}-$$-rw"
 PROM_NAME="mockserver-rw-prom-${RUN_ID}"
 SUT_NAME="mockserver-rw-sut-${RUN_ID}"
+# Containers resolve each other by these short aliases, never by the names above: a DNS label
+# caps at 63 characters and the names reach 64+ with a 5-digit PID. Unique per run, because
+# PERF_RW_NETWORK may be a network other containers share.
+ALIAS_ID="$(printf '%s' "$RUN_ID" | cksum | awk '{print $1}')"
+PROM_ALIAS="rw-prom-${ALIAS_ID}"
+SUT_ALIAS="rw-sut-${ALIAS_ID}"
 K6_PREFIX="mockserver-rw-k6-${RUN_ID}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/perf-rw.XXXXXX")"
 chmod 0777 "$WORK"
@@ -228,6 +236,28 @@ if ! cpusets_physically_disjoint "${PAIRS[@]}" >&2; then
   die "SUT / Prometheus / k6 cpusets are not physically disjoint — refusing to measure contention"
 fi
 
+# --- container-side URLs: every host a k6 container resolves --------------------
+# Go's resolver (k6) refuses a DNS label over 63 characters, so a long alias turns every push
+# into "no such host". Checked on the assembled URLs, not on the alias constants.
+assert_dns_host() { # what url
+  local host="${2#*://}" rest label
+  host="${host%%/*}"; host="${host%:*}"
+  case "$host" in \[*) return 0 ;; esac # IPv6 literal: not a DNS name
+  [ -n "$host" ] || die "$1 '$2' has no host"
+  rest="$host."
+  while [ -n "$rest" ]; do
+    label="${rest%%.*}"; rest="${rest#*.}"
+    if [ -z "$label" ] || [ "${#label}" -gt 63 ]; then
+      die "$1 host '$host' has a ${#label}-character DNS label; a label caps at 63 (RFC 1035), so k6 could not resolve it. Use a short --network-alias, not the container name"
+    fi
+  done
+}
+LAUNCH_SUT=""
+if [ -z "$TARGET_URL" ]; then LAUNCH_SUT=1; TARGET_URL="http://${SUT_ALIAS}:1080"; fi
+RW_URL="http://${PROM_ALIAS}:9090/api/v1/write"
+assert_dns_host "remote-write URL" "$RW_URL"
+assert_dns_host "target URL" "$TARGET_URL"
+
 # --- network, Prometheus, SUT --------------------------------------------------
 if [ -n "$NETWORK_IN" ]; then
   NETWORK="$NETWORK_IN"
@@ -246,7 +276,7 @@ chmod 0644 "$WORK/prometheus.yml"
 ALL_NAMES="$ALL_NAMES $PROM_NAME"
 # Native histograms on; the lookback is long so each rung's final cumulative value is
 # readable at any instant after the run without a per-rung query time.
-docker run -d --name "$PROM_NAME" --network "$NETWORK" --network-alias "$PROM_NAME" \
+docker run -d --name "$PROM_NAME" --network "$NETWORK" --network-alias "$PROM_ALIAS" \
   --cpuset-cpus="$PROM_CPUS" -p 127.0.0.1::9090 \
   -v "$WORK/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
   "$PROM_IMAGE" --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/prometheus \
@@ -258,12 +288,38 @@ docker run -d --name "$PROM_NAME" --network "$NETWORK" --network-alias "$PROM_NA
 published() { local hp; hp="$(docker port "$1" "$2" 2>/dev/null | head -1)"; echo "${PERF_RW_PUBLISHED_HOST:-${hp%:*}}:${hp##*:}"; }
 prom_url() { echo "http://$(published "$PROM_NAME" 9090/tcp)"; }
 PROM_URL="$(prom_url)"
-RW_URL="http://${PROM_NAME}:9090/api/v1/write"
 for _ in $(seq 1 60); do
   curl -sf "$PROM_URL/-/ready" >/dev/null 2>&1 && break
   sleep 1
 done
 curl -sf "$PROM_URL/-/ready" >/dev/null || die "Prometheus did not become ready at $PROM_URL"
+
+# Remote-write send failures in k6 logs (the same count gates rw_no_failed_pushes).
+rw_push_failures() { { grep -hiE 'failed to send|level=error.*remote write' "$@" 2>/dev/null || true; } | wc -l | tr -d ' '; }
+# Pre-flight: before any rung, one k6 inside $NETWORK pushes through the same output, URL and
+# resolver the ladder uses, and its series must reach Prometheus; a dead path fails in seconds.
+preflight_remote_write() {
+  local tag="preflight" name="${K6_PREFIX}-preflight" log="$WORK/preflight.log" got="" fails
+  ALL_NAMES="$ALL_NAMES $name"
+  printf 'export default function () {}\n' | docker run -i --rm --name "$name" --network "$NETWORK" \
+    --cpuset-cpus="$XCHECK_CPUS" -e "K6_PROMETHEUS_RW_SERVER_URL=$RW_URL" \
+    -e "K6_PROMETHEUS_RW_PUSH_INTERVAL=${PUSH_S}s" -e "K6_PROMETHEUS_RW_STALE_MARKERS=false" \
+    "$K6_IMAGE" run --quiet --vus 1 --iterations 1 --tag "proc=$tag" -o experimental-prometheus-rw - > "$log" 2>&1 \
+    || die "remote-write pre-flight: the k6 container failed to run (see preflight.log): $(tail -n 3 "$log" | tr '\n' ' ')"
+  fails="$(rw_push_failures "$log")"
+  if [ "$fails" -gt 0 ]; then
+    die "remote-write pre-flight: $fails push failure(s) to $RW_URL before any rung: $(grep -m1 -hiE 'failed to send|level=error.*remote write' "$log")"
+  fi
+  for _ in $(seq 1 10); do
+    got="$(curl -sf --max-time 5 --data-urlencode "query=sum(k6_iterations_total{proc=\"$tag\"})" "$(prom_url)/api/v1/query" \
+      | jq -r '.data.result[0].value[1] // empty' 2>/dev/null)" || got=""
+    [ -n "$got" ] && [ "$got" != 0 ] && break
+    sleep 1
+  done
+  [ -n "$got" ] && [ "$got" != 0 ] || die "remote-write pre-flight: k6 reported no push failure, but its iteration never reached Prometheus via $RW_URL"
+  echo "--- remote-write pre-flight ok: k6 in $NETWORK pushed to $RW_URL (k6_iterations_total{proc=\"$tag\"}=$got)" >&2
+}
+preflight_remote_write
 
 wait_ready() {
   local url="$1" code
@@ -275,14 +331,13 @@ wait_ready() {
   return 1
 }
 
-if [ -z "$TARGET_URL" ]; then
+if [ -n "$LAUNCH_SUT" ]; then
   ALL_NAMES="$ALL_NAMES $SUT_NAME"
-  docker run -d --name "$SUT_NAME" --network "$NETWORK" --network-alias "$SUT_NAME" \
+  docker run -d --name "$SUT_NAME" --network "$NETWORK" --network-alias "$SUT_ALIAS" \
     --cpuset-cpus="$SERVER_CPUS" --memory="$SERVER_MEMORY" -p 127.0.0.1::1080 \
     -e MOCKSERVER_LOG_LEVEL=ERROR -e MOCKSERVER_DISABLE_SYSTEM_OUT=true -e MOCKSERVER_METRICS_ENABLED=true \
     "$MOCKSERVER_IMAGE" -serverPort 1080 >/dev/null
   SUT_CONTAINER="$SUT_NAME"
-  TARGET_URL="http://${SUT_NAME}:1080"
   CURL_URL="http://$(published "$SUT_NAME" 1080/tcp)"
 else
   CURL_URL="${PERF_RW_TARGET_CURL_URL:-$TARGET_URL}"
@@ -625,6 +680,11 @@ xcheck_phase() {
   merge_phase xcheck wallclock xcheck-by-time
 }
 [ -n "$XRATES" ] && soft xcheck_phase xcheck_phase
+# A push path that broke after the pre-flight: stop before the main phase spends its rig time.
+XCHECK_RW_FAILURES="$(rw_push_failures "$WORK"/xcheck-p*.log)"
+if [ "$XCHECK_RW_FAILURES" -gt 0 ]; then
+  die "cross-check phase: $XCHECK_RW_FAILURES remote-write send failure(s), aborting before the main phase: $(grep -m1 -hiE 'failed to send|level=error.*remote write' "$WORK"/xcheck-p*.log)"
+fi
 
 run_phase main "$N" "$RATES" "$WINDOW_MODE" true "$(IFS=';'; echo "${K6_SETS[*]}")"
 soft merge_main merge_phase main "$WINDOW_MODE" main-merged
@@ -680,8 +740,22 @@ SWEEP_RATES="$(jq -r '[.points[].offered_rps] | join(",")' "$WORK/sweep.json")"
 T0_S="$(jq -r '[(.points[0].per_process // [])[] | .rung_start_epoch_ms | select(. != null)]
   | if length == 0 then "null" else (min / 1000 | floor) end' "$WORK/main-merged.json")"
 [ "$T0_S" = null ] && T0_S="$(jq -r '.start_at_s' "$MAIN_META")"
+# The SUT's sampled CPU turns on derive_saturation's server-headroom test (a short rung with
+# the server under 85% of its pin is client-limited). Off when the SUT's pin is unknown: an
+# external target without an explicit PERF_RW_SERVER_CPUS.
+# shellcheck disable=SC2034  # read by derive_saturation
+SERVER_PIN_PCT=0
+SUT_CPU_LOG="$WORK/main-sut-cpu.csv"
+: > "$SUT_CPU_LOG"
+if [ -n "$SUT_CONTAINER" ] && { [ -n "$LAUNCH_SUT" ] || [ -n "${PERF_RW_SERVER_CPUS:-}" ]; }; then
+  # shellcheck disable=SC2034
+  SERVER_PIN_PCT=$(( $(cpu_count "$SERVER_CPUS") * 100 ))
+  { echo "ts,cpu_pct"
+    awk -v c="$SUT_CONTAINER" '$2 == c && $3 != "" { printf "%s,%s\n", $1, $3 }' "$WORK/main-cpu.csv"
+  } > "$SUT_CPU_LOG"
+fi
 soft_capture SATURATION_JSON '{"ladder":[],"rig_valid_peak_achieved_rps":null,"saturation_rps":null}' saturation \
-  derive_saturation "$WORK/sweep.json" "$WORK/main-k6-cpu.csv" "$T0_S"
+  derive_saturation "$WORK/sweep.json" "$WORK/main-k6-cpu.csv" "$T0_S" "$SUT_CPU_LOG"
 # derive_saturation reads a rung with no CPU sample as 0% (headroom), so count them here.
 RUNG_COUNT="$(jq '.points | length' "$WORK/sweep.json")"
 CPU_SAMPLES="[]"
@@ -736,7 +810,7 @@ soft_capture PER_PROCESS '[]' per_process build_per_process
 SUT_CPU="$( [ -n "$SUT_CONTAINER" ] && cpu_stats "$WORK/main-cpu.csv" "$SUT_CONTAINER" "$L0" "$L1" || echo '{"mean":null,"max":null}')"
 PROM_CPU="$(cpu_stats "$WORK/main-cpu.csv" "$PROM_NAME" "$L0" "$L1")"
 # Send failures and slow flushes both invalidate: k6 warns a slow flush may drop samples.
-RW_FAILURES="$( { grep -hiE 'failed to send|level=error.*remote write' "$WORK"/*-p*.log 2>/dev/null || true; } | wc -l | tr -d ' ')"
+RW_FAILURES="$(rw_push_failures "$WORK"/*-p*.log)"
 SLOW_FLUSHES="$( { grep -hoE 'took [0-9.]+(ms|s) while flush period' "$WORK"/*-p*.log 2>/dev/null || true; } \
   | awk '{d=$2; v=d+0; if (d ~ /ms$/) v=v/1000; n++; if (v>m) m=v} END{printf "{\"count\":%d,\"max_took_s\":%s}", n, (n ? sprintf("%.3f", m) : "null")}')"
 

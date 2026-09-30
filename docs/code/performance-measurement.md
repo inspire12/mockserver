@@ -307,6 +307,21 @@ each process's own count"]
 | `rw_no_failed_pushes` | No k6 remote-write send failure |
 | `rw_no_slow_flushes` | No flush took longer than the push interval (k6 warns that samples may then be dropped); `.remote_write.slow_flushes` reports the count and the longest. This also catches Prometheus stalls of 1–2 s, too short for the cut gates. On a contended host it trips first; raise `PERF_RW_PUSH_INTERVAL_S` rather than loosen the gate |
 
+**Fail fast before measuring.** Three checks stop the harness (`valid: false` with
+`rw_harness_completed` naming the reason, exit 1) before it spends rig time on a result that
+cannot be valid:
+
+| Check | When | What it catches |
+|---|---|---|
+| DNS label guard | Before any container starts | A host in `RW_URL` or the target URL with a DNS label over 63 characters. k6's Go resolver refuses such a name, so every push fails with `no such host`. The check reads the assembled URLs, not the alias constants |
+| Remote-write pre-flight | Once Prometheus is ready, before the SUT, warm-up or any rung | One k6 inside the run's network pushes through the same `experimental-prometheus-rw` output and URL the ladder uses. Any push failure in its log, or its `k6_iterations_total{proc="preflight"}` not reaching Prometheus within 10 s, stops the run in seconds (`preflight.log` is kept) |
+| Cross-check push failures | After the cross-check phase, before the main phase | A push path that broke after the pre-flight. Stopping here saves the main phase and its merge, several minutes on the rig |
+
+Containers reach Prometheus and a launched SUT through short aliases (`rw-prom-<cksum>`,
+`rw-sut-<cksum>`, where the checksum is taken over the run ID). They never use the container
+names: `mockserver-rw-prom-<36-character build ID>-<pid>-rw` is 64 characters once the PID has 5
+digits. The alias is unique per run because `PERF_RW_NETWORK` may be a shared network.
+
 `cross_check.cross_run` separately compares the N-process rungs with that single-process run at
 the same aggregate rate (achieved ratio within 0.02; p50/p95/p99 within 20/35/60%) — two separate
 runs, so it carries run-to-run noise and is reported, with `cross_check.equivalent`, rather than
@@ -361,7 +376,11 @@ inventory (`prom-series-inventory.json`).
   **Hyperthreads:** a process on 4 physical cores with both hyperthreads has an 800% pin it
   cannot reach, so the harness passes `K6_PHYS_CORES` and the k6 CPU test uses the
   hyperthread-aware ceiling (62.5% of that pin; see [Client-limited rungs](#sweepjs--throughput-vs-latency-knee)).
-  The harness passes no server CPU log, so its `server_headroom_test` reads `off`.
+  The SUT's CPU from the same `docker stats` sampler, against a pin of `PERF_RW_SERVER_CPUS`,
+  turns on the server-headroom test (`server_headroom_test: "active"`). A short rung with the
+  server under 85% of its pin is then client-limited, so the result tells a client limit from a
+  server one. The test is off only for an external target without an explicit
+  `PERF_RW_SERVER_CPUS`, because its pin is unknown.
 - **Placement.** SUT, Prometheus and every k6 process are proven physically disjoint by
   `lib/perf-cpu-topology.sh`. On the 48-vCPU rig the defaults are SUT on physical cores 0–5,
   Prometheus on core 23 (vCPUs 23,47), and four k6 processes on four physical cores each, both
@@ -390,9 +409,24 @@ per-iteration `vusActive` sample and stall accounting cost ~17 µs; they stay on
 rig-invalid). The saving that lifts the ceiling is from dividing the rate across processes;
 per-process cost stays about where the published mode is.
 
+**Ladder.** The harness has its own default ladder: the published rungs up to 48,000, then
+56,000, 64,000, 72,000, 80,000 and 96,000 rps (17 rungs, about 80 s longer than the published
+13). Split over four processes the client knee moves up. In build 527 the SUT used about 250–300% of
+its 600% pin at 64k, so the published ladder stopped below any server knee. Each process's VU
+pool is `0.08 × its own rate`, so the four pools add up to what one process would get at the
+aggregate rate, and more above 25,600 rps, where one process's pool caps at 2,048, and below
+~4,800 rps, where the 96-VU floor applies (Little's law holds per process too). At the 96k top that is 1,920 VUs per process.
+k6 initialises about 4,960 VUs per process over the overlapping top rungs, which took ~3 GiB per
+process locally, so a local run with fewer than four processes needs a short `PERF_RW_RATES`
+(the default ladder OOM-kills a k6 container in an 8 GiB Docker Desktop VM). `Insufficient VUs` warnings on sub-knee rungs are the transient-stall signature
+the single-process ladder shows too (build 527: pool hit at 4k–24k with p95 active VUs 3–7). The
+occupancy rule reads them as stalls, so they are not a sizing fault.
+
 **Running it.** `PERF_SERVING_RW_MULTIK6=true` on a perf build runs it against the main SUT right
-after the published sweep, on the same ladder, and stores the result under `.serving_rw_multik6`
-and the `serving-rw-multik6.json` artifact; that run is not baseline-eligible. It adds ~10 min, and
+after the published sweep and stores the result under `.serving_rw_multik6`
+and the `serving-rw-multik6.json` artifact; that run is not baseline-eligible. It uses the
+harness's own ladder unless `PERF_RW_RATES` is set, or `K6_SWEEP_RATES` is set explicitly (the
+allocation-profile run's short ladder), in which case it follows that. It adds ~11–12 min, and
 `perf-test-guard.sh` raises the run step's timeout by 15 min when the flag is set. For a trial also
 set `PERF_INFO_ARM=false` and `PERF_COVERAGE=false`, the two default-on phases the run step's
 timeout comment names as removable. Locally:
@@ -415,6 +449,12 @@ PERF_RW_TEST_FAIL_STEP=cross_check ... rw-multi-k6-sweep.sh .tmp/rw-failstep.jso
 # a hard abort inside a function still leaves an invalid result naming the failed command (exit 125)
 PERF_RW_K6_IMAGE=grafana/k6:does-not-exist PERF_RW_XCHECK=false ... rw-multi-k6-sweep.sh .tmp/rw-abort.json
 ```
+
+The fail-fast checks have no hook; they are degrade-tested on a temporary copy of the script.
+Set `PROM_ALIAS="$PROM_NAME"` with a 36-character `BUILDKITE_BUILD_ID` and a 5-digit PID, and the
+guard must stop the run at once. Also disable the `assert_dns_host "remote-write URL"` line, and
+the pre-flight must stop it within seconds on `no such host`. Point only the cross-check phase's
+`K6_PROMETHEUS_RW_SERVER_URL` at an unknown host, and the run must stop before `phase=main`.
 
 ### `forward.js` — forward connection-pool guard
 

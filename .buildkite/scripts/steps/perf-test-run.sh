@@ -2144,7 +2144,9 @@ jq -r '(.rungs // [])[] | "    \(.offered_rps) rps: client \(.client_over_5ms_fr
 dump_ceiling_jfr "$SWEEP_RUNGS_JSON" "$SATURATION_RPS"
 
 # --- OPT-IN item 31: this ladder from N k6 processes merged in Prometheus
-# (scripts/rw-multi-k6-sweep.sh), against THIS SUT so both methods measure one server.
+# (scripts/rw-multi-k6-sweep.sh), against THIS SUT so both methods measure one server. On the
+# default ladder it runs its own, which continues past 64k; an explicit PERF_RW_RATES, else an
+# explicit K6_SWEEP_RATES (e.g. the allocation profile's short ladder), overrides that.
 # Notify-only, never published, excluded from validity; the harness exits 2 on its own gates.
 SERVING_RW_MULTIK6_JSON='{}'
 SERVING_RW_MULTIK6_ATTEMPTED=false
@@ -2159,7 +2161,7 @@ if [ "${PERF_SERVING_RW_MULTIK6:-false}" = "true" ]; then
     PERF_RW_REPO_ROOT="$REPO_ROOT" PERF_RW_NETWORK="$NETWORK" \
       PERF_RW_TARGET_URL="$SUT_BASE_HTTP" PERF_RW_TARGET_CURL_URL="http://${SERVER_METRICS:-127.0.0.1:1080}" \
       PERF_RW_SUT_CONTAINER="$SERVER" PERF_RW_SERVER_CPUS="$SERVER_CPUS" PERF_RW_IMAGE="$MOCKSERVER_IMAGE" \
-      PERF_RW_RATES="${PERF_RW_RATES:-$SWEEP_RATES}" PERF_RW_STEP="$SWEEP_STEP" PERF_RW_GAP="$SWEEP_GAP" \
+      PERF_RW_RATES="${PERF_RW_RATES:-${K6_SWEEP_RATES:-}}" PERF_RW_STEP="$SWEEP_STEP" PERF_RW_GAP="$SWEEP_GAP" \
       PERF_RW_SETTLE_S="$SETTLE_S" PERF_RW_WARMUP_DURATION="${PERF_RW_WARMUP_DURATION:-0s}" \
       PERF_RW_DEBUG_DIR="$OUT_DIR/serving-rw-multik6-work" \
       bash "$REPO_ROOT/mockserver-performance-test/scripts/rw-multi-k6-sweep.sh" "$OUT_DIR/serving-rw-multik6.json" || rw_rc=$?
