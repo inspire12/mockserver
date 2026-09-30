@@ -431,7 +431,9 @@ def chart_hw_matrix(hw, out_dir):
     """Healthy ceiling per hardware size: one bar per cores x memory point, in the
     published order. Lower-bound points are hatched and labelled with >=, the
     control point is drawn in a second colour, and a point that ran out of memory
-    is marked rather than dropped."""
+    is marked rather than dropped. A dashed line shows ideal linear scaling from the
+    1-core point (its per-core rate x cores), drawn only when that point is measured
+    and not itself a lower bound."""
     pts = hw.get("points") or []
     if not pts:
         print("  (hardware matrix has no points — skipping hardware chart)")
@@ -440,6 +442,11 @@ def chart_hw_matrix(hw, out_dir):
               + ("\n(control)" if p.get("control") else "") for p in pts]
     vals = [p.get("healthy_ceiling_rps") or 0 for p in pts]
     x = np.arange(len(pts))
+    base = next((p for p in pts if p.get("cores") == 1 and not p.get("control")
+                 and p.get("status") == "measured" and p.get("healthy_ceiling_rps")
+                 and not p.get("lower_bound")), None)
+    ideal = [base["healthy_ceiling_rps"] * p["cores"] for p in pts] if base else []
+    top = max(vals + ideal + [1]) * 1.18
 
     fig, ax = plt.subplots(figsize=(max(7.5, 1.35 * len(pts) + 2.5), 5.2))
     for i, p in enumerate(pts):
@@ -454,18 +461,25 @@ def chart_hw_matrix(hw, out_dir):
             ax.annotate(text, xy=(x[i], vals[i]), xytext=(0, 6), textcoords="offset points",
                         ha="center", fontsize=9, color=RED, fontweight="bold")
         elif p.get("healthy_ceiling_rps"):
+            # Inside the bar top, so the ideal line above it never crosses the label.
+            inside = vals[i] > 0.14 * top
             ax.annotate(("≥ " if lower else "") + f"{vals[i] / 1000:.0f}k",
-                        xy=(x[i], vals[i]), xytext=(0, 6), textcoords="offset points",
-                        ha="center", fontsize=10, color=GREY)
+                        xy=(x[i], vals[i]), xytext=(0, -14 if inside else 6), textcoords="offset points",
+                        ha="center", fontsize=10, fontweight="bold" if inside else "normal",
+                        color="white" if inside else GREY, zorder=5)
+    if len(ideal) > 1:
+        ax.plot(x, ideal, "--", color=GREY, lw=1.4, alpha=0.8, marker="_", ms=16,
+                label="ideal: 1-core rate × cores", zorder=4)
+        ax.legend(frameon=False, loc="upper left", bbox_to_anchor=(0, 0.93), fontsize=9)
     _grid(ax)
     ax.set_xticks(x)
     ax.set_xticklabels(labels, fontsize=10)
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(_fmt_k))
     ax.set_ylabel("healthy ceiling (requests / sec)")
     ax.set_title("Throughput by hardware size", fontweight="bold", fontsize=14)
-    ax.set_ylim(bottom=0, top=max(vals + [1]) * 1.18)
+    ax.set_ylim(bottom=0, top=top)
     if any(p.get("lower_bound") for p in pts):
-        ax.text(0.01, 0.97, "hatched = lower bound (the load generator or test range may have been the limit)",
+        ax.text(0.01, 0.97, "hatched = lower bound (the load generator, the test range or something other than MockServer's CPU may have been the limit)",
                 transform=ax.transAxes, ha="left", va="top", fontsize=9, color=GREY)
     save(fig, out_dir, "perf_hw_matrix")
 

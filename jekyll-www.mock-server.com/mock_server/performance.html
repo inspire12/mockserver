@@ -209,10 +209,12 @@ schema_faq:
 <h3>Throughput by hardware size</h3>
 {% assign hw = site.data.perf_figures.hw_matrix %}
 {% if hw and hw.points and hw.points.size > 0 %}
-<p>To help you choose a container size, the same test was run against single MockServer containers of different sizes. Each row is a fresh container limited to that many CPU cores and that much memory, using the Docker image's default memory settings (no <span class="inline_code">-Xmx</span>). The <strong>healthy ceiling</strong> is the highest request rate it kept up with while median latency stayed flat; the latency columns are measured at that rate. This is a separate run from the headline figures above, with its own memory limits, so its 6-core row can differ from them. Rates are tested in steps (roughly 6&ndash;17% apart above 8,000 req/s), so each ceiling is accurate to about one step.</p>
+<p>To help you choose a container size, the same test was run against single MockServer containers of different sizes, each limited to that many CPU cores and that much memory and using the Docker image's default memory settings (no <span class="inline_code">-Xmx</span>). This is a separate run from the headline figures above, so its 6-core row can differ from them.</p>
+<p><strong>Healthy ceiling:</strong> the highest offered rate MockServer served at &ge;95% with no errors and median latency within 3&times; of its median at the lowest rates tested. Measured on {% if hw.source.instance_type %}an AWS {{ hw.source.instance_type }}{% else %}the performance test machine{% endif %}{% if hw.source.host_physical_cores %} ({{ hw.source.host_physical_cores }} physical cores){% endif %}; each size is a fresh container pinned to its own {% if hw.source.cpus_physically_verified %}physical {% endif %}CPU cores{% if hw.source.k6_processes %}; {{ hw.source.k6_processes }} k6 load generators run on {% if hw.source.k6_physical_cores %}{{ hw.source.k6_physical_cores }} {% endif %}other cores{% else %}; the load generator runs on other cores{% endif %}. Rows marked &ge; may have been limited by the load generator, by the highest rate tested, or by something other than MockServer's CPU &mdash; MockServer handled at least that much.</p>
+<p><strong>Per core</strong> is the healthy ceiling divided by the cores; <strong>vs 1 core</strong> compares it with the 1-core row, so 1.00 would be perfectly linear scaling. <strong>Peak</strong> is the most MockServer served on any rate the load generator could deliver cleanly, which can be above the healthy ceiling once latency has started to rise. The latency columns are measured at the healthy ceiling. Rates are tested in steps, so each ceiling is accurate to about one step.</p>
 <table class="results">
     <thead>
-    <tr><td>CPU cores</td><td>memory</td><td>healthy ceiling req/s</td><td>median (p50)</td><td>p95</td><td>notes</td></tr>
+    <tr><td>CPU cores</td><td>memory</td><td>healthy ceiling req/s</td><td>per core</td><td>vs 1 core</td><td>peak req/s</td><td>median (p50)</td><td>p95</td><td>notes</td></tr>
     </thead>
     <tbody>
     {% for p in hw.points %}
@@ -220,6 +222,9 @@ schema_faq:
         <td>{{ p.cores }}</td>
         <td>{{ p.memory_display }}</td>
         <td>{% if p.healthy_ceiling_rps_display %}{% if p.lower_bound %}&ge;&nbsp;{% endif %}{{ p.healthy_ceiling_rps_display }}{% else %}&mdash;{% endif %}</td>
+        <td>{% if p.rps_per_core_display %}{% if p.lower_bound %}&ge;&nbsp;{% endif %}{{ p.rps_per_core_display }}{% else %}&mdash;{% endif %}</td>
+        <td>{% if p.scaling_vs_1core_display %}{% if p.lower_bound %}&ge;&nbsp;{% endif %}{{ p.scaling_vs_1core_display }}{% else %}&mdash;{% endif %}</td>
+        <td>{% if p.peak_display %}{% if p.lower_bound %}&ge;&nbsp;{% endif %}{{ p.peak_display }}{% else %}&mdash;{% endif %}</td>
         <td>{% if p.healthy_ceiling_p50_ms %}{{ p.healthy_ceiling_p50_ms }}&nbsp;ms{% else %}&mdash;{% endif %}</td>
         <td>{% if p.healthy_ceiling_p95_ms %}{{ p.healthy_ceiling_p95_ms }}&nbsp;ms{% else %}&mdash;{% endif %}</td>
         <td>{{ p.note }}</td>
@@ -229,14 +234,14 @@ schema_faq:
     <tr style="opacity:0.6">
         <td>{{ s.cores }}</td>
         <td>{{ s.memory_display }}</td>
-        <td>&mdash;</td><td>&mdash;</td><td>&mdash;</td>
-        <td>not measured: {% if s.oom_killed %}ran out of memory while starting{% elsif s.type == "infeasible" %}the test machine cannot fit this size alongside the load generator{% else %}the test did not complete for this size{% endif %}</td>
+        <td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td>
+        <td>not measured: {% if s.oom_killed %}ran out of memory while starting{% elsif s.type == "infeasible" %}the test machine cannot fit this size alongside the load generator{% elsif s.status == "invalid_measurement" %}the measurement failed its own consistency checks{% else %}the test did not complete for this size{% endif %}</td>
     </tr>
     {% endfor %}
     </tbody>
 </table>
 {% assign hw_chart = site.static_files | where: "path", "/images/perf_hw_matrix.png" | first %}
-{% if hw_chart %}<img class="ui_image" src="/images/perf_hw_matrix.png" alt="Healthy ceiling in requests per second for each container size, from the smallest to the largest number of CPU cores">{% endif %}
+{% if hw_chart %}<img class="ui_image" src="/images/perf_hw_matrix.png" alt="Healthy ceiling in requests per second for each container size, from the smallest to the largest number of CPU cores, with a dashed line for ideal linear scaling from the 1-core size">{% endif %}
 <p><strong>What this run shows:</strong></p>
 <ul>
     {% if hw.per_core %}{% assign pc = hw.per_core %}
@@ -269,13 +274,13 @@ schema_faq:
     {% endif %}
     {% endif %}
     {% assign hw_lb = hw.points | where: "lower_bound", true %}{% if hw_lb.size > 0 %}
-    <li>Rows marked <strong>lower bound</strong> (shown with &ge;) may have been limited by the load generator or the highest rate tested rather than by MockServer, so that size can handle at least that much.</li>
+    <li>Rows marked <strong>lower bound</strong> (shown with &ge;) may have been limited by the load generator, by the highest rate tested, or by something other than MockServer's CPU, so that size can handle at least that much; its per-core and scaling figures are minimums too.</li>
     {% endif %}
     <li>Leave headroom. These are the highest rates at which latency was still flat, measured with logging reduced below the default, so plan to run below them &mdash; and see <a href="#troubleshooting_performance">memory &amp; troubleshooting</a> if you keep a large request history.</li>
 </ul>
 <p style="font-size:0.9em">{{ hw.source.note }} Measured {{ hw.source.run_timestamp_utc }}{% if hw.source.build_number %} &middot; build&nbsp;#{{ hw.source.build_number }}{% endif %}{% if hw.source.mockserver_version %} &middot; MockServer {{ hw.source.mockserver_version }}{% endif %}{% if hw.source.instance_type %} &middot; {{ hw.source.instance_type }}{% endif %}.</p>
 {% else %}
-<p><em>Not yet measured.</em> A table of throughput for different container sizes &mdash; from 1 CPU core with 512&nbsp;MB of memory up to 8 cores with 2&nbsp;GB &mdash; will appear here once it has been measured on the performance test machine. Until then, size against the single-instance figures above and benchmark your own workload.</p>
+<p><em>Not yet measured.</em> A table of throughput for different container sizes &mdash; from 1 CPU core with 512&nbsp;MB of memory up to 6 cores with 2&nbsp;GB &mdash; will appear here once it has been measured on the performance test machine. Until then, size against the single-instance figures above and benchmark your own workload.</p>
 {% endif %}
 
 <h3>Matcher scaling (time per request match)</h3>
