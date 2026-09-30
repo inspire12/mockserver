@@ -1686,8 +1686,9 @@ run_regression() {
 #   direct_buffer_used_bytes / _count, netty_direct_used_bytes  OFF-HEAP buffer memory (the NIO "direct"
 #                                 pool, and Netty's own counter where Netty keeps one), so an allocator
 #                                 change can be judged on native memory, not just heap
-#   scrape_ts                     when the metrics scrape started; `ts` precedes it by the docker-stats
-#                                 call (1-2 s), which matters when a row is placed inside a sweep rung
+#   scrape_ts                     when the metrics scrape started, i.e. when docker stats returned, so
+#                                 also the end of cpu_pct's ~1 s interval; `ts` precedes it by the
+#                                 docker-stats call (1-3 s), so place a row inside a sweep rung by scrape_ts
 # A BLANK JVM-metric column has THREE distinct meanings, all preserved and NOT conflated: (1) the
 # metric is absent on an older image; (2) the scrape TIMED OUT (--max-time 4) because the SUT was
 # thrashing in GC near death — common in the final rows, and itself a death signal; (3) a genuine
@@ -1930,8 +1931,9 @@ sweep_cpu_sampler() { # k6_container_name  out_csv
   echo "ts,cpu_pct" > "$out_csv"
   while true; do
     local ts cpu
-    ts="$(date -u +%s)"
+    # Stamped on return: docker stats reports the ~1 s before it returns (performance-measurement.md, sweep.js).
     cpu="$(docker stats --no-stream --format '{{.CPUPerc}}' "$cname" 2>/dev/null | tr -d '% ' || echo '')"
+    ts="$(date -u +%s)"
     # DROP the first successful reading: `docker stats --no-stream` computes CPU%
     # over the interval since the container STARTED, so its cold read is inflated
     # and lands in the first rung's window. The k6 container runs ONCE for the whole
@@ -2007,6 +2009,8 @@ run_sweep "$SWEEP_K6" "$SERVER_ALIAS" "$OUT_DIR/sweep.json" "$SWEEP_CPU_LOG"
 abort_if_sut_died
 SWEEP_T0="$LAST_SWEEP_T0"
 SATURATION_JSON="$(derive_saturation "$OUT_DIR/sweep.json" "$SWEEP_CPU_LOG" "$SWEEP_T0" "$DIAG_SAMPLE_LOG")"
+# The k6 CPU trace rides in the diagnostics bundle so rig validity can be re-derived offline.
+cp "$SWEEP_CPU_LOG" "$DIAG_DIR/sweep-k6-cpu.csv" 2>/dev/null || true
 PEAK_ACHIEVED_RPS="$(jq -r '.rig_valid_peak_achieved_rps' <<<"$SATURATION_JSON")"
 SATURATION_RPS="$(jq -r '.saturation_rps' <<<"$SATURATION_JSON")"
 echo "--- rig_valid_peak_achieved_rps=$PEAK_ACHIEVED_RPS saturation_rps=$SATURATION_RPS (client pin=${K6_PIN_PCT}%, cores=$K6_CORES)"
@@ -2183,7 +2187,7 @@ if [ "${PERF_SERVING_RW_MULTIK6:-false}" = "true" ]; then
     SERVING_RW_MULTIK6_JSON="$(jq -c --argjson t "$RW_TAIL_JSON" '. + {tail_localisation: $t}' <<<"$SERVING_RW_MULTIK6_JSON")"
     echo "--- rw multi-k6 tail localisation (share of requests over 5 ms; client = merged k6 histogram, server = MockServer histogram; notify-only):"
     jq -r '(.rungs // [])[] | "    \(.offered_rps) rps: client \(.client_over_5ms_frac // "unavailable") server \(.server_over_5ms_frac // "unavailable") (n=\(.server_requests) over \(.server_window_s)s)"' <<<"$RW_TAIL_JSON" || true
-    echo "--- serving_rw_multik6: rc=$rw_rc valid=$(jq -r '.valid | if . == null then "?" else tostring end' <<<"$SERVING_RW_MULTIK6_JSON") healthy_ceiling=$(jq -r '.headline.healthy_ceiling_rps // "?"' <<<"$SERVING_RW_MULTIK6_JSON") rig_valid_peak=$(jq -r '.rig_valid_peak_achieved_rps // "?"' <<<"$SERVING_RW_MULTIK6_JSON") (single-process: ${PEAK_ACHIEVED_RPS}) cross_check_equivalent=$(jq -r '.cross_check.equivalent | if . == null then "?" else tostring end' <<<"$SERVING_RW_MULTIK6_JSON")"
+    echo "--- serving_rw_multik6: rc=$rw_rc valid=$(jq -r '.valid | if . == null then "?" else tostring end' <<<"$SERVING_RW_MULTIK6_JSON") $(jq -r 'if .valid == true then "healthy_ceiling=\(.headline.healthy_ceiling_rps // "?")" else "healthy_ceiling_if_valid=\(.headline_if_valid.healthy_ceiling_rps // "?") (NOT a result: the run is invalid)" end' <<<"$SERVING_RW_MULTIK6_JSON") rig_valid_peak=$(jq -r '.rig_valid_peak_achieved_rps // "?"' <<<"$SERVING_RW_MULTIK6_JSON") (single-process: ${PEAK_ACHIEVED_RPS}) cross_check_equivalent=$(jq -r '.cross_check.equivalent | if . == null then "?" else tostring end' <<<"$SERVING_RW_MULTIK6_JSON") cross_run_agrees=$(jq -r '.cross_check.cross_run.agrees | if . == null then "?" else tostring end' <<<"$SERVING_RW_MULTIK6_JSON")"
     abort_if_sut_died
   fi
 fi
@@ -2406,8 +2410,8 @@ sampler() {
   echo "ts,cpu_pct,heap_bytes,gc_seconds,threads" > "$SAMPLE_LOG"
   while true; do
     local cpu metrics heap gc threads ts
-    ts="$(date -u +%s)"
     cpu="$(docker stats --no-stream --format '{{.CPUPerc}}' "$SERVER" 2>/dev/null | tr -d '% ' || echo '')"
+    ts="$(date -u +%s)"
     metrics="$(curl -s --max-time 4 "$SERVER_METRICS_URL" 2>/dev/null || echo '')"
     heap="$(printf '%s' "$metrics" | awk -F' ' '/^jvm_memory_used_bytes\{area="heap"\}/{print $2}')"
     gc="$(printf '%s' "$metrics" | awk -F' ' '/^jvm_gc_collection_seconds_sum/{s+=$2} END{print s}')"
@@ -2619,11 +2623,11 @@ if [ "${PERF_PROXY_PROFILE:-true}" = "true" ]; then
       HS_CPU_PID=""
       hs_cpu_sampler() {
         while true; do
-          local ts; ts="$(date -u +%s)"
           for arm in tls13 mtls jdk; do
-            local nm cpu
+            local nm cpu ts
             case "$arm" in tls13) nm="$SERVER";; mtls) nm="$MTLS";; jdk) nm="$JDK_SUT";; esac
             cpu="$(docker stats --no-stream --format '{{.CPUPerc}}' "$nm" 2>/dev/null | tr -d '% ' || echo '')"
+            ts="$(date -u +%s)"
             [ -n "$cpu" ] && printf '%s,%s,%s\n' "$ts" "$arm" "$cpu" >> "$HS_CPU_LOG"
           done
           sleep "${PERF_HS_SAMPLE_INTERVAL:-2}"

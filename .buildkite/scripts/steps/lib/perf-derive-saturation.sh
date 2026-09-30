@@ -28,8 +28,10 @@ derive_saturation() { # sweep_json_host_path  cpu_log_host_path  t0_epoch  [serv
     cpu_map="$(jq -c --arg k "$r" --argjson mean "${cpumean:-0}" --argjson max "${cpumax:-0}" '. + {($k): {mean:$mean, max:$max}}' <<<"$cpu_map")"
     if [ -n "$srv_log" ] && [ -s "$srv_log" ]; then
       # Fewer than two samples leaves the rung unmeasured (null), not judged on one reading.
-      srvstats="$(awk -F',' -v a="$ws" -v b="$we" 'NR==1 { for (k=1; k<=NF; k++) if ($k=="cpu_pct") c=k; next }
-        c && $1>=a && $1<b && $c!="" { s+=$c; n++ } END{ if(n>=2) printf "%.1f %d", s/n, n; else printf "null %d", n }' "$srv_log" 2>/dev/null || echo "null 0")"
+      # A row is placed by scrape_ts when the log has it (diag-samples.csv: stamped when docker
+      # stats returned, the end of the reading), else by its first column.
+      srvstats="$(awk -F',' -v a="$ws" -v b="$we" 'NR==1 { tc=1; for (k=1; k<=NF; k++) { if ($k=="cpu_pct") c=k; if ($k=="scrape_ts") tc=k }; next }
+        c && $tc!="" && $tc>=a && $tc<b && $c!="" { s+=$c; n++ } END{ if(n>=2) printf "%.1f %d", s/n, n; else printf "null %d", n }' "$srv_log" 2>/dev/null || echo "null 0")"
       srv_map="$(jq -c --arg k "$r" --argjson mean "${srvstats%% *}" --argjson n "${srvstats##* }" '. + {($k): {mean:$mean, n:$n}}' <<<"$srv_map")"
     fi
   done

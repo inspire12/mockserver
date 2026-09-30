@@ -402,11 +402,12 @@ for N in "${PROCS_ARR[@]}"; do
   for ((i=0;i<N;i++)); do WANT_NAMES="${WANT_NAMES:+$WANT_NAMES }${K6_PREFIX}-N${N}-p${i}"; done
   [ -n "$SUT_NAME_FOR_STATS" ] && WANT_NAMES="${WANT_NAMES:+$WANT_NAMES }$SUT_NAME_FOR_STATS"
   ( while true; do
+      # Stamped on return (performance-measurement.md, sweep.js).
+      stats="$(docker stats --no-stream --format '{{.Name}} {{.CPUPerc}}' 2>/dev/null || true)"
       ts="$(date -u +%s)"
-      docker stats --no-stream --format '{{.Name}} {{.CPUPerc}}' 2>/dev/null \
-        | awk -v t="$ts" -v want="$WANT_NAMES" '
+      awk -v t="$ts" -v want="$WANT_NAMES" '
             BEGIN{ split(want, a, " "); for(i in a) keep[a[i]]=1 }
-            ($1 in keep){ gsub(/%/,"",$2); printf "%s %s %s\n", t, $1, $2 }' >> "$CPU_LOG"
+            ($1 in keep){ gsub(/%/,"",$2); printf "%s %s %s\n", t, $1, $2 }' <<<"$stats" >> "$CPU_LOG"
       sleep "$SWEEP_SAMPLE_INTERVAL"
     done ) & SAMPLER_PID=$!
 
@@ -485,7 +486,7 @@ for N in "${PROCS_ARR[@]}"; do
       local ws=$(( T0 + k * (STEP_S + GAP_S) + SWEEP_SETTLE_S ))
       local we=$(( T0 + k * (STEP_S + GAP_S) + STEP_S ))
       local mx
-      mx="$(awk -v n="$name" -v a="$ws" -v b="$we" '$2==n && $1>=a && $1<=b && $3!="" {c=$3+0; if(c>m){m=c; s=1}} END{ if(s) printf "%.1f", m }' "$CPU_LOG")"
+      mx="$(awk -v n="$name" -v a="$ws" -v b="$we" '$2==n && $1>=a && $1<b && $3!="" {c=$3+0; if(c>m){m=c; s=1}} END{ if(s) printf "%.1f", m }' "$CPU_LOG")"
       rungmap="$(jq -c --arg key "$a" --argjson v "${mx:-null}" '. + {($key): $v}' <<<"$rungmap")"
     done
     jq -nc --argjson om "${overall:-null}" --argjson rm "$rungmap" '{overall_max_cpu_pct:$om, per_rung_cpu_pct:$rm}'

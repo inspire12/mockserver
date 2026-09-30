@@ -493,8 +493,9 @@ for PI in "${!P_CORES[@]}"; do
   CPU_LOG="$WORK/cpu-${PKEY}.csv"
   echo "ts,k6_cpu_pct,sut_cpu_pct,sut_mem_bytes,retained_entries,retained_bytes" > "$CPU_LOG"
   ( while true; do
-      ts="$(date -u +%s)"
+      # Stamped on return (performance-measurement.md, sweep.js).
       stats="$(docker stats --no-stream --format '{{.Name}} {{.CPUPerc}} {{.MemUsage}}' "$K6_NAME" "$SERVER" 2>/dev/null || echo '')"
+      ts="$(date -u +%s)"
       k6c="$(printf '%s\n' "$stats" | awk -v n="$K6_NAME" '$1==n{gsub(/%/,"",$2); print $2}')"
       sutc="$(printf '%s\n' "$stats" | awk -v n="$SERVER" '$1==n{gsub(/%/,"",$2); print $2}')"
       sutm="$(printf '%s\n' "$stats" | awk -v n="$SERVER" '
@@ -562,8 +563,8 @@ for PI in "${!P_CORES[@]}"; do
     # Emit the max in the window, or EMPTY when the window caught NO sample (so a
     # sparse/last-rung window becomes null, not a false 0% — a 0 would misread as
     # "idle" and mis-attribute the limit). `n` counts matched rows.
-    maxcpu="$(awk -F',' -v a="$ws" -v b="$we" 'NR>1 && $1>=a && $1<=b && $2!="" { n++; if($2+0>m) m=$2+0 } END{ if(n>0) printf "%.1f", m; }' "$CPU_LOG" 2>/dev/null || echo '')"
-    maxsut="$(awk -F',' -v a="$ws" -v b="$we" 'NR>1 && $1>=a && $1<=b && $3!="" { n++; if($3+0>m) m=$3+0 } END{ if(n>0) printf "%.1f", m; }' "$CPU_LOG" 2>/dev/null || echo '')"
+    maxcpu="$(awk -F',' -v a="$ws" -v b="$we" 'NR>1 && $1>=a && $1<b && $2!="" { n++; if($2+0>m) m=$2+0 } END{ if(n>0) printf "%.1f", m; }' "$CPU_LOG" 2>/dev/null || echo '')"
+    maxsut="$(awk -F',' -v a="$ws" -v b="$we" 'NR>1 && $1>=a && $1<b && $3!="" { n++; if($3+0>m) m=$3+0 } END{ if(n>0) printf "%.1f", m; }' "$CPU_LOG" 2>/dev/null || echo '')"
     CPU_MAP="$(jq -c --arg k "$r" --argjson v "${maxcpu:-null}" '. + {($k): $v}' <<<"$CPU_MAP")"
     SUT_CPU_MAP="$(jq -c --arg k "$r" --argjson v "${maxsut:-null}" '. + {($k): $v}' <<<"$SUT_CPU_MAP")"
   done
