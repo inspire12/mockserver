@@ -144,6 +144,8 @@ public class Configuration {
     private Boolean useNativeTransport;
     private Integer nioEventLoopThreadCount;
     private Integer soBacklog;
+    private Long inboundConnectionIdleTimeoutMillis;
+    private Integer maxInboundConnections;
     private Integer actionHandlerThreadCount;
     private Integer maxPendingDelayedResponses;
     private Integer maxQueuedTemplateActions;
@@ -2079,6 +2081,46 @@ public class Configuration {
      */
     public Configuration soBacklog(Integer soBacklog) {
         this.soBacklog = soBacklog;
+        return this;
+    }
+
+    public Long inboundConnectionIdleTimeoutMillis() {
+        if (inboundConnectionIdleTimeoutMillis == null) {
+            return ConfigurationProperties.inboundConnectionIdleTimeoutMillis();
+        }
+        return Math.max(0L, inboundConnectionIdleTimeoutMillis);
+    }
+
+    /**
+     * <p>How long, in milliseconds, an inbound client connection may sit idle - nothing read or written
+     * and no request in progress - before MockServer closes it. Default {@code 300000} (5 minutes),
+     * {@code 0} disables it. Connections with a request in progress, a streaming response, an active
+     * HTTP/2 stream, or that have become a WebSocket, CONNECT/SOCKS tunnel or binary relay are never
+     * closed by this timeout. Applies to connections accepted after it is set.</p>
+     *
+     * @param inboundConnectionIdleTimeoutMillis idle timeout in milliseconds, 0 to disable
+     */
+    public Configuration inboundConnectionIdleTimeoutMillis(Long inboundConnectionIdleTimeoutMillis) {
+        this.inboundConnectionIdleTimeoutMillis = inboundConnectionIdleTimeoutMillis;
+        return this;
+    }
+
+    public Integer maxInboundConnections() {
+        if (maxInboundConnections == null) {
+            return ConfigurationProperties.maxInboundConnections();
+        }
+        return Math.max(0, maxInboundConnections);
+    }
+
+    /**
+     * <p>Maximum number of inbound client connections held open at once; a connection accepted beyond
+     * it is closed immediately (reset), logged and counted. Default {@code 0}, meaning no limit. Each
+     * CONNECT or SOCKS tunnel holds two slots (the client's connection plus MockServer's loopback).</p>
+     *
+     * @param maxInboundConnections maximum concurrent inbound connections, 0 for no limit
+     */
+    public Configuration maxInboundConnections(Integer maxInboundConnections) {
+        this.maxInboundConnections = maxInboundConnections;
         return this;
     }
 

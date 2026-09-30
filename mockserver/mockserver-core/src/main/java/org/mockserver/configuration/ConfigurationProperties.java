@@ -123,6 +123,8 @@ public class ConfigurationProperties {
     private static final String MOCKSERVER_USE_NATIVE_TRANSPORT = "mockserver.useNativeTransport";
     private static final String MOCKSERVER_NIO_EVENT_LOOP_THREAD_COUNT = "mockserver.nioEventLoopThreadCount";
     private static final String MOCKSERVER_SO_BACKLOG = "mockserver.soBacklog";
+    private static final String MOCKSERVER_INBOUND_CONNECTION_IDLE_TIMEOUT_MILLIS = "mockserver.inboundConnectionIdleTimeoutMillis";
+    private static final String MOCKSERVER_MAX_INBOUND_CONNECTIONS = "mockserver.maxInboundConnections";
     private static final String MOCKSERVER_ACTION_HANDLER_THREAD_COUNT = "mockserver.actionHandlerThreadCount";
     private static final String MOCKSERVER_MAX_PENDING_DELAYED_RESPONSES = "mockserver.maxPendingDelayedResponses";
     private static final String MOCKSERVER_MAX_QUEUED_TEMPLATE_ACTIONS = "mockserver.maxQueuedTemplateActions";
@@ -2484,6 +2486,44 @@ public class ConfigurationProperties {
      */
     public static void soBacklog(int backlog) {
         setProperty(MOCKSERVER_SO_BACKLOG, "" + backlog);
+    }
+
+    public static long inboundConnectionIdleTimeoutMillis() {
+        return Math.max(0L, readLongProperty(MOCKSERVER_INBOUND_CONNECTION_IDLE_TIMEOUT_MILLIS, "MOCKSERVER_INBOUND_CONNECTION_IDLE_TIMEOUT_MILLIS", 300_000L));
+    }
+
+    /**
+     * <p>How long, in milliseconds, an inbound client connection may sit idle - nothing read or written
+     * and no request in progress - before MockServer closes it. Default {@code 300000} (5 minutes);
+     * {@code 0} disables the timeout, and a negative value is treated as {@code 0}.</p>
+     *
+     * <p>Only quiet connections are closed: a connection with a request awaiting its response (a
+     * delayed response, a paused breakpoint), a streaming response (SSE, chunked, gRPC), an active
+     * HTTP/2 stream, or one that has become a WebSocket, a CONNECT/SOCKS tunnel or a raw binary relay
+     * is never closed by this timeout.</p>
+     *
+     * @param millis idle timeout in milliseconds, 0 to disable
+     */
+    public static void inboundConnectionIdleTimeoutMillis(long millis) {
+        setProperty(MOCKSERVER_INBOUND_CONNECTION_IDLE_TIMEOUT_MILLIS, "" + millis);
+    }
+
+    public static int maxInboundConnections() {
+        return Math.max(0, readIntegerProperty(MOCKSERVER_MAX_INBOUND_CONNECTIONS, "MOCKSERVER_MAX_INBOUND_CONNECTIONS", 0));
+    }
+
+    /**
+     * <p>Maximum number of inbound client connections held open at once. A connection accepted while
+     * the limit is reached is closed immediately (reset), logged and counted, rather than accepted and
+     * left waiting. Default {@code 0}, meaning no limit; a negative value is treated as {@code 0}.</p>
+     *
+     * <p>Each CONNECT or SOCKS tunnel holds two slots: the client's connection plus MockServer's own
+     * loopback connection to itself.</p>
+     *
+     * @param maxConnections maximum concurrent inbound connections, 0 for no limit
+     */
+    public static void maxInboundConnections(int maxConnections) {
+        setProperty(MOCKSERVER_MAX_INBOUND_CONNECTIONS, "" + maxConnections);
     }
 
     public static int actionHandlerThreadCount() {

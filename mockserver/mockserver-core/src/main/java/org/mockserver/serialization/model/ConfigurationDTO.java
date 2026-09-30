@@ -50,6 +50,8 @@ public class ConfigurationDTO implements DTO<Configuration> {
 
     private Integer nioEventLoopThreadCount;
     private Integer soBacklog;
+    private Long inboundConnectionIdleTimeoutMillis;
+    private Integer maxInboundConnections;
     private Integer actionHandlerThreadCount;
     private Integer maxPendingDelayedResponses;
     private Integer maxQueuedTemplateActions;
@@ -395,6 +397,8 @@ public class ConfigurationDTO implements DTO<Configuration> {
 
             this.nioEventLoopThreadCount = configuration.nioEventLoopThreadCount();
             this.soBacklog = configuration.soBacklog();
+            this.inboundConnectionIdleTimeoutMillis = configuration.inboundConnectionIdleTimeoutMillis();
+            this.maxInboundConnections = configuration.maxInboundConnections();
             this.actionHandlerThreadCount = configuration.actionHandlerThreadCount();
             this.maxPendingDelayedResponses = configuration.maxPendingDelayedResponses();
             this.maxQueuedTemplateActions = configuration.maxQueuedTemplateActions();
@@ -799,6 +803,8 @@ public class ConfigurationDTO implements DTO<Configuration> {
 
         configuration.nioEventLoopThreadCount(nioEventLoopThreadCount);
         configuration.soBacklog(soBacklog);
+        configuration.inboundConnectionIdleTimeoutMillis(inboundConnectionIdleTimeoutMillis);
+        configuration.maxInboundConnections(maxInboundConnections);
         configuration.actionHandlerThreadCount(actionHandlerThreadCount);
         configuration.maxPendingDelayedResponses(maxPendingDelayedResponses);
         configuration.maxQueuedTemplateActions(maxQueuedTemplateActions);
@@ -1321,6 +1327,12 @@ public class ConfigurationDTO implements DTO<Configuration> {
         }
         if (soBacklog != null) {
             target.soBacklog(soBacklog);
+        }
+        if (inboundConnectionIdleTimeoutMillis != null) {
+            target.inboundConnectionIdleTimeoutMillis(inboundConnectionIdleTimeoutMillis);
+        }
+        if (maxInboundConnections != null) {
+            target.maxInboundConnections(maxInboundConnections);
         }
         if (nioEventLoopThreadCount != null) {
             target.nioEventLoopThreadCount(nioEventLoopThreadCount);
@@ -2524,6 +2536,24 @@ public class ConfigurationDTO implements DTO<Configuration> {
 
     public ConfigurationDTO setSoBacklog(Integer soBacklog) {
         this.soBacklog = soBacklog;
+        return this;
+    }
+
+    public Long getInboundConnectionIdleTimeoutMillis() {
+        return inboundConnectionIdleTimeoutMillis;
+    }
+
+    public ConfigurationDTO setInboundConnectionIdleTimeoutMillis(Long inboundConnectionIdleTimeoutMillis) {
+        this.inboundConnectionIdleTimeoutMillis = inboundConnectionIdleTimeoutMillis;
+        return this;
+    }
+
+    public Integer getMaxInboundConnections() {
+        return maxInboundConnections;
+    }
+
+    public ConfigurationDTO setMaxInboundConnections(Integer maxInboundConnections) {
+        this.maxInboundConnections = maxInboundConnections;
         return this;
     }
 

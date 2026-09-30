@@ -14,6 +14,7 @@ import org.mockserver.lifecycle.ExpectationsListener;
 import org.mockserver.lifecycle.LifeCycle;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.mock.action.http.HttpActionHandler;
+import org.mockserver.netty.connection.InboundConnectionLimiter;
 import org.mockserver.netty.dns.DnsRequestHandler;
 import org.mockserver.netty.http3.Http3NativeUnavailableException;
 import org.mockserver.netty.http3.Http3Server;
@@ -48,6 +49,7 @@ public class MockServer extends LifeCycle {
     private volatile org.mockserver.netty.mcp.McpSessionManager mcpSessionManager;
     private volatile io.netty.channel.Channel dnsChannel;
     private volatile Http3Server http3Server;
+    private volatile InboundConnectionLimiter inboundConnectionLimiter;
 
     /**
      * Start the instance using the ports provided
@@ -195,6 +197,7 @@ public class MockServer extends LifeCycle {
         // handler means "authenticated": the control plane reported itself locked but was fully open.
         MockServerUnificationInitializer initializer = new MockServerUnificationInitializer(configuration, MockServer.this, httpState, new HttpActionHandler(configuration, this::getForwardClientEventLoopGroup, httpState, proxyConfigurations, nettyClientSslContextFactory), nettyServerSslContextFactory);
         this.mcpSessionManager = initializer.getMcpSessionManager();
+        inboundConnectionLimiter = new InboundConnectionLimiter(configuration, mockServerLogger);
         serverServerBootstrap = new ServerBootstrap()
             .group(bossGroup, workerGroup)
             // Accept-queue depth, configurable via mockserver.soBacklog. The 1024 default is
@@ -209,6 +212,7 @@ public class MockServer extends LifeCycle {
             // childOption, not option: a listening socket never writes, so the mark only means
             // anything on accepted connections (see PacedLargeWriteHandler, which reads it)
             .childOption(ChannelOption.WRITE_BUFFER_WATER_MARK, CONNECTION_WRITE_BUFFER_WATER_MARK)
+            .handler(inboundConnectionLimiter)
             .childHandler(initializer)
             .childAttr(REMOTE_SOCKET, remoteSocket)
             .childAttr(PROXYING, remoteSocket != null);
@@ -364,6 +368,15 @@ public class MockServer extends LifeCycle {
     public int getHttp3Port() {
         Http3Server server = http3Server;
         return server != null ? server.getPort() : -1;
+    }
+
+    /**
+     * Returns the number of inbound TCP connections this server currently holds open (every bound
+     * port; HTTP/3 connections are counted separately by {@link #getHttp3ActiveConnectionCount()}).
+     */
+    public int getInboundConnectionCount() {
+        InboundConnectionLimiter limiter = inboundConnectionLimiter;
+        return limiter != null ? limiter.getOpenConnections() : 0;
     }
 
     /**

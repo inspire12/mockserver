@@ -51,6 +51,11 @@ public class SniHandler extends AbstractSniHandler<SslContext> {
      * client a failed connection was for. Captured in {@link #lookup(ChannelHandlerContext, String)}.
      */
     public static final AttributeKey<String> SNI_HOSTNAME = AttributeKey.valueOf("SNI_HOSTNAME");
+    /**
+     * Set while the server certificate for this connection is being generated off the event loop, so
+     * the inbound idle timeout does not mistake MockServer's own work for a silent client.
+     */
+    public static final AttributeKey<Boolean> SSL_CONTEXT_PENDING = AttributeKey.valueOf("SSL_CONTEXT_PENDING");
 
     /**
      * Shared, bounded pool that runs the (potentially RSA-keygen-heavy) server SSL context provisioning
@@ -98,6 +103,7 @@ public class SniHandler extends AbstractSniHandler<SslContext> {
         if (cached != null) {
             return ctx.executor().newSucceededFuture(cached);
         }
+        ctx.channel().attr(SSL_CONTEXT_PENDING).set(Boolean.TRUE);
         String host = isNotBlank(hostname) ? hostname.toLowerCase(Locale.ROOT) : "";
         CompletableFuture<SslContext> generation = inFlightByHost.computeIfAbsent(host, key -> {
             CompletableFuture<SslContext> future =
@@ -118,6 +124,9 @@ public class SniHandler extends AbstractSniHandler<SslContext> {
 
     @Override
     protected void onLookupComplete(ChannelHandlerContext ctx, String hostname, Future<SslContext> sslContextFuture) {
+        if (ctx.channel().hasAttr(SSL_CONTEXT_PENDING)) {
+            ctx.channel().attr(SSL_CONTEXT_PENDING).set(null);
+        }
         if (!sslContextFuture.isSuccess()) {
             final Throwable cause = sslContextFuture.cause();
             if (cause instanceof Error) {

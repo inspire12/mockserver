@@ -377,6 +377,48 @@
     <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.soBacklog=16384</code></pre>
 </div>
 
+<button id="button_configuration_inbound_connection_idle_timeout_millis" class="accordion title"><strong>Idle Connection Timeout</strong></button>
+<div class="panel title">
+    <p>How long, in milliseconds, a client connection may sit completely idle before MockServer closes it. Every open connection costs memory even when it carries no traffic (roughly 4 KB of kernel socket memory plus MockServer's own per-connection state), so clients that open keep-alive connections and never close them can slowly push a container towards its memory limit. This timeout releases them.</p>
+    <p>Only genuinely quiet connections are closed: nothing read or written for the whole timeout <em>and</em> nothing in progress. A connection is never closed by this timeout while it is:</p>
+    <ul>
+        <li>waiting for a response &mdash; a delayed response, a slow forward, or a request paused at a breakpoint</li>
+        <li>streaming a response &mdash; Server-Sent Events, chunked or gRPC streaming, however long the gaps between messages</li>
+        <li>carrying an open HTTP/2 stream</li>
+        <li>a WebSocket, a CONNECT or SOCKS tunnel, or a raw (non-HTTP) proxied connection</li>
+    </ul>
+    <p>Mainstream HTTP clients (Java, OkHttp, Apache, Python, Node, Go) notice a server closing an idle pooled connection and open a new one, so the 5 minute default should go unnoticed by normal test suites. In rare cases a request sent at the exact moment a connection is closed may fail and need a retry, as with any server that closes idle keep-alive connections. Set it to <span class="inline_code">0</span> to never close idle connections, which was the behaviour before this setting existed. The value applies to connections accepted after it is changed.</p>
+    <p>Type: <span class="keyword">long</span> Default: <span class="this_value">300000</span> (5 minutes)</p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.inboundConnectionIdleTimeoutMillis(long millis)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.inboundConnectionIdleTimeoutMillis=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_INBOUND_CONNECTION_IDLE_TIMEOUT_MILLIS=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.inboundConnectionIdleTimeoutMillis=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.inboundConnectionIdleTimeoutMillis=60000</code></pre>
+</div>
+
+<button id="button_configuration_max_inbound_connections" class="accordion title"><strong>Maximum Open Connections</strong></button>
+<div class="panel title">
+    <p>The most client connections MockServer will hold open at once. When the limit is reached, a new connection is closed immediately (the client sees a connection reset straight away rather than hanging), a warning is logged at most every 10 seconds, and <span class="inline_code">mock_server_inbound_connections_rejected_total</span> is incremented. As soon as a connection closes, new ones are accepted again.</p>
+    <p>Use it to put a hard ceiling on connection memory in a memory-limited container, for example when many load-test clients each hold a pool of keep-alive connections. Watch <span class="inline_code">mock_server_inbound_connections_open</span> to choose a value. Each CONNECT or SOCKS proxy tunnel uses <strong>two</strong> connections (the client's plus MockServer's own internal connection to itself); if the second is refused the client receives a <span class="inline_code">502</span>.</p>
+    <p>HTTP/3 (QUIC) connections are not counted. MockServer's own start-up warm-up request (see <span class="inline_code">startupWarmup</span>) holds one connection for a few seconds after start, so allow for it with a very small limit. The value is read for each new connection, so it can be changed while MockServer is running.</p>
+    <p>Type: <span class="keyword">int</span> Default: <span class="this_value">0</span> (no limit)</p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.maxInboundConnections(int maxConnections)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.maxInboundConnections=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_MAX_INBOUND_CONNECTIONS=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.maxInboundConnections=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.maxInboundConnections=5000</code></pre>
+</div>
+
 <button id="button_configuration_nio_event_loop_thread_count" class="accordion title"><strong>Number of Event Loop Threads</strong></button>
 <div class="panel title">
     <p>Number of threads for main event loop</p>

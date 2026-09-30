@@ -171,7 +171,7 @@ pinned 163 MB of heap. A body whose chunks average under 1 KiB is still consolid
 (`HttpObjectAggregatorsTest`). The worst case this leaves is the component heap itself: about 1.1 MB per
 HTTP/1.1 connection at the 10 MiB `maxRequestBodySize` (10,240 components × ~110 B), and per stream on
 HTTP/2, so ~110 MB for one HTTP/2 connection with 100 concurrent streams. Bounding that further depends on
-the connection cap (performance-programme #35) or a lower limit for HTTP/2 stream children. This covers HTTP/1.1 and the HTTP/2 stream children, whose DATA frames become
+the connection cap (`maxInboundConnections`, off by default — see [Connection Memory](#connection-memory)) or a lower limit for HTTP/2 stream children. This covers HTTP/1.1 and the HTTP/2 stream children, whose DATA frames become
 the same chunks; the HTTP/3 request accumulator uses the same limit. Two places still copy as they grow:
 the relay's HTTP/2 legs, where Netty's `InboundHttp2ToHttpAdapter` writes DATA frames into one growing
 buffer, and `ByteToMessageDecoder` cumulation, which stays small because the HTTP decoder consumes it as it reads.
@@ -202,7 +202,7 @@ cap) it is 10 arenas rather than 12, still more than the 5 worker event loops th
 
 **Not covered.** Native memory that is not a Netty buffer: TLS state inside BoringSSL (`netty-tcnative`),
 thread stacks, and the JDK's own temporary direct buffers, which stay under the JVM's
-`MaxDirectMemorySize`. Those grow with the number of connections, which is not capped.
+`MaxDirectMemorySize`. Those grow with the number of connections, which is capped only when `maxInboundConnections` is set.
 
 #### Direct-memory evidence
 
@@ -223,6 +223,10 @@ upload and stalling (upload).
 Before, the upload at 512 MiB survived only because the heap was nearly empty (86 MiB committed); with a
 full heap the same direct growth would not fit. The download direct figure after the change (20 MiB) is
 the pooled chunks left from loading the 11 MiB expectation, not per-connection buffering.
+
+### Connection Memory
+
+Every open client connection costs memory whether or not it carries traffic: kernel socket buffers (about 3.9 KiB per idle connection measured in a 512 MiB container, charged to the container's memory cgroup but outside the JVM heap) plus the channel, its pipeline and per-connection state on the heap. None of the heap-derived limits above bound it, so many idle keep-alive connections can push a container towards its memory limit on their own. Two properties bound it: `inboundConnectionIdleTimeoutMillis` (default 5 minutes) closes connections that are idle with nothing in progress, and `maxInboundConnections` (default off) caps how many are held at once; `mock_server_inbound_connections_open` shows the live count. See [netty-pipeline.md → Inbound Connection Bounds](netty-pipeline.md#inbound-connection-bounds).
 
 ### Timing Sensitivity
 

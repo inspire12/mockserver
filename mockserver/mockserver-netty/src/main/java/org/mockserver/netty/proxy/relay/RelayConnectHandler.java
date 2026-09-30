@@ -26,6 +26,7 @@ import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.LoggingHandler;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.Protocol;
+import org.mockserver.netty.connection.InboundConnectionActivity;
 import org.mockserver.netty.unification.PortUnificationHandler;
 import org.slf4j.event.Level;
 
@@ -33,6 +34,7 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 
+import static org.mockserver.exception.ExceptionHandling.closeOnFlush;
 import static org.mockserver.exception.ExceptionHandling.connectionClosedException;
 import static org.mockserver.exception.ExceptionHandling.isSslOrDecoderFault;
 import static org.mockserver.exception.ExceptionHandling.sniDescription;
@@ -64,11 +66,15 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
 
     @Override
     public void channelRead0(final ChannelHandlerContext proxyClientCtx, final T request) {
+        final InetSocketAddress remoteSocket = getDownstreamSocket(proxyClientCtx);
         Bootstrap bootstrap = new Bootstrap()
             .group(proxyClientCtx.channel().eventLoop())
             .channel(NettyTransport.socketChannelClassFor(proxyClientCtx.channel().eventLoop()))
             .option(ChannelOption.ALLOCATOR, NettyAllocator.ALLOCATOR)
             .handler(new ChannelInboundHandlerAdapter() {
+                // confined to the proxy client's event loop, which this bootstrap shares
+                private boolean tunnelEstablished;
+
                 @Override
                 public void channelActive(final ChannelHandlerContext mockServerCtx) {
                     String hostForMessage = host.contains(":") ? "[" + host + "]" : host;
@@ -82,6 +88,7 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
                 @Override
                 public void channelRead(ChannelHandlerContext mockServerCtx, Object msg) {
                     if (msg instanceof ByteBuf && new String(ByteBufUtil.getBytes((ByteBuf) msg), StandardCharsets.UTF_8).startsWith(PROXIED_RESPONSE)) {
+                        tunnelEstablished = true;
                         // this branch consumes the message (it does not forward it via fireChannelRead), so the
                         // inbound ByteBuf must be released here to avoid leaking one pooled buffer per tunnel setup
                         try {
@@ -89,6 +96,8 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
                                 .writeAndFlush(successResponse(request))
                                 .addListener((ChannelFutureListener) channelFuture -> {
                                     removeCodecSupport(proxyClientCtx);
+                                    // a tunnel may legitimately stay silent for as long as the client likes
+                                    InboundConnectionActivity.markLongLived(proxyClientCtx.channel());
 
                                     // downstream (to proxy client)
                                     ChannelPipeline pipelineToProxyClient = proxyClientCtx.channel().pipeline();
@@ -140,9 +149,40 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
                         mockServerCtx.fireChannelRead(msg);
                     }
                 }
+
+                @Override
+                public void channelInactive(ChannelHandlerContext mockServerCtx) {
+                    // Closed before the tunnel was set up - for example refused by maxInboundConnections.
+                    // Fail the client now; nothing else would ever answer its CONNECT/SOCKS request.
+                    if (!tunnelEstablished) {
+                        if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+                            mockServerLogger.logEvent(
+                                new LogEntry()
+                                    .setLogLevel(Level.WARN)
+                                    .setMessageFormat("tunnel connection to:{}closed before the tunnel was established, failing the proxy client request")
+                                    .setArguments(remoteSocket)
+                            );
+                        }
+                        Channel proxyClientChannel = proxyClientCtx.channel();
+                        proxyClientChannel.writeAndFlush(failureResponse(request));
+                        closeOnFlush(proxyClientChannel);
+                    }
+                    mockServerCtx.fireChannelInactive();
+                }
+
+                @Override
+                public void exceptionCaught(ChannelHandlerContext mockServerCtx, Throwable cause) {
+                    // Before set-up the only handler here is this one, so an I/O error (typically a reset
+                    // from a refused loopback) would otherwise reach the pipeline tail as a Netty WARN;
+                    // channelInactive answers the client. Afterwards the relay handlers own errors.
+                    if (tunnelEstablished) {
+                        mockServerCtx.fireExceptionCaught(cause);
+                    } else {
+                        mockServerCtx.close();
+                    }
+                }
             });
 
-        final InetSocketAddress remoteSocket = getDownstreamSocket(proxyClientCtx);
         bootstrap.connect(remoteSocket).addListener((ChannelFutureListener) future -> {
             if (!future.isSuccess()) {
                 failure("Connection failed to " + remoteSocket, future.cause(), proxyClientCtx, failureResponse(request));

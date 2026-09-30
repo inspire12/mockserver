@@ -131,6 +131,9 @@ public class ConfigurationEnforcementClassificationTest {
             "org.mockserver.log.MockServerEventLogRequestLogEntryVerificationTest#shouldFailVerificationWithLimitedReturnedRequestsViaConfiguration");
         ENFORCEMENT_VERIFIED.put("maxSocketTimeoutInMillis",
             "org.mockserver.httpclient.netty.NettyHttpClientConnectionPoolTest#shouldTimeOutAStalledReusedPooledConnectionInsteadOfHanging");
+        // read per accept from the server's Configuration instance by InboundConnectionLimiter
+        ENFORCEMENT_VERIFIED.put("maxInboundConnections",
+            "org.mockserver.netty.connection.InboundConnectionLimitIntegrationTest#shouldRefuseConnectionBeyondLimitAndRecoverWhenOneCloses");
         // consumed when the forward client's HTTP/1.1 pipeline is built (it sizes the aggregator), so it
         // cannot be re-read per request — but an instance-set value still changes observable behaviour:
         // an upstream body over the limit fails the forward with a 502 instead of being relayed.
@@ -405,6 +408,7 @@ public class ConfigurationEnforcementClassificationTest {
         "dnsEnabled",
         "grpcBidiStreamingEnabled",
         "http3ConnectUdpEnabled",
+        "maxInboundConnections",
         "maxRequestBodySize",
         "maxResponseBodySize",
         "redactSecretsInLog",

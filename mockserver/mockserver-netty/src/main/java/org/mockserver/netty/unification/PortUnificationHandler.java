@@ -33,6 +33,8 @@ import org.mockserver.model.Delay;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.netty.HttpRequestHandler;
+import org.mockserver.netty.connection.HttpExchangeTracker;
+import org.mockserver.netty.connection.InboundConnectionActivity;
 import org.mockserver.netty.mcp.McpStreamableHttpHandler;
 import org.mockserver.netty.grpc.GrpcToHttpRequestHandler;
 import org.mockserver.netty.grpc.GrpcToHttpResponseHandler;
@@ -477,6 +479,9 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
                 configuration.maxHeaderSize(),
                 configuration.maxChunkSize()
             ));
+            if (InboundConnectionActivity.isTracked(ctx.channel())) {
+                addLastIfNotPresent(pipeline, HttpExchangeTracker.INSTANCE);
+            }
             addLastIfNotPresent(pipeline, preserveHeadersNettyRemoves);
             addLastIfNotPresent(pipeline, new HttpContentDecompressor());
             addLastIfNotPresent(pipeline, httpContentLengthRemover);
@@ -533,6 +538,8 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
     }
 
     private void switchToProxyConnected(ChannelHandlerContext ctx, ByteBuf msg) {
+        // MockServer's own loopback leg of a CONNECT/SOCKS tunnel: idle-closing it would tear the tunnel down
+        InboundConnectionActivity.markLongLived(ctx.channel());
         String message = readMessage(msg);
         if (message.startsWith(PROXIED_SECURE)) {
             String[] hostParts = HttpRequest.splitHostPort(StringUtils.substringAfter(message, PROXIED_SECURE));
@@ -556,6 +563,8 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
     }
 
     private void switchToBinaryRequestProxying(ChannelHandlerContext ctx, ByteBuf msg) {
+        // a raw TCP protocol (a database, a broker) may legitimately stay silent for long periods
+        InboundConnectionActivity.markLongLived(ctx.channel());
         addLastIfNotPresent(ctx.pipeline(), new BinaryRequestProxyingHandler(configuration, httpState.getMockServerLogger(), httpState.getScheduler(), actionHandler.getHttpClient(), httpState));
 
         // fire message back through pipeline

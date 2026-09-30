@@ -420,6 +420,18 @@ Two `GaugeWithCallback` gauges expose the TCP **accept queue** — the queue the
 
 The **live accept-queue depth** and **SYN-drop count** are kernel counters (`/proc/net/netstat` `TcpExt: ListenOverflows`), not reachable in-process; they are deliberately not attempted here. Watch the OS-level counter directly if you need the live overflow count.
 
+### Inbound Connection Metrics
+
+Track how many client connections MockServer holds and what the two connection bounds (`maxInboundConnections`, `inboundConnectionIdleTimeoutMillis`) did about them — see [netty-pipeline.md](netty-pipeline.md#inbound-connection-bounds).
+
+| Metric Name | Type | Description |
+|-------------|------|-------------|
+| `mock_server_inbound_connections_open` | GaugeWithCallback | Inbound TCP connections currently open, summed over every MockServer in the JVM (HTTP/3 excluded). Backed by a static `AtomicLong` maintained whether or not metrics are enabled, so it is correct from the first scrape. |
+| `mock_server_inbound_connections_rejected_total` | Counter | Connections reset on accept because `maxInboundConnections` were already open. |
+| `mock_server_inbound_connections_idle_closed_total` | Counter | Connections closed by `inboundConnectionIdleTimeoutMillis` with nothing in progress. |
+
+Updated through `Metrics.inboundConnectionOpened()` / `inboundConnectionClosed()` (from `InboundConnectionLimiter`), `incrementInboundConnectionsRejected()` and `incrementInboundConnectionsIdleClosed()` (from `InboundConnectionIdleHandler`); the two counters are no-ops until metrics are enabled. Not mirrored to OTLP.
+
 ### Load Injection Metrics (`mock_server_load_*`)
 
 The `mock_server_load_*` family is registered by `Metrics.registerLoadMetrics()` when `metricsEnabled` is `true` (there is no `loadGenerationEnabled` check in `Metrics` registration — that flag only gates the PUT endpoint). All metrics in this family are also mirrored to OTLP by `OtelMetricsExporter` — see [telemetry.md](telemetry.md).

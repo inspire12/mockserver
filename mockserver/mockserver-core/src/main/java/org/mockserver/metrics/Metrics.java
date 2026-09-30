@@ -22,6 +22,7 @@ import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.IntSupplier;
 import java.util.function.Supplier;
@@ -59,6 +60,13 @@ public class Metrics {
     private static volatile Counter evictedLogEntriesTotal;
     // Counter for drift analyses shed because too many were already queued (best-effort work).
     private static volatile Counter droppedDriftAnalysesTotal;
+    // Inbound client connections currently open, summed over every MockServer in the JVM. Maintained
+    // whether or not metrics are enabled (one atomic per connection open/close) so the gauge is correct
+    // from the first scrape rather than from whenever metrics happened to be switched on.
+    private static final AtomicLong openInboundConnections = new AtomicLong();
+    // Inbound connections refused by maxInboundConnections, and closed by inboundConnectionIdleTimeoutMillis.
+    private static volatile Counter inboundConnectionsRejectedTotal;
+    private static volatile Counter inboundConnectionsIdleClosedTotal;
     // Live queue depths of the shared scheduler pool and the template-action pool, set by HttpState.
     private static final AtomicReference<IntSupplier> schedulerQueueDepthSupplier = new AtomicReference<>();
     private static final AtomicReference<IntSupplier> templateActionQueueDepthSupplier = new AtomicReference<>();
@@ -259,6 +267,19 @@ public class Metrics {
                     droppedDriftAnalysesTotal = Counter.builder()
                         .name("mock_server_dropped_drift_analyses")
                         .help("Number of forwarded responses not analysed for mock drift because the drift-analysis backlog was full")
+                        .register();
+                    GaugeWithCallback.builder()
+                        .name("mock_server_inbound_connections_open")
+                        .help("Inbound client connections currently open (HTTP/1.1, HTTP/2, TLS, SOCKS, tunnels; excludes HTTP/3)")
+                        .callback(callback -> callback.call(openInboundConnections.get()))
+                        .register();
+                    inboundConnectionsRejectedTotal = Counter.builder()
+                        .name("mock_server_inbound_connections_rejected")
+                        .help("Inbound connections closed on accept because maxInboundConnections connections were already open")
+                        .register();
+                    inboundConnectionsIdleClosedTotal = Counter.builder()
+                        .name("mock_server_inbound_connections_idle_closed")
+                        .help("Inbound connections closed after inboundConnectionIdleTimeoutMillis with nothing in progress")
                         .register();
                     GaugeWithCallback.builder()
                         .name("mock_server_scheduler_queued_tasks")
@@ -652,6 +673,8 @@ public class Metrics {
             evictedLogEntriesTotal = null;
             droppedDriftAnalysesTotal = null;
             overloadRejectionsTotal = null;
+            inboundConnectionsRejectedTotal = null;
+            inboundConnectionsIdleClosedTotal = null;
             forwardHostLabels.clear();
             forwardHostLabelCount.set(0);
             forwardRequestDurationSeconds = null;
@@ -825,6 +848,63 @@ public class Metrics {
      */
     public static long getDroppedDriftAnalysesCount() {
         Counter counter = droppedDriftAnalysesTotal;
+        return counter != null ? (long) counter.get() : 0L;
+    }
+
+    /**
+     * Record an inbound client connection being admitted; pair with exactly one
+     * {@link #inboundConnectionClosed()} when it closes.
+     */
+    public static void inboundConnectionOpened() {
+        openInboundConnections.incrementAndGet();
+    }
+
+    public static void inboundConnectionClosed() {
+        openInboundConnections.decrementAndGet();
+    }
+
+    /**
+     * Inbound client connections currently open across every MockServer in this JVM.
+     */
+    public static long getOpenInboundConnections() {
+        return openInboundConnections.get();
+    }
+
+    /**
+     * Count an inbound connection refused because {@code maxInboundConnections} was reached.
+     * No-op unless metrics are enabled.
+     */
+    public static void incrementInboundConnectionsRejected() {
+        Counter counter = inboundConnectionsRejectedTotal;
+        if (counter != null) {
+            counter.inc();
+        }
+    }
+
+    /**
+     * Count an inbound connection closed by {@code inboundConnectionIdleTimeoutMillis}.
+     * No-op unless metrics are enabled.
+     */
+    public static void incrementInboundConnectionsIdleClosed() {
+        Counter counter = inboundConnectionsIdleClosedTotal;
+        if (counter != null) {
+            counter.inc();
+        }
+    }
+
+    /**
+     * Return the refused-inbound-connection count, or 0 if metrics are disabled.
+     */
+    public static long getInboundConnectionsRejectedCount() {
+        Counter counter = inboundConnectionsRejectedTotal;
+        return counter != null ? (long) counter.get() : 0L;
+    }
+
+    /**
+     * Return the idle-closed-inbound-connection count, or 0 if metrics are disabled.
+     */
+    public static long getInboundConnectionsIdleClosedCount() {
+        Counter counter = inboundConnectionsIdleClosedTotal;
         return counter != null ? (long) counter.get() : 0L;
     }
 

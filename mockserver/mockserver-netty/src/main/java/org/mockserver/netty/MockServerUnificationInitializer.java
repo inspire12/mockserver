@@ -7,6 +7,7 @@ import org.mockserver.configuration.Configuration;
 import org.mockserver.lifecycle.LifeCycle;
 import org.mockserver.mock.HttpState;
 import org.mockserver.mock.action.http.HttpActionHandler;
+import org.mockserver.netty.connection.InboundConnectionIdleHandler;
 import org.mockserver.netty.mcp.McpSessionManager;
 import org.mockserver.netty.mcp.McpStreamableHttpHandler;
 import org.mockserver.netty.proxy.ProxyProtocolOriginalDestinationHandler;
@@ -48,6 +49,10 @@ public class MockServerUnificationInitializer extends ChannelHandlerAdapter {
 
     @Override
     public void handlerAdded(ChannelHandlerContext ctx) {
+        long idleTimeoutMillis = configuration.inboundConnectionIdleTimeoutMillis();
+        if (idleTimeoutMillis > 0) {
+            ctx.pipeline().addFirst("inbound-idle", new InboundConnectionIdleHandler(idleTimeoutMillis, httpState.getMockServerLogger()));
+        }
         // When transparent proxy mode is enabled, add:
         // 1. PROXY protocol v1 handler (reads first inbound bytes for PROXY header)
         // 2. Transparent proxy handler (resolves via conntrack at channelActive)

@@ -208,6 +208,9 @@ rate(mock_server_requests_received_total[5m])</code></pre>
         <tr><td><span class="inline_code">mock_server_expectations_byte_evicted_total</span></td><td>Counter</td><td>Expectations evicted to stay within the byte budget.</td></tr>
         <tr><td><span class="inline_code">mock_server_accept_queue_backlog_configured</span></td><td>Gauge</td><td>Configured accept-queue depth (<a href="/mock_server/configuration_properties.html">soBacklog</a>).</td></tr>
         <tr><td><span class="inline_code">mock_server_accept_queue_backlog_effective</span></td><td>Gauge</td><td>The smaller of the configured depth and the kernel ceiling (<span class="inline_code">/proc/sys/net/core/somaxconn</span>), read at startup. Emitted only on Linux, where that ceiling is readable; omitted on macOS and restricted containers rather than reported as the configured value.</td></tr>
+        <tr><td><span class="inline_code">mock_server_inbound_connections_open</span></td><td>Gauge</td><td>Client connections currently open (HTTP/1.1, HTTP/2, TLS, SOCKS and tunnels; HTTP/3 is not counted). Use it to size <a href="/mock_server/configuration_properties.html">maxInboundConnections</a>.</td></tr>
+        <tr><td><span class="inline_code">mock_server_inbound_connections_rejected_total</span></td><td>Counter</td><td>Connections closed on arrival because <a href="/mock_server/configuration_properties.html">maxInboundConnections</a> connections were already open.</td></tr>
+        <tr><td><span class="inline_code">mock_server_inbound_connections_idle_closed_total</span></td><td>Counter</td><td>Connections closed by <a href="/mock_server/configuration_properties.html">inboundConnectionIdleTimeoutMillis</a> after being idle with nothing in progress.</td></tr>
     </tbody>
 </table>
 

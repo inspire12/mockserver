@@ -70,6 +70,7 @@ This coverage runs against the **unshaded** module classpath, so it cannot see a
 | Channel | `EpollServerSocketChannel` or `NioServerSocketChannel` | Server socket (transport-matched) |
 | SO_BACKLOG | 1024 | Connection queue depth |
 | AUTO_READ | true | Automatic read on new channels |
+| Server channel handler | `InboundConnectionLimiter` | Counts open connections and enforces `maxInboundConnections` — see [Inbound Connection Bounds](#inbound-connection-bounds) |
 | ALLOCATOR | `NettyAllocator.ALLOCATOR` (`PooledByteBufAllocator.DEFAULT`) | One pooled allocator for every channel — see [ByteBuf Allocator](#bytebuf-allocator) |
 | WRITE_BUFFER_WATER_MARK | 8KB low / 32KB high, on accepted connections (`childOption`) | When a connection's outbound buffer passes 32 KB it reports itself unwritable until it drains below 8 KB. The mark bounds nothing by itself; it matters only to code that reads writability — see [Outbound Buffering and Backpressure](#outbound-buffering-and-backpressure). Before `MockServer.CONNECTION_WRITE_BUFFER_WATER_MARK` was set with `childOption` it was set with `option`, which applies to the listening socket (which never writes), so accepted connections had Netty's 32 KB / 64 KB default |
 
@@ -228,6 +229,40 @@ A configurable connection delay can be applied before protocol detection begins.
 Configuration: `ConfigurationProperties.connectionDelayMillis(long millis)`, system property `mockserver.connectionDelayMillis`, environment variable `MOCKSERVER_CONNECTION_DELAY_MILLIS`. Default: 0 (no delay).
 
 **Non-blocking:** The delay defers the first read via the event loop's scheduler instead of sleeping, so it does not stall other channels sharing the same worker thread. The delay is applied once per channel at `channelActive`.
+
+### Inbound Connection Bounds
+
+**Outcome:** two bounds stop idle or excess client connections from growing kernel socket memory (~3.9 KiB measured per connection) and per-channel state without limit. `inboundConnectionIdleTimeoutMillis` (default `300000`, `0` disables) closes a connection that has read and written nothing for the timeout **and** has nothing in progress; `maxInboundConnections` (default `0` = no limit) resets any connection accepted beyond the limit before it is registered. Both are read from the `Configuration` instance per connection, so a runtime change applies to the next connection.
+
+```mermaid
+flowchart LR
+    ACC["server channel
+InboundConnectionLimiter"] -->|"over maxInboundConnections"| RST["SO_LINGER 0 + closeForcibly
+WARN (10 s throttle) + rejected counter"]
+    ACC -->|admitted| INIT["MockServerUnificationInitializer"]
+    INIT --> IDLE["InboundConnectionIdleHandler
+(first in pipeline)"]
+    IDLE -->|"ALL_IDLE for the timeout"| BUSY{"InboundConnectionActivity
+busy?"}
+    BUSY -->|yes| KEEP["keep; re-check after another period"]
+    BUSY -->|no| CLOSE["channel().close()
+idle-closed counter"]
+```
+
+| Component | Where | Role |
+|-----------|-------|------|
+| `InboundConnectionLimiter` | `ServerBootstrap.handler(...)` on the listening socket, ahead of `ServerBootstrapAcceptor` (and behind the loopback-shadow probe) | Per-server `AtomicInteger` of open connections, decremented on each child's `closeFuture`; refuses the N+1th with a reset, so a refused connection never gets a worker event loop or a pipeline. Also feeds the JVM-wide `mock_server_inbound_connections_open` gauge |
+| `InboundConnectionIdleHandler` | `addFirst` in `MockServerUnificationInitializer.handlerAdded`, only when the timeout is `> 0` | An `IdleStateHandler(0, 0, timeout)` whose `channelIdle` consults the activity instead of firing the event, so no other handler reacting to `IdleStateEvent` can see it. Closes through `channel().close()` so an HTTP/2 codec sends GOAWAY and TLS sends close_notify |
+| `InboundConnectionActivity` | channel attribute, created by the idle handler | Busy when: an HTTP/1.1 exchange is in progress, an HTTP/2 stream is active (`Http2ConnectionHandler.connection().numActiveStreams()`), auto-read is off (connection delay, relay back-pressure), the server certificate is being generated off the event loop (`SniHandler.SSL_CONTEXT_PENDING`), a TLS handshake is incomplete (bounded by the handshake's own timeout), or the connection is marked long-lived |
+| `HttpExchangeTracker` | `@Sharable` singleton directly after `HttpServerCodec` in `switchToHttp`, only on tracked channels | An exchange starts at a decoded `HttpRequest` and ends when the `LastHttpContent` of its response **has been written** (promise completion), so delayed, breakpoint-paused and streaming responses count, and so does a large body `PacedLargeWriteHandler` is still slicing to a slow reader (its promise completes only when the last slice is written). Pipeline order: `inbound-idle`, `PacedLargeWriteHandler`, `HttpServerCodec`, `HttpExchangeTracker` — the tracker must stay after the codec. `1xx` responses do not end an exchange; `101` also marks the connection long-lived |
+
+**Long-lived (exempt) connections** — marked with `InboundConnectionActivity.markLongLived(channel)`: a `101 Switching Protocols` (WebSocket: dashboard, callback, mocked and proxied), the client leg of a CONNECT/SOCKS tunnel once `RelayConnectHandler` has set it up, MockServer's own loopback leg (`PortUnificationHandler.switchToProxyConnected`), and raw binary proxying (`switchToBinaryRequestProxying`). Their silences are legitimate and their traffic is not HTTP exchanges the tracker could see. Marking also removes the idle handler and the exchange tracker from the pipeline (on the event loop), so a WebSocket or tunnel stops paying their per-write cost, and `isTracked` stops a later `switchToHttp` on the loopback leg from re-installing the tracker. A response written as raw bytes (an `HttpError` `responseBytes`) never ends its exchange, so that connection stays exempt — the safe direction to be wrong in.
+
+**Tunnels and the cap.** A CONNECT/SOCKS tunnel whose target is MockServer itself holds two slots: the client's connection and the internal loopback connection `RelayConnectHandler` opens. If the loopback is refused by the cap, the loopback channel closes before `PROXIED_RESPONSE_` arrives; `RelayConnectHandler`'s `channelInactive` then answers the client with the failure response (`502` for CONNECT) and closes, where it previously waited forever.
+
+**Start-up warm-up.** `startupWarmup`'s `HttpURLConnection` request to the server leaves a JDK keep-alive connection open for about 5 seconds, which counts against the cap; tests with a very small cap set `startupWarmup(false)`.
+
+**Not covered:** HTTP/3 (QUIC has its own `http3MaxIdleTimeout` and is not counted) and outbound forward/proxy connections (the forward pool has its own idle reaper). A child whose registration fails is still decremented: Netty's register path calls `closeForcibly()` and then completes the close future, which runs the limiter's listener.
 
 ### TCP Chaos Handler
 

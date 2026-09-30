@@ -738,6 +738,45 @@ public class MetricsTest {
         assertThat(scrapeUnlabeledCounterValue("mock_server_expectations_byte_evicted"), is(0.0));
     }
 
+    // --- Inbound connection gauge and counters ---
+
+    @Test
+    public void reportsOpenInboundConnectionsAsTheyOpenAndClose() {
+        new Metrics(configuration().metricsEnabled(true));
+        long before = Metrics.getOpenInboundConnections();
+
+        Metrics.inboundConnectionOpened();
+        Metrics.inboundConnectionOpened();
+        assertThat(scrapeGaugeValue("mock_server_inbound_connections_open"), is((double) before + 2));
+
+        Metrics.inboundConnectionClosed();
+        assertThat(scrapeGaugeValue("mock_server_inbound_connections_open"), is((double) before + 1));
+
+        Metrics.inboundConnectionClosed();
+        assertThat(Metrics.getOpenInboundConnections(), is(before));
+    }
+
+    @Test
+    public void countsRejectedAndIdleClosedInboundConnections() {
+        new Metrics(configuration().metricsEnabled(true));
+
+        Metrics.incrementInboundConnectionsRejected();
+        Metrics.incrementInboundConnectionsRejected();
+        Metrics.incrementInboundConnectionsIdleClosed();
+
+        assertThat(scrapeUnlabeledCounterValue("mock_server_inbound_connections_rejected"), is(2.0));
+        assertThat(scrapeUnlabeledCounterValue("mock_server_inbound_connections_idle_closed"), is(1.0));
+    }
+
+    @Test
+    public void inboundConnectionCountersAreNoOpsWhenMetricsDisabled() {
+        Metrics.incrementInboundConnectionsRejected();
+        Metrics.incrementInboundConnectionsIdleClosed();
+
+        assertThat(scrapeContains("mock_server_inbound_connections_rejected"), is(false));
+        assertThat(scrapeContains("mock_server_inbound_connections_idle_closed"), is(false));
+    }
+
     // --- Accept-queue backlog gauge tests ---
 
     @Test

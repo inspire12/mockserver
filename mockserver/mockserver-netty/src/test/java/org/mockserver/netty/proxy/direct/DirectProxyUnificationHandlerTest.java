@@ -73,6 +73,7 @@ public class DirectProxyUnificationHandlerTest {
         } else {
             assertThat(String.valueOf(embeddedChannel.pipeline().names()), embeddedChannel.pipeline().names(), contains(
                 "SniHandler#0",
+                "inbound-idle",
                 "PortUnificationHandler#0",
                 "DefaultChannelPipeline$TailContext#0"
             ));
@@ -114,6 +115,7 @@ public class DirectProxyUnificationHandlerTest {
                 "Socks5CommandRequestDecoder#0",
                 "Socks5ServerEncoder#0",
                 "Socks5ProxyHandler#0",
+                "inbound-idle",
                 "PortUnificationHandler#0",
                 "DefaultChannelPipeline$TailContext#0"
             ));
@@ -122,6 +124,7 @@ public class DirectProxyUnificationHandlerTest {
                 "Socks5CommandRequestDecoder#0",
                 "Socks5ServerEncoder#0",
                 "Socks5ProxyHandler#0",
+                "inbound-idle",
                 "PortUnificationHandler#0",
                 "DefaultChannelPipeline$TailContext#0"
             ));
@@ -161,8 +164,10 @@ public class DirectProxyUnificationHandlerTest {
             ));
         } else {
             assertThat(String.valueOf(embeddedChannel.pipeline().names()), embeddedChannel.pipeline().names(), contains(
+                "inbound-idle",
                 "PacedLargeWriteHandler#0",
                 "HttpServerCodec#0",
+                "HttpExchangeTracker#0",
                 "PreserveHeadersNettyRemoves#0",
                 "HttpContentDecompressor#0",
                 "HttpContentLengthRemover#0",
@@ -211,8 +216,10 @@ public class DirectProxyUnificationHandlerTest {
             ));
         } else {
             assertThat(String.valueOf(embeddedChannel.pipeline().names()), embeddedChannel.pipeline().names(), contains(
+                "inbound-idle",
                 "PacedLargeWriteHandler#0",
                 "HttpServerCodec#0",
+                "HttpExchangeTracker#0",
                 "PreserveHeadersNettyRemoves#0",
                 "HttpContentDecompressor#0",
                 "HttpContentLengthRemover#0",
