@@ -88,6 +88,20 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   reported by a WARN log at most every 10 seconds, and the new `mock_server_pending_delayed_tasks` gauge
   shows how many delayed tasks are waiting. Requests within the limits are served exactly as before, with
   the same delays and ordering.
+- **Delayed replies of bidirectional WebSocket mocks are now bounded, and always sent whole and in order.**
+  Each incoming message that matched a WebSocket matcher with delayed replies held its reply frames in
+  memory until they were sent, with no limit. Now a connection with more than 128 delayed replies still
+  waiting stops being read until they drain, so a client that sends faster than its replies are sent is
+  slowed by TCP flow control rather than growing the server's memory; the new
+  `mock_server_websocket_read_pauses_total` metric counts these pauses. Across all connections, delayed
+  reply frames have their own allowance of `maxPendingDelayedResponses`: a reply to one message is sent
+  completely or not at all, and when the allowance is full the WebSocket is closed with status `1013`
+  (Try Again Later), counted by `mock_server_overload_rejections` with `reason="websocket_replies"`. The
+  frames of a reply are now sent strictly in order of their delay, keeping their configured order when
+  delays are equal; frames with equal delays could previously reach the client in either order.
+  Timed scenario transitions (`PUT /mockserver/scenario/{name}` with `transitionAfterMs`) now keep at most
+  one scheduled task per scenario: a new transition cancels the one it replaces instead of leaving it
+  queued until its delay ended.
 - **TCP accept queue depth is now configurable** (`mockserver.soBacklog`, default **1024** — unchanged, but previously hard-coded). A full queue silently drops completed handshakes; the client-visible symptom is a **median latency near one second with no errors**. The effective depth is still capped by `net.core.somaxconn` (Linux) or `kern.ipc.somaxconn` (macOS). Raise deliberately — a deeper queue admits connections the server may not be able to serve in time, changing the failure mode from slow to dead. See [Performance](/mock_server/performance.html) for the three connection limits together.
 - **The number of open client connections can be capped** (`mockserver.maxInboundConnections`, default **0 = no limit**). Every open connection costs memory even when silent (about 4 KB of kernel socket memory each, plus per-connection state), so many clients holding keep-alive connections could push a memory-limited container towards its limit. A connection beyond the limit is reset at once instead of being accepted, a warning is logged at most every 10 seconds, and new connections are accepted again as soon as one closes. A CONNECT/SOCKS tunnel to MockServer itself uses two slots, and if its second is refused the client now gets a `502` instead of waiting forever. New metrics: `mock_server_inbound_connections_open`, `mock_server_inbound_connections_rejected_total` and `mock_server_inbound_connections_idle_closed_total`.
 - **Dashboard can request more log history per update.** Connect the dashboard WebSocket with `?logLimit=N` (e.g. `/_mockserver_ui_websocket?logLimit=250`) to receive up to `N` log rows, recorded requests and proxied requests per update instead of the fixed 100. Hard maximum of 500; invalid or missing values fall back to 100. Expectations are unaffected.
@@ -95,6 +109,14 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
 
 ### Changed
 
+- **TCP chaos `latencyMs` and `bandwidthBytesPerSec` now behave like a real slow link.** Inbound data is
+  delivered in the order it arrived: with a bandwidth limit, a small read that followed a large one used to
+  overtake it and reach the HTTP decoder first, and removing a latency profile let new data overtake data
+  still delayed. Bandwidth is now shared by all of a connection's data rather than applied to each read
+  separately, and latency and bandwidth set together add up instead of bandwidth replacing latency. Each
+  connection holds about 64 KiB in transit: while more is waiting, MockServer stops reading from it, so a
+  client uploading at full speed through a latency fault is slowed by TCP flow control (to roughly 64 to
+  128 KiB per latency period, about 1 MB/s at 100 ms) instead of being buffered without limit.
 - **MockServer run as its own process (the jar, Docker images, forked Maven plugin, launchers) now caps
   Netty's off-heap buffer memory at a quarter of the maximum heap (at least 64 MiB, never more than the
   heap): 64 MiB in a 512 MiB container, 128 MiB in a 1 GiB one.** It used to default to the whole heap
@@ -169,6 +191,10 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   (49.5-54.1 us before, 49.3-51.5 us after, four interleaved runs each).
 
 ### Fixed
+
+- **Inbound WebSocket and GraphQL breakpoints now actually stop the connection reading while a frame is paused.**
+  A decompression handler left in the WebSocket pipeline kept requesting reads, so later frames were
+  still read, and could be parked or processed, while the first frame waited for its decision.
 
 - **arm64 Docker images now carry the arm64 native TLS library.** The Dockerfiles defaulted the target
   architecture to amd64, and that default overrode the one Docker supplies, so an arm64 build copied the

@@ -211,6 +211,7 @@ rate(mock_server_requests_received_total[5m])</code></pre>
         <tr><td><span class="inline_code">mock_server_inbound_connections_open</span></td><td>Gauge</td><td>Client connections currently open (HTTP/1.1, HTTP/2, TLS, SOCKS and tunnels; HTTP/3 is not counted). Use it to size <a href="/mock_server/configuration_properties.html">maxInboundConnections</a>.</td></tr>
         <tr><td><span class="inline_code">mock_server_inbound_connections_rejected_total</span></td><td>Counter</td><td>Connections closed on arrival because <a href="/mock_server/configuration_properties.html">maxInboundConnections</a> connections were already open.</td></tr>
         <tr><td><span class="inline_code">mock_server_inbound_connections_idle_closed_total</span></td><td>Counter</td><td>Connections closed by <a href="/mock_server/configuration_properties.html">inboundConnectionIdleTimeoutMillis</a> after being idle with nothing in progress.</td></tr>
+        <tr><td><span class="inline_code">mock_server_websocket_read_pauses_total</span></td><td>Counter</td><td>Times a mocked WebSocket connection stopped reading because more than 128 delayed replies were still waiting to be sent on it. MockServer resumes reading once they drain, so the client is slowed down rather than failed; a rising count means clients send faster than their delayed replies are sent.</td></tr>
     </tbody>
 </table>
 

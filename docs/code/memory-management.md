@@ -744,11 +744,18 @@ The last two bound transient, not retained, memory: requests held while waiting 
 thread, each with its request, response writer and channel. The 64 KB per entry is an unmeasured,
 deliberately pessimistic estimate chosen so the bound holds well under the heap ceiling for ordinary
 request sizes; a request with a large body retains more. The 1,000 floor applies only when the JVM reports
-no heap ceiling. Delayed side actions have their own budget of the same size, so the worst case is bounded
-delayed tasks up to twice `maxPendingDelayedResponses`, plus up to `maxQueuedTemplateActions` queued renders,
-plus the delays that are counted but not bounded (chained SSE/WebSocket/gRPC messages, WebSocket bidi
-replies, close-socket delays and control-plane timed scenario transitions). Over a limit a request is answered `503` instead of being held (see
+no heap ceiling. Delayed side actions and WebSocket bidi reply frames each have their own budget of the same
+size, so the worst case is bounded delayed tasks up to three times `maxPendingDelayedResponses` (plus the frames
+of one reply set, which is admitted whole), plus up to `maxQueuedTemplateActions` queued renders, plus one
+timed transition per scenario, plus the delays that are counted but not bounded (chained SSE/WebSocket/gRPC
+messages and close-socket delays, one per stream or connection). Over a limit a request is answered `503`
+instead of being held, and a WebSocket reply set is refused whole by closing the socket with `1013` (see
 [request-processing.md](request-processing.md#overload-bounds-on-delayed-and-templated-actions)).
+
+Two per-connection bounds use backpressure instead of a limit, by pausing the connection's reads so TCP flow
+control slows the client: a WebSocket bidi connection with more than 128 delayed reply sets pending, and a
+connection under TCP chaos latency or bandwidth with more than 64 KiB of inbound data queued. Neither is
+configurable; each holds at most its threshold plus what one socket read (64 KiB) decodes to.
 
 Properties are resolved in this order (first match wins):
 

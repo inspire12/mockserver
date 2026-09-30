@@ -14,6 +14,7 @@ import org.mockserver.model.Header;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.model.NottableString;
+import org.mockserver.socket.ChannelReadPause;
 import org.mockserver.socket.NettyAllocator;
 import org.mockserver.socket.NettyTransport;
 import org.mockserver.socket.tls.NettySslContextFactory;
@@ -402,6 +403,8 @@ public class WebSocketProxyRelayHandler {
         private final FrameDirection direction;
         private final FrameTranscript transcript;
         private final HttpRequest request;
+        // whether this half holds a read pause on the peer (released when this channel drains)
+        private boolean pausingPeer;
 
         private FrameRelayHandler(Channel peerChannel, Channel ownChannel, FrameDirection direction,
                                   FrameTranscript transcript, HttpRequest request) {
@@ -436,7 +439,14 @@ public class WebSocketProxyRelayHandler {
          */
         @Override
         public void channelWritabilityChanged(ChannelHandlerContext ctx) {
-            peerChannel.config().setAutoRead(ctx.channel().isWritable());
+            boolean writable = ctx.channel().isWritable();
+            if (!writable && !pausingPeer) {
+                pausingPeer = true;
+                ChannelReadPause.pause(peerChannel);
+            } else if (writable && pausingPeer) {
+                pausingPeer = false;
+                ChannelReadPause.resume(peerChannel);
+            }
             ctx.fireChannelWritabilityChanged();
         }
 

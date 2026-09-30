@@ -19,6 +19,7 @@ import java.util.Arrays;
 import java.util.Map;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.core.Is.is;
 import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.mock.Expectation.when;
@@ -369,6 +370,19 @@ public class MetricsTest {
         } finally {
             Metrics.setPendingDelayedTasksSupplier(null);
         }
+    }
+
+    @Test
+    public void countsWebSocketReadPausesAndWebSocketReplyRejections() {
+        new Metrics(configuration().metricsEnabled(true));
+        long pausesBefore = Metrics.getWebSocketReadPausesCount();
+        Metrics.incrementWebSocketReadPauses();
+        Metrics.incrementWebSocketReadPauses();
+        Metrics.incrementOverloadRejections("websocket_replies");
+
+        assertThat(Metrics.getWebSocketReadPausesCount() - pausesBefore, is(2L));
+        assertThat(scrapeCounterTotal("mock_server_websocket_read_pauses"), is((double) pausesBefore + 2));
+        assertThat(scrapeCounterValue("mock_server_overload_rejections", "reason", "websocket_replies"), greaterThanOrEqualTo(1.0));
     }
 
     private static double scrapeGauge(String name) {

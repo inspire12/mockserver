@@ -43,6 +43,7 @@ import org.mockserver.netty.proxy.socks.Socks4ProxyHandler;
 import org.mockserver.netty.proxy.socks.Socks5ProxyHandler;
 import org.mockserver.netty.proxy.socks.SocksDetector;
 import org.mockserver.netty.websocketregistry.CallbackWebSocketServerHandler;
+import org.mockserver.socket.ChannelReadPause;
 import org.mockserver.socket.tls.NettySslContextFactory;
 import org.mockserver.socket.tls.SniHandler;
 import org.slf4j.event.Level;
@@ -214,13 +215,8 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
         }
         long delayMillis = connectionDelay != null ? connectionDelay.sampleValueMillis() : 0;
         if (delayMillis > 0) {
-            ctx.channel().config().setAutoRead(false);
-            ctx.executor().schedule(() -> {
-                if (ctx.channel().isActive()) {
-                    ctx.channel().config().setAutoRead(true);
-                    ctx.read();
-                }
-            }, delayMillis, java.util.concurrent.TimeUnit.MILLISECONDS);
+            ChannelReadPause.pause(ctx.channel());
+            ctx.executor().schedule(() -> ChannelReadPause.resume(ctx.channel()), delayMillis, java.util.concurrent.TimeUnit.MILLISECONDS);
         }
         ctx.fireChannelActive();
     }

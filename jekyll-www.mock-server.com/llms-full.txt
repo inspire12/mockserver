@@ -904,7 +904,7 @@ Number of threads for the action handler pool (serializing responses, handling d
 - Environment variable: MOCKSERVER_ACTION_HANDLER_THREAD_COUNT
 
 **maxPendingDelayedResponses**
-Maximum matched requests waiting for a configured delay (response/action delay, global delay, chaos latency) at once. Further ones are answered immediately with 503 Service Unavailable (the match still counts towards the expectation's times) and counted by the mock_server_overload_rejections metric when metrics are enabled. Delayed side actions (after-actions, secondary actions, step side effects) have their own allowance of the same size and are skipped when it is full; a forwarded response waiting for chaos latency is sent without the latency.
+Maximum matched requests waiting for a configured delay (response/action delay, global delay, chaos latency) at once. Further ones are answered immediately with 503 Service Unavailable (the match still counts towards the expectation's times) and counted by the mock_server_overload_rejections metric when metrics are enabled. Delayed side actions (after-actions, secondary actions, step side effects) have their own allowance of the same size and are skipped when it is full; a forwarded response waiting for chaos latency is sent without the latency. Delayed bidirectional WebSocket replies have a third allowance of the same size: a reply set is sent whole or refused whole, closing the WebSocket with 1013 (Try Again Later).
 - Default: max heap / 64 KB, capped at 100000 (0 = unbounded)
 - Environment variable: MOCKSERVER_MAX_PENDING_DELAYED_RESPONSES
 

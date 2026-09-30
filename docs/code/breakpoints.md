@@ -179,11 +179,15 @@ completed when the client replies or the timeout fires. No thread is blocked.
 - Decision actions: CONTINUE (process the original frame), MODIFY (process a
   replacement frame), DROP (discard — do not process), INJECT (process original
   + extra frame), CLOSE (evict stream, send CANCELLED trailer, close stream).
-- **Backpressure:** WebSocket and GraphQL handlers use `autoRead=false` while
-  a frame is parked. The gRPC-bidi handler uses its existing pull-based model
-  (withholding `ctx.read()`) — no `autoRead` toggling needed since it is already
-  `false` from `handlerAdded`. On resume (any decision), `ctx.read()` is called
-  to request the next frame (or `finish()` is called if `endStream`).
+- **Backpressure:** WebSocket and GraphQL handlers take a `ChannelReadPause`
+  hold while a frame is parked and release it on any decision (or the
+  auto-continue timeout). Reads resume only when no other holder still needs the
+  channel paused, and the hold's read gate stops the pipeline's own read
+  requests from draining the socket meanwhile; see
+  [Pausing reads](request-processing.md) in request-processing.md. The gRPC-bidi
+  handler keeps its pull-based model (withholding `ctx.read()`; `autoRead` is
+  already `false` from `handlerAdded`) and calls `ctx.read()` on resume, or
+  `finish()` if `endStream`.
 - **ByteBuf discipline:** the original `WebSocketFrame`'s ByteBuf is copied to
   `byte[]` at park time and the frame is released immediately. Both WebSocket
   handlers use `super(false)` (no auto-release), so the handler manages release

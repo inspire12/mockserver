@@ -1,6 +1,5 @@
 package org.mockserver.mock;
 
-import org.mockserver.model.Delay;
 import org.mockserver.model.TimedScenarioTransition;
 import org.mockserver.scheduler.Scheduler;
 import org.mockserver.state.KeyValueStore;
@@ -11,8 +10,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
-
-import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 public class ScenarioManager {
 
@@ -397,21 +394,40 @@ public class ScenarioManager {
     // --- Timed transitions ---
 
     /**
-     * Generation counter per scenario name for logical cancellation of
-     * pending timed transitions. When a new transition is scheduled (or an
-     * explicit cancel is requested), the generation is bumped so any
-     * previously submitted runnable becomes a no-op when it fires.
+     * The one pending timed transition per scenario name. A transition fires only if it is still the
+     * registered one when its delay elapses (the atomic {@code remove(name, pending)} decides), so replacing or
+     * cancelling it is safe even while it is about to run; the replaced task is also cancelled on the
+     * scheduler, so at most one task per scenario is queued.
      */
-    private final ConcurrentHashMap<String, Long> transitionGenerations = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, PendingTransition> pendingTransitions = new ConcurrentHashMap<>();
+
+    private static final class PendingTransition {
+        private Scheduler.PendingTask task;
+        private boolean cancelled;
+
+        synchronized void started(Scheduler.PendingTask task) {
+            if (cancelled) {
+                task.cancel();
+            } else {
+                this.task = task;
+            }
+        }
+
+        synchronized void cancel() {
+            cancelled = true;
+            if (task != null) {
+                task.cancel();
+            }
+        }
+    }
 
     /**
      * Schedules a timed transition: after {@code transition.getTransitionAfterMs()} ms,
      * if the scenario is still in {@code transition.getCurrentState()}, it will be
      * advanced to {@code transition.getNextState()}.
      * <p>
-     * Only one pending transition per scenario is logically active; scheduling a
-     * new transition for the same scenario logically cancels any pending one
-     * (the stale runnable becomes a no-op via generation counters).
+     * Only one pending transition per scenario exists; scheduling a new transition for the
+     * same scenario cancels the pending one.
      *
      * @param transition the transition descriptor (must have scenarioName, currentState, nextState, transitionAfterMs)
      * @param scheduler  the MockServer scheduler to use for delayed execution
@@ -422,17 +438,16 @@ public class ScenarioManager {
         String nextState = transition.getNextState();
         long delayMs = transition.getTransitionAfterMs();
 
-        // bump generation to logically cancel any pending transition for this scenario
-        long generation = transitionGenerations.merge(scenarioName, 1L, Long::sum);
-
-        Delay delay = new Delay(MILLISECONDS, delayMs);
-        scheduler.submitAsync(() -> {
-            // only fire if this generation is still current (not cancelled)
-            Long currentGen = transitionGenerations.get(scenarioName);
-            if (currentGen != null && currentGen == generation) {
+        PendingTransition pending = new PendingTransition();
+        PendingTransition replaced = pendingTransitions.put(scenarioName, pending);
+        if (replaced != null) {
+            replaced.cancel();
+        }
+        pending.started(scheduler.scheduleCancellable(() -> {
+            if (pendingTransitions.remove(scenarioName, pending)) {
                 matchesAndTransition(scenarioName, currentState, nextState);
             }
-        }, delay);
+        }, delayMs));
     }
 
     /**
@@ -440,15 +455,19 @@ public class ScenarioManager {
      */
     public void cancelPendingTransition(String scenarioName) {
         if (scenarioName != null) {
-            // bump generation so any pending transition runnable becomes a no-op
-            transitionGenerations.merge(scenarioName, 1L, Long::sum);
+            PendingTransition pending = pendingTransitions.remove(scenarioName);
+            if (pending != null) {
+                pending.cancel();
+            }
         }
     }
 
     /**
-     * Cancels all pending timed transitions and clears generation counters.
+     * Cancels all pending timed transitions.
      */
     public void cancelAllPendingTransitions() {
-        transitionGenerations.clear();
+        for (String scenarioName : pendingTransitions.keySet()) {
+            cancelPendingTransition(scenarioName);
+        }
     }
 }

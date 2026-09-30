@@ -20,6 +20,7 @@ import org.mockserver.model.Delay;
 import org.mockserver.model.GraphQLBody;
 import org.mockserver.model.SelectionSetMatchType;
 import org.mockserver.model.WebSocketMessage;
+import org.mockserver.socket.ChannelReadPause;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -276,18 +277,16 @@ public class GraphQLSubscriptionHandler extends SimpleChannelInboundHandler<WebS
             }
 
             // Apply backpressure
-            ctx.channel().config().setAutoRead(false);
+            ChannelReadPause.pause(ctx.channel());
 
             decisionFuture.thenAccept(decision ->
                 ctx.channel().eventLoop().execute(() -> {
                     try {
+                        // release this frame's hold; reading resumes once no other hold remains
+                        ChannelReadPause.resume(ctx.channel());
                         if (!ctx.channel().isActive()) {
                             return;
                         }
-
-                        // Restore autoRead + request next frame
-                        ctx.channel().config().setAutoRead(true);
-                        ctx.read();
 
                         switch (decision.getAction()) {
                             case CONTINUE ->
@@ -312,10 +311,7 @@ public class GraphQLSubscriptionHandler extends SimpleChannelInboundHandler<WebS
                 })
             ).exceptionally(ex -> {
                 LOG.debug("inbound breakpoint decision callback failed for GraphQL stream {}: {}", inboundStreamId, ex.getMessage());
-                ctx.channel().eventLoop().execute(() -> {
-                    ctx.channel().config().setAutoRead(true);
-                    ctx.read();
-                });
+                ChannelReadPause.resume(ctx.channel());
                 return null;
             });
             return;

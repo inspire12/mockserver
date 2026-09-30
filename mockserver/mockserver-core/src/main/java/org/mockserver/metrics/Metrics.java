@@ -74,6 +74,8 @@ public class Metrics {
     // Requests answered 503 because a bounded action queue was full, labelled by which bound. Null until
     // metrics are enabled.
     private static volatile Counter overloadRejectionsTotal;
+    // WebSocket connections whose reads were paused because too many delayed bidi reply sets were pending.
+    private static volatile Counter webSocketReadPausesTotal;
     // Per-upstream forwarded-request observability. Histogram of forward/proxy
     // latency labeled by upstream host, plus a count labeled by host + status
     // class. Both null until metrics are enabled. Cardinality is bounded by the
@@ -298,8 +300,12 @@ public class Metrics {
                         .register();
                     overloadRejectionsTotal = Counter.builder()
                         .name("mock_server_overload_rejections")
-                        .help("Tasks refused because a bound was full, by reason (delayed_responses and template_actions answered 503, delay_skipped sent without chaos latency, side_actions dropped)")
+                        .help("Tasks refused because a bound was full, by reason (delayed_responses and template_actions answered 503, delay_skipped sent without chaos latency, side_actions dropped, websocket_replies closed with 1013)")
                         .labelNames("reason")
+                        .register();
+                    webSocketReadPausesTotal = Counter.builder()
+                        .name("mock_server_websocket_read_pauses")
+                        .help("Times a mocked WebSocket connection stopped reading because too many delayed reply sets were pending on it")
                         .register();
                     forwardRequestDurationSeconds = Histogram.builder()
                         .name("mock_server_forward_request_duration_seconds")
@@ -673,6 +679,7 @@ public class Metrics {
             evictedLogEntriesTotal = null;
             droppedDriftAnalysesTotal = null;
             overloadRejectionsTotal = null;
+            webSocketReadPausesTotal = null;
             inboundConnectionsRejectedTotal = null;
             inboundConnectionsIdleClosedTotal = null;
             forwardHostLabels.clear();
@@ -926,13 +933,33 @@ public class Metrics {
 
     /**
      * Count one task refused because the bound named by {@code reason} was full ({@code delayed_responses},
-     * {@code template_actions}, {@code delay_skipped} or {@code side_actions}). No-op unless metrics are enabled.
+     * {@code template_actions}, {@code delay_skipped}, {@code side_actions} or {@code websocket_replies}). No-op
+     * unless metrics are enabled.
      */
     public static void incrementOverloadRejections(String reason) {
         Counter counter = overloadRejectionsTotal;
         if (counter != null && reason != null) {
             counter.labelValues(reason).inc();
         }
+    }
+
+    /**
+     * Count one WebSocket read pause (see {@code Scheduler.recordWebSocketReadPause}). No-op unless metrics are
+     * enabled.
+     */
+    public static void incrementWebSocketReadPauses() {
+        Counter counter = webSocketReadPausesTotal;
+        if (counter != null) {
+            counter.inc();
+        }
+    }
+
+    /**
+     * Return the WebSocket read-pause count, or 0 if metrics are disabled.
+     */
+    public static long getWebSocketReadPausesCount() {
+        Counter counter = webSocketReadPausesTotal;
+        return counter != null ? (long) counter.get() : 0L;
     }
 
     /**

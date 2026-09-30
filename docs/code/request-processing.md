@@ -880,7 +880,9 @@ flowchart TD
 | same, template stage | Response/forward template renders waiting for a thread | Template queue (`maxQueuedTemplateActions`) | `503` | `template_actions` |
 | `Scheduler.delayOptional(write)` | Chaos latency on an already-forwarded response | Delayed responses | The upstream response is written at once, without the latency | `delay_skipped` |
 | `Scheduler.sheddable(task)` | Delayed fire-and-forget side actions: after-actions and non-blocking before-actions, secondary actions, step side effects | Delayed side actions (its own budget, same limit) | Dropped | `side_actions` |
-| none | Chained per-message SSE/WebSocket/gRPC delays and close-socket delays (one per stream or connection); WebSocket bidi replies (one delayed task per frame of each reply set, one set per inbound frame); control-plane timed scenario transitions | Not bounded; counted in `mock_server_pending_delayed_tasks` only | Always admitted | — |
+| `Scheduler.scheduleReplySet(...)` | WebSocket bidi reply sets (one per matched inbound frame); per connection, reads also pause while more than 128 delayed sets are pending | WebSocket reply frames (its own budget, same limit), admitted or refused a whole set at a time | The WebSocket is closed with status `1013` (Try Again Later); no frame of the set is sent | `websocket_replies` |
+| `Scheduler.scheduleCancellable(...)` | Control-plane timed scenario transitions | One per scenario: a re-`PUT` cancels the one it replaces, which leaves the queue at once | Always admitted | — |
+| none | Chained per-message SSE/WebSocket/gRPC delays and close-socket delays (one per stream or connection) | Not bounded; counted in `mock_server_pending_delayed_tasks` only | Always admitted | — |
 
 Defaults for both properties are the heap ceiling / 64 KB, capped at 100,000; the 1,000 floor applies only
 when the JVM reports no heap ceiling. `0` removes a limit.
@@ -900,12 +902,24 @@ when the JVM reports no heap ceiling. `0` removes a limit.
 - *Side actions are shed on their own budget.* No client waits for them, so dropping one under overload
   (as drift analysis already does) is the least harmful outcome, and a separate budget means a webhook
   backlog can never make an unrelated mock answer 503. The worst case held is therefore bounded delayed
-  tasks up to twice `maxPendingDelayedResponses`, plus up to `maxQueuedTemplateActions` queued renders, plus
-  the unbounded per-stream delays in the last row.
-- *WebSocket bidi replies are not shed.* Each frame of a reply set is its own delayed task, and a client is
-  waiting for the whole set (a realtime LLM turn, for example), so shedding at the budget boundary would
-  deliver a partial reply silently. Bounding them needs the matcher's whole reply set admitted or refused
-  atomically, closing the socket with status 1013 (try again later) on refusal — plan row 34a.
+  tasks up to three times `maxPendingDelayedResponses` (responses, side actions, WebSocket reply frames —
+  the last plus the frames of one set, since a set is admitted whole), plus up to `maxQueuedTemplateActions`
+  queued renders, plus one timed transition per scenario, plus the per-stream delays in the last row.
+- *WebSocket bidi replies are backpressured, then refused whole, never shed.* A client is waiting for the
+  whole reply set (a realtime LLM turn, for example), so dropping frames at a budget boundary would deliver
+  a partial reply silently. The first bound is per connection: while more than 128 reply sets with a delayed
+  frame are pending on it, the connection stops reading, so TCP flow control slows the client instead of
+  its sets piling up; reading resumes at 64. The frames decoded from the socket read that crossed the
+  threshold are still processed, so a connection can exceed it by one read's worth (at most 64 KiB of
+  input). The global backstop admits a set only while fewer than `maxPendingDelayedResponses` reply frames
+  are waiting (its own budget, so a WebSocket flood cannot 503 an HTTP mock) and otherwise closes the socket
+  with `1013` (Try Again Later), sending no frame of the refused set. The threshold is a constant, not a
+  property: pausing only slows a client that has more than 128 replies outstanding, and the global bound is
+  already configurable.
+- *A reply set is one chain, not one task per frame.* Its frames are sent in order of their delay (each
+  measured from the match, as before), keeping configured order among equal delays, one after another on a
+  single chain that holds one scheduler task at a time. Scheduled independently, frames with equal delays
+  could run on different pool threads and reach the socket out of order.
 - *Admission counters, not bounded queues,* so both limits resize at runtime
   (`Scheduler.applyConfigurationCapacity()`, called from `HttpState.applyConfigurationUpdate`) at the cost
   of one increment and one compare per delayed dispatch. Undelayed dispatches allocate no wrapper
@@ -923,13 +937,23 @@ not logged until the next one.
 
 In synchronous (WAR/servlet) mode delays sleep on the request thread, nothing is queued and no bound applies.
 
+**Pausing reads.** Several handlers pause a connection's reads: pending WebSocket replies, a TCP chaos
+latency queue, a parked inbound breakpoint frame, WebSocket relay backpressure and the connection delay. They
+all go through `ChannelReadPause`, a per-channel hold count: auto-read turns off with the first hold and back
+on only when the last is released, so one holder finishing cannot resume reads another still needs paused.
+The first hold also installs a gate at the head of the pipeline that drops read requests while any hold
+remains. Without it, turning auto-read off did not stop reading: a decoder that saw no complete message, or
+the `HttpContentDecompressor` left in a WebSocket pipeline after the upgrade, calls `ctx.read()` after every
+read while auto-read is off, which kept draining the socket. A paused connection counts as busy, so the idle
+timeout never closes it.
+
 **Other executors on the request path** and whether each is bounded:
 
 | Executor / queue | Work | Bounded by |
 |------------------|------|-----------|
-| Shared scheduler, undelayed tasks | Forward continuations, lazy `once()` removal, before-actions, undelayed side actions | **Not bounded** — must-run work that cannot be answered with a 503; tracked by `mock_server_scheduler_queued_tasks` |
+| Shared scheduler, undelayed tasks | Forward continuations, lazy `once()` removal, before-actions, undelayed side actions | Not admission-bounded — must-run work that cannot be answered with a 503. Each belongs to a request already being served, so they are bounded by the requests in flight (open connections x HTTP/2 streams, capped by `maxInboundConnections` when set), and a forward continuation waits at most `maxFutureTimeout`; tracked by `mock_server_scheduler_queued_tasks` |
 | Shared scheduler, drift analysis | Best-effort forwarded-response drift analysis | Self-bounded to `max(16, 4 x actionHandlerThreadCount)`; excess dropped and counted |
-| `ScenarioManager` timed transitions (`submitAsync`) | One delayed transition per control-plane `PUT /mockserver/scenario` carrying `transitionAfterMs`; a later one for the same scenario turns earlier ones into no-ops | **Not bounded** — driven by the control plane, not by matched requests; each holds only scenario names |
+| `ScenarioManager` timed transitions (`scheduleCancellable`) | One delayed transition per scenario from `PUT /mockserver/scenario` carrying `transitionAfterMs` | One queued task per scenario: a later `PUT` with a transition cancels the pending one, and the scheduler's remove-on-cancel policy frees its queue slot at once. A `PUT` without a transition leaves a pending one in place (it fires only if the state still matches) |
 | Local-callback pool | Class callbacks | No queue (`SynchronousQueue`); threads deliberately unbounded to avoid the recursive loopback self-deadlock ([optimisation-safety.md](optimisation-safety.md) hazard 5). Its delay stage is bounded above |
 | JavaScript watchdog (`PolyglotRunner`) | Template timeout | One per in-flight JavaScript render, so bounded by the template pool |
 | `MatchingTimeoutExecutor`, `WasmRuntime` | Regex/XPath matching, WASM rules | `SynchronousQueue` with a thread cap and `AbortPolicy` |
@@ -937,8 +961,8 @@ In synchronous (WAR/servlet) mode delays sleep on the request thread, nothing is
 | `LoadScenarioOrchestrator` scheduler | VU pacing and think time | One pending task per virtual user (`loadGenerationMaxVirtualUsers`) |
 | `ForwardRetryPolicy` backoff (`CompletableFuture.delayedExecutor`) | Forward retries | In-flight forwards x `forwardProxyRetryCount` |
 | `ChaosExperimentOrchestrator` scheduler | Experiment stage timers | Control plane, one per experiment stage |
-| WebSocket bidi replies (`HttpWebSocketResponseActionHandler`) | Delayed reply frames to each inbound frame | **Not bounded** — counted in the gauge; see the rationale above |
-| `TcpChaosHandler` (`eventLoop().schedule`) | TCP latency/bandwidth fault injection | **Not bounded** — one scheduled read (holding its `ByteBuf`) per inbound read while a TCP latency profile is active; opt-in fault injection |
+| WebSocket bidi replies (`WebSocketReplySender`) | Delayed reply frames to each inbound frame | Per connection by pausing reads above 128 pending sets; globally by `maxPendingDelayedResponses` reply frames, refusing a whole set with close `1013`; see the rationale above |
+| `TcpChaosHandler` (`eventLoop().schedule`) | TCP latency/bandwidth fault injection | Per connection: inbound reads wait in one FIFO queue with one timer, and the connection stops reading while more than 64 KiB is queued (resuming at 32 KiB), so at most 64 KiB plus one socket read is held; queued buffers are released on close |
 
 ## Proxy Forwarding
 

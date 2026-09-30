@@ -39,9 +39,9 @@ import static org.hamcrest.Matchers.is;
 import static org.mockserver.configuration.Configuration.configuration;
 
 /**
- * A WebSocket bidi reply set (one delayed task per frame) must never be partially delivered because a
- * delayed-task budget is full: the frames are counted but not shed, so a client waiting for the whole turn
- * receives all of it.
+ * A WebSocket bidi reply set must never be partially delivered, or refused, because the delayed-response or
+ * side-action budget is full: reply sets are admitted whole against their own budget, so a client waiting for
+ * the whole turn receives all of it, in order.
  */
 public class OverloadWebSocketReplyIntegrationTest {
 
@@ -80,11 +80,10 @@ public class OverloadWebSocketReplyIntegrationTest {
                 }
                 sawTurnComplete |= node.path("serverContent").path("turnComplete").asBoolean(false);
             }
-            // order-insensitive: the multi-threaded scheduler does not strictly order closely spaced frames;
-            // completeness is what is under test
-            assertThat("every text delta arrived", String.join("", parts).length(), is(TURN_TEXT.length()));
+            assertThat("every text delta arrived, in order", String.join("", parts), is(TURN_TEXT));
             assertThat(sawTurnComplete, is(true));
             assertThat(scheduler.getOverloadRejectionCount(Scheduler.OverloadReason.SIDE_ACTIONS), is(0L));
+            assertThat(scheduler.getOverloadRejectionCount(Scheduler.OverloadReason.WEBSOCKET_REPLIES), is(0L));
         } finally {
             mockServer.stop();
         }

@@ -11,6 +11,7 @@ import org.mockserver.mock.breakpoint.StreamFrameBreakpointRegistry;
 import org.mockserver.model.WebSocketFrameType;
 import org.mockserver.model.WebSocketMessage;
 import org.mockserver.model.WebSocketMessageMatcher;
+import org.mockserver.socket.ChannelReadPause;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -28,9 +29,10 @@ import java.util.regex.PatternSyntaxException;
  * (this handler uses {@code super(false)} — no auto-release, so we manage the lifecycle). On
  * resume, a new frame is reconstructed from the captured/modified bytes.
  *
- * <p><b>Backpressure:</b> while a frame is parked, {@code autoRead} is set to {@code false}
- * on the channel, preventing further inbound frames from being read. On resume,
- * {@code autoRead} is restored and {@code ctx.read()} is called.
+ * <p><b>Backpressure:</b> while a frame is parked the channel's reads are paused (a
+ * {@link ChannelReadPause} hold), preventing further inbound frames from being read; the hold is
+ * released when the decision arrives. Pending delayed replies can hold the same channel's reads
+ * too, so reading resumes only once neither needs it paused.
  */
 public class BidirectionalWebSocketFrameHandler extends SimpleChannelInboundHandler<WebSocketFrame> {
 
@@ -53,6 +55,16 @@ public class BidirectionalWebSocketFrameHandler extends SimpleChannelInboundHand
      */
     public interface FrameSender {
         void send(ChannelHandlerContext ctx, WebSocketMessage message);
+
+        /**
+         * Send a matcher's whole reply set. The default sends each message independently; an implementation
+         * that delays frames overrides it to keep the set whole and in order.
+         */
+        default void sendAll(ChannelHandlerContext ctx, List<WebSocketMessage> messages) {
+            for (WebSocketMessage message : messages) {
+                send(ctx, message);
+            }
+        }
     }
 
     /**
@@ -153,19 +165,17 @@ public class BidirectionalWebSocketFrameHandler extends SimpleChannelInboundHand
             }
 
             // Apply backpressure: stop reading more inbound frames
-            ctx.channel().config().setAutoRead(false);
+            ChannelReadPause.pause(ctx.channel());
 
             // Chain the decision onto the channel's event loop (NEVER block the event loop)
             decisionFuture.thenAccept(decision ->
                 ctx.channel().eventLoop().execute(() -> {
                     try {
+                        // release this frame's hold; reading resumes once no other hold remains
+                        ChannelReadPause.resume(ctx.channel());
                         if (!ctx.channel().isActive()) {
                             return;
                         }
-
-                        // Restore autoRead + request next frame
-                        ctx.channel().config().setAutoRead(true);
-                        ctx.read();
 
                         switch (decision.getAction()) {
                             case CONTINUE ->
@@ -191,11 +201,8 @@ public class BidirectionalWebSocketFrameHandler extends SimpleChannelInboundHand
                 })
             ).exceptionally(ex -> {
                 LOG.debug("inbound breakpoint decision callback failed for stream {}: {}", inboundStreamId, ex.getMessage());
-                // Restore autoRead on failure so channel is not stuck
-                ctx.channel().eventLoop().execute(() -> {
-                    ctx.channel().config().setAutoRead(true);
-                    ctx.read();
-                });
+                // Release the hold on failure so the channel is not stuck
+                ChannelReadPause.resume(ctx.channel());
                 return null;
             });
             return;
@@ -205,9 +212,7 @@ public class BidirectionalWebSocketFrameHandler extends SimpleChannelInboundHand
         for (WebSocketMessageMatcher matcher : matchers) {
             if (matches(matcher, frame)) {
                 if (matcher.getResponses() != null) {
-                    for (WebSocketMessage response : matcher.getResponses()) {
-                        frameSender.send(ctx, response);
-                    }
+                    frameSender.sendAll(ctx, matcher.getResponses());
                 }
                 frame.release();
                 return; // first match wins
@@ -228,9 +233,7 @@ public class BidirectionalWebSocketFrameHandler extends SimpleChannelInboundHand
             for (WebSocketMessageMatcher matcher : matchers) {
                 if (matches(matcher, reconstructed)) {
                     if (matcher.getResponses() != null) {
-                        for (WebSocketMessage response : matcher.getResponses()) {
-                            frameSender.send(ctx, response);
-                        }
+                        frameSender.sendAll(ctx, matcher.getResponses());
                     }
                     return; // first match wins
                 }

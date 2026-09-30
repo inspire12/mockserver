@@ -91,8 +91,7 @@ public class ScenarioTimedTransitionTest {
         // given
         scenarioManager.setState("myScenario", "Step1");
 
-        // cancel first, then schedule - the cancellation bumps generation so
-        // subsequent transitions with the old generation become no-ops
+        // cancelling with nothing pending is a no-op
         scenarioManager.cancelPendingTransition("myScenario");
 
         // This test verifies the cancel API doesn't throw and the scenario
@@ -190,6 +189,66 @@ public class ScenarioTimedTransitionTest {
         assertThat(transition.getCurrentState(), is("from"));
         assertThat(transition.getNextState(), is("to"));
         assertThat(transition.getTransitionAfterMs(), is(5000L));
+    }
+
+    @Test(timeout = 10_000)
+    public void shouldKeepAtMostOneQueuedTransitionPerScenarioWhenRePut() throws Exception {
+        Configuration configuration = configuration();
+        Scheduler asyncScheduler = new Scheduler(configuration, new MockServerLogger(configuration, ScenarioTimedTransitionTest.class), false);
+        try {
+            for (int i = 0; i < 1_000; i++) {
+                scenarioManager.setState("rePut", "Step" + i);
+                scenarioManager.scheduleTransition(timedTransition()
+                    .withScenarioName("rePut")
+                    .withCurrentState("Step" + i)
+                    .withNextState("Done" + i)
+                    .withTransitionAfterMs(60_000L), asyncScheduler);
+            }
+            assertThat("replaced transitions leave the scheduler queue", asyncScheduler.getQueuedTaskCount(), is(1));
+            assertThat(asyncScheduler.getPendingDelayedTaskCount(), is(1));
+
+            // the latest transition is the live one
+            scenarioManager.scheduleTransition(timedTransition()
+                .withScenarioName("rePut")
+                .withCurrentState("Step999")
+                .withNextState("Finished")
+                .withTransitionAfterMs(20L), asyncScheduler);
+            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+            while (!"Finished".equals(scenarioManager.getState("rePut")) && System.nanoTime() < deadline) {
+                Thread.sleep(5);
+            }
+            assertThat(scenarioManager.getState("rePut"), is("Finished"));
+            assertThat(asyncScheduler.getQueuedTaskCount(), is(0));
+            assertThat(asyncScheduler.getPendingDelayedTaskCount(), is(0));
+        } finally {
+            asyncScheduler.shutdown();
+        }
+    }
+
+    @Test(timeout = 10_000)
+    public void shouldRemoveCancelledTransitionsFromTheSchedulerQueue() {
+        Configuration configuration = configuration();
+        Scheduler asyncScheduler = new Scheduler(configuration, new MockServerLogger(configuration, ScenarioTimedTransitionTest.class), false);
+        try {
+            for (int i = 0; i < 10; i++) {
+                scenarioManager.setState("scenario" + i, "Step1");
+                scenarioManager.scheduleTransition(timedTransition()
+                    .withScenarioName("scenario" + i)
+                    .withCurrentState("Step1")
+                    .withNextState("Step2")
+                    .withTransitionAfterMs(60_000L), asyncScheduler);
+            }
+            assertThat(asyncScheduler.getQueuedTaskCount(), is(10));
+
+            scenarioManager.cancelPendingTransition("scenario0");
+            assertThat(asyncScheduler.getQueuedTaskCount(), is(9));
+
+            scenarioManager.cancelAllPendingTransitions();
+            assertThat(asyncScheduler.getQueuedTaskCount(), is(0));
+            assertThat(asyncScheduler.getPendingDelayedTaskCount(), is(0));
+        } finally {
+            asyncScheduler.shutdown();
+        }
     }
 
     @Test

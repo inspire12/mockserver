@@ -3550,7 +3550,7 @@ PUT /mockserver/grpcChaos
             <td><strong>latency</strong></td>
             <td><code class="inline code">latencyMs</code></td>
             <td>long</td>
-            <td>Delays all inbound data by the specified milliseconds before it reaches the HTTP decoder</td>
+            <td>Delays all inbound data by the specified milliseconds before it reaches the HTTP decoder, keeping it in the order it arrived. Like a real link, only about 64 KiB is held in transit per connection: once more is waiting, MockServer stops reading from the connection until it drains, so a client sending a large body at full speed is slowed by TCP flow control to roughly 64 to 128 KiB per latency period (about 1 MB/s at 100 ms) rather than buffered in memory</td>
         </tr>
         <tr>
             <td><strong>down</strong></td>
@@ -3562,7 +3562,7 @@ PUT /mockserver/grpcChaos
             <td><strong>bandwidth</strong></td>
             <td><code class="inline code">bandwidthBytesPerSec</code></td>
             <td>long</td>
-            <td>Throttles inbound data to the specified bytes per second</td>
+            <td>Throttles inbound data to the specified bytes per second, releasing it in arrival order as if it were sent over a link of that speed; combined with <code class="inline code">latencyMs</code>, each chunk arrives after the time to send it plus the latency</td>
         </tr>
         <tr>
             <td><strong>slow_close</strong></td>
@@ -3597,7 +3597,7 @@ PUT /mockserver/grpcChaos
     </tbody>
 </table>
 
-<p>When multiple fault types are configured on the same profile, they are evaluated in priority order: <strong>down &gt; reset_peer &gt; limit_data &gt; slicer &gt; bandwidth &gt; latency</strong>.</p>
+<p>When multiple fault types are configured on the same profile, they are evaluated in priority order: <strong>down &gt; reset_peer &gt; limit_data &gt; slicer &gt; bandwidth and latency</strong> (bandwidth and latency combine, as on a real link).</p>
 
 <h3>TCP Chaos REST API</h3>
 

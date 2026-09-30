@@ -270,16 +270,18 @@ When TCP-layer chaos is active (at least one host registered in `TcpChaosRegistr
 
 | Fault Type | Field | Behaviour |
 |-----------|-------|-----------|
-| latency | `latencyMs` | Delays all inbound data by the configured milliseconds |
+| latency | `latencyMs` | Delays all inbound data by the configured milliseconds, in arrival order |
 | down | `down` | Silently drops all inbound data (service appears down) |
-| bandwidth | `bandwidthBytesPerSec` | Throttles inbound data to the configured bytes/sec |
+| bandwidth | `bandwidthBytesPerSec` | Throttles inbound data to the configured bytes/sec as a serial link (each read waits for the ones before it); combines with `latencyMs` |
 | slow_close | `slowClose` | Delays the TCP FIN by 2 seconds on close |
 | timeout | `timeout` | Never sends FIN; connection hangs on close |
 | reset_peer | `resetPeer` | Sends TCP RST and closes immediately |
 | slicer | `slicerChunkSize` | Fragments inbound data into chunks of the configured size |
 | limit_data | `limitDataBytes` | Closes the connection after the configured bytes received |
 
-The handler is **not sharable** (each channel gets its own instance) because it maintains per-connection state (`bytesConsumed` for `limitData`).
+The handler is **not sharable** (each channel gets its own instance) because it maintains per-connection state (`bytesConsumed` for `limitData`, and the latency/bandwidth queue).
+
+Latency and bandwidth hold inbound reads in one FIFO queue per connection, released by a single event-loop timer, so bytes are never reordered (a later undelayed read, for example after the profile is removed, waits behind queued ones). While more than 64 KiB is queued the connection's reads are paused through `ChannelReadPause`, resuming at 32 KiB, so a fast sender is held back by TCP flow control, as behind a real slow link, and the queue holds at most 64 KiB plus one socket read. Queued buffers are released when the connection closes. See [request-processing.md](request-processing.md#overload-bounds-on-delayed-and-templated-actions) for how read pauses from different handlers combine.
 
 Profiles are managed via the REST API:
 

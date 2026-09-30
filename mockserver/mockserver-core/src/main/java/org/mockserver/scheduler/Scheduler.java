@@ -12,13 +12,17 @@ import org.mockserver.model.Delay;
 import org.mockserver.model.HttpResponse;
 import org.slf4j.event.Level;
 
+import java.util.List;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
+import java.util.function.BooleanSupplier;
 import java.util.function.Predicate;
 
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static org.mockserver.log.model.LogEntry.LogMessageType.WARN;
 import static org.mockserver.mock.HttpState.getPort;
 import static org.mockserver.mock.HttpState.setPort;
@@ -75,14 +79,16 @@ public class Scheduler {
     private static final String OVERLOAD_LOG_FORMAT = "overloaded:{}task(s) that were:{}exceeded:{}which has a limit of:{}so they were:{}"
         + "in total since startup:{}raise that property or reduce the request rate; this is logged at most every 10 seconds per reason";
 
-    // Two independent budgets, so a backlog of fire-and-forget side actions can never 503 a response:
-    // delayed responses (incl. forwarded responses waiting for chaos latency) and delayed side actions.
-    // Delays with no fallback are counted apart, never refused: chained SSE/WebSocket/gRPC message delays and
-    // close-socket delays (one per stream or connection), WebSocket bidi replies (one set per inbound frame;
-    // shedding a frame would deliver a partial reply) and control-plane timed scenario transitions.
+    // Three independent budgets of the same size, so a backlog of one kind can never refuse another: delayed
+    // responses (incl. forwarded responses waiting for chaos latency), delayed side actions, and WebSocket bidi
+    // reply frames (admitted or refused a whole reply set at a time). Delays with no fallback are counted apart,
+    // never refused: chained SSE/WebSocket/gRPC message delays and close-socket delays (one per stream or
+    // connection) and control-plane timed scenario transitions (one per scenario).
     private final AtomicInteger pendingDelayedResponses = new AtomicInteger();
     private final AtomicInteger pendingDelayedSideActions = new AtomicInteger();
+    private final AtomicInteger pendingWebSocketReplyFrames = new AtomicInteger();
     private final AtomicInteger pendingUnboundedDelayedTasks = new AtomicInteger();
+    private final AtomicLong webSocketReadPauses = new AtomicLong();
     private final AtomicInteger queuedTemplateActions = new AtomicInteger();
     private volatile int maxPendingDelayedResponses = Integer.MAX_VALUE;
     private volatile int maxQueuedTemplateActions = Integer.MAX_VALUE;
@@ -102,6 +108,7 @@ public class Scheduler {
         DELAYED_RESPONSES("delayed_responses", "maxPendingDelayedResponses", "responses waiting for a configured delay", "answered 503 Service Unavailable"),
         DELAY_SKIPPED("delay_skipped", "maxPendingDelayedResponses", "forwarded responses waiting for chaos latency", "sent at once without the injected latency"),
         SIDE_ACTIONS("side_actions", "maxPendingDelayedResponses", "delayed side actions (after-actions, secondary actions, step side effects)", "dropped"),
+        WEBSOCKET_REPLIES("websocket_replies", "maxPendingDelayedResponses", "WebSocket reply frames waiting for their delays", "refused a whole reply set at a time, closing the WebSocket with 1013 Try Again Later"),
         TEMPLATE_ACTIONS("template_actions", "maxQueuedTemplateActions", "template renders waiting for a template thread", "answered 503 Service Unavailable");
 
         private final String metricLabel;
@@ -228,11 +235,15 @@ public class Scheduler {
         this.mockServerLogger = mockServerLogger;
         this.synchronous = synchronous;
         if (!this.synchronous) {
-            this.scheduler = new ScheduledThreadPoolExecutor(
+            ScheduledThreadPoolExecutor scheduledThreadPoolExecutor = new ScheduledThreadPoolExecutor(
                 configuration.actionHandlerThreadCount(),
                 new SchedulerThreadFactory("Scheduler"),
                 new ThreadPoolExecutor.CallerRunsPolicy()
             );
+            // a cancelled task (a replaced timed scenario transition, a cancelled coalescing or eventual-verify
+            // timer) leaves the queue at once instead of holding its slot until its delay would have elapsed
+            scheduledThreadPoolExecutor.setRemoveOnCancelPolicy(true);
+            this.scheduler = scheduledThreadPoolExecutor;
             // Unbounded cached pool for local-callback dispatch (see field javadoc). Core size 0,
             // max Integer.MAX_VALUE, 60s keep-alive — grows on demand and shrinks back to zero when
             // idle, so it never deadlocks a recursive/nested blocking local callback the way a bounded
@@ -288,8 +299,11 @@ public class Scheduler {
     /**
      * Tasks waiting in the shared scheduler pool's queue (0 in synchronous mode), including delayed tasks
      * whose delay has not elapsed. Delayed request dispatches are admission-bounded by
-     * {@code maxPendingDelayedResponses}; undelayed tasks (forward continuations, lazy removals) are not,
-     * because they must not be dropped. Best-effort work bounds its own submissions (see drift analysis).
+     * {@code maxPendingDelayedResponses}; undelayed tasks (forward continuations, lazy removals, before-actions,
+     * undelayed side actions) are not, because they must not be dropped. Each belongs to a request that is
+     * already being served, so they are bounded by the requests in flight (connections x HTTP/2 streams, each
+     * forward continuation for at most {@code maxFutureTimeout}). Best-effort work bounds its own submissions
+     * (see drift analysis).
      */
     public int getQueuedTaskCount() {
         return scheduler instanceof ThreadPoolExecutor ? ((ThreadPoolExecutor) scheduler).getQueue().size() : 0;
@@ -307,7 +321,30 @@ public class Scheduler {
      * delays sleep inline).
      */
     public int getPendingDelayedTaskCount() {
-        return pendingDelayedResponses.get() + pendingDelayedSideActions.get() + pendingUnboundedDelayedTasks.get();
+        return pendingDelayedResponses.get() + pendingDelayedSideActions.get() + pendingWebSocketReplyFrames.get() + pendingUnboundedDelayedTasks.get();
+    }
+
+    /**
+     * WebSocket bidi reply frames admitted whose delay has not yet elapsed.
+     */
+    public int getPendingWebSocketReplyFrameCount() {
+        return pendingWebSocketReplyFrames.get();
+    }
+
+    /**
+     * Count one WebSocket connection whose reads were paused because too many delayed reply sets were pending on
+     * it; kept whether or not metrics are enabled.
+     */
+    public void recordWebSocketReadPause() {
+        webSocketReadPauses.incrementAndGet();
+        Metrics.incrementWebSocketReadPauses();
+    }
+
+    /**
+     * WebSocket read pauses since this scheduler started (see {@link #recordWebSocketReadPause()}).
+     */
+    public long getWebSocketReadPauseCount() {
+        return webSocketReadPauses.get();
     }
 
     /**
@@ -560,6 +597,190 @@ public class Scheduler {
         } else {
             executeTemplateAction(command, rejectableOf(command), port);
         }
+    }
+
+    /**
+     * Send one WebSocket reply set: each write runs once its own delay (measured from now) has elapsed, strictly
+     * in the given order, and never concurrently with another write of the same set. The set's delayed writes
+     * are admitted or refused together against their own budget of {@code maxPendingDelayedResponses}: a set is
+     * admitted while fewer than that many reply frames are waiting, so a reply is never delivered in part.
+     * Writes whose delay has already elapsed run on the calling thread.
+     *
+     * @param writes       the frame writes, in send order
+     * @param delaysMillis each write's delay from now; must be non-decreasing
+     * @param stopped      checked before each write; once true the rest of the set is dropped (e.g. socket closed)
+     * @param onRefused    runs on the calling thread, instead of any write, when the set is refused
+     * @param onFinished   runs once an admitted set has run, or dropped, its last write
+     * @return whether the set was admitted
+     */
+    public boolean scheduleReplySet(List<Runnable> writes, long[] delaysMillis, BooleanSupplier stopped, Runnable onRefused, Runnable onFinished) {
+        Integer port = getPort();
+        long startNanos = System.nanoTime();
+        int delayed = 0;
+        for (long delayMillis : delaysMillis) {
+            if (delayMillis > 0) {
+                delayed++;
+            }
+        }
+        boolean counted = scheduler != null && delayed > 0;
+        if (counted && pendingWebSocketReplyFrames.getAndAdd(delayed) >= maxPendingDelayedResponses) {
+            pendingWebSocketReplyFrames.addAndGet(-delayed);
+            rejectForOverload(OverloadReason.WEBSOCKET_REPLIES, maxPendingDelayedResponses, onRefused, port);
+            return false;
+        }
+        new ReplySet(writes, delaysMillis, stopped, onFinished, port, startNanos, counted).runFrom(0);
+        return true;
+    }
+
+    private final class ReplySet {
+        private final List<Runnable> writes;
+        private final long[] delaysMillis;
+        private final BooleanSupplier stopped;
+        private final Runnable onFinished;
+        private final Integer port;
+        private final long startNanos;
+        private final boolean counted;
+
+        private ReplySet(List<Runnable> writes, long[] delaysMillis, BooleanSupplier stopped, Runnable onFinished, Integer port, long startNanos, boolean counted) {
+            this.writes = writes;
+            this.delaysMillis = delaysMillis;
+            this.stopped = stopped;
+            this.onFinished = onFinished;
+            this.port = port;
+            this.startNanos = startNanos;
+            this.counted = counted;
+        }
+
+        private void runFrom(int index) {
+            int next = index;
+            while (next < writes.size()) {
+                if (stopped.getAsBoolean()) {
+                    releaseFrom(next);
+                    run(onFinished, port);
+                    return;
+                }
+                long waitNanos = startNanos + MILLISECONDS.toNanos(delaysMillis[next]) - System.nanoTime();
+                if (waitNanos > 0) {
+                    if (scheduler == null) {
+                        sleep(waitNanos);
+                    } else {
+                        int resumeAt = next;
+                        try {
+                            scheduler.schedule(() -> runFrom(resumeAt), waitNanos, NANOSECONDS);
+                        } catch (RuntimeException exception) {
+                            releaseFrom(next);
+                            throw exception;
+                        }
+                        return;
+                    }
+                }
+                if (counted && delaysMillis[next] > 0) {
+                    pendingWebSocketReplyFrames.decrementAndGet();
+                }
+                run(writes.get(next), port);
+                next++;
+            }
+            run(onFinished, port);
+        }
+
+        private void releaseFrom(int index) {
+            if (counted) {
+                int remaining = 0;
+                for (int i = index; i < delaysMillis.length; i++) {
+                    if (delaysMillis[i] > 0) {
+                        remaining++;
+                    }
+                }
+                pendingWebSocketReplyFrames.addAndGet(-remaining);
+            }
+        }
+
+        private void sleep(long nanos) {
+            try {
+                NANOSECONDS.sleep(nanos);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("InterruptedException while applying delay to WebSocket reply", ie);
+            }
+        }
+    }
+
+    /**
+     * A delayed task that can be cancelled before it runs; see {@link #scheduleCancellable}.
+     */
+    public static final class PendingTask {
+        private final AtomicInteger pendingCount;
+        private final AtomicBoolean pending = new AtomicBoolean(true);
+        private volatile Future<?> future;
+
+        private PendingTask(AtomicInteger pendingCount) {
+            this.pendingCount = pendingCount;
+        }
+
+        private boolean claim() {
+            if (pending.compareAndSet(true, false)) {
+                if (pendingCount != null) {
+                    pendingCount.decrementAndGet();
+                }
+                return true;
+            }
+            return false;
+        }
+
+        /**
+         * Stop the task if it has not started; with the scheduler's remove-on-cancel policy its queue slot is
+         * freed at once.
+         */
+        public void cancel() {
+            if (claim()) {
+                Future<?> scheduled = future;
+                if (scheduled != null) {
+                    scheduled.cancel(false);
+                }
+            }
+        }
+    }
+
+    /**
+     * Run {@code command} on the shared scheduler once {@code delayMillis} has elapsed, unless
+     * {@link PendingTask#cancel() cancelled} first. Counted in {@link #getPendingDelayedTaskCount()} but never
+     * refused: callers keep at most one per key (e.g. one timed transition per scenario) and cancel the one they
+     * replace. In synchronous mode it sleeps and runs inline.
+     */
+    public PendingTask scheduleCancellable(Runnable command, long delayMillis) {
+        Integer port = getPort();
+        if (scheduler == null) {
+            if (delayMillis > 0) {
+                try {
+                    MILLISECONDS.sleep(delayMillis);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("InterruptedException while applying delay", ie);
+                }
+            }
+            PendingTask task = new PendingTask(null);
+            if (task.claim()) {
+                run(command, port);
+            }
+            return task;
+        }
+        PendingTask task = new PendingTask(pendingUnboundedDelayedTasks);
+        pendingUnboundedDelayedTasks.incrementAndGet();
+        try {
+            task.future = scheduler.schedule(() -> {
+                if (task.claim()) {
+                    run(command, port);
+                }
+            }, Math.max(0, delayMillis), MILLISECONDS);
+        } catch (RuntimeException exception) {
+            task.claim();
+            throw exception;
+        }
+        if (!task.pending.get()) {
+            // cancelled by another thread before the future was published
+            task.future.cancel(false);
+        }
+        return task;
     }
 
     private long sampleCombinedDelayMillis(Delay... delays) {
