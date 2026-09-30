@@ -76,6 +76,8 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
     // per-stream state: headers + accumulated body
     private Http3RequestBridge.ParsedHeaders parsedHeaders;
     private CompositeByteBuf bodyAccumulator;
+    private int bodyComponentLimit;
+    private int mergedBodyComponents;
     // Running total of accumulated body bytes for enforcing the maxRequestBodySize cap.
     private long accumulatedBodySize;
     // Non-null once this stream has been routed to true bidirectional gRPC streaming;
@@ -113,8 +115,15 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
 
     @Override
     protected void channelRead(ChannelHandlerContext ctx, Http3HeadersFrame headersFrame) {
+        if (parsedHeaders != null) {
+            // a second HEADERS frame on a request stream is its trailers: keep the request and body already started
+            return;
+        }
         parsedHeaders = Http3RequestBridge.parseHeaders(headersFrame);
-        bodyAccumulator = ctx.alloc().compositeBuffer(HttpObjectAggregators.componentLimit(configuration.maxRequestBodySize()));
+        // the component limit is enforced by Http3RequestBridge.limitComponents, not by the buffer's own consolidation
+        bodyAccumulator = ctx.alloc().compositeBuffer(Integer.MAX_VALUE);
+        bodyComponentLimit = HttpObjectAggregators.streamComponentLimit(configuration.maxRequestBodySize());
+        mergedBodyComponents = 0;
 
         // True bidirectional gRPC streaming is routed here, at HEADERS time, because the
         // server must start writing response frames while the client is still sending
@@ -178,6 +187,7 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
                 }
                 accumulatedBodySize += frameSize;
                 Http3RequestBridge.accumulateBody(bodyAccumulator, dataFrame);
+                mergedBodyComponents = Http3RequestBridge.limitComponents(bodyAccumulator, bodyComponentLimit, mergedBodyComponents);
             }
         } finally {
             dataFrame.release();

@@ -394,6 +394,41 @@ public class Http3MockServerHandlerTest {
         handler.handlerRemoved(ctx);
     }
 
+    @Test
+    public void shouldKeepTheRequestAndBodyWhenTrailersFollowTheBody() throws Exception {
+        // given
+        HttpState httpState = mock(HttpState.class);
+        when(httpState.handle(any(), any(), anyBoolean())).thenReturn(true);
+        Http3MockServerHandler handler = new Http3MockServerHandler(
+            CONFIGURATION, LOGGER, httpState, mock(HttpActionHandler.class), new Metrics(CONFIGURATION)
+        );
+        ChannelHandlerContext ctx = mockChannelHandlerContextWithWrite();
+        DefaultHttp3HeadersFrame headersFrame = new DefaultHttp3HeadersFrame();
+        headersFrame.headers().method("POST");
+        headersFrame.headers().path("/with-trailers");
+        headersFrame.headers().scheme("https");
+        headersFrame.headers().add("content-type", "text/plain");
+        handler.channelRead(ctx, headersFrame);
+        handler.channelRead(ctx, new DefaultHttp3DataFrame(Unpooled.copiedBuffer("hello", StandardCharsets.UTF_8)));
+        java.lang.reflect.Field accField = Http3MockServerHandler.class.getDeclaredField("bodyAccumulator");
+        accField.setAccessible(true);
+        CompositeByteBuf accumulator = (CompositeByteBuf) accField.get(handler);
+
+        // when: the request ends with a trailers HEADERS frame
+        DefaultHttp3HeadersFrame trailers = new DefaultHttp3HeadersFrame();
+        trailers.headers().add("x-checksum", "abc");
+        handler.channelRead(ctx, trailers);
+        handler.channelInputClosed(ctx);
+
+        // then
+        ArgumentCaptor<HttpRequest> captor = ArgumentCaptor.forClass(HttpRequest.class);
+        verify(httpState).handle(captor.capture(), any(), anyBoolean());
+        assertThat(captor.getValue().getPath().getValue(), is("/with-trailers"));
+        assertThat(captor.getValue().getBodyAsString(), is("hello"));
+        assertThat("the body accumulator is released, not replaced and leaked", accumulator.refCnt(), is(0));
+        handler.handlerRemoved(ctx);
+    }
+
     private ChannelHandlerContext mockChannelHandlerContext() {
         ChannelHandlerContext ctx = mock(ChannelHandlerContext.class);
         when(ctx.alloc()).thenReturn(ByteBufAllocator.DEFAULT);

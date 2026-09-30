@@ -5,10 +5,12 @@ import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPipeline;
 import io.netty.handler.codec.http.HttpContentDecompressor;
+import io.netty.handler.codec.http2.Http2FrameStream;
 import io.netty.handler.codec.http2.Http2StreamChannel;
 import io.netty.handler.codec.http2.Http2StreamFrameToHttpObjectCodec;
 import io.netty.handler.timeout.ReadTimeoutHandler;
 import io.netty.util.AttributeKey;
+import org.mockserver.codec.HttpObjectAggregators;
 import org.mockserver.codec.MockServerHttpClientCodec;
 import org.mockserver.codec.StreamingAwareHttpObjectAggregator;
 import org.mockserver.configuration.Configuration;
@@ -103,11 +105,15 @@ public class Http2ForwardStreamChildInitializer extends ChannelInitializer<Http2
         pipeline.addLast(new Http2StreamFrameToHttpObjectCodec(false));
         pipeline.addLast(new HttpContentDecompressor());
         pipeline.addLast(new TimeToFirstByteHandler());
-        if (configuration != null) {
-            pipeline.addLast(new StreamingAwareHttpObjectAggregator(configuration.maxResponseBodySize(), configuration, mockServerLogger));
-        } else {
-            pipeline.addLast(new StreamingAwareHttpObjectAggregator(ConfigurationProperties.maxResponseBodySize()));
+        StreamingAwareHttpObjectAggregator aggregator = configuration != null
+            ? new StreamingAwareHttpObjectAggregator(configuration.maxResponseBodySize(), configuration, mockServerLogger)
+            : new StreamingAwareHttpObjectAggregator(ConfigurationProperties.maxResponseBodySize());
+        // our own request stream is the only one of its kind on the connection and keeps the HTTP/1.1 limit; a stream
+        // the upstream opens is one of several it could open, so it gets the per-stream limit
+        if (isPeerInitiated(ch)) {
+            HttpObjectAggregators.limitStreamComponents(aggregator);
         }
+        pipeline.addLast(aggregator);
         pipeline.addLast(new MockServerHttpClientCodec(mockServerLogger, proxyConfigurations));
         pipeline.addLast(httpClientHandler);
 
@@ -120,6 +126,14 @@ public class Http2ForwardStreamChildInitializer extends ChannelInitializer<Http2
                 parent.close();
             }
         });
+    }
+
+    /**
+     * A stream the upstream opened has an even id from the start; our own stream has no id until its HEADERS are sent.
+     */
+    static boolean isPeerInitiated(Http2StreamChannel ch) {
+        Http2FrameStream stream = ch.stream();
+        return stream != null && stream.id() > 0 && (stream.id() & 1) == 0;
     }
 
     private static <T> void copyAttribute(Channel from, Channel to, AttributeKey<T> key) {

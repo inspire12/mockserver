@@ -17,6 +17,7 @@ import static org.hamcrest.Matchers.*;
 public class HttpObjectAggregatorsTest {
 
     private static final int TEN_MIB = 10 * 1024 * 1024;
+    private static final int SIXTY_FOUR_MIB = 64 * 1024 * 1024;
 
     @Test
     public void shouldSizeTheComponentLimitToTheMaximumContentLength() {
@@ -26,6 +27,29 @@ public class HttpObjectAggregatorsTest {
         assertThat(HttpObjectAggregators.componentLimit(0), is(1024));
         assertThat(new StreamingAwareHttpObjectAggregator(TEN_MIB).maxCumulationBufferComponents(), is(10240));
         assertThat(HttpObjectAggregators.httpObjectAggregator(TEN_MIB).maxCumulationBufferComponents(), is(10240));
+    }
+
+    @Test
+    public void shouldSizeTheStreamComponentLimitToATenthOfTheConnectionLimit() {
+        assertThat(HttpObjectAggregators.streamComponentLimit(TEN_MIB), is(1024));
+        assertThat(HttpObjectAggregators.streamComponentLimit(50 * 1024 * 1024), is(5120));
+        assertThat(HttpObjectAggregators.streamComponentLimit(SIXTY_FOUR_MIB), is(6553));
+        assertThat(HttpObjectAggregators.streamComponentLimit(100 * 1024 * 1024), is(10240));
+        assertThat(HttpObjectAggregators.streamComponentLimit(Integer.MAX_VALUE), is(209715));
+        assertThat(HttpObjectAggregators.streamComponentLimit(64 * 1024), is(1024));
+        assertThat(HttpObjectAggregators.streamComponentLimit(0), is(1024));
+        assertThat(HttpObjectAggregators.streamHttpObjectAggregator(TEN_MIB).maxCumulationBufferComponents(), is(1024));
+        assertThat(HttpObjectAggregators.streamHttpObjectAggregator(SIXTY_FOUR_MIB).maxCumulationBufferComponents(), is(6553));
+        assertThat(HttpObjectAggregators.streamHttpObjectAggregator(SIXTY_FOUR_MIB).maxContentLength(), is(SIXTY_FOUR_MIB));
+    }
+
+    @Test
+    public void shouldHoldAFullBodyOfSixteenKibChunksWithinTheStreamComponentLimit() {
+        // 16 KiB is HTTP/2's default maximum DATA frame size; a full body of them must never be copied
+        for (int maxContentLength : new int[]{64 * 1024, TEN_MIB, 50 * 1024 * 1024, SIXTY_FOUR_MIB, 1024 * 1024 * 1024, Integer.MAX_VALUE}) {
+            int frames = (int) ((maxContentLength + (16L * 1024) - 1) / (16 * 1024));
+            assertThat("max " + maxContentLength, frames, lessThanOrEqualTo(HttpObjectAggregators.streamComponentLimit(maxContentLength)));
+        }
     }
 
     @Test

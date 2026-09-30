@@ -639,6 +639,14 @@ bidi-streaming) work over HTTP/3, matching the TCP (HTTP/1.1 and HTTP/2) path.
   `maxRequestBodySize` (default 10 MiB), matching the HTTP/1.1 and HTTP/2 paths;
   a request exceeding the cap is rejected (413 / stream shutdown) rather than
   buffered unboundedly.
+- **Request body components**: a body arrives in pieces of about one QUIC packet, so after its
+  first 64 pieces the accumulator copies pieces under 16 KiB into 16 KiB blocks
+  (`Http3RequestBridge.accumulateBody`) and keeps at most
+  `HttpObjectAggregators.streamComponentLimit(maxRequestBodySize)` components (1,024 by default;
+  `Http3RequestBridge.limitComponents`); see
+  [memory-management.md → Direct-memory limit](memory-management.md#direct-memory-limit).
+- **Request trailers**: a HEADERS frame after the request's first is its trailers; it is ignored,
+  as request trailers are on HTTP/1.1 and HTTP/2, and the request and body already received are kept.
 - **QUIC transport parameters**: transport parameters (`maxIdleTimeout`,
   `initialMaxData`, `initialMaxStreamDataBidirectional`, `initialMaxStreamsBidirectional`)
   and the QPACK dynamic table capacity are now configurable via `Configuration` /

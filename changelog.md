@@ -129,7 +129,14 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   closed sees it drop, and the log says `direct memory limit (io.netty.maxDirectMemory) reached`. Set
   `-XX:MaxDirectMemorySize` or `-Dio.netty.maxDirectMemory` to choose your own limit; MockServer leaves
   either as set. Aggregating a large body of ordinary-sized chunks no longer briefly needs twice its size
-  in off-heap memory. Embedded use (`ClientAndServer`, the JUnit and Spring integrations) is unchanged.
+  in off-heap memory. Over HTTP/2 and HTTP/3 each request stream may hold a tenth as many body pieces as
+  an HTTP/1.1 connection (at least 1,024), so a client sending tiny frames on 100 streams at once pins at
+  most about 11 MB of heap on one connection at the default `maxRequestBodySize`; an HTTP/2 body in the
+  usual 16 KiB frames is not copied at any `maxRequestBodySize`, and an HTTP/3 upload, which arrives in
+  packet-sized pieces, is copied about once instead of repeatedly as it arrives. An HTTP/2 upstream that
+  MockServer forwards to may now open only one stream of its own at a time, and that stream gets the same
+  per-stream limit. Embedded use
+  (`ClientAndServer`, the JUnit and Spring integrations) is unchanged.
 
 - **Behaviour change: idle client connections are now closed after 5 minutes by default** (`inboundConnectionIdleTimeoutMillis`); set it to `0` to restore the previous behaviour. Only a connection that has sent and received nothing for the whole timeout with nothing in progress is closed: one waiting for a delayed or breakpoint-paused response, streaming a response (SSE, chunked, gRPC), carrying an open HTTP/2 stream, or used as a WebSocket, CONNECT/SOCKS tunnel or raw binary proxy is never closed by it. Mainstream HTTP clients reconnect transparently; in rare cases a request sent at the exact moment of closure may need a retry.
 - `mock_server_evicted_log_entries_total` now counts evicted log entries rather than eviction
@@ -196,6 +203,10 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   A decompression handler left in the WebSocket pipeline kept requesting reads, so later frames were
   still read, and could be parked or processed, while the first frame waited for its decision.
 
+- **An HTTP/3 request that ends with trailers is no longer mangled.** The trailers were taken for a new
+  request's headers, so the request reached matching with no method or path and an empty body, and the
+  body already received was leaked. Trailers are now ignored, as request trailers already are over HTTP/1.1
+  and HTTP/2.
 - **arm64 Docker images now carry the arm64 native TLS library.** The Dockerfiles defaulted the target
   architecture to amd64, and that default overrode the one Docker supplies, so an arm64 build copied the
   x86_64 build of `netty-tcnative` into `/usr/lib`. This affects the published arm64 `-graaljs` and

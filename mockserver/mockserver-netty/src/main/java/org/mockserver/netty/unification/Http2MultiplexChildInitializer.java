@@ -277,7 +277,7 @@ public class Http2MultiplexChildInitializer extends ChannelInitializer<Http2Stre
         // channel attribute, where NettyHttpToMockServerHttpRequestDecoder reads it back (ctx.channel()).
         pipeline.addLast(new PreserveHeadersNettyRemoves());
         pipeline.addLast(new HttpContentDecompressor());
-        pipeline.addLast(HttpObjectAggregators.httpObjectAggregator(configuration.maxRequestBodySize()));
+        pipeline.addLast(HttpObjectAggregators.streamHttpObjectAggregator(configuration.maxRequestBodySize()));
 
         // Downstream chain -- identical to the existing switchToHttp2/switchToH2c post-adapter chain
         pipeline.addLast(callbackWebSocketServerHandler);

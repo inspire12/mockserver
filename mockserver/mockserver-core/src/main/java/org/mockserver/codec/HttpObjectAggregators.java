@@ -10,6 +10,7 @@ public final class HttpObjectAggregators {
 
     static final int MIN_COMPONENTS = 1024;
     static final int AVERAGE_CHUNK_BYTES = 1024;
+    static final int STREAM_DIVISOR = 10;
 
     private HttpObjectAggregators() {
         // utility class
@@ -38,5 +39,31 @@ public final class HttpObjectAggregators {
 
     public static int componentLimit(int maxContentLength) {
         return Math.max(MIN_COMPONENTS, maxContentLength / AVERAGE_CHUNK_BYTES);
+    }
+
+    /**
+     * An {@link HttpObjectAggregator} for one stream of an HTTP/2 connection, limited to
+     * {@link #streamComponentLimit(int)} components.
+     */
+    public static HttpObjectAggregator streamHttpObjectAggregator(int maxContentLength) {
+        return limitStreamComponents(new HttpObjectAggregator(maxContentLength));
+    }
+
+    /**
+     * Sets {@link #streamComponentLimit(int)} for an aggregator on one stream of a multiplexed connection. Must be
+     * called before the aggregator is added to a pipeline.
+     */
+    public static <T extends MessageAggregator<?, ?, ?, ?>> T limitStreamComponents(T aggregator) {
+        aggregator.setMaxCumulationBufferComponents(streamComponentLimit(aggregator.maxContentLength()));
+        return aggregator;
+    }
+
+    /**
+     * The component limit for one inbound stream of an HTTP/2 or HTTP/3 connection, which by default carries up to
+     * 100 concurrent streams: {@link #componentLimit(int)} / 10, never below Netty's default. The divisor must stay
+     * under 16 so a full body in 16 KiB DATA frames (HTTP/2's default maximum) still fits without a copy.
+     */
+    public static int streamComponentLimit(int maxContentLength) {
+        return Math.max(MIN_COMPONENTS, componentLimit(maxContentLength) / STREAM_DIVISOR);
     }
 }

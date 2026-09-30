@@ -232,12 +232,7 @@ public class HttpClientInitializer extends ChannelInitializer<SocketChannel> {
 
         int maxFrameSize = configuration != null ? configuration.maxResponseBodySize() : org.mockserver.configuration.ConfigurationProperties.maxResponseBodySize();
         Http2FrameCodecBuilder frameCodecBuilder = Http2FrameCodecBuilder.forClient()
-            .initialSettings(Http2Settings.defaultSettings()
-                // We are a client: never accept server push.
-                .pushEnabled(false)
-                .maxFrameSize(maxFrameSize < Http2CodecUtil.MAX_FRAME_SIZE_LOWER_BOUND
-                    ? Http2CodecUtil.MAX_FRAME_SIZE_LOWER_BOUND
-                    : Math.min(maxFrameSize, Http2CodecUtil.MAX_FRAME_SIZE_UPPER_BOUND)));
+            .initialSettings(forwardClientSettings(maxFrameSize));
         if (mockServerLogger.isEnabledForInstance(TRACE)) {
             frameCodecBuilder.frameLogger(new Http2FrameLogger(LogLevel.TRACE, HttpClientHandler.class.getName()));
         }
@@ -256,6 +251,19 @@ public class HttpClientInitializer extends ChannelInitializer<SocketChannel> {
         // ALPN already proved HTTP/2; the frame codec consumes SETTINGS, so complete immediately.
         recordForwardUpstreamProtocol(pipeline, "http2");
         protocolFuture.complete(Protocol.HTTP_2);
+    }
+
+    /**
+     * We are a client, so never accept server push. The upstream may open one stream of its own at a time: a legacy
+     * server answers on one, and every stream it opens gets its own response aggregator.
+     */
+    static Http2Settings forwardClientSettings(int maxFrameSize) {
+        return Http2Settings.defaultSettings()
+            .pushEnabled(false)
+            .maxConcurrentStreams(1)
+            .maxFrameSize(maxFrameSize < Http2CodecUtil.MAX_FRAME_SIZE_LOWER_BOUND
+                ? Http2CodecUtil.MAX_FRAME_SIZE_LOWER_BOUND
+                : Math.min(maxFrameSize, Http2CodecUtil.MAX_FRAME_SIZE_UPPER_BOUND));
     }
 
     /**

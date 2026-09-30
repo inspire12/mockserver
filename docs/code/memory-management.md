@@ -169,10 +169,42 @@ about twice its size: a 49 MiB forward failed at a 64 MiB cap and fits now
 110 bytes of heap, and a client can send one-byte chunks: unbounded, 1.5 million of them (9 MB on the wire)
 pinned 163 MB of heap. A body whose chunks average under 1 KiB is still consolidated each time it reaches the limit
 (`HttpObjectAggregatorsTest`). The worst case this leaves is the component heap itself: about 1.1 MB per
-HTTP/1.1 connection at the 10 MiB `maxRequestBodySize` (10,240 components × ~110 B), and per stream on
-HTTP/2, so ~110 MB for one HTTP/2 connection with 100 concurrent streams. Bounding that further depends on
-the connection cap (`maxInboundConnections`, off by default — see [Connection Memory](#connection-memory)) or a lower limit for HTTP/2 stream children. This covers HTTP/1.1 and the HTTP/2 stream children, whose DATA frames become
-the same chunks; the HTTP/3 request accumulator uses the same limit. Two places still copy as they grow:
+HTTP/1.1 connection at the 10 MiB `maxRequestBodySize` (10,240 components × ~110 B).
+
+**HTTP/2 and HTTP/3 request streams** get a tenth of that limit, never below 1,024
+(`HttpObjectAggregators.streamComponentLimit`: 1,024 at the 10 MiB default, 6,553 at 64 MiB), because one
+connection carries up to 100 concurrent streams (`HTTP2_MAX_CONCURRENT_STREAMS`; for HTTP/3,
+`http3InitialMaxStreamsBidirectional`, default 100). A connection's worst case is therefore about 11 MB
+(100 × 1,024 × ~110 B) on either protocol at the default, instead of ~110 MB; above 10 MiB it is
+100 × `maxRequestBodySize` / 10 KiB × ~110 B, ten times the HTTP/1.1 figure. The total grows with the number
+of connections, which only `maxInboundConnections` caps (off by default — see [Connection Memory](#connection-memory)).
+
+- **HTTP/2** — each DATA frame becomes one component. The divisor stays below 16, so a full body in
+  16 KiB frames (HTTP/2's default maximum frame size) fits without a copy at any `maxRequestBodySize`: 4,096
+  frames at 64 MiB stay 4,096 components (`Http2StreamComponentLimitTest`). Frames averaging under about
+  10 KiB are consolidated when they reach the limit; a 10 MiB body in 8 KiB frames is copied once.
+- **HTTP/3** — Netty hands a request body over in pieces of about one QUIC packet (about 1.1 KiB on
+  loopback) whatever DATA frame size the client sent, so one component per piece would reach the limit at
+  about 1.1 MiB, and `CompositeByteBuf`'s own consolidation copies the whole body each time it does (about
+  four times an 8 MiB body in total). Instead
+  `Http3RequestBridge.accumulateBody` keeps the first 64 pieces as they are, then copies each piece under
+  16 KiB into 16 KiB blocks and keeps larger pieces as they are, so each byte is copied at most once and a
+  body of tiny pieces needs one component per 16 KiB. Only pieces alternating between tiny and 16 KiB or more
+  still reach the limit; `limitComponents` then merges the components added since its last merge. Measured
+  at the default (`Http3BodyComponentLimitTest`, bytes allocated for copies, unused block space included):
+  1.0× the body for an 8 MiB upload in 1,156-byte pieces and for 10 MiB of one-byte pieces, 1.7× for 10 MiB
+  alternating one byte and 16 KiB. That last pattern also keeps up to one partly used 16 KiB block per large
+  piece, so it can hold about twice its size. A body of fewer than 64 pieces, or of pieces of 16 KiB or more,
+  is not copied.
+- **Forward client** — its own request stream keeps the HTTP/1.1 limit, because a forward connection carries
+  one request at a time (a pooled connection returns to the pool only when its stream ends). The upstream
+  can also open streams of its own (a server that answers on a new stream, as MockServer's older HTTP/2 server
+  did), and each gets a response aggregator. The client advertises `SETTINGS_MAX_CONCURRENT_STREAMS` 1, so the
+  upstream can open only one at a time, and it gets the per-stream limit
+  (`Http2ForwardStreamChildInitializer.isPeerInitiated`): a forward connection holds at most one full-limit
+  aggregator and one per-stream one (`Http2ForwardStreamComponentLimitTest`).
+
+Two places still copy as they grow:
 the relay's HTTP/2 legs, where Netty's `InboundHttp2ToHttpAdapter` writes DATA frames into one growing
 buffer, and `ByteToMessageDecoder` cumulation, which stays small because the HTTP decoder consumes it as it reads.
 

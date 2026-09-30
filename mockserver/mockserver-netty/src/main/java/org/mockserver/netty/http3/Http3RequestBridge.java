@@ -322,14 +322,52 @@ public final class Http3RequestBridge {
         return new DefaultHttp3DataFrame(Unpooled.wrappedBuffer(bodyBytes));
     }
 
+    static final int BLOCK_BYTES = 16 * 1024;
+    static final int COALESCE_AFTER_COMPONENTS = 64;
+
     /**
-     * Accumulate body data from an HTTP/3 data frame into a composite buffer.
+     * Accumulate body data from an HTTP/3 data frame into a composite buffer. HTTP/3 hands a body over in pieces of
+     * about one QUIC packet (1.1 KiB) whatever DATA frame size the client sent, so once the body has 64 components,
+     * pieces under 16 KiB are copied into 16 KiB blocks rather than kept one component each: each byte is copied at
+     * most once, and a body of one-byte pieces needs one component per 16 KiB.
      */
     public static void accumulateBody(CompositeByteBuf composite, Http3DataFrame dataFrame) {
         ByteBuf content = dataFrame.content();
-        if (content.isReadable()) {
+        int length = content.readableBytes();
+        if (length == 0) {
+            return;
+        }
+        if (length < BLOCK_BYTES && composite.numComponents() >= COALESCE_AFTER_COMPONENTS) {
+            if (composite.writableBytes() < length) {
+                composite.capacity(composite.capacity() + BLOCK_BYTES);
+            }
+            composite.writeBytes(content, content.readerIndex(), length);
+        } else {
+            // a new component starts at the composite's capacity, so drop the unwritten end of the last block first
+            composite.capacity(composite.writerIndex());
             composite.addComponent(true, content.retain());
         }
+    }
+
+    /**
+     * Keeps {@code composite} under {@code componentLimit} components when {@link #accumulateBody} alone does not,
+     * which takes pieces alternating between small and 16 KiB or more. {@link CompositeByteBuf}'s own consolidation
+     * copies the whole body each time; this copies only the components after the leading {@code merged} ones into one.
+     * The whole-body copy once half the limit is merged blocks is reachable only with no {@code maxRequestBodySize}.
+     *
+     * @return how many leading components are now merged blocks, to pass back on the next call
+     */
+    public static int limitComponents(CompositeByteBuf composite, int componentLimit, int merged) {
+        int components = composite.numComponents();
+        if (components < componentLimit) {
+            return merged;
+        }
+        if (merged >= componentLimit / 2) {
+            composite.consolidate();
+            return 1;
+        }
+        composite.consolidate(merged, components - merged);
+        return merged + 1;
     }
 
     /**
