@@ -35,8 +35,9 @@ K6_DIR="$REPO_ROOT/mockserver-performance-test/k6"
 HOST_CORES="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 0)"
 
 # Own ladder, not the published one: split over N processes the client knee moves up, so it
-# keeps the published rungs to 48k (comparable rung for rung) and continues past 64k.
-RATES="${PERF_RW_RATES:-500,1000,2000,4000,8000,16000,24000,32000,36000,40000,44000,48000,56000,64000,72000,80000,96000}"
+# keeps the published rungs to 48k (comparable rung for rung) and continues past the SUT's
+# projected CPU ceiling (docs/code/performance-measurement.md, "Ladder").
+RATES="${PERF_RW_RATES:-500,1000,2000,4000,8000,16000,24000,32000,36000,40000,44000,48000,56000,64000,72000,80000,96000,112000,128000}"
 SWEEP_STEP="${PERF_RW_STEP:-15s}"
 SWEEP_GAP="${PERF_RW_GAP:-5s}"
 SETTLE_S="${PERF_RW_SETTLE_S:-3}"
@@ -64,11 +65,21 @@ if [ -n "${PERF_RW_TEST_NULL_RUNG:-}" ]; then
     *) echo ":x: PERF_RW_TEST_NULL_RUNG='$PERF_RW_TEST_NULL_RUNG' is not a rung of PERF_RW_RATES ($RATES)" >&2; exit 2 ;;
   esac
 fi
+case "${PERF_RW_TEST_ZERO_TAIL:-}" in
+  ""|true) ;;
+  *) echo ":x: PERF_RW_TEST_ZERO_TAIL='$PERF_RW_TEST_ZERO_TAIL' must be empty or true" >&2; exit 2 ;;
+esac
 if [ -n "${PERF_RW_TEST_FAIL_STEP:-}" ]; then
   case " $SOFT_STEPS " in
     *" $PERF_RW_TEST_FAIL_STEP "*) ;;
     *) echo ":x: PERF_RW_TEST_FAIL_STEP='$PERF_RW_TEST_FAIL_STEP' is not a step; valid: $SOFT_STEPS" >&2; exit 2 ;;
   esac
+fi
+
+# The healthy ceiling's p99 bound (ms), applied to this arm only.
+P99_MAX_MS="${PERF_RW_P99_MAX_MS:-10}"
+if ! [[ "$P99_MAX_MS" =~ ^[0-9]+(\.[0-9]+)?$ ]] || ! awk -v v="$P99_MAX_MS" 'BEGIN{exit !(v+0 > 0)}'; then
+  echo ":x: PERF_RW_P99_MAX_MS='$P99_MAX_MS' must be a number of milliseconds above 0" >&2; exit 2
 fi
 
 # Rig-validity tunables — the same names and defaults perf-test-run.sh passes to
@@ -105,11 +116,13 @@ TARGET_URL="${PERF_RW_TARGET_URL:-}"
 SUT_CONTAINER="${PERF_RW_SUT_CONTAINER:-}"
 
 # Placement. The c5.12xlarge rig has 48 logical cpus, siblings at N and N+24: SUT on
-# physical cores 0-5 (siblings idle), Prometheus on 23, four k6 processes on four
-# physical cores each (both hyperthreads). Smaller hosts get a proportional layout.
+# physical cores 0-5 (siblings idle), perf-test-run.sh's upstream on 6, Prometheus on 23,
+# and eight k6 processes on two physical cores each (both hyperthreads) across 7-22, which
+# is every core left. Smaller hosts get a proportional layout.
 if [ "$HOST_CORES" -ge 48 ]; then
   DEF_SERVER="0-5"; DEF_PROM="23,47"
-  DEF_K6="7-10,31-34;11-14,35-38;15-18,39-42;19-22,43-46"
+  DEF_K6=""
+  for ((c=7; c<=21; c+=2)); do DEF_K6="${DEF_K6:+$DEF_K6;}$c-$((c+1)),$((c+24))-$((c+25))"; done
 else
   DEF_SERVER="0-3"; DEF_PROM="4"
   _n="${PERF_RW_PROCS:-3}"; _avail=$(( HOST_CORES - 6 )); _w=$(( _avail / _n )); [ "$_w" -lt 1 ] && _w=1
@@ -121,6 +134,8 @@ else
 fi
 SERVER_CPUS="${PERF_RW_SERVER_CPUS:-$DEF_SERVER}"
 PROM_CPUS="${PERF_RW_PROM_CPUS:-$DEF_PROM}"
+# Another container left running on the host (perf-test-run.sh's upstream), proven disjoint too.
+UPSTREAM_CPUS="${PERF_RW_UPSTREAM_CPUS:-}"
 IFS=';' read -ra K6_SETS <<< "${PERF_RW_K6_CPUSETS:-$DEF_K6}"
 N="${PERF_RW_PROCS:-${#K6_SETS[@]}}"
 if [ "$N" -lt 1 ] || [ "$N" -gt "${#K6_SETS[@]}" ]; then
@@ -178,12 +193,12 @@ write_fallback_result() { # rc failed_command
   [ -s "$merged" ] || merged=/dev/null
   fallback_json() { # merged_file
     jq -n --arg err "$err" --argjson n "${N:-0}" --slurpfile merged "$1" \
-      --arg hook_cut "${PERF_RW_TEST_CUT_FAULT:-}" --arg hook_step "${PERF_RW_TEST_FAIL_STEP:-}" --arg hook_null "${PERF_RW_TEST_NULL_RUNG:-}" '
+      --arg hook_cut "${PERF_RW_TEST_CUT_FAULT:-}" --arg hook_step "${PERF_RW_TEST_FAIL_STEP:-}" --arg hook_null "${PERF_RW_TEST_NULL_RUNG:-}" --arg hook_zero "${PERF_RW_TEST_ZERO_TAIL:-}" '
       {attempted:true, valid:false, headline:null,
        invalid_reasons:["rw_harness_completed: the harness aborted before assembling its result (\($err))"],
        validity:{valid:false, checks:[{name:"rw_harness_completed", ok:false, detail:$err}]},
        method:{method:"remote_write_multi_k6", procs:$n,
-               test_hooks:({cut_fault:$hook_cut, fail_step:$hook_step, null_rung:$hook_null} | with_entries(select(.value != "")))},
+               test_hooks:({cut_fault:$hook_cut, fail_step:$hook_step, null_rung:$hook_null, zero_tail:$hook_zero} | with_entries(select(.value != "")))},
        main_merged:($merged[0] // null)}'
   }
   # An unreadable merged file must not leave the output empty: retry without it.
@@ -227,13 +242,14 @@ die() { LAST_ERR="$1"; echo ":x: $1" >&2; exit 1; } # a deliberate stop the fall
 proc_start() { ps -o lstart= -p "$1" 2>/dev/null | awk '{$1=$1; print}'; } # "" if gone or unsupported
 record_pid() { echo "$1 $(proc_start "$1")" >> "$WORK/pids.txt"; }
 
-echo "--- item 31 remote-write multi-k6 sweep: N=$N rates=$RATES step=$SWEEP_STEP gap=$SWEEP_GAP settle=${SETTLE_S}s push=${PUSH_S}s quiet=${QUIET_S}s window=$WINDOW_MODE server=$SERVER_CPUS prometheus=$PROM_CPUS k6=${K6_SETS[*]} target=${TARGET_URL:-<launch SUT>} degrade=${DEGRADE:-none}" >&2
+echo "--- item 31 remote-write multi-k6 sweep: N=$N rates=$RATES step=$SWEEP_STEP gap=$SWEEP_GAP settle=${SETTLE_S}s push=${PUSH_S}s quiet=${QUIET_S}s window=$WINDOW_MODE server=$SERVER_CPUS prometheus=$PROM_CPUS upstream=${UPSTREAM_CPUS:-none} k6=${K6_SETS[*]} target=${TARGET_URL:-<launch SUT>} degrade=${DEGRADE:-none}" >&2
 
-# --- placement proof: SUT, Prometheus and every k6 on disjoint physical cores ---
+# --- placement proof: SUT, Prometheus, upstream and every k6 on disjoint physical cores ---
 PAIRS=(server "$SERVER_CPUS" prometheus "$PROM_CPUS")
+[ -n "$UPSTREAM_CPUS" ] && PAIRS+=(upstream "$UPSTREAM_CPUS")
 for ((i=0;i<N;i++)); do PAIRS+=("k6_$i" "${K6_SETS[$i]}"); done
 if ! cpusets_physically_disjoint "${PAIRS[@]}" >&2; then
-  die "SUT / Prometheus / k6 cpusets are not physically disjoint — refusing to measure contention"
+  die "SUT / Prometheus / upstream / k6 cpusets are not physically disjoint — refusing to measure contention"
 fi
 
 # --- container-side URLs: every host a k6 container resolves --------------------
@@ -513,11 +529,14 @@ merge_phase() {
     for ((i=0;i<n;i++)); do
       local proc="${phase}-p${i}" f="$WORK/${phase}-p${i}.json"
       local summ_count="null" start_ms="null" failed="null" dropped="null" pool="null" setup_late="null"
+      local stalls="null" stall_thr="null"
       if jq -e ".points[$k]" "$f" >/dev/null 2>&1; then
         summ_count="$(jq -r ".points[$k].sample_count // \"null\"" "$f")"
         start_ms="$(jq -r ".points[$k].start_epoch_ms // \"null\"" "$f")"
         failed="$(jq -r ".points[$k].failed_count // \"null\"" "$f")"
         dropped="$(jq -r ".points[$k].dropped_iterations // \"null\"" "$f")"
+        stalls="$(jq -r ".points[$k].stalls_post_settle // \"null\"" "$f")"
+        stall_thr="$(jq -r ".points[$k].stall_ms_threshold // \"null\"" "$f")"
         pool="$(jq -r ".vus_diagnostics.pool_per_rung[\"$r\"] // \"null\"" "$f")"
         setup_late="$(jq -r 'if .wallclock.start_at_ms and .wallclock.setup_end_ms then (.wallclock.setup_end_ms - .wallclock.start_at_ms) else "null" end' "$f")"
       fi
@@ -557,9 +576,11 @@ merge_phase() {
         --argjson hc "$prom_hist_count" --argjson st "$start_ms" --argjson fl "$failed" --argjson dr "$dropped" \
         --argjson pool "$pool" --argjson b "$boundary_s" --argjson cut "$cut_s" --argjson tol "$ACCOUNT_TOL" \
         --argjson sl "$setup_late" --argjson cx "$cut_excess" --argjson rate "$r" \
+        --argjson stalls "$stalls" --argjson sthr "$stall_thr" \
         --argjson push "$PUSH_S" --argjson wtol "$WINDOW_TOL" --arg wmode "$wmode" '
         . + [{proc:$proc, summary_count:$sc, prometheus_count:$pc, prometheus_histogram_count:$hc,
               rung_start_epoch_ms:$st, failed_count:$fl, dropped_iterations:$dr, pool:$pool,
+              stalls_post_settle:$stalls, stall_ms_threshold:$sthr,
               drop_fraction:(if $dr == null or $sc == null or ($dr + $sc) == 0 then null else (($dr / ($dr + $sc)) * 100000 | round) / 100000 end),
               setup_end_minus_start_at_ms:$sl,
               settle_boundary_s:$b, settle_cut_s:$cut,
@@ -593,9 +614,11 @@ merge_phase() {
       vals="$(jq -c --arg q "$q" --argjson v "$(promv "histogram_quantile($q, ${s_expr}) * 1000")" '. + {($q):$v}' <<<"$vals")"
       vals="$(jq -c --arg q "full_$q" --argjson v "$(promv "histogram_quantile($q, ${a_expr}) * 1000")" '. + {($q):$v}' <<<"$vals")"
     done
-    local a_count s_count vus_p95="null" vus_max="null"
+    local a_count s_count vus_p95="null" vus_max="null" over5
     a_count="$(promv "histogram_count(${a_expr})")"
     s_count="$(promv "histogram_count(${s_expr})")"
+    # Client-side share over 5 ms from the same merged steady histogram as the percentiles.
+    over5="$(promv "1 - histogram_fraction(0, 0.005, ${s_expr})")"
     if [ "$VU_DIAGNOSTICS" = true ]; then
       # Occupancy is per process (each has its own pool), so take the busiest process.
       vus_p95="$(nn "$(promq "histogram_quantile(0.95, sum by (proc) (k6_sweep_vus_active{${sel}}))" | jq -r '[.[].value[1]|tonumber] | max // "null"' || true)")"
@@ -604,7 +627,7 @@ merge_phase() {
     rungs_json="$(jq -c --argjson agg "${agg_arr[$k]}" --argjson r "$r" --argjson n "$n" --argjson procs "$procs_json" \
       --argjson v "$vals" --argjson ac "$a_count" --argjson sc "$s_count" --argjson bc "${b_count:-null}" \
       --argjson step "$STEP_S" --argjson vp95 "$vus_p95" --argjson vmax "$vus_max" --argjson maxskew "$MAX_SKEW_MS" \
-      --argjson push "$PUSH_S" '
+      --argjson push "$PUSH_S" --argjson over5 "$over5" '
       def r3: if . == null then null else (. * 1000 | round) / 1000 end;
       ([ $procs[] | .rung_start_epoch_ms | select(. != null) ]) as $starts
       | ([ $procs[] | .summary_count // 0 ] | add) as $summ_total
@@ -621,6 +644,7 @@ merge_phase() {
           sample_count: $ac,
           measured_sample_count: $sc,
           settle_excluded: $bc,
+          client_over_5ms_frac: (if $over5 == null then null else ([$over5, 0] | max) * 100000 | round / 100000 end),
           full_rung_ms: {p50_ms: ($v["full_0.5"]|r3), p95_ms: ($v["full_0.95"]|r3),
                          p99_ms: ($v["full_0.99"]|r3), p999_ms: ($v["full_0.999"]|r3)},
           error_rate: (if $summ_total > 0 then (($failed / $summ_total) * 100000 | round) / 100000 else 0 end),
@@ -702,13 +726,20 @@ if [ -n "${PERF_RW_TEST_NULL_RUNG:-}" ]; then
     "$WORK/main-merged.json" > "$WORK/main-merged.tmp" && mv "$WORK/main-merged.tmp" "$WORK/main-merged.json"
 fi
 
+# Degrade hook: PERF_RW_TEST_ZERO_TAIL=true reports no client tail at every rung (the old
+# fabricated zero), which rw_client_tail_consistent must reject wherever p99 is over 5.5 ms.
+if [ "${PERF_RW_TEST_ZERO_TAIL:-}" = true ]; then
+  jq '.points |= map(.client_over_5ms_frac = 0)' "$WORK/main-merged.json" > "$WORK/main-merged.tmp" \
+    && mv "$WORK/main-merged.tmp" "$WORK/main-merged.json"
+fi
+
 # --- assemble the sweep.json-shaped result --------------------------------------
 MAIN_META="$WORK/main-meta.json"
 build_sweep_json() {
 jq --argjson settle "$SETTLE_S" --argjson step "$STEP_S" --arg w "$WINDOW_MODE" '
   {proto:"http",
    latency_window:{settle_s:$settle, measured_s:($step-$settle), mode:$w, cut:"prometheus"},
-   points:[ .points[] | del(.per_process, .nominal_agg_offered_rps, .per_process_pool, .start_skew_ms, .skew_ok, .accounting_ok, .settle_cut_ok, .cut_excess_ok, .cut_measured) ],
+   points:[ .points[] | del(.per_process, .nominal_agg_offered_rps, .per_process_pool, .start_skew_ms, .skew_ok, .accounting_ok, .settle_cut_ok, .cut_excess_ok, .cut_measured, .client_over_5ms_frac) ],
    vus_diagnostics:{pool_per_rung:(reduce .points[] as $p ({}; . + {($p.offered_rps|tostring): $p.per_process_pool})),
                     note:"pool_per_rung is PER PROCESS, keyed by the aggregate offered rate; vus_active_p95 is the busiest process"}}
 ' "$WORK/main-merged.json"
@@ -728,18 +759,29 @@ K6_PIN_PCT=$(( K6_CORES * 100 ))
 K6_PHYS_CORES="$(phys_core_count "${K6_SETS[0]}")"; K6_PHYS_CORES="${K6_PHYS_CORES:-null}"
 PINS=""
 for ((i=0;i<N;i++)); do PINS="${PINS:+$PINS }${K6_PREFIX}-main-p${i}=$(( $(cpu_count "${K6_SETS[$i]}") * 100 ))"; done
-{ echo "ts,cpu_pct"
-  awk -v pins="$PINS" -v ref="$K6_PIN_PCT" '
-    BEGIN{ n=split(pins, a, " "); for(i=1;i<=n;i++){ split(a[i], kv, "="); pin[kv[1]]=kv[2] } }
-    ($2 in pin) && $3 != "" { v=$3*ref/pin[$2]; if(!($1 in m) || v>m[$1]) m[$1]=v }
-    END{ for(t in m) printf "%s,%.2f\n", t, m[t] }' "$WORK/main-cpu.csv" | sort -n
-} > "$WORK/main-k6-cpu.csv"
 # shellcheck disable=SC2034  # read by derive_saturation
 SWEEP_RATES="$(jq -r '[.points[].offered_rps] | join(",")' "$WORK/sweep.json")"
+RUNG_COUNT="$(jq '.points | length' "$WORK/sweep.json")"
 # CPU windows start from the earliest MEASURED rung-0 start, not the requested instant.
 T0_S="$(jq -r '[(.points[0].per_process // [])[] | .rung_start_epoch_ms | select(. != null)]
   | if length == 0 then "null" else (min / 1000 | floor) end' "$WORK/main-merged.json")"
 [ "$T0_S" = null ] && T0_S="$(jq -r '.start_at_s' "$MAIN_META")"
+# The worst process is the highest per-process MEAN over each rung's steady window (the window
+# derive_saturation reads, from T0_S, as sweep.json carries no rung starts), written to every
+# sample in that window; a per-sample max across N noisy readings overstates every process's
+# mean, more so as N grows. Outside a window: that max. derive_saturation's k6_cpu_pct_max
+# therefore equals the mean here; per_process[].per_rung[].cpu_pct_max holds the real maxima.
+{ echo "ts,cpu_pct"
+  awk -v pins="$PINS" -v ref="$K6_PIN_PCT" -v t0="$T0_S" -v step="$STEP_S" -v gap="$GAP_S" \
+      -v settle="$SETTLE_S" -v rungs="$RUNG_COUNT" '
+    function rung(t,  i, rs) { if (t < t0) return -1; i = int((t - t0) / (step + gap)); if (i >= rungs) return -1
+                               rs = t0 + i * (step + gap); return (t >= rs + settle && t < rs + step) ? i : -1 }
+    BEGIN{ n=split(pins, a, " "); for(i=1;i<=n;i++){ split(a[i], kv, "="); pin[kv[1]]=kv[2] } }
+    ($2 in pin) && $3 != "" { v=$3*ref/pin[$2]; if(!($1 in m) || v>m[$1]) m[$1]=v
+                              k=rung($1+0); if (k >= 0) { s[k, $2]+=v; c[k, $2]++ } }
+    END{ for (key in s) { split(key, kk, SUBSEP); mean=s[key]/c[key]; if (!(kk[1] in w) || mean > w[kk[1]]) w[kk[1]]=mean }
+         for (t in m) { k=rung(t+0); printf "%s,%.2f\n", t, ((k >= 0) && (k in w)) ? w[k] : m[t] } }' "$WORK/main-cpu.csv" | sort -t, -k1,1n
+} > "$WORK/main-k6-cpu.csv"
 # The SUT's sampled CPU turns on derive_saturation's server-headroom test (a short rung with
 # the server under 85% of its pin is client-limited). Off when the SUT's pin is unknown: an
 # external target without an explicit PERF_RW_SERVER_CPUS.
@@ -757,7 +799,6 @@ fi
 soft_capture SATURATION_JSON '{"ladder":[],"rig_valid_peak_achieved_rps":null,"saturation_rps":null}' saturation \
   derive_saturation "$WORK/sweep.json" "$WORK/main-k6-cpu.csv" "$T0_S" "$SUT_CPU_LOG"
 # derive_saturation reads a rung with no CPU sample as 0% (headroom), so count them here.
-RUNG_COUNT="$(jq '.points | length' "$WORK/sweep.json")"
 CPU_SAMPLES="[]"
 for ((k=0;k<RUNG_COUNT;k++)); do
   ws=$(( T0_S + k * (STEP_S + GAP_S) + SETTLE_S )); we=$(( T0_S + k * (STEP_S + GAP_S) + STEP_S ))
@@ -769,8 +810,10 @@ NOW_ISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 SYNTH="$(jq -nc --slurpfile s "$WORK/sweep.json" --argjson sat "$SATURATION_JSON" --arg ts "$NOW_ISO" \
   --argjson scpus "$(cpu_count "$SERVER_CPUS")" '
   {schema_version:2, timestamp_utc:$ts, config:{}, agent:{server_cpus:$scpus}, sweep:$s[0], saturation:$sat}')"
+# This arm alone adds the p99 bound (P99_MAX_MS, validated at startup); every other caller of
+# the filter stays p50-only (docs/code/performance-measurement.md, "The multi-k6 arm's p99 bound").
 headline_of() { jq -c --arg now "$NOW_ISO" --argjson lat_mult 3 --argjson keep "$KEEP" --arg fix_date "2026-09-16" \
-  -f "$FIGURES_JQ" <<<"$SYNTH" | jq -c '.headline'; }
+  --argjson p99_max_ms "$P99_MAX_MS" -f "$FIGURES_JQ" <<<"$SYNTH" | jq -c '.headline'; }
 soft_capture HEADLINE null headline headline_of
 
 # --- per-process, CPU and Prometheus cost ---------------------------------------
@@ -779,9 +822,12 @@ cpu_stats() { # csv name from_s to_s -> {mean,max,samples}
     END{ if(c) printf "{\"mean\":%.1f,\"max\":%.1f,\"samples\":%d}", s/c, m, c; else printf "{\"mean\":null,\"max\":null,\"samples\":0}" }' "$1"
 }
 L0="$(jq -r '.start_at_s' "$MAIN_META")"; L1="$(jq -r '.ladder_end_s' "$MAIN_META")"
+# cpu_frac_of_logical_pin divides by every logical cpu in the pin; cpu_frac_of_ceiling divides the
+# pin-scaled mean by derive_saturation's hyperthread-adjusted ceiling, the figure its k6 CPU test uses.
 build_per_process() {
-  local MAIN_COST PER_PROCESS="[]" c pin per_rung ws we i k
+  local MAIN_COST PER_PROCESS="[]" c pin per_rung ws we i k ceiling
   MAIN_COST="$(cpu_cost_json main)"
+  ceiling="$(jq -r '.client_cpu_ceiling_pct // "null"' <<<"$SATURATION_JSON")"
   for ((i=0;i<N;i++)); do
     c="${K6_PREFIX}-main-p${i}"
     pin=$(( $(cpu_count "${K6_SETS[$i]}") * 100 ))
@@ -789,15 +835,19 @@ build_per_process() {
     for ((k=0;k<RUNG_COUNT;k++)); do
       ws=$(( T0_S + k * (STEP_S + GAP_S) + SETTLE_S )); we=$(( T0_S + k * (STEP_S + GAP_S) + STEP_S ))
       per_rung="$(jq -c --argjson st "$(cpu_stats "$WORK/main-cpu.csv" "$c" "$ws" "$we")" --argjson pin "$pin" \
+        --argjson ref "$K6_PIN_PCT" --argjson ceil "$ceiling" \
         --argjson k "$k" --argjson i "$i" --slurpfile m "$WORK/main-merged.json" '
         . + [{offered_rps:$m[0].points[$k].offered_rps, cpu_pct_mean:$st.mean, cpu_pct_max:$st.max, cpu_samples:$st.samples,
-              cpu_frac_of_pin:(if $st.mean == null then null else (($st.mean / $pin) * 1000 | round) / 1000 end),
+              cpu_frac_of_logical_pin:(if $st.mean == null then null else (($st.mean / $pin) * 1000 | round) / 1000 end),
+              cpu_frac_of_ceiling:(if $st.mean == null or $ceil == null or $ceil <= 0 then null
+                                   else (($st.mean * $ref / $pin / $ceil) * 1000 | round) / 1000 end),
               drop_fraction:$m[0].points[$k].per_process[$i].drop_fraction}]' <<<"$per_rung")"
     done
     PER_PROCESS="$(jq -c --argjson i "$i" --arg set "${K6_SETS[$i]}" --argjson pin "$pin" --argjson per_rung "$per_rung" \
       --argjson cpu "$(cpu_stats "$WORK/main-cpu.csv" "$c" "$L0" "$L1")" --argjson cost "$MAIN_COST" \
+      --argjson ceil "$ceiling" \
       --argjson exit "$(jq ".exit_codes[$i] // null" "$MAIN_META")" --slurpfile s <(cat "$WORK/main-p${i}.json" 2>/dev/null || echo 'null') '
-      . + [{index:$i, cpuset:$set, pin_pct:$pin, exit_code:$exit,
+      . + [{index:$i, cpuset:$set, pin_pct:$pin, cpu_ceiling_pct:$ceil, exit_code:$exit,
             summary_present:($s[0] != null),
             cpu_pct_over_ladder:$cpu, cpu_us_per_request:$cost[$i].cpu_us_per_request, requests:$cost[$i].requests,
             setup_end_minus_start_at_ms:(if $s[0].wallclock.start_at_ms and $s[0].wallclock.setup_end_ms
@@ -871,6 +921,13 @@ build_cross() {
 if [ -n "$XRATES" ]; then
   soft_capture CROSS '{"attempted":true,"error":"cross-check assembly failed (see rw_assembly_steps_ok)"}' cross_check build_cross
 fi
+# cross_run is report-only (two separate runs), so it gates nothing, but it is not left silent.
+if [ "$(jq -r '.cross_run.agrees | if . == null then "null" else tostring end' <<<"$CROSS" 2>/dev/null)" = false ]; then
+  echo "WARNING: rw-multi-k6 cross_run (report-only, not a gate): the N-process ladder disagrees with the single-process cross-check run beyond the run-to-run tolerances ($(jq -c '.tolerances.cross_run' <<<"$CROSS" 2>/dev/null)); single vs multi per rung:" >&2
+  jq -r '(.cross_run.rungs // [])[] | select(.status != "no counterpart" and .ok != true)
+    | "    \(.offered_rps) rps [\(.status); outside: \([ (if .achieved_ratio.ok then empty else "achieved" end), (if .latency.p50.ok then empty else "p50" end), (if .latency.p95.ok then empty else "p95" end), (if .latency.p99.ok then empty else "p99" end) ] | join(","))]: achieved/offered \(.achieved_ratio.single) vs \(.achieved_ratio.multi); p50 \(.latency.p50.published) vs \(.latency.p50.remote_write) ms; p95 \(.latency.p95.published) vs \(.latency.p95.remote_write) ms; p99 \(.latency.p99.published) vs \(.latency.p99.remote_write) ms"' <<<"$CROSS" >&2 || true
+  [ "$(jq -r '.cross_run.compared // 0' <<<"$CROSS" 2>/dev/null)" != 0 ] || echo "    no rung had a single-process counterpart to compare" >&2
+fi
 
 # --- validity (fail closed) ---------------------------------------------------------
 VALIDITY="$(jq -nc --slurpfile m "$WORK/main-merged.json" --argjson pp "$PER_PROCESS" --arg wm "$WINDOW_MISMATCH" \
@@ -905,6 +962,11 @@ VALIDITY="$(jq -nc --slurpfile m "$WORK/main-merged.json" --argjson pp "$PER_PRO
       check("rw_cpu_sampled_every_rung"; all($cpusamples[]; . > 0);
         "no k6 CPU sample in the steady window of rung index(es) " + ([ range(0; $cpusamples|length) | select($cpusamples[.] == 0) | tostring ] | join(", "))),
       check("rw_window_accounts_every_request"; $wm == ""; $wm),
+      # A rung whose p99 is over 5 ms has at least 1% of requests over 5 ms; 5.5 / 0.005 leave
+      # room for the two interpolations disagreeing inside one native-histogram bucket.
+      check("rw_client_tail_consistent"; all($P[]; (.p99_ms == null) or (.p99_ms <= 5.5)
+                                                or ((.client_over_5ms_frac | type) == "number" and .client_over_5ms_frac > 0.005));
+        "p99 over 5.5 ms but no client share over 5 ms (<= 0.5% or missing) at " + ([ $P[] | select((.p99_ms != null) and (.p99_ms > 5.5) and (((.client_over_5ms_frac | type) == "number" and .client_over_5ms_frac > 0.005) | not)) | "\(.offered_rps): p99 \(.p99_ms) ms, client_over_5ms_frac \(.client_over_5ms_frac)" ] | join(", "))),
       check("rw_cross_check_same_requests"; (($cross.attempted | not) or ($cross.same_requests.equivalent and $cross.same_requests.accounting_ok));
         "the same requests measured by the published summary and by the Prometheus merge disagree beyond tolerance (see cross_check.same_requests)"),
       check("rw_no_failed_pushes"; $rwfail == 0; "\($rwfail) k6 log line(s) report a remote-write send failure"),
@@ -922,9 +984,9 @@ jq -n --argjson synth "$SYNTH" --argjson headline "$HEADLINE" --slurpfile m "$WO
   --arg wmode "$WINDOW_MODE" --arg vudiag "$VU_DIAGNOSTICS" --arg degrade "$DEGRADE" \
   --arg scpus "$SERVER_CPUS" --arg pcpus "$PROM_CPUS" --arg k6img "$K6_IMAGE" --arg promimg "$PROM_IMAGE" \
   --arg msimg "$MOCKSERVER_IMAGE" --argjson host_cores "$HOST_CORES" --argjson acct_tol "$ACCOUNT_TOL" \
-  --argjson cpusamples "$CPU_SAMPLES" --argjson t0 "$T0_S" \
+  --argjson cpusamples "$CPU_SAMPLES" --argjson t0 "$T0_S" --arg p99max "$P99_MAX_MS" \
   --argjson slow "$SLOW_FLUSHES" --argjson rwfail "${RW_FAILURES:-0}" \
-  --arg hook_cut "${PERF_RW_TEST_CUT_FAULT:-}" --arg hook_step "${PERF_RW_TEST_FAIL_STEP:-}" --arg hook_null "${PERF_RW_TEST_NULL_RUNG:-}" \
+  --arg hook_cut "${PERF_RW_TEST_CUT_FAULT:-}" --arg hook_step "${PERF_RW_TEST_FAIL_STEP:-}" --arg hook_null "${PERF_RW_TEST_NULL_RUNG:-}" --arg hook_zero "${PERF_RW_TEST_ZERO_TAIL:-}" \
   --argjson promwarn "$(head -n 50 "$PROM_WARNINGS" | jq -R . | jq -sc .)" '
   ($m[0].points) as $P
   | $synth + {
@@ -943,11 +1005,12 @@ jq -n --argjson synth "$SYNTH" --argjson headline "$HEADLINE" --slurpfile m "$WO
         observed_max_start_skew_ms: ([ $P[] | .start_skew_ms | select(. != null) ] | max),
         max_setup_end_minus_start_at_ms: ([ $pp[] | .setup_end_minus_start_at_ms | select(. != null) ] | max),
         native_histograms: true, histogram_bucket_factor: 1.1, accounting_tolerance: $acct_tol,
+        healthy_ceiling_p99_max_ms: ($p99max | tonumber? // $p99max),
         server_cpus: $scpus, prometheus_cpus: $pcpus, host_cores: $host_cores,
         k6_image: $k6img, prometheus_image: $promimg, mockserver_image: $msimg,
         cpu_window_t0_s: $t0,
         degrade: (if $degrade == "" then null else $degrade end),
-        test_hooks: ({cut_fault:$hook_cut, fail_step:$hook_step, null_rung:$hook_null} | with_entries(select(.value != "")))
+        test_hooks: ({cut_fault:$hook_cut, fail_step:$hook_step, null_rung:$hook_null, zero_tail:$hook_zero} | with_entries(select(.value != "")))
       },
       accounting: [ $P[] | {offered_rps, ok:.accounting_ok, per_process:[ .per_process[] | {proc, summary_count, prometheus_count, prometheus_histogram_count, accounted} ]} ],
       windows: [ $P[] | {offered_rps, start_skew_ms, skew_ok, settle_cut_ok,
@@ -956,6 +1019,13 @@ jq -n --argjson synth "$SYNTH" --argjson headline "$HEADLINE" --slurpfile m "$WO
                          measured_sample_count, settle_excluded} ]
                | [ range(0; length) as $k | .[$k] + {k6_cpu_samples: $cpusamples[$k]} ],
       per_process: $pp,
+      # Per rung, for perf-test-run.sh tail localisation: the earliest process start and the
+      # client share over 5 ms from the merged steady histogram (null when not computable).
+      # stalls_post_settle is informational and null unless every process reported it.
+      rung_windows: [ $P[] | {offered_rps, sample_count, measured_sample_count, client_over_5ms_frac,
+          start_epoch_ms: ([ .per_process[] | .rung_start_epoch_ms | select(. != null) ] | min),
+          stalls_post_settle: (if (.per_process | length) > 0 and all(.per_process[]; .stalls_post_settle != null)
+                               then ([ .per_process[] | .stalls_post_settle ] | add) else null end)} ],
       remote_write: {send_failures: $rwfail, slow_flushes: $slow},
       prometheus: {query_warnings: $promwarn},
       cpu: {sut_pct_over_ladder:$sutcpu, prometheus_pct_over_ladder:$promcpu,
@@ -965,7 +1035,7 @@ jq -n --argjson synth "$SYNTH" --argjson headline "$HEADLINE" --slurpfile m "$WO
 cp "$WORK/result.json" "$OUT_FILE"
 RESULT_WRITTEN=1
 
-echo "--- rw-multi-k6: valid=$(jq -r '.valid' "$WORK/result.json") healthy_ceiling=$(jq -r '.headline_if_valid.healthy_ceiling_rps // "null"' "$WORK/result.json") rig_valid_peak=$(jq -r '.rig_valid_peak_achieved_rps' "$WORK/result.json") skew_max_ms=$(jq -r '.method.observed_max_start_skew_ms' "$WORK/result.json") k6_us_per_req=$(jq -r '.cpu.k6_cpu_us_per_request_mean' "$WORK/result.json") cross_check_equivalent=$(jq -r '.cross_check.equivalent | if . == null then "n/a" else tostring end' "$WORK/result.json")" >&2
+echo "--- rw-multi-k6: valid=$(jq -r '.valid' "$WORK/result.json") healthy_ceiling=$(jq -r '.headline_if_valid.healthy_ceiling_rps // "null"' "$WORK/result.json") rig_valid_peak=$(jq -r '.rig_valid_peak_achieved_rps' "$WORK/result.json") skew_max_ms=$(jq -r '.method.observed_max_start_skew_ms' "$WORK/result.json") k6_us_per_req=$(jq -r '.cpu.k6_cpu_us_per_request_mean' "$WORK/result.json") cross_check_equivalent=$(jq -r '.cross_check.equivalent | if . == null then "n/a" else tostring end' "$WORK/result.json") cross_run_agrees=$(jq -r '.cross_check.cross_run.agrees | if . == null then "n/a" else tostring end' "$WORK/result.json")" >&2
 if [ "$(jq -r '.valid' "$WORK/result.json")" != true ]; then
   echo ":x: remote-write multi-k6 run INVALID:" >&2
   jq -r '.invalid_reasons[] | "    - " + .' "$WORK/result.json" >&2

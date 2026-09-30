@@ -586,9 +586,13 @@ export function handleSummary(data) {
       //   window = a transient stall; a flat spread = a steady limit. This is the
       //   discriminating signal, and a PROXY for drop timing (drops themselves
       //   cannot be timestamped in-script — a dropped iteration never runs code).
-      stalls: stalls && stalls.values ? round(stalls.values.count, 0) : 0,
+      // null, never 0, when not measured: stalls are counted only with VU diagnostics on, the
+      // lean summary materialises neither submetric, and wall-clock mode never tags a request
+      // `win`, so its steady submetric exists but stays empty.
+      stalls: SWEEP.vuDiagnostics && stalls && stalls.values ? round(stalls.values.count, 0) : null,
       // Set against `stalls`, shows what the settle window removed.
-      stalls_post_settle: steadyStalls && steadyStalls.values ? round(steadyStalls.values.count, 0) : 0,
+      stalls_post_settle: SWEEP.vuDiagnostics && !WALLCLOCK && steadyStalls && steadyStalls.values
+        ? round(steadyStalls.values.count, 0) : null,
       stall_ms_threshold: STALL_MS,
       stall_concurrency_max: round(scV.max, 1),
       stall_concurrency_avg: round(scV.avg, 1),

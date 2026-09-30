@@ -32,14 +32,19 @@
 #   $now       ISO-8601 timestamp to stamp as published_utc
 #   $lat_mult  latency multiple defining "still flat" (default caller: 3)
 #   $keep      achieved/offered floor for a healthy rung (default caller: 0.95)
+#   p99_max_ms OPTIONAL (read via $ARGS.named): also require p99 <= this many ms. Unset =
+#              p50-only, the published rule. Only the multi-k6 arm (rw-multi-k6-sweep.sh) sets
+#              it; see docs/code/performance-measurement.md ("The multi-k6 arm's p99 bound").
 #
 # The caller (perf-website-publish.sh) is responsible for REFUSING to publish a
 # run whose sweep is missing/invalid (headline null); this filter only shapes a
 # run it is given. behaviours is null when the run carries none — the page
 # renders the behaviours section only when it is present.
 
-def round2: (. * 100 | round) / 100;
-def round3: (. * 1000 | round) / 1000;
+# null-safe: a rung without a percentile (e.g. a multi-process rung with too few samples for a
+# tail) must publish as null, not abort the whole transform.
+def round2: if . == null then null else (. * 100 | round) / 100 end;
+def round3: if . == null then null else (. * 1000 | round) / 1000 end;
 # Thousands separators for the display strings the page renders (Jekyll has no
 # number-delimiter filter). Integer part only — latencies are small and unformatted.
 def commafy: (. // 0 | floor | tostring) | gsub("(?<=\\d)(?=(\\d{3})+$)"; ",");
@@ -64,12 +69,14 @@ def commafy: (. // 0 | floor | tostring) | gsub("(?<=\\d)(?=(\\d{3})+$)"; ",");
      elif ($n % 2) == 1 then $flat[($n / 2 | floor)]
      else (($flat[$n/2 - 1] + $flat[$n/2]) / 2) end) as $flat_p50
 | (if $flat_p50 == null then null else ($flat_p50 * $lat_mult) end) as $lat_thresh
-# healthy rungs: kept up, no errors, latency still flat.
+| ($ARGS.named.p99_max_ms // null | if . == null then null else tonumber end) as $p99_max
+# healthy rungs: kept up, no errors, latency still flat (and, when bounded, a missing p99 is not).
 | [ $s[]
     | select(.offered_rps > 0
              and (.error_rate // 0) == 0
              and .achieved_rps >= ($keep * .offered_rps)
-             and ($lat_thresh != null) and (.p50_ms != null) and (.p50_ms <= $lat_thresh)) ] as $healthy
+             and ($lat_thresh != null) and (.p50_ms != null) and (.p50_ms <= $lat_thresh)
+             and ($p99_max == null or ((.p99_ms != null) and (.p99_ms <= $p99_max)))) ] as $healthy
 | ($healthy | max_by(.offered_rps)) as $hc
 # No rig-valid rung above the ceiling (or none at all) means no overload was measured, so
 # no peak_* is published. It is a lower bound when, in addition, the next rung up was
@@ -344,3 +351,9 @@ def commafy: (. // 0 | floor | tostring) | gsub("(?<=\\d)(?=(\\d{3})+$)"; ",");
       "baseline-freshness assertion"
     ]
   }
+# Only a bounded call (the multi-k6 arm) carries the p99 fields, so the published shape is unchanged.
+| if $p99_max == null then . else
+    .source.healthy_ceiling_rule = "achieved>=\($keep)x,p50<=\($lat_mult)x_flat,p99<=\($p99_max)ms"
+    | .headline |= (if . == null then null
+                    else . + {healthy_ceiling_p99_ms: ($hc.p99_ms | round3), p99_max_ms: $p99_max} end)
+  end

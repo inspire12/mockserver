@@ -2064,9 +2064,10 @@ sweep_tail_localisation() { # sweep_json diag_csv -> JSON
   local rungs
   rungs="$(jq -r --argjson step "$STEP_S" '(.points // [])[] | select(.start_epoch_ms != null)
     | [.offered_rps, .start_epoch_ms, (.start_epoch_ms + $step * 1000),
-       (if (.stall_ms_threshold // 5) != 5 then ""
-        elif (.measured_sample_count // 0) > 0 then ((.stalls_post_settle // 0) / .measured_sample_count)
-        elif (.sample_count // 0) > 0 then ((.stalls // 0) / .sample_count)
+       (if has("client_over_5ms_frac") then (.client_over_5ms_frac // "")
+        elif (.stall_ms_threshold // 5) != 5 then ""
+        elif (.measured_sample_count // 0) > 0 then (if .stalls_post_settle == null then "" else .stalls_post_settle / .measured_sample_count end)
+        elif (.sample_count // 0) > 0 then (if .stalls == null then "" else .stalls / .sample_count end)
         else "" end)] | @tsv' "$1" 2>/dev/null || true)"
   if [ -z "$rungs" ] || [ ! -s "$2" ]; then echo '{}'; return 0; fi
   awk -v settle="$SETTLE_S" '
@@ -2160,21 +2161,28 @@ if [ "${PERF_SERVING_RW_MULTIK6:-false}" = "true" ]; then
     rw_rc=0
     PERF_RW_REPO_ROOT="$REPO_ROOT" PERF_RW_NETWORK="$NETWORK" \
       PERF_RW_TARGET_URL="$SUT_BASE_HTTP" PERF_RW_TARGET_CURL_URL="http://${SERVER_METRICS:-127.0.0.1:1080}" \
-      PERF_RW_SUT_CONTAINER="$SERVER" PERF_RW_SERVER_CPUS="$SERVER_CPUS" PERF_RW_IMAGE="$MOCKSERVER_IMAGE" \
+      PERF_RW_SUT_CONTAINER="$SERVER" PERF_RW_SERVER_CPUS="$SERVER_CPUS" PERF_RW_UPSTREAM_CPUS="$UPSTREAM_CPUS" \
+      PERF_RW_IMAGE="$MOCKSERVER_IMAGE" \
       PERF_RW_RATES="${PERF_RW_RATES:-${K6_SWEEP_RATES:-}}" PERF_RW_STEP="$SWEEP_STEP" PERF_RW_GAP="$SWEEP_GAP" \
       PERF_RW_SETTLE_S="$SETTLE_S" PERF_RW_WARMUP_DURATION="${PERF_RW_WARMUP_DURATION:-0s}" \
       PERF_RW_DEBUG_DIR="$OUT_DIR/serving-rw-multik6-work" \
       bash "$REPO_ROOT/mockserver-performance-test/scripts/rw-multi-k6-sweep.sh" "$OUT_DIR/serving-rw-multik6.json" || rw_rc=$?
     SERVING_RW_MULTIK6_JSON="$(cat "$OUT_DIR/serving-rw-multik6.json" 2>/dev/null || echo '{}')"
     jq -e . >/dev/null 2>&1 <<<"$SERVING_RW_MULTIK6_JSON" || SERVING_RW_MULTIK6_JSON='{}'
-    # A failed or invalid trial uploads the harness's work files at once, so it stays diagnosable.
-    if [ "$rw_rc" -ne 0 ] || [ "$(jq -r '.valid' <<<"$SERVING_RW_MULTIK6_JSON")" != true ]; then
-      if ! tar czf "$REPO_ROOT/serving-rw-multik6-work.tgz" -C "$OUT_DIR" serving-rw-multik6-work 2>/dev/null; then
-        echo "WARNING: could not archive $OUT_DIR/serving-rw-multik6-work — no work-files artifact this run" >&2
-      elif command -v buildkite-agent >/dev/null 2>&1; then
-        bk_upload_artifact "serving-rw-multik6-work.tgz"
-      fi
+    # Every trial uploads the harness's work files (per-process CPU samples, k6 logs, merges), valid or not.
+    if ! tar czf "$REPO_ROOT/serving-rw-multik6-work.tgz" -C "$OUT_DIR" serving-rw-multik6-work 2>/dev/null; then
+      echo "WARNING: could not archive $OUT_DIR/serving-rw-multik6-work — no work-files artifact this run" >&2
+    elif command -v buildkite-agent >/dev/null 2>&1; then
+      bk_upload_artifact "serving-rw-multik6-work.tgz"
     fi
+    # Tail localisation for this ladder too: its rungs ran on the same SUT, inside diag-samples.csv.
+    jq '{points: (.rung_windows // [])}' <<<"$SERVING_RW_MULTIK6_JSON" > "$OUT_DIR/serving-rw-multik6-rungs.json" 2>/dev/null \
+      || echo '{"points":[]}' > "$OUT_DIR/serving-rw-multik6-rungs.json"
+    RW_TAIL_JSON="$(sweep_tail_localisation "$OUT_DIR/serving-rw-multik6-rungs.json" "$DIAG_SAMPLE_LOG" || true)"
+    jq -se 'length == 1 and (.[0] | type) == "object"' >/dev/null 2>&1 <<<"$RW_TAIL_JSON" || RW_TAIL_JSON='{}'
+    SERVING_RW_MULTIK6_JSON="$(jq -c --argjson t "$RW_TAIL_JSON" '. + {tail_localisation: $t}' <<<"$SERVING_RW_MULTIK6_JSON")"
+    echo "--- rw multi-k6 tail localisation (share of requests over 5 ms; client = merged k6 histogram, server = MockServer histogram; notify-only):"
+    jq -r '(.rungs // [])[] | "    \(.offered_rps) rps: client \(.client_over_5ms_frac // "unavailable") server \(.server_over_5ms_frac // "unavailable") (n=\(.server_requests) over \(.server_window_s)s)"' <<<"$RW_TAIL_JSON" || true
     echo "--- serving_rw_multik6: rc=$rw_rc valid=$(jq -r '.valid | if . == null then "?" else tostring end' <<<"$SERVING_RW_MULTIK6_JSON") healthy_ceiling=$(jq -r '.headline.healthy_ceiling_rps // "?"' <<<"$SERVING_RW_MULTIK6_JSON") rig_valid_peak=$(jq -r '.rig_valid_peak_achieved_rps // "?"' <<<"$SERVING_RW_MULTIK6_JSON") (single-process: ${PEAK_ACHIEVED_RPS}) cross_check_equivalent=$(jq -r '.cross_check.equivalent | if . == null then "?" else tostring end' <<<"$SERVING_RW_MULTIK6_JSON")"
     abort_if_sut_died
   fi

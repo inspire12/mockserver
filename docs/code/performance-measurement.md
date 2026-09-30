@@ -123,6 +123,9 @@ before. Each result records `latency_window.settle_s`; per rung, `settle_exclude
 excluded requests, `measured_sample_count` the requests behind the percentiles, `full_rung_ms`
 the whole-rung percentiles, and `stalls_post_settle` the stalls left after the window opens (set
 against `stalls`, a large remaining share at a sub-knee rung suggests the settle is too short).
+Both are `null`, never 0, where they are not measured: with VU diagnostics off, in the lean
+summary (which does not materialise them) and, for `stalls_post_settle`, in wall-clock mode
+(which never tags a request with its window).
 Each rung stays one scenario, so its VUs and their connections carry across the settle boundary;
 each VU switches a VU-level `win` tag (`<rate>_settle` → `<rate>_steady`) the first time it
 starts an iteration past the boundary, and the percentiles are read from the
@@ -136,7 +139,52 @@ record that core or process count as a failure skip (`lib/perf-sweep-window.sh`)
 The healthy operating ceiling is the highest rung where `achieved_rps` is within 5% of
 `offered_rps` **and** latency is within a stated multiple of the flat-ladder baseline. The peak
 `achieved_rps` (top of the overload curve) is a different, higher number; do not publish one
-without the other.
+without the other. The multi-k6 arm alone also bounds p99 (next section).
+
+#### The multi-k6 arm's p99 bound
+
+**Outcome.** The multi-k6 (remote-write) arm counts a rung as healthy only if p99 is also at or
+under **10 ms** (`rw-multi-k6-sweep.sh` passes `p99_max_ms` to `lib/perf-website-figures.jq`; a
+rung with no p99 is not healthy; `PERF_RW_P99_MAX_MS` overrides it). Every other caller, including
+the published single-process headline and the per-core, hardware-matrix and multi-process
+ceilings, stays p50-only: for every input the old filter accepted, its output is byte-identical
+(checked on builds 533, 527, 511, 505, 464 and 517). The one intended difference is a latent fix:
+`round2`/`round3` are now null-safe, so a rung with a null percentile publishes null instead of
+aborting the transform. Before, that made `multi-process-sweep.sh`'s aggregate ceiling silently
+null whenever a rung's tail percentiles were suppressed for too few samples, and made
+`perf-website-publish.sh` fail with "TRANSFORM FAILED" on a run with a null p95 or p99. Build 533's multi-k6
+ceiling reads **44k** under the bound (p99 4.8 ms), with 48k (18.4 ms) and 56k (40 ms) a measured
+overload above it, where p50-only gave a 56k lower bound.
+
+**Why only this arm.** p50 stays ~0.09 ms far past the knee while p99 climbs to 30 ms or more, so
+a p50-only ceiling sits on rungs whose tail has already left the flat region. But on the
+single-process ladder that tail is k6's, not MockServer's: in build 533, 0.9–21% of requests
+took k6 over 5 ms from 32k to 64k while MockServer's handler histogram had none over 5 ms, and
+the four-process ladder on the same SUT held p99 at 0.41 ms at 36k where the single process read
+18.8 ms. Bounding the single-process p99 would make the published figure the load generator's
+tail. The published headline moves to the multi-k6 arm, with this bound, only once that arm has
+proven stable ([performance programme](../plans/performance-programme.md) item 44).
+
+p99 per rung on the published single-process ladder (6-core SUT, 3 s settle, builds 495–533),
+the evidence behind the 10 ms figure:
+
+| Offered rps | Runs | p99 min–max | Runs with p99 ≤ 10 ms |
+|---|---|---|---|
+| 500–24,000 | 13 | 0.19–0.71 ms | 13 |
+| 32,000 | 13 | 2.1–15.5 ms | 9 |
+| 36,000 | 10 | 11.7–26.5 ms | 0 |
+| 40,000–64,000 | 13 | 23.2–38.7 ms | 0 |
+
+Build 533's four-process ladder: 0.33–0.59 ms to 36k, 3.3 ms at 40k, 4.8 ms at 44k, then 18.4 ms
+at 48k and 40 ms at 56k.
+
+**Why 10 ms.** The flat region never exceeded 0.71 ms and every rung from 36k up read at least
+11.7 ms, so 10 ms separates them with room on both sides; on build 533's multi-k6 ladder it falls
+between 4.8 ms (44k) and 18.4 ms (48k). A bound under 2 ms would also have separated the
+single-process data, but 2-core runs 448–450 read p99 4–9 ms at their lowest rung (rung onset
+included), so it could not carry over to the smaller hardware-matrix sizes. The 48k tail is
+outside MockServer's handler timer (none over 5 ms at any multi-k6 rung up to 96k), so it is the
+client or the transport; the arm's per-rung tail localisation (below) is what separates the two.
 
 **Rig validity and the `vus_active_p95` criterion.** A rung is rig-valid when the k6 client had
 CPU headroom, low errors, and the VU pool was not exhausted. The original check keyed off
@@ -225,7 +273,8 @@ finer rungs at 39,000 and 41,000, the reported healthy ceiling would have been ~
 **Where the tail is (notify-only, every daily run).** k6 counts a request over 5 ms as a stall;
 the server records `mock_server_request_duration_seconds`, scraped into `diag-samples.csv`. Per rung,
 the run sets the two side by side as `sweep_tail.rungs[]` in `perf-result.json`
-(`client_over_5ms_frac` is `stalls_post_settle / measured_sample_count`; `server_over_5ms_frac` is
+(`client_over_5ms_frac` is `stalls_post_settle / measured_sample_count`, or null when the stall
+count is null; `server_over_5ms_frac` is
 the `req_dur_le_5ms` delta between the first and last `diag-samples.csv` rows inside the rung's
 post-settle window, with `server_window_s` and `server_requests` saying how much of the rung that
 covers), and the compare annotation prints them as a table. Rung windows come from each point's
@@ -263,9 +312,10 @@ offers each rung from N **independent** k6 processes (1/N of the rate each, no k
 coordination), all starting the ladder at one wall-clock instant and pushing native histograms to
 a pinned Prometheus by remote write. Latency is a **true merged percentile**
 (`histogram_quantile` over the summed histograms), throughput is the summed request count, and the
-healthy ceiling comes from `lib/perf-website-figures.jq` unchanged. It is opt-in and never
-published; switching the published method over is a separate, approved step after a rig
-cross-check.
+healthy ceiling comes from `lib/perf-website-figures.jq` with the p99 ≤ 10 ms bound on
+([The multi-k6 arm's p99 bound](#the-multi-k6-arms-p99-bound)). It is opt-in and never
+published; switching the published method over is a separate, approved step once the arm is
+stable (performance-programme item 44).
 
 ```mermaid
 flowchart LR
@@ -305,6 +355,7 @@ each process's own count"]
 | `rw_cpu_sampled_every_rung` | At least one k6 CPU sample fell in every rung's steady window; `derive_saturation` would otherwise read the rung as 0% CPU, i.e. headroom |
 | `rw_cross_check_same_requests` | One k6 in the published summary mode, **also** remote-writing, measures rungs up to `PERF_RW_XCHECK_MAX_RPS` (24,000); its summary percentiles and the Prometheus merge of the same requests agree within p50 10%, p95 10%, p99 15% (0.005 ms floor) |
 | `rw_no_failed_pushes` | No k6 remote-write send failure |
+| `rw_client_tail_consistent` | Every rung whose merged p99 is over 5.5 ms has a client share over 5 ms above 0.5% (1% by definition, less a margin for the two interpolations inside one native-histogram bucket). It stops the tail localisation reporting "client 0" at a rung with a tail, as it did when the share came from k6 stall counters that the lean summary never materialises |
 | `rw_no_slow_flushes` | No flush took longer than the push interval (k6 warns that samples may then be dropped); `.remote_write.slow_flushes` reports the count and the longest. This also catches Prometheus stalls of 1–2 s, too short for the cut gates. On a contended host it trips first; raise `PERF_RW_PUSH_INTERVAL_S` rather than loosen the gate |
 
 **Fail fast before measuring.** Three checks stop the harness (`valid: false` with
@@ -336,11 +387,12 @@ post-measurement step: `xcheck_phase`, `merge_main`, `sweep_json`, `saturation`,
 a pipeline, its last stage; read from `$BASH_COMMAND` before the trap runs anything, so it works
 inside functions too), plus the main phase's merged rungs. A deliberate stop names its own reason,
 and SIGTERM / SIGINT (a cancelled build) are recorded as such, exiting 143 / 130 after cleanup.
-Unknown `PERF_RW_TEST_FAIL_STEP` or `PERF_RW_TEST_NULL_RUNG` values are rejected at startup with
-exit 2. The first 50 Prometheus query warnings (for example an
+Unknown `PERF_RW_TEST_FAIL_STEP` or `PERF_RW_TEST_NULL_RUNG` values, a `PERF_RW_TEST_ZERO_TAIL`
+other than empty or `true`, and a `PERF_RW_P99_MAX_MS` that is not a positive decimal are rejected
+at startup with exit 2. The first 50 Prometheus query warnings (for example an
 empty result from mixing float and histogram samples) are kept under `.prometheus.query_warnings`,
-and `.method.test_hooks` records any test hook that was set. In `perf-test-run.sh` a non-zero exit
-or an invalid result also uploads `serving-rw-multik6-work.tgz` (`PERF_RW_DEBUG_DIR`): the
+and `.method.test_hooks` records any test hook that was set. In `perf-test-run.sh` every run, valid or
+not, also uploads `serving-rw-multik6-work.tgz` (`PERF_RW_DEBUG_DIR`): the
 harness's JSON, CSV and text files, the full k6 logs, the Prometheus server log and a series
 inventory (`prom-series-inventory.json`).
 
@@ -371,22 +423,40 @@ inventory (`prom-series-inventory.json`).
 - **Rig validity reuses the published rule.** `derive_saturation` lives in
   `lib/perf-derive-saturation.sh` (moved verbatim out of `perf-test-run.sh`) and is fed the busiest
   process's CPU scaled to one pin, the summed drops and the busiest process's `vus_active_p95`
-  against its own pool; its CPU windows start at the earliest measured rung-0 start.
-  `.per_process[].per_rung` records each process's CPU mean, fraction of pin and drop fraction.
-  **Hyperthreads:** a process on 4 physical cores with both hyperthreads has an 800% pin it
+  against its own pool; its CPU windows start at the earliest measured rung-0 start. The busiest
+  process is the one with the highest **mean** over the rung's steady window. The harness used to
+  take the highest process at each `docker stats` sample and average that, which sits above every
+  process's own mean when readings are noisy, and more so as N grows: at 64k in build 533 it read
+  499% against per-process means of 360–395%. So this arm's `saturation.ladder[].k6_cpu_pct_max`
+  equals its mean and carries no information; the real per-sample maxima are in
+  `.per_process[].per_rung[].cpu_pct_max`. `.per_process[].per_rung` records each process's
+  CPU mean and max, `cpu_frac_of_logical_pin` (the mean over every logical CPU in its pin),
+  `cpu_frac_of_ceiling` (the pin-scaled mean over the hyperthread-adjusted ceiling the k6 CPU test
+  uses, `.per_process[].cpu_ceiling_pct`) and its drop fraction.
+  **Hyperthreads:** a process on 2 physical cores with both hyperthreads has a 400% pin it
   cannot reach, so the harness passes `K6_PHYS_CORES` and the k6 CPU test uses the
-  hyperthread-aware ceiling (62.5% of that pin; see [Client-limited rungs](#sweepjs--throughput-vs-latency-knee)).
+  hyperthread-aware ceiling (62.5% of that pin, 250%; see [Client-limited rungs](#sweepjs--throughput-vs-latency-knee)).
   The SUT's CPU from the same `docker stats` sampler, against a pin of `PERF_RW_SERVER_CPUS`,
   turns on the server-headroom test (`server_headroom_test: "active"`). A short rung with the
   server under 85% of its pin is then client-limited, so the result tells a client limit from a
   server one. The test is off only for an external target without an explicit
   `PERF_RW_SERVER_CPUS`, because its pin is unknown.
-- **Placement.** SUT, Prometheus and every k6 process are proven physically disjoint by
+- **Placement.** SUT, Prometheus, the run's upstream (`PERF_RW_UPSTREAM_CPUS`, which
+  `perf-test-run.sh` passes) and every k6 process are proven physically disjoint by
   `lib/perf-cpu-topology.sh`. On the 48-vCPU rig the defaults are SUT on physical cores 0–5,
-  Prometheus on core 23 (vCPUs 23,47), and four k6 processes on four physical cores each, both
-  hyperthreads (`7-10,31-34` … `19-22,43-46`), which keeps the SUT's siblings idle. Override with
+  Prometheus on core 23 (vCPUs 23,47), and **eight** k6 processes on two physical cores each, both
+  hyperthreads (`7-8,31-32` … `21-22,45-46`), which keeps the SUT's siblings idle. Override with
   `PERF_RW_SERVER_CPUS`, `PERF_RW_PROM_CPUS`, `PERF_RW_K6_CPUSETS` (`;`-separated) and
-  `PERF_RW_PROCS`.
+  `PERF_RW_PROCS`; `PERF_RW_*` overrides do not affect baseline eligibility, since this arm never
+  is.
+- **The rig has no spare cores for k6.** The c5.12xlarge has 24 physical cores: 6 SUT, 1 upstream,
+  1 Prometheus and 16 k6, so the k6 processes already hold every core left. Splitting them eight
+  ways instead of four adds no CPU. It halves each process's rate, VU pool and memory, and keeps
+  every pool under the 2,048 cap to 128k (four processes would need 2,560 each there).
+  At build 533's ~290 µs of k6 CPU per request, the 16 cores' hyperthread-adjusted ceiling
+  (125% of a core each, 2,000% in all) carries about 69k req/s, so the client still limits the
+  ladder above ~70k. Measuring 100k or more needs cheaper requests on the client (~200 µs or less),
+  a larger single-socket host, or the load generator on its own host.
 - **Running the harness inside a container.** `PERF_RW_PUBLISHED_HOST` (for example
   `host.docker.internal`) replaces the host of the ports the harness itself publishes (its
   Prometheus and, when it launches one, the SUT). It does not touch `PERF_RW_TARGET_CURL_URL`.
@@ -410,15 +480,18 @@ rig-invalid). The saving that lifts the ceiling is from dividing the rate across
 per-process cost stays about where the published mode is.
 
 **Ladder.** The harness has its own default ladder: the published rungs up to 48,000, then
-56,000, 64,000, 72,000, 80,000 and 96,000 rps (17 rungs, about 80 s longer than the published
-13). Split over four processes the client knee moves up. In build 527 the SUT used about 250–300% of
-its 600% pin at 64k, so the published ladder stopped below any server knee. Each process's VU
-pool is `0.08 × its own rate`, so the four pools add up to what one process would get at the
-aggregate rate, and more above 25,600 rps, where one process's pool caps at 2,048, and below
-~4,800 rps, where the 96-VU floor applies (Little's law holds per process too). At the 96k top that is 1,920 VUs per process.
-k6 initialises about 4,960 VUs per process over the overlapping top rungs, which took ~3 GiB per
-process locally, so a local run with fewer than four processes needs a short `PERF_RW_RATES`
-(the default ladder OOM-kills a k6 container in an 8 GiB Docker Desktop VM). `Insufficient VUs` warnings on sub-knee rungs are the transient-stall signature
+56,000, 64,000, 72,000, 80,000, 96,000, 112,000 and 128,000 rps (19 rungs, about two minutes longer
+than the published 13). Split over several processes the client knee moves up. In build 533 the
+SUT used at most 36% of its 600% pin up to 64k and 486% at 85k achieved (the 96k rung), which puts
+its CPU ceiling around 90k or higher, so the ladder runs past it. Each process's VU
+pool is `0.08 × its own rate`, so the pools add up to what one process would get at the
+aggregate rate, and more above 25,600 rps per process, where one process's pool caps at 2,048, and
+below ~1,200 rps per process, where the 96-VU floor applies (Little's law holds per process too).
+With eight processes the 128k top is 16,000 rps and 1,280 VUs per process. k6 initialises the
+pools of the overlapping top rungs, about 3,360 VUs per process (~2 GiB, 16 GiB across the eight;
+four processes at the old 96k top initialised 4,960 VUs, ~3 GiB, per process), so a local run
+needs a short `PERF_RW_RATES` (the default ladder OOM-kills k6 containers in an 8 GiB Docker
+Desktop VM). `Insufficient VUs` warnings on sub-knee rungs are the transient-stall signature
 the single-process ladder shows too (build 527: pool hit at 4k–24k with p95 active VUs 3–7). The
 occupancy rule reads them as stalls, so they are not a sizing fault.
 
@@ -426,8 +499,16 @@ occupancy rule reads them as stalls, so they are not a sizing fault.
 after the published sweep and stores the result under `.serving_rw_multik6`
 and the `serving-rw-multik6.json` artifact; that run is not baseline-eligible. It uses the
 harness's own ladder unless `PERF_RW_RATES` is set, or `K6_SWEEP_RATES` is set explicitly (the
-allocation-profile run's short ladder), in which case it follows that. It adds ~11–12 min, and
-`perf-test-guard.sh` raises the run step's timeout by 15 min when the flag is set. For a trial also
+allocation-profile run's short ladder), in which case it follows that. It took ~10 min at N=4
+over 17 rungs (build 533) and should take ~12 min at N=8 over 19; `perf-test-guard.sh` raises the
+run step's timeout by 20 min when the flag is set. Every run uploads `serving-rw-multik6-work.tgz`
+(see above), valid or not. After the arm, `perf-test-run.sh` runs the same tail localisation as
+the published ladder over its rungs, from `.rung_windows` (the earliest process start, and the
+client share over 5 ms as `1 - histogram_fraction(0, 0.005, …)` over the same merged steady
+histogram the percentiles come from) against `diag-samples.csv`, and stores it as
+`.serving_rw_multik6.tail_localisation`. A `cross_check.cross_run` disagreement stays
+report-only, but the harness logs a `WARNING` naming each rung, the metrics outside tolerance and
+the single- and multi-process figures. For a trial also
 set `PERF_INFO_ARM=false` and `PERF_COVERAGE=false`, the two default-on phases the run step's
 timeout comment names as removable. Locally:
 
@@ -445,6 +526,8 @@ PERF_RW_TEST_CUT_FAULT=main-p1:empty PERF_RW_XCHECK=false ... rw-multi-k6-sweep.
 PERF_RW_PROCS=2 PERF_RW_RATES=1500,3000,6000 PERF_RW_XCHECK_MAX_RPS=3000 ... rw-multi-k6-sweep.sh .tmp/rw-cap.json
 # the result is written, invalid, when a merged rung is blank or a step fails
 PERF_RW_TEST_NULL_RUNG=1500 ... rw-multi-k6-sweep.sh .tmp/rw-null.json
+# the client share is zeroed at every rung: must fail rw_client_tail_consistent where p99 > 5.5 ms
+PERF_RW_TEST_ZERO_TAIL=true PERF_RW_XCHECK=false ... rw-multi-k6-sweep.sh .tmp/rw-zero.json
 PERF_RW_TEST_FAIL_STEP=cross_check ... rw-multi-k6-sweep.sh .tmp/rw-failstep.json   # or any step named above
 # a hard abort inside a function still leaves an invalid result naming the failed command (exit 125)
 PERF_RW_K6_IMAGE=grafana/k6:does-not-exist PERF_RW_XCHECK=false ... rw-multi-k6-sweep.sh .tmp/rw-abort.json
