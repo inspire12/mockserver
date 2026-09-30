@@ -29,8 +29,8 @@ import static org.mockserver.model.NottableString.string;
  */
 public final class Http3RequestBridge {
 
-    // stateless; shares the server-wide rule for a body sent with no Content-Type
-    private static final BodyDecoderEncoder NO_CONTENT_TYPE_DECODER = new BodyDecoderEncoder();
+    // stateless; the same decoder HTTP/1.1 and HTTP/2 use, so every protocol builds the same body
+    private static final BodyDecoderEncoder BODY_DECODER = new BodyDecoderEncoder();
 
     private Http3RequestBridge() {
         // utility class
@@ -57,45 +57,19 @@ public final class Http3RequestBridge {
         byte[] body
     ) {
         HttpRequest request = buildRequestWithoutBody(method, path, scheme, authority, headers);
-
-        // set body -- use string body for text content types so that expectation
-        // matching (which compares string bodies) works correctly; use binary body
-        // for everything else
         if (body != null && body.length > 0) {
-            String contentType = findContentType(headers);
-            if (contentType == null || contentType.isBlank()) {
-                request.withBody(NO_CONTENT_TYPE_DECODER.bytesToBody(body, null));
-            } else if (isTextContentType(contentType)) {
-                java.nio.charset.Charset charset = extractCharset(contentType);
-                request.withBody(new String(body, charset));
-            } else {
-                request.withBody(body);
-            }
+            request.withBody(BODY_DECODER.bytesToBody(body, findContentType(headers)));
         }
-
         return request;
     }
 
     /**
      * As {@link #toHttpRequest(String, String, String, String, List, byte[])}, but reads the
-     * accumulated request body straight from the {@link ByteBuf} it was accumulated into,
-     * <b>without first copying it into an intermediate {@code byte[]}</b>.
+     * accumulated request body from the {@link ByteBuf} it was accumulated into, copying it once.
      * <p>
-     * This removes one of the two body-sized allocations the HTTP/3 request path used to make.
-     * The previous flow was {@code readAccumulatedBody} (a body-sized {@code byte[]} copy of the
-     * composite buffer) followed by {@code new String(body, charset)} (a second body-sized
-     * allocation) for the common text case (JSON/XML/text bodies are stored as string bodies so
-     * expectation matching — which compares string bodies — works). For a text body this decodes
-     * the buffer to a {@code String} in one step; for a single-component buffer that avoids the
-     * intermediate {@code byte[]} entirely, and for a multi-component buffer it is no worse than
-     * before (the decoder consolidates once, as {@code readAccumulatedBody} did). A binary body
-     * still makes exactly one {@code byte[]} copy, as it always did.
-     * <p>
-     * The resulting {@link HttpRequest} is byte-for-byte identical to the {@code byte[]} overload's:
-     * {@code buf.toString(readerIndex, readableBytes, charset)} and {@code new String(bytes, charset)}
-     * decode the same bytes with the same charset (Netty's {@code CharsetUtil} decoder, like
-     * {@code String}'s constructor, replaces malformed/unmappable input), so encoding behaviour
-     * across content types and charsets is preserved exactly.
+     * The body is decoded by {@link BodyDecoderEncoder#bytesToBody}, exactly as the HTTP/1.1 and
+     * HTTP/2 mappers do, so it keeps the wire bytes as its raw bytes and gets the same body type and
+     * charset for every {@code Content-Type}.
      * <p>
      * <b>Buffer ownership:</b> the body is read non-destructively (reader index is not advanced) and
      * the buffer is <b>not</b> released here — the caller retains ownership and must release it (the
@@ -112,22 +86,9 @@ public final class Http3RequestBridge {
         HttpRequest request = buildRequestWithoutBody(method, path, scheme, authority, headers);
 
         if (body != null && body.isReadable()) {
-            String contentType = findContentType(headers);
-            if (contentType == null || contentType.isBlank()) {
-                byte[] bytes = new byte[body.readableBytes()];
-                body.getBytes(body.readerIndex(), bytes);
-                request.withBody(NO_CONTENT_TYPE_DECODER.bytesToBody(bytes, null));
-            } else if (isTextContentType(contentType)) {
-                java.nio.charset.Charset charset = extractCharset(contentType);
-                // decode straight from the buffer -- no intermediate byte[] for a single-component
-                // buffer. Non-destructive: toString(index, length, charset) does not advance the
-                // reader index, so the caller's release contract is unaffected.
-                request.withBody(body.toString(body.readerIndex(), body.readableBytes(), charset));
-            } else {
-                byte[] bytes = new byte[body.readableBytes()];
-                body.getBytes(body.readerIndex(), bytes);
-                request.withBody(bytes);
-            }
+            byte[] bytes = new byte[body.readableBytes()];
+            body.getBytes(body.readerIndex(), bytes);
+            request.withBody(BODY_DECODER.bytesToBody(bytes, findContentType(headers)));
         }
 
         return request;
@@ -390,52 +351,6 @@ public final class Http3RequestBridge {
         byte[] body = new byte[composite.readableBytes()];
         composite.readBytes(body);
         return body;
-    }
-
-    /**
-     * Determine if the content-type header indicates text content that should be
-     * stored as a string body rather than binary.
-     */
-    private static boolean isTextContentType(String contentType) {
-        String lower = contentType.toLowerCase(Locale.ROOT);
-        return lower.startsWith("text/")
-            || lower.contains("json")
-            || lower.contains("xml")
-            || lower.contains("html")
-            || lower.contains("javascript")
-            || lower.contains("yaml")
-            || lower.contains("csv")
-            || lower.contains("x-www-form-urlencoded");
-    }
-
-    /**
-     * Extract the charset from a content-type header value, defaulting to UTF-8.
-     */
-    private static java.nio.charset.Charset extractCharset(String contentType) {
-        if (contentType != null) {
-            String lower = contentType.toLowerCase(Locale.ROOT);
-            int charsetIndex = lower.indexOf("charset=");
-            if (charsetIndex >= 0) {
-                String charsetName = contentType.substring(charsetIndex + 8).trim();
-                // strip quotes and trailing parameters
-                if (charsetName.startsWith("\"")) {
-                    charsetName = charsetName.substring(1);
-                }
-                int endIndex = charsetName.indexOf(';');
-                if (endIndex >= 0) {
-                    charsetName = charsetName.substring(0, endIndex);
-                }
-                if (charsetName.endsWith("\"")) {
-                    charsetName = charsetName.substring(0, charsetName.length() - 1);
-                }
-                try {
-                    return java.nio.charset.Charset.forName(charsetName.trim());
-                } catch (Exception ignored) {
-                    // fall through to default
-                }
-            }
-        }
-        return java.nio.charset.StandardCharsets.UTF_8;
     }
 
     private static String charSeqToString(CharSequence seq) {

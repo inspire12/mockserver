@@ -153,13 +153,85 @@ public class Http3RequestBridgeTest {
         assertThat(request.getFirstHeader("content-type"), is("application/json"));
     }
 
+    // ---- body decoding: HTTP/3 must build the same body HTTP/1.1 and HTTP/2 do ----
+
+    /**
+     * A {@code text/*} body with no charset used to be decoded to a String and stored with
+     * {@code withBody(String)}, whose raw bytes are the String's ISO-8859-1 encoding: every
+     * non-Latin-1 character became {@code ?}, so the forwarded body and
+     * {@code getBodyAsRawBytes()} no longer matched the wire.
+     */
+    @Test
+    public void shouldKeepWireBytesOfUtf8TextBodyWithNoCharsetFromBothOverloads() {
+        byte[] body = "héllo wörld – 日本語 😀".getBytes(StandardCharsets.UTF_8);
+        List<Map.Entry<String, String>> headers = Arrays.asList(
+            new AbstractMap.SimpleImmutableEntry<>("content-type", "text/plain"));
+
+        HttpRequest fromBytes = Http3RequestBridge.toHttpRequest("POST", "/text", "https", "localhost", headers, body);
+        ByteBuf buffer = Unpooled.wrappedBuffer(body);
+        HttpRequest fromBuffer;
+        try {
+            fromBuffer = Http3RequestBridge.toHttpRequest("POST", "/text", "https", "localhost", headers, buffer);
+        } finally {
+            buffer.release();
+        }
+
+        assertThat(fromBytes.getBodyAsRawBytes(), is(body));
+        assertThat(fromBuffer.getBodyAsRawBytes(), is(body));
+        assertThat(fromBytes.getBody().getType(), is(org.mockserver.model.Body.Type.STRING));
+        assertThat(fromBuffer.getBody(), is(fromBytes.getBody()));
+    }
+
+    @Test
+    public void shouldBuildTheSameBodyAsTheHttp1MapperForEveryContentType() {
+        byte[] utf8Text = "héllo – 日本語 😀 {\"k\":\"ş\"}".getBytes(StandardCharsets.UTF_8);
+        byte[] binary = new byte[256];
+        for (int i = 0; i < binary.length; i++) {
+            binary[i] = (byte) i;
+        }
+        String[] contentTypes = {
+            "text/plain", "text/plain; charset=utf-8", "text/plain; charset=iso-8859-1", "text/html",
+            "text/csv", "application/json", "application/json; charset=utf-16", "application/xml",
+            "application/yaml", "application/x-www-form-urlencoded", "application/octet-stream",
+            "image/png", null
+        };
+        org.mockserver.mappers.FullHttpRequestToMockServerHttpRequest http1Mapper =
+            new org.mockserver.mappers.FullHttpRequestToMockServerHttpRequest(
+                org.mockserver.configuration.Configuration.configuration(),
+                new org.mockserver.logging.MockServerLogger(), true, null, 443);
+
+        for (byte[] body : Arrays.asList(utf8Text, binary)) {
+            for (String contentType : contentTypes) {
+                io.netty.handler.codec.http.DefaultFullHttpRequest http1Request = new io.netty.handler.codec.http.DefaultFullHttpRequest(
+                    io.netty.handler.codec.http.HttpVersion.HTTP_1_1, io.netty.handler.codec.http.HttpMethod.POST, "/parity",
+                    Unpooled.wrappedBuffer(body));
+                List<Map.Entry<String, String>> headers = new ArrayList<>();
+                if (contentType != null) {
+                    http1Request.headers().set("content-type", contentType);
+                    headers.add(new AbstractMap.SimpleImmutableEntry<>("content-type", contentType));
+                }
+                HttpRequest viaHttp1;
+                try {
+                    viaHttp1 = http1Mapper.mapFullHttpRequestToMockServerRequest(
+                        http1Request, null, null, null, org.mockserver.model.Protocol.HTTP_1_1);
+                } finally {
+                    http1Request.release();
+                }
+
+                HttpRequest viaHttp3 = Http3RequestBridge.toHttpRequest("POST", "/parity", "https", "localhost", headers, body);
+
+                String scenario = contentType + " / " + (body == binary ? "binary" : "utf-8 text");
+                assertThat(scenario, viaHttp3.getBody(), is(viaHttp1.getBody()));
+                assertThat(scenario, viaHttp3.getBodyAsRawBytes(), is(body));
+                assertThat(scenario, viaHttp3.getBodyAsString(), is(viaHttp1.getBodyAsString()));
+            }
+        }
+    }
+
     // ---- ByteBuf-overload of toHttpRequest ----
-    // The ByteBuf overload decodes a text body straight from the accumulated buffer, removing the
-    // intermediate body-sized byte[] copy the byte[] overload's caller had to make first. These
-    // tests pin that it produces a request byte-for-byte identical to the byte[] overload's across
-    // content types AND charsets (the encoding-preservation guarantee), that a binary body is still
-    // stored as raw bytes, and that the buffer is read non-destructively and NOT released (the
-    // handler owns release).
+    // These tests pin that the ByteBuf overload produces a request identical to the byte[]
+    // overload's across content types AND charsets, and that the buffer is read non-destructively
+    // and NOT released (the handler owns release).
 
     @Test
     public void shouldDecodeTextBodyFromByteBufIdenticallyToByteArray() {
@@ -187,12 +259,9 @@ public class Http3RequestBridgeTest {
     }
 
     /**
-     * The {@code String} conversion exists for charset handling; this repo has been bitten by a
-     * media-type gap that made a body decode wrongly. This pins that a non-UTF-8 charset (here
-     * ISO-8859-1, where byte {@code 0xE9} is 'é') decodes through the ByteBuf overload to exactly
-     * the same String the byte[] overload and {@code new String(bytes, charset)} produce — so the
-     * allocation change did not alter charset behaviour. It would fail if the ByteBuf path decoded
-     * with the wrong charset (e.g. UTF-8), where {@code 0xE9} is not a valid single byte.
+     * Both overloads must decode a non-UTF-8 charset identically (here ISO-8859-1, where byte
+     * {@code 0xE9} is 'é'). It would fail if the ByteBuf path decoded with the wrong charset
+     * (e.g. UTF-8), where {@code 0xE9} is not a valid single byte.
      */
     @Test
     public void shouldPreserveNonUtf8CharsetWhenDecodingBodyFromByteBuf() {
@@ -221,11 +290,8 @@ public class Http3RequestBridgeTest {
 
     @Test
     public void shouldDecodeMalformedUtf8IdenticallyToTheByteArrayOverload() {
-        // The buffer overload's whole justification is that it decodes identically to
-        // new String(bytes, charset). Valid input cannot distinguish the two decoders --
-        // only malformed input can, since that is where replacement behaviour lives.
-        // Netty's CharsetUtil decoder sets CodingErrorAction.REPLACE for both malformed
-        // and unmappable input, matching String's constructor; this pins that.
+        // Both overloads must decode malformed input identically; valid input cannot
+        // distinguish two decoders, only replacement behaviour on malformed input can.
         byte[] body = new byte[]{
             'a',
             (byte) 0xE9,             // lone continuation-less byte, invalid UTF-8

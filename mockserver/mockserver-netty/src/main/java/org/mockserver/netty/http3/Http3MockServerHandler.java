@@ -221,11 +221,8 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
                 return;
             }
 
-            // Pass the accumulated body buffer straight to the bridge rather than first copying
-            // it into a byte[]: for the common text-body case the bridge decodes the buffer to a
-            // String in one step, removing the body-sized byte[] copy readAccumulatedBody used to
-            // make. The buffer is read non-destructively and is released below in the finally
-            // (releaseBodyAccumulator), so the retain/release contract is unchanged.
+            // The bridge reads the accumulated buffer non-destructively and copies it once; it is
+            // released below in the finally (releaseBodyAccumulator).
             HttpRequest request = Http3RequestBridge.toHttpRequest(
                 parsedHeaders.method(),
                 parsedHeaders.path(),

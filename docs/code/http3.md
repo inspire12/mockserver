@@ -167,7 +167,7 @@ Key design points:
 - **Same matching**: uses `HttpState.firstMatchingExpectation()` and `HttpActionHandler.processAction()` -- identical to HTTP/1.1 and HTTP/2
 - **Same recording**: requests are logged in `MockServerEventLog` for verification
 - **Same proxy forwarding**: unmatched requests can be forwarded when configured
-- **Body handling**: text content types (JSON, XML, HTML, etc.) are stored as string bodies for correct expectation matching; binary content is stored as binary bodies
+- **Body handling**: `Http3RequestBridge` decodes every request body with `BodyDecoderEncoder.bytesToBody` and the request's `Content-Type`, as the HTTP/1.1 and HTTP/2 mapper does, so the body type (JSON, XML, string or binary), its charset and its raw bytes are the same on all three protocols for an uncompressed body (HTTP/3 does not decompress a `Content-Encoding` request body; HTTP/1.1 and HTTP/2 do). The raw bytes are always the bytes received, so a forwarded body is byte-identical; a `text/*` body with no charset is read as ISO-8859-1 for matching, as on HTTP/1.1 and HTTP/2
 - **Streaming support**: `Http3ResponseWriter` subscribes to `StreamingBody` and forwards each chunk as an HTTP/3 DATA frame with backpressure, matching the pattern used by `NettyResponseWriter` for HTTP/1.1
 
 ### Lifecycle Integration
@@ -542,7 +542,7 @@ bidi-streaming) work over HTTP/3, matching the TCP (HTTP/1.1 and HTTP/2) path.
 |---------|--------|
 | **TCP chaos (TcpChaosHandler)** | QUIC has no TCP RST/FIN/slow\_close semantics. HTTP-level chaos profiles (latency, error responses, degradation ramp) DO work over H3 |
 | **WebSocket callbacks + dashboard WebSocket** | RFC 6455 HTTP/1.1 Upgrade has no HTTP/3 equivalent. The analog is WebTransport (RFC 9220), which is not yet implemented |
-| **HTTP/1.1 framing fixups** | `PreserveHeadersNettyRemoves`, `HttpContentDecompressor`, `EarlyMatchingHandler` are HTTP/1.1 pipeline handlers that have no meaning in HTTP/3 (QPACK handles header encoding, HTTP/3 frames are self-describing) |
+| **HTTP/1.1 framing fixups** | `PreserveHeadersNettyRemoves` and `EarlyMatchingHandler` are HTTP/1.1 pipeline handlers that have no meaning in HTTP/3 (QPACK handles header encoding, HTTP/3 frames are self-describing). `HttpContentDecompressor` is not installed either, so an HTTP/3 request body with a `Content-Encoding` is not decompressed (plan item 49) |
 
 ### Not-yet-supported (deferred by demand)
 

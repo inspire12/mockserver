@@ -37,6 +37,7 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
@@ -47,6 +48,8 @@ import static org.mockserver.model.HttpForward.forward;
 import static org.mockserver.model.HttpOverrideForwardedRequest.forwardOverriddenRequest;
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
+import static org.mockserver.model.JsonBody.json;
+import static org.mockserver.model.StringBody.exact;
 import static org.mockserver.stop.Stop.stopQuietly;
 
 /**
@@ -168,6 +171,48 @@ public class Http3MockingMatrixIntegrationTest {
     }
 
     @Test
+    public void shouldForwardUtf8TextBodyWithNoCharsetByteIdenticalOverHttp3() throws Exception {
+        // given - an upstream that records the exact bytes it receives, and a forward to it
+        byte[] body = "héllo wörld – 日本語 😀".getBytes(StandardCharsets.UTF_8);
+        CapturingBodyCallback.CAPTURED.set(null);
+        upstreamClient
+            .when(request().withPath("/h3_forward_text"))
+            .respond(callback().withCallbackClass(CapturingBodyCallback.class));
+        mockServerClient
+            .when(request().withPath("/h3_forward_text"))
+            .forward(forward().withHost("127.0.0.1").withPort(upstreamServer.getLocalPort()));
+
+        // when - a text/plain body with no charset, holding non-Latin-1 characters, arrives over HTTP/3
+        Http3Result result = sendHttp3Request("POST", "/h3_forward_text", "text/plain", body);
+
+        // then - the upstream received exactly the bytes the client sent
+        assertThat("status over http3: <" + result.status + ">", result.status, is("200"));
+        assertThat(CapturingBodyCallback.CAPTURED.get(), is(body));
+    }
+
+    @Test
+    public void shouldMatchTextBodiesOnTheirStringOverHttp3() throws Exception {
+        String unicode = "héllo wörld – 日本語 😀";
+        mockServerClient
+            .when(request().withPath("/h3_match_text").withBody(exact(unicode)))
+            .respond(response().withBody("matched_utf8_text"));
+        mockServerClient
+            .when(request().withPath("/h3_match_ascii").withBody(exact("plain ascii text")))
+            .respond(response().withBody("matched_ascii_text"));
+        mockServerClient
+            .when(request().withPath("/h3_match_json").withBody(json("{\"name\":\"" + unicode + "\"}")))
+            .respond(response().withBody("matched_json"));
+
+        Http3Result text = sendHttp3Request("POST", "/h3_match_text", "text/plain; charset=utf-8", unicode.getBytes(StandardCharsets.UTF_8));
+        Http3Result ascii = sendHttp3Request("POST", "/h3_match_ascii", "text/plain", "plain ascii text".getBytes(StandardCharsets.UTF_8));
+        Http3Result jsonBody = sendHttp3Request("POST", "/h3_match_json", "application/json", ("{\"name\": \"" + unicode + "\"}").getBytes(StandardCharsets.UTF_8));
+
+        assertThat("body received over http3: <" + text.body + ">", text.body, is("matched_utf8_text"));
+        assertThat("body received over http3: <" + ascii.body + ">", ascii.body, is("matched_ascii_text"));
+        assertThat("body received over http3: <" + jsonBody.body + ">", jsonBody.body, is("matched_json"));
+    }
+
+    @Test
     public void shouldReceiveForwardOverriddenBodyOverHttp3() throws Exception {
         // given - an upstream that echoes the (overridden) request body, and a forward-overridden-request
         // action that both retargets the request at the upstream (via Host) and rewrites its body
@@ -237,6 +282,20 @@ public class Http3MockingMatrixIntegrationTest {
     }
 
     /**
+     * Upstream callback that records the exact request body bytes it received.
+     */
+    @SuppressWarnings("unused")
+    public static class CapturingBodyCallback implements ExpectationResponseCallback {
+        static final AtomicReference<byte[]> CAPTURED = new AtomicReference<>();
+
+        @Override
+        public HttpResponse handle(HttpRequest request) {
+            CAPTURED.set(request.getBodyAsRawBytes());
+            return response().withBody("captured");
+        }
+    }
+
+    /**
      * What a real QUIC client observed on its own request stream: the {@code :status} pseudo-header,
      * the concatenated DATA-frame body, and — for the error path — whether headers were ever received
      * and whether the stream was reset / closed without a response.
@@ -260,6 +319,13 @@ public class Http3MockingMatrixIntegrationTest {
      * close, so a dropped body reports "" rather than an opaque timeout.
      */
     private Http3Result sendHttp3Request(String method, String path, String requestBody) throws Exception {
+        return sendHttp3Request(method, path, null, requestBody != null ? requestBody.getBytes(StandardCharsets.UTF_8) : null);
+    }
+
+    private Http3Result sendHttp3Request(String method, String path, String contentType, byte[] requestBody) throws Exception {
+        if (clientGroup != null) {
+            clientGroup.shutdownGracefully();
+        }
         clientGroup = new NioEventLoopGroup(1);
 
         QuicSslContext clientSslContext = QuicSslContextBuilder.forClient()
@@ -335,11 +401,13 @@ public class Http3MockingMatrixIntegrationTest {
         requestHeaders.headers().path(path);
         requestHeaders.headers().scheme("https");
         requestHeaders.headers().authority("127.0.0.1:" + http3Port);
+        if (contentType != null) {
+            requestHeaders.headers().add("content-type", contentType);
+        }
 
         if (requestBody != null) {
             requestStream.write(requestHeaders).sync();
-            requestStream.writeAndFlush(new DefaultHttp3DataFrame(
-                    Unpooled.wrappedBuffer(requestBody.getBytes(StandardCharsets.UTF_8))))
+            requestStream.writeAndFlush(new DefaultHttp3DataFrame(Unpooled.wrappedBuffer(requestBody)))
                 .addListener(QuicStreamChannel.SHUTDOWN_OUTPUT)
                 .sync();
         } else {

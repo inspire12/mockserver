@@ -1039,7 +1039,7 @@ decoder keeps its raw bytes whenever a String view could not reproduce them.
 
 The rule lives in `BodyDecoderEncoder.bytesToBody`, which every inbound request (HTTP/1.1, HTTP/2,
 servlet) and every forwarded or proxied upstream response goes through; the HTTP/3 request bridge
-calls it for bodies with no `Content-Type` too. The streamed-response capture
+calls it for every body too. The streamed-response capture
 (`HttpActionHandler.setCapturedStreamingBody`) uses a similar but looser sniff for display only: it also
 rejects control bytes and tolerates one replacement character from a truncated tail, which a
 byte-identical forward cannot. Previously every such body became a

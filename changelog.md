@@ -234,6 +234,14 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   shapers and the body shown in log messages and HAR are now base64, retrieve returns the existing
   `BINARY` shape (base64) instead of text with replacement characters, and such a body is now left out
   of the `generateExpectation` LLM prompt rather than sent.
+- **An HTTP/3 text request body no longer loses its non-Latin-1 characters when forwarded.** A `text/*`
+  body sent without a charset (for example `text/plain` holding UTF-8 `日本語`) reached the upstream with
+  every character outside ISO-8859-1 replaced by `?`, and the recorded request's raw bytes did not match
+  what the client sent. HTTP/3 request bodies without a `Content-Encoding` are now decoded exactly as HTTP/1.1 and HTTP/2 decode them,
+  so they keep the bytes received: bytes in equal bytes out. As on HTTP/1.1 and HTTP/2, a `text/*` body
+  with no charset is read as ISO-8859-1 (HTTP's default), so to match such a body on non-Latin-1 text the
+  client should send a charset, such as `text/plain; charset=utf-8`; JSON and XML bodies are read as UTF-8
+  by default and match as before.
 - **arm64 Docker images now carry the arm64 native TLS library.** The Dockerfiles defaulted the target
   architecture to amd64, and that default overrode the one Docker supplies, so an arm64 build copied the
   x86_64 build of `netty-tcnative` into `/usr/lib`. This affects the published arm64 `-graaljs` and
