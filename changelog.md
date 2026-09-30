@@ -60,6 +60,12 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   from an unhandled error in WebSocket `permessage-deflate` decompression (Dependabot alert 581).
 - **The Node Testcontainers module's lockfile now resolves `brace-expansion` 5.0.12**, which fixes three
   denial-of-service issues in brace-pattern expansion (Dependabot alerts 582, 584 and 586).
+- **The Node Testcontainers module's lockfile now resolves `@grpc/grpc-js` 1.14.5**, which fixes
+  `getAuthContext` reporting unauthorized certificates as authorized in some configurations, and a server
+  sending handler error messages to the client in status messages (Dependabot alerts 591 and 592).
+- **The dashboard (`mockserver-ui`) now resolves `dompurify` 3.4.16**, which fixes a DOM XSS where an
+  `IN_PLACE` sanitize with a node-removing `afterSanitize` hook left event handlers armed on the removed
+  subtree (Dependabot alert 593).
 
 ### Added
 
