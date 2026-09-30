@@ -23,6 +23,7 @@ port-open probe reports ready far too early. `readiness-demo` proves the gap.
 
 Usage:
   bench_laptop.py all       --jar JAR --image IMAGE [--out laptop-result.json]
+  (JAR may be a ':'-separated classpath, e.g. the image's own + deps jars)
   bench_laptop.py ready     --image IMAGE [--runs 9 --warmups 1]
   bench_laptop.py footprint --image IMAGE [--settle 30]
   bench_laptop.py initscale --jar JAR
@@ -370,7 +371,7 @@ def main():
         # (loudly, not fatally) otherwise — a partial laptop block is better than
         # none, and every emitted metric still resolves to a laptop.* budget key.
         have_java = shutil.which("java") is not None
-        jar_ok = bool(jar) and os.path.isfile(jar)
+        jar_ok = bool(jar) and all(os.path.isfile(p) for p in jar.split(os.pathsep))
         if jar_ok and have_java:
             try:  # source-launch needs a full JDK (javac); a JRE-only agent fails here
                 b = run_injvm(jar, port, warmups, runs, label="injvm")

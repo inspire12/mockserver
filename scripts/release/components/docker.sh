@@ -78,15 +78,13 @@ cp "$SHADED_JAR" docker/aot/mockserver-netty-jar-with-dependencies.jar
 # (when non-empty) trust it before `apk add`, so builds behind a corporate
 # TLS-inspecting proxy succeed. Empty file in CI is a no-op. Populated from
 # MOCKSERVER_LOCAL_CA_BUNDLE (or the NODE_EXTRA_CA_CERTS / AWS_CA_BUNDLE
-# fallbacks). docker/local + docker/webhook are single-stage and do NOT COPY a
-# bundle, so they are excluded. Remove any stale bundle first so the helper
-# always writes a fresh one (matching the prior unconditional-overwrite).
-rm -f docker/graaljs/ca-bundle.pem docker/clustered/ca-bundle.pem docker/aot/ca-bundle.pem
+# fallbacks). docker/webhook is single-stage and does NOT COPY a bundle, so it
+# is excluded; docker/local and docker/aot COPY it into their jarprep stage.
+# Remove any stale bundle first so the helper always writes a fresh one.
+rm -f docker/local/ca-bundle.pem docker/graaljs/ca-bundle.pem docker/clustered/ca-bundle.pem docker/aot/ca-bundle.pem
+"$REPO_ROOT/docker/ensure-ca-bundle.sh" docker/local >/dev/null
 "$REPO_ROOT/docker/ensure-ca-bundle.sh" docker/graaljs >/dev/null
 "$REPO_ROOT/docker/ensure-ca-bundle.sh" docker/clustered >/dev/null
-# The aot Dockerfile's `download` stage COPYs ca-bundle.pem, but under `source=copy` that stage
-# is never built by BuildKit. Stage the bundle anyway for consistency (and so the file exists if
-# the download stage is ever built) — empty in CI is a no-op.
 "$REPO_ROOT/docker/ensure-ca-bundle.sh" docker/aot >/dev/null
 # docker/http3 only needs it for its Maven Central fallback, which the shaded release base never takes.
 rm -f docker/http3/ca-bundle.pem

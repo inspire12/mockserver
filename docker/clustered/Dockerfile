@@ -72,6 +72,18 @@ RUN NETTY_TCNATIVE="$(unzip -p mockserver-netty-jar-with-dependencies.jar META-I
          fi; \
        done
 
+# jarprep: drop every native binary a linux/<arch> container cannot load, then split the jar into
+# own.jar (org/mockserver/**) and deps.jar (the dependencies), both STORED and byte-reproducible, so
+# a release that changes no dependency reuses deps.jar's layer. The logic is the shared
+# mockserver-jarprep.sh (canonical copy docker/jarprep/): it takes the arch from this stage's
+# uname -m, checks every kept .so's ELF machine, and fails the build if a required native is missing.
+FROM tcnative AS jarprep
+RUN apk add --no-cache zip unzip
+# Bare, no default (a default overrides BuildKit's per-leg value); the stage's own uname -m is the authority.
+ARG TARGETARCH
+COPY mockserver-jarprep.sh /usr/local/bin/mockserver-jarprep.sh
+RUN sh /usr/local/bin/mockserver-jarprep.sh /mockserver-netty-jar-with-dependencies.jar "${TARGETARCH:-}" /jarprep
+
 # HEALTHCHECK probe — a ~2 MB static binary, NOT a second JVM: a probe JVM started inside the
 # container's memory cgroup every 10s pushed a 512 MiB container over its limit under load. Source:
 # docker/healthcheck/mockserver-healthcheck.go (copied byte-identically into each image context).
@@ -127,8 +139,10 @@ LABEL org.opencontainers.image.created="${BUILD_DATE}"
 # expose ports.
 EXPOSE 1080
 
-# copy in the main fat jar
-COPY mockserver-netty-jar-with-dependencies.jar /
+# deps.jar on its OWN layer, before own.jar: a release whose dependencies are unchanged produces a
+# byte-identical deps.jar, so `docker pull` reuses that layer instead of re-fetching it.
+COPY --from=jarprep /jarprep/deps.jar /mockserver-deps.jar
+COPY --from=jarprep /jarprep/own.jar /mockserver.jar
 
 # Native-TLS fallback for read-only-rootfs deployments (docker run --read-only):
 # normally /tmp is writable and Netty extracts the tcnative .so from the jar, so
@@ -161,7 +175,7 @@ USER nonroot
 # required (valid on JDK 21; obsolete from JDK 23, so absent on the JDK 25/26 images). Switch to G1
 # with -e JAVA_TOOL_OPTIONS=-XX:+UseG1GC; keep both flags if you set JAVA_TOOL_OPTIONS for -Xmx etc.
 ENV JAVA_TOOL_OPTIONS="-XX:+UseZGC -XX:+ZGenerational"
-ENTRYPOINT ["java", "-Dfile.encoding=UTF-8", "--enable-native-access=ALL-UNNAMED", "-XX:MaxRAMPercentage=50.0", "-cp", "/mockserver-netty-jar-with-dependencies.jar:/libs/*", "-Dmockserver.propertyFile=/config/mockserver.properties", "org.mockserver.cli.Main"]
+ENTRYPOINT ["java", "-Dfile.encoding=UTF-8", "--enable-native-access=ALL-UNNAMED", "-XX:MaxRAMPercentage=50.0", "-cp", "/mockserver.jar:/mockserver-deps.jar:/libs/*", "-Dmockserver.propertyFile=/config/mockserver.properties", "org.mockserver.cli.Main"]
 
 ENV SERVER_PORT=1080
 

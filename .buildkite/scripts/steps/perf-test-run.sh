@@ -2811,8 +2811,14 @@ if [ "${PERF_LAPTOP_PROFILE:-true}" = "true" ]; then
   if [ -z "$LAPTOP_JAR" ]; then
     _lc="$(docker create "$MOCKSERVER_IMAGE" 2>/dev/null || true)"
     if [ -n "$_lc" ]; then
-      docker cp "$_lc:/mockserver-netty-jar-with-dependencies.jar" \
-        "$OUT_DIR/mockserver.jar" >/dev/null 2>&1 && LAPTOP_JAR="$OUT_DIR/mockserver.jar"
+      # Current images ship the jar split in two (own classes + deps); older ones one fat jar.
+      if docker cp "$_lc:/mockserver.jar" "$OUT_DIR/mockserver.jar" >/dev/null 2>&1 \
+         && docker cp "$_lc:/mockserver-deps.jar" "$OUT_DIR/mockserver-deps.jar" >/dev/null 2>&1; then
+        LAPTOP_JAR="$OUT_DIR/mockserver.jar:$OUT_DIR/mockserver-deps.jar"
+      elif docker cp "$_lc:/mockserver-netty-jar-with-dependencies.jar" \
+        "$OUT_DIR/mockserver.jar" >/dev/null 2>&1; then
+        LAPTOP_JAR="$OUT_DIR/mockserver.jar"
+      fi
       docker rm "$_lc" >/dev/null 2>&1 || true
     fi
   fi

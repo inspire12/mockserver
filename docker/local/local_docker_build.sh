@@ -7,4 +7,8 @@ VERSION="$(cd "${REPO_ROOT}/mockserver" && ./mvnw -q -o help:evaluate -Dexpressi
 M2_REPO="${HOME}/.m2/repository"
 
 cp "${M2_REPO}/org/mock-server/mockserver-netty/${VERSION}/mockserver-netty-${VERSION}-jar-with-dependencies.jar" ./mockserver-netty-jar-with-dependencies.jar
+CA_STATE="$("${REPO_ROOT}/docker/ensure-ca-bundle.sh" .)"
 docker build --no-cache -t mockserver/mockserver:local-snapshot .
+if [[ "${CA_STATE}" == "created" ]]; then
+  rm -f ./ca-bundle.pem
+fi

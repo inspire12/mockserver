@@ -251,7 +251,9 @@ Uses local JAR"]
     DL -->|default| INT[Intermediate Stage]
     CP -->|ARG source=copy| INT
 
-    INT --> AC["AppCDS build stage
+    INT --> JP["jarprep stage
+trim natives, split into own + deps jars"]
+    JP --> AC["AppCDS build stage
 eclipse-temurin:26-jdk-noble
 jlink-trim + -Xshare:dump + training run
 -> /mockserver.jsa"]
@@ -271,7 +273,7 @@ The main Dockerfile supports two source modes via the `source` build ARG:
 
 Both modes download `netty-tcnative-boringssl-static` from Maven Central (`repo1.maven.org`) for TLS performance.
 
-After the source stage the JAR flows through an **AppCDS build stage** (see [AppCDS Standard Image](#appcds-standard-image-fast-start) below) that jlink-trims a JDK 26 runtime and produces a baked AppCDS archive via a training run; the runtime stage copies that trimmed runtime, the archive, the JAR, and the tcnative `.so` onto `distroless/java-base-debian12`. The JVM in the runtime image is JDK 26; the MockServer library itself is still compiled to the Java 17 bytecode floor, so this is a runtime-only choice (the jar runs unmodified on the newer JVM).
+After the source stage the JAR flows through a **jarprep stage** (see [Image Download Size](#image-download-size)) that trims its natives and splits it into `/mockserver.jar` + `/mockserver-deps.jar`, then an **AppCDS build stage** (see [AppCDS Standard Image](#appcds-standard-image-fast-start) below) that jlink-trims a JDK 26 runtime and produces a baked AppCDS archive via a training run; the runtime stage copies that trimmed runtime, the archive, the two jars, and the tcnative `.so` onto `distroless/java-base-debian12`. The JVM in the runtime image is JDK 26; the MockServer library itself is still compiled to the Java 17 bytecode floor, so this is a runtime-only choice (the jar runs unmodified on the newer JVM).
 
 **Exposed port:** 1080
 
@@ -300,7 +302,48 @@ On the Java 25/26 images `-XX:+ZGenerational` is **not** set because it is obsol
 
 See [startup-performance.md](../code/startup-performance.md) for the startup-time measurements under each collector.
 
-**Why two jars rather than the fat jar.** `docker/Dockerfile` splits the assembled jar into `/mockserver.jar` (MockServer's own `org/mockserver/**`, ~16% of the bytes) and `/mockserver-deps.jar` (everything else), each on its own image layer. Dependencies are the overwhelming majority and rarely change — 88.5% of dependency bytes were byte-identical between 8.0.0 and 8.0.1-SNAPSHOT, across a boundary that bumped BouncyCastle, Netty and OpenTelemetry — so a patch upgrade re-pulls roughly 21 MB instead of 66 MB. Both jars are built deterministically (sorted entry order, fixed timestamps, STORED) so identical dependency bytes yield an identical layer digest, which is what makes the reuse real. **Classpath ORDER matters and is fixed:** the AppCDS training run and the ENTRYPOINT both use `own:deps` in that order. The SIBLING images (`docker/local`, `aot`, `snapshot`, `root`, `root-snapshot`, `clustered`, `graaljs`) still ship the single `/mockserver-netty-jar-with-dependencies.jar`.
+### Image Download Size
+
+**Outcome:** every published server image (`docker/local` — the standard image — plus `-graaljs`, `-clustered` and `-aot`) and the `docker/Dockerfile` reference run the MockServer jar through one shared script, `docker/jarprep/mockserver-jarprep.sh`, before it enters the image. The script drops every native binary the container's architecture cannot load, stores the jar uncompressed, and splits it into `/mockserver.jar` (MockServer's own `org/mockserver/**` classes) and `/mockserver-deps.jar` (everything else), each on its own layer. Each image downloads about 38 MB less (measured). When a release changes no dependency, an upgrade also reuses the ~46 MB dependency layer and re-downloads about 84 MB less (calculated from measured layer sizes); a release that bumps any dependency re-downloads that layer, as most releases do.
+
+```mermaid
+flowchart LR
+    JAR["server jar
+(shaded, or assembly for docker/Dockerfile)"] --> TRIM["drop natives for other
+platforms and architectures"]
+    TRIM --> SPLIT["split and store uncompressed
+sorted entries, fixed timestamps"]
+    SPLIT --> OWN["/mockserver.jar
+changes every release"]
+    SPLIT --> DEPS["/mockserver-deps.jar
+byte-identical if no dependency changed"]
+```
+
+Measured with registry-style compressed layer sizes (`docker save`, gzip layer blobs), built from the 8.0.1-SNAPSHOT shaded jar:
+
+| Image | linux/arm64 before → after (measured) | linux/amd64 before → after (measured) | Upgrade pull when no dependency changed, arm64: before (measured) → after (calculated) |
+|---|---|---|---|
+| standard (`docker/local`) | 166.5 → 128.5 MB (−22.8%) | 167.4 → 129.7 MB (−22.5%) | 151.5 → ~67.9 MB |
+| `-aot` | 164.8 → 126.8 MB (−23.0%) | 165.8 → 128.1 MB (−22.7%) | 149.8 → ~66.2 MB |
+| `-graaljs` | 196.1 → 158.2 MB (−19.3%) | 197.5 → 159.9 MB (−19.1%) | 124.1 → ~40.5 MB |
+| `-clustered` | 238.8 → 200.9 MB (−15.9%) | 239.9 → 202.2 MB (−15.7%) | 176.3 → ~92.7 MB |
+
+The MockServer jar layer shrinks from 94.5 MB to 45.7 MB (deps) + 10.9 MB (own) in every image. The "before" upgrade pull builds the image twice with `--no-cache` (as the release's fresh builder does), from the 8.0.1-SNAPSHOT jar and from the same tree at 8.0.2-SNAPSHOT, and sums the layers whose digest changed. The "after" figure is calculated, not measured: that same set of changed layers with the new jar layers' measured sizes and the dependency layer reused. Between those two jars only `META-INF/MANIFEST.MF` and `org/mockserver/version/Version.class` differ, both of which go to `own.jar`, and independent builds produce the same dependency-layer digest. Reuse also needs the same jarprep build: a different alpine base or `zip` version could write `deps.jar` differently. Every other changed layer is rebuilt with fresh file timestamps, so it changes on every release even when its contents do not: the jlink runtime, the AppCDS archive or AOT cache, the healthcheck binary, the GraalJS jars and the Infinispan `/libs`. Normalising those timestamps too would take the standard image's upgrade pull to about 21 MB (own jar + archive); that is not done yet. Unpacked, each image is about 117 MB larger, because the jar is stored rather than deflated: the jar layers go from 102.6 MB to 40.8 MB (own) + 178.6 MB (deps), and the standard image's layers from 268.5 to 385.2 MB (summed uncompressed layer tars). Docker Desktop's image `Size` column (439 → 518 MB) mixes compressed and unpacked sizes, so it understates this.
+
+**What the script does, and what guards it:**
+
+| Step | Detail |
+|---|---|
+| Arch | The arch the build stage *runs on* (`uname -m`) is authoritative; a non-empty `TARGETARCH` must agree, and every jarprep stage declares `ARG TARGETARCH` bare (see [Platform ARGs and native libraries](#platform-args-and-native-libraries)). After the trim, every kept `.so` must have this arch's ELF `e_machine` (62 = x86-64, 183 = AArch64), and at least one must survive. |
+| Jar flavour | Detected from the jar: the **shaded** `mockserver-netty-no-dependencies` jar (what the published images ship) relocates dependencies under `shaded_package/`, including JNA, carries the epoll `.so` as `libshaded_1package_netty_transport_native_epoll_<arch>.so` (the name relocated Netty loads) and has no tcnative natives; the **assembly** `jar-with-dependencies` (what `docker/Dockerfile` and the container smoke tests use) does none of this. Anything else fails the build. |
+| Trim | Netty's `META-INF/native/` keeps the `*<arch>.so` suffix (never `linux_<arch>`, which would drop the epoll `.so`); zstd-jni, snappy, JNA and lz4-java keep their `linux/<arch>` directory. |
+| Split | `own.jar` = `org/mockserver/**` plus `META-INF/MANIFEST.MF` first (the shaded manifest carries the MockServer version, so it must not sit in `deps.jar`); `deps.jar` = everything else. The manifest gains `Class-Path: mockserver-deps.jar`, so `java -jar /mockserver.jar` still runs, but it does not use the AppCDS archive or AOT cache: those record the ENTRYPOINT's `-cp`, and under `-jar` the JVM logs `shared class paths mismatch` and starts without them. Both are built from a sorted entry list with fixed timestamps, so identical dependency bytes give an identical layer digest. |
+| Fail closed | One assertion per native family (epoll under the flavour's name, zstd, snappy, JNA, lz4) for this arch; for the assembly jar also tcnative present. Entry counts, the split predicate and the manifest `Class-Path` are checked. The assembly jar's quiche natives are dropped (jars up to 8.0.0 still bundle them; HTTP/3 ships in `-http3`); the shaded jar's quiche `.so` for this arch is kept, because the `-http3` layer copies it out of the base image's jars. |
+| Drift | `.buildkite/scripts/steps/docker-validate-sync.sh` fails if an image context's copy of the script differs from `docker/jarprep/`; if a Dockerfile stops running it or stops COPYing both `/jarprep/own.jar` and `/jarprep/deps.jar` from the jarprep stage; if its runtime stage COPYs `mockserver-netty-jar-with-dependencies.jar`; if an ENTRYPOINT stops using `-cp /mockserver.jar:/mockserver-deps.jar:/libs/*`; or if an AppCDS/AOT training command (`-XX:ArchiveClassesAtExit` / `-XX:AOTCacheOutput`) runs anything but `-cp /mockserver.jar:/mockserver-deps.jar org.mockserver.cli.Main`. |
+
+**Classpath order is fixed.** The AppCDS archive (standard image) and the AOT cache (`-aot`) record the training classpath, so the training run and the ENTRYPOINT both use `/mockserver.jar:/mockserver-deps.jar` in that order (reversed, `-Xshare:on` aborts with `shared class paths mismatch`). The union of the two jars is the trimmed jar's entry set, so class loading is unchanged. `docker/root`, `docker/snapshot` and `docker/root-snapshot` still ship the single fat jar; no pipeline publishes them. `docker/webhook` ships a separate 14 MB webhook jar with no native binaries.
+
+**Native libraries:** which natives load is unchanged by the trim, verified on arm64 and amd64 by loading each family in the image JVM. In the published (shaded-jar) images epoll loads (under its relocated name), as do snappy, lz4-java and zstd-jni; tcnative is absent (JDK TLS provider), quiche loads only in `-http3` (which installs it under the relocated name in `/usr/lib`), and JNA does not load (its relocated classes cannot bind the stock `jnidispatch`). The `docker/Dockerfile` reference image (assembly jar) loads epoll, BoringSSL and JNA, including BoringSSL under `--read-only` (`docker-build-verify.sh`).
 
 ### Heap Cap
 
@@ -377,11 +420,12 @@ In every surviving run the JVM's file-backed pages stayed at 100% of idle (no re
 
 **Outcome:** the standard image (`docker/local/Dockerfile`, which the release **and** snapshot pipelines build+push, and its download-mode reference `docker/Dockerfile`) bakes an **Application Class Data Sharing (AppCDS)** archive over the MockServer + library classes at image-build time. This cuts container time-to-ready by roughly a third (measured ~855 ms → ~570 ms launch-to-ready on an arm64 host, median of 5; that figure was measured on the JDK 17 runtime and should be re-measured on JDK 26 — a single local container observation post-bump was comparable) while remaining the real HotSpot JVM with 100% feature parity. It uses the same train-at-build + jlink-runtime shape as the experimental `-aot` image, on a JDK 26 runtime with an AppCDS archive rather than the `-aot` variant's JDK 25 Leyden AOT cache. The MockServer library is still compiled to the Java 17 bytecode floor — the JDK 26 runtime is a runtime-only choice.
 
-**Build shape (three stages):**
+**Build shape (four stages):**
 
-1. **Source stage** (`download` / `copy`, unchanged) produces `mockserver-netty-jar-with-dependencies.jar` (+ tcnative in `docker/Dockerfile`).
-2. **AppCDS build stage** (`eclipse-temurin:26-jdk-noble`): `jlink` trims a JDK 26 runtime with the same module set as the binary bundle (`java.se,jdk.unsupported,jdk.crypto.ec,jdk.crypto.cryptoki,jdk.naming.dns,jdk.zipfs,jdk.management`, see `scripts/build-binary-bundle.sh`; `jdk.management` supplies `com.sun.management.ThreadMXBean` for the `jvm_memory_allocated_bytes` Prometheus gauge — `java.se` aggregates only `java.*` modules, so omitting it silently drops that one metric). A jlink image does **not** carry the JDK's default CDS base archive, so `java -Xshare:dump` regenerates it from the bundled `lib/classlist`. A **training run** then starts MockServer with `-XX:ArchiveClassesAtExit=/mockserver.jsa`, polls the bundled `org.mockserver.cli.HealthCheck` until the status endpoint answers (which also drives the post-bind warmup so the first-request class burst is archived), and stops cleanly so the JVM writes the dynamic archive at exit. An `ls -l /mockserver.jsa` fails the build if the archive was not produced.
-3. **Runtime stage** (`gcr.io/distroless/java-base-debian12:nonroot`, digest-pinned — the **same base+digest as `docker/aot`**): copies the trimmed runtime to `/usr/lib/jvm/temurin25-trimmed`, plus the JAR, the `/mockserver.jsa` archive (and, in `docker/Dockerfile` only, the tcnative `.so`). The entrypoint adds `-XX:SharedArchiveFile=/mockserver.jsa`.
+1. **Source stage** (`download` / `copy` in `docker/Dockerfile`; the build context in `docker/local`) provides `mockserver-netty-jar-with-dependencies.jar` (+ tcnative in `docker/Dockerfile`).
+2. **jarprep stage** (alpine): `mockserver-jarprep.sh` trims the natives and splits the jar into `own.jar` + `deps.jar` (see [Image Download Size](#image-download-size)).
+3. **AppCDS build stage** (`eclipse-temurin:26-jdk-noble`): `jlink` trims a JDK 26 runtime with the same module set as the binary bundle (`java.se,jdk.unsupported,jdk.crypto.ec,jdk.crypto.cryptoki,jdk.naming.dns,jdk.zipfs,jdk.management`, see `scripts/build-binary-bundle.sh`; `jdk.management` supplies `com.sun.management.ThreadMXBean` for the `jvm_memory_allocated_bytes` Prometheus gauge — `java.se` aggregates only `java.*` modules, so omitting it silently drops that one metric). A jlink image does **not** carry the JDK's default CDS base archive, so `java -Xshare:dump` regenerates it from the bundled `lib/classlist`. A **training run** then starts MockServer with `-XX:ArchiveClassesAtExit=/mockserver.jsa` and `-cp /mockserver.jar:/mockserver-deps.jar`, polls the bundled `org.mockserver.cli.HealthCheck` until the status endpoint answers (which also drives the post-bind warmup so the first-request class burst is archived), and stops cleanly so the JVM writes the dynamic archive at exit. An `ls -l /mockserver.jsa` fails the build if the archive was not produced.
+4. **Runtime stage** (`gcr.io/distroless/java-base-debian12:nonroot`, digest-pinned — the **same base+digest as `docker/aot`**): copies the trimmed runtime to `/usr/lib/jvm/temurin25-trimmed`, then `/mockserver-deps.jar` and `/mockserver.jar` on separate layers, the `/mockserver.jsa` archive (and, in `docker/Dockerfile` only, the tcnative `.so`). The entrypoint adds `-XX:SharedArchiveFile=/mockserver.jsa` and keeps the training classpath order.
 
 > **AppCDS (JDK 26) vs Leyden AOT (JDK 25):** this image runs a JDK 26 runtime; `docker/aot/Dockerfile` runs JDK 25. Both use the `jlink --compress=zip-<level>` form (the legacy numeric `--compress=2` was removed after JDK 17). The difference in the baked artifact: this image bakes a classic **AppCDS** archive layered on a `-Xshare:dump` base CDS archive, whereas `-aot` bakes a **Leyden AOT cache** (which does not need the `-Xshare:dump` base layering). AppCDS keeps the standard image on the graceful `-Xshare:auto` fallback so it can never hard-fail on the archive at release time.
 
@@ -389,7 +433,7 @@ In every surviving run the JVM's file-backed pages stayed at 100% of idle (no re
 
 **Graceful fallback (validated):** the runtime relies on the JVM default `-Xshare:auto`, so a **missing or corrupt** `/mockserver.jsa` (bind-mounted away, arch mismatch, truncated) logs a CDS warning (`Unable to map shared spaces` / `bad magic number`) and starts **normally** rather than failing. This is the guarantee the DEFAULT image depends on — unlike the `-aot` variant it cannot soft-fail at release time. Verified by running the image with the archive replaced by `/dev/null` and by random bytes: both reached `PUT /mockserver/status` → 200.
 
-**Image size:** roughly break-even with the old `distroless/java17` image (the jlink-trimmed JDK 26 runtime offsets the ~33 MB archive; measured ~411 MB vs ~422 MB for `mockserver/mockserver:8.0.0` — re-measure on JDK 26 at the next size audit).
+**Image size:** 128.5 MB compressed download on linux/arm64 (129.7 MB on linux/amd64), of which the jlink runtime is 46.5 MB and the archive 9.7 MB; 385 MB of unpacked layers. See [Image Download Size](#image-download-size).
 
 **QEMU note (release/CI):** the release pipeline builds multi-arch via `buildx` on amd64 agents, so the **arm64 training run executes under QEMU emulation** and is slower than a native run. This is the same cost the `-aot` image already pays. Unlike `-aot` (which is error-isolated / soft-fail), the standard image is the primary artifact, so a training-run failure under QEMU would fail the build — the training loop polls for up to 120 s and stops cleanly, which is ample on emulated arm64.
 
@@ -405,9 +449,9 @@ export MOCKSERVER_LOCAL_CA_BUNDLE=/path/to/corporate-root-ca.pem
 docker build docker/            # base image (downloads from Maven Central via the proxy)
 ```
 
-**How it works:** each variant's alpine download stage (`docker/`, `docker/root/`, `docker/snapshot/`, `docker/root-snapshot/`, `docker/clustered/`, `docker/graaljs/`) `COPY`s a `ca-bundle.pem` from the build context. When that file is non-empty, the stage trusts it before `apk add` and before the `wget` jar downloads from `repo1.maven.org`, so TLS interception does not break the build. When it is empty (the CI/published-image case), an `[ -s ]` guard skips all trust changes, so the build is identical to a no-CA build.
+**How it works:** each variant's alpine download or jarprep stage (`docker/`, `docker/root/`, `docker/snapshot/`, `docker/root-snapshot/`, `docker/clustered/`, `docker/graaljs/`, `docker/local/`, `docker/aot/`) `COPY`s a `ca-bundle.pem` from the build context. When that file is non-empty, the stage trusts it before `apk add` and before the `wget` jar downloads from `repo1.maven.org`, so TLS interception does not break the build. When it is empty (the CI/published-image case), an `[ -s ]` guard skips all trust changes, so the build is identical to a no-CA build.
 
-The release/CI scripts and the container-integration-test harness stage this file automatically via the shared `docker/ensure-ca-bundle.sh` helper: it copies `MOCKSERVER_LOCAL_CA_BUNDLE` (or the `NODE_EXTRA_CA_CERTS` / `AWS_CA_BUNDLE` fallbacks) into the context when set, otherwise writes an empty placeholder. All `ca-bundle.pem` files are gitignored. `docker/local` and `docker/webhook` do **not** use this mechanism: `docker/webhook` is single-stage, and although `docker/local` is now multi-stage (its AppCDS build stage runs on `eclipse-temurin`), that stage performs **no network downloads** (it only copies the local JAR, jlink-trims, and runs a training start), so it needs no CA-bundle trust even behind a TLS-inspecting proxy.
+The release/CI scripts and the container-integration-test harness stage this file automatically via the shared `docker/ensure-ca-bundle.sh` helper: it copies `MOCKSERVER_LOCAL_CA_BUNDLE` (or the `NODE_EXTRA_CA_CERTS` / `AWS_CA_BUNDLE` fallbacks) into the context when set, otherwise writes an empty placeholder. All `ca-bundle.pem` files are gitignored. Only `docker/webhook` (single-stage) does **not** use this mechanism. `docker/local` and `docker/aot` need it for the `apk add zip unzip` in their jarprep stage, so every script that builds them stages the file first.
 
 The same download stages also harden Maven Central downloads against transient DNS/connection blips by appending GNU-wget retry directives (`tries`, `timeout`, `waitretry`, `retry_on_host_error`, `retry_connrefused`) to `/etc/wgetrc`. BusyBox wget ignores `/etc/wgetrc`, so this is a safe no-op on images that fall back to it.
 
@@ -461,7 +505,7 @@ See [CI/CD](ci-cd.md) for full pipeline details.
 
 **Every `ARG TARGETARCH` / `TARGETOS` / `TARGETPLATFORM` (and the `BUILD*` equivalents) is bare — never give one a default, and never fall back to a literal (`${TARGETARCH:-amd64}`).** A stage-level default such as `ARG TARGETARCH=amd64` *overrides* the value BuildKit injects, so on the arm64 leg of `docker buildx build --platform linux/amd64,linux/arm64` the stage still sees `amd64`. The release and snapshot pushes pass no `--build-arg TARGETARCH`, so the arm64 images copied the x86_64 `netty-tcnative` `.so` into `/usr/lib`.
 
-- **In target-platform stages that download or trim natives, the stage's own `uname -m` is the authority.** These are the `download` / `copy` / `tcnative` stages of the download-mode Dockerfiles (`docker/Dockerfile`, `docker/root`, `docker/root-snapshot`, `docker/snapshot`), `docker/graaljs` and `docker/clustered`, plus `docker/Dockerfile`'s `jarprep`. They run on the platform being built (buildx emulates a foreign one), so `uname -m` is the image's arch. `case "$(uname -m)"` maps `x86_64` and `aarch64|arm64` explicitly and fails on anything else. A non-empty `TARGETARCH` that disagrees with it fails the build, so `--platform linux/arm64 --build-arg TARGETARCH=amd64` is rejected. It is never used to choose the native.
+- **In target-platform stages that download or trim natives, the stage's own `uname -m` is the authority.** These are the `download` / `copy` / `tcnative` stages of the download-mode Dockerfiles (`docker/Dockerfile`, `docker/root`, `docker/root-snapshot`, `docker/snapshot`), `docker/graaljs` and `docker/clustered`, plus every `jarprep` stage (through `docker/jarprep/mockserver-jarprep.sh`). They run on the platform being built (buildx emulates a foreign one), so `uname -m` is the image's arch. `case "$(uname -m)"` maps `x86_64` and `aarch64|arm64` explicitly and fails on anything else. A non-empty `TARGETARCH` that disagrees with it fails the build, so `--platform linux/arm64 --build-arg TARGETARCH=amd64` is rejected. It is never used to choose the native.
 - **After download or trim, each `.so` in the stage has its ELF `e_machine` compared with the `uname`-derived value** using `od -An -tu2 -j18 -N2` (62 = x86-64, 183 = AArch64). A mismatch fails the build.
 - **`BUILDPLATFORM` stages are the exception.** The `healthcheck` and `-http3` `quic` stages run on the build machine and cross-target, so there `uname -m` is the wrong arch. They take the arch from `TARGETARCH` and check the output's ELF machine against it.
 - **`.buildkite/scripts/steps/docker-validate-sync.sh`** checks every Dockerfile under `docker/`. It joins `\` continuations into logical instructions and drops comment lines. It fails on:

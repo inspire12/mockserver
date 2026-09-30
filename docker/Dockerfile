@@ -108,157 +108,25 @@ RUN NETTY_TCNATIVE="$(unzip -p mockserver-netty-jar-with-dependencies.jar META-I
 
 FROM ${source} AS intermediate
 
+# jarprep: drop every native binary a linux/<arch> container cannot load, then split the jar into
+# own.jar (org/mockserver/**) and deps.jar (the dependencies), both STORED and byte-reproducible, so
+# a release that changes no dependency reuses deps.jar's layer. The logic is the shared
+# jarprep/mockserver-jarprep.sh (every published image runs a byte-identical copy): it takes the arch
+# from this stage's uname -m, checks every kept .so's ELF machine, and fails the build if a required
+# native is missing.
+FROM intermediate AS jarprep
+RUN apk add --no-cache zip unzip
+# Bare, no default (a default overrides BuildKit's per-leg value); the stage's own uname -m is the authority.
+ARG TARGETARCH
+COPY jarprep/mockserver-jarprep.sh /usr/local/bin/mockserver-jarprep.sh
+RUN sh /usr/local/bin/mockserver-jarprep.sh /mockserver-netty-jar-with-dependencies.jar "${TARGETARCH:-}" /jarprep
+
 # AppCDS build stage — jlink-trimmed JDK 26 runtime + training run producing the AppCDS archive.
 # Mirrors docker/local/Dockerfile (the release/snapshot artifact); this Dockerfile is the public
 # download-mode reference and additionally ships netty-tcnative (see the runtime stage below).
 # NOTE: the JVM inside this runtime image is JDK 26 — the MockServer library itself is still
 # compiled to the Java 17 bytecode floor (see AGENTS.md Java Compatibility Policy); running that
 # jar on a newer JVM is fully supported and is a runtime-only choice, independent of compilation.
-# ── Per-arch native trim + uncompressed repack (image download-size optimisation) ──
-# The fat jar bundles netty native binaries for EVERY platform under META-INF/native/:
-# linux, macOS and windows, each in x86_64 + aarch64. A linux container can only ever
-# load its own arch's ELF .so — the macOS blobs are Mach-O (.jnilib) and the Windows
-# ones are PE (.dll), object formats an ELF loader physically cannot map, and the
-# wrong-arch linux .so is just as unusable. Dropping them removes ~13 MiB from the
-# compressed image download with zero loss of function. Keyed on this stage's own
-# uname -m (a disagreeing TARGETARCH fails the build), like the tcnative download above.
-#
-# The KEEP filter is the "*<arch>.so" SUFFIX, and that shape is deliberate: the linux
-# natives for one arch are differently-named files —
-#   libnetty_tcnative_linux_<arch>.so
-#   libnetty_transport_native_epoll_<arch>.so   <-- note: NO "linux_" in the name
-# so a "linux_<arch>" filter would silently delete the epoll .so and degrade epoll to
-# NIO with no error anywhere in the log. Matching the "<arch>.so" suffix keeps both
-# ELF .so and drops .jnilib/.dll/wrong-arch. NEVER narrow this filter such that it
-# could remove this arch's epoll or tcnative .so.
-#
-# libnetty_quiche42_linux_<arch>.so used to be a third file here. The QUIC natives no
-# longer ship in the default fat jar (they moved to the jar-with-dependencies-http3
-# classifier), so there is nothing for this filter to keep: THESE IMAGES NO LONGER
-# SERVE HTTP/3. That is a real capability change and it is worth being precise about
-# the price, because it is not the ~11 MiB the standalone jar saves — this trim already
-# discarded four of the five platforms' quiche binaries, so the image was only ever
-# carrying ~2.4 MiB of them. A user who sets http3Port here gets an actionable start-up
-# failure (MockServer.requireQuicNative) rather than a silently unserved UDP port, and
-# can restore HTTP/3 by mounting netty-codec-native-quic-<ver>-linux-<arch>.jar (~2.7 MiB)
-# into /libs, which is already on the classpath in the ENTRYPOINT below.
-#
-# The jar is then repacked with STORED (uncompressed) entries. A jar is already a zip,
-# so the image layer's gzip gains almost nothing on it; storing the class bytes raw lets
-# the layer gzip compress them and shrinks the jar layer a further ~16 MiB. The AppCDS
-# training run below re-derives /mockserver.jsa from THIS repacked jar, so the archive
-# stays consistent (verified to map under -Xshare:on).
-#
-# ── Split into own.jar + deps.jar for INCREMENTAL image download ──
-# (docs/plans/performance-programme.md, "Scopes this programme never covered" item 1.)
-# A single file cannot span image layers, so the ONLY way to make a version bump re-pull
-# less than the whole ~57 MiB (compressed) jar layer is to ship MockServer's own classes
-# and its third-party dependencies as SEPARATE artifacts:
-#   own.jar   = org/mockserver/**            — MockServer's own classes, change every release
-#   deps.jar  = everything else (the deps)   — byte-stable across a patch release
-# Measured on the 8.0.1 fat jar: own = ~16% of the compressed bytes, deps = ~84%. Across the
-# 8.0.0 -> 8.0.1 boundary 88.5% of the dependency bytes were byte-identical (and that boundary
-# even bumped BouncyCastle/Netty/OTel; a patch that bumps no dependency changes 0% of deps.jar).
-# So deps.jar's layer is REUSED on `docker pull` at upgrade instead of re-pulled, and on a fresh
-# pull it and the runtime layer fetch CONCURRENTLY rather than one 57 MiB layer fetched serially.
-# The union own.jar + deps.jar on the classpath is byte-for-byte the same entry set as the fat
-# jar (verified: 2256 + 41844 = 44100 entries), so runtime behaviour is identical by construction
-# — the split point only decides WHICH layer an entry lands in, never whether it loads (both jars
-# are on the -cp). Nothing uses `-jar`, so a Main-Class manifest is irrelevant; the version is
-# baked into org/mockserver/version/Version.class, not read from a manifest.
-#
-# Layer REUSE additionally requires deps.jar to be BYTE-REPRODUCIBLE across releases: identical
-# dependency bytes must yield an identical file, hence an identical layer digest. `zip -r` walks
-# the filesystem in readdir order and stamps live mtimes — non-deterministic — so both jars are
-# instead built from a SORTED entry list with a FIXED timestamp on every entry AND on the output
-# file (COPY carries the source mtime into the layer tar). Directory entries are omitted; a jar
-# without them is valid and loads via the classpath the same way (Spring Boot / Gradle jars do
-# this), and it keeps the deterministic single-pass `zip -@` simple.
-FROM intermediate AS jarprep
-RUN apk add --no-cache zip unzip
-# Bare, no default (a default overrides BuildKit's per-leg value); the stage's own uname -m is the authority.
-ARG TARGETARCH
-WORKDIR /jarprep
-# FIVE native families are trimmed, not one. netty's live under META-INF/native/ and are matched by
-# ARCH SUFFIX; zstd-jni, snappy, JNA and lz4-java each use their own directory layout and are matched by
-# DIRECTORY PREFIX. Measured in the 8.0.1 fat jar: 28.17 MiB of native binaries, of which 14.62 MiB
-# cannot be loaded by a linux container at all - zstd-jni alone ships 18 platform builds where
-# exactly one is loadable. Trimming only META-INF/native/ left roughly
-# 9 MiB of unusable binaries in the image.
-#
-# Two details in the RUN below that are easy to undo by accident:
-#   MANIFEST.MF is re-added FIRST. A plain recursive `zip -r` orders entries by filesystem
-#   walk, leaving the manifest buried. Random-access JarFile (what `java -jar` and `-cp` use)
-#   finds it wherever it sits, but a streaming java.util.jar.JarInputStream reader only looks
-#   at the first couple of entries and would silently see a null manifest.
-#   The final greps FAIL THE BUILD if no native for this arch survived the trim. Without them a
-#   filter that silently matched nothing would still produce a working - merely larger - image,
-#   and the whole size win would disappear with no signal. There is one assertion PER FAMILY on
-#   purpose: a single combined check passes as long as any one family survives, which is exactly
-#   how a broken filter for one of the other four would go unnoticed. lz4-java was found only by
-#   listing what SURVIVED a trim run - it had been invisible in the by-owner breakdown.
-RUN set -eu; \
-    case "$(uname -m)" in \
-      x86_64) \
-        STAGE_ARCH=amd64; ARCH=x86_64; ELF_MACHINE=62; \
-        KEEP_ZSTD="linux/amd64/"; \
-        KEEP_SNAPPY="org/xerial/snappy/native/Linux/x86_64/"; \
-        KEEP_JNA="com/sun/jna/linux-x86-64/"; \
-        KEEP_LZ4="net/jpountz/util/linux/amd64/" ;; \
-      aarch64|arm64) \
-        STAGE_ARCH=arm64; ARCH=aarch_64; ELF_MACHINE=183; \
-        KEEP_ZSTD="linux/aarch64/"; \
-        KEEP_SNAPPY="org/xerial/snappy/native/Linux/aarch64/"; \
-        KEEP_JNA="com/sun/jna/linux-aarch64/"; \
-        KEEP_LZ4="net/jpountz/util/linux/aarch64/" ;; \
-      *) echo "ERROR: no native trim rule for stage arch '$(uname -m)'"; exit 1 ;; \
-    esac; \
-    if [ -n "${TARGETARCH:-}" ] && [ "$TARGETARCH" != "$STAGE_ARCH" ]; then \
-      echo "ERROR: TARGETARCH='$TARGETARCH' but this stage runs on $STAGE_ARCH - declare 'ARG TARGETARCH' without a default"; exit 1; \
-    fi; \
-    cp /mockserver-netty-jar-with-dependencies.jar app.jar; \
-    for e in $(unzip -l app.jar 'META-INF/native/*' | awk '/META-INF\/native\/.+[^\/]$/{print $NF}'); do \
-      case "$e" in *"$ARCH".so) : ;; *) echo "trim $e"; zip -q -d app.jar "$e" ;; esac; \
-    done; \
-    trim_prefix() { \
-      keep="$1"; glob="$2"; \
-      for e in $(unzip -l app.jar "$glob" | awk '$NF ~ /\.(so|dll|dylib|jnilib)$/ {print $NF}'); do \
-        case "$e" in "$keep"*) : ;; *) echo "trim $e"; zip -q -d app.jar "$e" ;; esac; \
-      done; \
-    }; \
-    trim_prefix "$KEEP_ZSTD"   '*libzstd-jni*'; \
-    trim_prefix "$KEEP_SNAPPY" 'org/xerial/snappy/native/*'; \
-    trim_prefix "$KEEP_JNA"    'com/sun/jna/*'; \
-    trim_prefix "$KEEP_LZ4"    'net/jpountz/util/*'; \
-    mkdir ex && (cd ex && unzip -q ../app.jar) && rm app.jar; \
-    find ex -type f -name '*.so' > /tmp/natives.txt; \
-    [ -s /tmp/natives.txt ] || { echo "ERROR: no .so native survived the trim"; exit 1; }; \
-    while read -r so; do \
-      ACTUAL="$(od -An -tu2 -j18 -N2 "$so")"; \
-      if [ "${ACTUAL##* }" != "$ELF_MACHINE" ]; then echo "ERROR: $so ELF machine ${ACTUAL##* }, expected $ELF_MACHINE for $ARCH"; exit 1; fi; \
-    done < /tmp/natives.txt; \
-    find ex -exec touch -h -t 200001010000.00 {} +; \
-    ( cd ex; \
-      find . -type f | sed 's#^\./##' | LC_ALL=C sort > /tmp/all.txt; \
-      grep    '^org/mockserver/' /tmp/all.txt                                    > /tmp/own.txt; \
-      grep -v '^org/mockserver/' /tmp/all.txt | grep -vx 'META-INF/MANIFEST.MF' > /tmp/deps.txt; \
-      zip -q -0 -X ../deps.jar META-INF/MANIFEST.MF; \
-      zip -q -0 -X -@ ../deps.jar < /tmp/deps.txt; \
-      zip -q -0 -X -@ ../own.jar  < /tmp/own.txt ); \
-    touch -t 200001010000.00 deps.jar own.jar; \
-    echo "own.jar entries: $(unzip -l own.jar | tail -1); deps.jar entries: $(unzip -l deps.jar | tail -1)"; \
-    unzip -Z1 own.jar | grep -qx "org/mockserver/cli/Main.class" || { echo "ERROR: own.jar is missing MockServer's own classes"; exit 1; }; \
-    LEAK="$(unzip -Z1 own.jar | grep -v '^org/mockserver/' || true)"; \
-    if [ -n "$LEAK" ]; then echo "ERROR: own.jar contains non-org/mockserver entries - the split predicate is wrong:"; echo "$LEAK"; exit 1; fi; \
-    echo "kept natives:"; unzip -l deps.jar 'META-INF/native/*' "${KEEP_ZSTD}*" "${KEEP_SNAPPY}*" "${KEEP_JNA}*" "${KEEP_LZ4}*"; \
-    unzip -l deps.jar 'META-INF/native/*' | grep -q "libnetty_transport_native_epoll_$ARCH.so" || { echo "ERROR: no netty epoll $ARCH native survived the trim"; exit 1; }; \
-    unzip -l deps.jar 'META-INF/native/*' | grep -q "libnetty_tcnative_linux_$ARCH.so" || { echo "ERROR: no netty tcnative $ARCH native survived the trim"; exit 1; }; \
-    if unzip -l deps.jar 'META-INF/native/*' | grep -q "quiche"; then echo "ERROR: a quiche native is present - this image builds from the DEFAULT jar, which must not carry QUIC natives"; exit 1; fi; \
-    unzip -l deps.jar | grep -q "${KEEP_ZSTD}libzstd-jni" || { echo "ERROR: no zstd native for $ARCH survived the trim"; exit 1; }; \
-    unzip -l deps.jar | grep -q "${KEEP_SNAPPY}libsnappyjava" || { echo "ERROR: no snappy native for $ARCH survived the trim"; exit 1; }; \
-    unzip -l deps.jar | grep -q "${KEEP_JNA}libjnidispatch" || { echo "ERROR: no JNA native for $ARCH survived the trim"; exit 1; }; \
-    unzip -l deps.jar | grep -q "${KEEP_LZ4}liblz4-java" || { echo "ERROR: no lz4 native for $ARCH survived the trim"; exit 1; }
-
 FROM eclipse-temurin:26-jdk-noble AS appcds-build
 
 # Split artifacts (see the jarprep stage): own classes and third-party deps as two jars, both
@@ -351,9 +219,8 @@ EXPOSE 1080
 # and by sibling Dockerfiles, so it is left as-is rather than churned; read the FROM line above
 # for the actual version.
 COPY --from=appcds-build /runtime /usr/lib/jvm/temurin25-trimmed
-# deps.jar is COPYed on its OWN layer, separately from own.jar, so that a version bump whose
-# dependencies are unchanged re-pulls only own.jar (~11 MiB compressed) + the CDS archive rather
-# than the whole ~57 MiB fat-jar layer; the deps layer is reused. See the jarprep stage.
+# deps.jar on its OWN layer, before own.jar: a release whose dependencies are unchanged produces a
+# byte-identical deps.jar, so `docker pull` reuses that layer instead of re-fetching it.
 COPY --from=appcds-build /mockserver-deps.jar /
 COPY --from=appcds-build /mockserver.jar /
 COPY --from=appcds-build /mockserver.jsa /

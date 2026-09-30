@@ -29,10 +29,34 @@
 # https://www.mock-server.com
 #
 
+# jarprep: drop every native binary a linux/<arch> container cannot load, then split the jar into
+# own.jar (org/mockserver/**) and deps.jar (the dependencies), both STORED and byte-reproducible, so
+# a release that changes no dependency reuses deps.jar's layer. The logic is the shared
+# mockserver-jarprep.sh (canonical copy docker/jarprep/): it takes the arch from this stage's
+# uname -m, checks every kept .so's ELF machine, and fails the build if a required native is missing.
+# ca-bundle.pem (empty in CI; staged by docker/ensure-ca-bundle.sh) is trusted before `apk add`.
+FROM alpine:3.24 AS jarprep
+COPY ca-bundle.pem /tmp/local-ca.pem
+RUN if [ -s /tmp/local-ca.pem ]; then \
+      mkdir -p /etc/ssl/certs && \
+      cp /tmp/local-ca.pem /etc/ssl/cert.pem && \
+      cp /tmp/local-ca.pem /etc/ssl/certs/ca-certificates.crt; \
+    fi && \
+    apk add --no-cache zip unzip
+COPY mockserver-netty-jar-with-dependencies.jar /mockserver-netty-jar-with-dependencies.jar
+# Bare, no default (a default overrides BuildKit's per-leg value); the stage's own uname -m is the authority.
+ARG TARGETARCH
+COPY mockserver-jarprep.sh /usr/local/bin/mockserver-jarprep.sh
+RUN sh /usr/local/bin/mockserver-jarprep.sh /mockserver-netty-jar-with-dependencies.jar "${TARGETARCH:-}" /jarprep
+
 # AppCDS build stage — jlink-trimmed JDK 26 runtime + training run producing the AppCDS archive
 FROM eclipse-temurin:26-jdk-noble AS appcds-build
 
-COPY mockserver-netty-jar-with-dependencies.jar /mockserver-netty-jar-with-dependencies.jar
+# own.jar and deps.jar from the jarprep stage. The AppCDS archive records this exact classpath, so the
+# training run and the runtime ENTRYPOINT MUST both list /mockserver.jar:/mockserver-deps.jar in that
+# order (the ENTRYPOINT appends /libs/*) or the archive does not map.
+COPY --from=jarprep /jarprep/own.jar  /mockserver.jar
+COPY --from=jarprep /jarprep/deps.jar /mockserver-deps.jar
 
 # Same module set validated end-to-end for the jlink binary bundle (scripts/build-binary-bundle.sh,
 # docs/code/cli.md): java.se aggregator + Netty Unsafe + TLS crypto + DNS + zipfs + jdk.management.
@@ -59,10 +83,10 @@ RUN "$JAVA_HOME/bin/jlink" \
 # the archive mappable. Under a non-ZGC override (e.g. JAVA_TOOL_OPTIONS=-XX:+UseG1GC) the archive is
 # not loaded: -Xshare:auto logs a CDS error and the JVM starts without it (slower cold start, still works).
 RUN /runtime/bin/java --enable-native-access=ALL-UNNAMED -XX:+UseZGC -XX:ArchiveClassesAtExit=/mockserver.jsa \
-      -jar /mockserver-netty-jar-with-dependencies.jar -p 1080 & \
+      -cp /mockserver.jar:/mockserver-deps.jar org.mockserver.cli.Main -p 1080 & \
     SERVER_PID=$!; \
     for i in $(seq 1 240); do \
-      /runtime/bin/java -cp /mockserver-netty-jar-with-dependencies.jar org.mockserver.cli.HealthCheck && break; \
+      /runtime/bin/java -cp /mockserver.jar:/mockserver-deps.jar org.mockserver.cli.HealthCheck && break; \
       sleep 0.5; \
     done; \
     kill -TERM "$SERVER_PID" && wait "$SERVER_PID" || true; \
@@ -128,7 +152,10 @@ EXPOSE 1080
 # and by sibling Dockerfiles, so it is left as-is rather than churned; read the FROM line above
 # for the actual version.
 COPY --from=appcds-build /runtime /usr/lib/jvm/temurin25-trimmed
-COPY --from=appcds-build /mockserver-netty-jar-with-dependencies.jar /
+# deps.jar on its OWN layer, before own.jar: a release whose dependencies are unchanged produces a
+# byte-identical deps.jar, so `docker pull` reuses that layer instead of re-fetching it.
+COPY --from=appcds-build /mockserver-deps.jar /
+COPY --from=appcds-build /mockserver.jar /
 COPY --from=appcds-build /mockserver.jsa /
 
 # don't run MockServer as root
@@ -153,7 +180,7 @@ USER nonroot
 # The AppCDS archive is trained under ZGC to match (collector-independent from JDK 22, so it still
 # maps under an override). JDK 26 ZGC is generational — no -XX:+ZGenerational (obsolete post-JDK 23).
 ENV JAVA_TOOL_OPTIONS="-XX:+UseZGC"
-ENTRYPOINT ["/usr/lib/jvm/temurin25-trimmed/bin/java", "-Dfile.encoding=UTF-8", "--enable-native-access=ALL-UNNAMED", "-XX:MaxRAMPercentage=50.0", "-XX:SharedArchiveFile=/mockserver.jsa", "-cp", "/mockserver-netty-jar-with-dependencies.jar:/libs/*", "-Dmockserver.propertyFile=/config/mockserver.properties", "org.mockserver.cli.Main"]
+ENTRYPOINT ["/usr/lib/jvm/temurin25-trimmed/bin/java", "-Dfile.encoding=UTF-8", "--enable-native-access=ALL-UNNAMED", "-XX:MaxRAMPercentage=50.0", "-XX:SharedArchiveFile=/mockserver.jsa", "-cp", "/mockserver.jar:/mockserver-deps.jar:/libs/*", "-Dmockserver.propertyFile=/config/mockserver.properties", "org.mockserver.cli.Main"]
 
 ENV SERVER_PORT=1080
 

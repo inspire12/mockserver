@@ -119,6 +119,64 @@ for df in "${DOCKERFILES[@]}"; do
   fi
 done
 
+# The published images (and the docker/Dockerfile reference) trim the jar's natives and split it into
+# own + deps jars with ONE shared script, so the size win cannot silently drift in one variant. Each
+# context carries a byte-identical copy of it, and every ENTRYPOINT uses the split classpath.
+JARPREP_SOURCE="$REPO_ROOT/docker/jarprep/mockserver-jarprep.sh"
+JARPREP_DOCKERFILES=(
+  "docker/Dockerfile"
+  "docker/local/Dockerfile"
+  "docker/graaljs/Dockerfile"
+  "docker/clustered/Dockerfile"
+  "docker/aot/Dockerfile"
+)
+for df in "${JARPREP_DOCKERFILES[@]}"; do
+  filepath="$REPO_ROOT/$df"
+  context_dir="$(dirname "$filepath")"
+  copy="$context_dir/mockserver-jarprep.sh"
+  [ "$df" = "docker/Dockerfile" ] && copy="$JARPREP_SOURCE"
+  if ! cmp -s "$JARPREP_SOURCE" "$copy"; then
+    echo "FAIL: ${copy#"$REPO_ROOT"/} is missing or differs from docker/jarprep/mockserver-jarprep.sh"
+    errors=$((errors + 1))
+  fi
+  if ! grep -qE '^RUN sh /usr/local/bin/mockserver-jarprep\.sh ' "$filepath"; then
+    echo "FAIL: $df must prepare its jar with mockserver-jarprep.sh (trimmed natives + own/deps split)"
+    errors=$((errors + 1))
+  fi
+  logical="$(logical_lines "$filepath")"
+  entrypoint_lines="$(grep -E '^ENTRYPOINT ' <<<"$logical" || true)"
+  if ! grep -qF '"-cp", "/mockserver.jar:/mockserver-deps.jar:/libs/*"' <<<"$entrypoint_lines"; then
+    echo "FAIL: $df ENTRYPOINT must use the split classpath /mockserver.jar:/mockserver-deps.jar:/libs/*"
+    errors=$((errors + 1))
+  fi
+  # The jars must come from the jarprep stage: an image that also COPYs the untrimmed fat jar into its
+  # runtime stage passes every other check here while shipping the old ~94 MB layer.
+  for part in own deps; do
+    if ! grep -qE "^COPY --from=jarprep /jarprep/${part}\\.jar " <<<"$logical"; then
+      echo "FAIL: $df must COPY --from=jarprep /jarprep/${part}.jar"
+      errors=$((errors + 1))
+    fi
+  done
+  runtime_stage="$(awk 'toupper($0) ~ /^[[:space:]]*FROM[[:space:]]/{stage=""} {stage=stage $0 "\n"} END{printf "%s", stage}' <<<"$logical")"
+  fat_copy="$(grep -iE '^[[:space:]]*COPY[[:space:]].*mockserver-netty-jar-with-dependencies\.jar' <<<"$runtime_stage" || true)"
+  if [ -n "$fat_copy" ]; then
+    echo "FAIL: $df's runtime stage COPYs the untrimmed fat jar; ship only the jarprep own/deps jars:"
+    echo "$fat_copy" | sed 's/^[[:space:]]*/    /'
+    errors=$((errors + 1))
+  fi
+  # An archive records its training classpath; a different one (e.g. reversed) is silently not mapped
+  # under the default -Xshare:auto, so every AppCDS/AOT training command must use the ENTRYPOINT's order.
+  training_cmds="$(grep -E '^RUN ' <<<"$logical" | tr '&;|' '\n\n\n' \
+    | grep -E -- '-XX:(ArchiveClassesAtExit|AOTCacheOutput)=' || true)"
+  wrong_cp="$(grep -vE -- '[[:space:]]-cp[[:space:]]+/mockserver\.jar:/mockserver-deps\.jar[[:space:]]+org\.mockserver\.cli\.Main([[:space:]]|$)' <<<"$training_cmds" \
+    | grep -E '[^[:space:]]' || true)"
+  if [ -n "$wrong_cp" ]; then
+    echo "FAIL: $df AppCDS/AOT training must run -cp /mockserver.jar:/mockserver-deps.jar org.mockserver.cli.Main:"
+    echo "$wrong_cp" | sed 's/^[[:space:]]*/    /'
+    errors=$((errors + 1))
+  fi
+done
+
 # Every image compiles the probe from a digest-pinned golang image (hard check) on the BUILD
 # platform, cross-compiling to TARGETARCH: Go crashes under QEMU, so the stage must never run as the
 # emulated leg of a multi-arch build. A defaulted 'ARG TARGETARCH=…' would pin one arch, so require

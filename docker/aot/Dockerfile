@@ -53,10 +53,31 @@ COPY mockserver-netty-jar-with-dependencies.jar .
 
 FROM ${source} AS intermediate
 
+# jarprep: drop every native binary a linux/<arch> container cannot load, then split the jar into
+# own.jar (org/mockserver/**) and deps.jar (the dependencies), both STORED and byte-reproducible, so
+# a release that changes no dependency reuses deps.jar's layer. The logic is the shared
+# mockserver-jarprep.sh (canonical copy docker/jarprep/): it takes the arch from this stage's
+# uname -m, checks every kept .so's ELF machine, and fails the build if a required native is missing.
+# ca-bundle.pem (empty in CI) is trusted before `apk add`: the copy stage does not set it up.
+FROM intermediate AS jarprep
+COPY ca-bundle.pem /tmp/local-ca.pem
+RUN if [ -s /tmp/local-ca.pem ]; then \
+      mkdir -p /etc/ssl/certs && \
+      cp /tmp/local-ca.pem /etc/ssl/cert.pem && \
+      cp /tmp/local-ca.pem /etc/ssl/certs/ca-certificates.crt; \
+    fi && \
+    apk add --no-cache zip unzip
+# Bare, no default (a default overrides BuildKit's per-leg value); the stage's own uname -m is the authority.
+ARG TARGETARCH
+COPY mockserver-jarprep.sh /usr/local/bin/mockserver-jarprep.sh
+RUN sh /usr/local/bin/mockserver-jarprep.sh /mockserver-netty-jar-with-dependencies.jar "${TARGETARCH:-}" /jarprep
+
 # AOT build stage — jlink-trimmed JDK 25 runtime + training run producing the AOT cache
 FROM eclipse-temurin:25-jdk-noble AS aot-build
 
-COPY --from=intermediate mockserver-netty-jar-with-dependencies.jar /mockserver-netty-jar-with-dependencies.jar
+# The AOT cache records this exact classpath: training and ENTRYPOINT both use own:deps in this order.
+COPY --from=jarprep /jarprep/own.jar  /mockserver.jar
+COPY --from=jarprep /jarprep/deps.jar /mockserver-deps.jar
 
 # Same module set validated end-to-end for the jlink binary bundle (docs/code/cli.md):
 # java.se aggregator + Netty Unsafe + TLS crypto + DNS + zipfs + jdk.management. jdk.management supplies
@@ -75,10 +96,10 @@ RUN "$JAVA_HOME/bin/jlink" \
 # other server images set — ZGC's fixed start-up cost defeats this variant's minimal-time-to-ready
 # purpose. Do not add -XX:+UseZGC here. See docs/code/startup-performance.md for the measurements.
 RUN /runtime/bin/java --enable-native-access=ALL-UNNAMED -XX:AOTCacheOutput=/mockserver.aot \
-      -jar /mockserver-netty-jar-with-dependencies.jar -p 1080 & \
+      -cp /mockserver.jar:/mockserver-deps.jar org.mockserver.cli.Main -p 1080 & \
     SERVER_PID=$!; \
     for i in $(seq 1 240); do \
-      /runtime/bin/java -cp /mockserver-netty-jar-with-dependencies.jar org.mockserver.cli.HealthCheck && break; \
+      /runtime/bin/java -cp /mockserver.jar:/mockserver-deps.jar org.mockserver.cli.HealthCheck && break; \
       sleep 0.5; \
     done; \
     kill -TERM "$SERVER_PID" && wait "$SERVER_PID" || true; \
@@ -117,7 +138,9 @@ LABEL org.opencontainers.image.authors="James Bloom <jamesdbloom@gmail.com>"
 EXPOSE 1080
 
 COPY --from=aot-build /runtime /usr/lib/jvm/temurin25-trimmed
-COPY --from=aot-build /mockserver-netty-jar-with-dependencies.jar /
+# deps.jar on its OWN layer, before own.jar, so an unchanged deps.jar layer is reused on upgrade.
+COPY --from=aot-build /mockserver-deps.jar /
+COPY --from=aot-build /mockserver.jar /
 COPY --from=aot-build /mockserver.aot /
 
 USER nonroot
@@ -128,7 +151,7 @@ USER nonroot
 # different CPU arch) the JVM logs a warning and starts normally.
 # GC: kept on the JDK default (G1), unlike the sibling server images' -XX:+UseZGC — see the training
 # stage above. To trade start-up for ZGC's lower tail latency, pass -XX:+UseZGC via JAVA_TOOL_OPTIONS.
-ENTRYPOINT ["/usr/lib/jvm/temurin25-trimmed/bin/java", "-Dfile.encoding=UTF-8", "--enable-native-access=ALL-UNNAMED", "-XX:MaxRAMPercentage=50.0", "-XX:AOTCache=/mockserver.aot", "-cp", "/mockserver-netty-jar-with-dependencies.jar:/libs/*", "-Dmockserver.propertyFile=/config/mockserver.properties", "org.mockserver.cli.Main"]
+ENTRYPOINT ["/usr/lib/jvm/temurin25-trimmed/bin/java", "-Dfile.encoding=UTF-8", "--enable-native-access=ALL-UNNAMED", "-XX:MaxRAMPercentage=50.0", "-XX:AOTCache=/mockserver.aot", "-cp", "/mockserver.jar:/mockserver-deps.jar:/libs/*", "-Dmockserver.propertyFile=/config/mockserver.properties", "org.mockserver.cli.Main"]
 
 ENV SERVER_PORT=1080
 

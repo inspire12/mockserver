@@ -3,10 +3,10 @@
 # Ensure a ca-bundle.pem exists in a Docker build context.
 #
 # Several MockServer Dockerfiles (docker/, docker/root/, docker/snapshot/,
-# docker/root-snapshot/, docker/clustered/, docker/graaljs/, docker/http3/) `COPY ca-bundle.pem`
-# into their alpine download stages so that builds behind a corporate
-# TLS-inspecting proxy can trust the corporate root CA before `apk add` and the
-# wget jar downloads. The COPY instruction fails if the file is absent, so this
+# docker/root-snapshot/, docker/clustered/, docker/graaljs/, docker/http3/, docker/local/,
+# docker/aot/) `COPY ca-bundle.pem` into their alpine stages so that builds
+# behind a corporate TLS-inspecting proxy can trust the corporate root CA before
+# `apk add` and the wget jar downloads. The COPY instruction fails if the file is absent, so this
 # helper guarantees one is present:
 #
 #   - if MOCKSERVER_LOCAL_CA_BUNDLE (or the NODE_EXTRA_CA_CERTS / AWS_CA_BUNDLE

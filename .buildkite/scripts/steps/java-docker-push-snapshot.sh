@@ -21,6 +21,10 @@ fi
 
 echo "--- :package: Found JAR: $SHADED_JAR"
 cp "$SHADED_JAR" docker/local/mockserver-netty-jar-with-dependencies.jar
+# docker/local's jarprep stage COPYs ca-bundle.pem and trusts it (when non-empty) before `apk add`;
+# empty in CI is a no-op. Remove any stale bundle first so a fresh one is always written.
+rm -f docker/local/ca-bundle.pem
+docker/ensure-ca-bundle.sh docker/local >/dev/null
 
 SMOKE_TAG="mockserver/mockserver:smoke-test-$$"
 SMOKE_CONTAINER="mockserver-smoke-$$"

@@ -14,10 +14,10 @@ source "${SCRIPT_DIR}/docker-compose.sh"
 # Variants whose Dockerfile now `COPY ca-bundle.pem` from the build context.
 # A placeholder must exist before `docker build` or the COPY fails. The base
 # docker/ context COPYs it too, but the smoke tests only build variant dirs;
-# `local` is single-stage and does NOT COPY a bundle, so it is excluded.
+# `local` and `aot` COPY it into their jarprep stage.
 function variant_copies_ca_bundle() {
   case "$1" in
-    root|snapshot|root-snapshot|clustered|graaljs|http3) return 0 ;;
+    root|snapshot|root-snapshot|clustered|graaljs|http3|local|aot) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -294,8 +294,8 @@ function smoke_test_variant() {
   fi
 
   cp "${source_jar}" "${jar_path}"
-  # local Dockerfile is single-stage and expects the JAR in build context;
-  # root + snapshot Dockerfiles take --build-arg source=copy.
+  # local takes the JAR straight from its build context (no source ARG);
+  # the other variant Dockerfiles take --build-arg source=copy.
   local build_args=""
   if [[ "${variant}" != "local" ]]; then
     build_args="--build-arg source=copy"

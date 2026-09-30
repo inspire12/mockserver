@@ -83,8 +83,13 @@ fi
 cp "$SHADED_JAR" "$_BLM_REPO_ROOT/docker/local/mockserver-netty-jar-with-dependencies.jar"
 
 # ── Step 3: Build local Docker image ─────────────────────────────────
+# The jarprep stage COPYs ca-bundle.pem (empty unless MOCKSERVER_LOCAL_CA_BUNDLE is set).
+_BLM_CA_STATE="$("$_BLM_REPO_ROOT/docker/ensure-ca-bundle.sh" "$_BLM_REPO_ROOT/docker/local")"
 echo "--- :docker: Building local image: $MOCKSERVER_IMAGE"
 docker build --tag "$MOCKSERVER_IMAGE" "$_BLM_REPO_ROOT/docker/local"
+if [[ "$_BLM_CA_STATE" == "created" ]]; then
+  rm -f "$_BLM_REPO_ROOT/docker/local/ca-bundle.pem"
+fi
 
 echo "--- :white_check_mark: Local MockServer image ready: $MOCKSERVER_IMAGE"
 

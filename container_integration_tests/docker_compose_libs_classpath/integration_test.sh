@@ -34,7 +34,7 @@ function build_initialiser_jar() {
     docker cp libs_extract:/mockserver.jar "${EXTRACT_DIR}/own.jar"
     docker cp libs_extract:/mockserver-deps.jar "${EXTRACT_DIR}/deps.jar"
     docker rm -f libs_extract >/dev/null 2>&1
-    # deps first so its META-INF/MANIFEST.MF lands in the merged jar (own.jar is manifest-less)
+    # deps first, then own: own.jar carries META-INF/MANIFEST.MF, so it lands in the merged jar
     ( cd "${EXTRACT_DIR}/merged" && unzip -qo ../deps.jar && unzip -qo ../own.jar && zip -qr "${MOCKSERVER_JAR}" . )
   fi
 
