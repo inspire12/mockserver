@@ -42,6 +42,8 @@ import static org.mockserver.proxyconfiguration.ProxyConfiguration.proxyConfigur
  */
 public class MockServer extends LifeCycle {
 
+    static final WriteBufferWaterMark CONNECTION_WRITE_BUFFER_WATER_MARK = new WriteBufferWaterMark(8 * 1024, 32 * 1024);
+
     private InetSocketAddress remoteSocket;
     private volatile org.mockserver.netty.mcp.McpSessionManager mcpSessionManager;
     private volatile io.netty.channel.Channel dnsChannel;
@@ -204,7 +206,9 @@ public class MockServer extends LifeCycle {
             .channel(NettyTransport.serverSocketChannelClassFor(bossGroup))
             .childOption(ChannelOption.AUTO_READ, true)
             .childOption(ChannelOption.ALLOCATOR, NettyAllocator.ALLOCATOR)
-            .option(ChannelOption.WRITE_BUFFER_WATER_MARK, new WriteBufferWaterMark(8 * 1024, 32 * 1024))
+            // childOption, not option: a listening socket never writes, so the mark only means
+            // anything on accepted connections (see PacedLargeWriteHandler, which reads it)
+            .childOption(ChannelOption.WRITE_BUFFER_WATER_MARK, CONNECTION_WRITE_BUFFER_WATER_MARK)
             .childHandler(initializer)
             .childAttr(REMOTE_SOCKET, remoteSocket)
             .childAttr(PROXYING, remoteSocket != null);

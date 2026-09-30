@@ -3,6 +3,7 @@ package org.mockserver.httpclient;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.util.AttributeKey;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.handler.codec.DecoderException;
 import io.netty.handler.codec.http2.Http2StreamChannel;
@@ -19,6 +20,8 @@ import java.util.Arrays;
 import java.util.List;
 
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
+import static org.mockserver.exception.ExceptionHandling.DIRECT_MEMORY_LIMIT_REACHED;
+import static org.mockserver.exception.ExceptionHandling.directMemoryLimitReached;
 import static org.mockserver.httpclient.NettyHttpClient.CONNECTION_POOL;
 import static org.mockserver.httpclient.NettyHttpClient.POOL_KEEP_PARENT;
 import static org.mockserver.httpclient.NettyHttpClient.POOL_KEY;
@@ -26,6 +29,8 @@ import static org.mockserver.httpclient.NettyHttpClient.RESPONSE_FUTURE;
 
 @ChannelHandler.Sharable
 public class HttpClientHandler extends SimpleChannelInboundHandler<Message> {
+
+    private static final AttributeKey<Boolean> DIRECT_MEMORY_LIMIT_LOGGED = AttributeKey.valueOf("DIRECT_MEMORY_LIMIT_LOGGED");
 
     private final List<String> connectionClosedStrings = Arrays.asList(
         "Broken pipe",
@@ -190,7 +195,16 @@ public class HttpClientHandler extends SimpleChannelInboundHandler<Message> {
 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-        if (isNotSslException(cause) && isNotConnectionReset(cause)) {
+        if (directMemoryLimitReached(cause)) {
+            // reads already buffered keep failing after close() starts, so log once per channel
+            if (mockServerLogger != null && ctx.channel().attr(DIRECT_MEMORY_LIMIT_LOGGED).setIfAbsent(Boolean.TRUE) == null) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.ERROR)
+                        .setMessageFormat(DIRECT_MEMORY_LIMIT_REACHED + ctx.channel() + " - " + cause.getMessage())
+                );
+            }
+        } else if (isNotSslException(cause) && isNotConnectionReset(cause)) {
             if (mockServerLogger != null && mockServerLogger.isEnabledForInstance(Level.WARN)) {
                 mockServerLogger.logEvent(
                     new LogEntry()

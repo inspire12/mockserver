@@ -131,6 +131,99 @@ On small heaps (< 256 MB), if you have both a large number of expectations AND h
 
 Network buffers live outside the stores above, in Netty's pooled allocator. All request/response traffic — including HTTP/2 stream channels, the CONNECT/SOCKS relay and HTTP/3 request streams — uses the same `PooledByteBufAllocator` (see [netty-pipeline.md → ByteBuf Allocator](netty-pipeline.md#bytebuf-allocator)). Before this was pinned, HTTP/2 stream channels used Netty 4.2's adaptive allocator, so an HTTP/2 workload kept two separate buffer pools. Measured with the equivalent JVM-wide setting (`-Dio.netty.allocator.type=pooled`), a single pooled allocator lowered the HTTP/2 benchmark's maximum heap by about 34 MB with throughput and latency unchanged.
 
+#### Direct-memory limit
+
+**Whenever MockServer runs as its own process via the CLI (the jar, the Docker images, the forked Maven
+plugin and the launchers), Netty's direct
+memory is capped at a quarter of the maximum heap, at least 64 MiB and never more than the heap.** So the
+heap plus Netty's buffers can reach 1.25× the heap rather than 2×: at a 256 MiB heap (a 512 MiB container
+at the images' 50%) the cap is 64 MiB, at 512 MiB (1 GiB) it is 128 MiB; the `-graaljs` image's 45% heap
+gives 64 MiB and 115 MiB.
+
+| Setting | Effect |
+|---------|--------|
+| Nothing set (default) | `org.mockserver.cli.Main` sets Netty's property to `max(64 MiB, heap / 4)`, capped at the heap, in its first static initialiser — Netty reads the property once, when it first initialises. Start-up logs a line starting `netty direct memory limit` at `INFO`, with the limit and whether it is the default or explicit |
+| `-Dio.netty.maxDirectMemory=<bytes>` | Used as given; MockServer does not override it. `-1` restores Netty's own default (the JVM limit below). The shaded jar's relocated Netty reads `shaded_package.io.netty.maxDirectMemory` (shade rewrites the literal), so MockServer copies a user's value to that name; the plain name is built at runtime so shade cannot rewrite it (`assert-shaded-direct-memory-property.sh` checks the shaded jar) |
+| `-XX:MaxDirectMemorySize=<size>` (command line or `JAVA_TOOL_OPTIONS`) | Netty uses it; MockServer does not set a limit of its own |
+| Embedded (`ClientAndServer`, JUnit, Spring) | Unchanged: the process is the test JVM's, not MockServer's |
+
+**Why.** Netty's limit otherwise defaults to the JVM's `MaxDirectMemorySize`, which defaults to the
+maximum heap, and nothing stops a workload filling both. Measured Netty direct use under small-body load
+stays near 8 MiB (two pooled arenas of 4 MiB chunks on one core); what grows it is buffers held per
+connection. The dominant case — every slow reader holding a direct copy of its whole response — is
+removed by `PacedLargeWriteHandler` (see
+[netty-pipeline.md → Outbound Buffering and Backpressure](netty-pipeline.md#outbound-buffering-and-backpressure)).
+The cap covers what remains, and each of these holds a whole body in direct memory until it is done:
+
+- request bodies being aggregated (each connection holds its partial body, up to `maxRequestBodySize`);
+- forwarded and proxied responses being aggregated (up to `maxResponseBodySize`, 50 MiB by default);
+- responses relayed through a CONNECT/SOCKS tunnel, aggregated on the loopback leg before being written
+  to the client.
+
+Every server and forward-client aggregator is built by `HttpObjectAggregators`, which sizes the
+aggregator's component limit to `max(1,024, maxContentLength / 1 KiB)` (10,240 for the 10 MiB request
+limit, 51,200 for the 50 MiB response limit). Past its limit a `CompositeByteBuf` consolidates everything so
+far into one new direct buffer, so with Netty's default of 1,024 collecting a large body briefly needed
+about twice its size: a 49 MiB forward failed at a 64 MiB cap and fits now
+(`DirectMemoryLimitForwardIntegrationTest`). The limit is not unbounded because each component costs about
+110 bytes of heap, and a client can send one-byte chunks: unbounded, 1.5 million of them (9 MB on the wire)
+pinned 163 MB of heap. A body whose chunks average under 1 KiB is still consolidated each time it reaches the limit
+(`HttpObjectAggregatorsTest`). The worst case this leaves is the component heap itself: about 1.1 MB per
+HTTP/1.1 connection at the 10 MiB `maxRequestBodySize` (10,240 components × ~110 B), and per stream on
+HTTP/2, so ~110 MB for one HTTP/2 connection with 100 concurrent streams. Bounding that further depends on
+the connection cap (performance-programme #35) or a lower limit for HTTP/2 stream children. This covers HTTP/1.1 and the HTTP/2 stream children, whose DATA frames become
+the same chunks; the HTTP/3 request accumulator uses the same limit. Two places still copy as they grow:
+the relay's HTTP/2 legs, where Netty's `InboundHttp2ToHttpAdapter` writes DATA frames into one growing
+buffer, and `ByteToMessageDecoder` cumulation, which stays small because the HTTP decoder consumes it as it reads.
+
+**What happens at the cap.** An allocation that would pass it throws `OutOfDirectMemoryError`, and the
+connection that made the allocation is closed. That is whichever connection needed a buffer next, not
+necessarily the one holding the memory. The process keeps serving. The `exceptionCaught` handlers of the
+HTTP/1.1 pipeline, `HttpRequestHandler` (also the HTTP/2 stream children), the MCP handler, the
+CONNECT/SOCKS relay and the forward client log it at `ERROR` as `direct memory limit
+(io.netty.maxDirectMemory) reached - raise it with … - closing connection <channel> - <Netty's message>` (`ExceptionHandling.directMemoryLimitReached`).
+What a client sees:
+
+| Where the allocation failed | What the client sees |
+|------|------|
+| Forward client, collecting the upstream response | `502` for that request (two concurrent 49 MiB forwards at 64 MiB: both `502`, both upstream connections closed) |
+| Its own connection, reading a request body | The connection closes mid-upload (the write fails or is reset) |
+| Its own connection, writing a response | That response is not sent in full (not measured; pacing keeps each write to a 32 KiB slice) |
+
+Without the cap the same load grows the process until the kernel kills the container. The fix for a
+workload that needs more is `-XX:MaxDirectMemorySize` or `-Dio.netty.maxDirectMemory`. Measured at
+`--memory=512m`, one core, 50% heap, with 40 clients each sending 6 MiB of an 8 MiB upload and stalling:
+see [the evidence below](#direct-memory-evidence).
+
+**Pooled arena count.** Netty sizes its default number of direct arenas as `min(2 × cores,
+maxDirectMemory / 24 MiB)`, so a lower limit can mean fewer arenas: 2 at 64 MiB, 5 at 128 MiB, 10 at
+256 MiB. On one or two cores this changes nothing; on a 6-core, 2 GiB container (1 GiB heap, 256 MiB
+cap) it is 10 arenas rather than 12, still more than the 5 worker event loops that allocate most buffers.
+
+**Not covered.** Native memory that is not a Netty buffer: TLS state inside BoringSSL (`netty-tcnative`),
+thread stacks, and the JDK's own temporary direct buffers, which stay under the JVM's
+`MaxDirectMemorySize`. Those grow with the number of connections, which is not capped.
+
+#### Direct-memory evidence
+
+Measured 2026-09-30 on Docker Desktop (Apple silicon): `eclipse-temurin:25-jdk`, one CPU,
+`-XX:+UseZGC -XX:MaxRAMPercentage=50`, the jar-with-dependencies built before and after the change,
+`maxLoggedBodyBytes=4096` so logged bodies do not confound the heap. Direct memory is NMT's `Other`
+category; `anon` is the container's unreclaimable memory from `memory.stat`. Two loads, each held 30 s:
+40 clients requesting an 8 MiB body and not reading (download), and 40 clients sending 6 MiB of an 8 MiB
+upload and stalling (upload).
+
+| Load | Limit | Before: direct / anon | After: direct / anon | After: outcome |
+|------|-------|-----------------------|----------------------|----------------|
+| Download | 512 MiB | killed by the kernel (exit 137) | 20 / 193 MiB | all 40 bodies delivered intact |
+| Download | 1 GiB | 340 / 521 MiB | 20 / 203 MiB | all 40 bodies delivered intact |
+| Upload | 512 MiB | 256 / 409 MiB (container at 507–511 of 512 MiB) | 64 / 239 MiB | 31 of 40 connections closed at the cap |
+| Upload | 1 GiB | 260 / 431 MiB | 128 / 298 MiB | 20 of 40 connections closed at the cap |
+
+Before, the upload at 512 MiB survived only because the heap was nearly empty (86 MiB committed); with a
+full heap the same direct growth would not fit. The download direct figure after the change (20 MiB) is
+the pooled chunks left from loading the 11 MiB expectation, not per-connection buffering.
+
 ### Timing Sensitivity
 
 `heapAvailableInKB()` derives its budget from the heap **ceiling** (`-Xmx`), which is fixed for the JVM's lifetime, so the computed default does **not** depend on when the property is first read or on allocation history.

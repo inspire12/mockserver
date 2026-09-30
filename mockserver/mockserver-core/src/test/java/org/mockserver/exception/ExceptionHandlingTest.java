@@ -10,10 +10,12 @@ import org.mockserver.logging.MockServerLogger;
 import javax.net.ssl.SSLException;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 import static org.mockserver.exception.ExceptionHandling.connectionClosedException;
+import static org.mockserver.exception.ExceptionHandling.directMemoryLimitReached;
 import static org.mockserver.exception.ExceptionHandling.handleThrowable;
 import static org.mockserver.exception.ExceptionHandling.isSslOrDecoderFault;
 import static org.mockserver.exception.ExceptionHandling.swallowThrowable;
@@ -95,6 +97,20 @@ public class ExceptionHandlingTest {
 
         assertThat(isSslOrDecoderFault(throwable), is(false));
         assertThat(connectionClosedException(throwable), is(true));
+    }
+
+    @Test
+    public void shouldRecogniseTheDirectMemoryLimitAnywhereInTheCauseChain() throws Exception {
+        java.lang.reflect.Constructor<io.netty.util.internal.OutOfDirectMemoryError> constructor =
+            io.netty.util.internal.OutOfDirectMemoryError.class.getDeclaredConstructor(String.class);
+        constructor.setAccessible(true);
+        Throwable limit = constructor.newInstance("failed to allocate 4194304 byte(s) of direct memory (used: 67108864, max: 67108864)");
+
+        assertThat(directMemoryLimitReached(limit), is(true));
+        assertThat(directMemoryLimitReached(new DecoderException(limit)), is(true));
+        assertThat(directMemoryLimitReached(new OutOfMemoryError("Java heap space")), is(false));
+        assertThat(directMemoryLimitReached(new RuntimeException()), is(false));
+        assertThat(ExceptionHandling.DIRECT_MEMORY_LIMIT_REACHED, containsString("-XX:MaxDirectMemorySize"));
     }
 
 }

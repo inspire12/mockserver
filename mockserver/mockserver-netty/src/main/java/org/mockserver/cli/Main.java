@@ -10,6 +10,7 @@ import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.netty.MockServer;
 import org.mockserver.netty.http3.Http3NativeUnavailableException;
+import org.mockserver.socket.NettyDirectMemoryLimit;
 import org.mockserver.version.Version;
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
@@ -61,6 +62,11 @@ import static org.slf4j.event.Level.*;
     }
 )
 public class Main {
+
+    // Must stay the first static initialiser: Netty reads the limit once, when it first initialises.
+    static {
+        NettyDirectMemoryLimit.applyDefault();
+    }
 
     /**
      * The command shown in usage/help text. When MockServer is started via a bundled
@@ -398,6 +404,15 @@ public class Main {
             // requested value, so this is behaviour-preserving.
             lastStartedPorts = mockServer.getLocalPorts();
             setPort(lastStartedPorts);
+            if (MockServerLogger.isEnabled(INFO)) {
+                MOCK_SERVER_LOGGER.logEvent(
+                    new LogEntry()
+                        .setType(SERVER_CONFIGURATION)
+                        .setLogLevel(INFO)
+                        .setMessageFormat("netty direct memory limit:{}")
+                        .setArguments(NettyDirectMemoryLimit.describe())
+                );
+            }
 
             if (ConfigurationProperties.logLevel() != null) {
                 MOCK_SERVER_LOGGER.logEvent(

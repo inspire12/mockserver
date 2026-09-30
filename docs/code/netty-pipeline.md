@@ -71,7 +71,7 @@ This coverage runs against the **unshaded** module classpath, so it cannot see a
 | SO_BACKLOG | 1024 | Connection queue depth |
 | AUTO_READ | true | Automatic read on new channels |
 | ALLOCATOR | `NettyAllocator.ALLOCATOR` (`PooledByteBufAllocator.DEFAULT`) | One pooled allocator for every channel — see [ByteBuf Allocator](#bytebuf-allocator) |
-| WRITE_BUFFER_WATER_MARK | 8KB low / 32KB high — server socket only; accepted child channels use Netty's default (32KB low / 64KB high) | Write-buffer backpressure on the acceptor socket. Set via `.option()`, which applies to the `ServerSocketChannel`, not to accepted child channels. `WriteBufferWaterMark.DEFAULT` in Netty 4.2 is 32 KB / 64 KB; `MockServer.java` (line ~205) intentionally sets a narrower mark on the acceptor, but child channels retain the Netty default. |
+| WRITE_BUFFER_WATER_MARK | 8KB low / 32KB high, on accepted connections (`childOption`) | When a connection's outbound buffer passes 32 KB it reports itself unwritable until it drains below 8 KB. The mark bounds nothing by itself; it matters only to code that reads writability — see [Outbound Buffering and Backpressure](#outbound-buffering-and-backpressure). Before `MockServer.CONNECTION_WRITE_BUFFER_WATER_MARK` was set with `childOption` it was set with `option`, which applies to the listening socket (which never writes), so accepted connections had Netty's 32 KB / 64 KB default |
 
 ### Port Binding and Loopback Reachability
 
@@ -261,7 +261,8 @@ Profiles support optional TTL-based auto-expiry (dead-man's switch), identical t
 ```mermaid
 graph LR
     TCH["TcpChaosHandler
-(conditional)"] --> A[HttpServerCodec]
+(conditional)"] --> PLW[PacedLargeWriteHandler]
+    PLW --> A[HttpServerCodec]
     A --> B[PreserveHeadersNettyRemoves]
     B --> C[HttpContentDecompressor]
     C --> D[HttpContentLengthRemover]
@@ -278,12 +279,13 @@ graph LR
 | Handler | Class | Purpose |
 |---------|-------|---------|
 | TcpChaosHandler | `o.m.netty.unification` | (Conditional) Injects TCP-layer faults (latency, down, bandwidth, slicer, etc.) on raw bytes before HTTP decoding. Only added when `TcpChaosRegistry` has active entries |
+| PacedLargeWriteHandler | `o.m.netty.unification` | Writes an encoded buffer larger than 64 KB (in practice a response body) in 32 KB slices, only while the connection is writable, so a slow reader does not hold a direct-memory copy of the whole body. See [Outbound Buffering and Backpressure](#outbound-buffering-and-backpressure) |
 | HttpServerCodec | Netty built-in | HTTP/1.1 request decoding / response encoding |
 | PreserveHeadersNettyRemoves | `o.m.codec` | Preserves `Content-Encoding`/`Transfer-Encoding` headers that the downstream `HttpContentDecompressor`/`HttpObjectAggregator` strip (reset per request so they cannot leak across a pooled connection — issue #2322). Also captures the original (still compressed) request body bytes before decompression, so the decompressed body and the original on-the-wire bytes are both available (issue #2326). Both are published per request as one immutable `PreservedRequest` channel attribute, read once by `NettyHttpToMockServerHttpRequestDecoder` |
 | HttpContentDecompressor | Netty built-in | Decompresses gzipped request bodies. The original compressed bytes are still preserved by `PreserveHeadersNettyRemoves` above and exposed via `HttpRequest#getBodyAsOriginalRawBytes()` |
 | HttpContentLengthRemover | `o.m.netty.unification` | Strips empty Content-Length headers |
 | EarlyMatchingHandler | `o.m.netty.unification` | On the first `HttpRequest` (headers only), checks for an expectation with `respondBeforeBody=true` whose matcher has no body component. If found, dispatches the response (and any close) and discards remaining `HttpContent`, so the response can be sent before the body is read. Reproduces scenarios like okhttp/okhttp#1001 (issue #1831). Skipped for `CONNECT` and HTTP/2 |
-| HttpObjectAggregator | Netty built-in | Aggregates HTTP chunks into `FullHttpRequest` |
+| HttpObjectAggregator | Netty built-in, created by `o.m.codec.HttpObjectAggregators` | Aggregates HTTP chunks into `FullHttpRequest`. Built with a component limit of `max(1,024, maxContentLength / 1 KiB)`, so a body of ordinary chunks is not consolidated into a second copy and a body of tiny chunks cannot pin unbounded heap (see [memory-management.md → Direct-memory limit](memory-management.md#direct-memory-limit)) |
 | CallbackWebSocketServerHandler | `o.m.netty.websocketregistry` | Intercepts `/_mockserver_callback_websocket` |
 | DashboardWebSocketHandler | `o.m.dashboard` | Intercepts `/_mockserver_ui_websocket` |
 | McpStreamableHttpHandler | `o.m.netty.mcp` | Intercepts `/mockserver/mcp` for MCP (Model Context Protocol) Streamable HTTP transport. Only added when `ConfigurationProperties.mcpEnabled()` is true. POST requests are offloaded to a dedicated executor (`McpSessionManager.getExecutor()`) to avoid blocking the Netty event loop during blocking tool calls (e.g., `Future.get()`) |
@@ -414,6 +416,39 @@ graph LR
 ```
 
 SOCKS5 is multi-phase: initial handshake → optional password auth → CONNECT command.
+
+## Outbound Buffering and Backpressure
+
+**A slow reader holds at most about 64 KB of its response in MockServer's outbound buffer, on HTTP/1.1
+and HTTP/2, but not through a CONNECT or SOCKS tunnel.** Netty's write-buffer water mark does not limit memory on its own: a write always lands in
+the channel's outbound buffer, and the mark only changes what `isWritable()` reports. So the bound comes
+from the code that waits for writability, and each protocol has its own:
+
+| Path | What waits for writability | Per-connection outbound data for a slow reader |
+|------|----------------------------|-----------------------------------------------|
+| HTTP/1.1 response | `PacedLargeWriteHandler` (a `ChunkedWriteHandler`) sends an encoded buffer over 64 KB in 32 KB slices while the connection is writable | About one slice plus the 32 KB high-water mark |
+| HTTP/2 response | Netty's `DefaultHttp2RemoteFlowController` writes at most `max(bytesBeforeUnwritable(), 32 KB)` of DATA per pass, and nothing while the connection is unwritable | About 64 KB by Netty's design (not measured here); the rest of the body waits in the flow controller as slices of the original buffer |
+| WebSocket proxy passthrough | `FrameRelayHandler` turns the peer's `autoRead` off while the channel it writes to is unwritable | What one read of the peer brought in |
+| Streaming forward (`StreamingResponseRelayHandler`) | Reads the next upstream chunk only after the previous downstream write completes | One chunk |
+| CONNECT / SOCKS tunnel | The relay aggregates each response from the loopback server before writing it to the client | The whole response |
+
+**Why the body, and why direct memory.** An HTTP/1.1 response body is a heap buffer (usually the
+expectation's own bytes). The NIO and epoll transports copy a heap buffer into a direct buffer when it is
+written, so before `PacedLargeWriteHandler` every client still reading a large response held a direct
+copy of the whole body: 40 clients reading an 8 MB body slowly held 340 MB of direct memory in a 1 GB
+container, and the same load killed a 512 MB container. The handler bounds the copy to one slice.
+
+**Why it sits below the codec.** `PacedLargeWriteHandler` is between the socket-side handlers (TLS, TCP
+chaos) and `HttpServerCodec`, so it sees encoded bytes. The bytes on the wire are unchanged (a `HEAD`
+response or a `Transfer-Encoding: chunked` one is framed by the codec before pacing), and anything written
+after a paced body queues behind it in order — including the raw bytes `HttpErrorActionHandler` writes
+from the codec's context. It paces only while `HttpServerCodec` is in the pipeline: a WebSocket upgrade
+removes the codec, and from then on frames go straight to the outbound buffer, where the WebSocket
+relay's backpressure can see them. When a connection becomes a CONNECT or SOCKS tunnel, `HttpConnectHandler` / `SocksConnectHandler` remove it along with the HTTP codecs. (`ChunkedWriteHandler` does not count what it queues as pending
+outbound bytes, so a frame queued behind a paced write would be invisible to that backpressure.)
+
+**Bodies up to 64 KB are not paced.** They pass through with one `instanceof` and a size check. A body
+between the high-water mark and 64 KB still lands in the outbound buffer whole, as before.
 
 ## Streaming Relay
 

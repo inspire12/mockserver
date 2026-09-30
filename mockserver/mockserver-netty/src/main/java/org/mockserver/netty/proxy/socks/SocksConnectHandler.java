@@ -6,6 +6,7 @@ import io.netty.channel.ChannelPipeline;
 import io.netty.handler.codec.http.HttpContentDecompressor;
 import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpServerCodec;
+import org.mockserver.netty.unification.PacedLargeWriteHandler;
 import org.mockserver.codec.MockServerHttpServerCodec;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.lifecycle.LifeCycle;
@@ -25,6 +26,7 @@ public abstract class SocksConnectHandler<T> extends RelayConnectHandler<T> {
         removeHandler(pipeline, HttpContentDecompressor.class);
         removeHandler(pipeline, HttpObjectAggregator.class);
         removeHandler(pipeline, MockServerHttpServerCodec.class);
+        removeHandler(pipeline, PacedLargeWriteHandler.class);
         if (pipeline.get(this.getClass()) != null) {
             pipeline.remove(this);
         }

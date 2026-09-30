@@ -15,6 +15,7 @@ import io.netty.handler.codec.quic.QuicChannel;
 import io.netty.handler.codec.quic.QuicStreamChannel;
 import org.mockserver.authentication.AuthenticationException;
 import org.mockserver.authentication.AuthenticationHandler;
+import org.mockserver.codec.HttpObjectAggregators;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.cors.CORSHeaders;
 import org.mockserver.grpc.GrpcDerivedHeaders;
@@ -113,7 +114,7 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
     @Override
     protected void channelRead(ChannelHandlerContext ctx, Http3HeadersFrame headersFrame) {
         parsedHeaders = Http3RequestBridge.parseHeaders(headersFrame);
-        bodyAccumulator = ctx.alloc().compositeBuffer();
+        bodyAccumulator = ctx.alloc().compositeBuffer(HttpObjectAggregators.componentLimit(configuration.maxRequestBodySize()));
 
         // True bidirectional gRPC streaming is routed here, at HEADERS time, because the
         // server must start writing response frames while the client is still sending

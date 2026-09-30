@@ -9,6 +9,7 @@ import io.netty.handler.codec.http2.Http2StreamChannel;
 import io.netty.handler.codec.http2.Http2StreamFrameToHttpObjectCodec;
 import io.netty.util.Attribute;
 import io.netty.util.AttributeKey;
+import org.mockserver.codec.HttpObjectAggregators;
 import org.mockserver.codec.MockServerHttpServerCodec;
 import org.mockserver.codec.PreserveHeadersNettyRemoves;
 import org.mockserver.configuration.Configuration;
@@ -276,7 +277,7 @@ public class Http2MultiplexChildInitializer extends ChannelInitializer<Http2Stre
         // channel attribute, where NettyHttpToMockServerHttpRequestDecoder reads it back (ctx.channel()).
         pipeline.addLast(new PreserveHeadersNettyRemoves());
         pipeline.addLast(new HttpContentDecompressor());
-        pipeline.addLast(new HttpObjectAggregator(configuration.maxRequestBodySize()));
+        pipeline.addLast(HttpObjectAggregators.httpObjectAggregator(configuration.maxRequestBodySize()));
 
         // Downstream chain -- identical to the existing switchToHttp2/switchToH2c post-adapter chain
         pipeline.addLast(callbackWebSocketServerHandler);

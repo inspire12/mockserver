@@ -121,6 +121,7 @@ public class HttpProxyUnificationInitializerTest {
 
         // then - should add HTTP handlers last
         assertThat(String.valueOf(embeddedChannel.pipeline().names()), embeddedChannel.pipeline().names(), contains(
+            "PacedLargeWriteHandler#0",
             "HttpServerCodec#0",
             "PreserveHeadersNettyRemoves#0",
             "HttpContentDecompressor#0",

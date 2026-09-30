@@ -94,6 +94,20 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
 
 ### Changed
 
+- **MockServer run as its own process (the jar, Docker images, forked Maven plugin, launchers) now caps
+  Netty's off-heap buffer memory at a quarter of the maximum heap (at least 64 MiB, never more than the
+  heap): 64 MiB in a 512 MiB container, 128 MiB in a 1 GiB one.** It used to default to the whole heap
+  again, so the heap plus network buffers could grow to twice the heap and get a container killed.
+  Forwarded and proxied responses, and uploads, are held in full while they are collected, and responses
+  through a CONNECT or SOCKS tunnel are held in full on their way to the client, so several large ones at
+  once can reach the cap: at 64 MiB one forwarded 49 MiB response succeeds, two at once both fail. When
+  the cap is reached, whichever connection needs a buffer next is closed, which may be an unrelated one,
+  and the server keeps serving; a client whose forward failed gets a `502`, a client whose connection was
+  closed sees it drop, and the log says `direct memory limit (io.netty.maxDirectMemory) reached`. Set
+  `-XX:MaxDirectMemorySize` or `-Dio.netty.maxDirectMemory` to choose your own limit; MockServer leaves
+  either as set. Aggregating a large body of ordinary-sized chunks no longer briefly needs twice its size
+  in off-heap memory. Embedded use (`ClientAndServer`, the JUnit and Spring integrations) is unchanged.
+
 - `mock_server_evicted_log_entries_total` now counts evicted log entries rather than eviction
   episodes. It used to go up by one when the event log started evicting (and once more after each
   reset), so it read 1 however many entries were lost; it now goes up by the number of entries evicted.
@@ -175,6 +189,14 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   checks it against the reference image (advisory, non-blocking, until it has proven stable on the CI
   agents). If you override the health check yourself, `["CMD", "/mockserver-healthcheck"]` is the
   command to call — the images have no shell or `curl`.
+
+- **A slow client downloading a large response no longer holds a copy of the whole body in off-heap
+  memory.** Every client still reading a response held a direct-memory copy of all of it: 40 clients
+  slowly reading an 8 MB body held 340 MB in a 1 GB container, and killed a 512 MB one. HTTP/1.1 bodies
+  over 64 KB are now sent a 32 KB slice at a time as the client reads, so each such client holds about
+  64 KB, with the bytes on the wire unchanged. The per-connection write-buffer limits MockServer sets
+  (8 KB / 32 KB) also reach client connections now; they had been applied to the listening socket, so
+  connections used Netty's 32 KB / 64 KB.
 
 - **The Docker images now use the native Linux epoll transport, as `useNativeTransport` (default
   `true`) always said they did.** Every published image is built from the shaded

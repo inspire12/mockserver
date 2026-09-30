@@ -5,7 +5,9 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.handler.codec.DecoderException;
 import io.netty.handler.ssl.NotSslRecordException;
+import io.netty.util.internal.OutOfDirectMemoryError;
 import io.netty.util.internal.PlatformDependent;
+import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.mockserver.httpclient.SocketConnectionException;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
@@ -135,6 +137,18 @@ public class ExceptionHandling {
         if (ch != null && ch.isActive()) {
             ch.writeAndFlush(Unpooled.EMPTY_BUFFER).addListener(ChannelFutureListener.CLOSE);
         }
+    }
+
+    public static final String DIRECT_MEMORY_LIMIT_REACHED = "direct memory limit (io.netty.maxDirectMemory) reached"
+        + " - raise it with -XX:MaxDirectMemorySize or -Dio.netty.maxDirectMemory - closing connection ";
+
+    /**
+     * True when Netty refused a buffer because its direct-memory limit ({@code io.netty.maxDirectMemory}) was
+     * reached. The connection that happened to allocate next fails, which is not necessarily the one holding
+     * the memory.
+     */
+    public static boolean directMemoryLimitReached(Throwable throwable) {
+        return ExceptionUtils.indexOfType(throwable, OutOfDirectMemoryError.class) >= 0;
     }
 
     /**

@@ -5,7 +5,6 @@ import io.netty.buffer.Unpooled;
 import io.netty.channel.*;
 import io.netty.handler.codec.ReplayingDecoder;
 import io.netty.handler.codec.http.HttpContentDecompressor;
-import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http2.*;
 import io.netty.handler.codec.socksx.v4.Socks4ServerDecoder;
@@ -16,6 +15,7 @@ import io.netty.handler.logging.LogLevel;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.util.AttributeKey;
 import org.apache.commons.lang3.StringUtils;
+import org.mockserver.codec.HttpObjectAggregators;
 import org.mockserver.codec.MockServerHttpServerCodec;
 import org.mockserver.codec.PreserveHeadersNettyRemoves;
 import org.mockserver.configuration.Configuration;
@@ -471,6 +471,7 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
             if (TcpChaosRegistry.getInstance().activeCount() > 0) {
                 pipeline.addLast("tcp-chaos", new TcpChaosHandler());
             }
+            addLastIfNotPresent(pipeline, new PacedLargeWriteHandler());
             addLastIfNotPresent(pipeline, new HttpServerCodec(
                 configuration.maxInitialLineLength(),
                 configuration.maxHeaderSize(),
@@ -480,7 +481,7 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
             addLastIfNotPresent(pipeline, new HttpContentDecompressor());
             addLastIfNotPresent(pipeline, httpContentLengthRemover);
             addLastIfNotPresent(pipeline, new EarlyMatchingHandler(configuration, httpState, actionHandler, isSslEnabledUpstream(ctx.channel())));
-            addLastIfNotPresent(pipeline, new HttpObjectAggregator(configuration.maxRequestBodySize()));
+            addLastIfNotPresent(pipeline, HttpObjectAggregators.httpObjectAggregator(configuration.maxRequestBodySize()));
             if (configuration.tlsMutualAuthenticationRequired() && configuration.controlPlaneTLSMutualAuthenticationRequired() && !isSslEnabledUpstream(ctx.channel())) {
                 HttpResponse httpResponse = response()
                     .withStatusCode(426)
@@ -617,7 +618,13 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable throwable) {
-        if (connectionClosedException(throwable)) {
+        if (directMemoryLimitReached(throwable)) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.ERROR)
+                    .setMessageFormat(DIRECT_MEMORY_LIMIT_REACHED + ctx.channel() + " - " + throwable.getMessage())
+            );
+        } else if (connectionClosedException(throwable)) {
             mockServerLogger.logEvent(
                 new LogEntry()
                     .setLogLevel(Level.ERROR)

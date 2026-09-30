@@ -152,6 +152,7 @@ public class HttpProxyUnificationInitializerSOCKSErrorTest {
         if (MockServerLogger.isEnabled(TRACE)) {
             assertThat(String.valueOf(embeddedChannel.pipeline().names()), embeddedChannel.pipeline().names(), contains(
                 "LoggingHandler#0",
+                "PacedLargeWriteHandler#0",
                 "HttpServerCodec#0",
                 "HttpContentDecompressor#0",
                 "HttpContentLengthRemover#0",
@@ -166,6 +167,7 @@ public class HttpProxyUnificationInitializerSOCKSErrorTest {
             ));
         } else {
             assertThat(String.valueOf(embeddedChannel.pipeline().names()), embeddedChannel.pipeline().names(), contains(
+                "PacedLargeWriteHandler#0",
                 "HttpServerCodec#0",
                 "PreserveHeadersNettyRemoves#0",
                 "HttpContentDecompressor#0",

@@ -69,6 +69,7 @@ public class StreamingAwareHttpObjectAggregator extends HttpObjectAggregator {
      */
     public StreamingAwareHttpObjectAggregator(int maxContentLength, Configuration configuration, MockServerLogger mockServerLogger, boolean relayOnly) {
         super(maxContentLength);
+        HttpObjectAggregators.limitComponents(this);
         this.configuration = configuration;
         this.mockServerLogger = mockServerLogger;
         this.relayOnly = relayOnly;
@@ -83,6 +84,7 @@ public class StreamingAwareHttpObjectAggregator extends HttpObjectAggregator {
      */
     public StreamingAwareHttpObjectAggregator(int maxContentLength) {
         super(maxContentLength);
+        HttpObjectAggregators.limitComponents(this);
         this.configuration = null;
         this.mockServerLogger = null;
         this.relayOnly = false;

@@ -8,11 +8,11 @@ import io.netty.channel.*;
 import io.netty.handler.codec.ByteToMessageDecoder;
 import io.netty.handler.codec.socksx.v4.Socks4ServerDecoder;
 import io.netty.handler.codec.socksx.v5.Socks5CommandRequestDecoder;
+import org.mockserver.codec.HttpObjectAggregators;
 import org.mockserver.socket.NettyAllocator;
 import org.mockserver.socket.NettyTransport;
 import io.netty.handler.codec.http.HttpClientCodec;
 import io.netty.handler.codec.http.HttpContentDecompressor;
-import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http2.*;
 import io.netty.handler.logging.LogLevel;
@@ -370,7 +370,7 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
         } else {
             pipelineToProxyClient.addLast(new HttpServerCodec(configuration.maxInitialLineLength(), configuration.maxHeaderSize(), configuration.maxChunkSize()));
             pipelineToProxyClient.addLast(new HttpContentDecompressor());
-            pipelineToProxyClient.addLast(new HttpObjectAggregator(configuration.maxRequestBodySize()));
+            pipelineToProxyClient.addLast(HttpObjectAggregators.httpObjectAggregator(configuration.maxRequestBodySize()));
         }
 
         pipelineToProxyClient.addLast(new UpstreamProxyRelayHandler(mockServerLogger, proxyClientCtx.channel(), mockServerCtx.channel(), host, port));
