@@ -392,6 +392,32 @@ numa_split_layout() { # sut_cores procs mode [per]
 }
 layout_value() { sed -n "s/^$1=//p" <<<"$2"; } # key layout_text
 
+# perf-test-run.sh's single-process k6 on a host with two or more nodes: the first <count> physical
+# cores, one thread each, of the node on another socket from the SUT's (mode other), or of the SUT's
+# node minus every core the SUT or upstream touches (mode same). Prints the cpuset. Returns 1 on a
+# host with fewer than two nodes (the caller keeps its fixed default), 2 when it cannot be placed.
+numa_single_k6_cpus() { # mode sut_spec upstream_spec count
+  local mode="$1" sut="$2" up="$3" count="$4" sn node firsts avail
+  [ "$(numa_node_count)" -ge 2 ] || return 1
+  [[ "$count" =~ ^[1-9][0-9]*$ ]] || { echo ":x: numa_single_k6_cpus: '$count' is not a positive whole number" >&2; return 2; }
+  sn="$(cpuset_numa_nodes "$sut" 2>/dev/null)" || sn=""
+  case "$sn" in ""|*" "*) echo ":x: the SUT cpuset '$sut' is not on one NUMA node, so k6's node cannot be chosen" >&2; return 2 ;; esac
+  case "$mode" in
+    other) node="$(numa_other_socket_node "$sn")" \
+             || { echo ":x: no NUMA node is on another socket from the SUT's node $sn (one socket split into nodes?)" >&2; return 2; } ;;
+    same) node="$sn" ;;
+    *) echo ":x: k6 NUMA node mode '$mode' must be other or same" >&2; return 2 ;;
+  esac
+  firsts="$(numa_node_phys_cores "$node" | awk -v used="$(expand_cpuset "$sut${up:+,$up}")" '
+    BEGIN { n = split(used, u, " "); for (i = 1; i <= n; i++) x[u[i]] = 1 }
+    { for (i = 1; i <= NF; i++) if ($i in x) next; print $1 }')"
+  avail="$(sed '/^$/d' <<<"$firsts" | wc -l | tr -d ' ')"
+  if [ "$avail" -lt "$count" ]; then
+    echo ":x: NUMA node $node has $avail free physical cores; the single-process k6 needs $count" >&2; return 2
+  fi
+  compress_cpulist "$(head -n "$count" <<<"$firsts" | paste -sd' ' -)"
+}
+
 # "--cpuset-mems=<node>" for a cpuset on one known node; nothing when that cannot be shown.
 numa_mems_flag() { # spec
   local n

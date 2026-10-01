@@ -130,7 +130,7 @@ FINAL="$(awk '/^# Arm-only: nothing downstream gates this result/ {p=1} p' "$RUN
 for b in ARMFN ELIG RAN FINAL; do [ -n "${!b}" ] || bad "block $b not found in $RUN"; done
 elig() { # PERF_RUN_ARM -> BASELINE_ELIGIBLE after the real eligibility block
   env -i PATH="$PATH" PERF_RUN_ARM="$1" PERF_JVM_DIAGNOSTICS=standard JAVA_TOOL_OPTS_VAL="" \
-    CONFIG_PROFILE=default RIG_PROFILE=default bash -c "set -euo pipefail; $ARMFN
+    CONFIG_PROFILE=default RIG_PROFILE=default K6_NUMA_NODE=other bash -c "set -euo pipefail; $ARMFN
 $ELIG
 echo \"\$BASELINE_ELIGIBLE\"" 2>/dev/null | tail -1
 }

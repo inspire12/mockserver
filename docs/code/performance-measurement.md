@@ -1635,16 +1635,17 @@ To publish a run's figures:
 
 ## Placement
 
-**Outcome.** The multi-k6 arm (`rw-multi-k6-sweep.sh`) and the hardware matrix
-(`lib/perf-percore.sh`) choose their cpusets from the host's sysfs topology. On a host with one
-NUMA node (the c5.12xlarge `perf` queue, Docker Desktop) the defaults are the fixed strings
-described above, byte for byte. On a host with two or more nodes (the c6i.32xlarge `perf-xl`
-queue) they are socket-split: the SUT, upstream and Prometheus on node 0 and every k6 process on
-node 1, so the load generator no longer shares the SUT's socket, memory bandwidth or LLC. Every
-container these two scripts start is also pinned to its node's memory (`--cpuset-mems`), a
-fail-closed guard refuses a cpuset that straddles nodes or puts k6 on the SUT's socket, and each
-result records where it ran. The SUT and upstream that `perf-test-run.sh` starts for the arm-only
-perf-xl steps are not memory-pinned yet; see the follow-ups at the end of this section.
+**Outcome.** The multi-k6 arm (`rw-multi-k6-sweep.sh`), the hardware matrix
+(`lib/perf-percore.sh`) and `perf-test-run.sh`'s own SUT, upstream and single-process k6 choose
+their cpusets from the host's sysfs topology. On a host with one NUMA node (the c5.12xlarge `perf`
+queue, Docker Desktop) the cpusets are the fixed strings described above, byte for byte. On a host
+with two or more nodes (the c6i.32xlarge `perf-xl` queue) they are socket-split: the SUT, upstream
+and Prometheus on node 0 and every k6 process on node 1, so the load generator no longer shares the
+SUT's socket, memory bandwidth or LLC. Every container the two arm scripts start, and every
+container `perf-test-run.sh` starts through `start_mockserver` (the SUT and upstream among them),
+is also pinned to its node's memory (`--cpuset-mems`). A fail-closed guard refuses a cpuset that
+straddles nodes or puts k6 on the SUT's socket, each arm's result records where it ran, and
+`PERF_K6_NUMA_NODE=same` keeps a run out of the baseline.
 
 ```mermaid
 flowchart TD
@@ -1681,7 +1682,7 @@ resolved layout as a `--- placement:` line; check it on the first `perf-xl` run.
 
 | Variable | Default | Effect |
 |---|---|---|
-| `PERF_K6_NUMA_NODE` | `other` | `same` puts k6 on the SUT's node (what is left after the SUT, upstream and Prometheus: 24 cores on the c6i) for the "k6 on the same socket vs the other socket" interference A/B. It marks the result `baseline_eligible: false` |
+| `PERF_K6_NUMA_NODE` | `other` | `same` puts k6 on the SUT's node (in the arms, what is left after the SUT, upstream and Prometheus: 24 cores on the c6i; for `perf-test-run.sh`'s own k6, `7-23`) for the "k6 on the same socket vs the other socket" interference A/B. It marks the result `baseline_eligible: false`, and `perf-test-run.sh` sets the run's top-level `baseline_eligible: false`. Any value but `other` or `same` stops the run before it starts a container |
 | `PERF_RW_PROCS` / `PERF_HW_MATRIX_PROCS` | 4 | N, the number of k6 processes, on a two-node host |
 | `PERF_RW_K6_CORES_PER_PROC` / `PERF_HW_MATRIX_K6_CORES_PER_PROC` | the k6 node's free cores ÷ N | Physical cores per k6 process. Set 6 on both arms of the interference A/B so both give k6 the same 24 cores |
 | `PERF_RW_SERVER_CPUS`, `PERF_RW_PROM_CPUS`, `PERF_RW_K6_CPUSETS`, `PERF_HW_MATRIX_K6_CPUSETS`, `PERF_HW_MATRIX_PROM_CPUS` | — | Explicit cpusets, as before; the guards still apply. `layout` reads `explicit` only when the k6 cpusets (`PERF_RW_K6_CPUSETS` / `PERF_HW_MATRIX_K6_CPUSETS`) are set; an explicit SUT or Prometheus cpuset alone keeps the computed layout's name |
@@ -1716,29 +1717,54 @@ point has `.points[].placement`, and the matrix has `baseline_eligible` and
 `topology_unknown`;
 `numa_nodes`, `sut_node` and `k6_node` are null when they cannot be read. The multi-k6 arm is never
 baseline-eligible on its own. A same-socket hardware-matrix run reports
-`.serving_hw_matrix.baseline_eligible: false`; the run's top-level `baseline_eligible` is set by
-`perf-test-run.sh`.
+`.serving_hw_matrix.baseline_eligible: false`, and `perf-test-run.sh` follows that block: when it
+reads `false`, the run's top-level `baseline_eligible` is `false` too.
+
+**`perf-test-run.sh`'s own placement.** Its SUT and upstream keep `0-5` and `6` on every host
+(on the c6i both are node 0). Its single-process k6 is placed like this:
+
+| Host | k6 default | Why |
+|---|---|---|
+| fewer than 16 logical cpus | unpinned, as before | pinning is skipped |
+| one node, or an unreadable map (c5.12xlarge, Docker Desktop, a NUMA-less kernel, `numa=off`) | `7-23`, as before | today's string. In CI an unreadable map or a `numa=off` host (more sockets than nodes) fails the run, as in the arms |
+| two or more nodes, `PERF_K6_NUMA_NODE=other` | the first 17 physical cores of the first node on another socket, one thread each (c6i: `32-48`) | see below |
+| two or more nodes, `PERF_K6_NUMA_NODE=same` | the first 17 physical cores of the SUT's node that neither the SUT nor the upstream touches, one thread each (c6i: `7-23`) | the A/B arm, with the same client budget |
+| `PERF_K6_CPUS` set | that cpuset | explicit; the guards still apply |
+
+Seventeen physical cores at one thread each is what k6 gets on the c5, where `7-23` holds every
+core the SUT and upstream leave. It is kept on the c6i, rather than giving k6 all 32 cores or both
+threads, for three reasons. A run on either queue then differs only in the host, not in the
+client's budget. The `same` and `other` arms of the interference A/B get the same budget by
+default, so the socket is the only variable. And with siblings idle the k6 pin (cores × 100%)
+still counts physical cores, so the client-limited reading means what it means on the c5. A
+two-node host that cannot fit 17 free cores on the chosen node fails the run and asks for
+`PERF_K6_CPUS`. On `perf-xl` today only the arm-only steps run, which never start this k6, so the
+default only keeps the placement guard coherent there and prepares for a full run on a two-node
+host; each arm's own block records the k6 placement it actually used.
+
+Beside the physical-core proof, the run calls `numa_placement_check "$PERF_K6_NUMA_NODE"` on the
+SUT and k6 cpusets, and on a multi-node host `assert_cpuset_single_node` on the upstream. The
+node map is primed once (`numa_map_prime`) when the lib is sourced. On a host with one node or an
+unreadable map the cpuset strings, and every other `docker run` argument, are byte-identical to
+before. The one addition is `--cpuset-mems=0` on a container whose cpuset the node map can place;
+on an unreadable map (Docker Desktop) there is none, and the NUMA check only logs a warning.
+
+The run's k6 containers, and the mTLS and JDK handshake SUTs (started with `cpuset_arg` rather
+than `start_mockserver`), carry `--cpuset-cpus` only. Their memory follows the kernel's
+local-node allocation for the cpus they are pinned to.
 
 **Tests.** `.buildkite/scripts/test/perf-cpu-topology-test.sh` (run by `perf-test-lint.sh`)
 builds fake sysfs trees for the c5.12xlarge, the c6i.32xlarge, an alternative two-node numbering,
 a host whose node 0 owns the high cpus, a three-node host, a c6i booted `numa=off`, two
-sub-NUMA-clustering hosts and a NUMA-less kernel. It drives the real scripts through
+sub-NUMA-clustering hosts and a NUMA-less kernel. It drives the two arm scripts through
 `PERF_RW_TEST_PLACEMENT_ONLY` and `PERF_PERCORE_TEST_PLACEMENT_ONLY`, which resolve and guard the
 placement and then exit before starting a container, and it re-assembles a perf-xl matrix from its
 `matrix-inputs.json`. It also checks that every pinned `docker run` in both scripts passes the
-`--cpuset-mems` of its own cpuset.
-
-**Follow-ups in `perf-test-run.sh`** (outside these two scripts, so not yet done):
-
-1. **Main SUT and upstream NUMA binding.** `start_mockserver` pins them with `--cpuset-cpus` only.
-   They need `--cpuset-mems` from `numa_mems_flag "$SERVER_CPUS"` and `numa_mems_flag
-   "$UPSTREAM_CPUS"` after a `numa_map_prime`; on the c6i (SUT `0-5`, upstream `6`) both are node 0.
-2. **The single-process k6 default on a two-node host.** `K6_CPUS` defaults to `7-23`, which on the
-   c6i is node 0, the SUT's socket. Move it to node 1 there (or keep it deliberately), and run
-   `numa_placement_check` beside `assert_cpusets_physically_disjoint`.
-3. **Baseline exclusion for the same-socket A/B.** Set `BASELINE_ELIGIBLE=false` when
-   `PERF_K6_NUMA_NODE=same`, as for `PERF_SERVING_RW_MULTIK6`. The hardware matrix records
-   `baseline_eligible: false` in its own block but cannot change the run's.
+`--cpuset-mems` of its own cpuset. For `perf-test-run.sh` it runs the script's real blocks (the
+`PERF_K6_NUMA_NODE` check, the lib source and prime, the core-pinning block, `start_mockserver`,
+and both eligibility blocks) against the same trees, as the script's other tests do. A run of the
+whole script would pass its EXIT trap and stale-container sweep, and a test-only switch inside it
+could leak into a real run.
 
 ## Rig Capacity and k6 CPU Behaviour
 

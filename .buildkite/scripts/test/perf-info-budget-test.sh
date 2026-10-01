@@ -48,6 +48,8 @@ SITE_covdl="$(call_site "$COV" 'start_mockserver "\$COV_DL_UPSTREAM"')"
 for s in upstream main info coverage covdl; do v="SITE_$s"; [ -n "${!v}" ] || bad "call site '$s' not found"; done
 [ "$FAILS" -eq 0 ] || { echo "FAILED: $FAILS check(s)" >&2; exit 1; }
 
+# shellcheck source=../steps/lib/perf-cpu-topology.sh
+. "$(dirname "$F")/lib/perf-cpu-topology.sh" # numa_mems_flag, which start_mockserver calls
 diag_jvm_opts() { echo "-Dstub.diag=$1"; }
 compose_java_tool_options() { printf '%s' "$2"; }
 docker() { if [ "$1" = run ]; then shift; printf '%s\n' "$@" > "$WORK/run.args"; fi; }
@@ -61,13 +63,16 @@ args_of() { # site [VAR=value ...] -> the docker run arguments of that call site
     INFO_SERVER_ALIAS=mockserver-info SERVER_ALIAS=mockserver alias=cov SERVER_MEMORY=2g mem=2g FILE_BODY_MOUNT="" mount="" level=ERROR
     NETWORK=n PERF_NETWORK_MODE=bridge DIAG_DIR="$WORK/diag" MOCKSERVER_IMAGE=img SUT_IMAGE_JAVA_TOOL_OPTIONS="" START_EXTRA_ENV=()
     : > "$WORK/run.args"
-    eval "${!site}"
+    # A helper the call site needs but this test did not lift fails here, not silently.
+    eval "${!site}" 2>"$WORK/args.err"
+    if grep -q 'command not found' "$WORK/args.err"; then echo "<missing helper: $(grep -m1 'command not found' "$WORK/args.err")>"; exit 1; fi
     cat "$WORK/run.args"
   )
 }
 budget_of() { # site [VAR=value ...] -> the budget the container is handed, or "absent"
   local a v; a="$(args_of "$@")"
   [ -n "$a" ] || { echo "<no docker run>"; return; }
+  case "$a" in "<missing helper"*) echo "$a"; return ;; esac
   v="$(awk -F= '$1 == "MOCKSERVER_MAX_EVENT_LOG_SIZE_IN_BYTES" {sub("^[^=]*=", ""); v = $0; found = 1; exit}
     END {print (!found ? "absent" : (v == "" ? "empty" : v))}' <<<"$a")"
   echo "$v"

@@ -175,6 +175,10 @@ case "$PERF_JVM_DIAGNOSTICS" in
   standard|gc|deep) ;;
   *) echo "ERROR: PERF_JVM_DIAGNOSTICS='$PERF_JVM_DIAGNOSTICS' — must be standard, gc or deep" >&2; exit 1 ;;
 esac
+# k6's NUMA node relative to the SUT's: other (default), or same for the same-socket interference
+# A/B, which is never baseline-eligible. The multi-k6 arm and the hardware matrix read it too.
+K6_NUMA_NODE="${PERF_K6_NUMA_NODE:-other}"
+case "$K6_NUMA_NODE" in other|same) ;; *) echo "ERROR: PERF_K6_NUMA_NODE='$K6_NUMA_NODE' must be other or same" >&2; exit 1 ;; esac
 # PERF_SERVER_JAVA_OPTS reaches every start_mockserver container, the upstream included, but only the
 # diag SUTs mount /diag, so a /diag file target there stops the upstream JVM at start.
 if [[ "${PERF_SERVER_JAVA_OPTS:-}" == *"/diag/"* ]]; then
@@ -838,6 +842,7 @@ k6_core_count() {
 if [ -r "$SCRIPT_DIR/lib/perf-cpu-topology.sh" ]; then
   # shellcheck source=lib/perf-cpu-topology.sh
   . "$SCRIPT_DIR/lib/perf-cpu-topology.sh"
+  numa_map_prime
 else
   echo ":x: CPU-topology guard lib not found at $SCRIPT_DIR/lib/perf-cpu-topology.sh — refusing to run without the physical-core disjointness proof" >&2
   exit 1
@@ -910,8 +915,16 @@ if [ "$CORES" -ge 16 ]; then
   #
   # Each cpuset is overridable via PERF_SERVER_CPUS / PERF_UPSTREAM_CPUS / PERF_K6_CPUS.
   SERVER_CPUS="${PERF_SERVER_CPUS:-0-5}"; UPSTREAM_CPUS="${PERF_UPSTREAM_CPUS:-6}"; K6_CPUS="${PERF_K6_CPUS:-7-23}"
+  # With two or more NUMA nodes 7-23 is on the SUT's node, so k6 keeps the c5 budget (17 physical cores,
+  # one thread each) on the other socket, or on the SUT's node for PERF_K6_NUMA_NODE=same.
+  if [ -z "${PERF_K6_CPUS:-}" ] && [ "$(numa_node_count)" -ge 2 ]; then
+    K6_CPUS="$(numa_single_k6_cpus "$K6_NUMA_NODE" "$SERVER_CPUS" "$UPSTREAM_CPUS" 17)" \
+      || { echo ":x: no default k6 cpuset fits this ${CORES}-cpu, $(numa_node_count)-node host (above); set PERF_K6_CPUS" >&2; exit 1; }
+  fi
   echo "--- core-pinning enabled (${CORES} logical cpus): server=$SERVER_CPUS upstream=$UPSTREAM_CPUS k6=$K6_CPUS"
   assert_cpusets_physically_disjoint || exit 1
+  numa_placement_check "$K6_NUMA_NODE" "$SERVER_CPUS" "$K6_CPUS" || exit 1
+  if [ "$(numa_node_count)" -ge 2 ]; then assert_cpuset_single_node upstream "$UPSTREAM_CPUS" || exit 1; fi
 else
   echo "--- WARNING: ${CORES} logical cpus (<16) — core-pinning skipped; numbers will be noisier"
 fi
@@ -979,9 +992,11 @@ start_mockserver() {
   # to the exact prior tokens.
   local net_flags=(--network "$NETWORK" --network-alias "$alias") publish_flag=(${publish:+-p 127.0.0.1::1080})
   if [ "$PERF_NETWORK_MODE" = host ]; then net_flags=(--network host); publish_flag=(); fi
+  # The memory of the cpuset's NUMA node; empty for an unpinned container or an unreadable node map.
+  local mems; mems="$(numa_mems_flag "$cpus")"
   # shellcheck disable=SC2046
   docker run -d $rm_flag --name "$name" "${net_flags[@]}" \
-    $(cpuset_arg "$cpus") \
+    $(cpuset_arg "$cpus") ${mems:+"$mems"} \
     ${mem:+--memory="$mem"} \
     ${mount:+-v "$mount"} \
     ${diag_mount_arg[@]+"${diag_mount_arg[@]}"} \
@@ -1594,6 +1609,10 @@ fi
 if [ "${PERF_SERVING_RW_MULTIK6:-false}" = "true" ]; then
   BASELINE_ELIGIBLE="false"
   echo "--- baseline eligibility: NOT eligible (PERF_SERVING_RW_MULTIK6=true) — the remote-write multi-k6 trial adds load before growth"
+fi
+if [ "$K6_NUMA_NODE" = "same" ]; then
+  BASELINE_ELIGIBLE="false"
+  echo "--- baseline eligibility: NOT eligible (PERF_K6_NUMA_NODE=same) — k6 on the SUT's socket is the interference A/B, not the daily series"
 fi
 if arm_only; then
   BASELINE_ELIGIBLE="false"
@@ -4017,6 +4036,11 @@ if [ "${PERF_SERVING_HW_MATRIX:-false}" = "true" ]; then
     fi
   fi
   resume_rig
+fi
+# The matrix records its own eligibility (false when it put k6 on the SUT's socket); the run follows it.
+if jq -e '.baseline_eligible == false' <<<"$SERVING_HW_MATRIX_JSON" >/dev/null 2>&1; then
+  BASELINE_ELIGIBLE="false"
+  echo "--- baseline eligibility: NOT eligible (.serving_hw_matrix.baseline_eligible=false) — the hardware matrix marked its placement non-baseline"
 fi
 
 # --- item 18 (client rig): multi-process aggregate throughput vs process count -

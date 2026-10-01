@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Fixture tests for the NUMA placement in lib/perf-cpu-topology.sh and the two arms that use it
-# (scripts/rw-multi-k6-sweep.sh and lib/perf-percore.sh's hardware matrix), driven against fake
-# sysfs trees through PERF_SYSFS_ROOT. Docker is a stub that fails, so nothing is started.
+# Fixture tests for the NUMA placement in lib/perf-cpu-topology.sh and its three users
+# (scripts/rw-multi-k6-sweep.sh, lib/perf-percore.sh's hardware matrix and perf-test-run.sh's main
+# SUT, upstream and k6), driven against fake sysfs trees through PERF_SYSFS_ROOT. Docker is a stub,
+# so nothing is started.
 # Run: .buildkite/scripts/test/perf-cpu-topology-test.sh
 set -euo pipefail
 
@@ -10,6 +11,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 . "$REPO_ROOT/.buildkite/scripts/steps/lib/perf-cpu-topology.sh"
 HARNESS="${PERF_TOPO_HARNESS:-$REPO_ROOT/mockserver-performance-test/scripts/rw-multi-k6-sweep.sh}"
 PERCORE="${PERF_TOPO_PERCORE:-$REPO_ROOT/.buildkite/scripts/steps/lib/perf-percore.sh}"
+RUN="${PERF_TOPO_RUN:-$REPO_ROOT/.buildkite/scripts/steps/perf-test-run.sh}"
 T="$(mktemp -d "${TMPDIR:-/tmp}/perf-topo-test.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
 FAILS=0
@@ -171,6 +173,18 @@ check "unreadable: rc 1" "1" "$(PERF_SYSFS_ROOT=$T/none numa_split_layout 6 4 ot
 check "does not fit: 4 x 9 on node 1 is rc 2" "2" "$(PERF_SYSFS_ROOT=$C6I numa_split_layout 6 4 other 9 >/dev/null 2>&1; echo $?)"
 check "does not fit: SUT 31 cores is rc 2" "2" "$(PERF_SYSFS_ROOT=$C6I numa_split_layout 31 4 other >/dev/null 2>&1; echo $?)"
 check "bad procs is rc 2" "2" "$(PERF_SYSFS_ROOT=$C6I numa_split_layout 6 0 other >/dev/null 2>&1; echo $?)"
+check "single k6, c6i other: 17 cores of node 1, one thread each" "32-48" "$(PERF_SYSFS_ROOT=$C6I numa_single_k6_cpus other 0-5 6 17)"
+check "single k6, c6i same: node 0 after the SUT and upstream (the c5 string)" "7-23" "$(PERF_SYSFS_ROOT=$C6I numa_single_k6_cpus same 0-5 6 17)"
+check "single k6, same: skips the upstream's core, wherever it is" "6,8-23" "$(PERF_SYSFS_ROOT=$C6I numa_single_k6_cpus same 0-5 7 17)"
+check "single k6, same: skips a core whose sibling the upstream uses" "7-23" "$(PERF_SYSFS_ROOT=$C6I numa_single_k6_cpus same 0-5 70 17)"
+check "single k6, node 0 on the high cpus: k6 on node 1's cpus" "0-6" "$(PERF_SYSFS_ROOT=$SWAP numa_single_k6_cpus other 8-13 14 7)"
+check "single k6, SNC: the other socket's node, not node 1" "8-11" "$(PERF_SYSFS_ROOT=$SNC numa_single_k6_cpus other 0-1 2 4)"
+check "single k6, one node: rc 1, the caller keeps 7-23" "1" "$(PERF_SYSFS_ROOT=$C5 numa_single_k6_cpus other 0-5 6 17 >/dev/null 2>&1; echo $?)"
+check "single k6, unreadable: rc 1" "1" "$(PERF_SYSFS_ROOT=$T/none numa_single_k6_cpus other 0-5 6 17 >/dev/null 2>&1; echo $?)"
+check "single k6, does not fit: rc 2" "2" "$(PERF_SYSFS_ROOT=$C6I numa_single_k6_cpus other 0-5 6 33 >/dev/null 2>&1; echo $?)"
+check "single k6, SUT straddling nodes: rc 2" "2" "$(PERF_SYSFS_ROOT=$C6I numa_single_k6_cpus other 30-33 6 17 >/dev/null 2>&1; echo $?)"
+check "single k6, one socket split into nodes: rc 2" "2" "$(PERF_SYSFS_ROOT=$SNC1 numa_single_k6_cpus other 0-1 2 2 >/dev/null 2>&1; echo $?)"
+check "single k6, bad mode: rc 2" "2" "$(PERF_SYSFS_ROOT=$C6I numa_single_k6_cpus sideways 0-5 6 17 >/dev/null 2>&1; echo $?)"
 check "every c6i layout cpuset is physically disjoint" "0" \
   "$(PERF_SYSFS_ROOT=$C6I rc cpusets_physically_disjoint server 0-5 upstream 6 prometheus 7,71 \
        k0 32-39,96-103 k1 40-47,104-111 k2 48-55,112-119 k3 56-63,120-127)"
@@ -339,6 +353,105 @@ for f in "$RW" "$PERCORE"; do
   stray="$(grep -n -- '--cpuset-cpus=' "$f" | grep -v -- '_MEMS:+"\|{mems:+"' || true)"
   check "$(basename "$f"): no --cpuset-cpus without a mems flag" "" "$stray"
 done
+
+echo "--- 7. perf-test-run.sh: main SUT, upstream and k6 placement, memory and eligibility (real blocks)"
+# Lifted from the script rather than run whole: everything after its trap and stale-container sweep
+# would need docker, and a test-only switch in the script could leak into a real run.
+lift() { # first_line_regex last_line_regex -> the lines from the first match through the next end match
+  LIFT_A="$1" LIFT_B="$2" awk '!p && $0 ~ ENVIRON["LIFT_A"] {p=1; print; next} p {print} p && $0 ~ ENVIRON["LIFT_B"] {exit}' "$RUN"
+}
+extract_fn() { awk -v n="$1" '$0 ~ "^"n"\\(\\) *\\{" {p=1; print; if ($0 ~ /}$/) exit; next} p {print} p && /^}/ {exit}' "$RUN"; }
+NODEMODE="$(lift '^K6_NUMA_NODE="[$][{]PERF_K6_NUMA_NODE:-other[}]"$' '^case "[$]K6_NUMA_NODE"')"
+LIBSRC="$(lift '^if \[ -r "[$]SCRIPT_DIR/lib/perf-cpu-topology.sh" \]; then$' '^fi$')"
+PIN="$(lift '^# --- core pinning' '^fi$')"
+ELIG="$(awk '/^BASELINE_ELIGIBLE="true"$/ {p=1} /^# --- image freshness:/ {exit} p' "$RUN")"
+HWMELIG="$(lift '^# The matrix records its own eligibility' '^fi$')"
+GUARDFN="$(extract_fn assert_cpusets_physically_disjoint)"; STARTFN="$(extract_fn start_mockserver)"; CPUARG="$(extract_fn cpuset_arg)"
+for b in NODEMODE LIBSRC PIN ELIG HWMELIG GUARDFN STARTFN CPUARG; do [ -n "${!b}" ] || bad "block $b not found in $RUN"; done
+# A range with no end match runs to EOF, and executing that would run the rest of the script.
+for b in LIBSRC PIN HWMELIG; do [ "$(tail -1 <<<"${!b}")" = "fi" ] || bad "block $b does not end at its fi"; done
+grep -q '^case "\$K6_NUMA_NODE"' <<<"$(tail -1 <<<"$NODEMODE")" || bad "block NODEMODE does not end at its case"
+printf '%s\n' 'set -euo pipefail' 'getconf() { echo "$FAKE_CORES"; }' "$NODEMODE" "$LIBSRC" "$GUARDFN" "$PIN" \
+  'echo "RESULT|$SERVER_CPUS|$UPSTREAM_CPUS|$K6_CPUS|${_NUMA_MAP_KEY:+primed}"' > "$T/pin.sh"
+pin() { # sysfs logical_cpus env... -> "rc|server|upstream|k6|primed"; output in $T/pin.log
+  local root="$1" cores="$2" rc=0; shift 2
+  env -i PATH="$PATH" PERF_SYSFS_ROOT="$root" FAKE_CORES="$cores" SCRIPT_DIR="$(dirname "$RUN")" "$@" \
+    bash "$T/pin.sh" >"$T/pin.log" 2>&1 || rc=$?
+  echo "$rc|$(grep '^RESULT|' "$T/pin.log" | cut -d'|' -f2- || true)"
+}
+logged() { grep -q -- "$1" "$T/pin.log" && echo yes || echo no; }
+# One node, an unreadable map, numa=off or a small box: today's strings exactly.
+check "c5: today's cpusets, map primed after the lib is sourced" "0|0-5|6|7-23|primed" "$(pin "$C5" 48)"
+check "  ... SUT and k6 each verified on node 0" "yes|yes" "$(logged 'server cpuset 0-5 is on NUMA node 0')|$(logged 'k6_0 cpuset 7-23 is on NUMA node 0')"
+check "c5 in CI: one socket, one node passes" "0|0-5|6|7-23|primed" "$(pin "$C5" 48 BUILDKITE=true)"
+check "unreadable (Docker Desktop), 48 cpus: today's cpusets" "0|0-5|6|7-23|primed" "$(pin "$T/none" 48)"
+check "  ... the NUMA check warns, once" "1" "$(grep -c 'WARNING: the NUMA node map is unreadable' "$T/pin.log" || true)"
+check "unreadable, 12 cpus: unpinned, as today" "0||||primed" "$(pin "$T/none" 12)"
+check "c5 with 8 cpus online: unpinned, no NUMA check" "0||||primed|no" "$(pin "$C5" 8)|$(logged 'NUMA')"
+check "numa=off c6i off-CI: today's cpusets, warned" "0|0-5|6|7-23|primed|yes" "$(pin "$NUMAOFF" 128)|$(logged 'sockets but 1 NUMA node')"
+check "numa=off c6i in CI: FAILS on the socket/node mismatch" "1|yes" "$(pin "$NUMAOFF" 128 BUILDKITE=true | cut -d'|' -f1)|$(logged '2 sockets but 1 NUMA node')"
+# Two nodes: k6 moves to the other socket, the rest stays.
+check "c6i: k6 on node 1, 17 cores one thread each" "0|0-5|6|32-48|primed" "$(pin "$C6I" 128)"
+check "  ... verified on different nodes" "yes" "$(logged 'server on NUMA node 0, k6 on node 1')"
+check "c6i in CI" "0|0-5|6|32-48|primed" "$(pin "$C6I" 128 BUILDKITE=true)"
+check "c6i same: k6 back on node 0, the c5 string" "0|0-5|6|7-23|primed|yes" "$(pin "$C6I" 128 PERF_K6_NUMA_NODE=same)|$(logged "k6 on the SUT's NUMA node 0")"
+check "c6i: explicit PERF_K6_CPUS=7-23 (the SUT's node) FAILS" "1|yes" "$(pin "$C6I" 128 PERF_K6_CPUS=7-23 | cut -d'|' -f1)|$(logged 'share NUMA node')"
+check "c6i: explicit PERF_K6_CPUS on node 1 is kept" "0|0-5|6|32-63|primed" "$(pin "$C6I" 128 PERF_K6_CPUS=32-63)"
+check "c6i same: explicit k6 on node 1 FAILS" "1" "$(pin "$C6I" 128 PERF_K6_NUMA_NODE=same PERF_K6_CPUS=32-48 | cut -d'|' -f1)"
+check "c6i: a SUT straddling nodes FAILS before k6 is chosen" "1|yes" "$(pin "$C6I" 128 PERF_SERVER_CPUS=30-33 | cut -d'|' -f1)|$(logged "SUT cpuset '30-33' is not on one NUMA node")"
+check "c6i: an upstream straddling nodes FAILS" "1|yes" "$(pin "$C6I" 128 PERF_UPSTREAM_CPUS=6,40 | cut -d'|' -f1)|$(logged "upstream cpuset '6,40' straddles")"
+check "alt numbering: node 1 too small for 17 cores FAILS, naming PERF_K6_CPUS" "1|yes" "$(pin "$ALT" 64 | cut -d'|' -f1)|$(logged 'set PERF_K6_CPUS')"
+check "SNC: the default does not fit FAILS" "1" "$(pin "$SNC" 16 PERF_SERVER_CPUS=0-1 PERF_UPSTREAM_CPUS=2 | cut -d'|' -f1)"
+check "SNC: explicit k6 on the SUT's socket FAILS" "1" "$(pin "$SNC" 16 PERF_SERVER_CPUS=0-1 PERF_UPSTREAM_CPUS=2 PERF_K6_CPUS=4-7 | cut -d'|' -f1)"
+check "SNC: explicit k6 on the other socket" "0|0-1|2|8-11|primed" "$(pin "$SNC" 16 PERF_SERVER_CPUS=0-1 PERF_UPSTREAM_CPUS=2 PERF_K6_CPUS=8-11)"
+check "one socket split into nodes: no node for k6 FAILS" "1|yes" "$(pin "$SNC1" 16 PERF_SERVER_CPUS=0-1 PERF_UPSTREAM_CPUS=2 | cut -d'|' -f1)|$(logged 'no NUMA node is on another socket')"
+check "bad PERF_K6_NUMA_NODE FAILS" "1|yes" "$(pin "$C5" 48 PERF_K6_NUMA_NODE=sideways | cut -d'|' -f1)|$(logged "PERF_K6_NUMA_NODE='sideways' must be other or same")"
+check "  ... even unpinned, before any placement" "1|yes" "$(pin "$C5" 8 PERF_K6_NUMA_NODE=sideways | cut -d'|' -f1)|$(logged "^ERROR: PERF_K6_NUMA_NODE='sideways' must be other or same")"
+
+# start_mockserver: the SUT, the upstream and every other container it starts get their cpuset's node.
+printf '%s\n' 'set -euo pipefail' "$LIBSRC" "$CPUARG" "$STARTFN" \
+  'require_dns_hostname() { :; }; diag_jvm_opts() { :; }; compose_java_tool_options() { :; }' \
+  'docker() { printf "%s\n" "$@" > "$ARGS_FILE"; }' \
+  'NETWORK=n MOCKSERVER_IMAGE=img PERF_MAX_EVENT_LOG_BYTES=1 SUT_IMAGE_JAVA_TOOL_OPTIONS= PERF_NETWORK_MODE=bridge START_EXTRA_ENV=()' \
+  'start_mockserver name "$CPUS" alias' > "$T/start.sh"
+started() { # sysfs cpus -> the container's --cpuset-* arguments, '|'-joined
+  : > "$T/start.args"
+  env -i PATH="$PATH" PERF_SYSFS_ROOT="$1" CPUS="$2" ARGS_FILE="$T/start.args" SCRIPT_DIR="$(dirname "$RUN")" \
+    bash "$T/start.sh" >/dev/null 2>&1 || echo "rc=$?"
+  grep -E '^--cpuset-' "$T/start.args" | paste -sd'|' - || true
+}
+check "c6i SUT 0-5: memory on node 0" "--cpuset-cpus=0-5|--cpuset-mems=0" "$(started "$C6I" 0-5)"
+check "c6i upstream 6: memory on node 0" "--cpuset-cpus=6|--cpuset-mems=0" "$(started "$C6I" 6)"
+check "c6i container on node 1: memory on node 1" "--cpuset-cpus=32-35|--cpuset-mems=1" "$(started "$C6I" 32-35)"
+check "c5 SUT: memory on node 0" "--cpuset-cpus=0-5|--cpuset-mems=0" "$(started "$C5" 0-5)"
+check "unreadable map (Docker Desktop): --cpuset-cpus only, as today" "--cpuset-cpus=0-5" "$(started "$T/none" 0-5)"
+check "unpinned container: neither flag, as today" "" "$(started "$C6I" "")"
+check "the main SUT and upstream are started with their cpusets" "1|1" \
+  "$(grep -cE '^start_mockserver "\$UPSTREAM" "\$UPSTREAM_CPUS" ' "$RUN" || true)|$(grep -cE '^start_mockserver "\$SERVER" "\$SERVER_CPUS" ' "$RUN" || true)"
+
+# Baseline eligibility: PERF_K6_NUMA_NODE=same, and the hardware matrix's own verdict.
+elig() { # env... -> BASELINE_ELIGIBLE after the real eligibility block
+  env -i PATH="$PATH" PERF_RUN_ARM="" PERF_JVM_DIAGNOSTICS=standard JAVA_TOOL_OPTS_VAL="" CONFIG_PROFILE=default RIG_PROFILE=default "$@" \
+    bash -c "set -euo pipefail; arm_only() { [ -n \"\$PERF_RUN_ARM\" ]; }
+$NODEMODE
+$ELIG
+echo \"\$BASELINE_ELIGIBLE\"" 2>/dev/null | tail -1
+}
+check "eligibility: default k6 placement stays eligible" "true|true" "$(elig)|$(elig PERF_K6_NUMA_NODE=other)"
+check "eligibility: PERF_K6_NUMA_NODE=same is not eligible" "false" "$(elig PERF_K6_NUMA_NODE=same)"
+hwm_elig() { # serving_hw_matrix block -> BASELINE_ELIGIBLE after the real matrix-eligibility block
+  env -i PATH="$PATH" SERVING_HW_MATRIX_JSON="$1" BASELINE_ELIGIBLE=true bash -c "set -euo pipefail
+$HWMELIG
+echo \"\$BASELINE_ELIGIBLE\"" 2>/dev/null | tail -1
+}
+check "matrix block: not run, eligible, error, or null keeps the run eligible" "true|true|true|true" \
+  "$(hwm_elig '{}')|$(hwm_elig '{"baseline_eligible":true}')|$(hwm_elig '{"error":"x"}')|$(hwm_elig '{"baseline_eligible":null}')"
+check "matrix block: baseline_eligible false makes the run ineligible" "false" "$(hwm_elig '{"points":[],"baseline_eligible":false}')"
+line_of() { grep -nE -- "$1" "$RUN" | head -1 | cut -d: -f1; }
+L_HWM="$(line_of '^  SERVING_HW_MATRIX_JSON="[$][(]percore_block')"; L_VETO="$(line_of '^# The matrix records its own eligibility')"
+L_OUT="$(line_of '--argjson baseline_eligible "[$]BASELINE_ELIGIBLE"')"
+check "the matrix verdict is read after the matrix runs and before the result is assembled" "true" \
+  "$([ -n "$L_HWM" ] && [ -n "$L_VETO" ] && [ -n "$L_OUT" ] && [ "$L_HWM" -lt "$L_VETO" ] && [ "$L_VETO" -lt "$L_OUT" ] && echo true || echo false)"
 
 echo
 if [ "$FAILS" -gt 0 ]; then echo ":x: $FAILS check(s) failed" >&2; exit 1; fi

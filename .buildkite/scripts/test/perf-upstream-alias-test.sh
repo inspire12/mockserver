@@ -104,7 +104,7 @@ start_rc() { # mode alias -> "rc docker_calls network_alias"
     set -euo pipefail
     NETWORK=n MOCKSERVER_IMAGE=img PERF_MAX_EVENT_LOG_BYTES=1 SUT_IMAGE_JAVA_TOOL_OPTIONS=
     docker() { echo call >> '$WORK/docker.calls'; printf '%s\n' \"\$@\" > '$WORK/docker.args'; }
-    cpuset_arg() { :; }; diag_jvm_opts() { :; }; compose_java_tool_options() { :; }
+    cpuset_arg() { :; }; numa_mems_flag() { :; }; diag_jvm_opts() { :; }; compose_java_tool_options() { :; }
     $GUARD_FN
     $START_FN
     start_mockserver name 1 \"\$ALIAS\"" >/dev/null 2>&1 || rc=$?
