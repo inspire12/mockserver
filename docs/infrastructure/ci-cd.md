@@ -166,10 +166,20 @@ producer dying. It keys off **producer liveness via the Buildkite API** — that
 daily `mockserver-performance-test` schedule is still firing and its most recent
 *scheduled* build passed — rather than the raw age of the S3 baseline object, because
 the producer is commit-gated not to write on a quiet day, so object age cannot tell a
-dead producer apart from a legitimately quiet master. It fails closed (no-schedule,
-stalled, last-run-not-passed, denied, transport each exit non-zero) and, so it has a
-guaranteed cadence rather than depending on an infra-path commit, runs on its **own
-daily Buildkite schedule** (`infra_baseline_freshness_daily` at 16:00 UTC, offset from
+dead producer apart from a legitimately quiet master. It queries by **time, not by
+count**: it pages (100 per page, following the `Link` header) through builds created in
+a lookback window (the 30h liveness window + 24h). A fixed "newest N builds" page would
+be crowded out by manual `[perf-run]` builds and report `NO_SCHEDULE` on a healthy
+producer. Only if that window holds no daily scheduled build does it page back through
+older history, to tell `STALLED` (a schedule exists but stopped firing) from
+`NO_SCHEDULE` (none ever). If the window holds daily scheduled builds but none has
+finished, it fails as `STALLED` (producer wedged): an older pass cannot vouch for them. Every outcome
+other than a pass exits non-zero (no-schedule, stalled, last-run-not-passed, truncated
+at the page cap, denied, transport, config), and a fixture step
+(`.buildkite/scripts/test/perf-baseline-freshness-test.sh`) exercises each of those
+classes against a fake API. So that it has a guaranteed cadence rather than depending
+on an infra-path commit, it runs on its **own daily Buildkite schedule**
+(`infra_baseline_freshness_daily` at 16:00 UTC, offset from
 the producer's 04:00 run) as well as on every infra-path build.
 
 ### Buildkite Pipelines
