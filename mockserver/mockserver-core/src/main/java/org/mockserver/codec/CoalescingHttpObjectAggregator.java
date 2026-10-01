@@ -9,20 +9,26 @@ import io.netty.handler.codec.http.HttpMessage;
 import io.netty.handler.codec.http.HttpObjectAggregator;
 
 /**
- * An {@link HttpObjectAggregator} that can copy long runs of tiny content pieces into 16 KiB blocks, so a body sent
- * as one-byte HTTP/2 DATA frames is copied about once instead of being consolidated whole each time it passes the
- * component limit.
+ * An {@link HttpObjectAggregator} that, past its component limit, merges only the components added since its last
+ * merge instead of consolidating the whole body (the rule the HTTP/3 accumulator uses), and can also copy long runs
+ * of tiny pieces into 16 KiB blocks. Either way a body of one-byte pieces is copied about once rather than whole each
+ * time it passes the limit.
  * <p>
- * Off until {@link #coalesceSmallContent()}, it behaves exactly like {@link HttpObjectAggregator}. When on:
+ * Off until {@link #mergeNewComponentsOnly()} or {@link #coalesceSmallContent()}, it behaves exactly like
+ * {@link HttpObjectAggregator}. {@link #mergeNewComponentsOnly()} turns on the merge rule alone: the HTTP/1.1-limit
+ * aggregators (server connection, forward client) use it. {@link #coalesceSmallContent()} adds the blocks, for an
+ * HTTP/2 stream's limit, a tenth of the connection's, which the merge rule alone would pass every 1,024 frames:
  * <ul>
  *     <li>the first 64 components, every piece of 1 KiB or more, and any run of fewer than 16 consecutive pieces
  *     under 1 KiB (a DATA frame cut short by the flow-control window, say) are kept as they arrive;</li>
  *     <li>each 16th piece of a run copies the run into the free tail of the current 16 KiB block (a new one once it
  *     is full), so each such byte is copied into a block once, the component bookkeeping is paid once per 16
- *     pieces, and at most one block per body is part-used;</li>
- *     <li>past the component limit only the components after the leading already-merged ones are merged, the rule
- *     the HTTP/3 accumulator uses, instead of Netty's consolidation of the whole body.</li>
+ *     pieces, and at most one block per body is part-used.</li>
  * </ul>
+ * A piece is usually a slice of a socket read, which stays allocated while any slice of it is held, so a block copy
+ * frees nothing while larger pieces from the same reads are kept: blocks can hold about the body again on top of the
+ * reads, which is why the HTTP/1.1-limit aggregators, which rarely reach their limit, do without them.
+ * <p>
  * The oversized-body check is Netty's and sees every byte, because Netty appends each piece and a run is only
  * moved, never held back. The aggregator never owns a reference to a block: a block is reachable only through
  * slices held as components, so releasing the composite (or merging them) frees it.
@@ -35,6 +41,7 @@ public class CoalescingHttpObjectAggregator extends HttpObjectAggregator {
     static final int COALESCE_AFTER_COMPONENTS = 64;
 
     private boolean coalescing;
+    private boolean copyingRuns;
     private CompositeByteBuf composite;
     private ByteBuf block;
     private int blockFill;
@@ -49,15 +56,30 @@ public class CoalescingHttpObjectAggregator extends HttpObjectAggregator {
     }
 
     /**
-     * Turns on block coalescing for this aggregator's bodies. Must be called before the aggregator is added to a
-     * pipeline.
+     * Turns on the merge rule and block coalescing for this aggregator's bodies. Must be called before the aggregator
+     * is added to a pipeline.
      */
     public void coalesceSmallContent() {
         coalescing = true;
+        copyingRuns = true;
+    }
+
+    /**
+     * Turns on only the merge rule: past the component limit, merge the components added since the last merge
+     * rather than the whole body, and copy nothing into blocks. Must be called before the aggregator is added to a
+     * pipeline.
+     */
+    public void mergeNewComponentsOnly() {
+        coalescing = true;
+        copyingRuns = false;
     }
 
     public boolean isCoalescingSmallContent() {
-        return coalescing;
+        return coalescing && copyingRuns;
+    }
+
+    public boolean isMergingNewComponentsOnly() {
+        return coalescing && !copyingRuns;
     }
 
     /**
@@ -86,8 +108,16 @@ public class CoalescingHttpObjectAggregator extends HttpObjectAggregator {
     @Override
     protected void aggregate(FullHttpMessage aggregated, HttpContent content) throws Exception {
         super.aggregate(aggregated, content);
-        if (composite != null && aggregated.content() == composite) {
-            appended(composite, content.content().readableBytes());
+        CompositeByteBuf target = composite;
+        if (target == null) {
+            return;
+        }
+        if (!copyingRuns) {
+            if (target.numComponents() > maxCumulationBufferComponents() && aggregated.content() == target) {
+                limitComponents(target);
+            }
+        } else if (aggregated.content() == target) {
+            appended(target, content.content().readableBytes());
         }
     }
 
@@ -191,14 +221,17 @@ public class CoalescingHttpObjectAggregator extends HttpObjectAggregator {
     }
 
     /**
-     * Once the body passes the component limit, at the same append that Netty's own consolidation would copy the
-     * whole body, merges only the components after the leading {@code merged} ones into one: the HTTP/3
-     * accumulator's rule.
+     * Once the body passes the component limit, merges only the components after the leading {@code merged} ones
+     * into one: the HTTP/3 accumulator's rule. Without blocks the merged components count as one, as the single
+     * component Netty's consolidation leaves does, so each merge is at the append where Netty would copy the whole
+     * body, and never copies or holds more than that would; the composite can then hold up to {@code merged - 1}
+     * components over the limit.
      */
     private void limitComponents(CompositeByteBuf target) {
         int components = target.numComponents();
         int limit = maxCumulationBufferComponents();
-        if (components <= limit) {
+        int counted = copyingRuns ? components : components - Math.max(merged - 1, 0);
+        if (counted <= limit) {
             return;
         }
         // every block slice was added since the last merge, so the merge releases the block

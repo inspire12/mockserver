@@ -296,11 +296,149 @@ public class CoalescingHttpObjectAggregatorTest {
     }
 
     @Test
-    public void shouldLeaveAnAggregatorThatIsNotAStreamAggregatorUncoalesced() {
-        assertThat(new CoalescingHttpObjectAggregator(TEN_MIB).isCoalescingSmallContent(), is(false));
+    public void shouldCopyRunsOnlyOnStreamAggregatorsAndMergeNewComponentsOnEveryProductionAggregator() {
+        CoalescingHttpObjectAggregator plain = new CoalescingHttpObjectAggregator(TEN_MIB);
+        assertThat(plain.isCoalescingSmallContent() || plain.isMergingNewComponentsOnly(), is(false));
         assertThat(((CoalescingHttpObjectAggregator) HttpObjectAggregators.streamHttpObjectAggregator(TEN_MIB)).isCoalescingSmallContent(), is(true));
-        assertThat(new StreamingAwareHttpObjectAggregator(TEN_MIB).isCoalescingSmallContent(), is(false));
         assertThat(HttpObjectAggregators.limitStreamComponents(new StreamingAwareHttpObjectAggregator(TEN_MIB)).isCoalescingSmallContent(), is(true));
+        for (CoalescingHttpObjectAggregator connection : new CoalescingHttpObjectAggregator[]{
+            HttpObjectAggregators.httpObjectAggregator(TEN_MIB),
+            new StreamingAwareHttpObjectAggregator(TEN_MIB),
+            new StreamingAwareHttpObjectAggregator(TEN_MIB, null, null),
+            new StreamingAwareHttpObjectAggregator(TEN_MIB, null, null, true)
+        }) {
+            assertThat(connection.getClass().getSimpleName(), connection.isMergingNewComponentsOnly(), is(true));
+            assertThat(connection.getClass().getSimpleName(), connection.isCoalescingSmallContent(), is(false));
+        }
+    }
+
+    @Test
+    public void shouldCopyABodyOfOneBytePiecesAboutOnceAtTheConnectionLimit() {
+        // the HTTP/1.1 aggregator merges every 10,240 pieces only what arrived since its last merge; consolidating the
+        // whole body each time, as Netty does, would copy about bodyBytes^2 / 20,480 bytes: 214 MB here
+        int bodyBytes = 2 * 1024 * 1024;
+        TrackingAllocator allocator = new TrackingAllocator();
+        EmbeddedChannel channel = new EmbeddedChannel();
+        channel.config().setAllocator(allocator);
+        channel.pipeline().addLast(HttpObjectAggregators.httpObjectAggregator(TEN_MIB));
+        try {
+            FullHttpRequest request = send(channel, new int[]{1}, bodyBytes, Ending.EMPTY_LAST, null);
+            try {
+                assertThat(ByteBufUtil.getBytes(request.content()), is(expectedBody(bodyBytes)));
+                assertThat(((CompositeByteBuf) request.content()).numComponents(), lessThanOrEqualTo(10_240));
+            } finally {
+                request.release();
+            }
+        } finally {
+            channel.finishAndReleaseAll();
+        }
+        assertThat(allocator.allocatedBytes, allOf(lessThanOrEqualTo((long) bodyBytes), greaterThan((long) bodyBytes - 10_240)));
+        allocator.assertAllReleased();
+    }
+
+    @Test
+    public void shouldMergeAtTheConnectionLimitExactlyAsNettyUntilItsFirstMerge() {
+        int limit = HttpObjectAggregators.componentLimit(TEN_MIB);
+        int piece = SMALL / 2;
+        for (int pieces : new int[]{limit, limit + 1}) {
+            Result merging = aggregate(HttpObjectAggregators.httpObjectAggregator(TEN_MIB), new int[]{piece}, pieces * piece);
+            Result plain = aggregate(HttpObjectAggregators.limitComponents(new HttpObjectAggregator(TEN_MIB)), new int[]{piece}, pieces * piece);
+            assertThat(pieces + " pieces", merging.components, is(plain.components));
+            assertThat(pieces + " pieces", merging.allocatedBytes, is(plain.allocatedBytes));
+            assertThat(pieces + " pieces", merging.allocatedBytes, is(pieces == limit ? 0L : (long) pieces * piece));
+        }
+    }
+
+    @Test
+    public void shouldHoldAtMostTwiceTheBodyAndCopyNoMoreThanNettyAtTheConnectionLimit() {
+        // the body pieces and every copy are held, as in the stream tests; without blocks each byte is held once, in a
+        // piece or a merged component, plus the one merge being made, so at most twice the body
+        int[][] patterns = {
+            {1}, {100}, {1, BLOCK}, runThen(100, 31, SMALL), mix(16, 64, 1, SMALL, 5, 10, 1, SMALL),
+            mix(16, SMALL - 1, 1, SMALL, 15, 1, 1, SMALL), mix(64, SMALL - 1, 1, SMALL, 15, 1, 1, SMALL, 15, 1, 1, SMALL, 15, 1, 1, SMALL, 15, 1, 1, SMALL)
+        };
+        for (int maxContentLength : new int[]{256 * 1024, 1024 * 1024, TEN_MIB}) {
+            int limit = HttpObjectAggregators.componentLimit(maxContentLength);
+            // tiny pieces past two merges that turn large just before Netty's third (MergeNewComponentsOnlyNettyDifferentialTest)
+            int[][] withPhaseShift = java.util.Arrays.copyOf(patterns, patterns.length + 1);
+            withPhaseShift[patterns.length] = mix(2 * limit + 1, 1, limit - 1, 1_000);
+            for (int[] pattern : withPhaseShift) {
+                if (pattern.length == 1 && pattern[0] == 1 && maxContentLength == TEN_MIB) {
+                    // Netty's arm would copy 5.4 GB; shouldCopyABodyOfOneBytePiecesAboutOnceAtTheConnectionLimit covers it
+                    continue;
+                }
+                String description = "limit " + maxContentLength + " pieces " + java.util.Arrays.toString(java.util.Arrays.copyOf(pattern, Math.min(pattern.length, 8)));
+                Result merging = aggregateCountingPieces(HttpObjectAggregators.httpObjectAggregator(maxContentLength), pattern, maxContentLength);
+                Result plain = aggregateCountingPieces(HttpObjectAggregators.limitComponents(new HttpObjectAggregator(maxContentLength)), pattern, maxContentLength);
+                assertThat(description, merging.body, is(expectedBody(maxContentLength)));
+                assertThat(description, merging.peakLiveBytes, lessThanOrEqualTo(2L * maxContentLength));
+                assertThat(description, merging.allocatedBytes, lessThanOrEqualTo(plain.allocatedBytes));
+            }
+        }
+    }
+
+    private static Result aggregate(HttpObjectAggregator aggregator, int[] pattern, int length) {
+        TrackingAllocator allocator = new TrackingAllocator();
+        EmbeddedChannel channel = new EmbeddedChannel();
+        channel.config().setAllocator(allocator);
+        channel.pipeline().addLast(aggregator);
+        Result result = new Result();
+        try {
+            FullHttpRequest request = send(channel, pattern, length, Ending.EMPTY_LAST, null);
+            try {
+                result.body = ByteBufUtil.getBytes(request.content());
+                result.components = ((CompositeByteBuf) request.content()).numComponents();
+            } finally {
+                request.release();
+            }
+        } finally {
+            channel.finishAndReleaseAll();
+        }
+        result.allocatedBytes = allocator.allocatedBytes;
+        allocator.assertAllReleased();
+        return result;
+    }
+
+    /**
+     * Like {@link #aggregate(HttpObjectAggregator, int[], int)}, with the body pieces allocated from an allocator that
+     * shares the live and peak count; {@code allocatedBytes} counts the copies only.
+     */
+    private static Result aggregateCountingPieces(HttpObjectAggregator aggregator, int[] pattern, int length) {
+        Usage usage = new Usage();
+        TrackingAllocator allocator = new TrackingAllocator(usage);
+        TrackingAllocator pieceAllocator = new TrackingAllocator(usage);
+        EmbeddedChannel channel = new EmbeddedChannel();
+        channel.config().setAllocator(allocator);
+        channel.pipeline().addLast(aggregator);
+        Result result = new Result();
+        try {
+            FullHttpRequest request = send(channel, pattern, length, Ending.EMPTY_LAST, null, pieceAllocator);
+            try {
+                result.body = ByteBufUtil.getBytes(request.content());
+            } finally {
+                request.release();
+            }
+        } finally {
+            channel.finishAndReleaseAll();
+        }
+        allocator.assertAllReleased();
+        pieceAllocator.assertAllReleased();
+        result.allocatedBytes = allocator.allocatedBytes;
+        result.peakLiveBytes = usage.peakLiveBytes;
+        return result;
+    }
+
+    /**
+     * Pairs of (count, size): {@code count} pieces of {@code size} bytes, in order.
+     */
+    private static int[] mix(int... countsAndSizes) {
+        List<Integer> sizes = new ArrayList<>();
+        for (int i = 0; i < countsAndSizes.length; i += 2) {
+            for (int piece = 0; piece < countsAndSizes[i]; piece++) {
+                sizes.add(countsAndSizes[i + 1]);
+            }
+        }
+        return sizes.stream().mapToInt(Integer::intValue).toArray();
     }
 
     @Test

@@ -157,9 +157,14 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   packet-sized pieces, is copied about once instead of repeatedly as it arrives. An HTTP/2 upload sent as
   many small DATA frames is now copied at most about twice (at most 1.8× its size in the mixes measured,
   against up to 160× before; 10 MiB in one-byte frames used to cost about 54 GB of copying and now costs
-  10 MiB), and the most it holds stays within about twice the body, the old worst case, though some mixes of
-  small and larger frames now peak higher than before; a body in 16 KiB frames, including the shorter frames
-  the flow-control window cuts, is still not copied. An HTTP/2 upstream that
+  10 MiB), and the most it holds stayed within about twice the body, the old worst case, in tests that gave
+  each frame a buffer of its own, though some mixes of small and larger frames now peak higher than before
+  (frames that share the connection's reads have not yet been measured); a body in 16 KiB frames, including the shorter frames
+  the flow-control window cuts, is still not copied. An HTTP/1.1 upload, a forwarded or tunnelled response,
+  or a response on the forward client's own HTTP/2 stream, sent as many tiny chunks, is now copied about once
+  instead of in full each time it passes the limit on body pieces (a 10 MiB upload in one-byte chunks
+  used to cost about 5.4 GB of copying and a 50 MiB forwarded response about 27 GB), and never copies more,
+  or holds more body bytes, than before; a body of chunks averaging 1 KiB or more is unchanged. An HTTP/2 upstream that
   MockServer forwards to may now open only one stream of its own at a time, and that stream gets the same
   per-stream limit. Embedded use
   (`ClientAndServer`, the JUnit and Spring integrations) is unchanged.

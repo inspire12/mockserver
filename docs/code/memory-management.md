@@ -167,9 +167,28 @@ far into one new direct buffer, so with Netty's default of 1,024 collecting a la
 about twice its size: a 49 MiB forward failed at a 64 MiB cap and fits now
 (`DirectMemoryLimitForwardIntegrationTest`). The limit is not unbounded because each component costs about
 110 bytes of heap, and a client can send one-byte chunks: unbounded, 1.5 million of them (9 MB on the wire)
-pinned 163 MB of heap. A body whose chunks average under 1 KiB is still consolidated each time it reaches the limit
-(`HttpObjectAggregatorsTest`). The worst case this leaves is the component heap itself: about 1.1 MB per
-HTTP/1.1 connection at the 10 MiB `maxRequestBodySize` (10,240 components × ~110 B).
+pinned 163 MB of heap. A body whose chunks average under 1 KiB still reaches the limit
+(`HttpObjectAggregatorsTest`); there the aggregator merges only the chunks added since its last merge. All of
+these aggregators are `CoalescingHttpObjectAggregator`s in `mergeNewComponentsOnly` mode: the HTTP/1.1 server's, the
+forward client's HTTP/1.1 one and its own HTTP/2 stream's, and both legs of the CONNECT relay. Netty's consolidation of the whole body each time copied about N² / (2 × limit) bytes
+for a body of one-byte chunks: about 5.4 GB for a 10 MiB request and 26.8 GB for a 50 MiB forwarded response. Now
+each byte is copied once, plus the whole body again each time half the limit is merged components, which happens
+only at limits below about 2 MiB (1.5× the body for one-byte chunks at 1 MiB). The merged components count as one
+towards the limit, as the single component Netty's consolidation leaves does, so each merge falls on the chunk where
+Netty would have copied the whole body and copies at most that: for any mix of chunk sizes the aggregator never
+copies more, or holds more body bytes, than Netty's (`MergeNewComponentsOnlyNettyDifferentialTest`). Counting each merged component
+instead let the merges drift earlier than Netty's, and a 10 MiB-limit body that turned from one-byte to
+1,000-byte chunks just before Netty's third consolidation was copied 10.3 MB where Netty copied 31 KB. A merge
+releases every chunk it covers, so what is held at once stays within twice the body, the old worst case, plus the
+framing of socket reads still holding unmerged chunks (`Http1ChunkComponentLimitTest`).
+
+These aggregators deliberately do not copy runs of tiny chunks into blocks as HTTP/2 streams do (below). A chunk
+is a slice of a socket read, and the read stays allocated while any chunk in it is held, so where larger chunks keep
+the reads alive a block copy only adds memory. Measured through the real HTTP/1.1 codec, with reads of 64 KiB:
+blocks held up to 2.9× the body at a 10 MiB limit (64 chunks of 1,023 bytes and a 1 KiB chunk, then four times 15
+one-byte chunks and a 1 KiB chunk, repeated), against 1.1× for Netty's aggregator and for merging alone. The
+worst case left is the component heap itself: about 1.2 MB per HTTP/1.1 connection at the 10 MiB
+`maxRequestBodySize` (10,240 components, plus up to 1,023 merged ones, × ~110 B).
 
 **HTTP/2 and HTTP/3 request streams** get a tenth of that limit, never below 1,024
 (`HttpObjectAggregators.streamComponentLimit`: 1,024 at the 10 MiB default, 6,553 at 64 MiB), because one
@@ -209,7 +228,10 @@ of connections, which only `maxInboundConnections` caps (off by default — see 
   case; 44 of those mixes peak higher than before (for example 1.83× against 1.00× for runs of 31 one-byte
   frames between 16 KiB frames at a 1 MiB limit). `CoalescingHttpObjectAggregatorTest` bounds copying and the
   peak to twice the body plus one block for runs of 100-byte frames between 1 KiB frames, and the blocks and
-  merged copies to the body plus 32 KiB for runs of one-byte frames between 1 KiB frames at a 512 KiB limit. The forward client's streams the upstream
+  merged copies to the body plus 32 KiB for runs of one-byte frames between 1 KiB frames at a 512 KiB limit. These
+  peaks count each frame as a buffer of its own; a DATA frame is a slice of a connection read, so where larger
+  frames keep the reads alive, block copies add to them (see the HTTP/1.1 note above); re-measuring through the
+  real HTTP/2 codec is plan item 62. The forward client's streams the upstream
   opens (below) coalesce the same way.
 - **HTTP/3** — Netty hands a request body over in pieces of about one QUIC packet (about 1.1 KiB on
   loopback) whatever DATA frame size the client sent, so one component per piece would reach the limit at
@@ -225,7 +247,8 @@ of connections, which only `maxInboundConnections` caps (off by default — see 
   piece, so it can hold about twice its size. A body of fewer than 64 pieces, or of pieces of 16 KiB or more,
   is not copied.
 - **Forward client** — its own request stream keeps the HTTP/1.1 limit, because a forward connection carries
-  one request at a time (a pooled connection returns to the pool only when its stream ends). The upstream
+  one request at a time (a pooled connection returns to the pool only when its stream ends), and merges only new
+  components past it, without blocks, as its HTTP/1.1 aggregator does. The upstream
   can also open streams of its own (a server that answers on a new stream, as MockServer's older HTTP/2 server
   did), and each gets a response aggregator. The client advertises `SETTINGS_MAX_CONCURRENT_STREAMS` 1, so the
   upstream can open only one at a time, and it gets the per-stream limit

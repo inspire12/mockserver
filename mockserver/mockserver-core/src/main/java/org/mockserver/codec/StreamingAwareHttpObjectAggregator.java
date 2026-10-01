@@ -75,6 +75,7 @@ public class StreamingAwareHttpObjectAggregator extends CoalescingHttpObjectAggr
     public StreamingAwareHttpObjectAggregator(int maxContentLength, Configuration configuration, MockServerLogger mockServerLogger, boolean relayOnly) {
         super(maxContentLength);
         HttpObjectAggregators.limitComponents(this);
+        mergeNewComponentsOnly();
         this.configuration = configuration;
         this.mockServerLogger = mockServerLogger;
         this.relayOnly = relayOnly;
@@ -82,14 +83,15 @@ public class StreamingAwareHttpObjectAggregator extends CoalescingHttpObjectAggr
 
     /**
      * Backwards-compatible constructor for use without streaming support (e.g. in relay
-     * pipelines where Configuration is not yet threaded through). Behaves identically to
-     * a plain {@link HttpObjectAggregator}.
+     * pipelines where Configuration is not yet threaded through). Aggregates every response,
+     * as a plain {@link HttpObjectAggregator} does, merging only new components past the limit.
      *
      * @param maxContentLength the maximum content length
      */
     public StreamingAwareHttpObjectAggregator(int maxContentLength) {
         super(maxContentLength);
         HttpObjectAggregators.limitComponents(this);
+        mergeNewComponentsOnly();
         this.configuration = null;
         this.mockServerLogger = null;
         this.relayOnly = false;

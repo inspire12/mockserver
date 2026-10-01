@@ -1,15 +1,22 @@
 package org.mockserver.codec;
 
+import io.netty.buffer.CompositeByteBuf;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.*;
 import io.netty.handler.timeout.ReadTimeoutHandler;
 import io.netty.util.AttributeKey;
+import io.netty.util.ReferenceCountUtil;
 import org.junit.Test;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.httpclient.StreamingResponseRelayHandler;
 import org.mockserver.model.Message;
 
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -300,5 +307,62 @@ public class StreamingAwareHttpObjectAggregatorTest {
             channel.pipeline().get(StreamingResponseRelayHandler.class), notNullValue());
 
         channel.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldSwitchToStreamingAfterMergingATinyChunkResponseOnTheSameConnection() {
+        // a loopback relay connection carries one response after another through the same aggregator: the first, in
+        // one-byte chunks, passes the 1,024-component limit about sixty times and is merged; the second is an event
+        // stream, so the aggregator steps aside at its head and every chunk after it passes through as it arrived
+        Configuration configuration = new Configuration();
+        configuration.streamingResponsesEnabled(true);
+        StreamingAwareHttpObjectAggregator aggregator = new StreamingAwareHttpObjectAggregator(64 * 1024, configuration, null, true);
+        List<Object> received = new ArrayList<>();
+        EmbeddedChannel channel = new EmbeddedChannel(new HttpClientCodec(), aggregator, new ChannelInboundHandlerAdapter() {
+            @Override
+            public void channelRead(ChannelHandlerContext ctx, Object msg) {
+                received.add(msg);
+            }
+        });
+        try {
+            channel.writeOutbound(new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/aggregated"));
+            channel.writeOutbound(new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/streamed"));
+            for (Object outbound = channel.readOutbound(); outbound != null; outbound = channel.readOutbound()) {
+                ReferenceCountUtil.release(outbound);
+            }
+            int aggregatedBytes = 60_000;
+            int events = 50;
+            StringBuilder wire = new StringBuilder("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n");
+            StringBuilder aggregatedBody = new StringBuilder();
+            for (int i = 0; i < aggregatedBytes; i++) {
+                char character = (char) ('a' + i % 26);
+                aggregatedBody.append(character);
+                wire.append("1\r\n").append(character).append("\r\n");
+            }
+            wire.append("0\r\n\r\nHTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n");
+            for (int i = 0; i < events; i++) {
+                wire.append("1\r\n").append((char) ('A' + i % 26)).append("\r\n");
+            }
+            wire.append("0\r\n\r\n");
+            channel.writeInbound(Unpooled.copiedBuffer(wire, StandardCharsets.US_ASCII));
+
+            assertThat(received.get(0), instanceOf(FullHttpResponse.class));
+            FullHttpResponse aggregated = (FullHttpResponse) received.get(0);
+            assertThat(aggregated.content().toString(StandardCharsets.US_ASCII), is(aggregatedBody.toString()));
+            assertThat(((CompositeByteBuf) aggregated.content()).numComponents(), lessThanOrEqualTo(1024));
+            assertThat(received.get(1), instanceOf(HttpResponse.class));
+            assertThat(received.get(1), not(instanceOf(FullHttpResponse.class)));
+            assertThat(((HttpResponse) received.get(1)).headers().get(HttpHeaderNames.CONTENT_TYPE), is("text/event-stream"));
+            assertThat(received.size(), is(2 + events + 1));
+            for (int i = 0; i < events; i++) {
+                HttpContent chunk = (HttpContent) received.get(2 + i);
+                assertThat(chunk.content().toString(StandardCharsets.US_ASCII), is(String.valueOf((char) ('A' + i % 26))));
+            }
+            assertThat(received.get(2 + events), instanceOf(LastHttpContent.class));
+            assertThat("the aggregator stepped aside for the stream", channel.pipeline().get(StreamingAwareHttpObjectAggregator.class), is(nullValue()));
+        } finally {
+            received.forEach(ReferenceCountUtil::release);
+            channel.finishAndReleaseAll();
+        }
     }
 }

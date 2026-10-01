@@ -17,12 +17,16 @@ public final class HttpObjectAggregators {
     }
 
     /**
-     * An {@link HttpObjectAggregator} with a component limit sized to its maximum content length.
+     * An {@link HttpObjectAggregator} with a component limit sized to its maximum content length that, past the limit,
+     * {@link CoalescingHttpObjectAggregator#mergeNewComponentsOnly() merges only new components}: a body of one-byte
+     * chunks would otherwise be consolidated whole every 10,240 chunks at a 10 MiB limit.
      *
      * @see #limitComponents(MessageAggregator)
      */
-    public static HttpObjectAggregator httpObjectAggregator(int maxContentLength) {
-        return limitComponents(new HttpObjectAggregator(maxContentLength));
+    public static CoalescingHttpObjectAggregator httpObjectAggregator(int maxContentLength) {
+        CoalescingHttpObjectAggregator aggregator = limitComponents(new CoalescingHttpObjectAggregator(maxContentLength));
+        aggregator.mergeNewComponentsOnly();
+        return aggregator;
     }
 
     /**
