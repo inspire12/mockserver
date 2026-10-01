@@ -39,6 +39,20 @@ final class Ipv4UdpPortProbe {
         }
     }
 
+    /**
+     * @return true if a dual-stack wildcard bind of {@code port}, as the server makes, succeeds. The channel is never
+     * registered with a selector, so closing it releases the port at once; a Netty channel's socket stays bound
+     * until its event loop next deregisters it.
+     */
+    static boolean dualStackBindSucceeds(int port) {
+        try (DatagramChannel channel = DatagramChannel.open()) {
+            channel.bind(new InetSocketAddress(port));
+            return true;
+        } catch (IOException | UnsupportedOperationException e) {
+            return false;
+        }
+    }
+
     static BindException ipv4WildcardConflict(int port) {
         return new BindException("UDP port " + port + " is already in use by another socket listening on 0.0.0.0:" + port
             + ", so HTTP/3 requests to localhost:" + port + " would reach that socket instead of MockServer"

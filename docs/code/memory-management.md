@@ -284,6 +284,29 @@ Before, the upload at 512 MiB survived only because the heap was nearly empty (8
 full heap the same direct growth would not fit. The download direct figure after the change (20 MiB) is
 the pooled chunks left from loading the 11 MiB expectation, not per-connection buffering.
 
+#### Decompressed request bodies
+
+**A compressed request body cannot make MockServer allocate more than `maxRequestBodySize` for it, plus
+one decoder buffer.** Every inbound protocol (HTTP/1.1, HTTP/2 and HTTP/3) and the relay's streaming
+scan decompress with `MockServerHttpContentDecompressor`, whose decoders pass their output on in pieces as
+they produce it, and the aggregator after it refuses the request once the decompressed size passes
+`maxRequestBodySize`: a 256 MiB zstd bomb (8 KiB on the wire) gets `413` over HTTP/1.1 and HTTP/2 at
+`-Xmx256m`.
+
+For `zstd` one piece is at most 64 KiB (`MockServerHttpContentDecompressor.ZSTD_MAX_ALLOCATION`). Netty's
+`ZstdDecoder(0)`, which `HttpContentDecompressor`'s defaults use, allocates whatever content size the
+frame header declares as one buffer, so before this bound a 17-byte body declaring 1.5 GiB threw
+`OutOfMemoryError` at `-Xmx256m` over HTTP/1.1 and HTTP/2. The other codings size their buffers from the
+input they have received, except a raw Snappy block, whose declared size is checked against
+`maxRequestBodySize` before it is allocated. `zstd` is decoded only where zstd-jni is on the classpath, as it is in the
+shaded jar and the images (through `kafka-clients`).
+
+**Not covered.** A zstd decoder's window is native memory allocated by zstd-jni, outside the heap and the
+direct-memory cap; Netty accepts windows up to 128 MiB (`Window_Log` 27). Upstream **responses** are
+decompressed by the forward client (`HttpClientInitializer`, `Http2ForwardStreamChildInitializer`) and the
+relay's loopback pipeline with Netty's own decompressors, so an upstream `zstd` response declaring a huge
+content size still throws `OutOfMemoryError` (seen at `-Xmx256m` proxying a 17-byte response).
+
 ### Connection Memory
 
 Every open client connection costs memory whether or not it carries traffic: kernel socket buffers (about 3.9 KiB per idle connection measured in a 512 MiB container, charged to the container's memory cgroup but outside the JVM heap) plus the channel, its pipeline and per-connection state on the heap. None of the heap-derived limits above bound it, so many idle keep-alive connections can push a container towards its memory limit on their own. Two properties bound it: `inboundConnectionIdleTimeoutMillis` (default 5 minutes) closes connections that are idle with nothing in progress, and `maxInboundConnections` (default off) caps how many are held at once; `mock_server_inbound_connections_open` shows the live count. See [netty-pipeline.md → Inbound Connection Bounds](netty-pipeline.md#inbound-connection-bounds).

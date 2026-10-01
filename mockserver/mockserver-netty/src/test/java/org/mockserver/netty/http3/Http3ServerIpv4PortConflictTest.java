@@ -24,6 +24,10 @@ public class Http3ServerIpv4PortConflictTest {
     private static final boolean DUAL_STACK_MAC_OS = System.getProperty("os.name", "").toLowerCase().contains("mac")
         && !Boolean.getBoolean("java.net.preferIPv4Stack");
 
+    // a refusal or stop that leaves the socket to the event loop fails these on almost every iteration but the first
+    // QUIC bind in the JVM, so several iterations keep them red on any order of test execution
+    private static final int REBIND_ITERATIONS = 25;
+
     private Http3Server server;
 
     @After
@@ -61,18 +65,36 @@ public class Http3ServerIpv4PortConflictTest {
     @Test
     public void shouldReleaseARefusedPort() throws Exception {
         assumeQuicAvailable();
-        int port;
-        try (DatagramChannel otherApplication = DatagramChannel.open(StandardProtocolFamily.INET)) {
-            otherApplication.bind(new InetSocketAddress("0.0.0.0", 0));
-            port = ((InetSocketAddress) otherApplication.getLocalAddress()).getPort();
-            Http3Server refused = new Http3Server();
-            server = refused;
-            assertThrows(BindException.class, () -> refused.start(port));
-        }
+        for (int i = 0; i < REBIND_ITERATIONS; i++) {
+            int port = portFreeOnBothStacks();
+            try (DatagramChannel otherApplication = DatagramChannel.open(StandardProtocolFamily.INET)) {
+                otherApplication.bind(new InetSocketAddress("0.0.0.0", port));
+                Http3Server refused = new Http3Server();
+                server = refused;
+                assertThrows(BindException.class, () -> refused.start(port));
+            }
 
-        server.stop();
-        server = new Http3Server();
-        assertThat(server.start(port), is(port));
+            server = new Http3Server();
+            assertThat("iteration " + i, server.start(port), is(port));
+            server.stop();
+            server = null;
+        }
+    }
+
+    @Test
+    public void shouldReleaseAStoppedPortForAnImmediateRestart() throws Exception {
+        assumeQuicAvailable();
+        for (int i = 0; i < REBIND_ITERATIONS; i++) {
+            int port = portFreeOnBothStacks();
+            server = new Http3Server();
+            server.start(port);
+            server.stop();
+
+            server = new Http3Server();
+            assertThat("iteration " + i, server.start(port), is(port));
+            server.stop();
+            server = null;
+        }
     }
 
     @Test
@@ -109,6 +131,20 @@ public class Http3ServerIpv4PortConflictTest {
     @Test
     public void shouldReportAFreePortAsNotHeldOnIpv4() {
         assertThat(Ipv4UdpPortProbe.heldOnIpv4(findFreeUdpPort()), is(false));
+    }
+
+    /**
+     * A port free on IPv4 and for a dual-stack bind, so a failure in these loops is the server's own: on macOS
+     * another process occasionally holds an IPv4-allocated port on IPv6.
+     */
+    private static int portFreeOnBothStacks() {
+        for (int attempt = 0; attempt < 20; attempt++) {
+            int port = findFreeUdpPort();
+            if (!Ipv4UdpPortProbe.heldOnIpv4(port) && Ipv4UdpPortProbe.dualStackBindSucceeds(port)) {
+                return port;
+            }
+        }
+        throw new IllegalStateException("no UDP port free on both IPv4 and a dual-stack bind in 20 attempts");
     }
 
     private static void assumeQuicAvailable() {

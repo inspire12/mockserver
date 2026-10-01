@@ -208,6 +208,14 @@ call site cannot reinstate the silent-disable behaviour. See *Getting the QUIC n
 
 The bound HTTP/3 port is accessible via `MockServer.getHttp3Port()`.
 
+**Stop releases the port before it returns.** A Netty NIO channel's socket is closed only when its event
+loop deregisters it, not when `close()` completes, so `Http3Server.stop()` also waits (up to 5 s, quiet
+period 0) for the server's own event-loop group to terminate, and logs a warning naming the port if it
+does not. Before, an immediate restart on the same
+port failed with `Address already in use` on most attempts, on macOS and Linux alike.
+`Http3ServerIpv4PortConflictTest.shouldReleaseAStoppedPortForAnImmediateRestart` restarts 25 times in one
+JVM.
+
 ### Alt-Svc Auto-Discovery
 
 When `http3Port > 0` and `http3AdvertiseAltSvc` is `true` (the default), MockServer
@@ -336,14 +344,17 @@ The server guards against the same quirk (`Ipv4UdpPortProbe`, the UDP counterpar
 listeners' `LoopbackShadowProbe`). On macOS a dual-stack wildcard bind succeeds on a port another
 process holds on `0.0.0.0`, and that process then receives the server's `127.0.0.1` traffic; Linux
 refuses the bind. So before binding an explicit port, `Http3Server.start` tries an IPv4 bind of
-`0.0.0.0:port` (no `SO_REUSEADDR`) and releases it. If that bind failed but the dual-stack bind then
-succeeds, the server closes its socket and throws a `BindException` naming the port, the conflict and
-`lsof -nP -iUDP:<port>`; where the bind itself fails (Linux, or an IPv4-only stack) its own error is
-kept. The probe has to come first: on both macOS and Linux an IPv4 bind fails once the same process's
+`0.0.0.0:port` (no `SO_REUSEADDR`) and releases it. If that bind failed, it tries the dual-stack bind
+the server would make with a plain `DatagramChannel` that is never registered with a selector, so closing
+it frees the port at once. If that succeeds, `start` throws a `BindException` naming the port, the
+conflict and `lsof -nP -iUDP:<port>` without having created a Netty channel; where it fails (Linux, or
+an IPv4-only stack) the server's own bind runs and its error is kept. The test bind is what makes a
+refused port free when `start` throws: refusing after Netty had bound left the socket open until the
+event loop deregistered it, so the caller could not rebind the port for up to about 200 ms. The probe has to come first: on both macOS and Linux an IPv4 bind fails once the same process's
 own dual-stack socket holds the port, so a probe after the bind cannot tell MockServer's socket from
 another application's. Port 0 is bound as before, without the probe: `MockServer` starts HTTP/3 only
 for an `http3Port` above 0, and tests take their port from `TestPortFactory.findFreeUdpPort()`. `MockServer` logs a failed HTTP/3 start as a warning and keeps serving TCP, so a refused
-`http3Port` disables HTTP/3 rather than failing start-up. `Http3ServerIpv4PortConflictTest` covers it.
+`http3Port` disables HTTP/3 rather than failing start-up. `Http3ServerIpv4PortConflictTest` covers it, rebinding a refused port 25 times in one JVM.
 
 ### Test QUIC client writes (flush every awaited write)
 

@@ -65,6 +65,7 @@ import static org.mockserver.socket.tls.PEMToFile.x509ChainFromPEMFile;
 public class Http3Server {
 
     private static final Logger LOG = LoggerFactory.getLogger(Http3Server.class);
+    private static final long STOP_TIMEOUT_SECONDS = 5;
 
     private final AtomicInteger activeHttp3Connections = new AtomicInteger(0);
 
@@ -234,16 +235,14 @@ public class Http3Server {
     /**
      * Refuses a port another application holds on the IPv4 wildcard, which macOS would otherwise let this
      * dual-stack socket share while delivering its localhost datagrams to that application (see
-     * {@link Ipv4UdpPortProbe}). Where the bind itself fails (Linux, or an IPv4-only stack), its own error is kept.
+     * {@link Ipv4UdpPortProbe}). The refusal is decided before Netty binds anything, so a refused port is free
+     * as soon as this throws. Where the bind itself fails (Linux, or an IPv4-only stack), its own error is kept.
      */
     private static Channel bindExplicitPort(Bootstrap bootstrap, int port) throws InterruptedException, BindException {
-        boolean heldOnIpv4 = Ipv4UdpPortProbe.heldOnIpv4(port);
-        Channel bound = bootstrap.bind(new InetSocketAddress(port)).sync().channel();
-        if (heldOnIpv4) {
-            bound.close().awaitUninterruptibly();
+        if (Ipv4UdpPortProbe.heldOnIpv4(port) && Ipv4UdpPortProbe.dualStackBindSucceeds(port)) {
             throw Ipv4UdpPortProbe.ipv4WildcardConflict(port);
         }
-        return bound;
+        return bootstrap.bind(new InetSocketAddress(port)).sync().channel();
     }
 
     /**
@@ -267,6 +266,7 @@ public class Http3Server {
      * Stop the HTTP/3 server and release resources.
      */
     public void stop() {
+        int port = getPort();
         if (channel != null) {
             try {
                 channel.close().sync();
@@ -276,7 +276,11 @@ public class Http3Server {
             channel = null;
         }
         if (group != null) {
-            group.shutdownGracefully();
+            // a selector-registered socket is closed only when its event loop deregisters it, so the port is
+            // free for a restart only once the loop has terminated
+            if (!group.shutdownGracefully(0, STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS).awaitUninterruptibly(STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                LOG.warn("HTTP/3 (QUIC) event loop did not terminate within {}s, so UDP port {} may still be bound", STOP_TIMEOUT_SECONDS, port);
+            }
             group = null;
         }
         LOG.info("HTTP/3 (QUIC) server stopped");
