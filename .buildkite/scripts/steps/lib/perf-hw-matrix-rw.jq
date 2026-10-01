@@ -83,6 +83,7 @@ def num: if type == "number" then . else null end;
       # null, not false, when no rung had a single-process counterpart to compare.
     cross_run_agrees: (if (.cross_check.cross_run.compared // 0) == 0 then null else .cross_check.cross_run.agrees end),
       k6_cpu_us_per_request_mean: (.cpu.k6_cpu_us_per_request_mean // null),
+      k6_runtime: (.config.k6_runtime // null),
       observed_max_start_skew_ms: (.method.observed_max_start_skew_ms // null)
     },
     ladder: $rungs,

@@ -86,6 +86,9 @@ check "cross_run_agrees null when nothing was compared" "null" \
   "$(point_of "$(jq -c '. + {cross_check:{equivalent:true, cross_run:{agrees:false, compared:0}}}' <<<"$RW")" | jq -r '.measurement.cross_run_agrees')"
 check "cross_run_agrees kept when rungs were compared" "false" \
   "$(point_of "$(jq -c '. + {cross_check:{equivalent:true, cross_run:{agrees:false, compared:2}}}' <<<"$RW")" | jq -r '.measurement.cross_run_agrees')"
+check "k6_runtime carried from the result's config" '{"gogc":"400","gomemlimit":null,"graceful_stop":"5s"}' \
+  "$(point_of "$(jq -c '.config.k6_runtime = {gogc:"400", gomemlimit:null, graceful_stop:"5s"}' <<<"$RW")" | jq -c '.measurement.k6_runtime')"
+check "k6_runtime null for a result without it" "null" "$(point_of "$RW" | jq -c '.measurement.k6_runtime')"
 
 echo "--- 2. published hw_matrix fields (lib/perf-website-figures.jq)"
 RUN="$(jq -n '{schema_version:2, timestamp_utc:"2026-09-30T00:00:00Z", config:{}, agent:{},

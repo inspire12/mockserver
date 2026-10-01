@@ -16,7 +16,7 @@ REPO_ROOT="${PERF_RW_REPO_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 LIB_DIR="$REPO_ROOT/.buildkite/scripts/steps/lib"
 FIGURES_JQ="$LIB_DIR/perf-website-figures.jq"
 CROSS_JQ="$LIB_DIR/perf-rw-cross-check.jq"
-for lib in perf-cpu-topology.sh perf-sweep-window.sh perf-derive-saturation.sh; do
+for lib in perf-cpu-topology.sh perf-sweep-window.sh perf-derive-saturation.sh perf-k6-interrupted.sh; do
   if [ ! -r "$LIB_DIR/$lib" ]; then
     echo ":x: $LIB_DIR/$lib not found — refusing to run without the shared guard" >&2
     exit 1
@@ -54,6 +54,15 @@ VU_DIAGNOSTICS="${PERF_RW_VU_DIAGNOSTICS:-true}"
 # Report-only: Go's GC trace in each k6 log (GODEBUG=gctrace=1), summarised per rung as .k6_gc.
 K6_GCTRACE="${PERF_RW_K6_GCTRACE:-true}"
 case "$K6_GCTRACE" in true|false) ;; *) echo ":x: PERF_RW_K6_GCTRACE must be true or false" >&2; exit 2 ;; esac
+# Go GC knobs passed to every k6 process as GOGC / GOMEMLIMIT; empty = Go's defaults (100, no limit).
+K6_GOGC="${PERF_RW_K6_GOGC:-}"
+K6_GOMEMLIMIT="${PERF_RW_K6_GOMEMLIMIT:-}"
+if [ -n "$K6_GOGC" ] && ! [[ "$K6_GOGC" =~ ^(off|[0-9]+)$ ]]; then
+  echo ":x: PERF_RW_K6_GOGC='$K6_GOGC' must be a whole percentage or off (Go would silently use 100)" >&2; exit 2
+fi
+if [ -n "$K6_GOMEMLIMIT" ] && ! [[ "$K6_GOMEMLIMIT" =~ ^(off|[0-9]+(B|KiB|MiB|GiB|TiB)?)$ ]]; then
+  echo ":x: PERF_RW_K6_GOMEMLIMIT='$K6_GOMEMLIMIT' must be off or bytes with an optional B/KiB/MiB/GiB/TiB suffix (e.g. 8GiB)" >&2; exit 2
+fi
 ACCOUNT_TOL="${PERF_RW_ACCOUNT_TOL:-0}"
 WARMUP_RATE="${PERF_RW_WARMUP_RATE:-2000}"
 WARMUP_DURATION="${PERF_RW_WARMUP_DURATION:-10s}"
@@ -161,11 +170,28 @@ to_secs() {
     for(i=1;i<=length(s);i++){c=substr(s,i,1);
       if(c ~ /[0-9]/){n=n c}
       else{v=n+0; n="";
-        if(c=="s")t+=v; else if(c=="m")t+=v*60; else if(c=="h")t+=v*3600}}
+        if(c=="m" && substr(s,i+1,1)=="s"){t+=v/1000; i++}
+        else if(c=="s")t+=v; else if(c=="m")t+=v*60; else if(c=="h")t+=v*3600}}
     printf "%d", t}'
 }
 STEP_S="$(to_secs "$SWEEP_STEP")"
 GAP_S="$(to_secs "$SWEEP_GAP")"
+# Opt-in: each rung's gracefulStop (empty = k6's 30s). At or below the gap, rung VU reservations
+# stop overlapping, so k6 initialises the largest pool, not the sum of ~3 adjacent ones; but a
+# request cut off at gracefulStop is in no count (rw_no_interrupted_iterations catches it).
+K6_GRACEFUL_STOP="${PERF_RW_K6_GRACEFUL_STOP:-}"
+if [ -n "$K6_GRACEFUL_STOP" ] && ! [[ "$K6_GRACEFUL_STOP" =~ ^([1-9][0-9]*s|[1-9][0-9]{3,}ms)$ ]]; then
+  echo ":x: PERF_RW_K6_GRACEFUL_STOP='$K6_GRACEFUL_STOP' must be whole s or ms of at least 1s (e.g. 5s)" >&2; exit 2
+fi
+K6_GO_ENV=()
+[ -n "$K6_GOGC" ] && K6_GO_ENV+=(-e "GOGC=$K6_GOGC")
+[ -n "$K6_GOMEMLIMIT" ] && K6_GO_ENV+=(-e "GOMEMLIMIT=$K6_GOMEMLIMIT")
+k6_runtime_json() { # the result's .config.k6_runtime
+  jq -nc --arg gogc "$K6_GOGC" --arg gomem "$K6_GOMEMLIMIT" --arg gstop "$K6_GRACEFUL_STOP" '
+    {gogc:(if $gogc == "" then null else $gogc end), gomemlimit:(if $gomem == "" then null else $gomem end),
+     graceful_stop:(if $gstop == "" then null else $gstop end),
+     note:"applied to every measured k6 process (xcheck and main phases); null = Go defaults (GOGC 100, no memory limit) and k6 30s gracefulStop"}'
+}
 case "$WINDOW_MODE" in wallclock|vu_tag) ;; *) echo ":x: PERF_RW_WINDOW_MODE must be wallclock or vu_tag" >&2; exit 1 ;; esac
 [[ "$PUSH_S" =~ ^[1-9][0-9]*$ ]] || { echo ":x: PERF_RW_PUSH_INTERVAL_S must be a whole number of seconds >= 1" >&2; exit 1; }
 if [ "$QUIET_S" -lt $(( PUSH_S * 2 )) ]; then
@@ -202,9 +228,9 @@ write_fallback_result() { # rc failed_command
   else err="exit $rc: $2"; fi
   [ -s "$merged" ] || merged=/dev/null
   fallback_json() { # merged_file
-    jq -n --arg err "$err" --argjson n "${N:-0}" --slurpfile merged "$1" \
+    jq -n --arg err "$err" --argjson n "${N:-0}" --slurpfile merged "$1" --argjson k6rt "$(k6_runtime_json 2>/dev/null || echo null)" \
       --arg hook_cut "${PERF_RW_TEST_CUT_FAULT:-}" --arg hook_step "${PERF_RW_TEST_FAIL_STEP:-}" --arg hook_null "${PERF_RW_TEST_NULL_RUNG:-}" --arg hook_zero "${PERF_RW_TEST_ZERO_TAIL:-}" '
-      {attempted:true, valid:false, headline:null,
+      {attempted:true, valid:false, headline:null, config:{k6_runtime:$k6rt},
        invalid_reasons:["rw_harness_completed: the harness aborted before assembling its result (\($err))"],
        validity:{valid:false, checks:[{name:"rw_harness_completed", ok:false, detail:$err}]},
        method:{method:"remote_write_multi_k6", procs:$n,
@@ -252,7 +278,7 @@ die() { LAST_ERR="$1"; echo ":x: $1" >&2; exit 1; } # a deliberate stop the fall
 proc_start() { ps -o lstart= -p "$1" 2>/dev/null | awk '{$1=$1; print}'; } # "" if gone or unsupported
 record_pid() { echo "$1 $(proc_start "$1")" >> "$WORK/pids.txt"; }
 
-echo "--- item 31 remote-write multi-k6 sweep: N=$N rates=$RATES step=$SWEEP_STEP gap=$SWEEP_GAP settle=${SETTLE_S}s push=${PUSH_S}s quiet=${QUIET_S}s window=$WINDOW_MODE server=$SERVER_CPUS prometheus=$PROM_CPUS upstream=${UPSTREAM_CPUS:-none} k6=${K6_SETS[*]} target=${TARGET_URL:-<launch SUT>} degrade=${DEGRADE:-none}" >&2
+echo "--- item 31 remote-write multi-k6 sweep: N=$N rates=$RATES step=$SWEEP_STEP gap=$SWEEP_GAP settle=${SETTLE_S}s push=${PUSH_S}s quiet=${QUIET_S}s window=$WINDOW_MODE server=$SERVER_CPUS prometheus=$PROM_CPUS upstream=${UPSTREAM_CPUS:-none} k6=${K6_SETS[*]} target=${TARGET_URL:-<launch SUT>} degrade=${DEGRADE:-none} k6_gogc=${K6_GOGC:-default} k6_gomemlimit=${K6_GOMEMLIMIT:-none} k6_graceful_stop=${K6_GRACEFUL_STOP:-k6-default}" >&2
 
 # --- placement proof: SUT, Prometheus, upstream and every k6 on disjoint physical cores ---
 PAIRS=(server "$SERVER_CPUS" prometheus "$PROM_CPUS")
@@ -445,21 +471,22 @@ run_phase() {
     local kname="${K6_PREFIX}-${phase}-p${i}"
     names="${names:+$names }$kname"
     ALL_NAMES="$ALL_NAMES $kname"; echo "$kname" >> "$WORK/containers.txt"
+    # No --quiet: k6's progress line is its only report of interrupted iterations.
     docker run -d --name "$kname" --network "$NETWORK" --cpuset-cpus="${set_arr[$i]}" \
       -v "$K6_DIR:/k6:ro" -v "$WORK:/out" \
       -e "BASE_URL=$TARGET_URL" -e "PROTO=http" \
       -e "K6_SWEEP_RATES=$pp" -e "K6_SWEEP_STEP=${STEP_S}s" -e "K6_SWEEP_GAP=${GAP_S}s" \
       -e "K6_SWEEP_SETTLE=${SETTLE_S}s" -e "K6_SWEEP_RESULT_PATH=/out/${phase}-p${i}.json" \
       -e "K6_SWEEP_WINDOW_MODE=$wmode" -e "K6_SWEEP_LEAN_SUMMARY=$lean" \
-      -e "K6_SWEEP_VU_DIAGNOSTICS=$VU_DIAGNOSTICS" \
-      -e "GODEBUG=$([ "$K6_GCTRACE" = true ] && echo gctrace=1)" \
+      -e "K6_SWEEP_VU_DIAGNOSTICS=$VU_DIAGNOSTICS" -e "K6_SWEEP_GRACEFUL_STOP=$K6_GRACEFUL_STOP" \
+      -e "GODEBUG=$([ "$K6_GCTRACE" = true ] && echo gctrace=1)" ${K6_GO_ENV[@]+"${K6_GO_ENV[@]}"} \
       -e "K6_SWEEP_START_AT_MS=$(( start_s * 1000 ))" -e "K6_SWEEP_QUIET=${QUIET_S}s" \
       -e "K6_SWEEP_MANAGE_SUT=$([ "$i" -eq 0 ] && echo true || echo false)" \
       -e "K6_PROMETHEUS_RW_SERVER_URL=$RW_URL" \
       -e "K6_PROMETHEUS_RW_TREND_AS_NATIVE_HISTOGRAM=true" \
       -e "K6_PROMETHEUS_RW_PUSH_INTERVAL=${PUSH_S}s" \
       -e "K6_PROMETHEUS_RW_STALE_MARKERS=false" \
-      "$K6_IMAGE" run --quiet --tag "proc=${phase}-p${i}" -o experimental-prometheus-rw /k6/sweep.js >/dev/null
+      "$K6_IMAGE" run --tag "proc=${phase}-p${i}" -o experimental-prometheus-rw /k6/sweep.js >/dev/null
   done
 
   local cpu_log="$WORK/${phase}-cpu.csv" want="$names $PROM_NAME ${SUT_CONTAINER:-}"
@@ -879,8 +906,8 @@ done
 
 NOW_ISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 SYNTH="$(jq -nc --slurpfile s "$WORK/sweep.json" --argjson sat "$SATURATION_JSON" --arg ts "$NOW_ISO" \
-  --argjson scpus "$(cpu_count "$SERVER_CPUS")" '
-  {schema_version:2, timestamp_utc:$ts, config:{}, agent:{server_cpus:$scpus}, sweep:$s[0], saturation:$sat}')"
+  --argjson scpus "$(cpu_count "$SERVER_CPUS")" --argjson k6rt "$(k6_runtime_json)" '
+  {schema_version:2, timestamp_utc:$ts, config:{k6_runtime:$k6rt}, agent:{server_cpus:$scpus}, sweep:$s[0], saturation:$sat}')"
 # This arm alone adds the p99 bound (P99_MAX_MS, validated at startup); every other caller of
 # the filter stays p50-only (docs/code/performance-measurement.md, "The multi-k6 arm's p99 bound").
 headline_of() { jq -c --arg now "$NOW_ISO" --argjson lat_mult 3 --argjson keep "$KEEP" --arg fix_date "2026-09-16" \
@@ -921,6 +948,7 @@ build_per_process() {
       . + [{index:$i, cpuset:$set, pin_pct:$pin, cpu_ceiling_pct:$ceil, exit_code:$exit,
             summary_present:($s[0] != null),
             cpu_pct_over_ladder:$cpu, cpu_us_per_request:$cost[$i].cpu_us_per_request, requests:$cost[$i].requests,
+            vus_initialized:($s[0].vus_diagnostics.vus_initialized_global_max // null),
             setup_end_minus_start_at_ms:(if $s[0].wallclock.start_at_ms and $s[0].wallclock.setup_end_ms
                                          then ($s[0].wallclock.setup_end_ms - $s[0].wallclock.start_at_ms) else null end),
             per_rung:$per_rung}]' <<<"$PER_PROCESS")"
@@ -953,6 +981,25 @@ k6_gc_json() {
 }
 K6_GC="$(k6_gc_json 2>/dev/null)" || K6_GC=null
 jq -e . >/dev/null 2>&1 <<<"$K6_GC" || K6_GC=null
+# Every measured process (the cross-check's too, when its phase ran); a missing log reads as null.
+k6_interrupted_all() {
+  local out="[]" ph n i
+  for ph in xcheck main; do
+    n="$(jq -r '.n // empty' "$WORK/$ph-meta.json" 2>/dev/null || true)"
+    if [ "$ph" = main ]; then n="${n:-$N}"; elif [ -z "$n" ]; then continue; fi
+    for ((i=0;i<${n:-0};i++)); do
+      out="$(jq -c --argjson e "$(k6_interrupted_json "$ph-p$i" "$WORK/$ph-p$i.log")" '. + [$e]' <<<"$out")"
+    done
+  done
+  echo "$out"
+}
+INTERRUPTED_FAIL='{"name":"rw_no_interrupted_iterations","ok":false,"detail":"assembly failed: the per-process interrupted-iteration counts could not be built"}'
+K6_INTERRUPTED="$(k6_interrupted_all)" || K6_INTERRUPTED=""
+if jq -e 'type == "array"' >/dev/null 2>&1 <<<"$K6_INTERRUPTED"; then
+  INTERRUPTED_CHECK="$(k6_interrupted_check "$K6_INTERRUPTED")" || INTERRUPTED_CHECK="$INTERRUPTED_FAIL"
+else
+  K6_INTERRUPTED="[]"; INTERRUPTED_CHECK="$INTERRUPTED_FAIL"
+fi
 SUT_CPU="$( [ -n "$SUT_CONTAINER" ] && cpu_stats "$WORK/main-cpu.csv" "$SUT_CONTAINER" "$L0" "$L1" || echo '{"mean":null,"max":null}')"
 PROM_CPU="$(cpu_stats "$WORK/main-cpu.csv" "$PROM_NAME" "$L0" "$L1")"
 # Send failures and slow flushes both invalidate: k6 warns a slow flush may drop samples.
@@ -979,7 +1026,7 @@ fi
 # --- validity (fail closed) ---------------------------------------------------------
 VALIDITY="$(jq -nc --slurpfile m "$WORK/main-merged.json" --argjson pp "$PER_PROCESS" --arg wm "$WINDOW_MISMATCH" \
   --argjson cross "$CROSS" --argjson rwfail "${RW_FAILURES:-0}" --argjson cpusamples "$CPU_SAMPLES" \
-  --argjson slow "$SLOW_FLUSHES" \
+  --argjson slow "$SLOW_FLUSHES" --argjson intcheck "$INTERRUPTED_CHECK" \
   --argjson promfail "$(wc -l < "$PROM_FAILURES" | tr -d ' ')" --arg promfirst "$(head -1 "$PROM_FAILURES")" \
   --argjson push "$PUSH_S" --argjson n "$N" --arg stepfail "$ASSEMBLY_FAILURES" \
   --argjson want "$(jq '.agg_rates | length' "$MAIN_META")" '
@@ -1018,7 +1065,8 @@ VALIDITY="$(jq -nc --slurpfile m "$WORK/main-merged.json" --argjson pp "$PER_PRO
         "the same requests measured by the published summary and by the Prometheus merge disagree beyond tolerance at " + (($cross.same_requests.failed // []) | if length == 0 then "(no rung; see cross_check.same_requests)" else join(" | ") end)),
       check("rw_no_failed_pushes"; $rwfail == 0; "\($rwfail) k6 log line(s) report a remote-write send failure"),
       check("rw_no_slow_flushes"; $slow.count == 0;
-        "\($slow.count) remote-write flush(es) took longer than the \($push) s push interval (max \($slow.max_took_s) s); k6 warns samples may be dropped")
+        "\($slow.count) remote-write flush(es) took longer than the \($push) s push interval (max \($slow.max_took_s) s); k6 warns samples may be dropped"),
+      $intcheck
     ] as $checks
   | {valid:all($checks[]; .ok), checks:$checks,
      reasons:[ $checks[] | select(.ok|not) | "\(.name): \(.detail)" ]}')"
@@ -1032,7 +1080,7 @@ jq -n --argjson synth "$SYNTH" --argjson headline "$HEADLINE" --slurpfile m "$WO
   --arg scpus "$SERVER_CPUS" --arg pcpus "$PROM_CPUS" --arg k6img "$K6_IMAGE" --arg promimg "$PROM_IMAGE" \
   --arg msimg "$MOCKSERVER_IMAGE" --argjson host_cores "$HOST_CORES" --argjson acct_tol "$ACCOUNT_TOL" \
   --argjson cpusamples "$CPU_SAMPLES" --argjson t0 "$T0_S" --arg p99max "$P99_MAX_MS" \
-  --argjson slow "$SLOW_FLUSHES" --argjson rwfail "${RW_FAILURES:-0}" --argjson k6gc "$K6_GC" \
+  --argjson slow "$SLOW_FLUSHES" --argjson rwfail "${RW_FAILURES:-0}" --argjson k6gc "$K6_GC" --argjson k6int "$K6_INTERRUPTED" \
   --arg hook_cut "${PERF_RW_TEST_CUT_FAULT:-}" --arg hook_step "${PERF_RW_TEST_FAIL_STEP:-}" --arg hook_null "${PERF_RW_TEST_NULL_RUNG:-}" --arg hook_zero "${PERF_RW_TEST_ZERO_TAIL:-}" \
   --argjson promwarn "$(head -n 50 "$PROM_WARNINGS" | jq -R . | jq -sc .)" '
   ($m[0].points) as $P
@@ -1067,7 +1115,8 @@ jq -n --argjson synth "$SYNTH" --argjson headline "$HEADLINE" --slurpfile m "$WO
                          cut_excess_requests:[ .per_process[] | .cut_excess_requests ], cut_excess_ok,
                          measured_sample_count, settle_excluded} ]
                | [ range(0; length) as $k | .[$k] + {k6_cpu_samples: $cpusamples[$k]} ],
-      per_process: $pp,
+      per_process: [ $pp[] | . as $p | . + {interrupted_iterations: ([ $k6int[] | select(.proc == "main-p\($p.index)") | .interrupted ] | first)} ],
+      k6_interrupted: $k6int,
       # Per rung, for perf-test-run.sh tail localisation: the earliest process start and the
       # client share over 5 ms from the merged steady histogram (null when not computable).
       # stalls_post_settle is informational and null unless every process reported it.

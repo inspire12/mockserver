@@ -111,6 +111,10 @@ if (!/^\d+(ms|s)$/.test(String(SWEEP.settle).trim())) {
   throw new Error(`sweep.js: K6_SWEEP_SETTLE must be a whole number of ms or s (e.g. 3s), got "${SWEEP.settle}"`);
 }
 const SETTLE_SECONDS = toSeconds(SWEEP.settle);
+// An iteration still running at gracefulStop is interrupted and in no k6 metric, so keep it >= 1s.
+if (SWEEP.gracefulStop !== null && (!/^\d+(ms|s)$/.test(SWEEP.gracefulStop) || toSeconds(SWEEP.gracefulStop) < 1)) {
+  throw new Error(`sweep.js: K6_SWEEP_GRACEFUL_STOP must be whole ms or s of at least 1s (e.g. 5s), got "${SWEEP.gracefulStop}"`);
+}
 const SETTLE_MS = SETTLE_SECONDS * 1000;
 if (SETTLE_SECONDS >= STEP_SECONDS) {
   throw new Error(`sweep.js: K6_SWEEP_SETTLE (${SWEEP.settle}) must be shorter than K6_SWEEP_STEP (${SWEEP.step}) or no rung has a measured latency window.`);
@@ -257,6 +261,7 @@ function buildScenarios() {
       // possible, so each scenario gets its own exec wrapper via the tag below.
       tags: { rate: String(rate) },
       env: { SWEEP_RATE: String(rate) },
+      ...(SWEEP.gracefulStop !== null ? { gracefulStop: SWEEP.gracefulStop } : {}),
     };
   });
   if (QUIET_SECONDS > 0) {
@@ -644,6 +649,8 @@ export function handleSummary(data) {
       // The no-growth expectation for the global initialized count: k6's planned
       // peak of overlapping rung reservations (see plannedVusBaseline).
       vus_initialized_baseline: initBaseline,
+      // Each rung's gracefulStop (K6_SWEEP_GRACEFUL_STOP); null = k6's 30s default.
+      graceful_stop: SWEEP.gracefulStop,
       // The actual global initialized high-water for the whole run.
       vus_initialized_global_max: vusInitGlobalMax,
       // The bottom-line answer to "did the pool ever grow?": true iff the global
