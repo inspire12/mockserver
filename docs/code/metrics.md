@@ -163,6 +163,34 @@ histogram_quantile(0.95, sum by (le) (rate(mock_server_request_duration_seconds_
 
 It is registered (once) when `metricsEnabled`. Timing is captured per `NettyResponseWriter` (one is created per request, so there is no cross-request race) and **only when metrics are enabled** — `Metrics.observeRequestDurationSeconds(...)` is a no-op otherwise, so the request hot path pays nothing when metrics are off.
 
+This histogram times only the request handler: it starts when `HttpRequestHandler` builds the response writer (after the socket read, decode and aggregation) and stops at the response hand-off (`sendResponse`), before the response is encoded or written. An expectation `delay` is inside it, because the response is handed off after the delay; a `chunkDelay`, a slow reader, and the event-loop hand-off of a response written from another thread are not.
+
+### Transport-Inclusive Request Latency Histogram
+
+`mock_server_request_transport_duration_seconds` is a classic histogram of the time from a request's **head being decoded** to the write of its response's **last byte completing** on the socket. It answers "was this request slow inside MockServer at all?", where the handler histogram only answers "was the handler slow?".
+
+```mermaid
+flowchart LR
+    A["socket read"] --> B["head decoded\n(transport starts)"]
+    B --> C["aggregate + decode"]
+    C --> D["handler\n(request_duration)"]
+    D --> E["encode + write\n(event-loop hand-off)"]
+    E --> F["last byte written\n(transport ends)"]
+```
+
+| Aspect | Behaviour |
+|---|---|
+| Buckets | 0.5, 1, 2, 3, **5**, 7.5, 10, 15, 20, 30, 40, 50, 75, 100 ms, then 0.25, 0.5, 1, 2.5, 5, 10 s (`Metrics.REQUEST_TRANSPORT_DURATION_BUCKETS`). 5 ms is a boundary because the perf harness reads the share of requests over 5 ms |
+| HTTP/1.1 | `HttpTransportTimer`, one per connection, directly after `HttpServerCodec`. Starts on each decoded `HttpRequest`, pairs requests with responses in order (so keep-alive and pipelined requests are timed separately), and records from the `LastHttpContent` write promise. A `1xx` other than `101` ends nothing; a `101` removes the timer (the connection is a WebSocket from then on) |
+| HTTP/2 | `Http2StreamTransportTimer`, one per stream child channel, ahead of the frame-to-HTTP codec (installed by `Http2MultiplexChildInitializer`). Starts on the stream's first HEADERS frame and records from the write promise of the frame carrying `endStream`, which completes only once flow control lets it out. Once per stream; a reset stream is not recorded |
+| HTTP/3 | Not timed: a QUIC stream's response ends with `shutdownOutput()`, not a frame flag, so there is no single cheap hook |
+| Recorded | Only when the final write succeeds; a failed write (client gone) is not recorded. An exchange whose response is written as raw bytes (an `HttpError` with response bytes) or never written is not recorded either, and its start stays queued, so later exchanges on that HTTP/1.1 keep-alive connection are timed from an earlier request's start (plan item 47) |
+| Scope | Every HTTP exchange, control plane included: expectation PUTs, dashboard traffic and the metrics scrape itself (whose own sample lands in the next scrape). Requests inside a CONNECT tunnel to MockServer are timed on its loopback connection; the CONNECT exchange itself includes setting that loopback up |
+| Streaming | A streamed (SSE, chunked, gRPC server-streaming) response records its whole duration, to the last byte |
+| Not included | Time before Netty reads the request (kernel receive queue, an event loop busy with other connections) — neither histogram can see that |
+
+**Cost.** Both timers are installed only when `metricsEnabled` is on at connection (or stream) set-up, so a server with metrics off has no extra handler and pays nothing. With metrics on, `TransportTimerBenchmark` (`mockserver-benchmark`, one request read and one response written through an `EmbeddedChannel`) measured about 53 ns and 24 bytes per exchange: two `System.nanoTime()` calls, one histogram observation and one write-promise listener.
+
 ### Per-Upstream Forward/Proxy Observability
 
 Three Prometheus metrics give per-upstream visibility into forwarded and proxied requests — which upstream a request hit, how it performed, and which protocol the forward leg negotiated. All are registered once when `metricsEnabled` is `true`.
@@ -612,6 +640,8 @@ The four `heap*` columns come from `MemoryMXBean.getHeapMemoryUsage()` (so `heap
 | `MetricsHandler` | mockserver-core | `org.mockserver.metrics.MetricsHandler` |
 | `BuildInfoCollector` | mockserver-core | `org.mockserver.metrics.BuildInfoCollector` |
 | `JvmMetricsCollector` | mockserver-core | `org.mockserver.metrics.JvmMetricsCollector` |
+| `HttpTransportTimer` | mockserver-netty | `org.mockserver.netty.connection.HttpTransportTimer` (HTTP/1.1 transport-inclusive latency) |
+| `Http2StreamTransportTimer` | mockserver-netty | `org.mockserver.netty.connection.Http2StreamTransportTimer` (HTTP/2 per-stream transport-inclusive latency) |
 | `ChaosAutoHaltMonitor` | mockserver-core | `org.mockserver.mock.action.http.ChaosAutoHaltMonitor` |
 | `LlmCostBudgetMonitor` | mockserver-core | `org.mockserver.mock.action.http.LlmCostBudgetMonitor` |
 | `MetricLabels` | mockserver-core | `org.mockserver.metrics.MetricLabels` (route templatizing for load metrics) |

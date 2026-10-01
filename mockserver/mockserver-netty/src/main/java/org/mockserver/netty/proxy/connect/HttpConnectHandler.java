@@ -7,6 +7,7 @@ import io.netty.handler.codec.http.HttpContentDecompressor;
 import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpServerCodec;
+import org.mockserver.netty.connection.HttpTransportTimer;
 import org.mockserver.netty.unification.PacedLargeWriteHandler;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.lifecycle.LifeCycle;
@@ -31,6 +32,7 @@ public final class HttpConnectHandler extends RelayConnectHandler<HttpRequest> {
         removeHandler(pipeline, HttpObjectAggregator.class);
         removeHandler(pipeline, MockServerHttpServerCodec.class);
         removeHandler(pipeline, PacedLargeWriteHandler.class);
+        removeHandler(pipeline, HttpTransportTimer.class);
         if (pipeline.get(this.getClass()) != null) {
             pipeline.remove(this);
         }

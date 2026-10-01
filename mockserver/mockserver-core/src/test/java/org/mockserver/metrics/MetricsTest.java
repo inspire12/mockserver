@@ -72,6 +72,43 @@ public class MetricsTest {
     }
 
     @Test
+    public void recordsTransportDurationWithABucketBoundaryAtFiveMilliseconds() {
+        new Metrics(configuration().metricsEnabled(true));
+        Metrics.observeRequestTransportDurationSeconds(0.004);
+        Metrics.observeRequestTransportDurationSeconds(0.006);
+        Metrics.observeRequestTransportDurationSeconds(0.040);
+
+        io.prometheus.metrics.model.snapshots.HistogramSnapshot.HistogramDataPointSnapshot dataPoint = transportDurationDataPoint();
+        assertThat(dataPoint.getCount(), is(3L));
+        long atOrBelowFiveMillis = 0;
+        for (io.prometheus.metrics.model.snapshots.ClassicHistogramBucket bucket : dataPoint.getClassicBuckets()) {
+            if (bucket.getUpperBound() <= 0.005) {
+                atOrBelowFiveMillis += bucket.getCount();
+            }
+        }
+        assertThat(atOrBelowFiveMillis, is(1L));
+        assertThat(Arrays.stream(Metrics.REQUEST_TRANSPORT_DURATION_BUCKETS).anyMatch(bound -> bound == 0.005), is(true));
+    }
+
+    @Test
+    public void doesNotRegisterTransportDurationWhenMetricsDisabled() {
+        new Metrics(configuration().metricsEnabled(false));
+        Metrics.observeRequestTransportDurationSeconds(0.01);
+
+        assertThat(scrapeContains("mock_server_request_transport_duration_seconds"), is(false));
+    }
+
+    private static io.prometheus.metrics.model.snapshots.HistogramSnapshot.HistogramDataPointSnapshot transportDurationDataPoint() {
+        for (MetricSnapshot snapshot : PrometheusRegistry.defaultRegistry.scrape()) {
+            if (snapshot.getMetadata().getName().equals("mock_server_request_transport_duration_seconds")
+                && snapshot instanceof io.prometheus.metrics.model.snapshots.HistogramSnapshot histogramSnapshot) {
+                return histogramSnapshot.getDataPoints().get(0);
+            }
+        }
+        throw new AssertionError("mock_server_request_transport_duration_seconds is not registered");
+    }
+
+    @Test
     public void registersSlowRequestCounter() {
         new Metrics(configuration().metricsEnabled(true));
         Metrics.incrementSlowRequestTotal();

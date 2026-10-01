@@ -34,6 +34,7 @@ import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.netty.HttpRequestHandler;
 import org.mockserver.netty.connection.HttpExchangeTracker;
+import org.mockserver.netty.connection.HttpTransportTimer;
 import org.mockserver.netty.connection.InboundConnectionActivity;
 import org.mockserver.netty.mcp.McpStreamableHttpHandler;
 import org.mockserver.netty.grpc.GrpcToHttpRequestHandler;
@@ -477,6 +478,9 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
             ));
             if (InboundConnectionActivity.isTracked(ctx.channel())) {
                 addLastIfNotPresent(pipeline, HttpExchangeTracker.INSTANCE);
+            }
+            if (Boolean.TRUE.equals(configuration.metricsEnabled())) {
+                addLastIfNotPresent(pipeline, new HttpTransportTimer());
             }
             addLastIfNotPresent(pipeline, preserveHeadersNettyRemoves);
             addLastIfNotPresent(pipeline, new HttpContentDecompressor());

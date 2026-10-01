@@ -22,6 +22,7 @@ import org.mockserver.mappers.MockServerHttpResponseToFullHttpResponse;
 import org.mockserver.mock.HttpState;
 import org.mockserver.mock.action.http.HttpActionHandler;
 import org.mockserver.netty.HttpRequestHandler;
+import org.mockserver.netty.connection.Http2StreamTransportTimer;
 import org.mockserver.netty.grpc.GrpcBidiRouterHandler;
 import org.mockserver.netty.grpc.GrpcToHttpRequestHandler;
 import org.mockserver.netty.grpc.GrpcToHttpResponseHandler;
@@ -65,6 +66,7 @@ public class Http2MultiplexChildInitializer extends ChannelInitializer<Http2Stre
     private final MockServerLogger mockServerLogger;
     private final boolean sslEnabled;
     private final Certificate[] clientCertificates;
+    private final boolean timeTransport;
 
     // Sharable handler instances -- reused across child channels (same as the existing h2 branch)
     private final CallbackWebSocketServerHandler callbackWebSocketServerHandler;
@@ -98,6 +100,7 @@ public class Http2MultiplexChildInitializer extends ChannelInitializer<Http2Stre
         this.mcpStreamableHttpHandler = mcpStreamableHttpHandler;
         this.sslEnabled = sslEnabled;
         this.clientCertificates = clientCertificates;
+        this.timeTransport = Boolean.TRUE.equals(configuration.metricsEnabled());
 
         // Pre-build sharable handlers -- mirrors the instances created in switchToHttp2/switchToH2c
         this.callbackWebSocketServerHandler = new CallbackWebSocketServerHandler(httpState);
@@ -143,6 +146,10 @@ public class Http2MultiplexChildInitializer extends ChannelInitializer<Http2Stre
         // full list and rationale; without it protocol detection, WebSocket-501, mTLS control-plane
         // auth, and proxy routing all misbehave on multiplexed HTTP/2 streams.
         pipeline.addLast("connectionScope", ConnectionScopeHandler.INSTANCE);
+        if (timeTransport) {
+            // ahead of the codec, so it sees the stream's own HEADERS/DATA frames and their endStream flag
+            pipeline.addLast(new Http2StreamTransportTimer());
+        }
 
         if (configuration.grpcBidiStreamingEnabled()
             && descriptorStore != null

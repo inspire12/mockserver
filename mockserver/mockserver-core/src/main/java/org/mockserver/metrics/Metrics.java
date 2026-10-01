@@ -48,6 +48,13 @@ public class Metrics {
     private static volatile Histogram requestDurationSeconds;
     // Per-route (method-labeled) histogram, registered only when route labels are enabled.
     private static volatile Histogram requestDurationByMethodSeconds;
+    // Transport-inclusive request latency: request head decoded to the response's last byte written to
+    // the socket. Null until metrics are enabled; the Netty timers that feed it are only installed then.
+    private static volatile Histogram requestTransportDurationSeconds;
+    // 5 ms is a boundary because the perf harness reads the share of requests over 5 ms from it.
+    static final double[] REQUEST_TRANSPORT_DURATION_BUCKETS = {
+        0.0005, 0.001, 0.002, 0.003, 0.005, 0.0075, 0.01, 0.015, 0.02, 0.03, 0.04, 0.05, 0.075, 0.1, 0.25, 0.5, 1, 2.5, 5, 10
+    };
     // Counter for slow forwarded requests. Null until metrics are enabled.
     private static volatile Counter slowRequestTotal;
     // Counter for log events dropped because the event-log disruptor ring buffer was full.
@@ -253,6 +260,12 @@ public class Metrics {
                         .help("MockServer request handling duration in seconds")
                         .classicOnly()
                         .classicUpperBounds(0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10)
+                        .register();
+                    requestTransportDurationSeconds = Histogram.builder()
+                        .name("mock_server_request_transport_duration_seconds")
+                        .help("Time from a request's head being decoded to the last byte of its response being written to the socket, in seconds (HTTP/1.1 and HTTP/2)")
+                        .classicOnly()
+                        .classicUpperBounds(REQUEST_TRANSPORT_DURATION_BUCKETS)
                         .register();
                     slowRequestTotal = Counter.builder()
                         .name("mock_server_slow_requests")
@@ -674,6 +687,7 @@ public class Metrics {
             additionalMetricsRegistered.set(false);
             requestDurationSeconds = null;
             requestDurationByMethodSeconds = null;
+            requestTransportDurationSeconds = null;
             slowRequestTotal = null;
             droppedLogEventsTotal = null;
             evictedLogEntriesTotal = null;
@@ -770,6 +784,17 @@ public class Metrics {
         io.opentelemetry.api.metrics.DoubleHistogram otelHistogram = otelRequestDurationHistogram;
         if (otelHistogram != null) {
             otelHistogram.record(seconds);
+        }
+    }
+
+    /**
+     * Record a transport-inclusive request duration (seconds): from the request head being decoded to
+     * the write of the response's last byte completing. No-op unless metrics are enabled.
+     */
+    public static void observeRequestTransportDurationSeconds(double seconds) {
+        Histogram histogram = requestTransportDurationSeconds;
+        if (histogram != null) {
+            histogram.observe(seconds);
         }
     }
 

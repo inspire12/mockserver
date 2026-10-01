@@ -158,6 +158,37 @@ rate(mock_server_requests_received_total[5m])</code></pre>
 
 <pre class="prettyprint lang-text code"><code class="code">histogram_quantile(0.95, sum by (le) (rate(mock_server_request_duration_seconds_bucket[1m])))</code></pre>
 
+<p>
+    This histogram times MockServer's request handling only: it stops when the response is handed over to be
+    written. It does not include writing the response to the network, so a slow client, a response sent in
+    delayed chunks (<span class="inline_code">chunkDelay</span>), or time waiting for a busy network thread
+    does not show up in it.
+</p>
+
+<h4>Request latency including the network write</h4>
+
+<p>
+    <span class="inline_code">mock_server_request_transport_duration_seconds</span> is a Prometheus histogram
+    of the time from MockServer reading a request's headers to the last byte of its response being written to
+    the network. It covers HTTP/1.1 and HTTP/2 (each HTTP/2 stream is timed separately; HTTP/3 is not timed).
+    Buckets run from 0.5 ms to 10 s, with fine buckets between 1 ms and 100 ms.
+</p>
+
+<p>
+    Use it to tell whether slow requests seen by a client were slow inside MockServer. If your client sees
+    slow requests but this histogram does not, the time was spent outside MockServer: in the client, the
+    network, or before MockServer read the request. Compare the share of requests over 5 ms, for example:
+</p>
+
+<pre class="prettyprint lang-text code"><code class="code">1 - sum(rate(mock_server_request_transport_duration_seconds_bucket{le="0.005"}[1m]))
+  / sum(rate(mock_server_request_transport_duration_seconds_count[1m]))</code></pre>
+
+<p>
+    It counts every request, including calls to MockServer's own API such as creating expectations and
+    scraping metrics. A streamed response (for example server-sent events) is timed until its last byte, so
+    long-lived streams show up as long requests.
+</p>
+
 <h4>Build info</h4>
 
 <p>

@@ -142,6 +142,36 @@ public class HttpProxyUnificationInitializerTest {
     }
 
     @Test
+    public void shouldTimeHttpExchangesDirectlyAfterTheCodecWhenMetricsAreEnabled() {
+        // given
+        embeddedChannel = new EmbeddedChannel();
+        embeddedChannel.pipeline().addLast(new MockServerUnificationInitializer(configuration().metricsEnabled(true), mock(LifeCycle.class), new HttpState(configuration(), new MockServerLogger(), mock(Scheduler.class)), mock(HttpActionHandler.class), null));
+
+        // when - basic HTTP request
+        embeddedChannel.writeInbound(Unpooled.wrappedBuffer("GET /somePath HTTP/1.1\r\nHost: some.random.host\r\n\r\n".getBytes(UTF_8)));
+
+        // then - the transport timer sits between the codec and everything that aggregates or answers
+        assertThat(String.valueOf(embeddedChannel.pipeline().names()), embeddedChannel.pipeline().names(), contains(
+            "inbound-idle",
+            "PacedLargeWriteHandler#0",
+            "HttpServerCodec#0",
+            "HttpExchangeTracker#0",
+            "HttpTransportTimer#0",
+            "PreserveHeadersNettyRemoves#0",
+            "HttpContentDecompressor#0",
+            "HttpContentLengthRemover#0",
+            "HttpObjectAggregator#0",
+            "CallbackWebSocketServerHandler#0",
+            "DashboardWebSocketHandler#0",
+            "McpStreamableHttpHandler#0",
+            "MockServerHttpServerCodec#0",
+            "TraceContextHandler#0",
+            "HttpRequestHandler#0",
+            "DefaultChannelPipeline$TailContext#0"
+        ));
+    }
+
+    @Test
     public void shouldSupportUnknownProtocol() {
         // given
         embeddedChannel = new EmbeddedChannel(new MockServerUnificationInitializer(configuration(), mock(LifeCycle.class), new HttpState(configuration(), new MockServerLogger(), mock(Scheduler.class)), mock(HttpActionHandler.class), null));

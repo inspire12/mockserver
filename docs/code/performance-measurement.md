@@ -303,8 +303,9 @@ its pin (the sweep's exclusion reasons) and per-worker event-loop CPU (the deep 
 per-thread table). Build 502 is the worked case: from 44,000 rps up k6 saw 19–27% of requests over
 5 ms and the handler at most 0.004% (rung starts reconstructed, since that run predates
 `start_epoch_ms`), and its ceiling JFR showed no thread above ~45% of a core with the server at 275% of
-its 600% CPU. The two together, not the table alone, put that tail outside MockServer. A server-side
-accept-to-flush (or decode-to-flush) timer would close the gap; it is not built.
+its 600% CPU. The two together, not the table alone, put that tail outside MockServer. The decode-to-flush
+timer that narrows the gap now exists (`mock_server_request_transport_duration_seconds`; 502 predates it);
+the time before the event loop reads the socket is still unmeasured.
 
 **Ladder anchor rule.** Always include at least one rung *below* the expected knee. A ladder that
 starts above the cleanly-served region reports `saturation_rps=0` — every rung is already in
@@ -877,6 +878,15 @@ plus publish and barely moves; the figures that matter are printed per iteration
 its park and unpark) and `batches_per_entry` (how often the consumer came back from a wait). A
 benchmark with no think time measures the saturated regime, where the consumer never sleeps and
 the wait strategy barely matters.
+
+### `TransportTimerBenchmark` JMH — on demand, not run by CI
+
+`./run.sh -prof gc TransportTimerBenchmark` reads one request and writes and flushes one response
+through an `EmbeddedChannel`, with `HttpTransportTimer` in the pipeline (`timed=true`) or a
+pass-through handler in its place (`timed=false`). The difference is the per-exchange cost of the
+transport-inclusive latency histogram with metrics on: about 53 ns and 24 B/op when it was added
+(134 vs 187 ns/op, 136 vs 160 B/op, 2 forks on a developer Mac). With metrics off the timer is not
+installed, so there is nothing to measure.
 
 ### The seven promoted dark benchmarks
 

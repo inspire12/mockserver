@@ -9,6 +9,7 @@ import org.mockserver.configuration.Configuration;
 import org.mockserver.lifecycle.LifeCycle;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpResponse;
+import org.mockserver.netty.connection.HttpTransportTimer;
 import org.mockserver.scheduler.Scheduler;
 
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -78,6 +79,7 @@ public class HttpConnectHandlerTest {
         // given - a pipeline with HTTP codec handlers and the HttpConnectHandler
         EmbeddedChannel channel = new EmbeddedChannel(
             new HttpServerCodec(),
+            new HttpTransportTimer(),
             new HttpContentDecompressor(),
             new HttpObjectAggregator(1024),
             handler
@@ -101,6 +103,8 @@ public class HttpConnectHandlerTest {
                 channel.pipeline().get(HttpContentDecompressor.class), is(nullValue()));
             assertThat("HttpObjectAggregator should be removed",
                 channel.pipeline().get(HttpObjectAggregator.class), is(nullValue()));
+            assertThat("HttpTransportTimer should be removed, the tunnel carries no more HTTP exchanges",
+                channel.pipeline().get(HttpTransportTimer.class), is(nullValue()));
             // HttpConnectHandler itself should also be removed
             assertThat("HttpConnectHandler should be removed",
                 channel.pipeline().get(HttpConnectHandler.class), is(nullValue()));
