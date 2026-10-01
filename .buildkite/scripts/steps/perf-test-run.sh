@@ -278,25 +278,23 @@ SERVER_MEMORY="${PERF_SERVER_MEMORY:-2g}"
 # killed the container mid-run, so the second (https_h2) pass could not even seed
 # ("no such host").
 # THE FIX: bound RETENTION, not rate. maxEventLogSizeInBytes is MockServer's own OOM
-# guard (MOCKSERVER_MAX_EVENT_LOG_SIZE_IN_BYTES) — when > 0 the ring ALSO enforces a
-# body-byte budget, evicting oldest-first until total logged body bytes fit, in
-# addition to the count bound. Retention is then capped at the budget REGARDLESS of
-# residence, so no rate x residence product can run away however far throughput falls.
-# 256 MiB is the documented starting point for a 2 GB container. At ERROR the whole log (retained
-# entries plus ring backlog) measures at most ~1.7x its budget (docs/code/memory-management.md),
-# ~430 MiB, leaving more than half of the 0.9 GiB heap for everything else.
-# WHY NOT SHRINK maxLogEntries INSTEAD: growth.js runs on THIS SAME SUT and must fill
-# the DEFAULT ~115.5k ring to reproduce the issue #2329 O(n)-eviction slope; a smaller
-# ring would never fill and would hide the bug. The byte budget does NOT corrupt growth
-# because growth loads only the tiny /simple body (~hundreds of bytes) — its total
-# retained bytes across ~115.5k entries stay in the tens of MB, far below 256 MiB, so the
-# byte budget never fires for growth and its count-bounded fill is untouched. Applied to
-# every start_mockserver container except the INFO SUT, and to the clustered A/B nodes
-# (start_clu), which run the same large_1mb/large_10mb arms on a 1.0 GiB heap.
-# Set-ness must be captured BEFORE the default below overwrites it: the CONFIG_PROFILE
-# trigger needs to know whether the caller set it, not what it resolved to.
-PERF_MAX_EVENT_LOG_BYTES_SET="${PERF_MAX_EVENT_LOG_BYTES+set}"
-PERF_MAX_EVENT_LOG_BYTES="${PERF_MAX_EVENT_LOG_BYTES:-268435456}" # 256 MiB
+# guard, on by default (heap/20 at ERROR): it evicts oldest-first by body bytes, so no rate x
+# residence product can run away. The main SUT runs at that shipped default (main_els_guard
+# confirms it from the gauge); PERF_MAX_EVENT_LOG_BYTES overrides it and marks the run tuned.
+# The upstream, path-coverage and clustered SUTs keep HARNESS_FIXED_EVENT_LOG_BYTES (none
+# measures the out-of-the-box figure). growth.js must fill the ~115.5k count ring (#2329), which
+# a heap-derived byte cap stops first, so its phase runs at GROWTH_EVENT_LOG_BYTES (scope_growth_event_log_budget).
+PERF_MAX_EVENT_LOG_BYTES_SET="${PERF_MAX_EVENT_LOG_BYTES:+set}"
+PERF_MAX_EVENT_LOG_BYTES="${PERF_MAX_EVENT_LOG_BYTES:-}"
+if [ -n "$PERF_MAX_EVENT_LOG_BYTES" ] && ! [[ "$PERF_MAX_EVENT_LOG_BYTES" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ERROR: PERF_MAX_EVENT_LOG_BYTES='$PERF_MAX_EVENT_LOG_BYTES' is not a positive integer (bytes); unset it for the shipped default" >&2
+  exit 1
+fi
+# A release may predate the budget gauges and the runtime-configuration fix, so a release comparison
+# starts the main SUT at the harness budget unless PERF_MAX_EVENT_LOG_BYTES says otherwise.
+if [ -n "${PERF_RELEASE_COMPARISON:-}" ] && [ -z "$PERF_MAX_EVENT_LOG_BYTES" ]; then PERF_MAX_EVENT_LOG_BYTES=268435456; fi
+HARNESS_FIXED_EVENT_LOG_BYTES="${PERF_MAX_EVENT_LOG_BYTES:-268435456}" # 256 MiB
+GROWTH_EVENT_LOG_BYTES="$HARNESS_FIXED_EVENT_LOG_BYTES"
 # The INFO SUT gets no budget (the shipped heap/12 default) unless this is set; setting it marks
 # the run tuned. PERF_MAX_EVENT_LOG_BYTES deliberately never reaches the INFO SUT.
 PERF_INFO_MAX_EVENT_LOG_BYTES="${PERF_INFO_MAX_EVENT_LOG_BYTES:-}"
@@ -951,8 +949,8 @@ fi
 START_EXTRA_ENV=()
 start_mockserver() {
   local name="$1" cpus="$2" alias="$3" publish="${4:-}" mem="${5:-}" mount="${6:-}" log_level="${7:-ERROR}" diag_subdir="${8:-}" no_rm="${9:-}" port="${10:-1080}"
-  # An EMPTY 11th argument passes no budget env at all (the server's shipped default); omitted = harness budget.
-  local event_log_bytes="${11-$PERF_MAX_EVENT_LOG_BYTES}"
+  # An EMPTY 11th argument passes no budget env at all (the server's shipped default); omitted = the fixed harness budget.
+  local event_log_bytes="${11-$HARNESS_FIXED_EVENT_LOG_BYTES}"
   # log_level defaults to ERROR — the tracked baseline's level, which every existing
   # caller relies on. The INFO publication arm (plan open question 5) passes INFO
   # explicitly; nothing else does, so the ERROR baseline is unaffected.
@@ -1135,7 +1133,7 @@ SUT_IMAGE_JAVA_TOOL_OPTIONS="$(image_java_tool_options "$MOCKSERVER_IMAGE")"
 
 echo "--- starting upstream + MockServer ($MOCKSERVER_IMAGE)"
 start_mockserver "$UPSTREAM" "$UPSTREAM_CPUS" "$UPSTREAM_ALIAS" "" "" "" "ERROR" "" "keep" "$UPSTREAM_PORT"
-start_mockserver "$SERVER" "$SERVER_CPUS" "$SERVER_ALIAS" "publish" "$SERVER_MEMORY" "$FILE_BODY_MOUNT" "ERROR" "sut" "" "$SUT_PORT"
+start_mockserver "$SERVER" "$SERVER_CPUS" "$SERVER_ALIAS" "publish" "$SERVER_MEMORY" "$FILE_BODY_MOUNT" "ERROR" "sut" "" "$SUT_PORT" "$PERF_MAX_EVENT_LOG_BYTES"
 # Follow the SUT's stdout/stderr into a host file from the moment it starts. The follow stream ENDS
 # when the container dies, so the file survives the container's reaping and captures the JVM's dying
 # words — an OutOfMemoryError stack, a "Terminating due to java.lang.OutOfMemoryError" from
@@ -1144,7 +1142,7 @@ start_mockserver "$SERVER" "$SERVER_CPUS" "$SERVER_ALIAS" "publish" "$SERVER_MEM
 # and the death message would otherwise be the only signal — and it is exactly what --rm destroyed.
 docker logs -f "$SERVER" > "$DIAG_DIR/sut/sut-server.log" 2>&1 &
 SUT_LOG_PID=$!
-echo "--- SUT started with --memory=$SERVER_MEMORY (bounded heap so GC cycles) + maxEventLogSizeInBytes=$PERF_MAX_EVENT_LOG_BYTES (body-byte OOM guard)"
+echo "--- SUT started with --memory=$SERVER_MEMORY (bounded heap so GC cycles) + maxEventLogSizeInBytes=${PERF_MAX_EVENT_LOG_BYTES:-<shipped default>} (body-byte OOM guard)"
 wait_ready "$UPSTREAM"
 wait_ready "$SERVER"
 
@@ -1209,6 +1207,128 @@ gauge_value() { # exact_series_name  < metrics_text
 # The info_* compare key: what the INFO SUT was handed, not what it resolved.
 info_els_method() { # requested_bytes -> shipped-default | fixed-<bytes>
   if [ -n "$1" ]; then echo "fixed-$1"; else echo "shipped-default"; fi
+}
+# --- main-SUT event-log budget helpers (perf-default-budget-test.sh runs each of them) ---
+# The server's heap divisors for the default retention budget and the in-flight floor
+# (ConfigurationProperties.defaultMaxEventLogSizeInBytes / defaultEventLogInFlightBytes); keep in step
+# with them. The in-flight cap is max(budget, heap/floor divisor). An unset level is the default, INFO.
+els_default_divisor() { # log_level
+  case "$1" in INFO|DEBUG|TRACE|"") echo 12 ;; *) echo 20 ;; esac
+}
+els_inflight_divisor() { # log_level
+  case "$1" in INFO|DEBUG|TRACE|"") echo 12 ;; *) echo 7 ;; esac
+}
+# One CONFIG_ERRORS line per failure, nothing when sound. An override is proven by the container env
+# (and by the gauge when the image has one); the shipped default only by the gauge, the JVM's own word.
+main_els_guard() { # requested handed resolved
+  if [ -n "$1" ]; then
+    [ "$2" = "$1" ] || echo "PERF_MAX_EVENT_LOG_BYTES=$1 was declared but the SUT container reports MOCKSERVER_MAX_EVENT_LOG_SIZE_IN_BYTES='$2' — this run would be labelled tuned while measuring something else"
+    [ -z "$3" ] || [ "$3" = "$1" ] || echo "PERF_MAX_EVENT_LOG_BYTES=$1 was handed to the SUT but its gauge mock_server_event_log_max_retained_bytes reads '$3'"
+    return 0
+  fi
+  [ -z "$2" ] || echo "the SUT must run at the shipped event-log budget but was handed MOCKSERVER_MAX_EVENT_LOG_SIZE_IN_BYTES='$2'"
+  awk -v v="$3" 'BEGIN{exit !(v+0>0)}' || echo "event-log byte budget not confirmed on the SUT: mock_server_event_log_max_retained_bytes='$3' (absent, unreadable or 0) — a run without a byte bound is at the build-#249 OOM risk; an image that predates the gauge needs PERF_MAX_EVENT_LOG_BYTES"
+}
+main_els_json() { # handed resolved_bytes resolved_entries resolved_in_flight heap_bytes log_level -> config.event_log_budget
+  jq -nc --arg handed "$1" --arg mb "$2" --arg me "$3" --arg mif "$4" --arg heap "$5" \
+    --argjson div "$(els_default_divisor "$6")" --argjson ifdiv "$(els_inflight_divisor "$6")" --arg method "$(info_els_method "$1")" '
+    def num: if . == "" then null else (tonumber? // null) end;
+    ($heap | num) as $h
+    | def fraction($d): if $h == null then null
+        else ((($h / 1024 | floor) - 20480) as $hk | if $hk < 0 then 0 else (($hk / $d | floor) * 1024) end) end;
+    ($mb | num) as $b
+    | { method: $method, requested_bytes: ($handed | num), requested_source: "container-env",
+        resolved_max_event_log_bytes: $b, resolved_max_log_entries: ($me | num),
+        resolved_max_in_flight_bytes: ($mif | num),
+        resolved_source: (if $b != null then "observed" else "unavailable" end),
+        heap_max_bytes: $h, heap_divisor: $div, in_flight_heap_divisor: $ifdiv,
+        expected_default_bytes: fraction($div),
+        expected_in_flight_cap_bytes: (if $b == null or fraction($ifdiv) == null then null
+          elif $b <= 0 then 0 else ([$b, fraction($ifdiv)] | max) end) }'
+}
+# PUTs maxEventLogSizeInBytes and confirms it from the SUT's own gauge; ELS_GAUGE_READ holds what
+# the gauge last read, so a failure can say what the server actually kept.
+set_sut_event_log_budget() { # base_url bytes -> 0 when the gauge reads bytes back
+  local i
+  ELS_GAUGE_READ=""
+  curl -sf --max-time 10 -o /dev/null -X PUT "$1/mockserver/configuration" \
+    -H 'Content-Type: application/json' -d "{\"maxEventLogSizeInBytes\": $2}" || { ELS_GAUGE_READ="<PUT failed>"; return 1; }
+  for i in 1 2 3; do
+    ELS_GAUGE_READ="$( { curl -sf --max-time 4 "$1/mockserver/metrics" 2>/dev/null || true; } | gauge_value mock_server_event_log_max_retained_bytes)"
+    [ "$ELS_GAUGE_READ" = "$2" ] && return 0
+    [ "$i" -lt 3 ] && sleep 1
+  done
+  return 1
+}
+# growth.js needs at least GROWTH_EVENT_LOG_BYTES for its count-ring fill. GROWTH_ELS_METHOD says how
+# it got it: "startup" (PERF_MAX_EVENT_LOG_BYTES), "startup-sufficient" (the resolved budget already
+# covers it) or "scoped" (raised for the phase, restored after, both gauge-confirmed).
+GROWTH_ELS_PRIOR=""; GROWTH_ELS_PRIOR_INFLIGHT=""; GROWTH_ELS_APPLIED=""; GROWTH_ELS_PUT_SENT=false
+GROWTH_ELS_PROBLEM=""; GROWTH_ELS_METHOD=""
+scope_growth_event_log_budget() { # base_url
+  local m
+  GROWTH_ELS_PROBLEM=""; GROWTH_ELS_PUT_SENT=false; GROWTH_ELS_APPLIED=""
+  if [ -n "$PERF_MAX_EVENT_LOG_BYTES" ]; then
+    GROWTH_ELS_METHOD=startup; GROWTH_ELS_PRIOR="$PERF_MAX_EVENT_LOG_BYTES"; GROWTH_ELS_APPLIED="$PERF_MAX_EVENT_LOG_BYTES"; return 0
+  fi
+  GROWTH_ELS_METHOD=scoped
+  m="$(curl -sf --max-time 4 "$1/mockserver/metrics" 2>/dev/null || true)"
+  GROWTH_ELS_PRIOR="$(gauge_value mock_server_event_log_max_retained_bytes <<<"$m")"
+  GROWTH_ELS_PRIOR_INFLIGHT="$(gauge_value mock_server_event_log_max_in_flight_bytes <<<"$m")"
+  if [ -z "$GROWTH_ELS_PRIOR" ]; then
+    GROWTH_ELS_PROBLEM="the SUT's pre-growth budget (gauge mock_server_event_log_max_retained_bytes) could not be read, so the budget was not raised; growth.js ran at the shipped budget"
+    return 1
+  fi
+  if [ "$GROWTH_ELS_PRIOR" -ge "$GROWTH_EVENT_LOG_BYTES" ]; then
+    GROWTH_ELS_METHOD=startup-sufficient; GROWTH_ELS_APPLIED="$GROWTH_ELS_PRIOR"; return 0
+  fi
+  GROWTH_ELS_PUT_SENT=true
+  if set_sut_event_log_budget "$1" "$GROWTH_EVENT_LOG_BYTES"; then GROWTH_ELS_APPLIED="$GROWTH_EVENT_LOG_BYTES"; return 0; fi
+  if [ "$ELS_GAUGE_READ" = "<PUT failed>" ]; then
+    GROWTH_ELS_PROBLEM="PUT /mockserver/configuration maxEventLogSizeInBytes=${GROWTH_EVENT_LOG_BYTES} failed (HTTP error or unreachable), so growth.js ran at the shipped budget ${GROWTH_ELS_PRIOR}"
+  elif [ "$ELS_GAUGE_READ" = "$GROWTH_ELS_PRIOR" ]; then
+    GROWTH_ELS_PROBLEM="PUT /mockserver/configuration maxEventLogSizeInBytes=${GROWTH_EVENT_LOG_BYTES} did not take effect: gauge mock_server_event_log_max_retained_bytes still reads '${ELS_GAUGE_READ}', expected ${GROWTH_EVENT_LOG_BYTES}. The SUT image predates the runtime-configuration fix (one Configuration shared by every MockServer construction path), so growth.js ran at the shipped budget ${GROWTH_ELS_PRIOR} and its byte cap, not the ~115.5k count ring, bounded the log (issue #2329 fill)"
+  else
+    GROWTH_ELS_PROBLEM="PUT /mockserver/configuration maxEventLogSizeInBytes=${GROWTH_EVENT_LOG_BYTES} unconfirmed (gauge mock_server_event_log_max_retained_bytes read '${ELS_GAUGE_READ}', expected ${GROWTH_EVENT_LOG_BYTES}, before ${GROWTH_ELS_PRIOR})"
+  fi
+  return 1
+}
+restore_growth_event_log_budget() { # base_url -> add_check growth_event_log_budget_scoped
+  local inflight
+  if [ "$GROWTH_ELS_PUT_SENT" = true ]; then
+    if ! set_sut_event_log_budget "$1" "$GROWTH_ELS_PRIOR"; then
+      GROWTH_ELS_PROBLEM="${GROWTH_ELS_PROBLEM:+$GROWTH_ELS_PROBLEM; }restoring maxEventLogSizeInBytes=${GROWTH_ELS_PRIOR} after growth.js did not take effect: gauge mock_server_event_log_max_retained_bytes reads '${ELS_GAUGE_READ}', expected ${GROWTH_ELS_PRIOR}, so every later phase ran on another budget"
+    else
+      inflight="$( { curl -sf --max-time 4 "$1/mockserver/metrics" 2>/dev/null || true; } | gauge_value mock_server_event_log_max_in_flight_bytes)"
+      [ -n "$inflight" ] && [ "$inflight" = "$GROWTH_ELS_PRIOR_INFLIGHT" ] \
+        || GROWTH_ELS_PROBLEM="${GROWTH_ELS_PROBLEM:+$GROWTH_ELS_PROBLEM; }after the restore the in-flight cap (gauge mock_server_event_log_max_in_flight_bytes) reads '${inflight}', not its pre-growth '${GROWTH_ELS_PRIOR_INFLIGHT}', so every later phase ran on another in-flight bound"
+    fi
+  fi
+  if [ -n "$GROWTH_ELS_PROBLEM" ]; then
+    add_check "growth_event_log_budget_scoped" false "$GROWTH_ELS_PROBLEM"
+  elif [ "$GROWTH_ELS_METHOD" = startup ]; then
+    add_check "growth_event_log_budget_scoped" true "growth.js ran at the PERF_MAX_EVENT_LOG_BYTES budget ${PERF_MAX_EVENT_LOG_BYTES} the SUT started with (no runtime change)"
+  elif [ "$GROWTH_ELS_METHOD" = startup-sufficient ]; then
+    add_check "growth_event_log_budget_scoped" true "growth.js ran at the SUT's resolved budget ${GROWTH_ELS_PRIOR}, already at least ${GROWTH_EVENT_LOG_BYTES} (no runtime change)"
+  else
+    add_check "growth_event_log_budget_scoped" true "growth.js ran at maxEventLogSizeInBytes=${GROWTH_ELS_APPLIED} (gauge-confirmed), restored to ${GROWTH_ELS_PRIOR} with the in-flight cap back at ${GROWTH_ELS_PRIOR_INFLIGHT}"
+  fi
+}
+# event_log_scaling.growth_phase: the budget growth.js ran at and whether its count ring filled (#2329).
+growth_phase_json() { # reads GROWTH_EVENT_LOG_BYTES, GROWTH_ELS_* and PERF_EVENT_LOG_APPROACH_RATIO
+  jq -nc --arg method "$GROWTH_ELS_METHOD" \
+    --arg target "$GROWTH_EVENT_LOG_BYTES" --arg prior "$GROWTH_ELS_PRIOR" --arg applied "$GROWTH_ELS_APPLIED" \
+    --arg me "$GROWTH_ELS_MAX_ENTRIES" --arg mb "$GROWTH_ELS_MAX_BYTES" --arg pe "$GROWTH_ELS_PEAK_ENTRIES" \
+    --arg pb "$GROWTH_ELS_PEAK_BYTES" --arg cu "$GROWTH_ELS_COUNT_UTIL" --arg bu "$GROWTH_ELS_BYTES_UTIL" \
+    --arg rows "$GROWTH_ELS_ROWS" --argjson thr "$PERF_EVENT_LOG_APPROACH_RATIO" '
+    def num: if . == "" then null else (tonumber? // null) end;
+    (($rows | num) // 0) as $r | def seen(f): if $r > 0 then f else null end;
+    { budget_method: (if $method == "" then null else $method end), target_bytes: ($target | num), prior_bytes: ($prior | num),
+        applied_bytes: ($applied | num), samples: $r,
+        resolved_max_event_log_bytes: seen($mb | num), resolved_max_log_entries: seen($me | num),
+        peak_retained_entries: seen($pe | num), peak_retained_bytes: seen($pb | num),
+        count_utilisation: seen($cu | num), bytes_utilisation: seen($bu | num),
+        count_ring_filled: (if $r > 0 then (($cu | num) // 0) >= $thr else null end) }' 2>/dev/null || echo null
 }
 event_log_counters() { # < metrics_text -> "dropped|evicted", each empty when absent
   local m; m="$(cat)"
@@ -1363,19 +1483,20 @@ DISABLE_SYSOUT_VAL="$(container_env MOCKSERVER_DISABLE_SYSTEM_OUT)"; DISABLE_SYS
 # JAVA_TOOL_OPTIONS is legitimately absent when PERF_SERVER_JAVA_OPTS is unset — an
 # empty OBSERVED value here is a true fact (no JVM opts), not a masked placeholder.
 JAVA_TOOL_OPTS_VAL="$(container_env JAVA_TOOL_OPTIONS)"
-# Body-byte OOM guard the SUT ACTUALLY received (observed from the container env), so
-# a reader can see the guard was in force for this run — and so the fail-closed check
-# below reddens loudly if a future edit ever drops it (a run without the guard is at
-# the exact OOM risk build #249 hit, and must never be silently baselined as a healthy
-# one). Read back from the container, not echoed from the shell var, on purpose.
+# The budget env the SUT ACTUALLY received (empty at the shipped default) and the budget its JVM
+# resolved, from its own gauges; main_els_guard below fails closed on either being wrong, since a run
+# without a byte bound is at the build-#249 OOM risk.
 MAX_EVENT_LOG_VAL="$(container_env MOCKSERVER_MAX_EVENT_LOG_SIZE_IN_BYTES)"
+MAIN_ELS_RESOLVED_BYTES="$(gauge_value mock_server_event_log_max_retained_bytes <<<"$CONFIG_METRICS")"
+MAIN_ELS_RESOLVED_ENTRIES="$(gauge_value mock_server_event_log_max_retained_entries <<<"$CONFIG_METRICS")"
+MAIN_ELS_RESOLVED_IN_FLIGHT="$(gauge_value mock_server_event_log_max_in_flight_bytes <<<"$CONFIG_METRICS")"
 # Accept-queue depth the SUT actually received. Absent is normal (shipped default), so
 # empty is not an error — but declared-yet-unapplied is, since the run would be labelled
 # tuned while measuring a default server.
 SO_BACKLOG_VAL="$(container_env MOCKSERVER_SO_BACKLOG)"
 # ANY tuning lever flips the profile to "tuned" so a non-default run can never poison the baseline.
-# Keyed on whether the user-facing PERF_* env var was SET (not on the resolved SERVER_MEMORY /
-# PERF_MAX_EVENT_LOG_BYTES, which always hold a default), so the daily guard-dispatched run — which
+# Keyed on whether the user-facing PERF_* env var was SET (not on the resolved SERVER_MEMORY, which
+# always holds a default, or PERF_MAX_EVENT_LOG_BYTES, which a release comparison fills), so the daily guard-dispatched run — which
 # sets none of these — stays "default", while a run that raises the heap, changes the GC, resizes the
 # log budget, sets the backlog, or opts into the large-heap profile is correctly excluded.
 # A cpuset override is rig TOPOLOGY, not server configuration, so it is tracked
@@ -1443,7 +1564,9 @@ fi
 awk -v v="$HEAP_MAX_BYTES" 'BEGIN{exit !(v+0>0)}' || CONFIG_ERRORS+=("resolved heap (jvm_memory_max_bytes{area=\"heap\"}) not a positive value: '${HEAP_MAX_BYTES}'")
 [ -n "$LOG_LEVEL_VAL" ]     || CONFIG_ERRORS+=("MOCKSERVER_LOG_LEVEL not recordable (neither container env nor shell)")
 [ -n "$DISABLE_SYSOUT_VAL" ] || CONFIG_ERRORS+=("MOCKSERVER_DISABLE_SYSTEM_OUT not recordable (neither container env nor shell)")
-awk -v v="$MAX_EVENT_LOG_VAL" 'BEGIN{exit !(v+0>0)}' || CONFIG_ERRORS+=("event-log body-byte OOM guard (MOCKSERVER_MAX_EVENT_LOG_SIZE_IN_BYTES) not applied to the SUT, OR the container env could not be read (docker inspect failed) - these are not distinguished here and both fail closed: '${MAX_EVENT_LOG_VAL}' — a run without it is at the build-#249 OOM risk and must not be baselined as healthy")
+while IFS= read -r ELS_GUARD_ERROR; do
+  [ -z "$ELS_GUARD_ERROR" ] || CONFIG_ERRORS+=("$ELS_GUARD_ERROR")
+done <<<"$(main_els_guard "$PERF_MAX_EVENT_LOG_BYTES" "$MAX_EVENT_LOG_VAL" "$MAIN_ELS_RESOLVED_BYTES")"
 if [ -n "$PERF_SO_BACKLOG" ]; then
   awk -v v="$PERF_SO_BACKLOG" 'BEGIN{exit !(v ~ /^[0-9]+$/ && v+0>0)}' \
     || CONFIG_ERRORS+=("PERF_SO_BACKLOG='${PERF_SO_BACKLOG}' is not a positive integer")
@@ -1687,6 +1810,8 @@ else
   fi
 fi
 
+MAIN_ELS_JSON="$(main_els_json "$MAX_EVENT_LOG_VAL" "$MAIN_ELS_RESOLVED_BYTES" "$MAIN_ELS_RESOLVED_ENTRIES" "$MAIN_ELS_RESOLVED_IN_FLIGHT" "$HEAP_MAX_BYTES" "$LOG_LEVEL_VAL")"
+jq -e . >/dev/null 2>&1 <<<"$MAIN_ELS_JSON" || MAIN_ELS_JSON="$(jq -nc --arg m "$(info_els_method "$MAX_EVENT_LOG_VAL")" '{method: $m}')"
 CONFIG_JSON="$(jq -n \
   --arg version "$MS_VERSION" --arg git_hash "$MS_GIT_HASH" \
   --arg image "$MOCKSERVER_IMAGE" --arg image_digest "$IMAGE_DIGEST" \
@@ -1701,7 +1826,7 @@ CONFIG_JSON="$(jq -n \
   --arg gc "$GC_IN_USE" --arg heap_max "$HEAP_MAX_BYTES" \
   --arg log_level "$LOG_LEVEL_VAL" --arg log_level_src "$LOG_LEVEL_SRC" \
   --arg disable_sysout "$DISABLE_SYSOUT_VAL" --arg disable_sysout_src "$DISABLE_SYSOUT_SRC" \
-  --arg max_event_log "$MAX_EVENT_LOG_VAL" \
+  --arg max_event_log "$MAX_EVENT_LOG_VAL" --argjson event_log_budget "$MAIN_ELS_JSON" \
   --arg so_backlog "$SO_BACKLOG_VAL" --arg config_profile "$CONFIG_PROFILE" --arg rig_profile "$RIG_PROFILE" \
   --arg jto "$JAVA_TOOL_OPTS_VAL" --arg psjo "${PERF_SERVER_JAVA_OPTS:-}" \
   --arg k6_image "$K6_IMAGE" --arg k6_digest "$K6_IMAGE_DIGEST" \
@@ -1757,7 +1882,9 @@ CONFIG_JSON="$(jq -n \
     heap_max_bytes: ($heap_max|tonumber),
     log_level: $log_level,
     disable_system_out: $disable_sysout,
-    max_event_log_size_bytes: ($max_event_log|tonumber),
+    # null = no budget handed (shipped default); event_log_budget.method is the compare key.
+    max_event_log_size_bytes: (if $max_event_log=="" then null else ($max_event_log|tonumber) end),
+    event_log_budget: $event_log_budget,
     # null = shipped default in force; a number = this run was tuned.
     so_backlog: (if $so_backlog=="" then null else ($so_backlog|tonumber) end),
     config_profile: $config_profile,
@@ -1788,7 +1915,7 @@ CONFIG_JSON="$(jq -n \
       k6_image_digest:"observed", cpusets:"declared", k6_cpu_pin_pct:"declared"
     }
   }')"
-echo "--- config resolved: ${MS_VERSION} gc='${GC_IN_USE}' heap_max=${HEAP_MAX_BYTES} jdk='${JDK_BUILD}' log_level=${LOG_LEVEL_VAL} maxEventLogSizeInBytes=${MAX_EVENT_LOG_VAL} soBacklog=${SO_BACKLOG_VAL:-<shipped default>} config_profile=${CONFIG_PROFILE} rig_profile=${RIG_PROFILE} provenance_ok=${PROVENANCE_OK} attributed=${ATTRIBUTED_COMMIT:0:10}(${ATTRIBUTED_SRC}) harness=${HARNESS_COMMIT:0:10} image_age_days=${IMAGE_AGE_DAYS} image_stale=${IMAGE_STALE} jvm_diagnostics=${PERF_JVM_DIAGNOSTICS} baseline_eligible=${BASELINE_ELIGIBLE} (schema_version=3)"
+echo "--- config resolved: ${MS_VERSION} gc='${GC_IN_USE}' heap_max=${HEAP_MAX_BYTES} jdk='${JDK_BUILD}' log_level=${LOG_LEVEL_VAL} maxEventLogSizeInBytes=${MAX_EVENT_LOG_VAL:-<shipped default>}(resolved ${MAIN_ELS_RESOLVED_BYTES:-?}) soBacklog=${SO_BACKLOG_VAL:-<shipped default>} config_profile=${CONFIG_PROFILE} rig_profile=${RIG_PROFILE} provenance_ok=${PROVENANCE_OK} attributed=${ATTRIBUTED_COMMIT:0:10}(${ATTRIBUTED_SRC}) harness=${HARNESS_COMMIT:0:10} image_age_days=${IMAGE_AGE_DAYS} image_stale=${IMAGE_STALE} jvm_diagnostics=${PERF_JVM_DIAGNOSTICS} baseline_eligible=${BASELINE_ELIGIBLE} (schema_version=3)"
 
 echo "--- seeding upstream /simple (forward target)"
 # Fail closed: the whole run forwards through this expectation, so an unseeded upstream must abort
@@ -2577,7 +2704,7 @@ if [ "$PERF_INFO_ARM" = "true" ]; then
   fi
   INFO_ELS_METHOD="$(info_els_method "$INFO_ELS_REQUESTED")"
   INFO_ELS_EXPECTED_DEFAULT=""
-  [ -z "$INFO_HEAP_MAX_BYTES" ] || INFO_ELS_EXPECTED_DEFAULT="$(awk -v h="$INFO_HEAP_MAX_BYTES" 'BEGIN{ hk=int(h/1024)-20480; if (hk<0) hk=0; printf "%.0f", int(hk/12)*1024 }')"
+  [ -z "$INFO_HEAP_MAX_BYTES" ] || INFO_ELS_EXPECTED_DEFAULT="$(awk -v h="$INFO_HEAP_MAX_BYTES" -v d="$(els_default_divisor INFO)" 'BEGIN{ hk=int(h/1024)-20480; if (hk<0) hk=0; printf "%.0f", int(hk/d)*1024 }')"
   INFO_ELS_PEAK_BYTES=""; INFO_ELS_PEAK_ENTRIES=""
   read -r INFO_ELS_PEAK_BYTES INFO_ELS_PEAK_ENTRIES <<<"$(event_log_peaks "$INFO_ELS_SAMPLES")" || true
   INFO_ELS_JSON="$(event_log_budget_json "$INFO_ELS_METHOD" "$INFO_ELS_REQUESTED" "$INFO_ELS_REQUESTED_SRC" \
@@ -2672,6 +2799,9 @@ if arm_only; then
   echo "ts,cpu_pct,heap_bytes,gc_seconds,threads" > "$SAMPLE_LOG"
 else
   echo "--- growth.js (sustained load + resource sampling)"
+  GROWTH_SUT_BASE_URL="${SERVER_METRICS_URL%/mockserver/metrics}"
+  scope_growth_event_log_budget "$GROWTH_SUT_BASE_URL" || echo "WARNING: $GROWTH_ELS_PROBLEM" >&2
+  GROWTH_ELS_T0="$(date -u +%s)"
   sampler & SAMPLER_PID=$!
   # Closes 10 s before the load's scheduled end, so no sample meets growth.js's teardown reset.
   open_live_histo_window "$(( $(to_secs "${K6_GROWTH_DURATION:-6m}") - 10 ))"
@@ -2687,6 +2817,8 @@ else
     "$K6_IMAGE" run /k6/growth.js
   close_live_histo_window
   kill "$SAMPLER_PID" >/dev/null 2>&1 || true; SAMPLER_PID=""
+  GROWTH_ELS_T1="$(date -u +%s)"
+  restore_growth_event_log_budget "$GROWTH_SUT_BASE_URL"
 fi
 
 # --- forward.js (forward connection-pool regression guard) --------------------
@@ -3381,8 +3513,8 @@ abort_if_sut_died
 # maxLogEntries ~= 128,500). The per-arm rate x residence x body figures
 # (large_10mb@0.1rps -> ~172 MB, large_1mb@0.5rps -> ~86 MB,
 # large-4KB@200rps -> ~137 MB) hold ONLY at residence ~172 s; they run away as this node
-# contends. So the clustered nodes get the SAME maxEventLogSizeInBytes body-byte OOM
-# guard (start_clu, above) as the main SUT, which caps total retained body bytes
+# contends. So the clustered nodes get the fixed harness maxEventLogSizeInBytes body-byte OOM
+# guard (start_clu, above; HARNESS_FIXED_EVENT_LOG_BYTES), which caps total retained body bytes
 # regardless of residence — and applies identically on control and cluster, so it does
 # not bias the ratio. The
 # SECOND node (B) receives NO request load, so its ring stays ~empty; it holds only
@@ -3509,8 +3641,8 @@ JGROUPS_XML
     # a JS arm would 500 and abort regression.js in setup()); the core arms
     # (match/forward/template/template_mustache/large/large_1mb/large_10mb) run
     # UNCHANGED — only env differs, the sanctioned parameterisation. start_clu also
-    # carries the maxEventLogSizeInBytes body-byte OOM guard (below), for the same
-    # reason the main SUT does: these MB arms run here too, on a 1.0 GiB clustered
+    # carries the fixed harness maxEventLogSizeInBytes body-byte OOM guard (below), because
+    # the MB arms run here too, on a 1.0 GiB clustered
     # heap. The budget is identical on control and cluster, so it evicts symmetrically
     # and cannot bias the within-run clustered/control ratio item 13 measures.
     # The JGroups discovery string, and the guard that validates WHAT ACTUALLY GOES TO DNS.
@@ -3570,7 +3702,7 @@ JGROUPS_XML
         --cpus "$CLU_CPUS" --memory "$CLU_MEM" -p 127.0.0.1::1080 \
         -e MOCKSERVER_LOG_LEVEL=WARN -e MOCKSERVER_DISABLE_SYSTEM_OUT=true \
         -e MOCKSERVER_METRICS_ENABLED=true \
-        -e MOCKSERVER_MAX_EVENT_LOG_SIZE_IN_BYTES="$PERF_MAX_EVENT_LOG_BYTES" \
+        -e MOCKSERVER_MAX_EVENT_LOG_SIZE_IN_BYTES="$HARNESS_FIXED_EVENT_LOG_BYTES" \
         -e "MOCKSERVER_STATE_BACKEND=$backend" \
         ${extra[@]+"${extra[@]}"} \
         "$CLU_IMAGE" -serverPort 1080 >/dev/null 2>&1
@@ -3825,7 +3957,7 @@ HEAP_RATIO="$(ratio "$HEAP_MIN_LAST" "$HEAP_MIN_FIRST")"
 # --- event-log scaling: resolved bounds vs observed peak, and which bound bound ------------------
 # Both event-log bounds derive from the heap ceiling but scale DIFFERENTLY: maxLogEntries is
 # min(heapAvailableKB/8, 250000) and CAPS at 250000 (reached by ~1.9 GiB of heap), while maxEventLogSizeInBytes
-# is (heapAvailableKB/divisor)*1024 (divisor 20 at WARN/ERROR/OFF, 12 at INFO/DEBUG/TRACE) and scales with the
+# is (heapAvailableKB/divisor)*1024 (the divisor is els_default_divisor's, by log level) and scales with the
 # heap without limit. For the perf workload's small bodies (~1.3 KB per entry) the BYTE budget binds
 # first up to roughly a 6 GiB heap at WARN (~3.7 GiB at INFO), and the COUNT cap above that — this
 # block MEASURES which one binds rather than assuming it. Resolved values come from the
@@ -3834,34 +3966,47 @@ HEAP_RATIO="$(ratio "$HEAP_MIN_LAST" "$HEAP_MIN_FIRST")"
 # columns are blank and samples_with_log_data is 0. Reads are safe here: the load phases (regression /
 # sweep / growth) are complete, so the retained peak is settled even though the sampler still runs.
 # An unset level means the server default, INFO.
-case "$LOG_LEVEL_VAL" in
-  INFO|DEBUG|TRACE|"") ELS_DIVISOR=12 ;;
-  *)                   ELS_DIVISOR=20 ;;
-esac
+ELS_DIVISOR="$(els_default_divisor "$LOG_LEVEL_VAL")"
 # Default heap-derived byte budget the server WOULD pick with no override: (heapAvailableKB/divisor)*1024,
 # where heapAvailableKB = heapBytes/1024 - 20480 (ConfigurationProperties.computeHeapAvailableInKB).
 # On a large-heap run the resolved budget must be at least this, i.e. the log budget scaled with the
 # heap at least as fast as the shipped default would have.
 ELS_EXPECTED_DEFAULT_BYTES="$(awk -v h="$HEAP_MAX_BYTES" -v d="$ELS_DIVISOR" 'BEGIN{ hk=int(h/1024)-20480; if (hk<0) hk=0; printf "%.0f", int(hk/d)*1024 }')"
-read -r ELS_MAX_ENTRIES ELS_MAX_BYTES ELS_PEAK_ENTRIES ELS_PEAK_BYTES ELS_PEAK_INFLIGHT ELS_EVICTED ELS_LOG_ROWS <<EOF
-$(awk -F',' '
-  NR>1 && $20!="" { if ($20+0>me) me=$20; lr++ }
-  NR>1 && $19!="" { if ($19+0>mb) mb=$19 }
-  NR>1 && $17!="" { if ($17+0>pe) pe=$17 }
-  NR>1 && $18!="" { if ($18+0>pb) pb=$18 }
-  NR>1 && $15!="" { if ($15+0>pif) pif=$15 }
-  NR>1 && $21!="" { if ($21+0>ev) ev=$21 }
-  END { printf "%.0f %.0f %.0f %.0f %.0f %.0f %d", me+0, mb+0, pe+0, pb+0, pif+0, ev+0, lr+0 }
-' "$DIAG_SAMPLE_LOG" 2>/dev/null)
-EOF
-read -r ELS_COUNT_UTIL ELS_BYTES_UTIL ELS_MEAN_ENTRY ELS_BINDING ELS_BOUND_REACHED <<EOF
-$(awk -v me="$ELS_MAX_ENTRIES" -v mb="$ELS_MAX_BYTES" -v pe="$ELS_PEAK_ENTRIES" -v pb="$ELS_PEAK_BYTES" \
-      -v ev="$ELS_EVICTED" -v thr="$PERF_EVENT_LOG_APPROACH_RATIO" 'BEGIN{
-  cu = (me>0)? pe/me : 0; bu = (mb>0)? pb/mb : 0; mean = (pe>0)? pb/pe : 0;
+# diag-samples.csv columns: 1 ts, 12 dropped, 15 in-flight, 17/18 retained entries/bytes, 19/20 their
+# bounds, 21 evicted, 33 scrape_ts. Utilisation is per row against that row's own bounds, because the
+# growth window [t0,t1] runs at GROWTH_EVENT_LOG_BYTES; the resolved bounds come from rows outside it
+# (all rows if none). A row is placed by when its metrics were scraped (scrape_ts, else ts).
+# Prints the whole-run figures (max_entries max_bytes peak_entries peak_bytes peak_in_flight evicted rows
+# dropped count_util bytes_util), then the growth window's (max_entries max_bytes peak_entries
+# peak_bytes count_util bytes_util rows).
+event_log_window_stats() { # samples_csv growth_t0 growth_t1
+  awk -F',' -v t0="$2" -v t1="$3" '
+    NR == 1 || $20 == "" { next }
+    { t = ($33 != "") ? $33 : $1; w = (t0 != "" && t1 != "" && t+0 >= t0+0 && t+0 <= t1+0); rows++
+      cu = ($20+0 > 0) ? $17/$20 : 0; bu = ($19+0 > 0) ? $18/$19 : 0
+      if ($17+0 > pe) pe = $17; if ($18+0 > pb) pb = $18; if ($15+0 > pif) pif = $15
+      if ($21+0 > ev) ev = $21; if ($12+0 > dr) dr = $12; if (cu > mcu) mcu = cu; if (bu > mbu) mbu = bu
+      if ($20+0 > ame) ame = $20; if ($19+0 > amb) amb = $19
+      if (w) { gr++; if ($20+0 > gme) gme = $20; if ($19+0 > gmb) gmb = $19; if ($17+0 > gpe) gpe = $17
+               if ($18+0 > gpb) gpb = $18; if (cu > gcu) gcu = cu; if (bu > gbu) gbu = bu }
+      else   { orow++; if ($20+0 > ome) ome = $20; if ($19+0 > omb) omb = $19 } }
+    END { if (!orow) { ome = ame; omb = amb }
+          printf "%.0f %.0f %.0f %.0f %.0f %.0f %d %.0f %.4f %.4f %.0f %.0f %.0f %.0f %.4f %.4f %d\n",
+            ome+0, omb+0, pe+0, pb+0, pif+0, ev+0, rows+0, dr+0, mcu+0, mbu+0,
+            gme+0, gmb+0, gpe+0, gpb+0, gcu+0, gbu+0, gr+0 }' "$1" 2>/dev/null \
+    || echo "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
+}
+read -r ELS_MAX_ENTRIES ELS_MAX_BYTES ELS_PEAK_ENTRIES ELS_PEAK_BYTES ELS_PEAK_INFLIGHT ELS_EVICTED ELS_LOG_ROWS ELS_DROPPED \
+  ELS_COUNT_UTIL ELS_BYTES_UTIL GROWTH_ELS_MAX_ENTRIES GROWTH_ELS_MAX_BYTES GROWTH_ELS_PEAK_ENTRIES GROWTH_ELS_PEAK_BYTES \
+  GROWTH_ELS_COUNT_UTIL GROWTH_ELS_BYTES_UTIL GROWTH_ELS_ROWS \
+  <<<"$(event_log_window_stats "$DIAG_SAMPLE_LOG" "${GROWTH_ELS_T0:-}" "${GROWTH_ELS_T1:-}")"
+read -r ELS_MEAN_ENTRY ELS_BINDING ELS_BOUND_REACHED <<<"$(awk -v cu="$ELS_COUNT_UTIL" -v bu="$ELS_BYTES_UTIL" \
+    -v pe="$ELS_PEAK_ENTRIES" -v pb="$ELS_PEAK_BYTES" -v ev="$ELS_EVICTED" -v thr="$PERF_EVENT_LOG_APPROACH_RATIO" 'BEGIN{
+  mean = (pe>0)? pb/pe : 0;
   reached = (ev>0 || cu>=thr || bu>=thr) ? "true" : "false";
   binding = (reached=="false") ? "neither" : ((cu>=bu)? "count" : "bytes");
-  printf "%.4f %.4f %.0f %s %s", cu, bu, mean, binding, reached }')
-EOF
+  printf "%.0f %s %s", mean, binding, reached }')"
+GROWTH_PHASE_JSON="$(growth_phase_json)"
 [ "$PERF_LARGE_HEAP_PROFILE" = "true" ] && ELS_LARGE_HEAP_BOOL=true || ELS_LARGE_HEAP_BOOL=false
 EVENT_LOG_SCALING_JSON="$(jq -n \
   --argjson heap_max_bytes "${HEAP_MAX_BYTES:-0}" \
@@ -3869,7 +4014,7 @@ EVENT_LOG_SCALING_JSON="$(jq -n \
   --argjson heap_divisor "$ELS_DIVISOR" \
   --argjson resolved_max_log_entries "$ELS_MAX_ENTRIES" \
   --argjson resolved_max_event_log_bytes "$ELS_MAX_BYTES" \
-  --argjson requested_max_event_log_bytes "${MAX_EVENT_LOG_VAL:-0}" \
+  --argjson requested_max_event_log_bytes "${MAX_EVENT_LOG_VAL:-null}" \
   --argjson expected_default_budget_bytes "$ELS_EXPECTED_DEFAULT_BYTES" \
   --argjson peak_retained_entries "$ELS_PEAK_ENTRIES" \
   --argjson peak_retained_bytes "$ELS_PEAK_BYTES" \
@@ -3883,6 +4028,8 @@ EVENT_LOG_SCALING_JSON="$(jq -n \
   --argjson approach_ratio "$PERF_EVENT_LOG_APPROACH_RATIO" \
   --argjson samples_with_log_data "$ELS_LOG_ROWS" \
   --argjson large_heap_profile "$ELS_LARGE_HEAP_BOOL" \
+  --argjson dropped_log_events "${ELS_DROPPED:-0}" \
+  --argjson growth_phase "$GROWTH_PHASE_JSON" \
   '{
     # resolved_* are the EFFECTIVE bounds read from the server gauges; requested_max_event_log_bytes is
     # what the container was handed (MOCKSERVER_MAX_EVENT_LOG_SIZE_IN_BYTES). expected_default_budget_bytes
@@ -3908,9 +4055,12 @@ EVENT_LOG_SCALING_JSON="$(jq -n \
     bound_reached: $bound_reached,
     approach_ratio: $approach_ratio,
     samples_with_log_data: $samples_with_log_data,
-    large_heap_profile: $large_heap_profile
+    large_heap_profile: $large_heap_profile,
+    # Peak of the cumulative dropped-events counter: recorded, never checked.
+    dropped_log_events: $dropped_log_events,
+    growth_phase: $growth_phase
   }')"
-echo "--- event-log scaling: heap=${HEAP_MAX_BYTES}B maxLogEntries=${ELS_MAX_ENTRIES} maxEventLogSizeInBytes=${ELS_MAX_BYTES} (expected_default_floor=${ELS_EXPECTED_DEFAULT_BYTES}) peak_entries=${ELS_PEAK_ENTRIES}(util ${ELS_COUNT_UTIL}) peak_bytes=${ELS_PEAK_BYTES}(util ${ELS_BYTES_UTIL}) evicted=${ELS_EVICTED} binding=${ELS_BINDING} bound_reached=${ELS_BOUND_REACHED} large_heap_profile=${PERF_LARGE_HEAP_PROFILE}"
+echo "--- event-log scaling: heap=${HEAP_MAX_BYTES}B maxLogEntries=${ELS_MAX_ENTRIES} maxEventLogSizeInBytes=${ELS_MAX_BYTES} (expected_default_floor=${ELS_EXPECTED_DEFAULT_BYTES}) peak_entries=${ELS_PEAK_ENTRIES}(util ${ELS_COUNT_UTIL}) peak_bytes=${ELS_PEAK_BYTES}(util ${ELS_BYTES_UTIL}) evicted=${ELS_EVICTED} dropped=${ELS_DROPPED} binding=${ELS_BINDING} bound_reached=${ELS_BOUND_REACHED} large_heap_profile=${PERF_LARGE_HEAP_PROFILE}; growth phase: $(jq -rc '"budget \(.applied_bytes // "unconfirmed") (\(.budget_method)), peak_entries \(.peak_retained_entries) of \(.resolved_max_log_entries), count_ring_filled \(.count_ring_filled)"' <<<"$GROWTH_PHASE_JSON" 2>/dev/null || echo unavailable)"
 # Fail-closed assertions ONLY on an opted-in large-heap run (a normal run records the block and adds
 # no check — its log may legitimately never fill). Three ways to red: gauges absent (cannot verify);
 # byte budget did not scale with the heap; or neither bound was exercised (measured more headroom, not

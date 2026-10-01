@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034  # the fixture variables are read by eval'd function bodies and call sites
-# Docker-free checks that the INFO-log-level SUT runs at the shipped event-log budget while every
-# other SUT keeps the harness budget, and that perf-test-compare.sh keys the info_* baseline on it.
+# Docker-free checks that the INFO-log-level SUT runs at the shipped event-log budget, that the
+# fixed-budget SUTs keep the harness budget, and that perf-test-compare.sh keys the info_* baseline on it.
+# The main SUT's budget is checked in perf-default-budget-test.sh.
 # The call sites, env guard and compare program are lifted from the real scripts, not copied.
 # Run: .buildkite/scripts/test/perf-info-budget-test.sh
 #   (PERF_RUN_SCRIPT / PERF_COVERAGE_LIB / PERF_COMPARE_SCRIPT=<path> to test another copy)
@@ -38,8 +39,12 @@ for fn in start_mockserver cpuset_arg require_dns_hostname; do
   if [ -z "$body" ]; then bad "function $fn not found in $F"; continue; fi
   eval "$body"
 done
-ENV_BLOCK="$(block "$F" '^PERF_MAX_EVENT_LOG_BYTES_SET=')"
-[ -n "$ENV_BLOCK" ] || bad "PERF_MAX_EVENT_LOG_BYTES/PERF_INFO_MAX_EVENT_LOG_BYTES block not found"
+MAIN_ENV_BLOCK="$(block "$F" '^PERF_MAX_EVENT_LOG_BYTES_SET=')"
+INFO_ENV_BLOCK="$(block "$F" '^PERF_INFO_MAX_EVENT_LOG_BYTES=')"
+[ -n "$MAIN_ENV_BLOCK" ] && [ -n "$INFO_ENV_BLOCK" ] || bad "PERF_MAX_EVENT_LOG_BYTES/PERF_INFO_MAX_EVENT_LOG_BYTES block not found"
+ENV_BLOCK="$MAIN_ENV_BLOCK
+$(awk '/^HARNESS_FIXED_EVENT_LOG_BYTES=|^GROWTH_EVENT_LOG_BYTES=/' "$F")
+$INFO_ENV_BLOCK"
 SITE_upstream="$(call_site "$F" 'start_mockserver "\$UPSTREAM"')"
 SITE_main="$(call_site "$F" 'start_mockserver "\$SERVER"')"
 SITE_info="$(call_site "$F" 'start_mockserver "\$INFO_SERVER"')"
@@ -77,7 +82,7 @@ budget_of() { # site [VAR=value ...] -> the budget the container is handed, or "
     END {print (!found ? "absent" : (v == "" ? "empty" : v))}' <<<"$a")"
   echo "$v"
 }
-for s in upstream main coverage covdl; do
+for s in upstream coverage covdl; do
   check "$s SUT keeps the harness 256 MiB" "268435456" "$(budget_of "$s")"
   check "$s SUT follows PERF_MAX_EVENT_LOG_BYTES" "536870912" "$(budget_of "$s" PERF_MAX_EVENT_LOG_BYTES=536870912)"
   check "$s SUT ignores PERF_INFO_MAX_EVENT_LOG_BYTES" "268435456" "$(budget_of "$s" PERF_INFO_MAX_EVENT_LOG_BYTES=104857600)"
@@ -187,7 +192,7 @@ check "the annotation body renders INFO_NOTE" "true" \
   "$(grep -qF '${INFO_NOTE}' <<<"$(grep -F '${PROVENANCE}' "$CMP")" && echo true || echo false)"
 
 echo "--- 6. event_log_budget derivation"
-for fn in info_els_method event_log_counters event_log_peaks event_log_budget_json event_log_sampler start_info_els_sampler stop_info_els_sampler; do
+for fn in info_els_method els_default_divisor event_log_counters event_log_peaks event_log_budget_json event_log_sampler start_info_els_sampler stop_info_els_sampler; do
   body="$(extract "$fn")"; [ -n "$body" ] && eval "$body" || bad "function $fn not found in $F"
 done
 check "no requested budget is shipped-default" "shipped-default" "$(info_els_method "")"

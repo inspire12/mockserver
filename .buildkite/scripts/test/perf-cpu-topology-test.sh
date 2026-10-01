@@ -412,7 +412,7 @@ check "  ... even unpinned, before any placement" "1|yes" "$(pin "$C5" 8 PERF_K6
 printf '%s\n' 'set -euo pipefail' "$LIBSRC" "$CPUARG" "$STARTFN" \
   'require_dns_hostname() { :; }; diag_jvm_opts() { :; }; compose_java_tool_options() { :; }' \
   'docker() { printf "%s\n" "$@" > "$ARGS_FILE"; }' \
-  'NETWORK=n MOCKSERVER_IMAGE=img PERF_MAX_EVENT_LOG_BYTES=1 SUT_IMAGE_JAVA_TOOL_OPTIONS= PERF_NETWORK_MODE=bridge START_EXTRA_ENV=()' \
+  'NETWORK=n MOCKSERVER_IMAGE=img PERF_MAX_EVENT_LOG_BYTES=1 HARNESS_FIXED_EVENT_LOG_BYTES=1 SUT_IMAGE_JAVA_TOOL_OPTIONS= PERF_NETWORK_MODE=bridge START_EXTRA_ENV=()' \
   'start_mockserver name "$CPUS" alias' > "$T/start.sh"
 started() { # sysfs cpus -> the container's --cpuset-* arguments, '|'-joined
   : > "$T/start.args"

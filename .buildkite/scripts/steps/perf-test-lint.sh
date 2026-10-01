@@ -84,6 +84,9 @@ bash "$REPO_ROOT/.buildkite/scripts/test/perf-xl-dispatch-test.sh"
 echo "--- compare queue-history checks (a perf-xl run never enters or displaces the perf baseline window)"
 bash "$REPO_ROOT/.buildkite/scripts/test/perf-compare-queue-history-test.sh"
 
+echo "--- main-SUT event-log budget checks (item 51: shipped default on the main SUT, scoped growth budget, main-SUT baseline key)"
+bash "$REPO_ROOT/.buildkite/scripts/test/perf-default-budget-test.sh"
+
 echo "--- allocation-profile annotation checks (item 28: ceiling views, size cap, degrade notes)"
 bash "$REPO_ROOT/.buildkite/scripts/test/perf-allocprofile-annotation-test.sh"
 

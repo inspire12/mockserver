@@ -102,7 +102,7 @@ start_rc() { # mode alias -> "rc docker_calls network_alias"
   local rc=0
   PERF_NETWORK_MODE="$1" ALIAS="$2" bash -c "
     set -euo pipefail
-    NETWORK=n MOCKSERVER_IMAGE=img PERF_MAX_EVENT_LOG_BYTES=1 SUT_IMAGE_JAVA_TOOL_OPTIONS=
+    NETWORK=n MOCKSERVER_IMAGE=img PERF_MAX_EVENT_LOG_BYTES=1 HARNESS_FIXED_EVENT_LOG_BYTES=1 SUT_IMAGE_JAVA_TOOL_OPTIONS=
     docker() { echo call >> '$WORK/docker.calls'; printf '%s\n' \"\$@\" > '$WORK/docker.args'; }
     cpuset_arg() { :; }; numa_mems_flag() { :; }; diag_jvm_opts() { :; }; compose_java_tool_options() { :; }
     $GUARD_FN

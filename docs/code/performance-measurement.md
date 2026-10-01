@@ -888,6 +888,7 @@ Only the checks that cannot apply to a release image change:
 | Image freshness | Older than 7 days reds compare | Not evaluated: `config.image_stale` is null |
 | Clustered A/B | On | Off by default, because the clustered image is the current snapshot |
 | Guard bookkeeping | Records `perf_regression_ran_commit` | Does not, so the next daily run is not skipped |
+| Event-log budget | Main SUT at the shipped default, confirmed from `mock_server_event_log_max_retained_bytes`; `growth.js` raised to 256 MiB at runtime | Main SUT started at 256 MiB (`PERF_MAX_EVENT_LOG_BYTES` overrides), confirmed from the container env when the release predates the gauge; `growth.js` runs at it with no runtime change, because a release may predate the runtime-configuration fix |
 
 The run's other MockServer containers are started from the same image, so the upstreams (the
 run's upstream and the coverage download upstream) run the release too; only the clustered A/B
@@ -898,7 +899,10 @@ release does not export is null. Compare a release run's `perf-result.json` arti
 default run on the same instance type. The two images carry their own shipped defaults (8.0.0 runs
 JDK 17 at `MaxRAMPercentage=75` with the JVM's ergonomic collector, which is G1 in the 2 GB SUT
 and Serial below about 1.75 GB; the current snapshot runs JDK 25 with ZGC at 60), so the
-comparison is shipped default against shipped default, and `config` records both. The
+comparison is shipped default against shipped default, and `config` records both. The event-log
+budget is the exception: a release runs its main SUT at 256 MiB (see the table above), while a daily
+run uses the shipped heap/20. For a like-for-like comparison, set `PERF_MAX_EVENT_LOG_BYTES=268435456`
+on the daily run as well. The
 micro-benchmark and HTTP/2 multiplex steps build the harness commit from source, so they do not
 measure the release; the allocation-profile step reruns `perf-test-run.sh` with the same
 environment, so it profiles the release (and, like every deep run, is never baselined).
@@ -1895,6 +1899,61 @@ The compare step keys every `info_*` metric on `method`; a run without the block
 re-baselines from the first run after the change. While older runs remain in the window the
 annotation says so ("INFO-arm baseline reset").
 `.buildkite/scripts/test/perf-info-budget-test.sh` checks which SUTs get a budget and the key.
+
+The main SUT's event-log budget is a seventh break, in `behaviours.*`, `rig_valid_peak_achieved_rps`
+and the `tls13` handshake arm (`tls_handshake.tls13.*`; the `mtls` and `jdk` arms run on their own SUTs). Until item 51 the main SUT was handed the harness's 256 MiB, so the daily run
+never measured the shipped default; at 256 MiB the 2 GB SUT sat in the ZGC promotion-loop regime
+(build 575). The shipped default is now heap/20 at `ERROR` (47,290,368 bytes on the 922 MiB GraalJS
+heap), with the in-flight cap derived as the larger of that and heap/7 (135,115,776 bytes). The
+remote-write multi-k6 arm (`.serving_rw_multik6`) runs on the same SUT, so it moves to the shipped
+default too; item 44's run streak counts only runs with `config.event_log_budget.method` of
+`shipped-default`. The main SUT now gets no budget unless `PERF_MAX_EVENT_LOG_BYTES` is set (a positive
+integer; it marks the run `tuned`). A release comparison starts it at 256 MiB instead (see the
+release-comparison table). Each SUT's budget:
+
+| SUT | Budget | Why |
+|-----|--------|-----|
+| Main (ERROR) | shipped default | the figures users get |
+| INFO | shipped default (`PERF_INFO_MAX_EVENT_LOG_BYTES` overrides) | the sixth break |
+| `growth.js` phase (main SUT) | 256 MiB for the phase only | the count ring must fill (below) |
+| Upstream, path coverage, clustered nodes | fixed 256 MiB (`PERF_MAX_EVENT_LOG_BYTES` overrides) | none measures the out-of-the-box figure; their history is keyed on it |
+
+`growth.js` reproduces issue #2329 by filling the ~115.5k count ring. A `/simple` entry weighs about
+1.34 KB, so a heap-derived byte cap binds first: a local run at the old heap/7 default filled 101,058
+entries (87.5%) and evicted by bytes, and at heap/20 the log stops near 35k entries. So the harness reads the main SUT's
+resolved budget, raises it to 256 MiB with `PUT /mockserver/configuration` before `growth.js`, and
+restores it after, confirming each from `mock_server_event_log_max_retained_bytes`; after the restore
+`mock_server_event_log_max_in_flight_bytes` must also read its pre-growth value. The
+`growth_event_log_budget_scoped` validity check fails the run if any of these is not confirmed. On an
+image that predates the runtime-configuration fix (one `Configuration` shared by every `MockServer`
+construction path) the PUT is accepted and ignored: the gauge still reads the old value, and the
+check says the image predates the fix, naming the gauge and the expected value. A failed PUT, or a
+gauge that reads something else, is reported as such. Nothing is changed at runtime when
+`PERF_MAX_EVENT_LOG_BYTES` is set (`growth_phase.budget_method` `startup`) or when the resolved
+budget is already at least 256 MiB, as on a large heap (`startup-sufficient`); otherwise the method
+is `scoped`. `growth.*` keeps
+its history because the phase still runs at 256 MiB.
+
+The run records the main SUT's budget in `config.event_log_budget` (`method`, `requested_bytes`, the
+resolved budget, entry bound and in-flight cap from the SUT's gauges, `heap_max_bytes`, and the
+expected values to check them against: `expected_default_bytes` and `expected_in_flight_cap_bytes`);
+`config.max_event_log_size_bytes` is null when no budget was handed. A fail-closed check at config
+resolution requires, at the shipped default, that no budget was handed and that the resolved byte
+budget gauge reads above 0; with an override, that the container shows it and, when the image has
+the gauge, that the gauge does too. `event_log_scaling` measures utilisation per sample against that
+sample's own bounds, takes the resolved bounds from samples outside the growth window (a sample is
+placed by its `scrape_ts`, falling back to `ts`, because the scrape can land after the PUT), adds
+`dropped_log_events` (recorded, not checked; 576 dropped 33 over the whole run on a pre-#51 image whose in-flight cap
+equalled the 23 MB budget; with #51's derived cap (heap/7) none are expected; the first daily run
+confirms it) and `growth_phase`
+(the budget `growth.js` ran at and `count_ring_filled`). The compare step keys the three families on
+`config.event_log_budget.method`; a run without it reads as `fixed-268435456`, so they stay `:new:`
+until `MIN_BASELINE` runs share the new method ("Main-SUT baseline reset"). `forward.error_rate`,
+`growth.*` and the other families keep the full baseline.
+The heap divisors the harness expects mirror `ConfigurationProperties` and must move with it:
+`els_default_divisor` for the retention budget (20 at `WARN`/`ERROR`/`OFF`, 12 at
+`INFO`/`DEBUG`/`TRACE`) and `els_inflight_divisor` for the in-flight floor (7 and 12). `.buildkite/scripts/test/perf-default-budget-test.sh` checks the call sites, both guards,
+the scoped PUT against a stubbed SUT, the window statistics and the key.
 
 ### GC log cycle times are not stop-the-world pause times
 

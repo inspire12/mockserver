@@ -239,19 +239,18 @@ export const REGRESSION = {
   // pass could seed. The 2026-09-17 dispatch-pool fixes (eec183f7e/7fbae1350) make it
   // WORSE, not better: freeing the pool admits MORE body throughput. So a per-arm rate
   // is the WRONG lever — no rate keeps r × residence × B bounded once residence runs
-  // away. RETENTION is bounded at the SERVER instead: perf-test-run.sh starts every
-  // regression SUT with maxEventLogSizeInBytes = 256 MiB (MOCKSERVER_MAX_EVENT_LOG_-
-  // SIZE_IN_BYTES), a body-byte budget that evicts oldest-first so TOTAL retained body
-  // bytes never exceed the budget REGARDLESS of residence. These rates stay low only to
+  // away. RETENTION is bounded at the SERVER instead: maxEventLogSizeInBytes, a body-byte
+  // budget on by default (the main SUT runs at the shipped heap-derived value, the other
+  // SUTs at a fixed 256 MiB), evicts oldest-first so TOTAL retained body bytes never
+  // exceed the budget REGARDLESS of residence. These rates stay low only to
   // keep per-arm CPU/GC contention on the core-limited SUT modest (so they don't shift
   // the historical arms' latencies) and the run length bounded — NOT as the OOM guard.
   // The warmup NEVER touches these arms (regression.js excludes them from warmupOp),
   // so nothing accumulates before measurement either.
   // `growth` needs the default ~115,500-entry ring to fill (issue #2329 O(n) eviction),
-  // so the COUNT bound cannot be shrunk — which is exactly why the guard is a BYTE
-  // budget, not a smaller ring: growth loads only the tiny /simple body, so its total
-  // retained bytes stay in the tens of MB, far below 256 MiB, and the byte budget never
-  // fires for growth — its count-bounded fill is untouched. Raising these rates is now
+  // so the COUNT bound cannot be shrunk. A /simple entry weighs ~1.3 KB, so a heap-derived
+  // byte budget would bind first; perf-test-run.sh therefore raises the budget to 256 MiB
+  // for the growth phase only, where its ~150 MB fill stays under it. Raising these rates is now
   // safe from OOM (the budget caps retention); raise them only if the added SUT
   // contention is acceptable, and shrink the budget only alongside a smaller heap.
   large1mbRate: num('K6_REG_LARGE_1MB_RATE', 1),

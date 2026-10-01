@@ -1015,6 +1015,13 @@ def latpresent($f): (((.[$f] // {}).points // []) | length) > 0;
 # metrics compare only against runs with the same method. A run without the field forced 256 MiB.
 def infofp: ((.info_log_level_arm // {}).config.event_log_budget.method // "fixed-268435456");
 def infomeasured: (.info_log_level_arm // {}).measured == true;
+# Main-SUT event-log budget fingerprint (the seventh break). The main SUT ran with the harness
+# 256 MiB budget until it moved to the shipped default; behaviours.*, rig_valid_peak_achieved_rps and the
+# tls13 handshake arm (the only one on the main SUT) compare only against runs with the same method. A run
+# without the field forced 256 MiB.
+def mainelsfp: ((.config // {}).event_log_budget.method // "fixed-268435456");
+def mainelsmetric($m): ($m.bkey | startswith("behaviours.")) or $m.bkey == "rig_valid_peak_achieved_rps"
+  or (($m.bkey | startswith("tls_handshake.")) and ($m.name | startswith("tls13.")));
 
 # JMH methodology fingerprint of the HEAD run (item 15c baseline-discontinuity guard).
 # microbench / microbench_extra metrics are only comparable against baseline runs
@@ -1061,14 +1068,18 @@ def infomeasured: (.info_log_level_arm // {}).measured == true;
 | (.agent.instance_type // "") as $headinstance
 | ((.behaviours // {}) | keys | sort) as $headarms
 | infofp as $headinfofp
+| mainelsfp as $headelsfp
 | $baseline as $ballruns
 | [ $ballruns[] | select((.config.jmh // null) == $headjmh) ] as $bmicroruns
 | [ $ballruns[] | select(((.behaviours // {}) | keys | sort) == $headarms) ] as $bk6runs
 | [ $ballruns[] | select(infofp == $headinfofp) ] as $binforuns
+| [ $ballruns[] | select(mainelsfp == $headelsfp) ] as $belsruns
+| [ $bk6runs[] | select(mainelsfp == $headelsfp) ] as $bk6elsruns
 | bmapof($ballruns) as $bmapAll
 | bmapof($bmicroruns) as $bmapMicro
-| bmapof($bk6runs) as $bmapK6
 | bmapof($binforuns) as $bmapInfo
+| bmapof($belsruns) as $bmapEls
+| bmapof($bk6elsruns) as $bmapK6Els
 # Hardware-matched subsets, for metrics whose VALUE moves with the machine.
 # A timing figure from a different instance type is not a comparable sample, and a
 # rolling median that spans a hardware change absorbs the step change instead of
@@ -1093,12 +1104,14 @@ def infomeasured: (.info_log_level_arm // {}).measured == true;
 # of its gating during a migration — exactly when a regression is most likely.
 | [ $ballruns[] | select(((.agent.instance_type // "") == $headinstance) and ($headinstance != "")) ] as $bhwruns
 | [ $bmicroruns[] | select(((.agent.instance_type // "") == $headinstance) and ($headinstance != "")) ] as $bmicrohwruns
-| [ $bk6runs[] | select(((.agent.instance_type // "") == $headinstance) and ($headinstance != "")) ] as $bk6hwruns
 | [ $binforuns[] | select(((.agent.instance_type // "") == $headinstance) and ($headinstance != "")) ] as $binfohwruns
+| [ $belsruns[] | select(((.agent.instance_type // "") == $headinstance) and ($headinstance != "")) ] as $belshwruns
+| [ $bk6elsruns[] | select(((.agent.instance_type // "") == $headinstance) and ($headinstance != "")) ] as $bk6elshwruns
 | bmapof($bhwruns) as $bmapAllHw
 | bmapof($bmicrohwruns) as $bmapMicroHw
-| bmapof($bk6hwruns) as $bmapK6Hw
 | bmapof($binfohwruns) as $bmapInfoHw
+| bmapof($belshwruns) as $bmapElsHw
+| bmapof($bk6elshwruns) as $bmapK6ElsHw
 | ({serving_percore: latfp("serving_percore"), serving_multiproc: latfp("serving_multiproc"),
     serving_hw_matrix: latfp("serving_hw_matrix")}) as $headlat
 | ($headlat | with_entries(.key as $f | .value as $v | .value = {
@@ -1121,6 +1134,9 @@ def infomeasured: (.info_log_level_arm // {}).measured == true;
     head_info_budget_method: $headinfofp,
     baseline_info_comparable: ([ $binforuns[] | select(infomeasured) ] | length),
     baseline_info_other: ([ $ballruns[] | select(infomeasured and (infofp != $headinfofp)) ] | length),
+    head_main_els_method: $headelsfp,
+    baseline_main_els_comparable: ($belsruns | length),
+    baseline_main_els_other: ([ $ballruns[] | select(mainelsfp != $headelsfp) ] | length),
     sweep_latency_reset: ([ $headmetrics[] | .bkey | latfam | select(. != null) ] | unique
       | map({family: ., head_settle_s: $headlat[.], comparable: $bmapLat[.].comparable, other: $bmapLat[.].other,
              head_window: ($headlat[.] | if type == "string" then (split("|") | "settle \(.[0])s, \(.[1]) client, k6 \(.[2] // "defaults")")
@@ -1142,12 +1158,14 @@ def infomeasured: (.info_log_level_arm // {}).measured == true;
       | (if $lf != null then ($bmapLat[$lf][if $m.hw then "hw" else "all" end][$m.name] // [])
          elif $m.hw then
            (if ($m.bkey|startswith("microbench")) then ($bmapMicroHw[$m.name] // [])
-            elif ($m.bkey|startswith("behaviours")) then ($bmapK6Hw[$m.name] // [])
+            elif ($m.bkey|startswith("behaviours")) then ($bmapK6ElsHw[$m.name] // [])
+            elif mainelsmetric($m) then ($bmapElsHw[$m.name] // [])
             elif ($m.bkey|startswith("info_")) then ($bmapInfoHw[$m.name] // [])
             else ($bmapAllHw[$m.name] // []) end)
          else
            (if ($m.bkey|startswith("microbench")) then ($bmapMicro[$m.name] // [])
-            elif ($m.bkey|startswith("behaviours")) then ($bmapK6[$m.name] // [])
+            elif ($m.bkey|startswith("behaviours")) then ($bmapK6Els[$m.name] // [])
+            elif mainelsmetric($m) then ($bmapEls[$m.name] // [])
             elif ($m.bkey|startswith("info_")) then ($bmapInfo[$m.name] // [])
             else ($bmapAll[$m.name] // []) end)
          end) as $bv
@@ -1165,6 +1183,7 @@ def infomeasured: (.info_log_level_arm // {}).measured == true;
          elif ($m.bkey|startswith("microbench")) then $minbaseline
          elif ($m.bkey|startswith("behaviours")) then $minbaseline
          elif ($m.bkey|startswith("info_")) then $minbaseline
+         elif mainelsmetric($m) then $minbaseline
          else 1 end) as $minreq
       | if ($bv|length) < $minreq then {name:$m.name, head:$m.value, gating:$m.gating, status:"no-baseline"}
         else
@@ -1281,6 +1300,22 @@ if [ "$(printf '%s' "$RESULT_CMP" | jq -r '.head_info_measured // false')" = "tr
 :information_source: **INFO-arm baseline reset — event-log budget changed.** This run's INFO SUT used event-log budget \`${INFO_METHOD}\`; ${INFO_OTHER} baseline run(s) measured the INFO arm under a different one (runs before the switch forced the harness's 256 MiB, \`fixed-268435456\`). The \`info_*\` metrics compare ONLY against the ${INFO_COMPARABLE} run(s) with the same budget, ${INFO_STATE}. Notify-only; this never blocks the build."
 fi
 
+# Main-SUT event-log budget discontinuity (the seventh break). Same visibility rule as above.
+ELS_COMPARABLE="$(printf '%s' "$RESULT_CMP" | jq -r '.baseline_main_els_comparable // 0')"
+ELS_OTHER="$(printf '%s' "$RESULT_CMP" | jq -r '.baseline_main_els_other // 0')"
+ELS_METHOD="$(printf '%s' "$RESULT_CMP" | jq -r '.head_main_els_method // "unknown"')"
+ELS_NOTE=""
+if [ "$ELS_OTHER" -gt 0 ]; then
+  if [ "$ELS_COMPARABLE" -lt "$MIN_BASELINE" ]; then
+    ELS_STATE="so they stay \`:new: new\` (not flagged) until ${MIN_BASELINE} exist; they re-baseline from the first run after the switch"
+  else
+    ELS_STATE="which is enough to compare; the other runs are ignored until they leave the baseline window"
+  fi
+  ELS_NOTE="
+
+:information_source: **Main-SUT baseline reset — event-log budget changed.** This run's main SUT used event-log budget \`${ELS_METHOD}\`; ${ELS_OTHER} baseline run(s) used a different one (runs before the switch forced the harness's 256 MiB, \`fixed-268435456\`). \`behaviours.*\`, \`rig_valid_peak_achieved_rps\` and \`tls_handshake.tls13.*\` compare ONLY against the ${ELS_COMPARABLE} run(s) with the same budget, ${ELS_STATE}. \`growth.*\` keeps its history: growth.js still runs at 256 MiB. Notify-only; this never blocks the build."
+fi
+
 # Sweep latency-window discontinuity (docs/code/performance-measurement.md, "Rung-onset
 # exclusion"): shown only while the matching history is still below MIN_BASELINE.
 SWEEPLAT_NOTE="$(printf '%s' "$RESULT_CMP" | jq -r --argjson minb "$MIN_BASELINE" '
@@ -1393,7 +1428,7 @@ fi
 # carries them.
 EXTRA="${EXTRA}
 
-${PROVENANCE}${HW_NOTE}${PRECFG_NOTE}${MB_NOTE}${K6_NOTE}${INFO_NOTE}${SWEEPLAT_NOTE}${LAPTOP_INJVM_NOTE}${STREAM_NOTE}${CLU_NOTE}${PC_NOTE}${HWM_NOTE}${MP_NOTE}"
+${PROVENANCE}${HW_NOTE}${PRECFG_NOTE}${MB_NOTE}${K6_NOTE}${INFO_NOTE}${ELS_NOTE}${SWEEPLAT_NOTE}${LAPTOP_INJVM_NOTE}${STREAM_NOTE}${CLU_NOTE}${PC_NOTE}${HWM_NOTE}${MP_NOTE}"
 
 HEADER="Perf regression — \`${COMMIT:0:10}\` on \`${BRANCH}\` (baseline: ${BASE_COUNT} runs, median+MAD; budgets @ \`${BUDGETS_COMMIT:0:10}\`)"
 # Legend folded into every flagged annotation so a reader knows why the build did
