@@ -13,7 +13,7 @@ FIGURES_JQ="$LIB/perf-website-figures.jq"
 POINT_JQ="$LIB/perf-hw-matrix-rw.jq"
 PUBLISH="$REPO_ROOT/.buildkite/scripts/steps/perf-website-publish.sh"
 T="$(mktemp -d "${TMPDIR:-/tmp}/perf-hwm-test.XXXXXX")"
-trap 'rm -rf "$T"' EXIT
+trap '[ -n "${KEEP_T:-}" ] || rm -rf "$T"' EXIT
 FAILS=0
 ok()   { echo "  ok   $1"; }
 bad()  { echo "  FAIL $1" >&2; FAILS=$((FAILS + 1)); }
@@ -203,6 +203,165 @@ check "no samples -> null" "null" "$(jvm_rungs_json "" '[]' 10 2)"
 sed 's/^1002,0\.0,/1002,bad,/' "$T/jvm.csv" > "$T/jvm-bad.csv"
 J="$(jvm_rungs_json "$T/jvm-bad.csv" '[{"offered_rps":1000,"start_epoch_ms":1000000}]' 10 2)"
 check "a non-numeric cell is null, not a column shift (GC count still read)" "8" "$(jq -r '.[0].gc_count' <<<"$J")"
+
+echo "--- 5. offline re-assembly and a loud assembly failure (lib/perf-percore.sh, PERF_HW_MATRIX_REASSEMBLE_DIR)"
+PERCORE="$LIB/perf-percore.sh"
+W="$T/hwm-work"; mkdir -p "$W/1c-512m" "$W/2c-1g"
+jq -n '{source:"live", env:{PERF_HW_MATRIX:"1:512m,2:1g,4:2g"},
+  resolved:{host_cores:48, host_physical_cores:24, topology_known:true, k6_physical_cores:16,
+            image:"mockserver/mockserver:test", image_java_tool_options:"-XX:+UseZGC",
+            java_tool_options:"-XX:+UseZGC -Xlog:gc*", rig_paused:true}}' > "$W/matrix-inputs.json"
+ROWS='[[8000,8000,0.2,200,70,true,false],[8600,8600,0.2,220,75,true,false],[9300,9300,0.2,300,80,true,false],[10000,10000,0.2,300,95,true,false],[10800,9500,2.0,320,100,true,false]]'
+# ~800 KB of excluded rungs per point: together well past ARG_MAX (1 MiB on macOS) and the 128 KiB
+# per-argument cap on Linux, which an --argjson assembly fails as "Argument list too long".
+jq -c '.saturation.excluded = [range(0; 9000) | {offered_rps:., reason:("x" * 70)}]
+  | .rung_windows = [.sweep.points[] | {offered_rps, start_epoch_ms:(1000000 + 20000 * (.offered_rps / 1000 | floor))}]' \
+  <<<"$(rw_fixture "$ROWS" '{"client_pin_pct":3200}')" > "$W/1c-512m/rw-result.json"
+cp "$W/1c-512m/rw-result.json" "$W/2c-1g/rw-result.json"
+point_inputs() { # key cores mem mem_bytes
+  jq -n --arg k "$1" --argjson c "$2" --arg m "$3" --argjson mb "$4" '
+    {source:"live", key:$k, meta:{cores:$c, key:$k, memory_limit:$m, memory_limit_bytes:$mb, control:false},
+     sweep_rates:"8000,8600,9300,10000,10800", warmup_rate:(4000 * $c), server_cpus:([range(0; $c)] | map(tostring) | join(",")),
+     k6_cores:32, available_processors:$c, server_physical_cores:$c,
+     resolved:{max_heap_bytes:($mb * 0.45 | floor), max_log_entries:27136, max_event_log_bytes:31756288},
+     body_bytes:6, assumed_max_log_entries:27000,
+     sut_state:{running:true, oom_killed:false, exit_code:0, restart_count:0, finished_at_epoch:null, java_oom_errors:0},
+     rw_exit_code:0, cross_check_rates:"8000", cgroup_readable:true, memory_peak_bytes:($mb / 2),
+     retained_entries_peak:27136, retained_bytes_peak:1000000}'
+}
+point_inputs 1c-512m 1 512m 536870912 > "$W/1c-512m/point-inputs.json"
+point_inputs 2c-1g 2 1g 1073741824 > "$W/2c-1g/point-inputs.json"
+# 4:2g has no inputs: the original run skipped it, so its recorded skip is carried over.
+echo '{"cores":4,"key":"4c-2g","memory_limit":"2g","reason":"SUT cpus reach into the client placement","type":"infeasible"}' > "$W/skipped.ndjson"
+work_sums() { find "$W" -type f -exec shasum {} + | sort; }
+reassemble() { # out [env...] -> exit code
+  local out="$1" rc=0; shift
+  env "$@" PERF_PERCORE_MODE=hw_matrix PERF_HW_MATRIX_REASSEMBLE_DIR="$W" bash "$PERCORE" "$out" 2> "$out.log" || rc=$?
+  echo "$rc"
+}
+SUMS_BEFORE="$(work_sums)"
+check "re-assembly of an oversized matrix exits 0" "0" "$(reassemble "$T/re.json")"
+check "both points re-assembled, sorted" "1c-512m 2c-1g" "$(jq -r '[.points[].key] | join(" ")' "$T/re.json")"
+check "re-assembled ceilings are the live rule's" "$(jq -r '.healthy_ceiling_rps' <<<"$(point_of "$(cat "$W/1c-512m/rw-result.json")")") 10000" \
+  "$(jq -r '[.points[].healthy_ceiling_rps] | join(" ")' "$T/re.json")"
+check "the oversized excluded list is kept whole" "9000" "$(jq -r '.points[0].excluded | length' "$T/re.json")"
+check "the original run's skip is carried over" "4c-2g infeasible" "$(jq -r '.skipped[] | "\(.key) \(.type)"' "$T/re.json")"
+check "the block says it was re-assembled, from where (no absolute path)" "hwm-work" "$(jq -r '.reassembled_from' "$T/re.json")"
+check "each point names its inputs' source" "live live" "$(jq -r '[.points[].inputs_source] | join(" ")' "$T/re.json")"
+check "host facts come from matrix-inputs.json, not this host" "48 24 16" \
+  "$(jq -r '"\(.host_cores) \(.host_physical_cores) \(.client_placement.k6_physical_cores)"' "$T/re.json")"
+check "the memory peak comes from the point inputs" "0.5" "$(jq -r '.points[0].container_memory_peak_frac_of_limit' "$T/re.json")"
+check "re-assembly leaves the work dir untouched" "$SUMS_BEFORE" "$(work_sums)"
+# The operator's shell must not leak into a re-assembly: only matrix-inputs.json sets the matrix.
+reassemble "$T/env.json" PERF_HW_MATRIX_P99_MAX_MS=1 >/dev/null
+check "an operator PERF_HW_MATRIX_* is ignored, not applied" "10 yes" \
+  "$(jq -r '.points[0].healthy_ceiling_p99_bounded.p99_max_ms' "$T/env.json") $(grep -q 'ignores PERF_HW_MATRIX_P99_MAX_MS' "$T/env.json.log" && echo yes || echo no)"
+
+# Provenance reaches the published figures: assembly offline, and reconstructed inputs named.
+figs() { jq -c --arg now x --argjson lat_mult 3 --argjson keep 0.95 --arg fix_date 2026-09-16 -f "$FIGURES_JQ" "$1" | jq -c '.hw_matrix.source'; }
+jq '{schema_version:2, timestamp_utc:"2026-09-30T00:00:00Z", config:{}, agent:{},
+     sweep:{points:[{offered_rps:1000, achieved_rps:1000, p50_ms:0.2}]}, serving_hw_matrix:.}' "$T/re.json" > "$T/run-re.json"
+check "a re-assembled matrix publishes assembly=offline, live inputs unnamed" "offline null" \
+  "$(figs "$T/run-re.json" | jq -r '"\(.assembly) \(.inputs)"')"
+jq '.serving_hw_matrix.points[1].inputs_source = "reconstructed from the run log"' "$T/run-re.json" > "$T/run-rec.json"
+check "reconstructed inputs are named in the published source" "offline reconstructed from run log" \
+  "$(figs "$T/run-rec.json" | jq -r '"\(.assembly) \(.inputs)"')"
+jq --slurpfile hw "$T/re.json" '.serving_hw_matrix = $hw[0]' "$T/run-with-matrix.json" > "$T/run-offline.json"
+publish "$T/run-offline.json" PERF_PUBLISH_DRY_RUN=true PERF_PUBLISH_OUT="$T/dry-offline.json" || true
+check "publish says the matrix was re-assembled offline" "yes" \
+  "$(grep -q 'NOTE: hw_matrix was re-assembled offline' "$T/publish.log" && echo yes || echo no)"
+check "a live matrix publishes no assembly marker" "null" \
+  "$(jq 'del(.serving_hw_matrix.reassembled_from)' "$T/run-re.json" > "$T/run-live.json"; figs "$T/run-live.json" | jq -r '.assembly')"
+
+# Degrade: the whole-matrix assembly fails. It must exit non-zero, write an error block that names
+# the cause and the points lost, and say so on stderr, never a 0-byte file or an empty {}.
+rc="$(reassemble "$T/fail.json" PERF_HW_MATRIX_TEST_FAULT=assembly)"
+check "a failed assembly exits non-zero" "1" "$rc"
+check "a failed assembly writes an error block" "assembly_failed 2 0" \
+  "$(jq -r '"\(.error) \(.points_lost) \(.points | length)"' "$T/fail.json" 2>/dev/null || echo "no JSON")"
+check "the error block names jq's own error" "yes" \
+  "$(grep -q 'skipped.ndjson.missing' <<<"$(jq -r '.error_detail' "$T/fail.json")" && echo yes || echo no)"
+check "the failure is announced on stderr" "yes" "$(grep -q '^:x: ERROR: assembling serving_hw_matrix from 2 point(s)' "$T/fail.json.log" && echo yes || echo no)"
+
+rm "$W/2c-1g/point-inputs.json"
+reassemble "$T/partial.json" >/dev/null
+check "a point with no inputs is a failure skip, not dropped" "2c-1g failure" \
+  "$(jq -r '.skipped[] | select(.key == "2c-1g") | "\(.key) \(.type)"' "$T/partial.json")"
+mv "$W/matrix-inputs.json" "$W/matrix-inputs.json.bak"
+check "no matrix-inputs.json -> refused (exit 2)" "2" "$(reassemble "$T/none.json")"
+# A restored setting that reaches bash arithmetic ($(( HW_WARMUP_RPS_PER_CORE * C ))) must not run
+# a command smuggled into the file.
+jq --arg v "C[\$(touch $T/pwned)]" '.env.PERF_HW_MATRIX_WARMUP_RPS_PER_CORE = $v' "$W/matrix-inputs.json.bak" > "$W/matrix-inputs.json"
+check "an expansion in a restored setting -> refused (exit 2)" "2" "$(reassemble "$T/inj.json")"
+check "and nothing ran" "no" "$([ -e "$T/pwned" ] && echo yes || echo no)"
+mv "$W/matrix-inputs.json.bak" "$W/matrix-inputs.json"
+
+echo "--- 6. perf-test-run.sh: a failed producer is an error block, never {} (percore_block)"
+RUN_SH="$REPO_ROOT/.buildkite/scripts/steps/perf-test-run.sh"
+eval "$(awk '/^percore_block\(\) \{/ {p=1} p {print} p && /^}/ {exit}' "$RUN_SH")"
+if ! declare -F percore_block >/dev/null; then bad "percore_block not found in $RUN_SH"; else
+  : > "$T/empty.json"
+  B="$(percore_block "$T/empty.json" 1 "lib/perf-percore.sh (hw_matrix)")"
+  check "0-byte file + exit 1 -> producer_failed naming the size" "producer_failed|lib/perf-percore.sh (hw_matrix) exited 1 and wrote no JSON block (0 bytes)" \
+    "$(jq -r '"\(.error)|\(.error_detail)"' <<<"$B")"
+  check "the file itself is rewritten (the standalone artifact says why)" "producer_failed" "$(jq -r '.error' "$T/empty.json")"
+  check "a missing file -> 'no file'" "yes" "$(grep -qF '(no file)' <<<"$(percore_block "$T/absent.json" 1 x | jq -r '.error_detail')" && echo yes || echo no)"
+  cp "$T/fail.json" "$T/fail2.json"
+  check "the producer's own error is kept" "assembly_failed" "$(percore_block "$T/fail2.json" 1 x | jq -r '.error')"
+  cp "$T/re.json" "$T/rc1.json"
+  check "a valid block with exit 1 -> producer_failed, points kept" "producer_failed 2" \
+    "$(percore_block "$T/rc1.json" 1 x | jq -r '"\(.error) \(.points | length)"')"
+  cp "$T/re.json" "$T/ok.json"
+  check "a good block passes through" "2 null" "$(percore_block "$T/ok.json" 0 x | jq -r '"\(.points | length) \(.error)"')"
+fi
+
+echo "--- 7. the deep (allocation profile) step never runs an opt-in arm (perf-test-allocprofile.sh)"
+# The arms perf-test-run.sh only runs when a build opts in. The deep step inherits the build env,
+# so each must be forced off there, or a matrix build re-runs the matrix inside the deep step.
+ARMS="$( { grep -oE '"\$\{PERF_[A-Z0-9_]+:-false\}" = "true"' "$RUN_SH" | grep -oE 'PERF_[A-Z0-9_]+'
+           grep -oE '^PERF_[A-Z0-9_]+="\$\{PERF_[A-Z0-9_]+:-false\}"' "$RUN_SH" | cut -d= -f1; } | sort -u | tr '\n' ' ')"
+check "the opt-in arms are found" "yes" "$(for a in PERF_SERVING_HW_MATRIX PERF_SERVING_RW_MULTIK6; do grep -qw "$a" <<<"$ARMS" || exit 0; done; echo yes)"
+D="$T/deep/.buildkite/scripts/steps"; mkdir -p "$D/lib"
+cp "$REPO_ROOT/.buildkite/scripts/steps/perf-test-allocprofile.sh" "$D/"
+cp "$LIB/perf-jfr-image.sh" "$D/lib/"
+printf '#!/usr/bin/env bash\nenv > "%s"\n' "$T/deep-env.txt" > "$D/perf-test-run.sh"; chmod +x "$D/perf-test-run.sh"
+ON=(); for a in $ARMS; do ON+=("$a=true"); done
+env PATH="$T/bin:$PATH" "${ON[@]}" PERF_WORKLOAD=forward PERF_STEADY_RATE=5000 bash "$D/perf-test-allocprofile.sh" > "$T/deep.log" 2>&1 || true
+for a in $ARMS; do
+  check "deep step: $a forced off" "false" "$(grep -E "^$a=" "$T/deep-env.txt" | cut -d= -f2-)"
+done
+for a in PERF_WORKLOAD PERF_STEADY_RATE; do
+  check "deep step: $a cleared" "" "$(grep -E "^$a=" "$T/deep-env.txt" | cut -d= -f2-)"
+done
+check "deep step: still a deep run" "deep allocprofile" \
+  "$(grep -E '^PERF_JVM_DIAGNOSTICS=' "$T/deep-env.txt" | cut -d= -f2-) $(grep -E '^PERF_RUN_NAME=' "$T/deep-env.txt" | cut -d= -f2-)"
+
+echo "--- 8. multi-process-sweep.sh assembles from files and fails loudly"
+# Its tail (scaling verdict + block) run on synthetic points: ~1.2 MB, past both argument limits.
+MP_SH="$REPO_ROOT/mockserver-performance-test/scripts/multi-process-sweep.sh"
+MP_TAIL="$(awk '/^# --- scaling verdict across N/ {p=1} p' "$MP_SH")"
+mkdir -p "$T/mp"
+for n in 1 2 4 8; do
+  jq -nc --argjson n "$n" '{procs:$n, aggregate_healthy_ceiling_rps:(6000 * $n), per_process:[range(0; 3000) | {proc:., note:("y" * 90)}]}'
+done > "$T/mp-points.ndjson"
+echo '{"procs":16,"reason":"needs more cores","type":"infeasible"}' > "$T/mp-skipped.ndjson"
+mp_run() { # out scale_factor -> exit code
+  local rc=0
+  env OUT_FILE="$1" SCALE_FACTOR="$2" WORK="$T/mp" PTS="$T/mp-points.ndjson" SKP="$T/mp-skipped.ndjson" bash -c '
+    set -euo pipefail
+    POINTS=(); SKIPPED=()
+    while IFS= read -r l; do POINTS+=("$l"); done < "$PTS"
+    while IFS= read -r l; do SKIPPED+=("$l"); done < "$SKP"
+    HOST_CORES=48 PROCS_LADDER=1,2,4,8,16 AGG_RATES=1000 SWEEP_STEP=10s SWEEP_GAP=2s SWEEP_SETTLE_S=3
+    TARGET_URL="" SERVER_CORES=2 CLIENT_CORES_EACH=2
+    '"$MP_TAIL" > "$1.log" 2>&1 || rc=$?
+  echo "$rc"
+}
+check "multiproc: oversized points assemble (exit 0)" "0" "$(mp_run "$T/mp.json" 0.8)"
+check "multiproc: points, skips and the scaling verdict" "4 1 true" \
+  "$(jq -r '"\(.points | length) \(.skipped | length) \(.scaling.scales_with_procs)"' "$T/mp.json" 2>/dev/null || echo "no JSON")"
+check "multiproc: a failed assembly exits 1 with an error block" "1 assembly_failed 4" \
+  "$(mp_run "$T/mpf.json" bogus) $(jq -r '"\(.error) \(.points_lost)"' "$T/mpf.json" 2>/dev/null || echo "no JSON")"
 
 if [ "$FAILS" -ne 0 ]; then echo ":x: $FAILS check(s) failed" >&2; exit 1; fi
 echo "--- all hardware-matrix fixture checks passed"

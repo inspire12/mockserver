@@ -3751,18 +3751,34 @@ abort_if_sut_died
 # two-axis split the laptop profile uses.
 SERVING_PERCORE_JSON='{}'
 SERVING_PERCORE_ATTEMPTED=false
+# A sub-harness's block (lib/perf-percore.sh, multi-process-sweep.sh), or one whose .error names
+# why there is none: a failed producer must never read as an empty profile. Also rewrites the file, so the standalone artifact says so.
+percore_block() { # out_file exit_code label
+  local block
+  if jq -e 'type == "object" and (.points | type) == "array"' "$1" >/dev/null 2>&1; then
+    block="$(jq -c --argjson rc "$2" --arg l "$3" \
+      'if $rc != 0 and (has("error") | not) then . + {error:"producer_failed", error_detail:"\($l) exited \($rc)"} else . end' "$1")"
+  else
+    block="$(jq -nc --argjson rc "$2" --arg l "$3" --arg size "$(wc -c 2>/dev/null < "$1" | tr -d ' ')" '
+      {attempted:true, error:"producer_failed", points:[], skipped:[],
+       error_detail:("\($l) exited \($rc) and wrote no JSON block (" + (if $size == "" then "no file" else $size + " bytes" end) + ")")}')"
+  fi
+  printf '%s\n' "$block" > "$1"
+  printf '%s' "$block"
+}
 if [ "${PERF_SERVING_PERCORE:-false}" = "true" ]; then
   SERVING_PERCORE_ATTEMPTED=true
   echo "--- item 18 serving per-core (opt-in; PERF_SERVING_PERCORE=true)"
   # NOT an add_check on failure by itself: the presence gate lives in compare
   # (serving_percore_attempted + a non-empty points/skipped set), matching laptop.
-  if MOCKSERVER_IMAGE="$MOCKSERVER_IMAGE" PERF_PERCORE_REPO_ROOT="$REPO_ROOT" \
-       bash "$SCRIPT_DIR/lib/perf-percore.sh" "$OUT_DIR/serving-percore.json"; then
-    SERVING_PERCORE_JSON="$(cat "$OUT_DIR/serving-percore.json" 2>/dev/null || echo '{}')"
-    jq -e . >/dev/null 2>&1 <<<"$SERVING_PERCORE_JSON" || SERVING_PERCORE_JSON='{}'
-    echo "--- serving_percore: points=$(jq -r '(.points|length)//0' <<<"$SERVING_PERCORE_JSON") max_cores_measured=$(jq -r '.max_cores_measured//"?"' <<<"$SERVING_PERCORE_JSON") skipped=$(jq -r '(.skipped|length)//0' <<<"$SERVING_PERCORE_JSON")"
+  pc_rc=0
+  MOCKSERVER_IMAGE="$MOCKSERVER_IMAGE" PERF_PERCORE_REPO_ROOT="$REPO_ROOT" \
+    bash "$SCRIPT_DIR/lib/perf-percore.sh" "$OUT_DIR/serving-percore.json" || pc_rc=$?
+  SERVING_PERCORE_JSON="$(percore_block "$OUT_DIR/serving-percore.json" "$pc_rc" "lib/perf-percore.sh (percore)")"
+  if jq -e 'has("error")' <<<"$SERVING_PERCORE_JSON" >/dev/null; then
+    echo ":x: serving per-core profile FAILED — $(jq -r '.error_detail // .error' <<<"$SERVING_PERCORE_JSON") (perf-test-compare.sh fails the build on it)" >&2
   else
-    echo "WARNING: serving per-core profile failed — result carries no serving_percore points this run (notify-only)" >&2
+    echo "--- serving_percore: points=$(jq -r '(.points|length)//0' <<<"$SERVING_PERCORE_JSON") max_cores_measured=$(jq -r '.max_cores_measured//"?"' <<<"$SERVING_PERCORE_JSON") skipped=$(jq -r '(.skipped|length)//0' <<<"$SERVING_PERCORE_JSON")"
   fi
 fi
 
@@ -3802,14 +3818,15 @@ if [ "${PERF_SERVING_HW_MATRIX:-false}" = "true" ]; then
   SERVING_HW_MATRIX_ATTEMPTED=true
   echo "--- item 27 hardware matrix (opt-in; PERF_SERVING_HW_MATRIX=true, matrix=${PERF_HW_MATRIX:-default})"
   pause_rig
-  if MOCKSERVER_IMAGE="$MOCKSERVER_IMAGE" PERF_PERCORE_REPO_ROOT="$REPO_ROOT" PERF_PERCORE_MODE=hw_matrix \
-       PERF_HW_MATRIX_RIG_PAUSED="$RIG_PAUSE_COMPLETE" PERF_HW_MATRIX_DEBUG_DIR="$OUT_DIR/serving-hw-matrix-work" \
-       bash "$SCRIPT_DIR/lib/perf-percore.sh" "$OUT_DIR/serving-hw-matrix.json"; then
-    SERVING_HW_MATRIX_JSON="$(cat "$OUT_DIR/serving-hw-matrix.json" 2>/dev/null || echo '{}')"
-    jq -e . >/dev/null 2>&1 <<<"$SERVING_HW_MATRIX_JSON" || SERVING_HW_MATRIX_JSON='{}'
-    echo "--- serving_hw_matrix: points=$(jq -r '(.points|length)//0' <<<"$SERVING_HW_MATRIX_JSON") skipped=$(jq -r '(.skipped|length)//0' <<<"$SERVING_HW_MATRIX_JSON") $(jq -r '[(.points // [])[] | "\(.key)=\(.healthy_ceiling_rps // "none")(\(.status))"] | join(" ")' <<<"$SERVING_HW_MATRIX_JSON")"
+  hwm_rc=0
+  MOCKSERVER_IMAGE="$MOCKSERVER_IMAGE" PERF_PERCORE_REPO_ROOT="$REPO_ROOT" PERF_PERCORE_MODE=hw_matrix \
+    PERF_HW_MATRIX_RIG_PAUSED="$RIG_PAUSE_COMPLETE" PERF_HW_MATRIX_DEBUG_DIR="$OUT_DIR/serving-hw-matrix-work" \
+    bash "$SCRIPT_DIR/lib/perf-percore.sh" "$OUT_DIR/serving-hw-matrix.json" || hwm_rc=$?
+  SERVING_HW_MATRIX_JSON="$(percore_block "$OUT_DIR/serving-hw-matrix.json" "$hwm_rc" "lib/perf-percore.sh (hw_matrix)")"
+  if jq -e 'has("error")' <<<"$SERVING_HW_MATRIX_JSON" >/dev/null; then
+    echo ":x: hardware matrix FAILED — $(jq -r '.error_detail // .error' <<<"$SERVING_HW_MATRIX_JSON") (perf-test-compare.sh fails the build on it; re-assemble the work files with PERF_HW_MATRIX_REASSEMBLE_DIR)" >&2
   else
-    echo "WARNING: hardware matrix profile failed — result carries no serving_hw_matrix points this run (notify-only)" >&2
+    echo "--- serving_hw_matrix: points=$(jq -r '(.points|length)//0' <<<"$SERVING_HW_MATRIX_JSON") skipped=$(jq -r '(.skipped|length)//0' <<<"$SERVING_HW_MATRIX_JSON") $(jq -r '[(.points // [])[] | "\(.key)=\(.healthy_ceiling_rps // "none")(\(.status))"] | join(" ")' <<<"$SERVING_HW_MATRIX_JSON")"
   fi
   # Per-point multi-k6 work files (rw results, k6 logs, CPU samples), valid or not.
   if [ -d "$OUT_DIR/serving-hw-matrix-work" ]; then
@@ -3859,13 +3876,14 @@ if [ "${PERF_SERVING_MULTIPROC:-false}" = "true" ]; then
   # NOT an add_check on failure by itself: the presence gate lives in compare
   # (serving_multiproc_attempted + a non-empty points/skipped set), matching the
   # serving_percore / laptop presence gates.
-  if MOCKSERVER_IMAGE="$MOCKSERVER_IMAGE" PERF_MULTI_REPO_ROOT="$REPO_ROOT" \
-       bash "$REPO_ROOT/mockserver-performance-test/scripts/multi-process-sweep.sh" "$OUT_DIR/serving-multiproc.json"; then
-    SERVING_MULTIPROC_JSON="$(cat "$OUT_DIR/serving-multiproc.json" 2>/dev/null || echo '{}')"
-    jq -e . >/dev/null 2>&1 <<<"$SERVING_MULTIPROC_JSON" || SERVING_MULTIPROC_JSON='{}'
-    echo "--- serving_multiproc: points=$(jq -r '(.points|length)//0' <<<"$SERVING_MULTIPROC_JSON") procs_measured=$(jq -rc '.procs_measured//"?"' <<<"$SERVING_MULTIPROC_JSON") scales_with_procs=$(jq -r '.scaling.scales_with_procs//"?"' <<<"$SERVING_MULTIPROC_JSON") skipped=$(jq -r '(.skipped|length)//0' <<<"$SERVING_MULTIPROC_JSON")"
+  mp_rc=0
+  MOCKSERVER_IMAGE="$MOCKSERVER_IMAGE" PERF_MULTI_REPO_ROOT="$REPO_ROOT" \
+    bash "$REPO_ROOT/mockserver-performance-test/scripts/multi-process-sweep.sh" "$OUT_DIR/serving-multiproc.json" || mp_rc=$?
+  SERVING_MULTIPROC_JSON="$(percore_block "$OUT_DIR/serving-multiproc.json" "$mp_rc" "multi-process-sweep.sh")"
+  if jq -e 'has("error")' <<<"$SERVING_MULTIPROC_JSON" >/dev/null; then
+    echo ":x: serving multi-process profile FAILED — $(jq -r '.error_detail // .error' <<<"$SERVING_MULTIPROC_JSON") (perf-test-compare.sh fails the build on it)" >&2
   else
-    echo "WARNING: serving multi-process profile failed — result carries no serving_multiproc points this run (notify-only)" >&2
+    echo "--- serving_multiproc: points=$(jq -r '(.points|length)//0' <<<"$SERVING_MULTIPROC_JSON") procs_measured=$(jq -rc '.procs_measured//"?"' <<<"$SERVING_MULTIPROC_JSON") scales_with_procs=$(jq -r '.scaling.scales_with_procs//"?"' <<<"$SERVING_MULTIPROC_JSON") skipped=$(jq -r '(.skipped|length)//0' <<<"$SERVING_MULTIPROC_JSON")"
   fi
 fi
 
@@ -4014,6 +4032,13 @@ else
   VALIDITY_JSON='{"valid":false,"checks":[]}'
 fi
 
+# The sub-harness blocks go to jq as FILES: one of them alone can exceed the kernel's per-argument
+# limit (128 KiB on Linux), and an --argjson would then fail the whole result with E2BIG.
+RESULT_BLOCKS="$OUT_DIR/result-blocks"; mkdir -p "$RESULT_BLOCKS"
+printf '%s\n' "$SERVING_PERCORE_JSON" > "$RESULT_BLOCKS/serving_percore.json"
+printf '%s\n' "$SERVING_HW_MATRIX_JSON" > "$RESULT_BLOCKS/serving_hw_matrix.json"
+printf '%s\n' "$SERVING_MULTIPROC_JSON" > "$RESULT_BLOCKS/serving_multiproc.json"
+printf '%s\n' "$SERVING_RW_MULTIK6_JSON" > "$RESULT_BLOCKS/serving_rw_multik6.json"
 jq -n \
   --arg commit "$COMMIT" --arg harness_commit "$HARNESS_COMMIT" --arg branch "$BRANCH" --arg ts "$TS" \
   --arg build_number "${BUILDKITE_BUILD_NUMBER:-}" --arg build_url "${BUILDKITE_BUILD_URL:-}" \
@@ -4049,13 +4074,13 @@ jq -n \
   --argjson laptop "$LAPTOP_JSON" \
   --argjson laptop_attempted "$LAPTOP_ATTEMPTED" \
   --argjson laptop_parallel "$LAPTOP_PARALLEL_JSON" \
-  --argjson serving_percore "$SERVING_PERCORE_JSON" \
+  --slurpfile serving_percore_f "$RESULT_BLOCKS/serving_percore.json" \
   --argjson serving_percore_attempted "$SERVING_PERCORE_ATTEMPTED" \
-  --argjson serving_hw_matrix "$SERVING_HW_MATRIX_JSON" \
+  --slurpfile serving_hw_matrix_f "$RESULT_BLOCKS/serving_hw_matrix.json" \
   --argjson serving_hw_matrix_attempted "$SERVING_HW_MATRIX_ATTEMPTED" \
-  --argjson serving_multiproc "$SERVING_MULTIPROC_JSON" \
+  --slurpfile serving_multiproc_f "$RESULT_BLOCKS/serving_multiproc.json" \
   --argjson serving_multiproc_attempted "$SERVING_MULTIPROC_ATTEMPTED" \
-  --argjson serving_rw_multik6 "$SERVING_RW_MULTIK6_JSON" \
+  --slurpfile serving_rw_multik6_f "$RESULT_BLOCKS/serving_rw_multik6.json" \
   --argjson serving_rw_multik6_attempted "$SERVING_RW_MULTIK6_ATTEMPTED" \
   --argjson info_log_level_arm "$INFO_ARM_JSON" \
   --argjson info_log_level_arm_attempted "$INFO_ARM_ATTEMPTED" \
@@ -4063,7 +4088,9 @@ jq -n \
   --arg heap_start "$HEAP_START" --arg heap_end "$HEAP_END" --arg heap_peak "$HEAP_PEAK" --arg heap_ratio "$HEAP_RATIO" \
   --arg heap_min_first "$HEAP_MIN_FIRST" --arg heap_min_last "$HEAP_MIN_LAST" \
   --arg gc_delta "$GC_DELTA" --arg threads_peak "$THREADS_PEAK" \
-  '{
+  '($serving_percore_f[0]) as $serving_percore | ($serving_hw_matrix_f[0]) as $serving_hw_matrix
+  | ($serving_multiproc_f[0]) as $serving_multiproc | ($serving_rw_multik6_f[0]) as $serving_rw_multik6
+  | {
     # schema_version 2: a `config` block records what the run WAS (JVM/JDK/GC,
     # resolved heap, log level, image digest, k6 pin) so runs are only ever compared
     # when configured alike. A stored run with schema_version 1 has no config block

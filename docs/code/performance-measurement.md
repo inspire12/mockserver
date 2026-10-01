@@ -1077,7 +1077,43 @@ fraction of the limit, peak retained log entries and bytes with each bound's uti
 warm-up and cross-check phases), `sweep_rates`, `saturation`
 (`client_limited_from_rps`, `server_headroom_test`, the CPU ceilings), and `measurement`
 (validity, cross-check verdicts, k6 CPU per request, the cross-check rates). Every point's rw
-work files go into the `serving-hw-matrix-work.tgz` artifact.
+work files go into the `serving-hw-matrix-work.tgz` artifact, with the SUT's memory and event-log
+samples (`<point>/sut-samples.csv`), the point's inputs (`point-inputs.json`) and its assembled
+`point.json`.
+
+**Assembly fails loudly, and can be redone offline.** The points and skips reach the final jq as
+files (`points.ndjson`, `skipped.ndjson` in the work dir), never as `--argjson`: Linux caps one
+argument at 128 KiB, and six points with their knee diagnostics come to about 135 KB. Build 544
+hit exactly that (`jq: Argument list too long`), left a 0-byte `serving-hw-matrix.json`, and its
+result read `"serving_hw_matrix": {}`. `perf-test-run.sh` passes its four sub-harness blocks to the
+result jq as files for the same reason, and `multi-process-sweep.sh` does the same with its points
+and skips. A failed assembly now exits non-zero and writes
+`{error: "assembly_failed", error_detail, points_lost, skips_lost}`
+(`PERF_HW_MATRIX_TEST_FAULT=assembly` exercises it); `perf-test-run.sh` turns any failed percore,
+hardware-matrix or multi-process producer
+(non-zero exit, or an empty or unparsable file) into `{error: "producer_failed", error_detail}`, in
+`result.json` and the standalone artifact, and compare's presence gate quotes it.
+
+A live matrix also writes `matrix-inputs.json` (its `PERF_HW_MATRIX*` / `PERF_PERCORE_*` settings
+and host facts), so a work dir can be re-assembled without the rig:
+
+```bash
+tar xzf serving-hw-matrix-work.tgz
+PERF_PERCORE_MODE=hw_matrix PERF_HW_MATRIX_REASSEMBLE_DIR="$PWD/serving-hw-matrix-work" \
+  .buildkite/scripts/steps/lib/perf-percore.sh serving-hw-matrix.json
+```
+
+This re-runs the point mapping, labelling and assembly over the recorded files with no Docker and
+leaves the work dir unchanged. Only `matrix-inputs.json` sets the matrix: any `PERF_HW_MATRIX*` or
+`PERF_PERCORE_*` variable in the operator's shell is unset first (and named on stderr), and a
+recorded value containing `$`, a backtick or brackets is refused. The block carries
+`reassembled_from` (the work dir's name, never a local path), and each point `inputs_source`.
+`perf-website-figures.jq` publishes that as `hw_matrix.source.assembly: "offline"`, plus
+`inputs: "reconstructed from run log"` when any point's inputs were not recorded live, and
+`perf-website-publish.sh` notes it in its log and a build annotation. A point with no `point-inputs.json` keeps the original run's skip from
+`skipped.ndjson`, or else becomes a `failure` skip. Runs before this change (544 among them) have
+no input files; theirs can be reconstructed from the run-step log, which prints each point's
+cpuset, resolved bounds, cross-check rates and memory-peak fraction (not the retained-log peaks).
 
 **Knee diagnostics (item 51, report-only).** So a matrix run can explain its own knee, each
 point's SUT also:
@@ -1142,7 +1178,12 @@ goes at the ceiling*, on every dispatched run. It reruns `perf-test-run.sh` with
 `jdk.CPUTimeSample#enabled=true`, NMT, GC file logging, a live-heap histogram during growth) on a
 short ladder. That instrumentation depresses throughput, so the step is `soft_fail`, nothing depends
 on it, and every artifact carries an `allocprofile-` prefix that `perf-test-compare.sh` never
-downloads. The views are read with a digest-pinned JDK 25 `jfr` (`PERF_JFR_JDK_IMAGE`, defaulted once in
+downloads. The step inherits the build env, so the opt-in arms (`PERF_SERVING_HW_MATRIX`,
+`PERF_SERVING_RW_MULTIK6`, `PERF_SERVING_PERCORE`, `PERF_SERVING_MULTIPROC`,
+`PERF_LAPTOP_PARALLEL`, `PERF_LARGE_HEAP_PROFILE`, `PERF_WORKLOAD`, `PERF_STEADY_RATE`) are forced off there, not
+defaulted: builds 540 and 544 re-ran the whole hardware matrix in this step and hit its 30-minute
+timeout, and 537 re-ran the multi-k6 arm. The micro-benchmark and HTTP/2 multiplex steps read
+none of them. The views are read with a digest-pinned JDK 25 `jfr` (`PERF_JFR_JDK_IMAGE`, defaulted once in
 `.buildkite/scripts/steps/lib/perf-jfr-image.sh`), the SUT's own JDK; an older `jfr` lacks views such as `cpu-time-hot-methods`.
 
 Its annotation reports, in order:

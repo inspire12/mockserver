@@ -675,11 +675,22 @@ done
 # limit was PER-PROCESS (client-side) and multi-process helps; a flat ceiling
 # means a SHARED-PATH or server limit that more processes on this host cannot
 # lift. Uses aggregate_healthy_ceiling_rps, keyed off the process COUNT.
-POINTS_JSON="$(printf '%s\n' "${POINTS[@]:-}" | jq -sc 'map(select(. != null and . != ""))')"
-SKIPPED_JSON="$(printf '%s\n' "${SKIPPED[@]:-}" | jq -sc 'map(select(. != null and . != ""))')"
+# Points and skips reach jq as FILES: with per-rung, per-process detail they outgrow the kernel's
+# per-argument limit (128 KiB on Linux) at a handful of process counts.
+printf '%s\n' "${POINTS[@]+"${POINTS[@]}"}" > "$WORK/points.ndjson"
+printf '%s\n' "${SKIPPED[@]+"${SKIPPED[@]}"}" > "$WORK/skipped.ndjson"
+# A failed assembly never reads as an empty profile: exit non-zero with an error block naming why.
+assembly_failed() { # what, stderr file
+  local detail
+  detail="$(head -c 600 "$2" 2>/dev/null | tr '\n' ' ')"
+  echo ":x: ERROR: multiproc: $1 failed from ${#POINTS[@]} point(s) — ${detail:-no error output}" >&2
+  jq -nc --arg d "$1 failed: ${detail:-no error output}" --argjson np "${#POINTS[@]}" --argjson ns "${#SKIPPED[@]}" \
+    '{attempted:true, error:"assembly_failed", error_detail:$d, points_lost:$np, skips_lost:$ns, points:[], skipped:[]}' > "$OUT_FILE"
+  exit 1
+}
 
-SCALING="$(jq -nc --argjson points "$POINTS_JSON" --argjson factor "$SCALE_FACTOR" '
-  ($points | sort_by(.procs)) as $p
+SCALING="$(jq -nc --slurpfile points_in "$WORK/points.ndjson" --argjson factor "$SCALE_FACTOR" '
+  ($points_in | map(select(type == "object")) | sort_by(.procs)) as $p
   | ($p | map(select(.aggregate_healthy_ceiling_rps != null))) as $valid
   | if ($valid | length) < 2 then
       {verdict:"insufficient_points", note:"need >=2 process counts with a valid aggregate ceiling to judge scaling"}
@@ -706,11 +717,11 @@ SCALING="$(jq -nc --argjson points "$POINTS_JSON" --argjson factor "$SCALE_FACTO
             elif ($ceiling_ratio >= ($factor * $proc_ratio)) then "aggregate ceiling scales with process count => the single-process ceiling was a per-process CLIENT limit; multi-process load generation lifts it"
             else "aggregate ceiling is flat vs process count => a SHARED-PATH or server limit; more client processes on this host will NOT help (need multiple client hosts, or the limit is server-internal). See per-N limited_by." end)
         }
-    end')"
+    end' 2> "$WORK/scaling.err")" || assembly_failed "the scaling verdict" "$WORK/scaling.err"
 
 jq -nc \
-  --argjson points "$POINTS_JSON" \
-  --argjson skipped "$SKIPPED_JSON" \
+  --slurpfile points_in "$WORK/points.ndjson" \
+  --slurpfile skipped_in "$WORK/skipped.ndjson" \
   --argjson scaling "$SCALING" \
   --argjson host_cores "$HOST_CORES" \
   --arg procs "$PROCS_LADDER" \
@@ -719,7 +730,9 @@ jq -nc \
   --arg target "${TARGET_URL:-launched}" \
   --argjson server_cores "$SERVER_CORES" \
   --argjson client_cores_each "$CLIENT_CORES_EACH" '
-  {
+  ($points_in | map(select(type == "object"))) as $points
+  | ($skipped_in | map(select(type == "object"))) as $skipped
+  | {
     attempted:true,
     proto:"http",
     experiment:"multi-process aggregate throughput vs process count (item 18: is the ~6,000 rps ceiling a client or a server limit?)",
@@ -736,6 +749,7 @@ jq -nc \
     scaling:$scaling,
     points:($points|sort_by(.procs)),
     skipped:$skipped
-  }' > "$OUT_FILE"
+  }' > "$WORK/assembled.json" 2> "$WORK/assembly.err" || assembly_failed "assembling the block" "$WORK/assembly.err"
+cat "$WORK/assembled.json" > "$OUT_FILE"
 
 echo "--- multiproc: points=$(jq -r '.points|length' "$OUT_FILE") skipped=$(jq -r '.skipped|length' "$OUT_FILE") scales_with_procs=$(jq -r '.scaling.scales_with_procs' "$OUT_FILE")" >&2

@@ -182,7 +182,12 @@ def commafy: (. // 0 | floor | tostring) | gsub("(?<=\\d)(?=(\\d{3})+$)"; ",");
              + (if ([ $hwp[] | .cpus_physically_verified == true ] | all) and $hw_paused
                 then " (each on its own physical core, with no other test container on it)" else "" end)
              + " and limited to that much memory, with the image default heap sizing (no -Xmx). The load generator runs on other cores. Logging is reduced below the shipped INFO default for measurement.")
-    },
+    }
+    # A matrix re-assembled offline from a run's work files (lib/perf-percore.sh) says so.
+    + (if (.serving_hw_matrix.reassembled_from // null) == null then {} else
+        {assembly: "offline"}
+        + (if ([ $hwp[] | (.inputs_source // "live") != "live" ] | any)
+           then {inputs: "reconstructed from run log"} else {} end) end),
     points: [ $hwp[] | {
         key: (.key // ((.cores | tostring) + "c")),
         cores: .cores,

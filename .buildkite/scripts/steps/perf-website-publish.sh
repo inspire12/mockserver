@@ -264,6 +264,15 @@ fi
 HW_ORIGIN="none"
 if jq -e '.hw_matrix != null' "$WORK/candidate.json" >/dev/null 2>&1; then
   HW_ORIGIN="this run"
+  HW_ASSEMBLY="$(jq -r '.hw_matrix.source | if .assembly == "offline" then "re-assembled offline" + (if .inputs then ", inputs " + .inputs else "" end) else empty end' "$WORK/candidate.json")"
+  if [ -n "$HW_ASSEMBLY" ]; then
+    HW_ORIGIN="this run (${HW_ASSEMBLY})"
+    if command -v buildkite-agent >/dev/null 2>&1; then
+      printf '%s\n' ":information_source: **Hardware-size figures were ${HW_ASSEMBLY}**, not assembled on the rig: \`hw_matrix.source\` records it, so the page data carries the provenance." \
+        | buildkite-agent annotate --style info --context perf-website-publish-hw-provenance || true
+    fi
+    echo "NOTE: hw_matrix was ${HW_ASSEMBLY}"
+  fi
 elif [ -f "$DATA_FILE" ] && jq -e '.hw_matrix != null' "$DATA_FILE" >/dev/null 2>&1; then
   jq --slurpfile old "$DATA_FILE" '.hw_matrix = $old[0].hw_matrix' "$WORK/candidate.json" > "$WORK/candidate.hw.json" \
     && mv "$WORK/candidate.hw.json" "$WORK/candidate.json"

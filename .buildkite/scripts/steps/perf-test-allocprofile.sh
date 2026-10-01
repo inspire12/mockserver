@@ -303,11 +303,21 @@ echo "--- :microscope: allocation profile — deep JFR run (PERF_RUN_NAME=${RUN_
 # investigation can widen the ladder without editing this file.
 # The ladder climbs past the healthy ceiling in 8k steps so the ceiling profile (knee rung to the
 # top, at least two rungs) covers the knee region rather than one rung at the top.
+# The opt-in arms are forced off, NOT defaulted: this step inherits the build env, so a build
+# that opts the clean run into one (e.g. PERF_SERVING_HW_MATRIX=true) would re-run it here.
 rc=0
 PERF_RUN_NAME="$RUN_NAME" \
 PERF_JVM_DIAGNOSTICS=deep \
 PERF_SERVER_MEMORY="${PERF_SERVER_MEMORY:-4g}" \
 PERF_CLUSTERED=false \
+PERF_SERVING_HW_MATRIX=false \
+PERF_SERVING_RW_MULTIK6=false \
+PERF_SERVING_PERCORE=false \
+PERF_SERVING_MULTIPROC=false \
+PERF_LAPTOP_PARALLEL=false \
+PERF_LARGE_HEAP_PROFILE=false \
+PERF_WORKLOAD='' \
+PERF_STEADY_RATE='' \
 PERF_INFO_ARM="${PERF_INFO_ARM:-false}" \
 PERF_LAPTOP_PROFILE="${PERF_LAPTOP_PROFILE:-false}" \
 PERF_STREAMING="${PERF_STREAMING:-false}" \

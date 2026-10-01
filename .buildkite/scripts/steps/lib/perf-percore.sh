@@ -107,6 +107,48 @@ case "$MODE" in
   *) echo "ERROR: PERF_PERCORE_MODE='$MODE' (expected percore or hw_matrix)" >&2; exit 2 ;;
 esac
 
+# Offline re-assembly (no Docker): PERF_HW_MATRIX_REASSEMBLE_DIR names a hardware-matrix work dir
+# (PERF_HW_MATRIX_DEBUG_DIR of an earlier run). Its matrix-inputs.json restores that run's settings
+# and host facts; each <point>/point-inputs.json and the point's rw/jvm files are re-assembled.
+REASSEMBLE_DIR="${PERF_HW_MATRIX_REASSEMBLE_DIR:-}"
+RUN_INPUTS_KEYS_RE='^PERF_(HW_MATRIX|PERCORE)(_[A-Z0-9_]+)?$'
+RUN_INPUTS_EXCLUDED='["PERF_HW_MATRIX_DEBUG_DIR","PERF_HW_MATRIX_REASSEMBLE_DIR","PERF_HW_MATRIX_TEST_FAULT","PERF_HW_MATRIX_RIG_PAUSED","PERF_PERCORE_REPO_ROOT","PERF_PERCORE_MODE"]'
+if [ -n "$REASSEMBLE_DIR" ]; then
+  if [ "$MODE" != hw_matrix ]; then
+    echo "ERROR: PERF_HW_MATRIX_REASSEMBLE_DIR needs PERF_PERCORE_MODE=hw_matrix" >&2; exit 2
+  fi
+  RUN_INPUTS="$REASSEMBLE_DIR/matrix-inputs.json"
+  if ! jq -e '(.resolved | type) == "object"' "$RUN_INPUTS" >/dev/null 2>&1; then
+    echo "ERROR: $RUN_INPUTS is missing or has no .resolved block; cannot re-assemble $REASSEMBLE_DIR" >&2; exit 2
+  fi
+  # The recorded settings replace the operator's: a matching variable left in this shell would
+  # silently re-assemble a different matrix from the one that ran.
+  for _k in $(compgen -e); do
+    [[ "$_k" =~ $RUN_INPUTS_KEYS_RE ]] || continue
+    jq -e --arg k "$_k" 'index($k) != null' <<<"$RUN_INPUTS_EXCLUDED" >/dev/null && continue
+    echo "--- re-assembly ignores $_k from this shell (the run's own settings come from matrix-inputs.json)" >&2
+    unset "$_k"
+  done
+  # Only the matrix's own settings are restored, never paths or test hooks. Some reach bash
+  # arithmetic, which would execute a $(...) or a[...] inside a value, so those are refused.
+  while IFS=$'\t' read -r _k _v; do
+    [ -n "$_k" ] || continue
+    if [[ "$_v" == *[\$\`\[\]]* ]]; then
+      echo "ERROR: $RUN_INPUTS: refusing $_k='$_v' (contains \$, \` or brackets)" >&2; exit 2
+    fi
+    export "$_k=$_v"
+  done < <(jq -r --arg re "$RUN_INPUTS_KEYS_RE" --argjson ex "$RUN_INPUTS_EXCLUDED" \
+             '(.env // {}) | to_entries[] | select((.key | test($re)) and (.key as $k | $ex | index($k) | not))
+              | [.key, (.value | tostring)] | @tsv' "$RUN_INPUTS")
+  _client="$(jq -r '.env.PERF_HW_MATRIX_CLIENT // "multik6"' "$RUN_INPUTS")"
+  if [ "$_client" != multik6 ]; then
+    echo "ERROR: only a multik6 matrix can be re-assembled ($RUN_INPUTS has client=$_client)" >&2; exit 2
+  fi
+  PERF_HW_MATRIX_RIG_PAUSED="$(jq -r '.resolved.rig_paused == true' "$RUN_INPUTS")"; export PERF_HW_MATRIX_RIG_PAUSED
+  _img="$(jq -r '.resolved.image // empty' "$RUN_INPUTS")"
+  [ -n "$_img" ] && export PERF_PERCORE_IMAGE="$_img"
+fi
+
 # --- inputs (all overridable) --------------------------------------------------
 MOCKSERVER_IMAGE="${PERF_PERCORE_IMAGE:-${MOCKSERVER_IMAGE:-mockserver/mockserver:mockserver-snapshot-graaljs}}"
 K6_IMAGE="${PERF_PERCORE_K6_IMAGE:-grafana/k6:1.7.1@sha256:4fd3a694926b064d3491d9b02b01cde886583c4931f1223816e3d9a7bdfa7e0f}"
@@ -114,6 +156,7 @@ PROBE_JDK_IMAGE="${PERF_PERCORE_JDK_IMAGE:-eclipse-temurin:17-jdk}"
 K6_DIR="$REPO_ROOT/mockserver-performance-test/k6"
 
 HOST_CORES="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 0)"
+[ -n "$REASSEMBLE_DIR" ] && HOST_CORES="$(jq -r '.resolved.host_cores // 0' "$RUN_INPUTS")"
 
 # The core ladder item 18 names. C=16 is included so the artifact records it as
 # skipped-with-reason on a box that cannot host it, rather than omitting the rung.
@@ -371,6 +414,7 @@ fi
 # --- compile the availableProcessors probe ONCE (JDK image; the SUT image is a
 # JRE and cannot run the single-file source launcher, so we ship a .class and run
 # it with `--entrypoint java -cp` in the SUT image). ---------------------------
+if [ -z "$REASSEMBLE_DIR" ]; then
 cat > "$WORK/AvailableProcessors.java" <<'EOF'
 public class AvailableProcessors {
   public static void main(String[] a) {
@@ -383,11 +427,15 @@ if ! docker run --rm -v "$WORK:/w" -w /w "$PROBE_JDK_IMAGE" javac AvailableProce
   echo '{"attempted":true,"error":"probe_compile_failed","points":[],"skipped":[]}' > "$OUT_FILE"
   exit 0
 fi
+fi
 
 # The SUT's JAVA_TOOL_OPTIONS: the image's own default (kept, so its GC is not dropped) plus
 # the hw_matrix extras. Unreadable image env would silently drop that default, so stop.
 SUT_IMAGE_JTO=""; SUT_JTO=""
-if [ -n "$HW_SUT_EXTRA_OPTS" ]; then
+if [ -n "$REASSEMBLE_DIR" ]; then
+  SUT_IMAGE_JTO="$(jq -r '.resolved.image_java_tool_options // ""' "$RUN_INPUTS")"
+  SUT_JTO="$(jq -r '.resolved.java_tool_options // ""' "$RUN_INPUTS")"
+elif [ -n "$HW_SUT_EXTRA_OPTS" ]; then
   docker image inspect "$MOCKSERVER_IMAGE" >/dev/null 2>&1 || docker pull -q "$MOCKSERVER_IMAGE" >/dev/null 2>&1 || true
   if ! docker image inspect "$MOCKSERVER_IMAGE" >/dev/null 2>&1; then
     echo "ERROR: cannot inspect $MOCKSERVER_IMAGE for its JAVA_TOOL_OPTIONS default" >&2
@@ -399,7 +447,7 @@ if [ -n "$HW_SUT_EXTRA_OPTS" ]; then
   echo "--- SUT JAVA_TOOL_OPTIONS: $SUT_JTO (image default: ${SUT_IMAGE_JTO:-none})" >&2
 fi
 
-docker network create "$NETWORK" >/dev/null
+[ -n "$REASSEMBLE_DIR" ] || docker network create "$NETWORK" >/dev/null
 
 # Report a JVM's availableProcessors for a cpuset, using the SUT image's own JVM.
 probe_processors() { # cpuset
@@ -415,9 +463,32 @@ probe_processors() { # cpuset
 # readable (a macOS Docker Desktop run) it falls back to logical ids, labelled unverified.
 TOPO_KNOWN=false
 HOST_PHYS_CORES=null
-if phys_core_key 0 >/dev/null 2>&1; then
+if [ -n "$REASSEMBLE_DIR" ]; then
+  TOPO_KNOWN="$(jq -r '.resolved.topology_known == true' "$RUN_INPUTS")"
+  HOST_PHYS_CORES="$(jq -r '.resolved.host_physical_cores // null' "$RUN_INPUTS")"
+elif phys_core_key 0 >/dev/null 2>&1; then
   TOPO_KNOWN=true
   HOST_PHYS_CORES="$(phys_core_count "0-$((HOST_CORES-1))")"
+fi
+# k6's physical core count, for the matrix block (host topology, so restored when re-assembling).
+if [ -n "$REASSEMBLE_DIR" ]; then
+  K6_PHYS_CORES="$(jq -r '.resolved.k6_physical_cores // null' "$RUN_INPUTS")"
+else
+  K6_PHYS_CORES="$(phys_core_count "${HW_K6_SPEC//;/,}")"
+fi
+# The hardware matrix's settings and host facts, so its work dir can be re-assembled offline.
+if [ "$MODE" = hw_matrix ] && [ -z "$REASSEMBLE_DIR" ] && [ -n "${PERF_HW_MATRIX_DEBUG_DIR:-}" ]; then
+  mkdir -p "$PERF_HW_MATRIX_DEBUG_DIR"
+  jq -n --arg re "$RUN_INPUTS_KEYS_RE" --argjson ex "$RUN_INPUTS_EXCLUDED" --argjson hc "$HOST_CORES" \
+    --argjson hpc "$HOST_PHYS_CORES" --argjson topo "$TOPO_KNOWN" --argjson k6p "$K6_PHYS_CORES" \
+    --arg img "$MOCKSERVER_IMAGE" --arg ijto "$SUT_IMAGE_JTO" --arg jto "$SUT_JTO" \
+    --argjson paused "$([ "${PERF_HW_MATRIX_RIG_PAUSED:-false}" = true ] && echo true || echo false)" '
+    {source:"live",
+     env:($ENV | with_entries(select((.key | test($re)) and (.key as $k | $ex | index($k) | not)))),
+     resolved:{host_cores:$hc, host_physical_cores:$hpc, topology_known:$topo, k6_physical_cores:$k6p,
+               image:$img, image_java_tool_options:$ijto, java_tool_options:$jto, rig_paused:$paused}}' \
+    > "$PERF_HW_MATRIX_DEBUG_DIR/matrix-inputs.json" \
+    || echo "WARNING: could not write $PERF_HW_MATRIX_DEBUG_DIR/matrix-inputs.json — this matrix cannot be re-assembled offline" >&2
 fi
 # echoes "<server cpuset> <k6 cpuset> <k6 core count>"; k6 cpuset "-" when none fit.
 select_cpusets() {
@@ -502,6 +573,8 @@ start_point_sampler() {
   local names="$SERVER"
   [ "$HW_CLIENT" = single ] && names="$K6_NAME $SERVER"
   CPU_LOG="$WORK/cpu-${PKEY}.csv"
+  # hw_matrix keeps it in the point dir, so the work-files archive carries the memory peaks.
+  if [ "$MODE" = hw_matrix ]; then mkdir -p "$POINT_DIR"; CPU_LOG="$POINT_DIR/sut-samples.csv"; fi
   echo "ts,k6_cpu_pct,sut_cpu_pct,sut_mem_bytes,retained_entries,retained_bytes" > "$CPU_LOG"
   JVM_LOG=""
   if [ "$MODE" = hw_matrix ]; then
@@ -547,22 +620,27 @@ skip_point_failure() { # reason
   SKIPPED+=("$(jq -c --arg r "$1" --argjson st "${STATE_JSON:-null}" '. + {reason:$r, type:"failure", sut_state:$st}' <<<"$POINT_META")")
 }
 # PERF_HW_MATRIX_TEST_FAULT (degrade tests only): sut_inspect makes the SUT state unreadable;
-# point_jq makes the point assembly fail.
+# point_jq makes the point assembly fail; assembly makes the whole-matrix assembly fail.
 case "${PERF_HW_MATRIX_TEST_FAULT:-}" in
-  ""|sut_inspect|point_jq) ;;
-  *) echo "ERROR: PERF_HW_MATRIX_TEST_FAULT='$PERF_HW_MATRIX_TEST_FAULT' (expected sut_inspect or point_jq)" >&2; exit 2 ;;
+  ""|sut_inspect|point_jq|assembly) ;;
+  *) echo "ERROR: PERF_HW_MATRIX_TEST_FAULT='$PERF_HW_MATRIX_TEST_FAULT' (expected sut_inspect, point_jq or assembly)" >&2; exit 2 ;;
 esac
 
+# The SUT's peak memory and retained event-log entries/bytes over the point's samples.
+sample_peaks() {
+  MEM_PEAK="$(awk -F',' 'NR>1 && $4!="" { n++; if($4+0>m) m=$4+0 } END{ if(n>0) printf "%.0f", m; }' "$CPU_LOG" 2>/dev/null || echo '')"
+  RETAINED_PEAK="$(awk -F',' 'NR>1 && $5!="" { n++; if($5+0>m) m=$5+0 } END{ if(n>0) printf "%.0f", m; }' "$CPU_LOG" 2>/dev/null || echo '')"
+  RETAINED_BYTES_PEAK="$(awk -F',' 'NR>1 && $6!="" { n++; if($6+0>m) m=$6+0 } END{ if(n>0) printf "%.0f", m; }' "$CPU_LOG" 2>/dev/null || echo '')"
+}
+
 # One multik6 point against the running $SERVER: scripts/rw-multi-k6-sweep.sh in its existing-SUT
-# mode, mapped into the point schema by lib/perf-hw-matrix-rw.jq. Sets AGG, STATE_JSON,
-# DIED_AT_RPS, DIED_BEFORE_SWEEP, HC_RPS and MAXLOG_USED; returns 1 after recording a skip.
-measure_point_multik6() {
-  local rw_dir="$POINT_DIR" rw_rc=0 xrates rw hc50 hc99 fae valid died warm rung_jvm
-  local point_jq="$SCRIPT_DIR/perf-hw-matrix-rw.jq"
-  [ "${PERF_HW_MATRIX_TEST_FAULT:-}" = point_jq ] && point_jq="$point_jq.missing"
+# mode. Sets RW_RC, XRATES, STATE_JSON and the memory peaks, and removes the SUT.
+run_point_multik6() {
+  local rw_dir="$POINT_DIR"
+  RW_RC=0
   mkdir -p "$rw_dir"
-  xrates="${PERF_HW_MATRIX_XCHECK_RATES:-$(tr ',' '\n' <<<"$POINT_RATES" | awk -v cap="$HW_XCHECK_MAX_RPS" '$1+0 <= cap' | head -3 | paste -sd, -)}"
-  xrates="${xrates:-8000,16000,24000}"
+  XRATES="${PERF_HW_MATRIX_XCHECK_RATES:-$(tr ',' '\n' <<<"$POINT_RATES" | awk -v cap="$HW_XCHECK_MAX_RPS" '$1+0 <= cap' | head -3 | paste -sd, -)}"
+  XRATES="${XRATES:-8000,16000,24000}"
   start_point_sampler
   PERF_RW_REPO_ROOT="$REPO_ROOT" PERF_RW_NETWORK="$NETWORK" PERF_RW_TARGET_URL="http://mockserver:1080" \
     PERF_RW_TARGET_CURL_URL="http://${HOSTPORT}" PERF_RW_SUT_CONTAINER="$SERVER" PERF_RW_SERVER_CPUS="$SCPU" \
@@ -570,17 +648,71 @@ measure_point_multik6() {
     PERF_RW_UPSTREAM_CPUS="" PERF_RW_IMAGE="$MOCKSERVER_IMAGE" PERF_RW_K6_IMAGE="$K6_IMAGE" \
     PERF_RW_RATES="$POINT_RATES" PERF_RW_STEP="$SWEEP_STEP" PERF_RW_GAP="$SWEEP_GAP" PERF_RW_SETTLE_S="$SWEEP_SETTLE_S" \
     PERF_RW_WARMUP_RATE="$POINT_WARMUP_RATE" PERF_RW_WARMUP_DURATION="$WARMUP_DURATION" \
-    PERF_RW_XCHECK=true PERF_RW_XCHECK_RATES="$xrates" PERF_RW_P99_MAX_MS="$HW_P99_MAX_MS" \
+    PERF_RW_XCHECK=true PERF_RW_XCHECK_RATES="$XRATES" PERF_RW_P99_MAX_MS="$HW_P99_MAX_MS" \
     PERF_RW_DEBUG_DIR="$rw_dir" \
-    bash "$REPO_ROOT/mockserver-performance-test/scripts/rw-multi-k6-sweep.sh" "$rw_dir/rw-result.json" >&2 || rw_rc=$?
+    bash "$REPO_ROOT/mockserver-performance-test/scripts/rw-multi-k6-sweep.sh" "$rw_dir/rw-result.json" >&2 || RW_RC=$?
   kill "$SAMPLER_PID" >/dev/null 2>&1 || true
   wait "$SAMPLER_PID" 2>/dev/null || true
-  # Report-only: kept for an invalid point too, so its knee can still be read.
-  rung_jvm="$(jvm_rungs_json "$JVM_LOG" "$(jq -c '.rung_windows // []' "$rw_dir/rw-result.json" 2>/dev/null || echo '[]')" "$STEP_S" "$SWEEP_SETTLE_S" 2>/dev/null || echo null)"
-  printf '%s\n' "${rung_jvm:-null}" > "$rw_dir/jvm-rungs.json"
-
   STATE_JSON="$(sut_state_json)"
   docker rm -f "$SERVER" >/dev/null 2>&1 || true
+  sample_peaks
+}
+
+# Everything a multik6 point's assembly reads besides its rw and jvm files, for re-assembly.
+write_point_inputs() {
+  jq -n --argjson meta "$POINT_META" --arg rates "$POINT_RATES" --argjson wrate "$POINT_WARMUP_RATE" \
+    --arg scpu "$SCPU" --argjson k6c "$k6w" --argjson avail "$AVAIL" --argjson sphys "${SPHYS:-null}" \
+    --argjson resolved "$RESOLVED_JSON" --argjson body "$BODY_BYTES" --argjson assumed "$ASSUMED_MAX_LOG_ENTRIES" \
+    --argjson state "$STATE_JSON" --argjson rc "$RW_RC" --arg xrates "$XRATES" --argjson cg "$SUT_CGROUP_READABLE" \
+    --argjson mempeak "${MEM_PEAK:-null}" --argjson retpeak "${RETAINED_PEAK:-null}" --argjson retbpeak "${RETAINED_BYTES_PEAK:-null}" '
+    {source:"live", key:$meta.key, meta:$meta, sweep_rates:$rates, warmup_rate:$wrate, server_cpus:$scpu,
+     k6_cores:$k6c, available_processors:$avail, server_physical_cores:$sphys, resolved:$resolved,
+     body_bytes:$body, assumed_max_log_entries:$assumed, sut_state:$state, rw_exit_code:$rc,
+     cross_check_rates:$xrates, cgroup_readable:$cg, memory_peak_bytes:$mempeak,
+     retained_entries_peak:$retpeak, retained_bytes_peak:$retbpeak}' > "$POINT_DIR/point-inputs.json" \
+    || echo "WARNING: could not write $POINT_DIR/point-inputs.json — $LBL cannot be re-assembled offline" >&2
+}
+
+# Re-assembly: the same variables from <point>/point-inputs.json; a point the original run skipped
+# keeps its skip (skipped.ndjson). Returns 1 after recording a skip.
+load_point_inputs() {
+  local f="$POINT_DIR/point-inputs.json" prior
+  if ! jq -e '(.sut_state | type) == "object" and (.resolved | type) == "object" and .server_cpus != null' "$f" >/dev/null 2>&1; then
+    prior="$(jq -c --arg k "$PKEY" 'select(.key == $k)' "$REASSEMBLE_DIR/skipped.ndjson" 2>/dev/null | head -1 || true)"
+    if [ -n "$prior" ]; then
+      echo "--- $LBL: no point inputs; keeping the original run's skip" >&2
+      SKIPPED+=("$prior")
+    else
+      STATE_JSON=null
+      skip_point_failure "nothing to re-assemble: $PKEY/point-inputs.json is missing or incomplete"
+    fi
+    return 1
+  fi
+  SCPU="$(jq -r '.server_cpus' "$f")"; k6w="$(jq -c '.k6_cores' "$f")"; AVAIL="$(jq -c '.available_processors' "$f")"
+  SPHYS="$(jq -c '.server_physical_cores' "$f")"; RESOLVED_JSON="$(jq -c '.resolved' "$f")"
+  BODY_BYTES="$(jq -c '.body_bytes // 6' "$f")"; STATE_JSON="$(jq -c '.sut_state' "$f")"
+  RW_RC="$(jq -c '.rw_exit_code' "$f")"; XRATES="$(jq -r '.cross_check_rates // ""' "$f")"
+  SUT_CGROUP_READABLE="$(jq -r '.cgroup_readable == true' "$f")"
+  ASSUMED_MAX_LOG_ENTRIES="$(jq -c --argjson d "$ASSUMED_MAX_LOG_ENTRIES" '.assumed_max_log_entries // $d' "$f")"
+  POINT_RATES="$(jq -r --arg d "$POINT_RATES" '.sweep_rates // $d' "$f")"
+  POINT_WARMUP_RATE="$(jq -c --argjson d "$POINT_WARMUP_RATE" '.warmup_rate // $d' "$f")"
+  MEM_PEAK="$(jq -r '.memory_peak_bytes // empty' "$f")"; RETAINED_PEAK="$(jq -r '.retained_entries_peak // empty' "$f")"
+  RETAINED_BYTES_PEAK="$(jq -r '.retained_bytes_peak // empty' "$f")"
+  INPUTS_SOURCE="$(jq -r '.source // "unknown"' "$f")"
+  return 0
+}
+
+# The point's rw result mapped into the point schema by lib/perf-hw-matrix-rw.jq, plus the knee
+# diagnostics. Sets AGG, DIED_AT_RPS, DIED_BEFORE_SWEEP, HC_RPS and MAXLOG_USED; returns 1 after
+# recording a skip. Every failure is checked explicitly: callers run it where errexit is off.
+assemble_point_multik6() {
+  local rw_dir="$POINT_DIR" rw hc50 hc99 fae valid died warm rung_jvm skip
+  local point_jq="$SCRIPT_DIR/perf-hw-matrix-rw.jq"
+  [ "${PERF_HW_MATRIX_TEST_FAULT:-}" = point_jq ] && point_jq="$point_jq.missing"
+  # Report-only: kept for an invalid point too, so its knee can still be read.
+  rung_jvm="$(jvm_rungs_json "$rw_dir/jvm-samples.csv" "$(jq -c '.rung_windows // []' "$rw_dir/rw-result.json" 2>/dev/null || echo '[]')" "$STEP_S" "$SWEEP_SETTLE_S" 2>/dev/null || echo null)"
+  [ -n "$REASSEMBLE_DIR" ] || printf '%s\n' "${rung_jvm:-null}" > "$rw_dir/jvm-rungs.json"
+
   if [ "$(jq -r '.running' <<<"$STATE_JSON" 2>/dev/null)" != true ] && [ "$(jq -r '.running' <<<"$STATE_JSON" 2>/dev/null)" != false ]; then
     skip_point_failure "could not read the SUT's state after the sweep (docker inspect failed)"; return 1
   fi
@@ -590,15 +722,17 @@ measure_point_multik6() {
     echo "WARNING: SUT did not survive the sweep cleanly at $LBL: $STATE_JSON" >&2
   fi
   rw="$(jq -c 'select(type == "object")' "$rw_dir/rw-result.json" 2>/dev/null || true)"
-  [ -n "$rw" ] || rw="$(jq -nc --argjson rc "$rw_rc" '{valid:false, invalid_reasons:["the multi-k6 harness wrote no result (exit \($rc))"]}')"
+  [ -n "$rw" ] || rw="$(jq -nc --argjson rc "$RW_RC" '{valid:false, invalid_reasons:["the multi-k6 harness wrote no result (exit \($rc))"]}')"
   valid="$(jq -r '.valid == true' <<<"$rw")"
   # An invalid measurement is not a point. A SUT that died stays a point: its status is the result.
   if [ "$valid" != true ] && [ "$died" != true ]; then
-    echo "ERROR: multi-k6 measurement INVALID at $LBL (exit $rw_rc): $(jq -r '(.invalid_reasons // []) | join("; ")' <<<"$rw")" >&2
-    SKIPPED+=("$(jq -c --argjson rw "$rw" --argjson st "$STATE_JSON" --argjson res "$RESOLVED_JSON" --argjson rc "$rw_rc" '
+    echo "ERROR: multi-k6 measurement INVALID at $LBL (exit $RW_RC): $(jq -r '(.invalid_reasons // []) | join("; ")' <<<"$rw")" >&2
+    # Only the reasons go on the command line: the whole rw result can exceed the per-argument limit.
+    skip="$(jq -c --argjson ir "$(jq -c '.invalid_reasons // []' <<<"$rw")" --argjson st "$STATE_JSON" --argjson res "$RESOLVED_JSON" --argjson rc "$RW_RC" '
       . + {type:"failure", status:"invalid_measurement",
-           reason:("multi-k6 measurement failed its own validity checks: " + (($rw.invalid_reasons // []) | map(split(":")[0]) | join(", "))),
-           invalid_reasons:($rw.invalid_reasons // []), rw_exit_code:$rc, oom_killed:($st.oom_killed == true), sut_state:$st, resolved:$res}' <<<"$POINT_META")")
+           reason:("multi-k6 measurement failed its own validity checks: " + ($ir | map(split(":")[0]) | join(", "))),
+           invalid_reasons:$ir, rw_exit_code:$rc, oom_killed:($st.oom_killed == true), sut_state:$st, resolved:$res}' <<<"$POINT_META")" || skip=""
+    if [ -n "$skip" ]; then SKIPPED+=("$skip"); else skip_point_failure "multi-k6 measurement INVALID (exit $RW_RC); recording its reasons failed"; fi
     return 1
   fi
 
@@ -626,9 +760,9 @@ measure_point_multik6() {
 
   warm="$(jq -c '{drive_p50_ms:(.points[0].p50_ms // null), drive_achieved_rps:(.points[0].achieved_rps // null)}' "$rw_dir/warmup.json" 2>/dev/null || echo '{}')"
   AGG="$(jq -c --arg scpu "$SCPU" --arg kcpu "$HW_K6_SPEC" --argjson k6c "$k6w" --argjson avail "$AVAIL" \
-    --argjson warm "$warm" --argjson wrate "$POINT_WARMUP_RATE" --argjson rc "$rw_rc" --arg xrates "$xrates" \
+    --argjson warm "$warm" --argjson wrate "$POINT_WARMUP_RATE" --argjson rc "$RW_RC" --arg xrates "$XRATES" \
     --argjson rjvm "${rung_jvm:-null}" --arg jto "$SUT_JTO" --argjson gclog "$([ "$HW_GC_LOG" = true ] && echo true || echo false)" \
-    --argjson cg "$([ -n "$SUT_CGROUP_DIR" ] && echo true || echo false)" '
+    --argjson cg "$SUT_CGROUP_READABLE" '
     .server_cpus=$scpu | .k6_cpus=$kcpu | .k6_cores=$k6c | .available_processors=$avail
     | .jvm = {java_tool_options:(if $jto == "" then null else $jto end), gc_log:$gclog, cgroup_readable:$cg}
     | .rung_jvm = $rjvm
@@ -637,6 +771,87 @@ measure_point_multik6() {
     | .warmup = ($warm + {drive_rate:$wrate, first_rung_p50_ms:$r1, second_rung_p50_ms:$r2,
                           first_rung_slower_than_second:(($r1 != null) and ($r2 != null) and ($r1 > $r2))})' <<<"$AGG")" || AGG=""
   [ -n "$AGG" ] || { skip_point_failure "adding the placement and warm-up to the point failed"; return 1; }
+  return 0
+}
+
+# Memory, survival and lower-bound labelling, then the point is recorded. A ceiling is a LOWER
+# BOUND when its rung was client-limited, the SUT never neared its CPU pin, it is the top rung
+# offered, or the CPU samples needed to rule the first two out are missing (cpu_unverified).
+# Returns 1 after recording a skip.
+finish_point() {
+  if [ "$(jq -r '.running' <<<"$STATE_JSON" 2>/dev/null)" != true ] && [ "$(jq -r '.running' <<<"$STATE_JSON" 2>/dev/null)" != false ]; then
+    skip_point_failure "could not read the SUT's state after the sweep (docker inspect failed)"; return 1
+  fi
+  AGG="$(jq -c --argjson meta "$POINT_META" --argjson resolved "$RESOLVED_JSON" --argjson state "$STATE_JSON" \
+    --argjson mempeak "${MEM_PEAK:-null}" --argjson retpeak "${RETAINED_PEAK:-null}" --argjson died_at "$DIED_AT_RPS" \
+    --argjson retbpeak "${RETAINED_BYTES_PEAK:-null}" \
+    --argjson sphys "${SPHYS:-null}" --argjson assumed "$ASSUMED_MAX_LOG_ENTRIES" --argjson used "$MAXLOG_USED" \
+    --arg rates "$POINT_RATES" --argjson topo "$TOPO_KNOWN" --argjson died_early "$DIED_BEFORE_SWEEP" '
+    def frac($a; $b): if $a == null or $b == null or $b <= 0 then null else (($a / $b) * 1000 | round) / 1000 end;
+    . + $meta
+    | ([.ladder[].offered_rps] | max) as $top
+    | .healthy_ceiling_rps as $hc
+    | ($state.running == false) as $died
+    | (($state.java_oom_errors // 0) > 0) as $jvm_oom
+    | .server_physical_cores = $sphys
+    | .cpus_physically_verified = $topo
+    | .sweep_rates = $rates
+    | .resolved = $resolved
+    | .heap_frac_of_memory_limit = frac($resolved.max_heap_bytes; $meta.memory_limit_bytes)
+    | .container_memory_peak_bytes = $mempeak
+    | .container_memory_peak_frac_of_limit = frac($mempeak; $meta.memory_limit_bytes)
+    | .event_log_retained_entries_peak = $retpeak
+    | .event_log_retained_bytes_peak = $retbpeak
+    | frac($retpeak; $resolved.max_log_entries) as $cu
+    | frac($retbpeak; $resolved.max_event_log_bytes) as $bu
+    | .event_log_count_utilisation = $cu
+    | .event_log_bytes_utilisation = $bu
+    # Either bound evicts, so the log is full when EITHER is reached.
+    | .event_log_filled = (if $cu == null and $bu == null then null
+                           else ((($cu // 0) >= 0.95) or (($bu // 0) >= 0.95)) end)
+    | .event_log_binding_bound = (if $cu == null and $bu == null then null
+                                  elif ($bu // 0) >= ($cu // 0) then "bytes" else "entries" end)
+    | .event_log_mean_entry_bytes = (if ($retpeak // 0) > 0 and $retbpeak != null
+                                     then ($retbpeak / $retpeak | round) else null end)
+    | .retention.assumed_max_log_entries = $assumed
+    | .retention.max_log_entries_used = $used
+    | .retention.max_log_entries_source = (if $resolved.max_log_entries != null then "resolved" else "assumed" end)
+    | .retention.retained_bytes_estimate = ($used * .retention.body_bytes)
+    | .sut_state = $state
+    | .oom_killed = ($state.oom_killed == true)
+    | .java_out_of_memory = $jvm_oom
+    | .sut_survived = (($died or $jvm_oom) | not)
+    | .died_at_offered_rps = (if $died then $died_at else null end)
+    | .died_before_sweep = ($died and $died_early)
+    | .client_headroom_frac_at_ceiling = (if .healthy_ceiling_client_cpu_pct == null then null
+                                          else frac(.client_pin_pct - .healthy_ceiling_client_cpu_pct; .client_pin_pct) end)
+    # A SUT that did not survive has no ceiling to bound; its status says what happened.
+    # multik6 points carry derive_saturation-based candidates (lib/perf-hw-matrix-rw.jq).
+    | .lower_bound_reasons = if ($died or $jvm_oom) then []
+        elif has("lower_bound_candidates") then .lower_bound_candidates else [
+        (if .client_limited_at_ceiling == true then "client_cpu_limited" else empty end),
+        (if $hc != null and .peak_limited_by == "load_path_or_virtualization" then "server_cpu_not_saturated" else empty end),
+        (if $hc != null and $hc == $top then "ladder_top_reached" else empty end),
+        (if $hc != null and (.peak_limited_by == null or .healthy_ceiling_client_cpu_pct == null)
+         then "cpu_unverified" else empty end) ] end
+    | del(.lower_bound_candidates)
+    | .lower_bound = ((.lower_bound_reasons | length) > 0)
+    | .status = (if $state.oom_killed == true then "oom_killed" elif $died then "sut_died"
+                 elif $jvm_oom then "java_out_of_memory" elif $hc == null then "no_healthy_ceiling"
+                 else "measured" end)' <<<"$AGG")" || AGG=""
+  [ -n "$AGG" ] || { skip_point_failure "labelling the point's memory, survival and lower bounds failed"; return 1; }
+  if [ -n "$REASSEMBLE_DIR" ]; then
+    AGG="$(jq -c --arg src "$INPUTS_SOURCE" '. + {inputs_source:$src}' <<<"$AGG")" \
+      || { skip_point_failure "marking the re-assembled point failed"; return 1; }
+  fi
+
+  echo "    $LBL  status=$(jq -r '.status' <<<"$AGG") heap=$(jq -r '.resolved.max_heap_bytes' <<<"$AGG") mem_peak=$(jq -r '.container_memory_peak_frac_of_limit' <<<"$AGG") lower_bound=$(jq -r '.lower_bound_reasons | join("+")' <<<"$AGG")" >&2
+  echo "    C=$C  healthy_ceiling=${HC_RPS} rps_per_core=$(jq -r '.rps_per_core' <<<"$AGG") peak=$(jq -r '.rig_valid_peak_achieved_rps' <<<"$AGG") sut_cpu@peak=$(jq -r '.sut_cpu_at_peak_pct' <<<"$AGG")%/$(jq -r '.sut_pin_pct' <<<"$AGG")% peak_limited_by=$(jq -r '.peak_limited_by' <<<"$AGG")" >&2
+  POINTS+=("$AGG")
+  if [ "$C" -gt "$MAX_MEASURED" ]; then MAX_MEASURED="$C"; fi
+  if [ "$MODE" = hw_matrix ] && [ -z "$REASSEMBLE_DIR" ]; then
+    printf '%s\n' "$AGG" > "$POINT_DIR/point.json" 2>/dev/null || true
+  fi
   return 0
 }
 
@@ -654,6 +869,7 @@ for PI in "${!P_CORES[@]}"; do
     PKEY="${C}c"; LBL="C=$C"
   fi
   POINT_DIR="${PERF_HW_MATRIX_DEBUG_DIR:+$PERF_HW_MATRIX_DEBUG_DIR/$PKEY}"; POINT_DIR="${POINT_DIR:-$WORK/rw-${PKEY}}"
+  [ -n "$REASSEMBLE_DIR" ] && POINT_DIR="$REASSEMBLE_DIR/$PKEY"
   POINT_META="$(jq -nc --argjson c "$C" --arg mem "$MEM" --argjson memb "${MEM_BYTES:-null}" \
     --argjson ctl "$IS_CONTROL" --arg key "$PKEY" --arg mode "$MODE" '
     if $mode == "hw_matrix" then {cores:$c, key:$key, memory_limit:$mem, memory_limit_bytes:$memb, control:$ctl}
@@ -670,6 +886,12 @@ for PI in "${!P_CORES[@]}"; do
   POINT_WARMUP_RATE="$WARMUP_RATE"
   if [ "$MODE" = hw_matrix ] && [ -z "${PERF_PERCORE_WARMUP_RATE:-}" ]; then
     POINT_WARMUP_RATE=$(( HW_WARMUP_RPS_PER_CORE * C ))
+  fi
+
+  if [ -n "$REASSEMBLE_DIR" ]; then
+    echo "+++ $LBL  re-assembling from $POINT_DIR" >&2
+    if load_point_inputs && assemble_point_multik6; then finish_point || true; fi
+    continue
   fi
 
   # Feasibility: the SUT needs C cores AND k6 needs >= K6_MIN_CORES on DISJOINT
@@ -742,6 +964,7 @@ for PI in "${!P_CORES[@]}"; do
     "$MOCKSERVER_IMAGE" -serverPort 1080 >/dev/null
   SUT_CGROUP_DIR=""
   [ "$MODE" = hw_matrix ] && SUT_CGROUP_DIR="$(sut_cgroup_dir "$(docker inspect -f '{{.Id}}' "$SERVER" 2>/dev/null || true)")"
+  SUT_CGROUP_READABLE=false; [ -n "$SUT_CGROUP_DIR" ] && SUT_CGROUP_READABLE=true
 
   HOSTPORT="$(docker port "$SERVER" 1080/tcp 2>/dev/null | head -1)"
   HOSTPORT="${HOSTPORT:-127.0.0.1:1080}"
@@ -786,7 +1009,9 @@ for PI in "${!P_CORES[@]}"; do
   BODY_BYTES="${BODY_BYTES:-6}"
 
   if [ "$HW_CLIENT" = multik6 ]; then
-    measure_point_multik6 || continue
+    run_point_multik6 || true
+    write_point_inputs
+    assemble_point_multik6 || continue
   else # ---- single-k6 client: percore mode, and hw_matrix with PERF_HW_MATRIX_CLIENT=single ----
   # --- warm-up drive (NEVER measured): remove the JIT/first-touch transient so
   # the sweep's first rung is not systematically slow. ------------------------
@@ -1058,92 +1283,32 @@ for PI in "${!P_CORES[@]}"; do
         first_rung_p50_ms:$r1, second_rung_p50_ms:$r2,
         first_rung_slower_than_second:(($r1 != null) and ($r2 != null) and ($r1 > $r2))
       }' <<<"$AGG")"
+  sample_peaks
   fi # ---- end single-k6 client ----
-  MEM_PEAK="$(awk -F',' 'NR>1 && $4!="" { n++; if($4+0>m) m=$4+0 } END{ if(n>0) printf "%.0f", m; }' "$CPU_LOG" 2>/dev/null || echo '')"
-  RETAINED_PEAK="$(awk -F',' 'NR>1 && $5!="" { n++; if($5+0>m) m=$5+0 } END{ if(n>0) printf "%.0f", m; }' "$CPU_LOG" 2>/dev/null || echo '')"
-  RETAINED_BYTES_PEAK="$(awk -F',' 'NR>1 && $6!="" { n++; if($6+0>m) m=$6+0 } END{ if(n>0) printf "%.0f", m; }' "$CPU_LOG" 2>/dev/null || echo '')"
-
-  # Memory, survival and lower-bound labelling. A ceiling is a LOWER BOUND when its rung
-  # was client-limited, the SUT never neared its CPU pin, it is the top rung offered, or
-  # the CPU samples needed to rule the first two out are missing (cpu_unverified).
-  if [ "$(jq -r '.running' <<<"$STATE_JSON" 2>/dev/null)" != true ] && [ "$(jq -r '.running' <<<"$STATE_JSON" 2>/dev/null)" != false ]; then
-    skip_point_failure "could not read the SUT's state after the sweep (docker inspect failed)"; continue
-  fi
-  AGG="$(jq -c --argjson meta "$POINT_META" --argjson resolved "$RESOLVED_JSON" --argjson state "$STATE_JSON" \
-    --argjson mempeak "${MEM_PEAK:-null}" --argjson retpeak "${RETAINED_PEAK:-null}" --argjson died_at "$DIED_AT_RPS" \
-    --argjson retbpeak "${RETAINED_BYTES_PEAK:-null}" \
-    --argjson sphys "${SPHYS:-null}" --argjson assumed "$ASSUMED_MAX_LOG_ENTRIES" --argjson used "$MAXLOG_USED" \
-    --arg rates "$POINT_RATES" --argjson topo "$TOPO_KNOWN" --argjson died_early "$DIED_BEFORE_SWEEP" '
-    def frac($a; $b): if $a == null or $b == null or $b <= 0 then null else (($a / $b) * 1000 | round) / 1000 end;
-    . + $meta
-    | ([.ladder[].offered_rps] | max) as $top
-    | .healthy_ceiling_rps as $hc
-    | ($state.running == false) as $died
-    | (($state.java_oom_errors // 0) > 0) as $jvm_oom
-    | .server_physical_cores = $sphys
-    | .cpus_physically_verified = $topo
-    | .sweep_rates = $rates
-    | .resolved = $resolved
-    | .heap_frac_of_memory_limit = frac($resolved.max_heap_bytes; $meta.memory_limit_bytes)
-    | .container_memory_peak_bytes = $mempeak
-    | .container_memory_peak_frac_of_limit = frac($mempeak; $meta.memory_limit_bytes)
-    | .event_log_retained_entries_peak = $retpeak
-    | .event_log_retained_bytes_peak = $retbpeak
-    | frac($retpeak; $resolved.max_log_entries) as $cu
-    | frac($retbpeak; $resolved.max_event_log_bytes) as $bu
-    | .event_log_count_utilisation = $cu
-    | .event_log_bytes_utilisation = $bu
-    # Either bound evicts, so the log is full when EITHER is reached.
-    | .event_log_filled = (if $cu == null and $bu == null then null
-                           else ((($cu // 0) >= 0.95) or (($bu // 0) >= 0.95)) end)
-    | .event_log_binding_bound = (if $cu == null and $bu == null then null
-                                  elif ($bu // 0) >= ($cu // 0) then "bytes" else "entries" end)
-    | .event_log_mean_entry_bytes = (if ($retpeak // 0) > 0 and $retbpeak != null
-                                     then ($retbpeak / $retpeak | round) else null end)
-    | .retention.assumed_max_log_entries = $assumed
-    | .retention.max_log_entries_used = $used
-    | .retention.max_log_entries_source = (if $resolved.max_log_entries != null then "resolved" else "assumed" end)
-    | .retention.retained_bytes_estimate = ($used * .retention.body_bytes)
-    | .sut_state = $state
-    | .oom_killed = ($state.oom_killed == true)
-    | .java_out_of_memory = $jvm_oom
-    | .sut_survived = (($died or $jvm_oom) | not)
-    | .died_at_offered_rps = (if $died then $died_at else null end)
-    | .died_before_sweep = ($died and $died_early)
-    | .client_headroom_frac_at_ceiling = (if .healthy_ceiling_client_cpu_pct == null then null
-                                          else frac(.client_pin_pct - .healthy_ceiling_client_cpu_pct; .client_pin_pct) end)
-    # A SUT that did not survive has no ceiling to bound; its status says what happened.
-    # multik6 points carry derive_saturation-based candidates (lib/perf-hw-matrix-rw.jq).
-    | .lower_bound_reasons = if ($died or $jvm_oom) then []
-        elif has("lower_bound_candidates") then .lower_bound_candidates else [
-        (if .client_limited_at_ceiling == true then "client_cpu_limited" else empty end),
-        (if $hc != null and .peak_limited_by == "load_path_or_virtualization" then "server_cpu_not_saturated" else empty end),
-        (if $hc != null and $hc == $top then "ladder_top_reached" else empty end),
-        (if $hc != null and (.peak_limited_by == null or .healthy_ceiling_client_cpu_pct == null)
-         then "cpu_unverified" else empty end) ] end
-    | del(.lower_bound_candidates)
-    | .lower_bound = ((.lower_bound_reasons | length) > 0)
-    | .status = (if $state.oom_killed == true then "oom_killed" elif $died then "sut_died"
-                 elif $jvm_oom then "java_out_of_memory" elif $hc == null then "no_healthy_ceiling"
-                 else "measured" end)' <<<"$AGG")" || AGG=""
-  [ -n "$AGG" ] || { skip_point_failure "labelling the point's memory, survival and lower bounds failed"; continue; }
-
-  echo "    $LBL  status=$(jq -r '.status' <<<"$AGG") heap=$(jq -r '.resolved.max_heap_bytes' <<<"$AGG") mem_peak=$(jq -r '.container_memory_peak_frac_of_limit' <<<"$AGG") lower_bound=$(jq -r '.lower_bound_reasons | join("+")' <<<"$AGG")" >&2
-  echo "    C=$C  healthy_ceiling=${HC_RPS} rps_per_core=$(jq -r '.rps_per_core' <<<"$AGG") peak=$(jq -r '.rig_valid_peak_achieved_rps' <<<"$AGG") sut_cpu@peak=$(jq -r '.sut_cpu_at_peak_pct' <<<"$AGG")%/$(jq -r '.sut_pin_pct' <<<"$AGG")% peak_limited_by=$(jq -r '.peak_limited_by' <<<"$AGG")" >&2
-  POINTS+=("$AGG")
-  [ "$C" -gt "$MAX_MEASURED" ] && MAX_MEASURED="$C"
+  finish_point || continue
 done
 
 # --- assemble the serving_percore / serving_hw_matrix block --------------------
-POINTS_JSON="$(printf '%s\n' "${POINTS[@]:-}" | jq -sc 'map(select(. != null and . != ""))')"
-SKIPPED_JSON="$(printf '%s\n' "${SKIPPED[@]:-}" | jq -sc 'map(select(. != null and . != ""))')"
+# Points and skips go to jq as FILES: together they easily exceed the kernel's per-argument limit
+# (128 KiB on Linux), which an --argjson would hit as "Argument list too long". A live matrix keeps
+# them in its work dir, so a failed assembly can be re-assembled offline.
+ASM_DIR="$WORK"
+if [ "$MODE" = hw_matrix ] && [ -z "$REASSEMBLE_DIR" ] && [ -n "${PERF_HW_MATRIX_DEBUG_DIR:-}" ]; then
+  ASM_DIR="$PERF_HW_MATRIX_DEBUG_DIR"
+fi
+printf '%s\n' "${POINTS[@]+"${POINTS[@]}"}" > "$ASM_DIR/points.ndjson"
+printf '%s\n' "${SKIPPED[@]+"${SKIPPED[@]}"}" > "$ASM_DIR/skipped.ndjson"
+SKIPPED_FILE="$ASM_DIR/skipped.ndjson"
+[ "${PERF_HW_MATRIX_TEST_FAULT:-}" = assembly ] && SKIPPED_FILE="$ASM_DIR/skipped.ndjson.missing"
 REQUESTED_JSON="$(for i in "${!P_CORES[@]}"; do
   jq -nc --argjson c "${P_CORES[$i]}" --arg m "${P_MEM[$i]}" --argjson ctl "${P_CONTROL[$i]}" \
     '{cores:$c, memory_limit:$m, control:$ctl}'; done | jq -sc '.')"
 
+ASM_OUT="$WORK/assembled.json"; ASM_ERR="$WORK/assembly.err"
+asm_rc=0
 jq -nc \
-  --argjson points "$POINTS_JSON" \
-  --argjson skipped "$SKIPPED_JSON" \
+  --slurpfile points_in "$ASM_DIR/points.ndjson" \
+  --slurpfile skipped_in "$SKIPPED_FILE" \
   --argjson requested "$REQUESTED_JSON" \
   --argjson host_cores "$HOST_CORES" \
   --argjson host_phys "$HOST_PHYS_CORES" \
@@ -1156,13 +1321,15 @@ jq -nc \
   --arg ladder "$CORE_LADDER" \
   --arg rates "$([ "$HW_CLIENT" = multik6 ] || echo "$SWEEP_RATES")" \
   --arg client "$HW_CLIENT" --arg k6sets "$HW_K6_SPEC" --arg promcpus "$HW_PROM_CPUS" \
-  --argjson k6phys "$(phys_core_count "${HW_K6_SPEC//;/,}")" --arg anchors "$HW_LADDER_ANCHORS" \
+  --argjson k6phys "$K6_PHYS_CORES" --arg anchors "$HW_LADDER_ANCHORS" --arg reassembled "${REASSEMBLE_DIR:+$(basename "$REASSEMBLE_DIR")}" \
   --arg ref "$HW_RPS_PER_CORE_REF" --arg lo "$HW_LADDER_LO" --arg hi "$HW_LADDER_HI" --arg rungs "$HW_LADDER_RUNGS" \
   --arg explicit_rates "${PERF_HW_MATRIX_SWEEP_RATES:-}" \
   --arg step "$SWEEP_STEP" --arg gap "$SWEEP_GAP" --argjson settle "$SWEEP_SETTLE_S" \
   --arg imgjto "$SUT_IMAGE_JTO" --arg sutopts "$HW_SUT_JAVA_OPTS" --arg jto "$SUT_JTO" --arg gclog "$HW_GC_LOG" '
   def nonempty: if . == "" then null else . end;
-  {
+  ($points_in | map(select(type == "object"))) as $points
+  | ($skipped_in | map(select(type == "object"))) as $skipped
+  | {
     attempted:true,
     mode:$mode,
     proto:"http",
@@ -1208,6 +1375,21 @@ jq -nc \
       # explicit, un-skimmable statement of where the curve ends and why (item 18).
       curve_complete_to_16:(($points | map(.cores) | max // 0) >= 16),
       points:($points | sort_by(.cores))
-    } end' > "$OUT_FILE"
+    } end
+  + (if $reassembled != "" then {reassembled_from:$reassembled} else {} end)' > "$ASM_OUT" 2> "$ASM_ERR" || asm_rc=$?
 
-echo "--- serving_${MODE} points=$(jq -r '.points | length' "$OUT_FILE") skipped=$(jq -r '.skipped | length' "$OUT_FILE") max_cores_measured=$(jq -r '.max_cores_measured' "$OUT_FILE")" >&2
+# A failed assembly must never read as an empty matrix: say so, name the cause, keep the counts.
+if [ "$asm_rc" -ne 0 ] || ! jq -e '(.points | type) == "array" and (.skipped | type) == "array"' "$ASM_OUT" >/dev/null 2>&1; then
+  ASM_DETAIL="$(head -c 600 "$ASM_ERR" 2>/dev/null | tr '\n' ' ')"
+  ASM_DETAIL="jq exit ${asm_rc}: ${ASM_DETAIL:-no error output}"
+  echo ":x: ERROR: assembling serving_${MODE} from ${#POINTS[@]} point(s) and ${#SKIPPED[@]} skip(s) FAILED — ${ASM_DETAIL}" >&2
+  [ "$ASM_DIR" = "$WORK" ] || echo "    the points and skips are kept in $ASM_DIR (points.ndjson, skipped.ndjson); re-assemble with PERF_HW_MATRIX_REASSEMBLE_DIR" >&2
+  jq -nc --arg mode "$MODE" --arg detail "$ASM_DETAIL" --argjson np "${#POINTS[@]}" --argjson ns "${#SKIPPED[@]}" '
+    {attempted:true, mode:$mode, error:"assembly_failed",
+     error_detail:("assembling the block from \($np) point(s) and \($ns) skip(s) failed: " + $detail),
+     points_lost:$np, skips_lost:$ns, points:[], skipped:[]}' > "$OUT_FILE"
+  exit 1
+fi
+cat "$ASM_OUT" > "$OUT_FILE"
+
+echo "--- serving_${MODE} points=$(jq -r '.points | length' "$ASM_OUT") skipped=$(jq -r '.skipped | length' "$ASM_OUT") max_cores_measured=$(jq -r '.max_cores_measured' "$ASM_OUT")" >&2

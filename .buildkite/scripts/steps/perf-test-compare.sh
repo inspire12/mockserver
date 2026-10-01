@@ -436,8 +436,9 @@ if [ "$(jq -r '.serving_percore_attempted // false' "$RESULT")" = "true" ]; then
   # zero points with any failure skip (or with no skip at all) is a broken profile
   # that must go RED, not a green build with the failure buried in stdout.
   PC_FAIL_SKIPS="$(jq -r '[(.serving_percore.skipped // [])[] | select((.type // "") == "failure")] | length' "$RESULT")"
-  if [ "$PC_POINTS" = "0" ] && { [ "$PC_SKIPPED" = "0" ] || [ "$PC_FAIL_SKIPS" != "0" ]; }; then
-    FAIL_DETAIL="$(jq -r '[(.serving_percore.skipped // [])[] | select((.type // "") == "failure") | "C="+(.cores|tostring)+" ("+.reason+")"] | join("; ")' "$RESULT")"
+  PC_ERROR="$(jq -r '.serving_percore.error_detail // .serving_percore.error // empty' "$RESULT")"
+  if [ "$PC_POINTS" = "0" ] && { [ "$PC_SKIPPED" = "0" ] || [ "$PC_FAIL_SKIPS" != "0" ] || [ -n "$PC_ERROR" ]; }; then
+    FAIL_DETAIL="$(jq -r '[(.serving_percore.error_detail // .serving_percore.error // empty), ((.serving_percore.skipped // [])[] | select((.type // "") == "failure") | "C="+(.cores|tostring)+" ("+.reason+")")] | join("; ")' "$RESULT")"
     annotate "error" ":no_entry: **Serving per-core profile FAILED to produce — build FAILED** — \`${COMMIT:0:10}\` on \`${BRANCH}\`
 
 The run set \`serving_percore_attempted: true\` but its \`.serving_percore\` block measured NO core-count and its only skips (if any) are RIG FAILURES, not infeasibility${FAIL_DETAIL:+: **${FAIL_DETAIL}**}. That means the per-core sweep (\`lib/perf-percore.sh\`, item 18) failed wholesale — a docker/probe error, an unreachable k6, a pin-proof mismatch, or a producer crash — rather than measuring or DELIBERATELY skipping (infeasible) any core-count. Compare is head-driven, so a missing block would otherwise emit zero serving_percore metrics and pass GREEN with no signal — the false green this gate exists to stop. The run was still persisted to the baseline history above, so the k6 result is not lost. Notify-only serving_percore VALUES are unaffected — this gate is about PRESENCE, not regression."
@@ -484,8 +485,9 @@ if [ "$(jq -r '.serving_multiproc_attempted // false' "$RESULT")" = "true" ]; th
   # FAILURES; infeasible-typed skips (N too big for the box) are expected. A run that
   # measured NOTHING is only benign when every skip is infeasibility.
   MP_FAIL_SKIPS="$(jq -r '[(.serving_multiproc.skipped // [])[] | select((.type // "") == "failure")] | length' "$RESULT")"
-  if [ "$MP_POINTS" = "0" ] && { [ "$MP_SKIPPED" = "0" ] || [ "$MP_FAIL_SKIPS" != "0" ]; }; then
-    MP_FAIL_DETAIL="$(jq -r '[(.serving_multiproc.skipped // [])[] | select((.type // "") == "failure") | "N="+(.procs|tostring)+" ("+.reason+")"] | join("; ")' "$RESULT")"
+  MP_ERROR="$(jq -r '.serving_multiproc.error_detail // .serving_multiproc.error // empty' "$RESULT")"
+  if [ "$MP_POINTS" = "0" ] && { [ "$MP_SKIPPED" = "0" ] || [ "$MP_FAIL_SKIPS" != "0" ] || [ -n "$MP_ERROR" ]; }; then
+    MP_FAIL_DETAIL="$(jq -r '[(.serving_multiproc.error_detail // .serving_multiproc.error // empty), ((.serving_multiproc.skipped // [])[] | select((.type // "") == "failure") | "N="+(.procs|tostring)+" ("+.reason+")")] | join("; ")' "$RESULT")"
     annotate "error" ":no_entry: **Serving multi-process profile FAILED to produce — build FAILED** — \`${COMMIT:0:10}\` on \`${BRANCH}\`
 
 The run set \`serving_multiproc_attempted: true\` but its \`.serving_multiproc\` block measured NO process-count and its only skips (if any) are RIG FAILURES, not infeasibility${MP_FAIL_DETAIL:+: **${MP_FAIL_DETAIL}**}. That means the multi-process sweep (\`mockserver-performance-test/scripts/multi-process-sweep.sh\`, item 18 client rig) failed wholesale — a docker/probe error, an unreachable k6, or a producer crash — rather than measuring or DELIBERATELY skipping (infeasible) any process-count. Compare is head-driven, so a missing block would otherwise emit zero serving_multiproc metrics and pass GREEN with no signal — the false green this gate exists to stop. The run was still persisted to the baseline history above, so the k6 result is not lost. Notify-only serving_multiproc VALUES are unaffected — this gate is about PRESENCE, not regression."
@@ -528,8 +530,9 @@ if [ "$(jq -r '.serving_hw_matrix_attempted // false' "$RESULT")" = "true" ]; th
 The run set \`serving_hw_matrix_attempted: true\` and produced ${HWM_POINTS} point(s), but none has a healthy ceiling and none was OOM-killed ($(jq -r '[(.serving_hw_matrix.points // [])[] | .key + "=" + (.status // "?")] | join(", ")' "$RESULT")). Every rung failed the ceiling rule, which points at the rig, not at MockServer, and the website would publish no table. The run was still persisted to the baseline history above."
     exit 1
   fi
-  if [ "$HWM_POINTS" = "0" ] && { [ "$HWM_SKIPPED" = "0" ] || [ "$HWM_FAIL_SKIPS" != "0" ]; }; then
-    HWM_FAIL_DETAIL="$(jq -r '[(.serving_hw_matrix.skipped // [])[] | select((.type // "") == "failure") | (.key // ((.cores|tostring)+"c"))+" ("+.reason+")"] | join("; ")' "$RESULT")"
+  HWM_ERROR="$(jq -r '.serving_hw_matrix.error_detail // .serving_hw_matrix.error // empty' "$RESULT")"
+  if [ "$HWM_POINTS" = "0" ] && { [ "$HWM_SKIPPED" = "0" ] || [ "$HWM_FAIL_SKIPS" != "0" ] || [ -n "$HWM_ERROR" ]; }; then
+    HWM_FAIL_DETAIL="$(jq -r '[(.serving_hw_matrix.error_detail // .serving_hw_matrix.error // empty), ((.serving_hw_matrix.skipped // [])[] | select((.type // "") == "failure") | (.key // ((.cores|tostring)+"c"))+" ("+.reason+")")] | join("; ")' "$RESULT")"
     annotate "error" ":no_entry: **Hardware matrix profile FAILED to produce — build FAILED** — \`${COMMIT:0:10}\` on \`${BRANCH}\`
 
 The run set \`serving_hw_matrix_attempted: true\` but its \`.serving_hw_matrix\` block measured NO point and its only skips (if any) are RIG FAILURES${HWM_FAIL_DETAIL:+: **${HWM_FAIL_DETAIL}**}. The matrix (\`lib/perf-percore.sh\` in hw_matrix mode, item 27) failed wholesale, so it would otherwise pass GREEN with no figures. The run was still persisted to the baseline history above. Notify-only serving_hw_matrix VALUES are unaffected — this gate is about PRESENCE, not regression."
