@@ -130,17 +130,28 @@ public class Http3BodyComponentLimitTest {
         headersFrame.headers().scheme("https");
         handler.channelRead(ctx, headersFrame);
 
-        int pieces = 5_000;
-        byte[] piece = new byte[QUIC_PIECE_BYTES];
-        for (int i = 0; i < pieces; i++) {
-            handler.channelRead(ctx, new DefaultHttp3DataFrame(Unpooled.copiedBuffer(piece)));
+        // a large piece closes the block holding the tiny one before it, so this body passes the stream limit (1,024
+        // at the default 10 MiB) and only the handler's limitComponents call keeps it under
+        int pairs = 600;
+        int bodyBytes = pairs * (1 + Http3RequestBridge.BLOCK_BYTES);
+        byte[] body = new byte[bodyBytes];
+        for (int i = 0; i < bodyBytes; i++) {
+            body[i] = (byte) (i % 251);
+        }
+        for (int offset = 0, piece = 0; offset < bodyBytes; piece++) {
+            int length = piece % 2 == 0 ? 1 : Http3RequestBridge.BLOCK_BYTES;
+            handler.channelRead(ctx, new DefaultHttp3DataFrame(Unpooled.copiedBuffer(body, offset, length)));
+            offset += length;
         }
 
         Field accumulatorField = Http3MockServerHandler.class.getDeclaredField("bodyAccumulator");
         accumulatorField.setAccessible(true);
         CompositeByteBuf accumulator = (CompositeByteBuf) accumulatorField.get(handler);
-        assertThat(accumulator.readableBytes(), is(pieces * QUIC_PIECE_BYTES));
-        assertThat(accumulator.numComponents(), lessThanOrEqualTo(LIMIT));
+        assertThat(ByteBufUtil.getBytes(accumulator), is(body));
+        assertThat(accumulator.numComponents(), lessThan(LIMIT));
+        Field mergedField = Http3MockServerHandler.class.getDeclaredField("mergedBodyComponents");
+        mergedField.setAccessible(true);
+        assertThat("the handler's limitComponents merged components", (int) mergedField.get(handler), greaterThan(0));
         handler.handlerRemoved(ctx);
         assertThat(accumulator.refCnt(), is(0));
     }

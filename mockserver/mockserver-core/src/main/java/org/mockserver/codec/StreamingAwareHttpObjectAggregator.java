@@ -37,7 +37,7 @@ import java.util.regex.Pattern;
  * Ordinary chunked responses (e.g. Tomcat/servlet responses that use chunked
  * transfer-encoding without {@code Content-Length}) are aggregated normally.
  */
-public class StreamingAwareHttpObjectAggregator extends HttpObjectAggregator {
+public class StreamingAwareHttpObjectAggregator extends CoalescingHttpObjectAggregator {
 
     private final Configuration configuration;
     private final MockServerLogger mockServerLogger;

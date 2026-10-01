@@ -43,18 +43,23 @@ public final class HttpObjectAggregators {
 
     /**
      * An {@link HttpObjectAggregator} for one stream of an HTTP/2 connection, limited to
-     * {@link #streamComponentLimit(int)} components.
+     * {@link #streamComponentLimit(int)} components and coalescing small pieces.
      */
     public static HttpObjectAggregator streamHttpObjectAggregator(int maxContentLength) {
-        return limitStreamComponents(new HttpObjectAggregator(maxContentLength));
+        return limitStreamComponents(new CoalescingHttpObjectAggregator(maxContentLength));
     }
 
     /**
-     * Sets {@link #streamComponentLimit(int)} for an aggregator on one stream of a multiplexed connection. Must be
-     * called before the aggregator is added to a pipeline.
+     * Sets {@link #streamComponentLimit(int)} for an aggregator on one stream of a multiplexed connection, and turns
+     * on {@link CoalescingHttpObjectAggregator#coalesceSmallContent() block coalescing} when the aggregator supports
+     * it: at a tenth of the connection limit, a body of tiny DATA frames would otherwise be consolidated whole every
+     * 1,024 frames. Must be called before the aggregator is added to a pipeline.
      */
     public static <T extends MessageAggregator<?, ?, ?, ?>> T limitStreamComponents(T aggregator) {
         aggregator.setMaxCumulationBufferComponents(streamComponentLimit(aggregator.maxContentLength()));
+        if (aggregator instanceof CoalescingHttpObjectAggregator) {
+            ((CoalescingHttpObjectAggregator) aggregator).coalesceSmallContent();
+        }
         return aggregator;
     }
 

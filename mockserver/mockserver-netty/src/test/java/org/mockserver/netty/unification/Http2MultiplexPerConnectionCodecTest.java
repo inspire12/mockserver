@@ -10,7 +10,6 @@ import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.HttpContentDecompressor;
 import io.netty.handler.codec.http.HttpMethod;
-import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.codec.http2.Http2FrameCodecBuilder;
 import io.netty.handler.codec.http2.Http2MultiplexHandler;
@@ -19,6 +18,7 @@ import io.netty.handler.codec.http2.Http2StreamChannelBootstrap;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockserver.codec.CoalescingHttpObjectAggregator;
 import org.mockserver.codec.MockServerHttpServerCodec;
 import org.mockserver.codec.PreserveHeadersNettyRemoves;
 import org.mockserver.configuration.Configuration;
@@ -88,7 +88,7 @@ public class Http2MultiplexPerConnectionCodecTest {
             StreamAddressedContentHandler.class,
             PreserveHeadersNettyRemoves.class,
             HttpContentDecompressor.class,
-            HttpObjectAggregator.class,
+            CoalescingHttpObjectAggregator.class,
             CallbackWebSocketServerHandler.class,
             DashboardWebSocketHandler.class,
             MockServerHttpServerCodec.class,

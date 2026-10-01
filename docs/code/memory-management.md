@@ -181,8 +181,36 @@ of connections, which only `maxInboundConnections` caps (off by default — see 
 
 - **HTTP/2** — each DATA frame becomes one component. The divisor stays below 16, so a full body in
   16 KiB frames (HTTP/2's default maximum frame size) fits without a copy at any `maxRequestBodySize`: 4,096
-  frames at 64 MiB stay 4,096 components (`Http2StreamComponentLimitTest`). Frames averaging under about
-  10 KiB are consolidated when they reach the limit; a 10 MiB body in 8 KiB frames is copied once.
+  frames at 64 MiB stay 4,096 components (`Http2StreamComponentLimitTest`). The stream aggregator is a
+  `CoalescingHttpObjectAggregator` (`HttpObjectAggregators.streamHttpObjectAggregator`). Without it a body of
+  one-byte frames was consolidated whole every 1,024 frames, about N² / 2,048 bytes of copying (53.7 GB for
+  10 MiB). It now:
+  - keeps the first 64 components, every frame of 1 KiB or more, and any run of fewer than 16 consecutive
+    frames under 1 KiB (a frame cut short by the flow-control window, say) as they arrive, uncopied;
+  - at the 16th frame of a run, copies the run into the free tail of the current 16 KiB block (a new one
+    once it is full; the current block is kept when a larger frame interrupts the run), so each such byte is
+    copied into a block once, a body of one-byte frames needs one component per 16 KiB, and at most one block per stream is
+    part-used (at most 16 KiB unused);
+  - once the body passes the limit, at the same frame where Netty would have consolidated the whole body,
+    merges only the components added since its last merge (the HTTP/3 rule below), so the merges copy each
+    byte at most once more. For this it replaces the aggregator's composite buffer with one that has no limit
+    of its own (one extra empty composite per request, about 170 bytes of heap).
+
+  Bytes copied, old → new (`CoalescingHttpObjectAggregatorTest`, and a counting allocator over the same
+  aggregators at the 10 MiB default): 10 MiB in one-byte frames 53.7 GB → 10 MiB; in 100-byte frames
+  538 MB → 10 MiB; in 1 KiB frames 47 MB → 10 MiB; 8 KiB frames, 16 KiB frames, 16 KiB frames with a
+  16,383-byte frame every fourth, and one byte alternating with 16 KiB are unchanged (8.4 MB, 0, 0, 8.4 MB:
+  the first merge copies the body so far, as Netty's consolidation did). Mixes of runs and larger frames cost
+  more, for two reasons: the first merge still copies the whole body so far, and with fewer components it comes
+  later, at a larger body; and bytes copied into a block are copied again when a merge covers them. Across 270
+  mixes (runs of 15–32 frames of 1, 100 or 1,023 bytes between 1,023-byte, 1 KiB or 16 KiB frames, at 256 KiB
+  to 64 MiB limits) at most 1.8× the body is copied, against up to 160× (and 5,120× for one-byte frames) before,
+  and the most held at once (body pieces, blocks and merged copies) is at most 2.0× the body, the old worst
+  case; 44 of those mixes peak higher than before (for example 1.83× against 1.00× for runs of 31 one-byte
+  frames between 16 KiB frames at a 1 MiB limit). `CoalescingHttpObjectAggregatorTest` bounds copying and the
+  peak to twice the body plus one block for runs of 100-byte frames between 1 KiB frames, and the blocks and
+  merged copies to the body plus 32 KiB for runs of one-byte frames between 1 KiB frames at a 512 KiB limit. The forward client's streams the upstream
+  opens (below) coalesce the same way.
 - **HTTP/3** — Netty hands a request body over in pieces of about one QUIC packet (about 1.1 KiB on
   loopback) whatever DATA frame size the client sent, so one component per piece would reach the limit at
   about 1.1 MiB, and `CompositeByteBuf`'s own consolidation copies the whole body each time it does (about

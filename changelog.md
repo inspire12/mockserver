@@ -148,7 +148,12 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   an HTTP/1.1 connection (at least 1,024), so a client sending tiny frames on 100 streams at once pins at
   most about 11 MB of heap on one connection at the default `maxRequestBodySize`; an HTTP/2 body in the
   usual 16 KiB frames is not copied at any `maxRequestBodySize`, and an HTTP/3 upload, which arrives in
-  packet-sized pieces, is copied about once instead of repeatedly as it arrives. An HTTP/2 upstream that
+  packet-sized pieces, is copied about once instead of repeatedly as it arrives. An HTTP/2 upload sent as
+  many small DATA frames is now copied at most about twice (at most 1.8× its size in the mixes measured,
+  against up to 160× before; 10 MiB in one-byte frames used to cost about 54 GB of copying and now costs
+  10 MiB), and the most it holds stays within about twice the body, the old worst case, though some mixes of
+  small and larger frames now peak higher than before; a body in 16 KiB frames, including the shorter frames
+  the flow-control window cuts, is still not copied. An HTTP/2 upstream that
   MockServer forwards to may now open only one stream of its own at a time, and that stream gets the same
   per-stream limit. Embedded use
   (`ClientAndServer`, the JUnit and Spring integrations) is unchanged.

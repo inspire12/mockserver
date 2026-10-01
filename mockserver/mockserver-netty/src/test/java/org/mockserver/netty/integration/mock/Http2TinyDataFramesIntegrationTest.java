@@ -27,8 +27,11 @@ import org.junit.Before;
 import org.junit.Test;
 import org.mockserver.client.MockServerClient;
 import org.mockserver.netty.MockServer;
+import org.mockserver.test.Http2FlowControlBodies;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -40,9 +43,9 @@ import static org.mockserver.model.HttpResponse.response;
 import static org.mockserver.stop.Stop.stopQuietly;
 
 /**
- * A request body sent over HTTP/2 as thousands of one-byte DATA frames passes the stream's component limit
- * (1,024 at the default 10 MiB) several times, so the aggregator consolidates it more than once. The body must
- * still reach the matchers unchanged. A raw in-JVM Netty h2c client puts each frame on the wire as written.
+ * A request body sent over HTTP/2 as thousands of one-byte DATA frames would pass the stream's component limit
+ * (1,024 at the default 10 MiB) several times; the aggregator copies small frames into 16 KiB blocks instead. The
+ * body must still reach the matchers unchanged. A raw in-JVM Netty h2c client puts each frame on the wire as written.
  */
 public class Http2TinyDataFramesIntegrationTest {
 
@@ -101,6 +104,76 @@ public class Http2TinyDataFramesIntegrationTest {
             assertThat("status (404 => the body did not arrive unchanged) - body <" + response.body + ">", response.status, is("200"));
             assertThat(response.body, is("matched"));
             assertThat(mockServerClient.retrieveRecordedRequests(request().withPath("/tiny_frames").withBody(body)), arrayWithSize(1));
+        } finally {
+            group.shutdownGracefully(0, 1, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test(timeout = 60000)
+    public void shouldReceiveLargeBodiesOfMixedFramesOnConcurrentStreamsUnchanged() throws Exception {
+        // runs of tiny frames (coalesced into blocks) between 16 KiB frames (kept as they are), over the flow-control
+        // window, interleaved across streams so blocks from the pooled allocator are in use by several bodies at once.
+        // Once the window is used up the client's flow controller merges queued frames, so no stream reaches its
+        // component limit here; merges on pooled buffers are covered by CoalescingHttpObjectAggregatorTest
+        String[] markers = {"stream-a", "stream-b", "stream-c"};
+        List<byte[]> bodies = new ArrayList<>();
+        for (String marker : markers) {
+            String body = Http2FlowControlBodies.body(Http2FlowControlBodies.Size.LARGE, marker);
+            bodies.add(body.getBytes(StandardCharsets.US_ASCII));
+            mockServerClient
+                .when(request().withMethod("POST").withPath("/large_mixed/" + marker).withBody(body))
+                .respond(response().withStatusCode(200).withBody("matched " + marker));
+        }
+        List<Integer> frameSizes = new ArrayList<>();
+        for (int i = 0; i < 200; i++) {
+            frameSizes.add(1);
+        }
+        frameSizes.add(16 * 1024);
+        for (int i = 0; i < 50; i++) {
+            frameSizes.add(100);
+        }
+        frameSizes.add(5_000);
+
+        NioEventLoopGroup group = new NioEventLoopGroup();
+        try {
+            Channel parent = connectMultiplexParent(group);
+            List<Http2StreamChannel> streams = new ArrayList<>();
+            List<CompletableFuture<Response>> responses = new ArrayList<>();
+            for (String marker : markers) {
+                CompletableFuture<Response> responseFuture = new CompletableFuture<>();
+                Http2StreamChannel streamChannel = new Http2StreamChannelBootstrap(parent)
+                    .handler(new ResponseCollector(responseFuture))
+                    .open()
+                    .sync()
+                    .getNow();
+                streamChannel.write(new DefaultHttp2HeadersFrame(new DefaultHttp2Headers()
+                    .method(HttpMethod.POST.asciiName())
+                    .scheme(HttpScheme.HTTP.name())
+                    .authority("localhost:" + mockServer.getLocalPort())
+                    .path("/large_mixed/" + marker), false));
+                streams.add(streamChannel);
+                responses.add(responseFuture);
+            }
+            int[] offsets = new int[markers.length];
+            for (int frame = 0; offsets[0] < bodies.get(0).length; frame++) {
+                for (int stream = 0; stream < markers.length; stream++) {
+                    byte[] body = bodies.get(stream);
+                    int length = Math.min(frameSizes.get(frame % frameSizes.size()), body.length - offsets[stream]);
+                    boolean last = offsets[stream] + length == body.length;
+                    streams.get(stream).write(new DefaultHttp2DataFrame(Unpooled.wrappedBuffer(body, offsets[stream], length), last));
+                    offsets[stream] += length;
+                }
+                if (frame % 1_000 == 0) {
+                    streams.forEach(Http2StreamChannel::flush);
+                }
+            }
+            streams.forEach(Http2StreamChannel::flush);
+
+            for (int stream = 0; stream < markers.length; stream++) {
+                Response response = responses.get(stream).get(30, TimeUnit.SECONDS);
+                assertThat("status (404 => the body did not arrive unchanged) for " + markers[stream], response.status, is("200"));
+                assertThat(response.body, is("matched " + markers[stream]));
+            }
         } finally {
             group.shutdownGracefully(0, 1, TimeUnit.SECONDS);
         }
