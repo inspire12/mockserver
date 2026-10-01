@@ -351,9 +351,17 @@ publish_snapshot_http3() {
   trap 'docker rm -f "mockserver-http3-smoke-$HTTP3_SMOKE_ID" "mockserver-http3-refuse-$HTTP3_SMOKE_ID" >/dev/null 2>&1 || true
         docker rmi -f "mockserver/mockserver:smoke-http3-$HTTP3_SMOKE_ID" >/dev/null 2>&1 || true' EXIT
   trap 'exit 143' TERM INT
-  base_digest="$(docker buildx imagetools inspect "${ECR_REPO}:snapshot" | awk '/^Digest:/{print $2; exit}')"
-  if [[ "$base_digest" != sha256:* ]]; then
-    echo "could not resolve the digest of ${ECR_REPO}:snapshot" >&2
+  # Capture before parsing: piping imagetools into an early-exiting awk races, and when awk wins
+  # imagetools dies of SIGPIPE (exit 255, no message), which pipefail turns into a silent failure.
+  local inspect_out inspect_rc=0
+  inspect_out="$(docker buildx imagetools inspect "${ECR_REPO}:snapshot" 2>&1)" || inspect_rc=$?
+  if (( inspect_rc != 0 )); then
+    echo "docker buildx imagetools inspect ${ECR_REPO}:snapshot failed (exit ${inspect_rc}): ${inspect_out}" >&2
+    return 1
+  fi
+  base_digest="$(awk '/^Digest:/{print $2; exit}' <<<"$inspect_out")"
+  if [[ ! "$base_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "docker buildx imagetools inspect ${ECR_REPO}:snapshot printed no sha256 Digest line: ${inspect_out}" >&2
     return 1
   fi
   base_ref="${ECR_REPO}@${base_digest}"

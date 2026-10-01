@@ -216,10 +216,12 @@ increment_patch_version() {
   echo "${major}.${minor}.$((patch + 1))"
 }
 
+# awk reads to the end here and below: an early `exit` lets sed die of SIGPIPE under pipefail once
+# the tag list outgrows a single write.
 latest_release_version() {
   git -C "$REPO_ROOT" tag --list "mockserver-[0-9]*" --sort=-v:refname \
     | sed 's/^mockserver-//' \
-    | awk 'NR == 1 { print; exit }'
+    | awk 'NR == 1 { print }'
 }
 
 # Return the highest mockserver-X.Y.Z tag that is NOT $1. Used by
@@ -235,7 +237,7 @@ previous_release_version() {
   git -C "$REPO_ROOT" tag --list "mockserver-[0-9]*" --sort=-v:refname \
     | sed 's/^mockserver-//' \
     | grep -v -x -F "$exclude" \
-    | awk 'NR == 1 { print; exit }'
+    | awk 'NR == 1 { print }'
 }
 
 version_to_subdomain() {

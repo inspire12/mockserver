@@ -498,6 +498,26 @@ else
     fi
   fi
 
+  # Prints the index digest of image ref $1: the first `Digest:` line of `imagetools inspect`'s plain
+  # output (`--format` template fields differ across buildx versions; on the release agent
+  # `.Manifest.Digest` printed nothing). The output is captured before parsing because piping it into
+  # an early-exiting awk races: imagetools can die of SIGPIPE (exit 255, no message). On failure it
+  # prints the command, exit status and output on stderr and returns 1.
+  image_index_digest() {
+    local out rc=0 digest
+    out="$(docker buildx imagetools inspect "$1" 2>&1)" || rc=$?
+    if (( rc != 0 )); then
+      echo "docker buildx imagetools inspect $1 failed (exit $rc): $out" >&2
+      return 1
+    fi
+    digest="$(awk '/^Digest:/{print $2; exit}' <<<"$out")"
+    if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+      echo "docker buildx imagetools inspect $1 printed no sha256 Digest line: $out" >&2
+      return 1
+    fi
+    printf '%s\n' "$digest"
+  }
+
   # ---- Cosign-sign pushed Docker images ------------------------------------
   # Sign by digest so the signature binds to the exact manifest, not a mutable
   # tag. Uses the SAME cosign key infrastructure as helm.sh. NO-OP until a
@@ -538,34 +558,11 @@ else
   cosign_sign_docker_image() {
     local image_ref="$1"
     # Resolve the tag to a digest so we sign by content, not by mutable tag.
-    # The template field is `.Manifest.Digest` — NOT `.Digest`, which does not
-    # exist on imagetools' tplInputs and makes buildx error with
-    # `can't evaluate field Digest in type imagetools.tplInputs`. Build #53 hid
-    # that behind `2>/dev/null`, so every image's digest came back empty and
-    # ALL signing failed (aborting the release). Capture stderr INTO the var and
-    # surface it: on success the value is `sha256:…`; on failure it is the error
-    # text, which we now log instead of swallowing.
-    # Parse the `Digest:` line from `imagetools inspect`'s PLAIN output rather
-    # than a `--format` Go-template. The template field name is NOT portable
-    # across buildx versions: locally `.Digest` errors and `.Manifest.Digest`
-    # works, but on the release agent `.Manifest.Digest` yields an EMPTY string
-    # with NO error (build #54: "skipping cosign sign ()") — so neither template
-    # is safe everywhere. The first `^Digest:` line of the plain output is the
-    # index/manifest-list digest (exactly what cosign should sign) and that format
-    # has been stable for years. Stderr is captured (not merged into $digest, and
-    # not swallowed) so a real failure — auth, missing image — is surfaced; the
-    # trailing `|| true` keeps a non-zero inspect from aborting under pipefail.
-    local digest inspect_err
-    mkdir -p "$REPO_ROOT/.tmp"
-    inspect_err="$REPO_ROOT/.tmp/imagetools-inspect.$$"
-    digest=$(docker buildx imagetools inspect "$image_ref" 2>"$inspect_err" \
-      | awk '/^Digest:/{print $2; exit}' || true)
-    if [[ "$digest" != sha256:* ]]; then
-      log_info "WARNING: could not resolve digest for $image_ref — skipping cosign sign ($(cat "$inspect_err" 2>/dev/null))"
-      rm -f "$inspect_err"
+    local digest
+    if ! digest="$(image_index_digest "$image_ref")"; then
+      log_info "WARNING: could not resolve digest for $image_ref — skipping cosign sign"
       return 1
     fi
-    rm -f "$inspect_err"
     local repo="${image_ref%%:*}"
     local ref_by_digest="${repo}@${digest}"
     log_info "  cosign sign $ref_by_digest"
@@ -740,8 +737,7 @@ PY
   # then pushed, mirrored and signed exactly like the core images.
   echo "--- :docker: Building, smoke-testing and pushing the -http3 image variant"
   resolve_http3_base_digest() {
-    HTTP3_BASE_DIGEST="$(docker buildx imagetools inspect "${ECR_REPO}:$FULL_TAG" | awk '/^Digest:/{print $2; exit}')"
-    [[ "$HTTP3_BASE_DIGEST" == sha256:* ]]
+    HTTP3_BASE_DIGEST="$(image_index_digest "${ECR_REPO}:$FULL_TAG")"
   }
   retry 3 5 -- resolve_http3_base_digest \
     || { log_error "could not resolve the digest of ${ECR_REPO}:$FULL_TAG for the -http3 base"; exit 1; }
