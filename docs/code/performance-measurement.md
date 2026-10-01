@@ -1692,6 +1692,39 @@ back explicitly compares with the runs from before the change. Those metrics sta
 the new signature. `.buildkite/scripts/test/perf-k6-runtime-test.sh` checks the signature. The
 other hardware-matrix figures built on rig validity are notify-only and annotate the move.
 
+The INFO SUT's event-log budget is a sixth break, in every `info_*` metric. Until item 40 the INFO
+SUT was handed the harness's 256 MiB `maxEventLogSizeInBytes`, which exists for the ERROR SUT's
+`growth.js` fill. At INFO that is over three times the shipped default (heap/12, 75.2 MiB on the
+GraalJS SUT's 922 MiB heap), so the INFO arm never measured the out-of-the-box figure. When the
+image heap fell to 922 MiB, the INFO `regression.js` tails rose 2–9× (541). Build 565 re-ran on the
+old 1,230 MiB heap (`-Xmx1229m` reaches the INFO SUT too) and put them back down, so it points to
+the heap. But 565 also ran a newer image (five more server commits), and it came in below every
+earlier old-heap run, so it does not settle the question: build 579 (565's image, default heap,
+256 MiB budget) decides it. 565 still used the 256 MiB INFO budget. Its INFO SUT logged 777
+`Allocation Stall` events totalling 21.4 s (longest 107 ms), against 12 totalling 62 ms on the ERROR
+SUT. Summing the four phase columns of the `Allocation Stalls:` lines gives 763, which corroborates it. The
+256 MiB INFO budget as the way the smaller heap hurts is a hypothesis; the 579/580 A/B tests it (see
+item 40 in `docs/plans/performance-programme.md`).
+
+The INFO SUT now gets no budget, so the INFO arm measures the out-of-the-box figure. Only
+`PERF_INFO_MAX_EVENT_LOG_BYTES` sets one, and setting it marks the run `tuned`;
+`PERF_MAX_EVENT_LOG_BYTES` never reaches the INFO SUT. The run records the INFO SUT's budget in
+`info_log_level_arm.config.event_log_budget`:
+
+- what it was handed: `method` (`shipped-default` or `fixed-<bytes>`) and `requested_bytes`;
+- what its JVM resolved, from its own gauges: `resolved_max_event_log_bytes`,
+  `resolved_max_log_entries`, `heap_max_bytes`, and `expected_default_bytes` to check against;
+- whether the bound was reached during the INFO load, from a 2 s sampler (the load phases reset
+  the log, so a read afterwards would show it empty): `peak_retained_bytes`,
+  `peak_retained_entries`, their utilisations, `evicted_log_entries`, `dropped_log_events`,
+  `bound_reached` and `binding`.
+
+The compare step keys every `info_*` metric on `method`; a run without the block reads as
+`fixed-268435456`. So `info_*` stays `:new:` until `MIN_BASELINE` runs share the new method, and
+re-baselines from the first run after the change. While older runs remain in the window the
+annotation says so ("INFO-arm baseline reset").
+`.buildkite/scripts/test/perf-info-budget-test.sh` checks which SUTs get a budget and the key.
+
 ### GC log cycle times are not stop-the-world pause times
 
 `-Xlog:gc` records GC cycle duration, not stop-the-world (STW) pause duration. A 1,000 ms p95 cycle under generational ZGC is concurrent work and is consistent with a request p95 of ~74 ms — not 1,000 ms. For STW pauses use `-Xlog:gc+phases`. ZGC's actual STW pauses are typically under 1 ms regardless of heap size.

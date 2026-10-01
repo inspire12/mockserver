@@ -244,13 +244,19 @@ SERVER_MEMORY="${PERF_SERVER_MEMORY:-2g}"
 # because growth loads only the tiny /simple body (~hundreds of bytes) — its total
 # retained bytes across ~115.5k entries stay in the tens of MB, far below 256 MiB, so the
 # byte budget never fires for growth and its count-bounded fill is untouched. Applied to
-# EVERY SUT that runs regression.js with the MB arms: the main SUT here and the clustered
-# A/B nodes (start_clu) — the clustered image runs the same large_1mb/large_10mb arms on
-# a 1.0 GiB heap and was at the identical risk.
+# every start_mockserver container except the INFO SUT, and to the clustered A/B nodes
+# (start_clu), which run the same large_1mb/large_10mb arms on a 1.0 GiB heap.
 # Set-ness must be captured BEFORE the default below overwrites it: the CONFIG_PROFILE
 # trigger needs to know whether the caller set it, not what it resolved to.
 PERF_MAX_EVENT_LOG_BYTES_SET="${PERF_MAX_EVENT_LOG_BYTES+set}"
 PERF_MAX_EVENT_LOG_BYTES="${PERF_MAX_EVENT_LOG_BYTES:-268435456}" # 256 MiB
+# The INFO SUT gets no budget (the shipped heap/12 default) unless this is set; setting it marks
+# the run tuned. PERF_MAX_EVENT_LOG_BYTES deliberately never reaches the INFO SUT.
+PERF_INFO_MAX_EVENT_LOG_BYTES="${PERF_INFO_MAX_EVENT_LOG_BYTES:-}"
+if [ -n "$PERF_INFO_MAX_EVENT_LOG_BYTES" ] && ! [[ "$PERF_INFO_MAX_EVENT_LOG_BYTES" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ERROR: PERF_INFO_MAX_EVENT_LOG_BYTES='$PERF_INFO_MAX_EVENT_LOG_BYTES' is not a positive integer (bytes); unset it for the shipped default" >&2
+  exit 1
+fi
 
 # Accept-queue depth for the SUT. Unset by default so the headline figure describes the
 # shipped configuration; setting it labels the result config_profile "tuned".
@@ -431,6 +437,7 @@ DIAG_SAMPLER_PID=""   # dense resource-trajectory sampler (JVM-internals diagnos
 LIVE_HISTO_PID=""     # live-heap class histogram sampler (deep runs only)
 SUT_LOG_PID=""        # docker-logs follower for the main SUT
 INFO_LOG_PID=""       # docker-logs follower for the INFO SUT
+INFO_ELS_SAMPLER_PID="" # event-log occupancy sampler for the INFO SUT
 SUT_DIAG_CAPTURED=""  # one-shot guard so the post-mortem capture runs at most once
 SWEEP_K6="k6-sweep-${RUN_ID}"
 # Plan open question 5 — the INFO-log-level PUBLICATION arm. The tracked, gated
@@ -667,6 +674,7 @@ cleanup() {
   [ -n "$LIVE_HISTO_PID" ] && kill "$LIVE_HISTO_PID" >/dev/null 2>&1 || true
   [ -n "$SUT_LOG_PID" ] && kill "$SUT_LOG_PID" >/dev/null 2>&1 || true
   [ -n "$INFO_LOG_PID" ] && kill "$INFO_LOG_PID" >/dev/null 2>&1 || true
+  declare -F stop_info_els_sampler >/dev/null && stop_info_els_sampler
   [ -n "${HS_CPU_PID:-}" ] && kill "$HS_CPU_PID" >/dev/null 2>&1 || true
   # The item 14 handshake SUTs (deterministic names from RUN_ID) — removed here too
   # so an early exit before the proxy block's own cleanup never leaks them.
@@ -887,6 +895,8 @@ fi
 START_EXTRA_ENV=()
 start_mockserver() {
   local name="$1" cpus="$2" alias="$3" publish="${4:-}" mem="${5:-}" mount="${6:-}" log_level="${7:-ERROR}" diag_subdir="${8:-}" no_rm="${9:-}" port="${10:-1080}"
+  # An EMPTY 11th argument passes no budget env at all (the server's shipped default); omitted = harness budget.
+  local event_log_bytes="${11-$PERF_MAX_EVENT_LOG_BYTES}"
   # log_level defaults to ERROR — the tracked baseline's level, which every existing
   # caller relies on. The INFO publication arm (plan open question 5) passes INFO
   # explicitly; nothing else does, so the ERROR baseline is unaffected.
@@ -937,7 +947,7 @@ start_mockserver() {
     -e MOCKSERVER_LOG_LEVEL="$log_level" \
     -e MOCKSERVER_DISABLE_SYSTEM_OUT=true \
     -e MOCKSERVER_METRICS_ENABLED=true \
-    -e MOCKSERVER_MAX_EVENT_LOG_SIZE_IN_BYTES="$PERF_MAX_EVENT_LOG_BYTES" \
+    ${event_log_bytes:+-e MOCKSERVER_MAX_EVENT_LOG_SIZE_IN_BYTES="$event_log_bytes"} \
     ${PERF_SO_BACKLOG:+-e MOCKSERVER_SO_BACKLOG="$PERF_SO_BACKLOG"} \
     "$MOCKSERVER_IMAGE" -serverPort "$port" >/dev/null
 }
@@ -1131,11 +1141,81 @@ metric_heap_max() {
     | awk -F'} ' '/^jvm_memory_max_bytes\{area="heap"\}/{print $2}' | head -1 \
     | awk '{printf "%d", $1+0}' || true
 }
+# One sample's value from metrics text on stdin, as an integer; empty when absent. Exact name match.
+gauge_value() { # exact_series_name  < metrics_text
+  awk -v m="$1" '$1 == m && $2 != "" {printf "%.0f", $2 + 0; exit}' || true
+}
+# --- INFO-arm event-log budget helpers (perf-info-budget-test.sh runs each of them) ---
+# The info_* compare key: what the INFO SUT was handed, not what it resolved.
+info_els_method() { # requested_bytes -> shipped-default | fixed-<bytes>
+  if [ -n "$1" ]; then echo "fixed-$1"; else echo "shipped-default"; fi
+}
+event_log_counters() { # < metrics_text -> "dropped|evicted", each empty when absent
+  local m; m="$(cat)"
+  printf '%s|%s\n' "$(gauge_value mock_server_dropped_log_events_total <<<"$m")" \
+    "$(gauge_value mock_server_evicted_log_entries_total <<<"$m")"
+}
+# Appends "retained_bytes retained_entries" every 2 s until killed. The load phases reset the
+# log, so its occupancy can only be seen by sampling during them.
+event_log_sampler() { # host:port outfile
+  while true; do
+    curl -sf --max-time 2 "http://$1/mockserver/metrics" 2>/dev/null | awk '
+      $1 == "mock_server_event_log_retained_bytes" {b = $2} $1 == "mock_server_event_log_retained_entries" {e = $2}
+      END {if (b != "") printf "%.0f %.0f\n", b, e + 0}' >> "$2" || true
+    sleep 2
+  done
+}
+start_info_els_sampler() { # host:port outfile
+  event_log_sampler "$1" "$2" & INFO_ELS_SAMPLER_PID=$!
+}
+stop_info_els_sampler() {
+  [ -n "$INFO_ELS_SAMPLER_PID" ] || return 0
+  kill "$INFO_ELS_SAMPLER_PID" >/dev/null 2>&1 || true
+  wait "$INFO_ELS_SAMPLER_PID" 2>/dev/null || true
+  INFO_ELS_SAMPLER_PID=""
+}
+event_log_peaks() { # samples_file -> "peak_bytes peak_entries", empty when there are no samples
+  awk '{if ($1 > b) b = $1; if ($2 > e) e = $2; n++} END {if (n) printf "%.0f %.0f", b, e}' "$1" 2>/dev/null || true
+}
+# event_log_budget for the INFO arm record; empty arguments become null. bound_reached is null when
+# evictions are unknown and no utilisation reaches the ratio. binding is null without utilisations,
+# else "neither" when no bound was reached (as in event_log_scaling), else the bound nearer its limit.
+event_log_budget_json() { # method requested requested_src max_bytes max_entries heap expected peak_bytes peak_entries dropped evicted ratio
+  jq -nc --arg method "$1" --arg requested "$2" --arg requested_src "$3" --arg mb "$4" --arg me "$5" \
+    --arg heap "$6" --arg expected "$7" --arg pb "$8" --arg pe "$9" --arg dropped "${10}" --arg ev "${11}" \
+    --argjson ratio "${12}" '
+    def num: if . == "" then null else (tonumber? // null) end;
+    ($mb | num) as $mb | ($me | num) as $me | ($pb | num) as $pb | ($pe | num) as $pe | ($ev | num) as $ev
+    | (if $mb != null and $mb > 0 and $pb != null then $pb / $mb else null end) as $bu
+    | (if $me != null and $me > 0 and $pe != null then $pe / $me else null end) as $cu
+    | (if ($ev // 0) > 0 or ($bu // 0) >= $ratio or ($cu // 0) >= $ratio then true
+       elif $ev == null then null else false end) as $reached
+    | {
+        method: $method,
+        requested_bytes: ($requested | num),
+        requested_source: $requested_src,
+        resolved_max_event_log_bytes: $mb,
+        resolved_max_log_entries: $me,
+        resolved_source: (if $mb != null then "observed" else "unavailable" end),
+        heap_max_bytes: ($heap | num),
+        expected_default_bytes: ($expected | num),
+        peak_retained_bytes: $pb,
+        peak_retained_entries: $pe,
+        bytes_utilisation: (if $bu == null then null else ($bu * 10000 | round / 10000) end),
+        count_utilisation: (if $cu == null then null else ($cu * 10000 | round / 10000) end),
+        evicted_log_entries: $ev,
+        dropped_log_events: ($dropped | num),
+        bound_reached: $reached,
+        binding: (if $reached == null or ($bu == null and $cu == null) then null
+                  elif $reached == false then "neither"
+                  elif ($cu // 0) >= ($bu // 0) then "count" else "bytes" end)
+      }' 2>/dev/null || echo null
+}
 # One env var as the SUT container ACTUALLY received it (empty if unset).
 # NOTE this is a WEAKER observation than gc/heap_max_bytes, which are read from the JVM's own
 # metrics endpoint. This only proves the container was HANDED the value, not that the JVM parsed
-# and applied it - hence the config block labels it container-env rather than observed. If the
-# server ever exposes the effective budget as a metric, read it from there instead.
+# and applied it - hence the config block labels it container-env rather than observed. The
+# resolved budgets are read from the gauges separately (event_log_scaling, event_log_budget).
 container_env() { # VAR_NAME [container_name=$SERVER]
   # Defaults to the ERROR baseline SUT so every existing caller is unchanged; the
   # INFO publication arm passes its own container name to read that SUT's log level.
@@ -1261,6 +1341,7 @@ if [ -n "${PERF_SO_BACKLOG:-}" ] \
    || [ -n "${PERF_SERVER_JAVA_OPTS:-}" ] \
    || [ -n "${PERF_SERVER_MEMORY:-}" ] \
    || [ -n "${PERF_MAX_EVENT_LOG_BYTES_SET:-}" ] \
+   || [ -n "${PERF_INFO_MAX_EVENT_LOG_BYTES:-}" ] \
    || [ "$PERF_LARGE_HEAP_PROFILE" = "true" ]; then
   CONFIG_PROFILE="tuned"
 fi
@@ -2362,18 +2443,27 @@ if [ "$PERF_INFO_ARM" = "true" ]; then
   INFO_T_START="$(date -u +%s)"
   echo "--- INFO-log-level arm: starting SUT ($MOCKSERVER_IMAGE, MOCKSERVER_LOG_LEVEL=INFO, pinned to $SERVER_CPUS)"
   INFO_MEASURED=false
-  # publish="" (no host port needed — log level is read via docker inspect, not the
-  # metrics endpoint); same memory bound + file-body mount + image as the ERROR SUT
-  # so the JS-template and file-body arms behave identically. Guarded with `|| true`
+  # Published so its event-log gauges can be read; same memory, mount and image as the ERROR SUT,
+  # but no harness event-log budget. Guarded with `|| true`
   # so a docker-run failure here degrades the (notify-only) INFO arm rather than
   # aborting the ERROR-baseline run under `set -e`; a failed start leaves either no
   # container or a kept one in `created`, both of which wait_ready fails at once, so the
   # arm records measured:false.
-  start_mockserver "$INFO_SERVER" "$SERVER_CPUS" "$INFO_SERVER_ALIAS" "" "$SERVER_MEMORY" "$FILE_BODY_MOUNT" "INFO" "info" \
+  start_mockserver "$INFO_SERVER" "$SERVER_CPUS" "$INFO_SERVER_ALIAS" "publish" "$SERVER_MEMORY" "$FILE_BODY_MOUNT" "INFO" "info" "" 1080 "$PERF_INFO_MAX_EVENT_LOG_BYTES" \
     && { docker logs -f "$INFO_SERVER" > "$DIAG_DIR/info/info-server.log" 2>&1 & INFO_LOG_PID=$!; } \
     || echo "WARNING: INFO SUT failed to start — INFO arm will record measured:false" >&2
+  INFO_ELS_MAX_BYTES=""; INFO_ELS_MAX_ENTRIES=""; INFO_HEAP_MAX_BYTES=""; INFO_ELS_DROPPED=""; INFO_ELS_EVICTED=""
+  INFO_ELS_SAMPLES="$DIAG_DIR/info/event-log-samples.txt"; : > "$INFO_ELS_SAMPLES" 2>/dev/null || true
   if wait_ready "$INFO_SERVER"; then
     INFO_MEASURED=true
+    INFO_METRICS_HOSTPORT="$(docker port "$INFO_SERVER" 1080/tcp 2>/dev/null | head -1 || true)"
+    INFO_METRICS=""
+    [ -z "$INFO_METRICS_HOSTPORT" ] || INFO_METRICS="$(curl -sf --max-time 4 "http://${INFO_METRICS_HOSTPORT}/mockserver/metrics" 2>/dev/null || true)"
+    INFO_ELS_MAX_BYTES="$(gauge_value mock_server_event_log_max_retained_bytes <<<"$INFO_METRICS")"
+    INFO_ELS_MAX_ENTRIES="$(gauge_value mock_server_event_log_max_retained_entries <<<"$INFO_METRICS")"
+    INFO_HEAP_MAX_BYTES="$(gauge_value 'jvm_memory_max_bytes{area="heap"}' <<<"$INFO_METRICS")"
+    echo "--- INFO SUT event-log budget: maxEventLogSizeInBytes=${INFO_ELS_MAX_BYTES:-<unreadable>} maxLogEntries=${INFO_ELS_MAX_ENTRIES:-<unreadable>} heap_max=${INFO_HEAP_MAX_BYTES:-<unreadable>} (requested: ${PERF_INFO_MAX_EVENT_LOG_BYTES:-shipped default})"
+    [ -z "$INFO_METRICS_HOSTPORT" ] || start_info_els_sampler "$INFO_METRICS_HOSTPORT" "$INFO_ELS_SAMPLES"
     # Per-behaviour percentiles at INFO (http + https_h2), same durations/arms as the
     # ERROR regression so the two are comparable. Guarded: a k6 failure degrades this
     # arm to measured:false rather than aborting the (ERROR-baseline) run.
@@ -2383,6 +2473,10 @@ if [ "$PERF_INFO_ARM" = "true" ]; then
     echo "--- INFO-log-level arm: sweep.js (knee curve at INFO)"
     run_sweep "$INFO_SWEEP_K6" "$INFO_SERVER_ALIAS" "$OUT_DIR/info-sweep.json" "$OUT_DIR/info-sweep-k6-cpu.csv" \
       || { echo "WARNING: INFO sweep failed — INFO knee degraded" >&2; INFO_MEASURED=false; }
+    stop_info_els_sampler
+    INFO_METRICS=""
+    [ -z "$INFO_METRICS_HOSTPORT" ] || INFO_METRICS="$(curl -sf --max-time 4 "http://${INFO_METRICS_HOSTPORT}/mockserver/metrics" 2>/dev/null || true)"
+    IFS='|' read -r INFO_ELS_DROPPED INFO_ELS_EVICTED <<<"$(event_log_counters <<<"$INFO_METRICS")" || true
   else
     echo "WARNING: INFO SUT did not become ready — INFO arm skipped (notify-only, ERROR baseline unaffected)" >&2
   fi
@@ -2394,6 +2488,20 @@ if [ "$PERF_INFO_ARM" = "true" ]; then
   # extension of the existing config-block mechanism, not a parallel one.
   INFO_LOG_LEVEL_VAL="$(container_env MOCKSERVER_LOG_LEVEL "$INFO_SERVER")"; INFO_LOG_LEVEL_SRC="observed"
   [ -n "$INFO_LOG_LEVEL_VAL" ] || { INFO_LOG_LEVEL_VAL="INFO"; INFO_LOG_LEVEL_SRC="declared"; }
+  if docker inspect "$INFO_SERVER" >/dev/null 2>&1; then
+    INFO_ELS_REQUESTED="$(container_env MOCKSERVER_MAX_EVENT_LOG_SIZE_IN_BYTES "$INFO_SERVER")"; INFO_ELS_REQUESTED_SRC="container-env"
+  else
+    INFO_ELS_REQUESTED="$PERF_INFO_MAX_EVENT_LOG_BYTES"; INFO_ELS_REQUESTED_SRC="declared"
+  fi
+  INFO_ELS_METHOD="$(info_els_method "$INFO_ELS_REQUESTED")"
+  INFO_ELS_EXPECTED_DEFAULT=""
+  [ -z "$INFO_HEAP_MAX_BYTES" ] || INFO_ELS_EXPECTED_DEFAULT="$(awk -v h="$INFO_HEAP_MAX_BYTES" 'BEGIN{ hk=int(h/1024)-20480; if (hk<0) hk=0; printf "%.0f", int(hk/12)*1024 }')"
+  INFO_ELS_PEAK_BYTES=""; INFO_ELS_PEAK_ENTRIES=""
+  read -r INFO_ELS_PEAK_BYTES INFO_ELS_PEAK_ENTRIES <<<"$(event_log_peaks "$INFO_ELS_SAMPLES")" || true
+  INFO_ELS_JSON="$(event_log_budget_json "$INFO_ELS_METHOD" "$INFO_ELS_REQUESTED" "$INFO_ELS_REQUESTED_SRC" \
+    "$INFO_ELS_MAX_BYTES" "$INFO_ELS_MAX_ENTRIES" "$INFO_HEAP_MAX_BYTES" "$INFO_ELS_EXPECTED_DEFAULT" \
+    "$INFO_ELS_PEAK_BYTES" "$INFO_ELS_PEAK_ENTRIES" "$INFO_ELS_DROPPED" "$INFO_ELS_EVICTED" "$PERF_EVENT_LOG_APPROACH_RATIO")"
+  jq -e . >/dev/null 2>&1 <<<"$INFO_ELS_JSON" || INFO_ELS_JSON="$(jq -nc --arg m "$INFO_ELS_METHOD" '{method: $m}')"
 
   # Merge the http + https_h2 behaviours (guarded to {} on any missing/unparsable
   # file), derive the INFO saturation with the SHARED derive_saturation, then assemble the
@@ -2416,6 +2524,7 @@ if [ "$PERF_INFO_ARM" = "true" ]; then
     --arg log_level "$INFO_LOG_LEVEL_VAL" --arg log_level_src "$INFO_LOG_LEVEL_SRC" \
     --arg image "$MOCKSERVER_IMAGE" --arg image_digest "$IMAGE_DIGEST" \
     --arg server_cpus "${SERVER_CPUS:-none}" --arg k6_cpus "${K6_CPUS:-none}" \
+    --argjson event_log_budget "$INFO_ELS_JSON" \
     --argjson behaviours "$INFO_BEHAVIOURS" \
     --argjson sweep "$INFO_SWEEP_JSON" \
     --argjson saturation "$INFO_SATURATION_JSON" '
@@ -2430,7 +2539,9 @@ if [ "$PERF_INFO_ARM" = "true" ]; then
         log_level_source: $log_level_src,
         image: $image,
         image_digest: $image_digest,
-        cpusets: { server: $server_cpus, k6: $k6_cpus }
+        cpusets: { server: $server_cpus, k6: $k6_cpus },
+        # .method is the compare key; runs without it forced 256 MiB.
+        event_log_budget: $event_log_budget
       },
       # Per-behaviour percentiles (http + https_h2 merged), SAME shape as the ERROR
       # .behaviours but under a distinct key so it is never fingerprint-matched or

@@ -69,6 +69,9 @@ bash "$REPO_ROOT/.buildkite/scripts/test/perf-k6-runtime-test.sh"
 echo "--- perf-test-run start-up checks (diagnostics tiers, env guards, wait_ready states)"
 bash "$REPO_ROOT/.buildkite/scripts/test/perf-run-ready-test.sh"
 
+echo "--- INFO-arm event-log budget checks (item 40: shipped default on the INFO SUT, info_* baseline key)"
+bash "$REPO_ROOT/.buildkite/scripts/test/perf-info-budget-test.sh"
+
 echo "--- allocation-profile annotation checks (item 28: ceiling views, size cap, degrade notes)"
 bash "$REPO_ROOT/.buildkite/scripts/test/perf-allocprofile-annotation-test.sh"
 

@@ -989,6 +989,11 @@ def latk6rt($f): (first(.[$f].points[]?.measurement.k6_runtime | select(. != nul
 def latfp($f): (.[$f].sweep.latency_settle_s // null) as $s
   | if $f == "serving_hw_matrix" and $s != null then "\($s)|\(.[$f].client // "single")|\(latk6rt($f))" else $s end;
 def latpresent($f): (((.[$f] // {}).points // []) | length) > 0;
+# INFO-arm event-log budget fingerprint. The INFO SUT ran with a harness-forced 256 MiB
+# budget until it was switched to the shipped default, which changes what info_* measure; info_*
+# metrics compare only against runs with the same method. A run without the field forced 256 MiB.
+def infofp: ((.info_log_level_arm // {}).config.event_log_budget.method // "fixed-268435456");
+def infomeasured: (.info_log_level_arm // {}).measured == true;
 
 # JMH methodology fingerprint of the HEAD run (item 15c baseline-discontinuity guard).
 # microbench / microbench_extra metrics are only comparable against baseline runs
@@ -1034,12 +1039,15 @@ def latpresent($f): (((.[$f] // {}).points // []) | length) > 0;
 # (gating) is a connection-pool guard the template engine cannot influence.
 | (.agent.instance_type // "") as $headinstance
 | ((.behaviours // {}) | keys | sort) as $headarms
+| infofp as $headinfofp
 | $baseline as $ballruns
 | [ $ballruns[] | select((.config.jmh // null) == $headjmh) ] as $bmicroruns
 | [ $ballruns[] | select(((.behaviours // {}) | keys | sort) == $headarms) ] as $bk6runs
+| [ $ballruns[] | select(infofp == $headinfofp) ] as $binforuns
 | bmapof($ballruns) as $bmapAll
 | bmapof($bmicroruns) as $bmapMicro
 | bmapof($bk6runs) as $bmapK6
+| bmapof($binforuns) as $bmapInfo
 # Hardware-matched subsets, for metrics whose VALUE moves with the machine.
 # A timing figure from a different instance type is not a comparable sample, and a
 # rolling median that spans a hardware change absorbs the step change instead of
@@ -1065,9 +1073,11 @@ def latpresent($f): (((.[$f] // {}).points // []) | length) > 0;
 | [ $ballruns[] | select(((.agent.instance_type // "") == $headinstance) and ($headinstance != "")) ] as $bhwruns
 | [ $bmicroruns[] | select(((.agent.instance_type // "") == $headinstance) and ($headinstance != "")) ] as $bmicrohwruns
 | [ $bk6runs[] | select(((.agent.instance_type // "") == $headinstance) and ($headinstance != "")) ] as $bk6hwruns
+| [ $binforuns[] | select(((.agent.instance_type // "") == $headinstance) and ($headinstance != "")) ] as $binfohwruns
 | bmapof($bhwruns) as $bmapAllHw
 | bmapof($bmicrohwruns) as $bmapMicroHw
 | bmapof($bk6hwruns) as $bmapK6Hw
+| bmapof($binfohwruns) as $bmapInfoHw
 | ({serving_percore: latfp("serving_percore"), serving_multiproc: latfp("serving_multiproc"),
     serving_hw_matrix: latfp("serving_hw_matrix")}) as $headlat
 | ($headlat | with_entries(.key as $f | .value as $v | .value = {
@@ -1086,6 +1096,10 @@ def latpresent($f): (((.[$f] // {}).points // []) | length) > 0;
     baseline_k6_comparable: ($bk6runs|length),
     head_jmh_present: ($headjmh != null),
     head_k6fp_present: (($headarms | length) > 0),
+    head_info_measured: infomeasured,
+    head_info_budget_method: $headinfofp,
+    baseline_info_comparable: ([ $binforuns[] | select(infomeasured) ] | length),
+    baseline_info_other: ([ $ballruns[] | select(infomeasured and (infofp != $headinfofp)) ] | length),
     sweep_latency_reset: ([ $headmetrics[] | .bkey | latfam | select(. != null) ] | unique
       | map({family: ., head_settle_s: $headlat[.], comparable: $bmapLat[.].comparable, other: $bmapLat[.].other,
              head_window: ($headlat[.] | if type == "string" then (split("|") | "settle \(.[0])s, \(.[1]) client, k6 \(.[2] // "defaults")")
@@ -1108,10 +1122,12 @@ def latpresent($f): (((.[$f] // {}).points // []) | length) > 0;
          elif $m.hw then
            (if ($m.bkey|startswith("microbench")) then ($bmapMicroHw[$m.name] // [])
             elif ($m.bkey|startswith("behaviours")) then ($bmapK6Hw[$m.name] // [])
+            elif ($m.bkey|startswith("info_")) then ($bmapInfoHw[$m.name] // [])
             else ($bmapAllHw[$m.name] // []) end)
          else
            (if ($m.bkey|startswith("microbench")) then ($bmapMicro[$m.name] // [])
             elif ($m.bkey|startswith("behaviours")) then ($bmapK6[$m.name] // [])
+            elif ($m.bkey|startswith("info_")) then ($bmapInfo[$m.name] // [])
             else ($bmapAll[$m.name] // []) end)
          end) as $bv
       # Minimum comparable runs before a THRESHOLD is computed. A config/fingerprint
@@ -1127,6 +1143,7 @@ def latpresent($f): (((.[$f] // {}).points // []) | length) > 0;
       | (if $m.hw or ($lf != null) then $minbaseline
          elif ($m.bkey|startswith("microbench")) then $minbaseline
          elif ($m.bkey|startswith("behaviours")) then $minbaseline
+         elif ($m.bkey|startswith("info_")) then $minbaseline
          else 1 end) as $minreq
       | if ($bv|length) < $minreq then {name:$m.name, head:$m.value, gating:$m.gating, status:"no-baseline"}
         else
@@ -1224,6 +1241,23 @@ if [ "$HEAD_K6FP_PRESENT" = "true" ] && [ "$K6_COMPARABLE" -lt "$BASE_TOTAL_CMP"
   K6_NOTE="
 
 :information_source: **k6 behaviour baseline reset — arm set changed.** Only ${K6_COMPARABLE}/${BASE_TOTAL_CMP} baseline run(s) share this run's set of behaviour arms, so the per-behaviour \`*.p95_ms\` / \`*.p99_ms\` / \`*.error_rate\` metrics compare ONLY against those (growth / sweep / forward keep the full baseline). They stay \`:new: new\` (no comparable baseline, NOT flagged) until at least ${MIN_BASELINE} arm-set-matching runs exist — the same warm-up threshold the global baseline uses — so adding or removing an arm (or switching the -graaljs/file capability, which changes which arms run) self-invalidates the k6 baseline window instead of comparing a different arm mix straight across the discontinuity and producing a misleading (notify-only) flag. The fingerprint is the arm set ALONE, which is stable across snapshot rebuilds, so once ${MIN_BASELINE} matching runs have accrued the metrics re-arm and then compare normally across rebuilds. These metrics are notify-only, so this never blocks the build."
+fi
+
+# INFO-arm event-log budget discontinuity (docs/code/performance-measurement.md,
+# "Saturation-series comparability break", the sixth break). Same visibility rule as above.
+INFO_COMPARABLE="$(printf '%s' "$RESULT_CMP" | jq -r '.baseline_info_comparable // 0')"
+INFO_OTHER="$(printf '%s' "$RESULT_CMP" | jq -r '.baseline_info_other // 0')"
+INFO_METHOD="$(printf '%s' "$RESULT_CMP" | jq -r '.head_info_budget_method // "unknown"')"
+INFO_NOTE=""
+if [ "$(printf '%s' "$RESULT_CMP" | jq -r '.head_info_measured // false')" = "true" ] && [ "$INFO_OTHER" -gt 0 ]; then
+  if [ "$INFO_COMPARABLE" -lt "$MIN_BASELINE" ]; then
+    INFO_STATE="so they stay \`:new: new\` (not flagged) until ${MIN_BASELINE} exist; \`info_*\` re-baselines from the first run after the switch"
+  else
+    INFO_STATE="which is enough to compare; the other runs are ignored until they leave the baseline window"
+  fi
+  INFO_NOTE="
+
+:information_source: **INFO-arm baseline reset — event-log budget changed.** This run's INFO SUT used event-log budget \`${INFO_METHOD}\`; ${INFO_OTHER} baseline run(s) measured the INFO arm under a different one (runs before the switch forced the harness's 256 MiB, \`fixed-268435456\`). The \`info_*\` metrics compare ONLY against the ${INFO_COMPARABLE} run(s) with the same budget, ${INFO_STATE}. Notify-only; this never blocks the build."
 fi
 
 # Sweep latency-window discontinuity (docs/code/performance-measurement.md, "Rung-onset
@@ -1338,7 +1372,7 @@ fi
 # carries them.
 EXTRA="${EXTRA}
 
-${PROVENANCE}${HW_NOTE}${PRECFG_NOTE}${MB_NOTE}${K6_NOTE}${SWEEPLAT_NOTE}${LAPTOP_INJVM_NOTE}${STREAM_NOTE}${CLU_NOTE}${PC_NOTE}${HWM_NOTE}${MP_NOTE}"
+${PROVENANCE}${HW_NOTE}${PRECFG_NOTE}${MB_NOTE}${K6_NOTE}${INFO_NOTE}${SWEEPLAT_NOTE}${LAPTOP_INJVM_NOTE}${STREAM_NOTE}${CLU_NOTE}${PC_NOTE}${HWM_NOTE}${MP_NOTE}"
 
 HEADER="Perf regression — \`${COMMIT:0:10}\` on \`${BRANCH}\` (baseline: ${BASE_COUNT} runs, median+MAD; budgets @ \`${BUDGETS_COMMIT:0:10}\`)"
 # Legend folded into every flagged annotation so a reader knows why the build did
