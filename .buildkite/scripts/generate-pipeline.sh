@@ -214,7 +214,9 @@ trigger_client_if_changed "^(mockserver-client-dotnet/|mockserver-testcontainers
 trigger_client_if_changed "^(mockserver-client-rust/|mockserver-testcontainers/rust/)" "mockserver-rust" "MockServer Rust"
 trigger_client_if_changed "^mockserver-client-php/" "mockserver-php" "MockServer PHP"
 trigger_if_changed "^(mockserver-vscode/|mockserver-jetbrains/)" "mockserver-editors" "MockServer Editors"
-trigger_if_changed "^mockserver/mockserver-maven-plugin/" "mockserver-maven-plugin" "MockServer Maven Plugin"
+# Its build step also runs the configuration call-site guard over the plugin, so a
+# change to that guard or to the step itself must run it too.
+trigger_if_changed "^(mockserver/mockserver-maven-plugin/|\.buildkite/pipeline-maven-plugin\.yml|\.buildkite/scripts/steps/maven-plugin-build\.sh|mockserver/mockserver-netty/src/test/java/org/mockserver/configuration/ConfigurationCallSiteGuardTest\.java)" "mockserver-maven-plugin" "MockServer Maven Plugin"
 trigger_if_changed "^mockserver-performance-test/" "mockserver-performance-test" "MockServer Performance Test"
 # docker/** routes here too (not only container_integration_tests/**): the
 # container-tests Helm step builds docker/Dockerfile and docker/clustered, so a

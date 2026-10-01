@@ -99,6 +99,10 @@ import static org.hamcrest.Matchers.is;
  * {@link #expectedScannedModules()} asserts every module that SHOULD be covered actually was, so an
  * incomplete tree fails loudly instead of narrowing the guard's scope in silence.
  *
+ * <p>{@code mockserver-maven-plugin} ships but is outside the reactor, so the quick build never builds
+ * it. {@code .buildkite/scripts/steps/maven-plugin-build.sh} runs the guard again after the plugin's
+ * {@code verify}, naming it in {@link #EXTRA_EXPECTED_MODULES_PROPERTY} so a missing plugin build fails.
+ *
  * <h2>Maintenance</h2>
  * <p>This guard needs zero per-property and zero per-module maintenance: it discovers the property set,
  * the call sites AND the set of modules to cover automatically. If it fails on a new call site, the
@@ -109,6 +113,13 @@ public class ConfigurationCallSiteGuardTest {
 
     private static final String CONFIGURATION_PROPERTIES = "org/mockserver/configuration/ConfigurationProperties";
     private static final String CONFIGURATION = "org/mockserver/configuration/Configuration";
+
+    /**
+     * Comma-separated non-reactor modules the run must also have scanned, e.g. {@code
+     * -Dguard.extraExpectedModules=mockserver-maven-plugin}. Surefire passes Maven user properties to
+     * the test JVM.
+     */
+    private static final String EXTRA_EXPECTED_MODULES_PROPERTY = "guard.extraExpectedModules";
 
     /**
      * Reactor modules that appear in {@code mockserver/pom.xml}'s {@code <modules>} list but which the
@@ -292,7 +303,9 @@ public class ConfigurationCallSiteGuardTest {
                 + "It almost always means the guard ran before these modules were compiled — e.g. in "
                 + "mockserver-netty's own test phase, where every module downstream of netty in the reactor is not "
                 + "yet built. Run it over a FULLY-built reactor (the post-install `surefire:test@configuration-"
-                + "callsite-guard` step), or add a justified exemption to MODULES_WITHOUT_SCANNABLE_MAIN_CLASSES: "
+                + "callsite-guard` step), or add a justified exemption to MODULES_WITHOUT_SCANNABLE_MAIN_CLASSES. "
+                + "A module named in -D" + EXTRA_EXPECTED_MODULES_PROPERTY + " must have been built (and not be in "
+                + "UNSHIPPED_MODULES_EXCLUDED_FROM_SCAN). Missing: "
                 + missingModules,
             missingModules, is(empty()));
         // core and netty are the load-bearing minimum; keep an explicit tripwire in case the derivation
@@ -588,6 +601,9 @@ public class ConfigurationCallSiteGuardTest {
      * {@link #MODULES_WITHOUT_SCANNABLE_MAIN_CLASSES}. This automatically excludes {@code mockserver-bom}
      * and the {@code *-no-dependencies} shade modules (no main sources) while automatically INCLUDING any
      * newly-added module that defines configuration call sites — no per-module maintenance.
+     *
+     * <p>Every module named in {@link #EXTRA_EXPECTED_MODULES_PROPERTY} is added unconditionally, so a
+     * misspelt, unbuilt or scan-exempt name fails the coverage check rather than being dropped.
      */
     private static Set<String> expectedScannedModules() throws IOException {
         Path root = mockserverRoot();
@@ -598,6 +614,11 @@ public class ConfigurationCallSiteGuardTest {
             }
             if (Files.isDirectory(root.resolve(module).resolve("src/main/java"))) {
                 expected.add(module);
+            }
+        }
+        for (String module : System.getProperty(EXTRA_EXPECTED_MODULES_PROPERTY, "").split(",")) {
+            if (!module.trim().isEmpty()) {
+                expected.add(module.trim());
             }
         }
         return expected;

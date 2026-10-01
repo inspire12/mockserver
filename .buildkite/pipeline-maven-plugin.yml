@@ -26,6 +26,7 @@ steps:
     command: ".buildkite/scripts/steps/maven-plugin-build.sh"
     artifact_paths:
       - "mockserver/mockserver-maven-plugin/**/TEST-*.xml"
+      - "mockserver/mockserver-netty/target/surefire-reports/TEST-org.mockserver.configuration.ConfigurationCallSiteGuardTest.xml"
     timeout_in_minutes: 45
     retry:
       automatic:
@@ -40,7 +41,8 @@ steps:
   - label: ":junit: annotate test results"
     plugins:
       - junit-annotate#8a549e5220869601737287b4d6a9293703dc5a6f:  # v2.7.0
-          artifacts: "mockserver/mockserver-maven-plugin/**/TEST-*.xml"
+          # Matches only what the build step uploaded: the plugin reports and the guard report.
+          artifacts: "mockserver/**/TEST-*.xml"
           always-annotate: true
           fail-build-on-error: false
     timeout_in_minutes: 10
