@@ -574,6 +574,17 @@ public abstract class LifeCycle implements Stoppable {
         return scheduler;
     }
 
+    /**
+     * The single live {@link Configuration} this server runs on: the instance shared by the
+     * {@link HttpState}, the event log and the request handlers, and the one that
+     * {@code PUT /mockserver/configuration} mutates. When the server was constructed without a
+     * configuration this is the default instance built at construction (by the
+     * {@code MockServer} constructor, or here when {@code null} is passed), never a second copy.
+     */
+    public Configuration getConfiguration() {
+        return configuration;
+    }
+
     public boolean isRunning() {
         return !bossGroup.isShuttingDown() || !workerGroup.isShuttingDown();
     }

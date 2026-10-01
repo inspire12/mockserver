@@ -57,7 +57,7 @@ public class MockServer extends LifeCycle {
      * @param localPorts the local port(s) to use, use 0 or no vararg values to specify any free port
      */
     public MockServer(final Integer... localPorts) {
-        this(null, proxyConfiguration(configuration()), localPorts);
+        this(configuration(), localPorts);
     }
 
     /**
@@ -87,7 +87,7 @@ public class MockServer extends LifeCycle {
      */
     public MockServer(final Configuration configuration, final List<ProxyConfiguration> proxyConfigurations, final Integer... localPorts) {
         super(configuration);
-        createServerBootstrap(configuration, proxyConfigurations, localPorts);
+        createServerBootstrap(proxyConfigurations, localPorts);
 
         // wait to start
         getLocalPort();
@@ -101,7 +101,7 @@ public class MockServer extends LifeCycle {
      * @param localPorts the local port(s) to use
      */
     public MockServer(final Integer remotePort, @Nullable final String remoteHost, final Integer... localPorts) {
-        this(null, proxyConfiguration(configuration()), remoteHost, remotePort, localPorts);
+        this(configuration(), remotePort, remoteHost, localPorts);
     }
 
     /**
@@ -152,16 +152,18 @@ public class MockServer extends LifeCycle {
                     .setArguments(proxyConfigurations)
             );
         }
-        createServerBootstrap(configuration, proxyConfigurations, localPorts);
+        createServerBootstrap(proxyConfigurations, localPorts);
 
         // wait to start
         getLocalPort();
     }
 
-    private void createServerBootstrap(Configuration configuration, final List<ProxyConfiguration> proxyConfigurations, final Integer... localPorts) {
-        if (configuration == null) {
-            configuration = configuration();
-        }
+    private void createServerBootstrap(final List<ProxyConfiguration> proxyConfigurations, final Integer... localPorts) {
+        // The instance LifeCycle resolved, never a fresh one: the request handlers built below must
+        // share it with HttpState and the event log, or PUT /mockserver/configuration mutates the
+        // handlers' copy while enforcement and resizing read the other, so a runtime change is
+        // echoed back but not applied (including enabling control-plane authentication).
+        final Configuration configuration = getConfiguration();
 
         // FIRST, before anything is bound. This depends only on configuration, so there is no reason to
         // discover it late - and discovering it late is expensive: the throw escapes the constructor, so

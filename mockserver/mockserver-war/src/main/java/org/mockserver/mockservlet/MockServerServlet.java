@@ -59,12 +59,12 @@ public class MockServerServlet extends HttpServlet implements ServletContextList
         this.configuration = configuration();
         this.mockServerLogger = new MockServerLogger(MockServerEventLog.class);
         this.httpServletRequestToMockServerRequestDecoder = new HttpServletRequestToMockServerHttpRequestDecoder(this.configuration, this.mockServerLogger);
-        this.scheduler = new Scheduler(configuration(), mockServerLogger);
-        this.httpStateHandler = new HttpState(configuration(), mockServerLogger, this.scheduler);
+        this.scheduler = new Scheduler(this.configuration, mockServerLogger);
+        this.httpStateHandler = new HttpState(this.configuration, mockServerLogger, this.scheduler);
         this.mockServerLogger = httpStateHandler.getMockServerLogger();
         this.portBindingSerializer = new PortBindingSerializer(mockServerLogger);
         this.workerGroup = new NioEventLoopGroup(configuration.nioEventLoopThreadCount(), new Scheduler.SchedulerThreadFactory(this.getClass().getSimpleName() + "-eventLoop"));
-        this.actionHandler = new HttpActionHandler(configuration(), () -> workerGroup, httpStateHandler, null, new NettySslContextFactory(this.configuration, this.mockServerLogger, true));
+        this.actionHandler = new HttpActionHandler(this.configuration, () -> workerGroup, httpStateHandler, null, new NettySslContextFactory(this.configuration, this.mockServerLogger, true));
         // Wire the replay handler so PUT /mockserver/replay can re-issue
         // requests using the existing NettyHttpClient (forward/proxy client).
         this.httpStateHandler.setReplayHandler(req -> actionHandler.getHttpClient().sendRequest(req));
@@ -96,7 +96,7 @@ public class MockServerServlet extends HttpServlet implements ServletContextList
     @Override
     public void service(HttpServletRequest httpServletRequest, HttpServletResponse httpServletResponse) {
 
-        ResponseWriter responseWriter = new ServletResponseWriter(configuration(), new MockServerLogger(), httpServletResponse);
+        ResponseWriter responseWriter = new ServletResponseWriter(configuration, new MockServerLogger(), httpServletResponse);
         HttpRequest request = null;
         try {
 

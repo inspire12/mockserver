@@ -59,6 +59,10 @@ For the two fixed properties, a PUT that **explicitly supplies a value differing
 
 Implemented in `HttpState.applyConfigurationUpdate(ConfigurationDTO)`, called from the `PUT /mockserver/configuration` route in `HttpRequestHandler`.
 
+### One `Configuration` instance per server
+
+A runtime change reaches enforcement only because every part of a server holds the **same** `Configuration` instance: `LifeCycle`, `HttpState`, the event log, the scheduler and the Netty request handlers that serve `PUT` and `GET /mockserver/configuration`. A server constructed without a `Configuration` — `new MockServer(ports)`, which the CLI, the Docker images and the Maven plugin use — gets one default instance built at construction (by the `MockServer` constructor, or by `LifeCycle` when `null` is passed), and `MockServer.createServerBootstrap` reads it back with `getConfiguration()` instead of building its own. Before that, those paths built two instances: the `PUT` changed the handlers' copy, so it returned `200` and `GET` echoed the new values, while `HttpState` kept enforcing and sizing from the other (control-plane authentication, event-log capacity, log redaction). The WAR servlets build one instance and pass it to every component. `RuntimeConfigurationEveryConstructionPathIntegrationTest` checks every `MockServer` and `ClientAndServer` constructor shape, and `MockServerServletSharedConfigurationTest` / `ProxyServletSharedConfigurationTest` the servlets. A new component must take the server's instance, not call `Configuration.configuration()`.
+
 ## Property categories
 
 `mockserver.example.properties` groups the core properties into blocks. `ConfigurationProperties.java` defines the full set — there are currently **~170 properties** (one `private static final String MOCKSERVER_*` key constant per property). The categories below cover both the blocks in the example file and the additional groups defined only in `ConfigurationProperties.java`:

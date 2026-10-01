@@ -22,6 +22,19 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
 
 ### Security
 
+- **Configuration changes made through the REST API now take effect on a server started from the
+  command line or Docker.** A server started without a configuration object (the command line, the
+  Docker images and the Maven plugin) held two copies of its configuration. `PUT
+  /mockserver/configuration` changed the copy that answers configuration requests, so it returned
+  `200` and a later `GET` reported the new values, but request handling kept using the startup
+  values. Enabling control-plane authentication this way, for example
+  `controlPlaneTLSMutualAuthenticationRequired: true`, reported success and left the control plane
+  open: calls without credentials could still clear the server and create expectations. Lowering
+  `maxLogEntries` or `maxEventLogSizeInBytes` evicted nothing, and enabling `redactSecretsInLog` left
+  retrieved logs unmasked. Every way of starting MockServer now uses one configuration. Settings
+  given at startup (system property, environment variable, properties file) were not affected, nor
+  were servers started through `ClientAndServer`, the JUnit rule and extension, or the Spring
+  integrations.
 - **`redactSecretsInLog` now masks credentials everywhere the event log is shown or retrieved.**
   With it enabled, each log entry for a proxied or forwarded request still carried the credentials its
   masked request had hidden: the log message printed to the console, returned by retrieve and shown in
