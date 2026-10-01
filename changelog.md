@@ -249,6 +249,14 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   with no charset is read as ISO-8859-1 (HTTP's default), so to match such a body on non-Latin-1 text the
   client should send a charset, such as `text/plain; charset=utf-8`; JSON and XML bodies are read as UTF-8
   by default and match as before.
+- **HTTP/3 request bodies sent with a `Content-Encoding` are now decompressed, as on HTTP/1.1 and
+  HTTP/2.** A `gzip` (or `deflate`, `snappy`, `zstd` or `br`) request body sent over HTTP/3 was matched
+  while still compressed, so a body expectation that matched the same request over HTTP/1.1 or HTTP/2
+  did not match it, and a forwarded `gzip` or `deflate` body was compressed a second time. The recorded request now has the
+  decompressed body, the compressed bytes as its original body, `content-length` set to the decompressed
+  size and `content-encoding` kept. `maxRequestBodySize` now also limits the decompressed size, so a
+  small compressed body that expands past it is rejected with `413`, and a body that cannot be
+  decompressed is dropped without a response, as on the other protocols.
 - **arm64 Docker images now carry the arm64 native TLS library.** The Dockerfiles defaulted the target
   architecture to amd64, and that default overrode the one Docker supplies, so an arm64 build copied the
   x86_64 build of `netty-tcnative` into `/usr/lib`. This affects the published arm64 `-graaljs` and

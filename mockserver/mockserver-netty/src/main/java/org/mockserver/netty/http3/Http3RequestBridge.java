@@ -15,6 +15,7 @@ import org.mockserver.model.Protocol;
 
 import java.util.AbstractMap;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Locale;
@@ -95,8 +96,69 @@ public final class Http3RequestBridge {
     }
 
     /**
+     * As {@link #toHttpRequest(String, String, String, String, List, ByteBuf)}, unless {@code decompressedBody} (the
+     * body {@link Http3RequestDecompressor} decompressed) is non-null: the request is then the one HTTP/1.1's
+     * decompressor, aggregator and request mapper build. The body is the decompressed bytes and the wire bytes are kept
+     * as its original body (when they differ); a {@code content-length} is replaced by the decompressed size, and
+     * {@code content-encoding} is kept but moved after the other headers. Neither buffer is released here.
+     */
+    public static HttpRequest toHttpRequest(
+        String method,
+        String path,
+        String scheme,
+        String authority,
+        List<Map.Entry<String, String>> headers,
+        ByteBuf body,
+        ByteBuf decompressedBody
+    ) {
+        if (decompressedBody == null) {
+            return toHttpRequest(method, path, scheme, authority, headers, body);
+        }
+        HttpRequest request = buildRequestWithoutBody(method, path, scheme, authority, headersAfterDecompression(headers, decompressedBody.readableBytes()));
+        byte[] decompressed = null;
+        if (decompressedBody.isReadable()) {
+            decompressed = new byte[decompressedBody.readableBytes()];
+            decompressedBody.getBytes(decompressedBody.readerIndex(), decompressed);
+            request.withBody(BODY_DECODER.bytesToBody(decompressed, findContentType(headers)));
+        }
+        if (body != null && body.isReadable()) {
+            byte[] original = new byte[body.readableBytes()];
+            body.getBytes(body.readerIndex(), original);
+            if (!Arrays.equals(original, decompressed)) {
+                request.withOriginalBody(original);
+            }
+        }
+        return request;
+    }
+
+    /**
+     * HTTP/1.1's decompressor drops {@code content-length}, its aggregator appends one with the decompressed size, and
+     * its request mapper appends the {@code content-encoding} the decompressor removed, so both end up last, in that
+     * order. A request with no {@code content-length} (on HTTP/1.1, a chunked one) gets none.
+     */
+    static List<Map.Entry<String, String>> headersAfterDecompression(List<Map.Entry<String, String>> headers, int decompressedLength) {
+        List<Map.Entry<String, String>> rewritten = new ArrayList<>(headers.size() + 1);
+        List<Map.Entry<String, String>> contentEncodings = new ArrayList<>(1);
+        boolean hadContentLength = false;
+        for (Map.Entry<String, String> header : headers) {
+            if (CONTENT_LENGTH.equalsIgnoreCase(header.getKey())) {
+                hadContentLength = true;
+            } else if (CONTENT_ENCODING.equalsIgnoreCase(header.getKey())) {
+                contentEncodings.add(header);
+            } else {
+                rewritten.add(header);
+            }
+        }
+        if (hadContentLength) {
+            rewritten.add(new AbstractMap.SimpleImmutableEntry<>(CONTENT_LENGTH, String.valueOf(decompressedLength)));
+        }
+        rewritten.addAll(contentEncodings);
+        return rewritten;
+    }
+
+    /**
      * Build the {@link HttpRequest} with method, path, query string and headers set, but no body.
-     * Shared by both {@code toHttpRequest} overloads so the two body-materialisation strategies
+     * Shared by the {@code toHttpRequest} overloads so the body-materialisation strategies
      * differ only in how they read the body, never in how the rest of the request is built.
      */
     private static HttpRequest buildRequestWithoutBody(
@@ -227,6 +289,7 @@ public final class Http3RequestBridge {
     }
 
     private static final String CONTENT_LENGTH = "content-length";
+    private static final String CONTENT_ENCODING = "content-encoding";
 
     /**
      * Whether a header field is one HTTP/3 forbids on a response.
@@ -303,7 +366,14 @@ public final class Http3RequestBridge {
      * most once, and a body of one-byte pieces needs one component per 16 KiB.
      */
     public static void accumulateBody(CompositeByteBuf composite, Http3DataFrame dataFrame) {
-        ByteBuf content = dataFrame.content();
+        accumulateBody(composite, dataFrame.content());
+    }
+
+    /**
+     * As {@link #accumulateBody(CompositeByteBuf, Http3DataFrame)} for one piece of a body; {@code content} is retained
+     * when it is added as a component, so the caller keeps its own reference.
+     */
+    static void accumulateBody(CompositeByteBuf composite, ByteBuf content) {
         int length = content.readableBytes();
         if (length == 0) {
             return;

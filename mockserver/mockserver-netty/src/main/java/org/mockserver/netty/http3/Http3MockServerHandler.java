@@ -6,6 +6,7 @@ import io.netty.buffer.CompositeByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.handler.codec.DecoderException;
 import io.netty.handler.codec.http3.DefaultHttp3DataFrame;
 import io.netty.handler.codec.http3.DefaultHttp3HeadersFrame;
 import io.netty.handler.codec.http3.Http3DataFrame;
@@ -83,7 +84,9 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
     // Non-null once this stream has been routed to true bidirectional gRPC streaming;
     // inbound DATA frames are then fed incrementally to it rather than accumulated.
     private Http3GrpcBidiStreamHandler bidiHandler;
-    // Set to true once a body-too-large rejection has been sent, to suppress further accumulation.
+    // Non-null while a Content-Encoding body is being decompressed alongside the wire bytes in bodyAccumulator.
+    private Http3RequestDecompressor decompressor;
+    // Set to true once the body has been rejected (too large, or a corrupt compressed body), to suppress further accumulation.
     private boolean bodyExceeded;
 
     public Http3MockServerHandler(
@@ -130,7 +133,10 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
         // request frames (QUIC streams are full-duplex). When a bidi method matches a
         // GrpcBidiResponse expectation, subsequent DATA frames are fed incrementally to
         // the bidi handler instead of being accumulated for one-shot processing.
-        tryBeginGrpcBidi(ctx);
+        if (!tryBeginGrpcBidi(ctx)) {
+            // HTTP/1.1 and HTTP/2 decompress with HttpContentDecompressor ahead of their aggregator; this is that step
+            decompressor = Http3RequestDecompressor.forHeaders(parsedHeaders.headers(), ctx.alloc(), configuration.maxRequestBodySize(), bodyComponentLimit);
+        }
     }
 
     @Override
@@ -188,6 +194,9 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
                 accumulatedBodySize += frameSize;
                 Http3RequestBridge.accumulateBody(bodyAccumulator, dataFrame);
                 mergedBodyComponents = Http3RequestBridge.limitComponents(bodyAccumulator, bodyComponentLimit, mergedBodyComponents);
+                if (decompressor != null) {
+                    decompress(ctx, () -> decompressor.decompress(dataFrame.content()));
+                }
             }
         } finally {
             dataFrame.release();
@@ -221,7 +230,11 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
                 return;
             }
 
-            // The bridge reads the accumulated buffer non-destructively and copies it once; it is
+            if (decompressor != null && !decompress(ctx, decompressor::finish)) {
+                return;
+            }
+
+            // The bridge reads the accumulated buffers non-destructively and copies them once; they are
             // released below in the finally (releaseBodyAccumulator).
             HttpRequest request = Http3RequestBridge.toHttpRequest(
                 parsedHeaders.method(),
@@ -229,7 +242,8 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
                 parsedHeaders.scheme(),
                 parsedHeaders.authority(),
                 parsedHeaders.headers(),
-                bodyAccumulator
+                bodyAccumulator,
+                decompressor != null ? decompressor.body() : null
             );
 
             // mTLS client-certificate capture: extract the peer certificate chain
@@ -865,13 +879,59 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
     }
 
     /**
-     * Release the body accumulator if it is non-null and has not already been
-     * released. Guards against double-release by nulling the reference.
+     * Runs one decompression step and, as HTTP/1.1 does, answers a decompressed body over
+     * {@code maxRequestBodySize} with 413 and drops the stream on a corrupt body without a response
+     * (HTTP/1.1 closes the connection; on HTTP/3, as on HTTP/2, only the request's stream is closed).
+     *
+     * @return false when the body was rejected, after which the request must not be processed
+     */
+    private boolean decompress(ChannelHandlerContext ctx, java.util.function.BooleanSupplier step) {
+        boolean withinLimit;
+        try {
+            withinLimit = step.getAsBoolean();
+        } catch (DecoderException decoderException) {
+            bodyExceeded = true;
+            if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.WARN)
+                        .setMessageFormat("HTTP/3 request body could not be decompressed -- closing stream " + ctx.channel())
+                        .setThrowable(decoderException)
+                );
+            }
+            releaseBodyAccumulator();
+            ctx.close();
+            return false;
+        }
+        if (!withinLimit) {
+            bodyExceeded = true;
+            if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.WARN)
+                        .setMessageFormat("HTTP/3 decompressed request body size {} exceeds maxRequestBodySize {} -- rejecting with 413")
+                        .setArguments(decompressor.decompressedSize(), configuration.maxRequestBodySize())
+                );
+            }
+            releaseBodyAccumulator();
+            sendPayloadTooLarge(ctx);
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Release the body accumulator (and any decompressor with its decompressed body) if it is
+     * non-null and has not already been released. Guards against double-release by nulling the reference.
      */
     private void releaseBodyAccumulator() {
         if (bodyAccumulator != null) {
             bodyAccumulator.release();
             bodyAccumulator = null;
+        }
+        if (decompressor != null) {
+            decompressor.release();
+            decompressor = null;
         }
     }
 }
