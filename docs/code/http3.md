@@ -332,6 +332,19 @@ that process. A QUIC client affected this way never sees the server's reply, and
 and 0.15% of dual-stack port probes were affected, with or without CPU load, which is consistent with
 about one HTTP/3 test failing per full `mockserver-netty` run. Linux never hands out such a port.
 
+The server guards against the same quirk (`Ipv4UdpPortProbe`, the UDP counterpart of the TCP
+listeners' `LoopbackShadowProbe`). On macOS a dual-stack wildcard bind succeeds on a port another
+process holds on `0.0.0.0`, and that process then receives the server's `127.0.0.1` traffic; Linux
+refuses the bind. So before binding an explicit port, `Http3Server.start` tries an IPv4 bind of
+`0.0.0.0:port` (no `SO_REUSEADDR`) and releases it. If that bind failed but the dual-stack bind then
+succeeds, the server closes its socket and throws a `BindException` naming the port, the conflict and
+`lsof -nP -iUDP:<port>`; where the bind itself fails (Linux, or an IPv4-only stack) its own error is
+kept. The probe has to come first: on both macOS and Linux an IPv4 bind fails once the same process's
+own dual-stack socket holds the port, so a probe after the bind cannot tell MockServer's socket from
+another application's. Port 0 is bound as before, without the probe: `MockServer` starts HTTP/3 only
+for an `http3Port` above 0, and tests take their port from `TestPortFactory.findFreeUdpPort()`. `MockServer` logs a failed HTTP/3 start as a warning and keeps serving TCP, so a refused
+`http3Port` disables HTTP/3 rather than failing start-up. `Http3ServerIpv4PortConflictTest` covers it.
+
 ## Dependencies
 
 | Artifact | Version | Scope |
@@ -605,11 +618,11 @@ bidi-streaming) work over HTTP/3, matching the TCP (HTTP/1.1 and HTTP/2) path.
 
 - **Native library compatibility**: the QUIC native (BoringSSL) must be available
   for the target platform. Missing natives will prevent the HTTP/3 server from starting.
-- **macOS port shadowing**: on macOS the HTTP/3 server's dual-stack wildcard bind succeeds on a UDP
-  port that another process holds on the IPv4 wildcard (`0.0.0.0`), and HTTP/3 traffic to `127.0.0.1`
-  then reaches that process instead. The TCP listeners detect the equivalent case at start-up
-  (`LoopbackShadowProbe`) and refuse an explicit port; the HTTP/3 server does not yet. Linux refuses
-  the bind, so there it fails loudly.
+- **macOS port shadowing**: on macOS a dual-stack wildcard UDP bind succeeds on a port that another
+  process holds on the IPv4 wildcard (`0.0.0.0`), and traffic to `127.0.0.1` then reaches that process.
+  The HTTP/3 server probes the port on IPv4 before binding and refuses it (see
+  [Test UDP sockets](#test-udp-sockets-macos-port-shadowing)); a process that takes the port between the
+  probe and the bind is not detected.
 - **API stability**: `netty-codec-http3` has graduated from the incubator into
   mainline Netty 4.2, but the HTTP/3 API may still evolve in future 4.2.x releases.
 - **Netty version coupling**: the HTTP/3 codec version is now aligned with the

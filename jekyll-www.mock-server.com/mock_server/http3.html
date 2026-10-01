@@ -70,6 +70,8 @@ Fix it with one of:
 
 <p>Earlier versions logged a warning and started anyway without HTTP/3, which meant the UDP port you asked for was silently never listening &mdash; this is what every earlier Docker image did. Refusing to start and telling you is the safer behaviour. To run without HTTP/3, remove <span class="inline_code">http3Port</span>.</p>
 
+<p>If the UDP port set by <span class="inline_code">http3Port</span> is already in use by another application, MockServer logs a warning naming the port and starts without HTTP/3; HTTP/1.1 and HTTP/2 are unaffected. Stop the other application or choose a different <span class="inline_code">http3Port</span>.</p>
+
 <p>The bound HTTP/3 port can be retrieved programmatically via <span class="inline_code">MockServer.getHttp3Port()</span>.</p>
 
 <a id="http3_native_requirement" class="anchor" href="#http3_native_requirement">&nbsp;</a>

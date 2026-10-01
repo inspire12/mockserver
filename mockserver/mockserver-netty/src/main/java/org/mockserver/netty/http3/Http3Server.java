@@ -30,6 +30,7 @@ import org.mockserver.socket.tls.KeyAndCertificateFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.net.BindException;
 import java.net.InetSocketAddress;
 import java.security.PrivateKey;
 import java.security.cert.X509Certificate;
@@ -211,14 +212,12 @@ public class Http3Server {
                 })
                 .build();
 
-            channel = new Bootstrap()
+            Bootstrap bootstrap = new Bootstrap()
                 .group(localGroup)
                 .channel(NioDatagramChannel.class)
                 .option(ChannelOption.ALLOCATOR, NettyAllocator.ALLOCATOR)
-                .handler(codec)
-                .bind(new InetSocketAddress(port))
-                .sync()
-                .channel();
+                .handler(codec);
+            channel = port == 0 ? bootstrap.bind(new InetSocketAddress(0)).sync().channel() : bindExplicitPort(bootstrap, port);
 
             int boundPort = ((InetSocketAddress) channel.localAddress()).getPort();
             LOG.info("HTTP/3 (QUIC) server started on UDP port: {}", boundPort);
@@ -230,6 +229,21 @@ public class Http3Server {
                 localGroup.shutdownGracefully();
             }
         }
+    }
+
+    /**
+     * Refuses a port another application holds on the IPv4 wildcard, which macOS would otherwise let this
+     * dual-stack socket share while delivering its localhost datagrams to that application (see
+     * {@link Ipv4UdpPortProbe}). Where the bind itself fails (Linux, or an IPv4-only stack), its own error is kept.
+     */
+    private static Channel bindExplicitPort(Bootstrap bootstrap, int port) throws InterruptedException, BindException {
+        boolean heldOnIpv4 = Ipv4UdpPortProbe.heldOnIpv4(port);
+        Channel bound = bootstrap.bind(new InetSocketAddress(port)).sync().channel();
+        if (heldOnIpv4) {
+            bound.close().awaitUninterruptibly();
+            throw Ipv4UdpPortProbe.ipv4WildcardConflict(port);
+        }
+        return bound;
     }
 
     /**

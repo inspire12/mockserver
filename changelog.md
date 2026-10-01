@@ -228,6 +228,10 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   request's headers, so the request reached matching with no method or path and an empty body, and the
   body already received was leaked. Trailers are now ignored, as request trailers already are over HTTP/1.1
   and HTTP/2.
+- **On macOS, HTTP/3 no longer starts on a UDP port another application already holds.** If another
+  application was listening on `http3Port` on IPv4 (`0.0.0.0`), MockServer's HTTP/3 server still
+  reported that it had started, but HTTP/3 requests to `localhost` went to the other application. It
+  now refuses the port with a warning that names it and the likely cause, as Linux already did.
 - **A binary body with no `Content-Type` is no longer corrupted when MockServer forwards or proxies it.**
   Such a body was decoded as UTF-8 text and re-encoded on the way out, so every invalid byte became a
   three-byte replacement character: 1,000,000 random bytes arrived as about 1.8–2 MB, a 49 MiB response as
