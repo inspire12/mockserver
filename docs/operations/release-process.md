@@ -290,11 +290,12 @@ entry silences a breach only when **all three bindings** hold:
 `reason`/`accepted_by`/`date` are required for the audit trail but do not gate. An absent
 file means nothing is accepted (the safe default).
 
-> **Queue note.** The gate runs on the `perf` queue, which is `max_size = 1`. If a
-> release preflight is triggered while the weekly ~2-hour soak occupies the agent, the
-> step **waits for the agent** rather than failing — the Buildkite `timeout_in_minutes`
-> counts execution time, not queue wait. An operator who sees "waiting for agent" should
-> check the perf pipeline schedule rather than assume the gate is stuck.
+> **Queue note.** The gate runs on the `perf` queue, which has at most three agents. If a
+> release preflight is triggered while perf builds (the daily regression's measurement
+> steps, or the weekly ~2-hour soak) occupy all of them, the step **waits for an agent**
+> rather than failing — the Buildkite `timeout_in_minutes` counts execution time, not
+> queue wait. An operator who sees "waiting for agent" should check the perf pipeline
+> schedule rather than assume the gate is stuck.
 
 ### SwaggerHub versioning convention
 

@@ -168,7 +168,7 @@ flowchart LR
 | `on_demand_percentage` | `number` | `20` | % on-demand vs spot (20 = 20% on-demand fallback) |
 | `perf_instance_types` | `string` | `c5.12xlarge` | EC2 instance type for the perf queue. Must have enough PHYSICAL cores for the run's cpusets — see the note on the variable; `perf-test-run.sh` fails the build if they overlap |
 | `perf_min_size` | `number` | `0` | Minimum perf queue instances (must remain 0) |
-| `perf_max_size` | `number` | `1` | Maximum perf queue instances (1 = no concurrent runs) |
+| `perf_max_size` | `number` | `3` | Maximum perf queue instances. One agent per instance, so concurrent perf jobs always run on separate machines |
 | `alert_email` | `string` | `""` | Email address for infrastructure alerts |
 
 ## Outputs
@@ -206,7 +206,7 @@ Four agent queues separate workloads by resource needs:
 | `default` | c5.2xlarge / c5a.2xlarge / m5.2xlarge | 20% on-demand / 80% Spot | 10 | 1 | Build and test (Maven, Docker, k3d) |
 | `trigger` | t3.small / t3a.small / t3.micro | 100% Spot | 4 | 4 | Trigger polling jobs (`sleep` + `curl` loops) |
 | `release` | Same as `default` | 100% on-demand | 2 | 1 | Release pipeline steps with release secrets |
-| `perf` | c5.12xlarge | 100% on-demand | 1 | 1 | Daily performance-regression benchmarks (k6 + JMH); max 1 enforces at most one concurrent run. 24 physical cores, so the server, upstream and k6 cpusets land on genuinely disjoint cores |
+| `perf` | c5.12xlarge | 100% on-demand | 3 | 1 | Daily performance-regression benchmarks (k6 + JMH); up to three perf jobs at once, each with a whole machine to itself. 24 physical cores, so the server, upstream and k6 cpusets land on genuinely disjoint cores |
 
 All queues have `min_size = 0` (scale-to-zero). This is a hard constraint — do not set `min_size` to a non-zero value.
 

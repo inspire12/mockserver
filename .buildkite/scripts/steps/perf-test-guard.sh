@@ -139,10 +139,11 @@ steps:
   #
   #   Why wait for them at all, rather than dropping the edge? Because compare
   #   MERGES microbench's artifacts, downloading them best-effort (`|| true`).
-  #   Depending only on perf-run would let compare start first on this serialized
-  #   queue and persist a day with NO microbench rows — silently losing the
-  #   gating metric .microbench.*.time_per_op. A gate that disappears without
-  #   going red is a worse failure than the one this wiring fixes.
+  #   Depending only on perf-run would let compare start first (the measurement
+  #   steps run in parallel on separate perf agents) and persist a day with NO
+  #   microbench rows — silently losing the gating metric .microbench.*.time_per_op.
+  #   A gate that disappears without going red is a worse failure than the one
+  #   this wiring fixes.
   #
   #   `publish` depends on `perf-compare` so a gating regression (which reds
   #   compare) still skips the public-figure PR.
@@ -162,8 +163,8 @@ steps:
     # Bumped 45 -> 60 for the INFO-log-level publication arm (plan open question 5):
     # a SECOND SUT at the shipped-default log level re-runs the two published figure
     # families (regression.js http+https + sweep.js), adding an estimated ~10 min of
-    # wall-clock. The perf box is serialised and the chain's occupancy is not yet
-    # measured (open question 6), so this adds headroom rather than risking the cap;
+    # wall-clock. The chain's occupancy is not yet measured (open question 6), so
+    # this adds headroom rather than risking the cap;
     # trim it back once a few runs show the real duration, or set PERF_INFO_ARM=false
     # to drop the arm entirely.
     # Bumped 60 -> 70 for the path-coverage phase (~8 min estimated; PERF_COVERAGE=false

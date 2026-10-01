@@ -191,19 +191,16 @@ resource "buildkite_pipeline_schedule" "infra_baseline_freshness_daily" {
 # over hours) and measuring the cost of verify / retrieveRecordedRequests against a
 # FULL log (item 10b).
 #
-# WHY SUNDAY 08:00 UTC — NOT the daily regression's slot. The `perf` queue is
-# max_size = 1 (terraform/buildkite-agents, perf_max_size), so at most one perf job
-# runs at a time. A 2h soak sharing the daily regression's 04:00 window would block
-# that day's regression entirely. The daily regression (perf_regression_daily,
-# 04:00) can occupy the perf queue for up to 3h45m if every step runs to its timeout
-# (run 70m + microbench 70m + h2-multiplex 30m + allocation profile 30m + compare 10m +
-# publish 15m, per perf-test-guard.sh), i.e. until ~07:45; the soak's 08:00 start still
-# clears that, and its 08:00–10:00 window is well clear of the 06:00
-# cleanup and the 16:00 baseline-freshness check (the freshness check runs in the
-# infra pipeline, a different queue, so there is no queue contention with it in any
-# case). Sunday is the lowest-commit day, so the commit-gated daily regression most
-# often skips and an ad-hoc [perf-run]/[perf-inject] is least likely to contend the
-# single perf agent. The [perf-soak] marker routes this build to the soak step ONLY
+# WHY SUNDAY 08:00 UTC — NOT the daily regression's slot. The `perf` queue has
+# perf_max_size agents (terraform/buildkite-agents), one per machine. A daily
+# regression build fans its four measurement steps out across those agents and can
+# hold all of them at once, so a soak started in the 04:00 window would queue
+# behind it. 08:00 is clear of the daily's worst case (every step at its timeout,
+# per perf-test-guard.sh), of the 06:00 cleanup and of the 16:00 baseline-freshness
+# check (which runs in the infra pipeline on a different queue anyway). Sunday is
+# the lowest-commit day, so the commit-gated daily regression most often skips and
+# an ad-hoc [perf-run]/[perf-inject] is least likely to contend for the perf
+# agents. The [perf-soak] marker routes this build to the soak step ONLY
 # (pipeline-perf-test.yml gates the daily guard and load test OFF for a [perf-soak]
 # build), so the soak never triggers the daily regression dispatch. No queue-
 # capacity change is needed: this only enqueues a build; the perf ASG scales from
@@ -285,8 +282,8 @@ resource "buildkite_pipeline" "pipeline" {
   # VALIDATION — a newer commit supersedes it and nothing is lost.
   #
   # It is false when the build IS THE MEASUREMENT. The daily performance run is
-  # created at 04:00 and then QUEUES, because the perf queue is scale-to-zero with
-  # max_size=1. Any push to master during that wait created a newer build and the
+  # created at 04:00 and then QUEUES, because the perf queue is scale-to-zero with a
+  # small agent cap. Any push to master during that wait created a newer build and the
   # queued daily was skipped before it ever started — so no measurement happened
   # that day, and perf-baseline-freshness.sh correctly reddened every subsequent
   # master build for reporting a producer that had not run.
@@ -300,7 +297,7 @@ resource "buildkite_pipeline" "pipeline" {
   # Filtering skip on !master therefore protects every scheduled/master build from
   # being dropped before it runs, while keeping the cost saving where it is safe:
   # feature and PR branches still skip their queued builds, which is what stops a
-  # rapid-iteration branch hogging the single perf agent.
+  # rapid-iteration branch hogging the perf agents.
   #
   # NARROWED TO THE PERF PIPELINE (2026-09-19, after G7). The first cut of this
   # applied the !master skip filter to every pipeline. A review judged that safe

@@ -61,6 +61,14 @@ flowchart TD
 `perf-test-guard.sh` skips the entire chain when `master` has not moved since the last run, so
 the daily job is a no-op on unchanged code.
 
+The `perf` queue runs up to three agents, one per machine, so the four measurement steps run in
+parallel, each on its own c5.12xlarge, and pass results to `perf-test-compare.sh` only as
+Buildkite artifacts. Different steps, and builds that run at the same time, therefore measure on
+different VMs. That does not disturb the rolling baseline, which already spans a fresh machine per
+daily run, but it does matter for a close A/B: VM-to-VM variance is a few percent, so measure both
+arms within one job on one machine (a within-run A/B, like the clustered-state arm) or repeat each
+arm, rather than comparing two separate builds.
+
 `perf-test-compare.sh` reads `behaviours.*`, `growth.*`, and `microbench.*` from the per-run
 artifacts and gates only the metrics explicitly marked `gating: true` in the compare script.
 Everything else is reported in the Buildkite annotation but does not change the exit code.
@@ -683,7 +691,7 @@ relay does not work); and (3) its **p50 ≥ `PERF_UPSTREAM_DELAY_MS × 0.8`** �
 SUT or a fast/shadowed upstream answers in ~0 ms and cannot clear this floor, so it goes red. Any
 failure → the check is false → `validity.valid=false`.
 
-Trigger a run (perf queue, one at a time):
+Trigger a run on the perf queue:
 
 ```bash
 # unit 21 — proxy concurrency with a 50 ms upstream
@@ -1058,8 +1066,9 @@ bk build create -p mockserver-performance-test -b master -c HEAD \
 
 The build runs the normal regression chain plus the matrix (about 10 minutes per point, 60 in
 all); the guard raises the run step's timeout from 70 to 160 minutes only when
-`PERF_SERVING_HW_MATRIX=true`. Avoid the 04:00 UTC daily slot and the Sunday 08:00 soak (the
-`perf` queue has one agent). `PERF_HW_MATRIX` overrides the points, as comma-separated
+`PERF_SERVING_HW_MATRIX=true`. Avoid the 04:00 UTC daily slot and the Sunday 08:00 soak (a
+daily build can hold all three `perf` agents, so a matrix build would queue behind it).
+`PERF_HW_MATRIX` overrides the points, as comma-separated
 `cores:memory[:control]` entries.
 
 ```mermaid

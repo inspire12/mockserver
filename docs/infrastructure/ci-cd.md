@@ -54,7 +54,7 @@ The monorepo uses a path-based pipeline orchestrator that dynamically triggers s
 | `default` | `c5.2xlarge`, `c5a.2xlarge`, `m5.2xlarge` | Build and test workloads (Maven, Docker, k3d) |
 | `trigger` | `t3.small`, `t3a.small`, `t3.micro` | Trigger polling jobs (`sleep` + `curl` loops) |
 | `release` | Same as `default` | Release pipeline steps that access release secrets |
-| `perf` | `c5.4xlarge` | Daily performance-regression benchmarks (k6 + JMH); scale-to-zero, max 1, 100% on-demand |
+| `perf` | `c5.12xlarge` | Daily performance-regression benchmarks (k6 + JMH); scale-to-zero, max 3 with one agent per instance, 100% on-demand |
 
 Trigger jobs (which poll child builds via the Buildkite API) run on cheap `trigger` queue instances to avoid starving build agents. See [Agent Starvation](#agent-starvation-from-script-based-triggers-resolved) for background.
 
@@ -250,7 +250,7 @@ The pipeline's first step (`perf-test-guard.sh`, `trigger` queue) implements a "
 
 1. Calls `last_perf_run_commit` (in `lib/last-successful-commit.sh`) — resolves the commit the heavy regression run *last actually executed against*, by reading the most recent `perf_regression_ran_commit` Buildkite build meta-data (set by `perf-test-run.sh`) via the Buildkite API (token in AWS Secrets Manager `mockserver-build/buildkite-api-token`). This is deliberately distinct from the sibling `last_successful_commit` (last *passed build*, used by `generate-pipeline.sh`): the perf-test pipeline passes on its lint step on every push, so "last passed build" would almost always be `HEAD` and the guard would skip forever.
 2. If `HEAD` equals the last run commit, annotates "skipped" and exits 0 — no compute is consumed.
-3. Otherwise (new commit, or no prior run recorded) uses `buildkite-agent pipeline upload` to dynamically inject the run, microbench, HTTP/2-multiplex, and compare steps into the running build. These steps target the `perf` agent queue (c5.4xlarge, on-demand).
+3. Otherwise (new commit, or no prior run recorded) uses `buildkite-agent pipeline upload` to dynamically inject the run, microbench, HTTP/2-multiplex, and compare steps into the running build. These steps target the `perf` agent queue (c5.12xlarge, on-demand, up to three agents with one per machine), so the measurement steps of one build run in parallel on separate machines.
 
 This pattern avoids a fixed multi-step pipeline definition (which would always run all steps) while keeping the guard cheap on the `trigger` queue.
 
@@ -267,6 +267,14 @@ This pattern avoids a fixed multi-step pipeline definition (which would always r
 | `perf-test-compare.sh` | `perf` | Merge artifacts + S3 persist + rolling median+MAD compare + Buildkite annotation |
 | `perf-website-publish.sh` | `perf` | Tail step, `soft_fail`, non-gating. Regenerates `perf_figures.json` + chart data/PNGs from the newest valid S3 run; when the committed figures have drifted, emits the refresh as a `git format-patch` build artifact (the perf queue has no git/gh credentials, so it cannot push). Applying the patch is a manual step — see [Published Figures → Publishing a run's figures](../code/performance-measurement.md#published-figures) |
 | `lib/perf-budgets-validate.sh` | — | Sourced by the compare and allocation gates to schema-check `perf-budgets.json` before either compares anything (a quoted number in that file does not error in jq, it silently disables the budget). Runs its own `--self-test` on every build |
+
+#### Concurrency on the `perf` queue
+
+The queue runs up to three agents, one per c5.12xlarge, so a perf job never shares its machine. What that relies on:
+
+- **Steps share nothing on disk.** Each measurement step builds or pulls what it needs; `perf-test-compare.sh` reads their results only through `buildkite-agent artifact download`, and `perf-website-publish.sh` only from S3. Either can land on any agent.
+- **The S3 history is append-only.** Each run writes its own `runs/<branch>/<ISO timestamp>__<commit>.json` key; no step rewrites a shared baseline object, and runs that are invalid or not baseline-eligible are never written. The baseline window is the newest N keys other than the run's own, so a concurrent build's run can fall in it — the same as a back-to-back run.
+- **Close A/B comparisons need one machine or repeats.** Two builds that run at the same time land on different VMs, and VM-to-VM variance of a few percent can swamp a small effect. Measure both arms within one job (a within-run A/B), or repeat each arm.
 
 See [Performance Tuning](../operations/performance-tuning.md#performance-regression-pipeline) for the full description of behaviours, thresholds, result schema, and how to re-baseline.
 

@@ -93,9 +93,10 @@ module "buildkite_trigger_stack" {
 # Dedicated PERFORMANCE queue. Reproducible numbers matter far more here than
 # throughput, so unlike the default queue this is a SINGLE fixed-performance
 # instance type (no mixed c5/c5a/m5 microarchitectures), 100% on-demand (no Spot
-# reclaim mid-run), max ONE instance (two perf runs never contend), and
-# scale-to-zero (min_size 0 — AGENTS.md hard constraint: zero idle cost). The
-# daily run launches the box on demand and the ASG terminates it when idle.
+# reclaim mid-run), ONE agent per instance (a perf job never shares its box, so
+# up to max_size jobs run at once on separate machines), and scale-to-zero
+# (min_size 0 — AGENTS.md hard constraint: zero idle cost). Jobs launch boxes on
+# demand and the ASG terminates each one when idle.
 module "buildkite_perf_stack" {
   source  = "buildkite/elastic-ci-stack-for-aws/buildkite"
   version = "~> 0.12.0"
@@ -106,7 +107,7 @@ module "buildkite_perf_stack" {
 
   instance_types          = var.perf_instance_types
   min_size                = var.perf_min_size # MUST stay 0 (scale to zero)
-  max_size                = var.perf_max_size # 1 — never run two perf jobs at once
+  max_size                = var.perf_max_size # concurrent perf jobs, each on its own box
   on_demand_percentage    = 100               # on-demand only — a Spot reclaim would poison the baseline
   on_demand_base_capacity = 0                 # base 0 so it truly scales to zero
 

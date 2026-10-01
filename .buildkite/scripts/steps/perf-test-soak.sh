@@ -28,9 +28,9 @@ set -euo pipefail
 # notify-only until ~8 weekly runs of variance let a budget be derived (~2
 # months). See docs/plans/performance-programme.md item 10.
 #
-# WHY WEEKLY, OUT OF THE DAILY'S SLOT: the perf queue is max_size=1. A 2h soak
-# starting in the daily regression's 04:00 UTC window would block that day's
-# regression entirely. This step is dispatched by a SEPARATE weekly schedule
+# WHY WEEKLY, OUT OF THE DAILY'S SLOT: a daily regression build can hold every
+# perf agent at once, so a 2h soak starting in its 04:00 UTC window would queue
+# behind it or delay it. This step is dispatched by a SEPARATE weekly schedule
 # (terraform/buildkite-pipelines/pipelines.tf) at a time clear of 04:00 (daily
 # regression) and 16:00 (baseline freshness).
 #

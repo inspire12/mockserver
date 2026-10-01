@@ -127,9 +127,9 @@ variable "perf_min_size" {
 }
 
 variable "perf_max_size" {
-  description = "Maximum perf agent instances (1 — never run two perf jobs concurrently so they don't contend)"
+  description = "Maximum perf agent instances. One agent per instance, so each perf job has a whole box to itself and concurrent jobs never share a machine"
   type        = number
-  default     = 1
+  default     = 3
 }
 
 variable "alert_email" {

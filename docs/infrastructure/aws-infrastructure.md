@@ -176,9 +176,9 @@ rate 1 min"]
 | ASG `default` | Min 0, Max 10, 60% on-demand / 40% Spot, diversified instance types (c5, c5a, m5), on-demand base capacity 1, 1 agent/instance, AZRebalance suspended |
 | ASG `trigger` | Min 0, Max 4, 100% Spot, t3.small/t3a.small/t3.micro, 4 agents/instance — cheap instances for trigger polling jobs |
 | ASG `release` | Min 0, Max 2, 100% on-demand, same instance types as default, 1 agent/instance |
-| ASG `perf` | Min 0, Max 1, 100% on-demand, c5.4xlarge, on-demand base 0 — scale-to-zero, never more than one concurrent perf run |
+| ASG `perf` | Min 0, Max 3, 100% on-demand, c5.12xlarge, on-demand base 0, 1 agent/instance — scale-to-zero; up to three concurrent perf jobs, each on its own machine |
 | Launch Template | c5.2xlarge (primary for default/release), t3.small (primary for trigger), 250 GiB gp3 root volume, delete-on-termination |
-| EC2 Instances | 0–10 default + 0–4 trigger + 0–2 release (ephemeral), all scale to zero when idle |
+| EC2 Instances | 0–10 default + 0–4 trigger + 0–2 release + 0–3 perf (ephemeral), all scale to zero when idle |
 
 #### Networking
 
@@ -303,11 +303,12 @@ Policies are scoped per queue — each agent role receives only the secrets and 
 
 #### Perf Queue (regression benchmarks)
 - **Minimum:** 0 instances (scale-to-zero — mandatory, see AGENTS.md)
-- **Maximum:** 1 instance — enforces at most one concurrent perf run for reproducibility
-- **Instance type:** c5.4xlarge (16 vCPU, 32 GB — enough to core-pin server + upstream + k6 to disjoint cpusets)
+- **Maximum:** 3 instances, 1 agent per instance — up to three perf jobs run at once, and each has a whole machine to itself, so concurrent jobs never contend for CPU, memory, Docker or ports. A regression build's measurement steps (run + sample, micro-benchmark, HTTP/2 multiplex, allocation profile) spread across the agents; they share results only through Buildkite artifacts and the S3 history, never through an agent's local disk
+- **Instance type:** c5.12xlarge (48 vCPU across 24 physical cores — enough to core-pin server + upstream + k6 to physically disjoint cpusets)
+- **Cross-machine variance:** two jobs that run at the same time are on different VMs, and VM-to-VM variance is a few percent. The rolling baseline already spans many machines (every daily run gets a fresh one), but a close A/B comparison should measure both arms within one job on one machine, or repeat each arm
 - **Capacity mix:** 100% on-demand (spot interruptions mid-benchmark would corrupt results)
 - **On-demand base capacity:** 0
-- **Single-AZ pinning:** not implemented (max_size 1 + single instance type already gives strong run-to-run reproducibility; single-AZ pinning is noted as an optional future hardening in `terraform/buildkite-agents/main.tf`)
+- **Single-AZ pinning:** not implemented (one agent per instance + a single instance type already gives strong run-to-run reproducibility)
 - **Managed policies:** `read_buildkite_api_token`, `buildkite-perf-results`
 
 #### Common

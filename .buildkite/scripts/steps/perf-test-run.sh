@@ -443,7 +443,7 @@ SWEEP_K6="k6-sweep-${RUN_ID}"
 # one. Its output lands under DISTINCT top-level keys (info_log_level_arm.*), never
 # under .behaviours / .sweep / rig_valid_peak_achieved_rps, so an INFO number can never be
 # confused with, or diffed against, the ERROR baseline series. Set PERF_INFO_ARM=false
-# to skip it if the (serialised) perf box is time-pressed — it is a pure add-on and
+# to skip it if the perf run is time-pressed — it is a pure add-on and
 # nothing else in the run depends on it.
 INFO_SERVER="mockserver-perf-info-${RUN_ID}"
 INFO_SERVER_ALIAS="mockserver-info"
@@ -3161,8 +3161,8 @@ abort_if_sut_died
 # jar + /libs/* = Infinispan + JGroups), and set
 # PERF_CLUSTERED_REQUIRE_MATCHING_REVISION=false because that image carries no
 # revision label. We do NOT build Infinispan a second time here, and we do NOT run
-# Maven on the measurement box — a multi-module reactor build on the serialized perf
-# agent immediately before measuring would perturb the very thing being measured.
+# Maven on the measurement box — a multi-module reactor build in the measurement job
+# immediately before measuring would perturb the very thing being measured.
 #
 # WHAT THE HOT PATH ACTUALLY TOUCHES (why the ratio is what it is): seedRegression
 # seeds every expectation with times:{unlimited:true}, so there is NO per-request

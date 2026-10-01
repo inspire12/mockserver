@@ -101,9 +101,9 @@ exit 0"]
     GUARD -->|"new commit since last RUN"| UPLOAD["Dynamic pipeline upload
 run + microbench + compare steps"]
     UPLOAD --> RUN["perf-test-run.sh
-perf queue  c5.4xlarge"]
+perf queue  c5.12xlarge"]
     UPLOAD --> MICRO["perf-test-microbench.sh
-perf queue  c5.4xlarge"]
+perf queue  c5.12xlarge"]
     RUN --> ARTIFACTS["Upload perf-result.json
 Buildkite artifacts"]
     MICRO --> ARTIFACTS
