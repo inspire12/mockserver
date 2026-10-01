@@ -173,6 +173,18 @@ heap_inspection_placement() { # work_dir jfr_rel
   return "$rc"
 }
 
+# The jdk.ThreadCPULoad period in seconds from a recording's active settings ("Thread CPU Load ... 10 s"),
+# or nothing when the recording has no settings events.
+thread_cpu_period() { # work_dir jfr_rel
+  jfr_tool "$1" view --width 200 active-settings "/w/$2" | awk '
+    BEGIN { u["ms"] = 0.001; u["s"] = 1; u["m"] = 60; u["min"] = 60; u["h"] = 3600 }
+    /^Thread CPU Load / { for (i = 4; i <= NF; i++) {
+      v = $i; unit = (i < NF ? $(i + 1) : "")
+      if (match(v, /^[0-9]+(\.[0-9]+)?/) && RLENGTH < length(v)) { unit = substr(v, RLENGTH + 1); v = substr(v, 1, RLENGTH) }
+      else if (v !~ /^[0-9]+(\.[0-9]+)?$/) continue
+      if (unit in u) { print v * u[unit]; exit } } }' || true
+}
+
 # Per-thread CPU over the ceiling window as "% of one core": a thread's summed jdk.ThreadCPULoad (a
 # fraction of the JVM's effective CPUs) over the window's sampling periods, times that CPU count, so a
 # thread alive for part of the window is not averaged over its own samples only. Grouped by name.
@@ -181,25 +193,46 @@ heap_inspection_placement() { # work_dir jfr_rel
 # period inside a rung (sweep-rungs.json), assuming the thread idles in the gaps, and the flag reads it.
 # jdk.CPULoad's jvmUser/jvmSystem are fractions of the HOST's hardware threads, not the container's.
 thread_cpu_table() { # work_dir jfr_rel
-  local rungs='[[]]'
-  if jq -e 'type == "array" and length > 0' "$1/sweep-rungs.json" >/dev/null 2>&1; then rungs="[$(cat "$1/sweep-rungs.json")]"; fi
-  jfr_tool "$1" print --json --events jdk.ThreadCPULoad,jdk.CPULoad,jdk.ContainerConfiguration,jdk.CPUInformation "/w/$2" \
-    | jq -r --argjson top "$CEILING_TOP_THREADS" --argjson hot "$HOT_THREAD_PCT" --argjson rungs "$rungs" '
-      def secs: capture("^(?<s>[^.Z]+)") | .s + "Z" | fromdate;
+  local rungs='[[]]' sched=none events period
+  if [ -e "$1/sweep-rungs.json" ]; then
+    sched=bad
+    if rungs="$(jq -c -s -e 'select(length == 1 and (.[0] | type == "array" and length > 0 and all(.[];
+                 (.start_epoch_ms | type) == "number" and (.end_epoch_ms | type) == "number")))' "$1/sweep-rungs.json" 2>/dev/null)"
+    then sched=ok; else rungs='[[]]'; fi
+  fi
+  if ! events="$(jfr_tool "$1" print --json --events jdk.ThreadCPULoad,jdk.CPULoad,jdk.ContainerConfiguration,jdk.CPUInformation "/w/$2")" \
+     || [ -z "$events" ]; then echo "(per-thread CPU unavailable: jfr print failed)"; return 0; fi
+  # ceiling.jfr from an older harness has no settings events; the load recording is the same JVM's.
+  period="$(thread_cpu_period "$1" "$2")"
+  if [ -z "$period" ] && [ -s "$1/sut/load.jfr" ]; then period="$(thread_cpu_period "$1" sut/load.jfr)"; fi
+  [[ "$period" =~ ^[0-9]+(\.[0-9]+)?$ ]] || period=null
+  jq -r --argjson top "$CEILING_TOP_THREADS" --argjson hot "$HOT_THREAD_PCT" --argjson rungs "$rungs" \
+        --argjson setp "$period" --arg sched "$sched" '
       def at: capture("^(?<s>[^.Z]+)(\\.(?<f>[0-9]+))?Z$") | ((.s + "Z") | fromdate) + (("0." + (.f // "0")) | tonumber);
       def inrung($t; $p): [$rungs[0][] | ([$t, .end_epoch_ms / 1000] | min) - ([$t - $p, .start_epoch_ms / 1000] | max)
                            | select(. > 0)] | add // 0;
-      def internal: test("CompilerThread|^JFR |^Service Thread$|^Monitor Deflation Thread$|^Common-Cleaner$|^Signal Dispatcher$");
+      def internal: test("^C[12] CompilerThread[0-9]+$|^JFR |^Service Thread$|^Monitor Deflation Thread$|^Common-Cleaner$|^Signal Dispatcher$|^Attach Listener$");
+      # Scaled past a full core by more than tail work at a rung end (5% is ~0.25 s at share 0.5): the
+      # thread also worked between rungs, so its in-rung load is only bounded, from below by assuming
+      # it ran flat out there: (l - (1 - f)) / f.
+      def broken: . != null and round > 105;
       [.recording.events[]] as $ev
       | ([$ev[] | select(.type == "jdk.ContainerConfiguration") | .values.effectiveCpuCount] | max) as $cc
       | ([$ev[] | select(.type == "jdk.CPUInformation") | .values.hwThreads] | max) as $hw
       | ($cc // $hw) as $cpus
       | [$ev[] | select(.type == "jdk.ThreadCPULoad")] as $tl
-      # One period per emission batch; assumes the ThreadCPULoad period is over 1 s (profile: 10 s).
-      | ([$tl[] | .values.startTime | at] | sort | . as $u
-         | [range(0; length) | select(. == 0 or $u[.] - $u[. - 1] > 1) | $u[.]]) as $batches
+      # One batch per emission (samples under 1 s apart; the period is over 1 s). A thread that exits
+      # emits a lone off-cadence sample, so only batches of two or more samples count as periods.
+      | ([$tl[] | .values.startTime | at] | sort
+         | reduce .[] as $x ([]; if length > 0 and $x - .[-1].last <= 1 then .[-1].last = $x | .[-1].n += 1
+                                 else . + [{at: $x, last: $x, n: 1}] end)
+         | [.[] | select(.n >= 2)] as $multi | (if ($multi | length) > 0 then $multi else . end) | map(.at)) as $cand
+      # The recorded period when it is usable (over 1 s, the batching gap), else the median batch gap.
+      | (if $setp == null then [range(1; $cand | length) | $cand[.] - $cand[. - 1]] | sort | (if length == 0 then null else .[length / 2 | floor] end)
+         elif $setp > 1 then $setp else null end) as $p
+      # A batch counts as a period only about $p after the last counted one, so off-cadence batches do not.
+      | (if $p == null then $cand else reduce $cand[] as $x ([]; if length == 0 or $x - .[-1] >= $p - 1 then . + [$x] else . end) end) as $batches
       | ($batches | length) as $periods
-      | ([range(1; $periods) | $batches[.] - $batches[. - 1]] | sort | if length == 0 then null else .[length / 2 | floor] end) as $p
       | (($rungs[0] | length) > 0 and $p != null) as $scaled
       | ([$ev[] | select(.type == "jdk.CPULoad") | ((.values.jvmUser // 0) + (.values.jvmSystem // 0))]
          | if length == 0 then null else add / length end) as $jvm
@@ -208,25 +241,50 @@ thread_cpu_table() { # work_dir jfr_rel
                         l: ((.values.user // 0) + (.values.system // 0)), at: (.values.startTime | at)}]
               | group_by(.t) | map({t: .[0].t, n: length, pct: ((map(.l) | add) / $periods * $cpus * 100),
                   peak: ((map(.l) | max) * $cpus * 100),
-                  inrung: (if $scaled then [.[] | (inrung(.at; $p) / $p) as $f | select($f >= 0.5) | .l / $f * $cpus * 100] | max else null end)})
+                  in: (if $scaled then [.[] | (inrung(.at; $p) / $p) as $f | select($f >= 0.5) | {s: (.l * $cpus / $f), f: $f, c: (.l * $cpus)}] else [] end)})
+              | map(. + {inrung: (if (.in | length) == 0 then null else .in | map(.s) | max * 100 end),
+                         lo: (.in | map((.c - (1 - .f)) / .f | [., 0] | max | [., 1] | min) | max // 0 | . * 100 | round)} | del(.in))
               | sort_by(-.pct)) as $rows
-        | ([$rows[] | select(.t | internal | not) | . + {key: ((if $scaled then .inrung else null end) // .peak | round)}]
-           | max_by([.key, (if $scaled then .inrung else null end) // .peak])) as $b
+        # Each application thread is judged on what its samples support: a scaled in-rung peak, a lower
+        # bound when it also worked between rungs, or its raw peak, which flags only when no thread has
+        # an in-rung figure (otherwise its samples sat mostly outside the rungs the others ran in).
+        | [$rows[] | select(.t | internal | not)
+           | . + (if .inrung == null then {kind: "raw", key: ([.peak, 100] | min | round)}
+                  elif .inrung | broken then {kind: "broken", key: .lo}
+                  else {kind: "scaled", key: ([.inrung, 100] | min | round)} end)] as $app
+        | ([$app[] | select(.key >= $hot and (.kind != "raw" or all($app[]; .kind == "raw")))] | max_by([.key, .peak])) as $f
+        | ([$app[] | select(.kind == "scaled")] | max_by([.key, .inrung])) as $s
+        | ([$app[] | select(.kind != "scaled")] | sort_by(-.peak)) as $o
+        | (if $sched == "none" then "No rung schedule in the bundle"
+           elif $sched == "bad" then "The rung schedule in the bundle (sweep-rungs.json) is empty or malformed"
+           elif $p == null then "The sampling period could not be told"
+           else "No application thread had a sample at least half inside a rung" end) as $why
         | "Java threads (\($rows | length)): **\($rows | map(.pct) | add | round)% of one core**; whole JVM incl. GC threads (jdk.CPULoad): **\(if $jvm == null or $hw == null then "n/a" else ($jvm * $hw * 100 | round | tostring) + "%" end) of one core**; \($cpus) effective CPUs (\($cc | if . == null then "host hardware threads" else "as the container sees them" end)), \($periods) sampling periods.\n",
           "| Thread | % of one core | Peak period | Peak in-rung | Samples |", "|---|---:|---:|---:|---:|",
-          ($rows[:$top][] | "| \(.t) | \(.pct * 10 | round / 10) | \(.peak * 10 | round / 10) | \(if .inrung == null then "n/a" else .inrung * 10 | round / 10 end) | \(.n) |"),
+          ($rows[:$top][] | "| \(.t) | \(.pct * 10 | round / 10) | \(.peak * 10 | round / 10) | \(if .inrung == null then "n/a" elif .inrung | broken then (if .lo >= 100 then "≥100" else "\(.lo)–100" end) else [.inrung, 100] | min | . * 10 | round / 10 end) | \(.n) |"),
+          (if any($rows[:$top][]; (.inrung | broken) and .lo < 100) then "\nA range in Peak in-rung: scaled to its in-rung part, that period passed a full core by more than tail work at a rung end allows, so the thread also worked between rungs (assumption broken); the lower figure assumes it ran flat out there." else empty end),
           "",
-          (if $b == null then "(no application threads to flag; JVM-internal threads such as compiler and JFR threads are not flagged)"
-           elif $scaled then
-             (if $b.key >= $hot
-              then ":warning: **\($b.t)** reached **\($b.key)% of one core** while a rung ran (its busiest period, scaled to the part inside a rung; flagged at \($hot)%): one thread was close to a full core, so it may cap throughput."
-              else "Busiest in-rung period: \($b.t) at \($b.key)% of one core (its busiest period, scaled to the part inside a rung; flagged at \($hot)%): no application thread was near a full core." end)
+          (if ($app | length) == 0 then "(no application threads to flag; JVM-internal threads such as compiler and JFR threads are not flagged)"
+           elif $f != null then
+             (if $f.kind == "scaled"
+              then ":warning: **\($f.t)** reached **\($f.key)% of one core** while a rung ran (its busiest period, scaled to the part inside a rung; flagged at \($hot)%): one thread was close to a full core, so it may cap throughput."
+              elif $f.kind == "broken"
+              then ":warning: **\($f.t)** reached at least **\($f.key)% of one core** while a rung ran (its busiest period, bounded assuming it ran flat out between rungs, where it also worked; flagged at \($hot)%): one thread was close to a full core, so it may cap throughput."
+              else ":warning: **\($f.t)** reached **\($f.key)% of one core** in its busiest sampling period (flagged at \($hot)%): one thread was close to a full core, so it may cap throughput." end)
+           elif $s == null and all($o[]; .kind == "raw") then
+             "Busiest sampling period: \($o[0].t) at \($o[0].key)% of one core (flagged at \($hot)%). \($why), so periods are not scaled: one that straddles a rung edge reads as little as ~75% of the in-rung load, and this is not proof that no thread was near a full core."
            else
-             (if $b.key >= $hot
-              then ":warning: **\($b.t)** reached **\($b.key)% of one core** in its busiest sampling period (flagged at \($hot)%): one thread was close to a full core, so it may cap throughput."
-              else "Busiest sampling period: \($b.t) at \($b.key)% of one core (flagged at \($hot)%). No rung schedule in the bundle, so periods are not scaled: one that straddles a rung edge reads as little as ~75% of the in-rung load, and this is not proof that no thread was near a full core." end)
+             (if $s == null then "No application thread had a scaled in-rung figure (flagged at \($hot)%)"
+              else "Busiest in-rung period: \($s.t) at \($s.key)% of one core (its busiest period, scaled to the part inside a rung; flagged at \($hot)%)" end)
+             + (if ($o | length) == 0 then ": no application thread was near a full core."
+                else ". Not judged on a scaled figure: "
+                  + ([$o[:3][] | if .kind == "broken"
+                       then "\(.t) (worked between rungs too, so its busiest in-rung period was \(.key)–100% of one core; raw peak \(.peak | round)%)"
+                       else "\(.t) (no sample at least half inside a rung; raw peak \(.peak | round)%)" end] | join("; "))
+                  + (if ($o | length) > 3 then "; and \(($o | length) - 3) more" else "" end)
+                  + ". This is not proof that no thread was near a full core." end)
            end)
-        end' 2>/dev/null || echo "(per-thread CPU unavailable: jfr print failed)"
+        end' <<<"$events" 2>/dev/null || echo "(per-thread CPU unavailable: the events could not be read)"
 }
 
 # Top methods per thread role over the ceiling window, from one `jfr print --json --stack-depth 1`

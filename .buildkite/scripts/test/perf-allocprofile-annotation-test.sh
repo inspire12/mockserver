@@ -7,6 +7,7 @@
 # Run: .buildkite/scripts/test/perf-allocprofile-annotation-test.sh
 #   PERF_ALLOCPROFILE_TEST_REAL=true   also run the corrupt-recording check through the real `jfr`
 #   PERF_ALLOCPROFILE_TEST_BUNDLE=<allocprofile-perf-jvm-diagnostics.tgz>   and render a real bundle
+#   PERF_ALLOCPROFILE_TEST_BUNDLE_PERIODS=<n>   and expect n sampling periods in it (build 537: 7)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -20,13 +21,16 @@ check() { # name expected actual
 has() { # name needle haystack
   if grep -qF -- "$2" <<<"$3"; then ok "$1"; else bad "$1: '$2' not in output"; printf '%s\n' "$3" | head -20 >&2; fi
 }
+lacks() { # name needle haystack
+  if grep -qF -- "$2" <<<"$3"; then bad "$1: '$2' in output"; printf '%s\n' "$3" | head -20 >&2; else ok "$1"; fi
+}
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/perf-allocprofile-annotation-test.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
 extract() {
   awk -v n="$1" '$0 ~ "^"n"\\(\\) *\\{" {p=1; print; if ($0 ~ /}$/) exit; next} p {print} p && /^}/ {exit}' "$F"
 }
-for fn in jfr_tool cap_annotation thread_cpu_table role_hot_methods monitor_threshold monitor_enter_summary \
+for fn in jfr_tool cap_annotation thread_cpu_period thread_cpu_table role_hot_methods monitor_threshold monitor_enter_summary \
           gc_cycle_summary jfr_view_block ceiling_profile load_window_figures heap_inspection_placement \
           largest_repo_dir assemble_finished_chunks emit_allocation_annotation annotate; do
   body="$(extract "$fn")"
@@ -104,6 +108,7 @@ echo "--- 2b. per-thread CPU: the busiest-period flag on both sides of HOT_THREA
 cpu_events() { # worker load in the first period (fraction of all CPUs) -> a jfr print --json fixture, 6 CPUs
   printf '{"recording":{"events":[{"type":"jdk.ContainerConfiguration","values":{"effectiveCpuCount":6}},{"type":"jdk.CPUInformation","values":{"hwThreads":12}},'
   printf '{"type":"jdk.ThreadCPULoad","values":{"startTime":"2026-09-30T21:34:00.1Z","eventThread":{"javaName":"worker1"},"user":%s,"system":0}},' "$1"
+  printf '{"type":"jdk.ThreadCPULoad","values":{"startTime":"2026-09-30T21:34:00.1Z","eventThread":{"javaName":"logger0"},"user":0.02,"system":0}},'
   printf '{"type":"jdk.ThreadCPULoad","values":{"startTime":"2026-09-30T21:34:10.1Z","eventThread":{"javaName":"worker1"},"user":0.01,"system":0}},'
   printf '{"type":"jdk.ThreadCPULoad","values":{"startTime":"2026-09-30T21:34:10.1Z","eventThread":{"javaName":"logger0"},"user":0.02,"system":0}}]}}\n'
 }
@@ -119,6 +124,8 @@ has "the flag decides on the rounded figure it prints" ":warning: **worker1** re
 has "without a rung schedule the line says a zero flag proves little" "is not proof that no thread was near a full core" "$cool"
 docker() { return 1; }
 check "a failed jfr print gives the per-thread note" "(per-thread CPU unavailable: jfr print failed)" "$(thread_cpu_table "$WORK" x.jfr)"
+docker() { :; }
+check "an empty jfr print gives the per-thread note, not nothing" "(per-thread CPU unavailable: jfr print failed)" "$(thread_cpu_table "$WORK" x.jfr)"
 
 echo "--- 2c. per-thread CPU scaled to the rung schedule: a 15 s rung + 5 s gap is two 10 s periods"
 T0=1790800000
@@ -144,6 +151,137 @@ has "good phase: the in-rung peak is flagged too" ":warning: **worker1** reached
 if grep -q 'CompilerThread0\*\* reached' <<<"$bad_phase$good_phase"; then bad "a JVM-internal thread was flagged"; else ok "JVM-internal threads are not flagged"; fi
 idle_phase="$(PHASE=17.5 HOT_THREAD_PCT=101 thread_cpu_table "$WORK/phase" x.jfr)"
 has "below the flag, the scaled line says so" "Busiest in-rung period: worker1 at 100% of one core" "$idle_phase"
+
+echo "--- 2d. per-thread CPU: the 0.5 cut-off, raw fallbacks, figures over 100%, and the sampling period"
+tl_fixture() { # rungs_json < "offset_s|thread|rung or flat|% of one core[|drain_s]" lines -> a jfr print --json fixture, 6 CPUs
+  # "rung": that load while a rung ran and idle in the gaps, over a 10 s period; "flat": that load throughout.
+  # drain_s: a full core for that long after each rung ends (a backlog drained between rungs).
+  jq -R -n --argjson t0 "$T0" --slurpfile r "$1" '
+    def inrung($t): [$r[0][] | ([$t, .end_epoch_ms / 1000] | min) - ([$t - 10, .start_epoch_ms / 1000] | max) | select(. > 0)] | add // 0;
+    def drain($t; $d): [$r[0][] | ([$t, .end_epoch_ms / 1000 + $d] | min) - ([$t - 10, .end_epoch_ms / 1000] | max) | select(. > 0)] | add // 0;
+    def iso: . as $x | ($x | floor | todate | sub("Z$"; "")) + "." + ((($x - ($x | floor)) * 1000 | round) + 1000 | tostring | .[1:]) + "Z";
+    {recording: {events: ([{type: "jdk.ContainerConfiguration", values: {effectiveCpuCount: 6}}]
+      + [inputs | select(length > 0) | split("|") | ($t0 + (.[0] | tonumber)) as $t
+         | {type: "jdk.ThreadCPULoad", values: {startTime: ($t | iso), eventThread: {javaName: .[1]},
+            user: ([(.[3] | tonumber) / 100 * (if .[2] == "rung" then inrung($t) / 10 else 1 end) + drain($t; (.[4] // "0" | tonumber)) / 10, 1]
+                   | min / 6), system: 0}}])}}'
+}
+batches() { # first_offset count spec... -> each spec at first_offset + 10 k, k = 0 .. count - 1
+  local off="$1" n="$2" k s; shift 2
+  for k in $(seq 0 $((n - 1))); do for s in "$@"; do echo "$(awk -v o="$off" -v k="$k" 'BEGIN { print o + 10 * k }')|$s"; done; done
+}
+FIX="$WORK/fixture.json"
+docker() { # `jfr print` gives $FIX; `jfr view active-settings` gives $SETTINGS (ceiling.jfr) or $LOAD_SETTINGS (load.jfr)
+  case " $* " in
+    *" active-settings "*) if [ "${*: -1}" = /w/sut/load.jfr ]; then printf '%s\n' "${LOAD_SETTINGS:-}"; else printf '%s\n' "${SETTINGS:-}"; fi ;;
+    *) cat "$FIX" ;;
+  esac
+}
+settings_view() { # Thread CPU Load period -> a `jfr view active-settings` table
+  printf '%-55s %-22s %-24s %-26s %-25s\n' 'Event Type' Enabled Threshold 'Stack Trace' Period \
+    'Java Monitor Blocked' true '1 ms' true '' 'Thread CPU Load' true '' '' "$1"
+}
+cpu_settings="$(settings_view '10 s')"
+check "period: 10 s" "10" "$(SETTINGS="$cpu_settings" thread_cpu_period "$WORK/phase" x.jfr)"
+check "period: 20 ms" "0.02" "$(SETTINGS="$(settings_view '20 ms')" thread_cpu_period "$WORK/phase" x.jfr)"
+check "period: 10s, unit unspaced" "10" "$(SETTINGS="$(settings_view '10s')" thread_cpu_period "$WORK/phase" x.jfr)"
+check "period: everyChunk is not a period" "" "$(SETTINGS="$(settings_view 'everyChunk')" thread_cpu_period "$WORK/phase" x.jfr)"
+check "period: no settings events" "" "$(thread_cpu_period "$WORK/phase" x.jfr)"
+# Periods end at offsets 2 + 10 k: the first is 2 s inside rung 0 (share 0.2), the rest 1 or 0.5.
+{ echo "2|worker1|flat|30"; batches 12 7 "worker1|rung|100"; batches 2 8 "logger0|flat|1"; } | tl_fixture "$WORK/phase/sweep-rungs.json" > "$FIX"
+r="$(thread_cpu_table "$WORK/phase" x.jfr)"   # without the cut-off the edge sample scales to 30 / 0.2 = 150%
+has "cut-off: an edge sample under half inside a rung is not scaled" "| worker1 | 72.5 | 100 | 100 | 8 |" "$r"
+has "cut-off: the in-rung flag reads the kept samples" ":warning: **worker1** reached **100% of one core** while a rung ran" "$r"
+{ echo "2|short-1|flat|95"; batches 2 8 "worker1|rung|60" "logger0|flat|1"; } | tl_fixture "$WORK/phase/sweep-rungs.json" > "$FIX"
+r="$(thread_cpu_table "$WORK/phase" x.jfr)"
+has "ranking: a raw peak is not ranked against in-rung ones, but named with its raw peak" \
+  "Busiest in-rung period: worker1 at 60% of one core (its busiest period, scaled to the part inside a rung; flagged at 90%). Not judged on a scaled figure: short-1 (no sample at least half inside a rung; raw peak 95%). This is not proof that no thread was near a full core." "$r"
+lacks "ranking: the raw 95% is not worded as in-rung" ":warning:" "$r"
+lacks "ranking: no all-clear while a thread is unscaled" "no application thread was near a full core" "$r"
+# Mixed: the event-log consumer pegged in each rung and draining 1 s after it reads 113% scaled, so it is
+# only bounded (80-100%), while a worker scales to 85%: the line must not give the all-clear.
+batches 17.5 7 "MockServer-EventLog0|rung|100|1" "worker1|rung|85" "logger0|flat|1" | tl_fixture "$WORK/phase/sweep-rungs.json" > "$FIX"
+r="$(thread_cpu_table "$WORK/phase" x.jfr)"
+has "mixed: the bounded thread shows its range" "| MockServer-EventLog0 | 80.7 | 85 | 80–100 | 7 |" "$r"
+has "mixed: the bounded thread is named with its range and raw peak" \
+  "Busiest in-rung period: worker1 at 85% of one core (its busiest period, scaled to the part inside a rung; flagged at 90%). Not judged on a scaled figure: MockServer-EventLog0 (worked between rungs too, so its busiest in-rung period was 80–100% of one core; raw peak 85%). This is not proof that no thread was near a full core." "$r"
+lacks "mixed: no all-clear" "no application thread was near a full core" "$r"
+batches 17.5 7 "MockServer-EventLog0|rung|100|1.75" "worker1|rung|85" "logger0|flat|1" | tl_fixture "$WORK/phase/sweep-rungs.json" > "$FIX"
+has "mixed: a lower bound at the threshold flags" ":warning: **MockServer-EventLog0** reached at least **90% of one core** while a rung ran" \
+  "$(thread_cpu_table "$WORK/phase" x.jfr)"
+mkdir -p "$WORK/short"
+jq -n --argjson t0 "$T0" '[range(0; 4) | {offered_rps: 1000, start_epoch_ms: (($t0 + . * 20) * 1000), end_epoch_ms: (($t0 + . * 20 + 4) * 1000)}]' \
+  > "$WORK/short/sweep-rungs.json"
+batches 5 8 "worker1|rung|100" "logger0|flat|1" | tl_fixture "$WORK/short/sweep-rungs.json" > "$FIX"
+r="$(thread_cpu_table "$WORK/short" x.jfr)"   # 4 s rungs: no period is half inside one
+has "4 s rungs: no in-rung figure" "| worker1 | 20 | 40 | n/a | 8 |" "$r"
+has "4 s rungs: the raw fallback says why and keeps its caveat" \
+  "Busiest sampling period: worker1 at 40% of one core (flagged at 90%). No application thread had a sample at least half inside a rung, so periods are not scaled: one that straddles a rung edge reads as little as ~75%" "$r"
+# Bad phase (every period 7.5 s in a rung), plus three lone thread-exit samples 5 s off the cadence.
+{ batches 17.5 7 "worker1|rung|100" "logger0|flat|1"; batches 22.5 3 "exit-1|flat|5" | awk -F'|' '{ $1 = $1 + 10 * (NR - 1); print }' OFS='|'; } \
+  | tl_fixture "$WORK/phase/sweep-rungs.json" > "$FIX"
+r="$(thread_cpu_table "$WORK/phase" x.jfr)"   # counted as batches, they halve the median gap: 150%
+has "exit samples: not counted as sampling periods" "7 sampling periods" "$r"
+has "exit samples: the period estimate is not skewed" ":warning: **worker1** reached **100% of one core** while a rung ran" "$r"
+# Two threads exiting together are a batch of two, which the estimate cannot drop; the setting gives the period.
+{ batches 17.5 7 "worker1|rung|100" "logger0|flat|1"; batches 22.5 3 "exit-1|flat|5" "exit-2|flat|5" | awk -F'|' '{ $1 = $1 + 10 * int((NR - 1) / 2); print }' OFS='|'; } \
+  | tl_fixture "$WORK/phase/sweep-rungs.json" > "$FIX"
+r="$(thread_cpu_table "$WORK/phase" x.jfr)"
+lacks "two-thread exits: the fixture skews an estimated period" "100% of one core** while a rung ran" "$r"
+r="$(SETTINGS="$cpu_settings" thread_cpu_table "$WORK/phase" x.jfr)"
+has "the period comes from the recording's settings" ":warning: **worker1** reached **100% of one core** while a rung ran" "$r"
+has "with a known period, off-cadence batches are not counted as periods" "7 sampling periods" "$r"
+for bad_period in '20 ms' '0 s'; do
+  has "a recorded period of $bad_period is not used" "The sampling period could not be told, so periods are not scaled" \
+    "$(SETTINGS="$(settings_view "$bad_period")" thread_cpu_table "$WORK/phase" x.jfr)"
+done
+mkdir -p "$WORK/loadset/sut"; cp "$WORK/phase/sweep-rungs.json" "$WORK/loadset/"; printf 'jfr' > "$WORK/loadset/sut/load.jfr"
+r="$(LOAD_SETTINGS="$cpu_settings" thread_cpu_table "$WORK/loadset" x.jfr)"
+has "an older ceiling.jfr without settings reads the period from load.jfr" ":warning: **worker1** reached **100% of one core** while a rung ran" "$r"
+batches 17.5 7 "background-1|flat|80" "worker1|rung|50" "logger0|flat|1" | tl_fixture "$WORK/phase/sweep-rungs.json" > "$FIX"
+r="$(thread_cpu_table "$WORK/phase" x.jfr)"   # 80 / 0.75 = 107% in-rung: it worked in the gaps too
+has "over 100%: the cell shows the bound, not the scaled figure" "| background-1 | 80 | 80 | 73–100 | 7 |" "$r"
+has "over 100%: the table says what the range means" "A range in Peak in-rung: scaled to its in-rung part, that period passed a full core" "$r"
+has "over 100%: the line names the thread with its bound" "background-1 (worked between rungs too, so its busiest in-rung period was 73–100% of one core; raw peak 80%)" "$r"
+lacks "over 100%: it does not drive the flag on its own" ":warning:" "$r"
+batches 17.5 7 "bg-1|flat|84" "bg-2|flat|83" "bg-3|flat|82" "bg-4|flat|81" "worker1|rung|50" "logger0|flat|1" \
+  | tl_fixture "$WORK/phase/sweep-rungs.json" > "$FIX"
+r="$(thread_cpu_table "$WORK/phase" x.jfr)"   # four bounded threads (75-79% lower bounds), none flagged
+has "bounded threads: the line names three, then counts the rest" "bg-3 (worked between rungs too" "$r"
+has "bounded threads: the rest are counted" "; and 1 more. This is not proof that no thread was near a full core." "$r"
+lacks "bounded threads: the fourth is not named" "bg-4 (" "$r"
+lacks "bounded threads: no flag" ":warning:" "$r"
+batches 17.5 7 "spin-1|flat|100" "logger0|flat|1" | tl_fixture "$WORK/phase/sweep-rungs.json" > "$FIX"
+r="$(thread_cpu_table "$WORK/phase" x.jfr)"
+has "over 100% with a pegged thread: flagged, on its lower bound" \
+  ":warning: **spin-1** reached at least **100% of one core** while a rung ran" "$r"
+has "a lower bound of 100 shows as at least 100" "| spin-1 | 100 | 100 | ≥100 | 7 |" "$r"
+lacks "no range shown, so no range note" "A range in Peak in-rung" "$r"
+batches 17.5 7 "worker1|flat|77" "logger0|flat|1" | tl_fixture "$WORK/phase/sweep-rungs.json" > "$FIX"
+r="$(thread_cpu_table "$WORK/phase" x.jfr)"   # 77 / 0.75 = 103%: rung-edge slop, shown as a full core
+has "slop just over 100%: shown at 100" "| worker1 | 77 | 77 | 100 | 7 |" "$r"
+has "slop just over 100%: flagged in-rung" ":warning: **worker1** reached **100% of one core** while a rung ran" "$r"
+batches 17.5 7 "C2 CompilerThread-pool-1|rung|95" "Attach Listener|rung|100" "C1 CompilerThread3|rung|100" "logger0|flat|1" \
+  | tl_fixture "$WORK/phase/sweep-rungs.json" > "$FIX"
+r="$(thread_cpu_table "$WORK/phase" x.jfr)"
+has "a worker named like a compiler thread is still flagged" ":warning: **C2 CompilerThread-pool-1** reached **95% of one core**" "$r"
+
+echo "--- 2e. per-thread CPU with a wrong-schema rung schedule: the unscaled table, not a failure"
+docker() { cpu_events "${CPU_LOAD:-0.16}"; }
+mkdir -p "$WORK/schema"; cp "$WORK/phase/sweep-rungs.json" "$WORK/schema/good.json"
+for case in string-epoch missing-end two-documents empty not-json; do
+  case "$case" in
+    string-epoch) jq '.[0].start_epoch_ms |= tostring' "$WORK/schema/good.json" ;;
+    missing-end) jq 'del(.[1].end_epoch_ms)' "$WORK/schema/good.json" ;;
+    two-documents) cat "$WORK/schema/good.json" "$WORK/schema/good.json" ;;
+    empty) echo '[]' ;;
+    not-json) echo '[{"start_epoch_ms":' ;;
+  esac > "$WORK/schema/sweep-rungs.json"
+  r="$(thread_cpu_table "$WORK/schema" x.jfr)"
+  has "$case: the per-thread table survives" "| worker1 | 51 | 96 | n/a | 2 |" "$r"
+  has "$case: the line says the schedule is unusable" "The rung schedule in the bundle (sweep-rungs.json) is empty or malformed, so periods are not scaled" \
+    "$(CPU_LOAD=0.12 thread_cpu_table "$WORK/schema" x.jfr)"
+done
 unset -f docker
 
 echo "--- 3. ceiling_profile degrade paths: a one-line note and return 1, never a failure"
@@ -203,6 +341,7 @@ if [ "${PERF_ALLOCPROFILE_TEST_REAL:-false}" = "true" ] || [ -n "${PERF_ALLOCPRO
     mkdir -p "$WORK/repo"; cp "$PERF_ALLOCPROFILE_TEST_BUNDLE" "$WORK/repo/allocprofile-perf-jvm-diagnostics.tgz"
     out="$(REPO_ROOT="$WORK/repo" ARTIFACT_PREFIX=allocprofile- ANNOTATE_CONTEXT=test emit_allocation_annotation)"
     printf '%s\n' "$out" > "${PERF_ALLOCPROFILE_TEST_OUT:-$WORK/annotation.md}"
+    [ -z "${PERF_ALLOCPROFILE_TEST_BUNDLE_PERIODS:-}" ] || has "real bundle: the sampling periods" "${PERF_ALLOCPROFILE_TEST_BUNDLE_PERIODS} sampling periods" "$out"
     for section in "#### per-thread CPU" "| Peak period |" "#### hot methods by thread role" "#### monitor contention" \
                    "#### GC cycles" "#### gc-pauses" "#### allocation-by-site" "#### cpu-time-hot-methods"; do
       has "real bundle: $section" "$section" "$out"

@@ -1322,23 +1322,53 @@ threads.
 
 - *Busiest thread.* The window average cannot show a one-thread limit, because the gaps between
   rungs dilute it. A single `jdk.ThreadCPULoad` sample cannot either. Each sample covers the period
-  before it (10 s in `profile`), and a 15 s rung plus its 5 s gap is exactly two periods, so the
-  sampling phase stays fixed for the whole window. At a bad phase every sample straddles a rung
+  before it, and a 15 s rung plus its 5 s gap is exactly two 10 s periods, so the sampling phase stays
+  fixed for the whole window. At a bad phase every sample straddles a rung
   edge, and a thread pegged inside the rungs reads as little as ~75% of one core. The table therefore
   has two more columns:
   - "Peak period" is the thread's busiest raw sample.
   - "Peak in-rung" divides each sample by the share of its period that fell inside a rung (from
     `sweep-rungs.json`), keeping only samples at least half inside one, and takes the busiest.
 
-  The line under the table flags the application thread whose rounded in-rung peak reaches
-  `PERF_ALLOCPROFILE_HOT_THREAD_PCT` (default 90). JVM-internal threads, such as the compiler and JFR
-  threads, stay in the table but are never flagged. The scaling assumes the thread idles in the gaps,
-  so it overstates one that also works there, such as the event-log consumer draining a backlog.
-  Treat a flag as a prompt to read the table, not as a verdict. In build 537 the scaling checked out:
-  worker event loop 7's straddling samples (14.3, 16.6 and 18.8% over about half-rung periods) scale
-  to 28.1, 33.0 and 37.6%, against 29.0, 32.9 and 37.7% for the in-rung periods just before them. Its
-  busiest period was 41%. When the bundle has no rung schedule, the line flags on the raw peak and
-  says that a straddled period can read as little as ~75% of the in-rung load.
+  The period is the `Thread CPU Load` period in the recording's `active-settings` (10 s in
+  `profile`), read from `sut/load.jfr` when an older `ceiling.jfr` has no settings events. A recorded
+  period of 1 s or less is not used, and the line then says the period could not be told. Without
+  settings, the period is the median gap between sampling batches. Only batches of two or more samples
+  count, because a thread that exits emits one lone sample off the cadence; build 537's ceiling had
+  one, from a C2 compiler thread. The window's period count then takes only batches about one period
+  (less 1 s) after the last one it counted, so two threads exiting together do not add a period.
+
+  Each application thread is judged on what its samples support:
+  - **Scaled.** Its in-rung peak, assuming it idled in the gaps. Up to 105% counts as tail work at a
+    rung's end and shows as 100: 5% is about 0.25 s of work after the rung at a period half inside
+    it (0.4 s at three-quarters). Gap work small enough to stay under 105% is still counted as
+    in-rung, so a scaled figure can overstate and a flag can be false.
+  - **Bounded.** A scaled peak over 105% means the thread also worked between rungs, so the
+    assumption is broken. Its in-rung load lies between (l − (1 − f)) / f, if it ran flat out in the
+    gaps, and 100%, where l is the period's load and f its share inside a rung. The table shows the
+    range, or `≥100` when the lower figure is a full core. A thread draining a backlog for more than
+    about 0.3 s after each rung, such as the event-log consumer, lands here.
+  - **Raw.** No sample was at least half inside a rung, so only its raw peak is known.
+
+  The line flags the application thread whose rounded scaled peak, or lower bound, reaches
+  `PERF_ALLOCPROFILE_HOT_THREAD_PCT` (default 90). A raw peak flags only when no application thread
+  has a scaled or bounded figure; otherwise its samples sat mostly outside the rungs. With no flag,
+  the line says that no application thread was near a full core only when every one was scaled.
+  Otherwise it names the bounded and raw threads, with their ranges and raw peaks, and says the result
+  is not proof. JVM-internal threads stay in the table but are never flagged. They are matched by
+  whole name: `C1`/`C2 CompilerThreadN`, `JFR …`, `Service Thread`, `Monitor Deflation Thread`,
+  `Common-Cleaner`, `Signal Dispatcher` and `Attach Listener`. Treat a flag as a prompt to read the
+  table, not as a verdict. In build 537 the scaling checked out: worker event loop 7's straddling
+  samples (14.3, 16.6 and 18.8% over about half-rung periods) scale to 28.1, 33.0 and 37.6%, against
+  29.0, 32.9 and 37.7% for the in-rung periods just before them. Its busiest period was 41%.
+
+  When no application thread is scaled or bounded, the line flags on the raw peak, says why, and says
+  that a straddled period can read as little as ~75% of the in-rung load. That happens in three cases:
+  - the bundle has no rung schedule;
+  - the schedule is unusable (empty, not one JSON array, or with a non-numeric or missing
+    `start_epoch_ms` or `end_epoch_ms`), in which case the table is still printed;
+  - no application thread had a sample at least half inside a rung, for example with rungs shorter
+    than half a period.
 - *Hot methods by thread role.* One `jfr print --json --stack-depth 1` dump gives the top frame of
   every sample, grouped by role (the thread name without its trailing number, so the five
   `workerEventLoop` threads are one row). It shows the top `PERF_ALLOCPROFILE_ROLE_METHODS` (default 8)
@@ -1374,11 +1404,15 @@ Buildkite rejects a body over 1 MiB). It cuts on whole lines, closes an open cod
 cut. Build 537's annotation re-rendered with these views was about 24 KB, and the ceiling section
 took about 10 s to render locally. `.buildkite/scripts/test/perf-allocprofile-annotation-test.sh` (run by
 `perf-test-lint.sh`) checks the size cap, the per-role, monitor and GC summaries against a JSON
-fixture (an empty events file included), the busiest-period flag on both sides of its threshold, and
+fixture (an empty events file included), the busiest-period flag on both sides of its threshold, the
+in-rung scaling (the half-inside cut-off, the parsed and range-checked period from settings or from
+multi-sample batches, the period count, the raw fallbacks, bounded threads with and without a flag,
+the mixed case that must not give an all-clear, internal-thread names and wrong-schema schedules), and
 every degrade path, with `docker` stubbed. Its multibyte size-cap case runs under a UTF-8 locale, so
 it fails on GNU awk (the Linux agents') if the cap stops counting bytes. Set `PERF_ALLOCPROFILE_TEST_REAL=true` to
 also feed a corrupt file to the real `jfr`. Set `PERF_ALLOCPROFILE_TEST_BUNDLE=<…perf-jvm-diagnostics.tgz>`
-to render a real bundle as well.
+to render a real bundle as well, and `PERF_ALLOCPROFILE_TEST_BUNDLE_PERIODS=<n>` to check its period count
+(build 537: 7).
 
 **Recording options.** `jdk.JavaMonitorEnter#threshold=1ms` records monitor waits of 1–10 ms, which
 the `profile` default of 10 ms hides; build 502 showed contention on the event-log disruptor lock
