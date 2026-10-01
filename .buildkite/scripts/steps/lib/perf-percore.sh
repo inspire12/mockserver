@@ -76,6 +76,10 @@ set -euo pipefail
 # mockserver-performance-test/scripts/rw-multi-k6-sweep.sh against that point's SUT, from one
 # fixed client placement, and its rig validity and lower-bound reasons come from derive_saturation
 # (lib/perf-hw-matrix-rw.jq), not the single-k6 85%-of-pin rule below.
+# Each hw_matrix SUT also writes a GC log (PERF_HW_MATRIX_GC_LOG, default true) and takes
+# PERF_HW_MATRIX_SUT_JAVA_OPTS, both appended to the image's own JAVA_TOOL_OPTIONS; the sampler
+# records GC time, event-log drops/evictions and the SUT cgroup's memory.events and PSI, which
+# each multik6 point summarises per rung steady window (.rung_jvm, <point dir>/jvm-rungs.json).
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -90,6 +94,10 @@ else
 fi
 # shellcheck source=perf-cpu-topology.sh
 . "$SCRIPT_DIR/perf-cpu-topology.sh"
+# shellcheck source=perf-java-opts.sh
+. "$SCRIPT_DIR/perf-java-opts.sh"
+# shellcheck source=perf-hw-matrix-jvm.sh
+. "$SCRIPT_DIR/perf-hw-matrix-jvm.sh"
 
 OUT_FILE="${1:-/dev/stdout}"
 
@@ -160,6 +168,18 @@ case "$HW_CLIENT" in
   *) echo "ERROR: PERF_HW_MATRIX_CLIENT='$HW_CLIENT' (expected multik6 or single)" >&2; exit 2 ;;
 esac
 [ "$MODE" = hw_matrix ] || HW_CLIENT=single
+HW_SUT_JAVA_OPTS="${PERF_HW_MATRIX_SUT_JAVA_OPTS:-}"
+HW_GC_LOG="${PERF_HW_MATRIX_GC_LOG:-true}"
+case "$HW_GC_LOG" in
+  true|false) ;;
+  *) echo "ERROR: PERF_HW_MATRIX_GC_LOG='$HW_GC_LOG' (expected true or false)" >&2; exit 2 ;;
+esac
+[ "$MODE" = hw_matrix ] || { HW_SUT_JAVA_OPTS=""; HW_GC_LOG=false; }
+# %p: a file per JVM, so another JVM in the container (an older image's Java HEALTHCHECK, which
+# also reads JAVA_TOOL_OPTIONS) cannot rotate the server's log away at its start.
+HW_GC_LOG_OPT='-Xlog:gc*:file=/jvm-diag/gc-%p.log:time,uptime,level,tags'
+HW_SUT_EXTRA_OPTS="${HW_SUT_JAVA_OPTS}"
+[ "$HW_GC_LOG" = true ] && HW_SUT_EXTRA_OPTS="${HW_SUT_EXTRA_OPTS:+$HW_SUT_EXTRA_OPTS }$HW_GC_LOG_OPT"
 if [ "$HW_CLIENT" = multik6 ]; then
   HW_WARMUP_RPS_PER_CORE="${PERF_HW_MATRIX_WARMUP_RPS_PER_CORE:-4000}"
 else
@@ -364,6 +384,21 @@ if ! docker run --rm -v "$WORK:/w" -w /w "$PROBE_JDK_IMAGE" javac AvailableProce
   exit 0
 fi
 
+# The SUT's JAVA_TOOL_OPTIONS: the image's own default (kept, so its GC is not dropped) plus
+# the hw_matrix extras. Unreadable image env would silently drop that default, so stop.
+SUT_IMAGE_JTO=""; SUT_JTO=""
+if [ -n "$HW_SUT_EXTRA_OPTS" ]; then
+  docker image inspect "$MOCKSERVER_IMAGE" >/dev/null 2>&1 || docker pull -q "$MOCKSERVER_IMAGE" >/dev/null 2>&1 || true
+  if ! docker image inspect "$MOCKSERVER_IMAGE" >/dev/null 2>&1; then
+    echo "ERROR: cannot inspect $MOCKSERVER_IMAGE for its JAVA_TOOL_OPTIONS default" >&2
+    echo '{"attempted":true,"error":"sut_image_env_unreadable","points":[],"skipped":[]}' > "$OUT_FILE"
+    exit 0
+  fi
+  SUT_IMAGE_JTO="$(image_java_tool_options "$MOCKSERVER_IMAGE")"
+  SUT_JTO="$(compose_java_tool_options "$SUT_IMAGE_JTO" "$HW_SUT_EXTRA_OPTS")"
+  echo "--- SUT JAVA_TOOL_OPTIONS: $SUT_JTO (image default: ${SUT_IMAGE_JTO:-none})" >&2
+fi
+
 docker network create "$NETWORK" >/dev/null
 
 # Report a JVM's availableProcessors for a cpuset, using the SUT image's own JVM.
@@ -468,6 +503,11 @@ start_point_sampler() {
   [ "$HW_CLIENT" = single ] && names="$K6_NAME $SERVER"
   CPU_LOG="$WORK/cpu-${PKEY}.csv"
   echo "ts,k6_cpu_pct,sut_cpu_pct,sut_mem_bytes,retained_entries,retained_bytes" > "$CPU_LOG"
+  JVM_LOG=""
+  if [ "$MODE" = hw_matrix ]; then
+    JVM_LOG="$POINT_DIR/jvm-samples.csv"; mkdir -p "$POINT_DIR"
+    echo "ts,$JVM_COLS" > "$JVM_LOG"
+  fi
   ( while true; do
       # Stamped on return (performance-measurement.md, sweep.js).
       # shellcheck disable=SC2086  # $names is one or two container names
@@ -482,11 +522,13 @@ start_point_sampler() {
           if (u == "GiB" || u == "GB") return n * 1073741824
           return n }
         $1==n { printf "%.0f", tob($3) }')"
-      retl="$(curl -s --max-time 1 "$METRICS_URL" 2>/dev/null | awk '
+      mbody="$(curl -s --max-time 1 "$METRICS_URL" 2>/dev/null || true)"
+      retl="$(awk '
         /^mock_server_event_log_retained_entries / { e = sprintf("%.0f", $2) }
         /^mock_server_event_log_retained_bytes /   { b = sprintf("%.0f", $2) }
-        END { printf "%s,%s", e, b }' || true)"
+        END { printf "%s,%s", e, b }' <<<"$mbody" || true)"
       printf '%s,%s,%s,%s,%s\n' "$ts" "${k6c:-}" "${sutc:-}" "${sutm:-}" "${retl:-,}" >> "$CPU_LOG"
+      [ -n "$JVM_LOG" ] && printf '%s,%s,%s\n' "$ts" "$(jvm_metric_cols <<<"$mbody")" "$(cgroup_cols "$SUT_CGROUP_DIR")" >> "$JVM_LOG"
       sleep "$SWEEP_SAMPLE_INTERVAL"
     done ) & SAMPLER_PID=$!
 }
@@ -515,10 +557,9 @@ esac
 # mode, mapped into the point schema by lib/perf-hw-matrix-rw.jq. Sets AGG, STATE_JSON,
 # DIED_AT_RPS, DIED_BEFORE_SWEEP, HC_RPS and MAXLOG_USED; returns 1 after recording a skip.
 measure_point_multik6() {
-  local rw_dir="$WORK/rw-${PKEY}" rw_rc=0 xrates rw hc50 hc99 fae valid died warm
+  local rw_dir="$POINT_DIR" rw_rc=0 xrates rw hc50 hc99 fae valid died warm rung_jvm
   local point_jq="$SCRIPT_DIR/perf-hw-matrix-rw.jq"
   [ "${PERF_HW_MATRIX_TEST_FAULT:-}" = point_jq ] && point_jq="$point_jq.missing"
-  [ -n "${PERF_HW_MATRIX_DEBUG_DIR:-}" ] && rw_dir="$PERF_HW_MATRIX_DEBUG_DIR/$PKEY"
   mkdir -p "$rw_dir"
   xrates="${PERF_HW_MATRIX_XCHECK_RATES:-$(tr ',' '\n' <<<"$POINT_RATES" | awk -v cap="$HW_XCHECK_MAX_RPS" '$1+0 <= cap' | head -3 | paste -sd, -)}"
   xrates="${xrates:-8000,16000,24000}"
@@ -534,6 +575,9 @@ measure_point_multik6() {
     bash "$REPO_ROOT/mockserver-performance-test/scripts/rw-multi-k6-sweep.sh" "$rw_dir/rw-result.json" >&2 || rw_rc=$?
   kill "$SAMPLER_PID" >/dev/null 2>&1 || true
   wait "$SAMPLER_PID" 2>/dev/null || true
+  # Report-only: kept for an invalid point too, so its knee can still be read.
+  rung_jvm="$(jvm_rungs_json "$JVM_LOG" "$(jq -c '.rung_windows // []' "$rw_dir/rw-result.json" 2>/dev/null || echo '[]')" "$STEP_S" "$SWEEP_SETTLE_S" 2>/dev/null || echo null)"
+  printf '%s\n' "${rung_jvm:-null}" > "$rw_dir/jvm-rungs.json"
 
   STATE_JSON="$(sut_state_json)"
   docker rm -f "$SERVER" >/dev/null 2>&1 || true
@@ -582,8 +626,12 @@ measure_point_multik6() {
 
   warm="$(jq -c '{drive_p50_ms:(.points[0].p50_ms // null), drive_achieved_rps:(.points[0].achieved_rps // null)}' "$rw_dir/warmup.json" 2>/dev/null || echo '{}')"
   AGG="$(jq -c --arg scpu "$SCPU" --arg kcpu "$HW_K6_SPEC" --argjson k6c "$k6w" --argjson avail "$AVAIL" \
-    --argjson warm "$warm" --argjson wrate "$POINT_WARMUP_RATE" --argjson rc "$rw_rc" --arg xrates "$xrates" '
+    --argjson warm "$warm" --argjson wrate "$POINT_WARMUP_RATE" --argjson rc "$rw_rc" --arg xrates "$xrates" \
+    --argjson rjvm "${rung_jvm:-null}" --arg jto "$SUT_JTO" --argjson gclog "$([ "$HW_GC_LOG" = true ] && echo true || echo false)" \
+    --argjson cg "$([ -n "$SUT_CGROUP_DIR" ] && echo true || echo false)" '
     .server_cpus=$scpu | .k6_cpus=$kcpu | .k6_cores=$k6c | .available_processors=$avail
+    | .jvm = {java_tool_options:(if $jto == "" then null else $jto end), gc_log:$gclog, cgroup_readable:$cg}
+    | .rung_jvm = $rjvm
     | .measurement += {rw_exit_code:$rc, cross_check_rates:$xrates}
     | (.ladder[0].p50_ms // null) as $r1 | (.ladder[1].p50_ms // null) as $r2
     | .warmup = ($warm + {drive_rate:$wrate, first_rung_p50_ms:$r1, second_rung_p50_ms:$r2,
@@ -605,6 +653,7 @@ for PI in "${!P_CORES[@]}"; do
   else
     PKEY="${C}c"; LBL="C=$C"
   fi
+  POINT_DIR="${PERF_HW_MATRIX_DEBUG_DIR:+$PERF_HW_MATRIX_DEBUG_DIR/$PKEY}"; POINT_DIR="${POINT_DIR:-$WORK/rw-${PKEY}}"
   POINT_META="$(jq -nc --argjson c "$C" --arg mem "$MEM" --argjson memb "${MEM_BYTES:-null}" \
     --argjson ctl "$IS_CONTROL" --arg key "$PKEY" --arg mode "$MODE" '
     if $mode == "hw_matrix" then {cores:$c, key:$key, memory_limit:$mem, memory_limit_bytes:$memb, control:$ctl}
@@ -678,11 +727,21 @@ for PI in "${!P_CORES[@]}"; do
   # limit is the whole budget (as on a Kubernetes pod); no -Xmx, so the image's
   # MaxRAMPercentage sizes the heap from the limit exactly as a user's container.
   docker rm -f "$SERVER" >/dev/null 2>&1 || true
+  sut_extra=()
+  if [ "$MODE" = hw_matrix ]; then
+    # GC log in the point dir (the work-files tgz), writable by the image's non-root user.
+    mkdir -p "$POINT_DIR/jvm" && chmod 0777 "$POINT_DIR/jvm"
+    sut_extra+=(-v "$POINT_DIR/jvm:/jvm-diag")
+    [ -n "$SUT_JTO" ] && sut_extra+=(-e "JAVA_TOOL_OPTIONS=$SUT_JTO")
+  fi
   docker run -d --name "$SERVER" --network "$NETWORK" --network-alias mockserver \
     --cpuset-cpus="$SCPU" --memory="$MEM" --memory-swap="$MEM" -p 127.0.0.1::1080 \
+    ${sut_extra[@]+"${sut_extra[@]}"} \
     -e MOCKSERVER_LOG_LEVEL=ERROR -e MOCKSERVER_DISABLE_SYSTEM_OUT=true \
     -e MOCKSERVER_METRICS_ENABLED=true \
     "$MOCKSERVER_IMAGE" -serverPort 1080 >/dev/null
+  SUT_CGROUP_DIR=""
+  [ "$MODE" = hw_matrix ] && SUT_CGROUP_DIR="$(sut_cgroup_dir "$(docker inspect -f '{{.Id}}' "$SERVER" 2>/dev/null || true)")"
 
   HOSTPORT="$(docker port "$SERVER" 1080/tcp 2>/dev/null | head -1)"
   HOSTPORT="${HOSTPORT:-127.0.0.1:1080}"
@@ -1100,7 +1159,9 @@ jq -nc \
   --argjson k6phys "$(phys_core_count "${HW_K6_SPEC//;/,}")" --arg anchors "$HW_LADDER_ANCHORS" \
   --arg ref "$HW_RPS_PER_CORE_REF" --arg lo "$HW_LADDER_LO" --arg hi "$HW_LADDER_HI" --arg rungs "$HW_LADDER_RUNGS" \
   --arg explicit_rates "${PERF_HW_MATRIX_SWEEP_RATES:-}" \
-  --arg step "$SWEEP_STEP" --arg gap "$SWEEP_GAP" --argjson settle "$SWEEP_SETTLE_S" '
+  --arg step "$SWEEP_STEP" --arg gap "$SWEEP_GAP" --argjson settle "$SWEEP_SETTLE_S" \
+  --arg imgjto "$SUT_IMAGE_JTO" --arg sutopts "$HW_SUT_JAVA_OPTS" --arg jto "$SUT_JTO" --arg gclog "$HW_GC_LOG" '
+  def nonempty: if . == "" then null else . end;
   {
     attempted:true,
     mode:$mode,
@@ -1136,7 +1197,11 @@ jq -nc \
       # true only when the caller (perf-test-run.sh) paused every other container on the
       # rig, so nothing else could run on a point cores during its sweep.
       other_containers_paused:$rig_paused,
-      server_config:"shipped image defaults (no -Xmx; heap from MaxRAMPercentage of the memory limit) with MOCKSERVER_LOG_LEVEL=ERROR and MOCKSERVER_DISABLE_SYSTEM_OUT=true",
+      server_config:("shipped image defaults (no -Xmx; heap from MaxRAMPercentage of the memory limit) with MOCKSERVER_LOG_LEVEL=ERROR and MOCKSERVER_DISABLE_SYSTEM_OUT=true"
+                     + (if $sutopts != "" then "; plus PERF_HW_MATRIX_SUT_JAVA_OPTS (sut_jvm)" else "" end)),
+      # JAVA_TOOL_OPTIONS = the image default + extra opts + the GC log (<point dir>/jvm/gc-<pid>.log).
+      sut_jvm:{image_java_tool_options:($imgjto | nonempty), extra_java_opts:($sutopts | nonempty),
+               gc_log:($gclog == "true"), java_tool_options:($jto | nonempty)},
       log_level:"ERROR",
       points:($points | sort_by(.cores, .memory_limit_bytes))
     } else {

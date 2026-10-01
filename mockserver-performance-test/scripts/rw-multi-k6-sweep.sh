@@ -15,6 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${PERF_RW_REPO_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 LIB_DIR="$REPO_ROOT/.buildkite/scripts/steps/lib"
 FIGURES_JQ="$LIB_DIR/perf-website-figures.jq"
+CROSS_JQ="$LIB_DIR/perf-rw-cross-check.jq"
 for lib in perf-cpu-topology.sh perf-sweep-window.sh perf-derive-saturation.sh; do
   if [ ! -r "$LIB_DIR/$lib" ]; then
     echo ":x: $LIB_DIR/$lib not found — refusing to run without the shared guard" >&2
@@ -23,7 +24,7 @@ for lib in perf-cpu-topology.sh perf-sweep-window.sh perf-derive-saturation.sh; 
   # shellcheck source=/dev/null
   . "$LIB_DIR/$lib"
 done
-[ -r "$FIGURES_JQ" ] || { echo ":x: $FIGURES_JQ not found" >&2; exit 1; }
+for f in "$FIGURES_JQ" "$CROSS_JQ"; do [ -r "$f" ] || { echo ":x: $f not found" >&2; exit 1; }; done
 
 OUT_FILE="${1:-/dev/stdout}"
 
@@ -105,9 +106,9 @@ KEEP="${PERF_RW_KEEP:-0.95}"
 # that ALSO remote-writes, on rungs where a single process is not saturated.
 XCHECK="${PERF_RW_XCHECK:-true}"
 XCHECK_MAX_RPS="${PERF_RW_XCHECK_MAX_RPS:-24000}"
-# Same-request tolerances: native histograms (bucket factor 1.1) resolve a quantile to ~5%,
-# and the time cut may move up to 2 push intervals of requests between windows. The
-# absolute floor only matters below ~0.05 ms.
+# Same-request tolerances: native histograms (bucket factor 1.1) resolve a quantile to ~5%.
+# The time cut's window differs by up to 2 push intervals of requests, which the rank band in
+# lib/perf-rw-cross-check.jq bounds. The absolute floor only matters below ~0.05 ms.
 XTOL_P50="${PERF_RW_XCHECK_TOL_P50:-0.10}"
 XTOL_P95="${PERF_RW_XCHECK_TOL_P95:-0.10}"
 XTOL_P99="${PERF_RW_XCHECK_TOL_P99:-0.15}"
@@ -738,10 +739,40 @@ if [ "$XCHECK" = true ]; then
   for a in "${_all[@]}"; do [ "$a" -le "$XCHECK_MAX_RPS" ] && XRATES="${XRATES:+$XRATES,}$a"; done
   XRATES="${PERF_RW_XCHECK_RATES:-$XRATES}"
 fi
+# The cross-check program's input (lib/perf-rw-cross-check.jq) from the work files. "levels"
+# runs before the main phase, so it reads no main merge.
+cross_input() { # mode
+  local band="$WORK/xcheck-band.json" main=/dev/null xcost="[]"
+  [ -s "$band" ] || band=/dev/null
+  if [ "$1" = cross ]; then main="$WORK/main-merged.json"; xcost="$(cpu_cost_json xcheck)"; fi
+  jq -nc --arg mode "$1" --arg live true --slurpfile pub "$WORK/xcheck-p0.json" --slurpfile bytime "$WORK/xcheck-by-time.json" \
+    --slurpfile bytag "$WORK/xcheck-by-tag.json" --slurpfile main "$main" --slurpfile band "$band" --argjson xcost "$xcost" \
+    --argjson t50 "$XTOL_P50" --argjson t95 "$XTOL_P95" --argjson t99 "$XTOL_P99" --argjson abs "$XTOL_ABS_MS" \
+    --argjson push "$PUSH_S" --argjson wtol "$WINDOW_TOL" \
+    --argjson ra "$RTOL_ACHIEVED" --argjson r50 "$RTOL_P50" --argjson r95 "$RTOL_P95" --argjson r99 "$RTOL_P99" '
+    {mode:$mode, live:($live == "true"), pub:$pub[0], bytime:$bytime[0], bytag:$bytag[0], main:$main[0], band:$band[0], xcost:$xcost,
+     tol:{p50:$t50, p95:$t95, p99:$t99, abs_ms:$abs, push_s:$push, window_tol:$wtol,
+          cross_run:{achieved_ratio:$ra, p50:$r50, p95:$r95, p99:$r99}}}'
+}
+# by_tag (exactly the published requests) at the levels that bound each by_time quantile, so
+# the band is as tight as the time cut allows; a failed query fails rw_prometheus_queries_ok.
+xcheck_band() {
+  local levels k q v r pts="[]"
+  levels="$(cross_input levels | jq -c -f "$CROSS_JQ")"
+  for k in $(jq -r '.[].index' <<<"$levels"); do
+    r="$(jq -r ".per_process_rates[$k]" "$WORK/xcheck-meta.json")"
+    for q in $(jq -r ".[$k].levels[]" <<<"$levels"); do
+      v="$(promv "histogram_quantile($q, sum(k6_http_req_duration_seconds{proc=~\"xcheck-p[0-9]+\",rate=\"$r\",win=\"${r}_steady\"})) * 1000")"
+      pts="$(jq -c --argjson k "$k" --argjson q "$q" --argjson v "$v" '.[$k] = ((.[$k] // []) + [[$q, $v]])' <<<"$pts")"
+    done
+  done
+  jq -nc --argjson p "$pts" '{points:[ $p[] | {quantiles:(. // [])} ]}' > "$WORK/xcheck-band.json"
+}
 xcheck_phase() {
   run_phase xcheck 1 "$XRATES" vu_tag false "$XCHECK_CPUS"
   merge_phase xcheck vu_tag xcheck-by-tag
   merge_phase xcheck wallclock xcheck-by-time
+  xcheck_band
 }
 [ -n "$XRATES" ] && soft xcheck_phase xcheck_phase
 # A push path that broke after the pre-flight: stop before the main phase spends its rig time.
@@ -933,56 +964,7 @@ SLOW_FLUSHES="$( { grep -hoE 'took [0-9.]+(ms|s) while flush period' "$WORK"/*-p
 CROSS='{"attempted":false}'
 # Report-only comparisons: rungs with no single-process counterpart (above the cross-check
 # cap) or with a missing figure are labelled, never divided. Missing inputs fail the step.
-build_cross() {
-  jq -nc --slurpfile pub "$WORK/xcheck-p0.json" --slurpfile bytime "$WORK/xcheck-by-time.json" \
-    --slurpfile bytag "$WORK/xcheck-by-tag.json" --slurpfile main "$WORK/main-merged.json" \
-    --argjson xcost "$(cpu_cost_json xcheck)" \
-    --argjson t50 "$XTOL_P50" --argjson t95 "$XTOL_P95" --argjson t99 "$XTOL_P99" --argjson abs "$XTOL_ABS_MS" \
-    --argjson ra "$RTOL_ACHIEVED" --argjson r50 "$RTOL_P50" --argjson r95 "$RTOL_P95" --argjson r99 "$RTOL_P99" '
-    def num: type == "number";
-    def within($a; $b; $tol): ($a|num) and ($b|num) and ((($a - $b)|fabs) <= ([($tol * ([$a, $b]|max)), $abs]|max));
-    def ratio($a; $o): if ($a|num) and ($o|num) and $o > 0 then $a / $o else null end;
-    def r3: if . == null then null else (. * 1000 | round) / 1000 end;
-    def cmp($x; $y; $t5; $t9; $t99): {
-        p50:{published:$x.p50_ms, remote_write:$y.p50_ms, ok:within($x.p50_ms; $y.p50_ms; $t5)},
-        p95:{published:$x.p95_ms, remote_write:$y.p95_ms, ok:within($x.p95_ms; $y.p95_ms; $t9)},
-        p99:{published:$x.p99_ms, remote_write:$y.p99_ms, ok:within($x.p99_ms; $y.p99_ms; $t99)}};
-    ($pub[0].points // []) as $P
-    | [ range(0; $P|length) as $k
-        | ($P[$k]) as $x | (($bytime[0].points // [])[$k] // {}) as $t | (($bytag[0].points // [])[$k] // {}) as $g
-        | {offered_rps:$x.offered_rps,
-           counts:{published:$x.sample_count, prometheus:$t.sample_count,
-                   ok:(($x.sample_count|num) and $x.sample_count == $t.sample_count)},
-           measured_counts:{published:$x.measured_sample_count, by_tag:$g.measured_sample_count, by_time:$t.measured_sample_count},
-           by_time:cmp($x; $t; $t50; $t95; $t99),
-           by_tag:cmp($x; $g; $t50; $t95; $t99)}
-        | . + {ok:(.counts.ok and .by_time.p50.ok and .by_time.p95.ok and .by_time.p99.ok)} ] as $same
-    | [ ($main[0].points // [])[] as $m
-        | ([ $P[] | select(.offered_rps == $m.nominal_agg_offered_rps) ] | first) as $x
-        | if $x == null then
-            {offered_rps:$m.nominal_agg_offered_rps, main_offered_rps:$m.offered_rps, status:"no counterpart", ok:null}
-          else
-            ratio($x.achieved_rps; $x.offered_rps) as $rs | ratio($m.achieved_rps; $m.offered_rps) as $rm
-            | {offered_rps:$x.offered_rps, main_offered_rps:$m.offered_rps,
-               status:(if $rs == null or $rm == null then "incomplete" else "compared" end),
-               achieved_ratio:{single:($rs|r3), multi:($rm|r3),
-                               ok:($rs != null and $rm != null and (($rs - $rm)|fabs) <= $ra)},
-               latency:cmp($x; $m; $r50; $r95; $r99)}
-            | . + {ok:(.achieved_ratio.ok and .latency.p50.ok and .latency.p95.ok and .latency.p99.ok)}
-          end ] as $run
-    | ([ $run[] | select(.status != "no counterpart") ]) as $cmp
-    | {attempted:true,
-       note:"same_requests: one k6 in the published summary mode ALSO remote-writing; its summary percentiles vs the Prometheus merge cut by time (the method under test) and by VU tag (histogram resolution only). cross_run: the N-process rungs vs that single-process run at the same aggregate offered rate (separate runs, so run-to-run noise); rungs above the cross-check cap have no counterpart.",
-       tolerances:{same_requests:{p50:$t50, p95:$t95, p99:$t99, abs_ms:$abs},
-                   cross_run:{achieved_ratio:$ra, p50:$r50, p95:$r95, p99:$r99, abs_ms:$abs}},
-       same_requests:{rungs:$same, equivalent:(($same|length) > 0 and all($same[]; .ok)),
-                      accounting_ok:(($bytime[0].points // []) as $bp | ($bp|length) > 0 and all($bp[]; .accounting_ok))},
-       cross_run:{rungs:$run, agrees:(($cmp|length) > 0 and all($cmp[]; .ok)),
-                  compared:([ $run[] | select(.status == "compared") ] | length),
-                  no_counterpart:([ $run[] | select(.status == "no counterpart") ] | length)},
-       single_process_cpu_us_per_request:($xcost[0].cpu_us_per_request // null)}
-    | . + {equivalent:(.same_requests.equivalent and .same_requests.accounting_ok)}'
-}
+build_cross() { cross_input cross | jq -c -f "$CROSS_JQ"; }
 if [ -n "$XRATES" ]; then
   soft_capture CROSS '{"attempted":true,"error":"cross-check assembly failed (see rw_assembly_steps_ok)"}' cross_check build_cross
 fi
@@ -1033,7 +1015,7 @@ VALIDITY="$(jq -nc --slurpfile m "$WORK/main-merged.json" --argjson pp "$PER_PRO
                                                 or ((.client_over_5ms_frac | type) == "number" and .client_over_5ms_frac > 0.005));
         "p99 over 5.5 ms but no client share over 5 ms (<= 0.5% or missing) at " + ([ $P[] | select((.p99_ms != null) and (.p99_ms > 5.5) and (((.client_over_5ms_frac | type) == "number" and .client_over_5ms_frac > 0.005) | not)) | "\(.offered_rps): p99 \(.p99_ms) ms, client_over_5ms_frac \(.client_over_5ms_frac)" ] | join(", "))),
       check("rw_cross_check_same_requests"; (($cross.attempted | not) or ($cross.same_requests.equivalent and $cross.same_requests.accounting_ok));
-        "the same requests measured by the published summary and by the Prometheus merge disagree beyond tolerance (see cross_check.same_requests)"),
+        "the same requests measured by the published summary and by the Prometheus merge disagree beyond tolerance at " + (($cross.same_requests.failed // []) | if length == 0 then "(no rung; see cross_check.same_requests)" else join(" | ") end)),
       check("rw_no_failed_pushes"; $rwfail == 0; "\($rwfail) k6 log line(s) report a remote-write send failure"),
       check("rw_no_slow_flushes"; $slow.count == 0;
         "\($slow.count) remote-write flush(es) took longer than the \($push) s push interval (max \($slow.max_took_s) s); k6 warns samples may be dropped")

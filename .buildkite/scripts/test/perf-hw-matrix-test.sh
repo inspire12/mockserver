@@ -172,5 +172,37 @@ rc=0; publish "$T/run-no-matrix.json" || rc=$?
 check "lower-bound headline without a new matrix still holds (exit 1)" "1" "$rc"
 check "the hold writes nothing" "" "$(git -C "$R" status --porcelain)"
 
+echo "--- 4. knee diagnostics (lib/perf-hw-matrix-jvm.sh: scrape, cgroup and per-rung summary)"
+# shellcheck source=../steps/lib/perf-hw-matrix-jvm.sh
+. "$LIB/perf-hw-matrix-jvm.sh"
+check "metric columns from a scrape" "2.5,40,3,1200" "$(printf '%s\n' '# HELP x' 'jvm_gc_collection_seconds_sum 2.5' \
+  'jvm_gc_collection_count 40.0' 'mock_server_dropped_log_events_total 3.0' 'mock_server_evicted_log_entries_total 1200.0' | jvm_metric_cols)"
+check "metric columns blank when absent (never zero)" ",,," "$(echo 'other_metric 1' | jvm_metric_cols)"
+mkdir -p "$T/cg"
+printf 'low 0\nhigh 7\nmax 2\noom 0\noom_kill 0\noom_group_kill 0\n' > "$T/cg/memory.events"
+printf 'some avg10=1.00 avg60=0.50 avg300=0.10 total=1500000\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=20000\n' > "$T/cg/cpu.pressure"
+printf 'some avg10=0.00 avg60=0.00 avg300=0.00 total=300\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=100\n' > "$T/cg/memory.pressure"
+check "cgroup columns" "7,2,0,0,1500000,20000,300,100" "$(cgroup_cols "$T/cg")"
+check "cgroup columns blank when unreadable" ",,,,,,," "$(cgroup_cols "")"
+CGD="$(sut_cgroup_dir "no-such-container-id")" # an assignment: a non-zero return would stop this set -e script
+check "no cgroup dir for an unknown container" "" "$CGD"
+# Two rungs of 10 s (settle 2) from t0=1000 and t0=1020; samples every 2 s, rung 2 GC-bound.
+{ echo "ts,$JVM_COLS"
+  echo "1001,0.0,0,0,0,1,0,0,0,0,0,," # in rung 1's settle window: excluded
+  for t in 1002 1004 1006 1008 1010; do echo "$t,0.$(( t - 1002 )),$(( t - 1000 )),0,$(( (t - 1000) * 100 )),1,0,0,0,$(( (t - 1000) * 100000 )),0,,"; done
+  for t in 1022 1024 1026 1028 1030; do echo "$t,$(( 1 + (t - 1022) / 2 )),$(( t - 1000 )),5,$(( 3000 + (t - 1020) * 900 )),9,0,0,0,$(( 2000000 + (t - 1020) * 900000 )),0,,"; done
+} > "$T/jvm.csv"
+J="$(jvm_rungs_json "$T/jvm.csv" '[{"offered_rps":1000,"start_epoch_ms":1000000},{"offered_rps":2000,"start_epoch_ms":1020000}]' 10 2)"
+check "rung 1: GC seconds per second" "0.1" "$(jq -r '.[0].gc_seconds_per_s' <<<"$J")"
+check "rung 2: GC seconds per second" "0.5" "$(jq -r '.[1].gc_seconds_per_s' <<<"$J")"
+check "rung 2: evictions per second, CPU pressure fraction" "900 0.9" "$(jq -r '.[1] | "\(.evicted_log_entries_per_s) \(.cpu_pressure_some_frac)"' <<<"$J")"
+check "rung 2: drops and memory.events high are deltas within the window" "0 0" "$(jq -r '.[1] | "\(.dropped_log_events) \(.memory_events.high)"' <<<"$J")"
+check "unreadable memory PSI stays null" "null" "$(jq -r '.[0].memory_pressure_some_frac' <<<"$J")"
+check "five samples per steady window" "5 5" "$(jq -r '[.[].samples] | join(" ")' <<<"$J")"
+check "no samples -> null" "null" "$(jvm_rungs_json "" '[]' 10 2)"
+sed 's/^1002,0\.0,/1002,bad,/' "$T/jvm.csv" > "$T/jvm-bad.csv"
+J="$(jvm_rungs_json "$T/jvm-bad.csv" '[{"offered_rps":1000,"start_epoch_ms":1000000}]' 10 2)"
+check "a non-numeric cell is null, not a column shift (GC count still read)" "8" "$(jq -r '.[0].gc_count' <<<"$J")"
+
 if [ "$FAILS" -ne 0 ]; then echo ":x: $FAILS check(s) failed" >&2; exit 1; fi
 echo "--- all hardware-matrix fixture checks passed"

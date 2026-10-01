@@ -379,21 +379,9 @@ diag_jvm_opts() {
   printf '%s' "$opts"
 }
 
-# The shipped image sets its own JAVA_TOOL_OPTIONS (e.g. -XX:+UseZGC); passing -e
-# JAVA_TOOL_OPTIONS REPLACES it, silently dropping the default GC. Read it once per image.
-image_java_tool_options() { # image_ref -> its built-in JAVA_TOOL_OPTIONS default (empty if none)
-  docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$1" 2>/dev/null \
-    | awk -F= '$1=="JAVA_TOOL_OPTIONS"{sub("^[^=]*=",""); print; exit}' || true
-}
-# Prepend the image default to a container's own opts. If those opts select a GC, drop the
-# image default's GC selectors first — two -XX:+Use*GC flags abort the JVM ("Multiple GCs").
-compose_java_tool_options() { # image_default  container_opts
-  local base="$1" extra="$2"
-  if grep -Eq -- '-XX:\+Use[A-Za-z0-9]*GC' <<<"$extra"; then
-    base="$(printf '%s' "$base" | sed -E 's/-XX:\+Use[A-Za-z0-9]*GC//g; s/-XX:\+ZGenerational//g; s/  */ /g; s/^ //; s/ $//')"
-  fi
-  printf '%s' "${base}${base:+${extra:+ }}${extra}"
-}
+# image_java_tool_options / compose_java_tool_options (shared with lib/perf-percore.sh).
+# shellcheck source=lib/perf-java-opts.sh
+. "$SCRIPT_DIR/lib/perf-java-opts.sh"
 
 # item 15d — file-backed response body arm. Generate a ~1 MB JSON file on the host
 # and mount it read-only into the SUT so a FILE-body expectation can serve it (the

@@ -373,7 +373,7 @@ each process's own count"]
 | `rw_settle_cut_excess_bounded` | The requests each process completed between its settle boundary and its cut are no more than its offered rate over 2 push intervals (+`PERF_RW_WINDOW_TOL`, 5%). There is no sample at the boundary, so the count between the cut and the sample before it is pro-rated to the part after the boundary (`cut_excess_requests`). The raw count (`cut_count_since_prev_sample`) is reported but not gated: a process that skipped a push before the boundary makes it cover several seconds, as it did for one process at 64k in build 535 (19,442 against a bound of 16,800, with the cut 312 ms late; pro-rated, ~2,500). The estimate assumes requests completed at a uniform rate between the two samples; lateness itself is bounded independently by `rw_settle_cut_within_bound`, and a late cut fails here too, since the pro-rated count grows with it. A counter that went backwards (a reset) leaves the excess null, which fails `rw_settle_cut_measured`. `.windows[].pre_boundary_sample_age_ms` shows how stale that earlier sample was |
 | `rw_window_accounts_every_request` | Every merged rung's settle + measured counts equal its request count (`lib/perf-sweep-window.sh`); true by construction in wall-clock mode, so the two gates above carry the window |
 | `rw_cpu_sampled_every_rung` | At least one k6 CPU sample fell in every rung's steady window; `derive_saturation` would otherwise read the rung as 0% CPU, i.e. headroom |
-| `rw_cross_check_same_requests` | One k6 in the published summary mode, **also** remote-writing, measures rungs up to `PERF_RW_XCHECK_MAX_RPS` (24,000); its summary percentiles and the Prometheus merge of the same requests agree within p50 10%, p95 10%, p99 15% (0.005 ms floor) |
+| `rw_cross_check_same_requests` | One k6 in the published summary mode, **also** remote-writing, measures rungs up to `PERF_RW_XCHECK_MAX_RPS` (24,000), and `lib/perf-rw-cross-check.jq` compares it per rung. Request counts match. `by_tag`, the Prometheus merge of exactly its steady requests, matches its summary in count and within p50 10%, p95 10%, p99 15% (0.005 ms floor): this catches a wrong Prometheus query or histogram path for one process; the N-process merge is covered by per-process accounting (`rw_accounting`). `by_time`, the time cut under test, starts at its cut rather than the settle boundary, so it holds d fewer requests (up to 2 push intervals at the offered rate, or a few more when a settle request completes after the cut, bounded by the VU pool). Each `by_time` quantile must agree within those tolerances, or lie within the published quantiles at levels [q(1-f), q+(1-q)f], f = d/n, which bound the quantile of any window missing d of n requests, widened by the same tolerances. The harness queries `by_tag` at those levels (`xcheck-band.json`); in a live run a missing or incomplete band file means no band, so the tight check decides. Only an offline re-derivation of a run without that file falls back to the published p50/p90/p95/p99/p999, a wider but still valid band. The band is not narrow: at f ≈ 8% (a cut one push late at 12 s steady windows) the p99 check only holds `by_time` between about the published p91 and p99.1. Build 540's 6-core point needed this: its cut landed 992 ms late, and the dropped first second moved p99 from 0.359 to 0.252 ms while `by_tag` agreed to 0.3%. `.cross_check.same_requests.failed` names each failing rung and why |
 | `rw_no_failed_pushes` | No k6 remote-write send failure |
 | `rw_client_tail_consistent` | Every rung whose merged p99 is over 5.5 ms has a client share over 5 ms above 0.5% (1% by definition, less a margin for the two interpolations inside one native-histogram bucket). It stops the tail localisation reporting "client 0" at a rung with a tail, as it did when the share came from k6 stall counters that the lean summary never materialises |
 | `rw_no_slow_flushes` | No flush took longer than the push interval (k6 warns that samples may then be dropped); `.remote_write.slow_flushes` reports the count and the longest. This also catches Prometheus stalls of 1–2 s, too short for the cut gates. On a contended host it trips first; raise `PERF_RW_PUSH_INTERVAL_S` rather than loosen the gate |
@@ -1078,6 +1078,27 @@ warm-up and cross-check phases), `sweep_rates`, `saturation`
 (`client_limited_from_rps`, `server_headroom_test`, the CPU ceilings), and `measurement`
 (validity, cross-check verdicts, k6 CPU per request, the cross-check rates). Every point's rw
 work files go into the `serving-hw-matrix-work.tgz` artifact.
+
+**Knee diagnostics (item 51, report-only).** So a matrix run can explain its own knee, each
+point's SUT also:
+
+| What | Where | Knob |
+|---|---|---|
+| A GC log, `-Xlog:gc*:file=…/gc-%p.log:time,uptime,level,tags` (the JVM's default rotation, 5 × 20 MB). One file per JVM: an older image's Java `HEALTHCHECK` also reads `JAVA_TOOL_OPTIONS`, and with one shared name each probe JVM rotated the server's log away at its start | `<point>/jvm/gc-<pid>.log` in the work-files tgz (the server is normally pid 1) | `PERF_HW_MATRIX_GC_LOG` (default `true`) |
+| Extra JVM options | the SUT's `JAVA_TOOL_OPTIONS` | `PERF_HW_MATRIX_SUT_JAVA_OPTS` |
+| Per-sample cumulative counters: `jvm_gc_collection_seconds_sum`, `jvm_gc_collection_count`, `mock_server_dropped_log_events_total`, `mock_server_evicted_log_entries_total`, and the SUT cgroup's `memory.events` (`high`, `max`, `oom`, `oom_kill`) and `cpu.pressure` / `memory.pressure` totals | `<point>/jvm-samples.csv`, from the 2 s sampler's existing metrics scrape plus host-side cgroup v2 files | — |
+| Per rung steady window: GC seconds per second, GC count, drops, evictions per second, `memory.events` deltas, and PSI as a fraction of wall time. Under generational ZGC `jvm_gc_collection_seconds` includes concurrent-cycle wall time, so `gc_seconds_per_s` is neither pause time nor CPU time and can exceed 1; read pauses from the GC log | `.points[].rung_jvm` and `<point>/jvm-rungs.json` (kept for an invalid point too) | — |
+
+`JAVA_TOOL_OPTIONS` is the image's own default with the extras appended
+(`lib/perf-java-opts.sh`, shared with `perf-test-run.sh`), so the image's `-XX:+UseZGC` is kept
+unless the extras choose another GC; if the image's environment cannot be read the matrix stops
+rather than drop that default. `.serving_hw_matrix.sut_jvm` and `.points[].jvm` record what was
+applied. The cgroup files are read from the host (`/sys/fs/cgroup/system.slice/docker-<id>.scope`
+or `/sys/fs/cgroup/docker/<id>`), because the distroless image has no shell; where they are
+unreadable (`.points[].jvm.cgroup_readable: false`, e.g. Docker Desktop) those columns are blank
+and the summaries `null`, never 0. GC logging adds a few lines per collection, and the counters ride a
+scrape the sampler already made, so the point's overhead is negligible; there is no JFR. The helpers are in `lib/perf-hw-matrix-jvm.sh`, with fixture checks in
+`.buildkite/scripts/test/perf-hw-matrix-test.sh`.
 
 **Publishing.** `perf-website-figures.jq` turns `.serving_hw_matrix` into `hw_matrix`, and
 emits null (so the committed table is kept) unless at least one point is `measured` with a
