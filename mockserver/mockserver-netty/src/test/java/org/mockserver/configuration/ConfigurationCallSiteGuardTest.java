@@ -78,7 +78,8 @@ import static org.hamcrest.Matchers.is;
  * (covering all overloads) so it stays readable and does not churn on signature changes.
  *
  * <h2>Where this guard runs, and why</h2>
- * <p>The guard scans compiled {@code .class} output across every reactor module's {@code target/classes}.
+ * <p>The guard scans compiled {@code .class} output in the {@code target/classes} of every module directory
+ * under {@code mockserver/} (except {@link #UNSHIPPED_MODULES_EXCLUDED_FROM_SCAN}).
  * That makes its coverage a function of what has been BUILT: a module that has not yet been compiled is
  * silently invisible and the scan passes having proven nothing about it. Because
  * {@code mockserver-junit-rule}, {@code mockserver-junit-jupiter} and every other module downstream of
@@ -123,6 +124,23 @@ public class ConfigurationCallSiteGuardTest {
      * produces main classes yet cannot be present when the guard runs, and say why.
      */
     private static final Map<String, String> MODULES_WITHOUT_SCANNABLE_MAIN_CLASSES = new TreeMap<>();
+
+    /**
+     * Directories under {@code mockserver/} whose {@code target/classes} is never scanned, each with a
+     * mandatory reason. CI never builds them before the guard runs, so scanning them only when a developer
+     * happens to have built one would make the verdict depend on local state.
+     * {@link #shouldExemptOnlyUnshippedNonReactorModulesFromScan()} asserts each entry is outside the reactor
+     * (so no release build includes it), sets {@code maven.deploy.skip} in its project-level properties, and
+     * is named by no release or image-build path ({@link #RELEASE_PATHS}).
+     */
+    private static final Map<String, String> UNSHIPPED_MODULES_EXCLUDED_FROM_SCAN = new TreeMap<>();
+
+    static {
+        UNSHIPPED_MODULES_EXCLUDED_FROM_SCAN.put("mockserver-benchmark",
+            "on-demand JMH module outside the reactor and not part of any release; its benchmarks deliberately read the "
+                + "static store (e.g. PerRequestConfigResolutionBenchmark measures ConfigurationProperties."
+                + "maxLoggedBodyBytes()) and are not server enforcement sites");
+    }
 
     /**
      * Classes that DEFINE the static-store fallback rather than enforcing a value. Their getters are
@@ -337,6 +355,89 @@ public class ConfigurationCallSiteGuardTest {
             violations, is(empty()));
     }
 
+    /** Repository paths that build or publish released artifacts; a trailing {@code *} matches a name prefix. */
+    private static final List<String> RELEASE_PATHS = java.util.Arrays.asList("scripts/release", ".buildkite/release*", "docker");
+
+    @Test
+    public void shouldExemptOnlyUnshippedNonReactorModulesFromScan() throws Exception {
+        Path root = mockserverRoot();
+        Set<String> reactorModules = reactorModules();
+        assertThat("could not derive the reactor module set", reactorModules.size(), greaterThan(10));
+        List<Path> releaseFiles = releasePathFiles(root.getParent());
+        assertThat("could not find the release and image-build files", releaseFiles.size(), greaterThan(10));
+        for (String module : UNSHIPPED_MODULES_EXCLUDED_FROM_SCAN.keySet()) {
+            Path pom = root.resolve(module).resolve("pom.xml");
+            assertThat("exempt module " + module + " no longer exists — delete its entry", Files.isRegularFile(pom), is(true));
+            assertThat("exempt module " + module + " is a reactor module, so CI builds it and the guard must scan it",
+                reactorModules.contains(module), is(false));
+            assertThat("exempt module " + module + " must set <maven.deploy.skip>true</maven.deploy.skip> in its "
+                    + "project-level <properties> (not in a profile or CDATA), or the guard must scan it",
+                projectLevelProperties(Files.readString(pom, StandardCharsets.UTF_8))
+                    .contains("<maven.deploy.skip>true</maven.deploy.skip>"), is(true));
+            byte[] name = module.getBytes(StandardCharsets.UTF_8);
+            List<String> referencing = new ArrayList<>();
+            for (Path file : releaseFiles) {
+                if (indexOf(Files.readAllBytes(file), name) >= 0) {
+                    referencing.add(root.getParent().relativize(file).toString());
+                }
+            }
+            assertThat("exempt module " + module + " is named by a release or image-build file, so it may ship and the "
+                    + "guard must scan it: " + referencing,
+                referencing, is(empty()));
+        }
+    }
+
+    /** The project-level {@code <properties>} content, or "" if absent or the pom uses CDATA. */
+    private static String projectLevelProperties(String pom) {
+        String stripped = pom.replaceAll("(?s)<!--.*?-->", "");
+        if (stripped.contains("<![CDATA[")) {
+            return "";
+        }
+        stripped = stripped.replaceAll("(?s)<(profiles|build|reporting)>.*?</\\1>", "");
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("(?s)<properties>(.*?)</properties>").matcher(stripped);
+        StringBuilder properties = new StringBuilder();
+        while (matcher.find()) {
+            properties.append(matcher.group(1));
+        }
+        return properties.toString();
+    }
+
+    private static List<Path> releasePathFiles(Path repoRoot) throws IOException {
+        List<Path> files = new ArrayList<>();
+        for (String releasePath : RELEASE_PATHS) {
+            List<Path> roots = new ArrayList<>();
+            if (releasePath.endsWith("*")) {
+                Path parent = repoRoot.resolve(releasePath).getParent();
+                String prefix = Paths.get(releasePath).getFileName().toString().replace("*", "");
+                try (Stream<Path> children = Files.list(parent)) {
+                    children.filter(c -> c.getFileName().toString().startsWith(prefix)).forEach(roots::add);
+                }
+            } else {
+                roots.add(repoRoot.resolve(releasePath));
+            }
+            for (Path releaseRoot : roots) {
+                assertThat("release path " + releaseRoot + " does not exist — update RELEASE_PATHS", Files.exists(releaseRoot), is(true));
+                try (Stream<Path> walk = Files.walk(releaseRoot)) {
+                    walk.filter(Files::isRegularFile).forEach(files::add);
+                }
+            }
+        }
+        return files;
+    }
+
+    private static int indexOf(byte[] haystack, byte[] needle) {
+        outer:
+        for (int i = 0; i <= haystack.length - needle.length; i++) {
+            for (int j = 0; j < needle.length; j++) {
+                if (haystack[i + j] != needle[j]) {
+                    continue outer;
+                }
+            }
+            return i;
+        }
+        return -1;
+    }
+
     /**
      * A wildcard static import of the store makes call sites invisible to review (they read as bare
      * {@code maxRequestBodySize()} rather than {@code ConfigurationProperties.maxRequestBodySize()}),
@@ -462,10 +563,14 @@ public class ConfigurationCallSiteGuardTest {
         return getters;
     }
 
-    /** Every {@code <module>/target/classes} directory present under the {@code mockserver/} reactor root. */
+    /**
+     * Every {@code <module>/target/classes} directory present under the {@code mockserver/} reactor root,
+     * except those in {@link #UNSHIPPED_MODULES_EXCLUDED_FROM_SCAN}.
+     */
     private static List<Path> moduleClassRoots() throws IOException {
         try (Stream<Path> modules = Files.list(mockserverRoot())) {
             return modules
+                .filter(module -> !UNSHIPPED_MODULES_EXCLUDED_FROM_SCAN.containsKey(module.getFileName().toString()))
                 .map(module -> module.resolve("target/classes"))
                 .filter(Files::isDirectory)
                 .sorted()
@@ -486,6 +591,21 @@ public class ConfigurationCallSiteGuardTest {
      */
     private static Set<String> expectedScannedModules() throws IOException {
         Path root = mockserverRoot();
+        Set<String> expected = new TreeSet<>();
+        for (String module : reactorModules()) {
+            if (MODULES_WITHOUT_SCANNABLE_MAIN_CLASSES.containsKey(module)) {
+                continue;
+            }
+            if (Files.isDirectory(root.resolve(module).resolve("src/main/java"))) {
+                expected.add(module);
+            }
+        }
+        return expected;
+    }
+
+    /** Every {@code <module>} listed in {@code mockserver/pom.xml}'s {@code <modules>} block. */
+    private static Set<String> reactorModules() throws IOException {
+        Path root = mockserverRoot();
         String pom = Files.readString(root.resolve("pom.xml"), StandardCharsets.UTF_8);
         int start = pom.indexOf("<modules>");
         int end = pom.indexOf("</modules>");
@@ -498,17 +618,11 @@ public class ConfigurationCallSiteGuardTest {
         String modulesBlock = pom.substring(start, end).replaceAll("(?s)<!--.*?-->", "");
         java.util.regex.Matcher matcher =
             java.util.regex.Pattern.compile("<module>\\s*([^<]+?)\\s*</module>").matcher(modulesBlock);
-        Set<String> expected = new TreeSet<>();
+        Set<String> modules = new TreeSet<>();
         while (matcher.find()) {
-            String module = matcher.group(1).trim();
-            if (MODULES_WITHOUT_SCANNABLE_MAIN_CLASSES.containsKey(module)) {
-                continue;
-            }
-            if (Files.isDirectory(root.resolve(module).resolve("src/main/java"))) {
-                expected.add(module);
-            }
+            modules.add(matcher.group(1).trim());
         }
-        return expected;
+        return modules;
     }
 
     /**
