@@ -278,7 +278,7 @@ schema_faq:
     {% endif %}
     <li>Leave headroom. These are the highest rates at which latency was still flat, measured with logging reduced below the default, so plan to run below them &mdash; and see <a href="#troubleshooting_performance">memory &amp; troubleshooting</a> if you keep a large request history.</li>
 </ul>
-<p style="font-size:0.9em">{{ hw.source.note }} Measured {{ hw.source.run_timestamp_utc }}{% if hw.source.build_number %} &middot; build&nbsp;#{{ hw.source.build_number }}{% endif %}{% if hw.source.mockserver_version %} &middot; MockServer {{ hw.source.mockserver_version }}{% endif %}{% if hw.source.instance_type %} &middot; {{ hw.source.instance_type }}{% endif %}.</p>
+<p style="font-size:0.9em">{{ hw.source.note }} Measured {{ hw.source.run_timestamp_utc }}{% if hw.source.build_number %} &middot; build&nbsp;#{{ hw.source.build_number }}{% endif %}{% if hw.source.mockserver_version %} &middot; MockServer {{ hw.source.mockserver_version }}{% endif %}{% if hw.source.instance_type %} &middot; {{ hw.source.instance_type }}{% endif %}{% if hw.source.assembly == "offline" %} &middot; re-assembled offline from the run's work files{% if hw.source.inputs %}, some inputs reconstructed from the run log{% endif %}{% endif %}.</p>
 {% else %}
 <p><em>Not yet measured.</em> A table of throughput for different container sizes &mdash; from 1 CPU core with 512&nbsp;MB of memory up to 6 cores with 2&nbsp;GB &mdash; will appear here once it has been measured on the performance test machine. Until then, size against the single-instance figures above and benchmark your own workload.</p>
 {% endif %}
