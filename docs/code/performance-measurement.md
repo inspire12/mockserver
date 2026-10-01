@@ -1195,7 +1195,7 @@ Its annotation reports, in order:
 | Live heap, last sample | `sut/live-heap-histogram.txt` (`jcmd GC.class_histogram`) | What the heap *retains*, near the end of growth.js with the event log full; see the ZGC pitfall below |
 | Allocation by site / by class | `jfr view` over `sut/load.jfr` | Only when the recording passes the sanity floor |
 | Live-heap histogram placement | every `GC_HeapInspection` in `sut/load.jfr` against the rung windows in `sweep-rungs.json` | Should read "none inside a sweep rung"; a warning names any rung that caught one |
-| Ceiling window: per-thread CPU, `hot-methods`, `cpu-time-hot-methods`, `cpu-time-statistics`, `contention-by-site`, `latencies-by-type`, `vm-operations`, `gc-pauses`, `native-methods`, `exception-count` | `sut/ceiling.jfr` | Only when the window passes its own floor; the two `cpu-time-*` views only when `jdk.CPUTimeSample` events exist. `cpu-time-hot-methods` also counts time in native socket writes and reads, which `hot-methods` (Java frames only) does not |
+| Ceiling window: per-thread CPU and the busiest thread, hot methods by thread role, `hot-methods`, `cpu-time-hot-methods`, `cpu-time-statistics`, monitor contention, GC cycles, `gc-pauses`, `gc-concurrent-phases`, `allocation-by-site`, `latencies-by-type`, `vm-operations`, `native-methods`, `exception-count` | `sut/ceiling.jfr` | Only when the window passes its own floor; the two `cpu-time-*` views only when `jdk.CPUTimeSample` events exist, `contention-by-site` only when there are monitor events, `allocation-by-site` only when there are allocation samples. `cpu-time-hot-methods` also counts time in native socket writes and reads, which `hot-methods` (Java frames only) does not. Every table is cut to a fixed number of rows |
 
 **Histogram placement.** `jcmd GC.class_histogram` is a stop-the-world `GC_HeapInspection`, 0.4–0.5 s
 at the ceiling. When it sampled every ~32 s through the whole run it landed in 10 of build 502's 22
@@ -1218,10 +1218,10 @@ nothing was (builds 482, 483, 485 and 486), and even its valid windows sat below
 selects whole chunks, and build 502's 952 s recording had three, so that dump alone still describes
 most of the run. `.buildkite/scripts/lib/JfrWindow.java` (JDK 19+ `RecordingFile.write` with a
 filter) then keeps only the events that started inside the window, plus the configuration events the
-views need, and writes `sut/ceiling.jfr`. `ceiling-window.json` records the rungs, the times, the
+views need (including `jdk.ActiveSetting`, so the cut recording says which thresholds it ran with), and writes `sut/ceiling.jfr`. `ceiling-window.json` records the rungs, the times, the
 kept and dropped event counts, or the reason there is no recording. The window includes the gaps
-between rungs, so a figure averaged over it (per-thread CPU) reads about three quarters of the
-in-rung load on the default 15 s rung / 5 s gap ladder. A window shorter than
+between rungs, so a figure averaged over it (per-thread CPU) reads below the in-rung load: with
+15 s rungs and 5 s gaps, n rungs give 15n / (20n − 5) of it, 80% for build 537's four. A window shorter than
 `PERF_ALLOCPROFILE_MIN_CEILING_S` (default 30) or with fewer than
 `PERF_ALLOCPROFILE_MIN_CEILING_EXEC_SAMPLES` (default 500) `jdk.ExecutionSample` events is reported
 INVALID and not summarised.
@@ -1237,6 +1237,68 @@ not averaged over its own samples only), times the effective CPU count
 of the host's hardware threads, not the container's, so that line multiplies by
 `jdk.CPUInformation.hwThreads`; on build 502's ceiling it reads 211% against 180% for the Java
 threads.
+
+**The other ceiling views** (item 28). All of them read the ceiling window only, and each is bounded:
+
+- *Busiest thread.* The window average cannot show a one-thread limit, because the gaps between
+  rungs dilute it. A single `jdk.ThreadCPULoad` sample cannot either. Each sample covers the period
+  before it (10 s in `profile`), and a 15 s rung plus its 5 s gap is exactly two periods, so the
+  sampling phase stays fixed for the whole window. At a bad phase every sample straddles a rung
+  edge, and a thread pegged inside the rungs reads as little as ~75% of one core. The table therefore
+  has two more columns:
+  - "Peak period" is the thread's busiest raw sample.
+  - "Peak in-rung" divides each sample by the share of its period that fell inside a rung (from
+    `sweep-rungs.json`), keeping only samples at least half inside one, and takes the busiest.
+
+  The line under the table flags the application thread whose rounded in-rung peak reaches
+  `PERF_ALLOCPROFILE_HOT_THREAD_PCT` (default 90). JVM-internal threads, such as the compiler and JFR
+  threads, stay in the table but are never flagged. The scaling assumes the thread idles in the gaps,
+  so it overstates one that also works there, such as the event-log consumer draining a backlog.
+  Treat a flag as a prompt to read the table, not as a verdict. In build 537 the scaling checked out:
+  worker event loop 7's straddling samples (14.3, 16.6 and 18.8% over about half-rung periods) scale
+  to 28.1, 33.0 and 37.6%, against 29.0, 32.9 and 37.7% for the in-rung periods just before them. Its
+  busiest period was 41%. When the bundle has no rung schedule, the line flags on the raw peak and
+  says that a straddled period can read as little as ~75% of the in-rung load.
+- *Hot methods by thread role.* One `jfr print --json --stack-depth 1` dump gives the top frame of
+  every sample, grouped by role (the thread name without its trailing number, so the five
+  `workerEventLoop` threads are one row). It shows the top `PERF_ALLOCPROFILE_ROLE_METHODS` (default 8)
+  methods for each of the busiest `PERF_ALLOCPROFILE_TOP_ROLES` (default 4) roles. It uses
+  `jdk.CPUTimeSample` when the recording has any (failed samples are left out) and `jdk.ExecutionSample`
+  otherwise, and says which. The whole-JVM `hot-methods` view mixes the event-log consumer with the
+  event loops; this table separates them.
+- *Monitor contention.* A count of `jdk.JavaMonitorEnter` events, printed beside the threshold the
+  recording ran with. The threshold is read from the recording's own `active-settings`, or from
+  `sut/load.jfr` when an older `ceiling.jfr` has no settings events. A zero is meaningful only at a
+  known threshold, so the line says when the threshold is unknown or the event was disabled.
+  `contention-by-site` follows only when there are events.
+- *GC cycles.* `jdk.GarbageCollection` grouped by collector, showing cycles, total and longest cycle
+  time, total and longest pause, and the top causes. Under ZGC the cycle time is concurrent, and only
+  the pause columns stopped application threads (see [GC log cycle times are not stop-the-world pause
+  times](#gc-log-cycle-times-are-not-stop-the-world-pause-times)). Next come `gc-pauses` and the top
+  12 rows of `gc-concurrent-phases`.
+- *Allocation by site at the ceiling.* This can differ from the load-window view, which covers the
+  whole run. In build 537 the load window's list included several JSON-unit matching sites, while the
+  ceiling's top sites were Netty header and buffer objects and `LogEntry.clone`.
+
+**Fail-safe.** Every view is notify-only, and none can fail the step. Each of these gives a one-line
+note in the ceiling section and a `warning` style: no ceiling recording, Docker unavailable, a `jfr`
+tool that cannot run (checked first with `jfr version`), a `jfr summary` that cannot read the file
+(a corrupt or truncated recording), or an earlier `jfr` call that timed out. A `jfr print` that fails
+leaves an empty events file, and each summary built from it says it is unavailable instead of printing
+nothing. Each call runs under `timeout -k 10` with `PERF_ALLOCPROFILE_JFR_DEADLINE_S` (default 120 s),
+so the `docker` client is killed even when a wedged daemon ignores SIGTERM. After one call times out,
+every later call is skipped, so a wedged Docker costs one deadline (plus the 10 s grace), not one per
+view, and the section says so. The whole annotation goes through
+`cap_annotation`, which keeps it under `PERF_ALLOCPROFILE_ANNOTATION_MAX_BYTES` (default 1,000,000;
+Buildkite rejects a body over 1 MiB). It cuts on whole lines, closes an open code fence, and notes the
+cut. Build 537's annotation re-rendered with these views was about 24 KB, and the ceiling section
+took about 10 s to render locally. `.buildkite/scripts/test/perf-allocprofile-annotation-test.sh` (run by
+`perf-test-lint.sh`) checks the size cap, the per-role, monitor and GC summaries against a JSON
+fixture (an empty events file included), the busiest-period flag on both sides of its threshold, and
+every degrade path, with `docker` stubbed. Its multibyte size-cap case runs under a UTF-8 locale, so
+it fails on GNU awk (the Linux agents') if the cap stops counting bytes. Set `PERF_ALLOCPROFILE_TEST_REAL=true` to
+also feed a corrupt file to the real `jfr`. Set `PERF_ALLOCPROFILE_TEST_BUNDLE=<…perf-jvm-diagnostics.tgz>`
+to render a real bundle as well.
 
 **Recording options.** `jdk.JavaMonitorEnter#threshold=1ms` records monitor waits of 1–10 ms, which
 the `profile` default of 10 ms hides; build 502 showed contention on the event-log disruptor lock

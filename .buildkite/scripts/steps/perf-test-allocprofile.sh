@@ -53,6 +53,13 @@ MIN_ALLOC_SAMPLES="${PERF_ALLOCPROFILE_MIN_ALLOC_SAMPLES:-1000}"
 MIN_CEILING_S="${PERF_ALLOCPROFILE_MIN_CEILING_S:-30}"
 MIN_CEILING_EXEC_SAMPLES="${PERF_ALLOCPROFILE_MIN_CEILING_EXEC_SAMPLES:-500}"
 CEILING_TOP_THREADS="${PERF_ALLOCPROFILE_TOP_THREADS:-12}"
+CEILING_TOP_ROLES="${PERF_ALLOCPROFILE_TOP_ROLES:-4}"
+CEILING_ROLE_METHODS="${PERF_ALLOCPROFILE_ROLE_METHODS:-8}"
+# Flag an application thread whose busiest in-rung period (see thread_cpu_table) reached this "% of
+# one core"; the window average cannot, since the gaps between rungs dilute it.
+HOT_THREAD_PCT="${PERF_ALLOCPROFILE_HOT_THREAD_PCT:-90}"
+# Buildkite rejects an annotation body over 1 MiB; this leaves headroom for the header line.
+ANNOTATION_MAX_BYTES="${PERF_ALLOCPROFILE_ANNOTATION_MAX_BYTES:-1000000}"
 
 annotate() { # style, body
   if command -v buildkite-agent >/dev/null 2>&1; then
@@ -61,9 +68,31 @@ annotate() { # style, body
   printf '\n%s\n' "$2"
 }
 
+# After one call times out every later call is skipped, so a wedged Docker costs one deadline, not one
+# per view. The marker is a file because most calls run in a command substitution or a pipeline.
+# -k: the docker CLI can outlive SIGTERM while the daemon is wedged.
 jfr_tool() { # work_dir, jfr args... (paths under /w)
-  local w="$1"; shift
-  timeout "$JFR_VIEW_DEADLINE_S" docker run --rm -v "$w:/w" "$JDK_IMAGE" jfr "$@" 2>/dev/null
+  local w="$1" rc=0; shift
+  [ ! -e "$w/.jfr-timed-out" ] || return 124
+  timeout -k 10 "$JFR_VIEW_DEADLINE_S" docker run --rm -v "$w:/w" "$JDK_IMAGE" jfr "$@" 2>/dev/null || rc=$?
+  case "$rc" in 124|137) : > "$w/.jfr-timed-out" ;; esac
+  return "$rc"
+}
+
+# Keep an annotation body under the byte limit: whole lines only, an open code fence closed, and
+# a note saying where the rest is.
+cap_annotation() { # max_bytes < body
+  LC_ALL=C awk -v max="$1" '
+    !cut && bytes + length($0) + 1 > max - 200 { cut = 1 }
+    cut { next }
+    { bytes += length($0) + 1; print; if ($0 ~ /^```/) fence = !fence }
+    END {
+      if (cut) {
+        if (fence) print "```"
+        print ""
+        print "_Annotation truncated at " bytes " bytes to stay under the Buildkite limit; the full views are in the bundle._"
+      }
+    }'
 }
 
 # Assemble the readable chunks of a JFR repository into /w/assembled.jfr. The chunk a live (or
@@ -72,7 +101,7 @@ assemble_finished_chunks() { # work_dir, repository dir under it
   local w="$1" rel="${2#"$1"/}"
   # shellcheck disable=SC2016
   # As the agent's uid, so the step's own cleanup can remove what the sidecar writes into $w.
-  timeout "$JFR_VIEW_DEADLINE_S" docker run --rm --user "$(id -u):$(id -g)" -v "$w:/w" "$JDK_IMAGE" sh -c '
+  timeout -k 10 "$JFR_VIEW_DEADLINE_S" docker run --rm --user "$(id -u):$(id -g)" -v "$w:/w" "$JDK_IMAGE" sh -c '
     mkdir -p /w/finished-chunks
     for f in "$1"/*.jfr; do jfr summary "$f" >/dev/null 2>&1 && cp "$f" /w/finished-chunks/; done
     ls /w/finished-chunks/*.jfr >/dev/null 2>&1 && jfr assemble /w/finished-chunks /w/assembled.jfr' _ "/w/$rel" >/dev/null 2>&1 || true
@@ -147,47 +176,177 @@ heap_inspection_placement() { # work_dir jfr_rel
 # Per-thread CPU over the ceiling window as "% of one core": a thread's summed jdk.ThreadCPULoad (a
 # fraction of the JVM's effective CPUs) over the window's sampling periods, times that CPU count, so a
 # thread alive for part of the window is not averaged over its own samples only. Grouped by name.
+# A sample covers the period before it, which can straddle a rung edge (15 s rung + 5 s gap is exactly
+# two 10 s periods, so the phase never moves). "Peak in-rung" divides each sample by the share of its
+# period inside a rung (sweep-rungs.json), assuming the thread idles in the gaps, and the flag reads it.
 # jdk.CPULoad's jvmUser/jvmSystem are fractions of the HOST's hardware threads, not the container's.
 thread_cpu_table() { # work_dir jfr_rel
+  local rungs='[[]]'
+  if jq -e 'type == "array" and length > 0' "$1/sweep-rungs.json" >/dev/null 2>&1; then rungs="[$(cat "$1/sweep-rungs.json")]"; fi
   jfr_tool "$1" print --json --events jdk.ThreadCPULoad,jdk.CPULoad,jdk.ContainerConfiguration,jdk.CPUInformation "/w/$2" \
-    | jq -r --argjson top "$CEILING_TOP_THREADS" '
+    | jq -r --argjson top "$CEILING_TOP_THREADS" --argjson hot "$HOT_THREAD_PCT" --argjson rungs "$rungs" '
       def secs: capture("^(?<s>[^.Z]+)") | .s + "Z" | fromdate;
+      def at: capture("^(?<s>[^.Z]+)(\\.(?<f>[0-9]+))?Z$") | ((.s + "Z") | fromdate) + (("0." + (.f // "0")) | tonumber);
+      def inrung($t; $p): [$rungs[0][] | ([$t, .end_epoch_ms / 1000] | min) - ([$t - $p, .start_epoch_ms / 1000] | max)
+                           | select(. > 0)] | add // 0;
+      def internal: test("CompilerThread|^JFR |^Service Thread$|^Monitor Deflation Thread$|^Common-Cleaner$|^Signal Dispatcher$");
       [.recording.events[]] as $ev
       | ([$ev[] | select(.type == "jdk.ContainerConfiguration") | .values.effectiveCpuCount] | max) as $cc
       | ([$ev[] | select(.type == "jdk.CPUInformation") | .values.hwThreads] | max) as $hw
       | ($cc // $hw) as $cpus
       | [$ev[] | select(.type == "jdk.ThreadCPULoad")] as $tl
       # One period per emission batch; assumes the ThreadCPULoad period is over 1 s (profile: 10 s).
-      | ([$tl[] | .values.startTime | secs] | unique | . as $u
-         | [range(0; length) | select(. == 0 or $u[.] - $u[. - 1] > 1)] | length) as $periods
+      | ([$tl[] | .values.startTime | at] | sort | . as $u
+         | [range(0; length) | select(. == 0 or $u[.] - $u[. - 1] > 1) | $u[.]]) as $batches
+      | ($batches | length) as $periods
+      | ([range(1; $periods) | $batches[.] - $batches[. - 1]] | sort | if length == 0 then null else .[length / 2 | floor] end) as $p
+      | (($rungs[0] | length) > 0 and $p != null) as $scaled
       | ([$ev[] | select(.type == "jdk.CPULoad") | ((.values.jvmUser // 0) + (.values.jvmSystem // 0))]
          | if length == 0 then null else add / length end) as $jvm
       | if $cpus == null or ($tl | length) == 0 then "(no jdk.ThreadCPULoad events or no CPU count in the window)"
-        else ([$tl[] | {t: (.values.eventThread.javaName // .values.eventThread.osName // "?"), l: ((.values.user // 0) + (.values.system // 0))}]
-              | group_by(.t) | map({t: .[0].t, n: length, pct: ((map(.l) | add) / $periods * $cpus * 100)}) | sort_by(-.pct)) as $rows
+        else ([$tl[] | {t: (.values.eventThread.javaName // .values.eventThread.osName // "?"),
+                        l: ((.values.user // 0) + (.values.system // 0)), at: (.values.startTime | at)}]
+              | group_by(.t) | map({t: .[0].t, n: length, pct: ((map(.l) | add) / $periods * $cpus * 100),
+                  peak: ((map(.l) | max) * $cpus * 100),
+                  inrung: (if $scaled then [.[] | (inrung(.at; $p) / $p) as $f | select($f >= 0.5) | .l / $f * $cpus * 100] | max else null end)})
+              | sort_by(-.pct)) as $rows
+        | ([$rows[] | select(.t | internal | not) | . + {key: ((if $scaled then .inrung else null end) // .peak | round)}]
+           | max_by([.key, (if $scaled then .inrung else null end) // .peak])) as $b
         | "Java threads (\($rows | length)): **\($rows | map(.pct) | add | round)% of one core**; whole JVM incl. GC threads (jdk.CPULoad): **\(if $jvm == null or $hw == null then "n/a" else ($jvm * $hw * 100 | round | tostring) + "%" end) of one core**; \($cpus) effective CPUs (\($cc | if . == null then "host hardware threads" else "as the container sees them" end)), \($periods) sampling periods.\n",
-          "| Thread | % of one core | Samples |", "|---|---:|---:|",
-          ($rows[:$top][] | "| \(.t) | \(.pct * 10 | round / 10) | \(.n) |")
+          "| Thread | % of one core | Peak period | Peak in-rung | Samples |", "|---|---:|---:|---:|---:|",
+          ($rows[:$top][] | "| \(.t) | \(.pct * 10 | round / 10) | \(.peak * 10 | round / 10) | \(if .inrung == null then "n/a" else .inrung * 10 | round / 10 end) | \(.n) |"),
+          "",
+          (if $b == null then "(no application threads to flag; JVM-internal threads such as compiler and JFR threads are not flagged)"
+           elif $scaled then
+             (if $b.key >= $hot
+              then ":warning: **\($b.t)** reached **\($b.key)% of one core** while a rung ran (its busiest period, scaled to the part inside a rung; flagged at \($hot)%): one thread was close to a full core, so it may cap throughput."
+              else "Busiest in-rung period: \($b.t) at \($b.key)% of one core (its busiest period, scaled to the part inside a rung; flagged at \($hot)%): no application thread was near a full core." end)
+           else
+             (if $b.key >= $hot
+              then ":warning: **\($b.t)** reached **\($b.key)% of one core** in its busiest sampling period (flagged at \($hot)%): one thread was close to a full core, so it may cap throughput."
+              else "Busiest sampling period: \($b.t) at \($b.key)% of one core (flagged at \($hot)%). No rung schedule in the bundle, so periods are not scaled: one that straddles a rung edge reads as little as ~75% of the in-rung load, and this is not proof that no thread was near a full core." end)
+           end)
         end' 2>/dev/null || echo "(per-thread CPU unavailable: jfr print failed)"
 }
 
-# The CPU / lock / GC / VM-operation profile of the ceiling window alone (sut/ceiling.jfr, cut to
-# the knee rung .. top rung by perf-test-run.sh), which the whole-load recording dilutes with the
-# idle and low rungs. Returns 1 when the window is missing or below its floor.
+# Top methods per thread role over the ceiling window, from one `jfr print --json --stack-depth 1`
+# dump. CPU-time samples when the recording has them (they count native socket time, which
+# execution samples miss), else execution samples. A role is the thread name minus its number.
+role_hot_methods() { # events_json
+  [ -s "$1" ] || { echo "(per-role hot methods unavailable: the sample events could not be read)"; return 0; }
+  jq -r --argjson roles "$CEILING_TOP_ROLES" --argjson rows "$CEILING_ROLE_METHODS" '
+    def short: if length > 90 then .[:87] + "..." else . end;
+    [.recording.events[] | select(.type == "jdk.CPUTimeSample" and .values.failed != true)] as $cpu
+    | (if ($cpu | length) > 0 then {k: "CPU-time samples (on-CPU time, native frames included)", s: $cpu}
+       else {k: "execution samples (Java frames only)", s: [.recording.events[] | select(.type == "jdk.ExecutionSample")]} end) as $src
+    | [$src.s[] | select(.values.stackTrace.frames[0] != null)
+       | {role: ((.values.eventThread // .values.sampledThread // {}) | (.javaName // .osName // "?") | sub("[0-9]+$"; "")),
+          m: (.values.stackTrace.frames[0].method | ((.type.name // "?") | gsub("/"; ".")) + "." + (.name // "?") | short)}] as $s
+    | ($s | length) as $n
+    | if $n == 0 then "(no samples with a stack trace in the window)"
+      else "Top \($rows) methods for each of the busiest \($roles) thread roles, from \($n) \($src.k); a role is the thread name without its trailing number.\n",
+        "| Thread role | Method | % of role | Samples |", "|---|---|---:|---:|",
+        ($s | group_by(.role)
+            | map({role: .[0].role, n: length, ms: (group_by(.m) | map({m: .[0].m, n: length}) | sort_by(-.n))})
+            | sort_by(-.n) | .[:$roles][]
+            | "| **\(.role)** (\(.n * 1000 / $n | round / 10)% of all samples) | | | \(.n) |",
+              (.n as $rn | .ms[:$rows][] | "| | `\(.m)` | \(.n * 1000 / $rn | round / 10) | \(.n) |"))
+      end' "$1" 2>/dev/null || echo "(per-role hot methods unavailable: the sample events could not be read)"
+}
+
+# The jdk.JavaMonitorEnter threshold the recording actually ran with ("1 ms", "disabled", or empty).
+# JDK 25 labels the event "Java Monitor Blocked" in the active-settings view.
+monitor_threshold() { # work_dir jfr_rel
+  jfr_tool "$1" view --width 200 active-settings "/w/$2" \
+    | awk '/^Java Monitor Blocked / { if ($4 == "true") print $5 " " $6; else if ($4 == "false") print "disabled"; exit }' || true
+}
+
+# Monitor waits over the threshold in the window: a count is meaningful only beside the threshold.
+monitor_enter_summary() { # events_json threshold
+  [ -s "$1" ] || { echo "- \`jdk.JavaMonitorEnter\`: unavailable (the events could not be read)"; return 0; }
+  jq -r --arg t "${2:-}" '
+    def secs: . as $d | ([$d | capture("(?<v>[0-9.]+)H") | .v | tonumber * 3600] + [$d | capture("(?<v>[0-9.]+)M") | .v | tonumber * 60]
+                         + [$d | capture("(?<v>[0-9.]+)S") | .v | tonumber]) | add // 0;
+    [.recording.events[] | select(.type == "jdk.JavaMonitorEnter")
+     | {d: (.values.duration | secs), c: ((.values.monitorClass.name // "?") | gsub("/"; ".")),
+        r: ((.values.eventThread.javaName // "?") | sub("[0-9]+$"; ""))}] as $e
+    | "- `jdk.JavaMonitorEnter` events"
+      + (if $t == "" then " (no event settings in the recording, so a zero cannot be told from a disabled event)"
+         elif $t == "disabled" then " (the event was **disabled** in this recording, so a zero means nothing)"
+         else " (a thread blocked on a monitor for at least the recorded threshold, **\($t)**)" end)
+      + ": **\($e | length)**"
+      + (if ($e | length) == 0 then "" else
+         ", longest \(($e | map(.d) | max) * 1000 | . * 100 | round / 100) ms, total \(($e | map(.d) | add) * 1000 | round) ms; by monitor class: "
+         + ($e | group_by(.c) | map({c: .[0].c, n: length}) | sort_by(-.n) | .[:3] | map("`\(.c)` ×\(.n)") | join(", "))
+         + "; by thread role: "
+         + ($e | group_by(.r) | map({r: .[0].r, n: length}) | sort_by(-.n) | .[:3] | map("\(.r) ×\(.n)") | join(", ")) end)' "$1" 2>/dev/null \
+    || echo "- \`jdk.JavaMonitorEnter\`: unavailable (the events could not be read)"
+}
+
+# GC cycles in the window by collector. Under ZGC the cycle time is concurrent work; only the pause
+# columns stopped application threads.
+gc_cycle_summary() { # events_json
+  [ -s "$1" ] || { echo "(GC cycle summary unavailable: the events could not be read)"; return 0; }
+  jq -r '
+    def secs: . as $d | ([$d | capture("(?<v>[0-9.]+)H") | .v | tonumber * 3600] + [$d | capture("(?<v>[0-9.]+)M") | .v | tonumber * 60]
+                         + [$d | capture("(?<v>[0-9.]+)S") | .v | tonumber]) | add // 0;
+    def ms: . * 1000 | if . >= 100 then round else . * 1000 | round / 1000 end;
+    [.recording.events[] | select(.type == "jdk.GarbageCollection")
+     | {name: (.values.name // "?"), cause: (.values.cause // "?"), d: (.values.duration | secs),
+        p: ((.values.sumOfPauses // "PT0S") | secs), lp: ((.values.longestPause // "PT0S") | secs)}] as $g
+    | if ($g | length) == 0 then "(no jdk.GarbageCollection events in the window)"
+      else "| Collector | Cycles | Cycle time total (ms) | Longest cycle (ms) | Pauses total (ms) | Longest pause (ms) | Causes |",
+        "|---|---:|---:|---:|---:|---:|---|",
+        ($g | group_by(.name) | sort_by(-length)[]
+         | "| \(.[0].name) | \(length) | \(map(.d) | add | ms) | \(map(.d) | max | ms) | \(map(.p) | add | ms) | \(map(.lp) | max | ms) | "
+           + (group_by(.cause) | map({c: .[0].cause, n: length}) | sort_by(-.n) | .[:3] | map("\(.c) ×\(.n)") | join(", ")) + " |"),
+        "", "Cycle time is the collector'"'"'s whole cycle (concurrent under ZGC); only the pause columns stopped application threads."
+      end' "$1" 2>/dev/null || echo "(GC cycle summary unavailable: the events could not be read)"
+}
+
+jfr_view_block() { # work_dir view rows jfr_rel
+  echo "#### $2"
+  echo '```'
+  jfr_tool "$1" view --width 120 "$2" "/w/$4" | awk -v n="$3" 'NF && ++k <= n' || true
+  echo '```'
+}
+
+# The CPU / lock / GC / VM-operation / allocation profile of the ceiling window alone (sut/ceiling.jfr,
+# cut to the knee rung .. top rung by perf-test-run.sh), which the whole-load recording dilutes with
+# the idle and low rungs. Every table is row-bounded. Returns 1 (a one-line note, never a step
+# failure) when the window is missing or below its floor, or `jfr` cannot run or read it.
 ceiling_profile() { # work_dir
-  local w="$1" meta secs summary execs cpu_samples view rows
+  local w="$1" meta secs summary execs cpu_samples alloc_samples view rows threshold monitors
+  local jfr_rel="sut/ceiling.jfr"
   echo "### ceiling window (CPU, locks, GC, VM operations)"
   meta="$(jq -c '.' "$w/ceiling-window.json" 2>/dev/null || true)"
-  if [ -z "$meta" ] || [ "$(jq -r '.jfr // empty' <<<"$meta")" != "sut/ceiling.jfr" ] || [ ! -s "$w/sut/ceiling.jfr" ]; then
+  if [ -z "$meta" ] || [ "$(jq -r '.jfr // empty' <<<"$meta")" != "$jfr_rel" ] || [ ! -s "$w/$jfr_rel" ]; then
     echo "No ceiling recording in the bundle$(jq -r '(.error // empty) | " (" + . + ")"' <<<"${meta:-null}" 2>/dev/null)."
     return 1
   fi
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "Docker is unavailable on this agent, so \`jfr\` could not read \`$jfr_rel\`; run \`jfr view hot-methods $jfr_rel\` on the bundle."
+    return 1
+  fi
+  if [ -e "$w/.jfr-timed-out" ]; then
+    echo "An earlier \`jfr\` call timed out (${JFR_VIEW_DEADLINE_S} s) or was killed, so the ceiling views were skipped; read them from the bundle."
+    return 1
+  fi
+  if ! jfr_tool "$w" version >/dev/null; then
+    echo "The \`jfr\` tool could not run (image \`${JDK_IMAGE%%@*}\`), so the ceiling views were skipped."
+    return 1
+  fi
+  if ! summary="$(jfr_tool "$w" summary "/w/$jfr_rel")" || ! grep -q '^ *Duration:' <<<"$summary"; then
+    echo "\`jfr summary\` could not read \`$jfr_rel\` (corrupt or truncated recording), so the ceiling views were skipped."
+    return 1
+  fi
   secs="$(jq -r '((.end_epoch_ms - .begin_epoch_ms) / 1000 | floor)' <<<"$meta")"
-  summary="$(jfr_tool "$w" summary /w/sut/ceiling.jfr || true)"
   execs="$(printf '%s\n' "$summary" | awk '$1=="jdk.ExecutionSample"{print $2; exit}')"
   cpu_samples="$(printf '%s\n' "$summary" | awk '$1=="jdk.CPUTimeSample"{print $2; exit}')"
+  alloc_samples="$(printf '%s\n' "$summary" | awk '$1=="jdk.ObjectAllocationSample"{print $2; exit}')"
   case "$execs" in ''|*[!0-9]*) execs=0 ;; esac
   case "$cpu_samples" in ''|*[!0-9]*) cpu_samples=0 ;; esac
+  case "$alloc_samples" in ''|*[!0-9]*) alloc_samples=0 ;; esac
   jq -r '"Rungs \(.first_rung_rps)–\(.last_rung_rps) rps (knee: saturation_rps \(.saturation_rps)), \(.begin_iso) to \(.end_iso)"' <<<"$meta"
   echo "— ${secs} s including the gaps between rungs, ${execs} execution samples, ${cpu_samples} CPU-time samples."
   if [ "${secs:-0}" -lt "$MIN_CEILING_S" ] || [ "$execs" -lt "$MIN_CEILING_EXEC_SAMPLES" ]; then
@@ -197,20 +356,36 @@ ceiling_profile() { # work_dir
   fi
   echo
   echo "#### per-thread CPU"
-  thread_cpu_table "$w" sut/ceiling.jfr
+  thread_cpu_table "$w" "$jfr_rel"
   echo
-  for view in hot-methods cpu-time-hot-methods cpu-time-statistics contention-by-site latencies-by-type vm-operations gc-pauses native-methods exception-count; do
+  jfr_tool "$w" print --json --stack-depth 1 \
+    --events jdk.CPUTimeSample,jdk.ExecutionSample,jdk.JavaMonitorEnter,jdk.GarbageCollection \
+    "/w/$jfr_rel" > "$w/ceiling-events.json" || : > "$w/ceiling-events.json"
+  echo "#### hot methods by thread role"
+  role_hot_methods "$w/ceiling-events.json"
+  echo
+  for view in hot-methods cpu-time-hot-methods cpu-time-statistics; do
     case "$view" in cpu-time-*) [ "$cpu_samples" -gt 0 ] || continue ;; esac
-    case "$view" in
-      hot-methods|cpu-time-hot-methods) rows=22 ;;
-      native-methods) rows=12 ;;
-      *) rows=16 ;;
-    esac
-    echo "#### ${view}"
-    echo '```'
-    jfr_tool "$w" view --width 120 "$view" /w/sut/ceiling.jfr | awk -v n="$rows" 'NF && ++k <= n' || true
-    echo '```'
+    case "$view" in *hot-methods) rows=22 ;; *) rows=16 ;; esac
+    jfr_view_block "$w" "$view" "$rows" "$jfr_rel"
   done
+  echo "#### monitor contention"
+  # ceiling.jfr from an older harness has no settings events; the load recording is the same JVM's.
+  threshold="$(monitor_threshold "$w" "$jfr_rel")"
+  if [ -z "$threshold" ] && [ -s "$w/sut/load.jfr" ]; then threshold="$(monitor_threshold "$w" sut/load.jfr)"; fi
+  monitor_enter_summary "$w/ceiling-events.json" "$threshold"
+  monitors="$(jq '[.recording.events[] | select(.type == "jdk.JavaMonitorEnter")] | length' "$w/ceiling-events.json" 2>/dev/null || echo 0)"
+  echo
+  [ "${monitors:-0}" = 0 ] || jfr_view_block "$w" contention-by-site 16 "$jfr_rel"
+  echo "#### GC cycles"
+  gc_cycle_summary "$w/ceiling-events.json"
+  echo
+  for view in gc-pauses gc-concurrent-phases allocation-by-site latencies-by-type vm-operations native-methods exception-count; do
+    case "$view" in allocation-by-site) [ "$alloc_samples" -gt 0 ] || continue ;; esac
+    case "$view" in native-methods|gc-concurrent-phases) rows=12 ;; *) rows=16 ;; esac
+    jfr_view_block "$w" "$view" "$rows" "$jfr_rel"
+  done
+  [ ! -e "$w/.jfr-timed-out" ] || echo "_A \`jfr\` call timed out (${JFR_VIEW_DEADLINE_S} s) or was killed, so the views after it are empty; read them from the bundle._"
   return 0
 }
 
@@ -287,13 +462,10 @@ emit_allocation_annotation() {
     fi
   fi
 
-  if command -v docker >/dev/null 2>&1; then
-    ceiling_profile "$work" >> "$out" || style="warning"
-  fi
+  ceiling_profile "$work" >> "$out" || style="warning"
 
-  annotate "$style" ":microscope: **Allocation profile — deep JFR run (NOT baselined).** Throughput this run is deliberately depressed by JFR/NMT/GC-logging, so its figures are excluded from the baseline. ${verdict} Bundle: \`${ARTIFACT_PREFIX}perf-jvm-diagnostics.tgz\`.
-
-$(cat "$out")"
+  local header=":microscope: **Allocation profile — deep JFR run (NOT baselined).** Throughput this run is deliberately depressed by JFR/NMT/GC-logging, so its figures are excluded from the baseline. ${verdict} Bundle: \`${ARTIFACT_PREFIX}perf-jvm-diagnostics.tgz\`."
+  annotate "$style" "$({ printf '%s\n\n' "$header"; cat "$out"; } | cap_annotation "$ANNOTATION_MAX_BYTES")"
 }
 
 echo "--- :microscope: allocation profile — deep JFR run (PERF_RUN_NAME=${RUN_NAME}); artifacts are prefixed and NOT baselined"

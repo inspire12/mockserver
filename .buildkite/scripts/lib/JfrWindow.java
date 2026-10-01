@@ -3,7 +3,8 @@
 // `jcmd JFR.dump begin=... end=...` selects whole CHUNKS, and a chunk can span many minutes, so a
 // "ceiling" dump bounded that way can still hold most of the run. This keeps an event only when its
 // start time is inside [begin, end), plus the configuration events the views and the per-thread CPU
-// figure need (container CPU count, JVM and GC configuration), which JFR writes at chunk start.
+// figure need (container CPU count, JVM and GC configuration, and the active event settings that
+// say what a zero count means, such as the monitor-enter threshold), which JFR writes at chunk start.
 // Needs JDK 19+ (RecordingFile.write with a filter). Run in a JDK sidecar with the recording mounted:
 //     java JfrWindow.java <in.jfr> <out.jfr> <beginEpochMs> <endEpochMs>
 // Prints "kept=<n> dropped=<n>" and exits non-zero when no event falls in the window.
@@ -18,7 +19,7 @@ public final class JfrWindow {
 
     private static final Set<String> CONFIGURATION_EVENTS = Set.of(
         "jdk.ContainerConfiguration", "jdk.CPUInformation", "jdk.JVMInformation",
-        "jdk.OSInformation", "jdk.GCConfiguration", "jdk.GCHeapConfiguration");
+        "jdk.OSInformation", "jdk.GCConfiguration", "jdk.GCHeapConfiguration", "jdk.ActiveSetting");
 
     public static void main(String[] args) throws Exception {
         if (args.length != 4) {

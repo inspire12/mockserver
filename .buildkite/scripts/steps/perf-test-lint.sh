@@ -63,6 +63,9 @@ bash "$REPO_ROOT/.buildkite/scripts/test/perf-rw-cross-check-test.sh"
 echo "--- perf-test-run start-up checks (diagnostics tiers, env guards, wait_ready states)"
 bash "$REPO_ROOT/.buildkite/scripts/test/perf-run-ready-test.sh"
 
+echo "--- allocation-profile annotation checks (item 28: ceiling views, size cap, degrade notes)"
+bash "$REPO_ROOT/.buildkite/scripts/test/perf-allocprofile-annotation-test.sh"
+
 echo "--- byte-compiling the SSE fidelity reader (item 12)"
 # The reader is pure-stdlib python3 run on the perf agent by perf-test-run.sh; a
 # syntax error would only surface mid-run, so compile it here. Skip (do not fail)
