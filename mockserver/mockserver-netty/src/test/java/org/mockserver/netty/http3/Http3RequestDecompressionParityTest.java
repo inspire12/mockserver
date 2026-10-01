@@ -14,7 +14,6 @@ import io.netty.handler.codec.compression.SnappyFrameEncoder;
 import io.netty.handler.codec.compression.Zstd;
 import io.netty.handler.codec.compression.ZstdEncoder;
 import io.netty.handler.codec.http.FullHttpResponse;
-import io.netty.handler.codec.http.HttpContentDecompressor;
 import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http3.DefaultHttp3DataFrame;
 import io.netty.handler.codec.http3.DefaultHttp3HeadersFrame;
@@ -24,10 +23,12 @@ import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.mockito.ArgumentCaptor;
 import org.mockserver.codec.HttpObjectAggregators;
+import org.mockserver.codec.MockServerHttpContentDecompressor;
 import org.mockserver.codec.NettyHttpToMockServerHttpRequestDecoder;
 import org.mockserver.codec.PreserveHeadersNettyRemoves;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.logging.MockServerLogger;
+import org.mockserver.metrics.remotewrite.SnappyBlock;
 import org.mockserver.metrics.Metrics;
 import org.mockserver.mock.HttpState;
 import org.mockserver.mock.action.http.HttpActionHandler;
@@ -61,7 +62,7 @@ import static org.mockserver.configuration.Configuration.configuration;
 /**
  * Checks that an HTTP/3 request with a {@code Content-Encoding} body reaches the matchers as the same
  * {@link HttpRequest} the HTTP/1.1 pipeline builds from the same bytes: the HTTP/1.1 side is the real
- * {@code HttpServerCodec -> PreserveHeadersNettyRemoves -> HttpContentDecompressor -> aggregator -> request decoder}
+ * {@code HttpServerCodec -> PreserveHeadersNettyRemoves -> MockServerHttpContentDecompressor -> aggregator -> request decoder}
  * chain {@code PortUnificationHandler} installs, the HTTP/3 side is {@link Http3MockServerHandler} fed QUIC-packet-sized
  * DATA frames. Headers (with their order), body, raw bytes and original body must agree, for well-formed, truncated
  * and corrupt bodies.
@@ -97,6 +98,8 @@ public class Http3RequestDecompressionParityTest {
         // HTTP/1.1's decompressor is not strict, so 'deflate' also accepts a raw (headerless) stream
         encodings.add(new Object[]{"deflate (raw)", "deflate", rawDeflate(PLAIN), true});
         encodings.add(new Object[]{"snappy", "snappy", encode(new SnappyFrameEncoder(), PLAIN), true});
+        // the raw block format Prometheus remote-write sends
+        encodings.add(new Object[]{"snappy (block)", "snappy", SnappyBlock.compress(PLAIN), true});
         encodings.add(new Object[]{"zstd", "zstd", Zstd.isAvailable() ? encode(new ZstdEncoder(), PLAIN) : gzip(PLAIN), Zstd.isAvailable()});
         encodings.add(new Object[]{"br", "br", Brotli.isAvailable() ? encode(new BrotliEncoder(), PLAIN) : gzip(PLAIN), Brotli.isAvailable()});
         // not decoded by HTTP/1.1, so not by HTTP/3 either
@@ -164,9 +167,17 @@ public class Http3RequestDecompressionParityTest {
 
         assertThat("compressed body is under the limit", bomb.length < MAX_BODY, is(true));
         assertThat(viaHttp1.request, nullValue());
-        assertThat(viaHttp1.status, is(413));
         assertThat(viaHttp3.request, nullValue());
-        assertThat(viaHttp3.status, is(413));
+        if (label.endsWith("(block)")) {
+            // a block declares its decoded size up front, so it is refused as corrupt before anything is decoded
+            assertThat(viaHttp1.rejected, is(true));
+            assertThat(viaHttp1.status, nullValue());
+            assertThat(viaHttp3.rejected, is(true));
+            assertThat(viaHttp3.status, nullValue());
+        } else {
+            assertThat(viaHttp1.status, is(413));
+            assertThat(viaHttp3.status, is(413));
+        }
     }
 
     private byte[] reencode(byte[] plain) {
@@ -178,7 +189,7 @@ public class Http3RequestDecompressionParityTest {
             case "x-deflate":
                 return label.endsWith("(raw)") ? rawDeflate(plain) : zlib(plain);
             case "snappy":
-                return encode(new SnappyFrameEncoder(), plain);
+                return label.endsWith("(block)") ? SnappyBlock.compress(plain) : encode(new SnappyFrameEncoder(), plain);
             case "zstd":
                 return encode(new ZstdEncoder(), plain);
             case "br":
@@ -222,7 +233,7 @@ public class Http3RequestDecompressionParityTest {
         EmbeddedChannel channel = new EmbeddedChannel(
             new HttpServerCodec(),
             new PreserveHeadersNettyRemoves(),
-            new HttpContentDecompressor(0),
+            new MockServerHttpContentDecompressor(MAX_BODY),
             HttpObjectAggregators.httpObjectAggregator(MAX_BODY),
             new NettyHttpToMockServerHttpRequestDecoder(CONFIGURATION, LOGGER, true, null, 1080)
         );

@@ -10,13 +10,13 @@ import io.netty.handler.codec.DecoderException;
 import io.netty.handler.codec.http.DefaultHttpContent;
 import io.netty.handler.codec.http.DefaultHttpRequest;
 import io.netty.handler.codec.http.HttpContent;
-import io.netty.handler.codec.http.HttpContentDecompressor;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.codec.http.LastHttpContent;
 import io.netty.util.ReferenceCountUtil;
+import org.mockserver.codec.MockServerHttpContentDecompressor;
 
 import java.util.List;
 import java.util.Map;
@@ -25,7 +25,7 @@ import static io.netty.handler.codec.http.DefaultHttpHeadersFactory.headersFacto
 
 /**
  * Decompresses one HTTP/3 request body that carries a {@code Content-Encoding}, exactly as the HTTP/1.1 and HTTP/2
- * pipelines do: the body is run through the same Netty {@link HttpContentDecompressor} they install, so the set of
+ * pipelines do: the body is run through the same {@link MockServerHttpContentDecompressor} they install, so the set of
  * supported encodings, the decoders and their failures are identical by construction.
  * <p>
  * The decompressed size is bounded by {@code maxRequestBodySize} as HTTP/1.1's aggregator bounds it, and compressed
@@ -49,7 +49,7 @@ final class Http3RequestDecompressor {
 
     /**
      * A decompressor for a request with these headers, or {@code null} when the request is not decompressed: it has
-     * no {@code Content-Encoding}, or one {@link HttpContentDecompressor} does not decode (such as {@code identity},
+     * no {@code Content-Encoding}, or one {@link MockServerHttpContentDecompressor} does not decode (such as {@code identity},
      * a list of codings, or {@code br} without Brotli on the classpath).
      *
      * @param maxBodySize the largest decompressed body accepted; zero or less for no limit
@@ -73,7 +73,7 @@ final class Http3RequestDecompressor {
         EmbeddedChannel channel = new EmbeddedChannel();
         // the decoders allocate from this channel's config, so give them the request stream's allocator
         channel.config().setAllocator(alloc);
-        channel.pipeline().addLast(new HttpContentDecompressor(0), sink);
+        channel.pipeline().addLast(new MockServerHttpContentDecompressor(maxBodySize), sink);
         Http3RequestDecompressor decompressor = new Http3RequestDecompressor(channel, sink);
         try {
             channel.writeInbound(nettyRequest);

@@ -73,6 +73,31 @@ public class HttpServletRequestToMockServerHttpRequestDecoderTest {
     }
 
     @Test
+    public void shouldForwardAContentEncodedBodyAsTheContainerReceivedIt() throws IOException {
+        // given - a servlet container does not decompress a request body, so it is still gzip
+        java.io.ByteArrayOutputStream gzipped = new java.io.ByteArrayOutputStream();
+        try (java.util.zip.GZIPOutputStream gzip = new java.util.zip.GZIPOutputStream(gzipped)) {
+            gzip.write("{\"name\":\"value\"}".getBytes(UTF_8));
+        }
+        MockHttpServletRequest httpServletRequest = new MockHttpServletRequest("POST", "/requestURI");
+        httpServletRequest.addHeader("Content-Type", "application/json");
+        httpServletRequest.addHeader("Content-Encoding", "gzip");
+        httpServletRequest.setContent(gzipped.toByteArray());
+
+        // when
+        HttpRequest httpRequest = new HttpServletRequestToMockServerHttpRequestDecoder(configuration(), new MockServerLogger()).mapHttpServletRequestToMockServerRequest(httpServletRequest);
+        io.netty.handler.codec.http.FullHttpRequest forwarded = new MockServerHttpRequestToFullHttpRequest(new MockServerLogger(), null).mapMockServerRequestToNettyRequest(httpRequest);
+
+        // then - forwarded as received, not gzipped a second time
+        try {
+            assertThat(httpRequest.isBodyAsReceived(), is(true));
+            assertThat(io.netty.buffer.ByteBufUtil.getBytes(forwarded.content()), is(gzipped.toByteArray()));
+        } finally {
+            forwarded.release();
+        }
+    }
+
+    @Test
     public void shouldStripSurroundingQuotesFromCookieValueButLeaveUnquotedValueUnchanged() {
         // given - Servlet 6 (Tomcat 11+) preserves RFC 6265 surrounding double quotes on cookie
         // values (e.g. "quotedValue" instead of quotedValue); the decoder must strip them while

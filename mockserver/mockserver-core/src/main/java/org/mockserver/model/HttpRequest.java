@@ -10,6 +10,7 @@ import java.util.*;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 import java.util.stream.Collectors;
 
+import static io.netty.handler.codec.http.HttpHeaderNames.CONTENT_ENCODING;
 import static io.netty.handler.codec.http.HttpHeaderNames.CONTENT_TYPE;
 import static io.netty.handler.codec.http.HttpHeaderNames.HOST;
 import static org.apache.commons.lang3.StringUtils.isBlank;
@@ -83,6 +84,13 @@ public class HttpRequest extends RequestDefinition implements HttpMessage<HttpRe
     // the wire, so it cannot reach an upstream target and silently disable that target's logging.
     @JsonIgnore
     private transient boolean loadGenerated;
+    // The body instance and Content-Encoding values a transport built this request with, so a forward can
+    // tell that neither was changed and send the bytes the client sent. Identity, not equality: any
+    // withBody replaces the instance. In-process only: excluded from equals/hashCode/JSON.
+    @JsonIgnore
+    private transient Body bodyAsReceived;
+    @JsonIgnore
+    private transient List<String> contentEncodingAsReceived;
 
     /**
      * Identifies a memoizable body-conversion target. The conversion result depends only on the
@@ -1087,6 +1095,32 @@ public class HttpRequest extends RequestDefinition implements HttpMessage<HttpRe
         return this;
     }
 
+    /**
+     * Records that the current body and {@code Content-Encoding} header are exactly as received from the client,
+     * with {@link #getBodyAsOriginalRawBytes()} the bytes it sent. Called by the server's transports once they have
+     * built a request that arrived with a {@code Content-Encoding}; a request with no body or no {@code Content-Encoding}
+     * is not marked. A later {@link #withBody} or change to that header ends it. In-process only, never serialised.
+     */
+    @JsonIgnore
+    public HttpRequest markBodyAsReceived() {
+        List<String> contentEncodings = body != null ? getHeader(CONTENT_ENCODING.toString()) : Collections.emptyList();
+        this.bodyAsReceived = contentEncodings.isEmpty() ? null : body;
+        this.contentEncodingAsReceived = contentEncodings.isEmpty() ? null : contentEncodings;
+        return this;
+    }
+
+    /**
+     * Whether the body and {@code Content-Encoding} header are still those {@link #markBodyAsReceived()} recorded, so
+     * {@link #getBodyAsOriginalRawBytes()} is still a correct wire form of this request's body. Always false for a
+     * request with no {@code Content-Encoding}, without looking the header up.
+     */
+    @JsonIgnore
+    public boolean isBodyAsReceived() {
+        return body != null
+            && body == bodyAsReceived
+            && Objects.equals(contentEncodingAsReceived, getHeader(CONTENT_ENCODING.toString()));
+    }
+
     @JsonIgnore
     public String getBodyAsString() {
         if (body != null) {
@@ -1537,6 +1571,8 @@ public class HttpRequest extends RequestDefinition implements HttpMessage<HttpRe
             .withLocalAddress(localAddress)
             .withRemoteAddress(remoteAddress);
         clone.withReceivedTimestamp(getReceivedTimestamp());
+        clone.bodyAsReceived = bodyAsReceived;
+        clone.contentEncodingAsReceived = contentEncodingAsReceived;
         return clone;
     }
 
@@ -1563,6 +1599,8 @@ public class HttpRequest extends RequestDefinition implements HttpMessage<HttpRe
             .withLocalAddress(localAddress)
             .withRemoteAddress(remoteAddress);
         clone.withReceivedTimestamp(getReceivedTimestamp());
+        clone.bodyAsReceived = bodyAsReceived;
+        clone.contentEncodingAsReceived = contentEncodingAsReceived;
         return clone;
     }
 

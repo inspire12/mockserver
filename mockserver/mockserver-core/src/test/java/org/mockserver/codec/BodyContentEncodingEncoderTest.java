@@ -1,6 +1,13 @@
 package org.mockserver.codec;
 
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
+import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.codec.compression.Brotli;
+import io.netty.handler.codec.compression.SnappyFrameDecoder;
+import io.netty.handler.codec.compression.Zstd;
 import org.junit.Test;
+import org.xerial.snappy.Snappy;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -36,12 +43,79 @@ public class BodyContentEncodingEncoderTest {
     }
 
     @Test
-    public void shouldReturnBodyUnchangedForUnknownEncoding() {
+    public void shouldReturnBodyUnchangedForAnEncodingThatIsNotDecoded() {
         byte[] input = "test-data".getBytes(UTF_8);
 
-        byte[] result = BodyContentEncodingEncoder.encodeBody(input, "br");
+        assertThat(BodyContentEncodingEncoder.encodeBody(input, "compress"), is(input));
+        assertThat(BodyContentEncodingEncoder.encodeBody(input, "identity"), is(input));
+        assertThat(BodyContentEncodingEncoder.encodeBody(input, "gzipped"), is(input));
+        if (!Brotli.isAvailable()) {
+            assertThat(BodyContentEncodingEncoder.encodeBody(input, "br"), is(input));
+        }
+        if (!Zstd.isAvailable()) {
+            assertThat(BodyContentEncodingEncoder.encodeBody(input, "zstd"), is(input));
+        }
+    }
 
-        assertThat(result, is(input));
+    @Test
+    public void shouldReturnBodyUnchangedForACodingList() {
+        byte[] input = "test-data".getBytes(UTF_8);
+
+        // MockServer never decodes a coding list, so a body sent with one is still in it
+        assertThat(BodyContentEncodingEncoder.encodeBody(input, "gzip, br"), is(input));
+        assertThat(BodyContentEncodingEncoder.encodeBody(input, "gzip, deflate"), is(input));
+        assertThat(BodyContentEncodingEncoder.encodeBody(input, "deflate,gzip"), is(input));
+        assertThat(BodyContentEncodingEncoder.encodeBody(input, "gzip,"), is(input));
+    }
+
+    @Test
+    public void shouldEncodeXGzipAndXDeflate() throws IOException {
+        byte[] input = "test-data".getBytes(UTF_8);
+
+        assertThat(decompress(BodyContentEncodingEncoder.encodeBody(input, "x-gzip"), "gzip"), is(input));
+        assertThat(decompress(BodyContentEncodingEncoder.encodeBody(input, " X-Deflate "), "deflate"), is(input));
+    }
+
+    @Test
+    public void shouldSnappyCompressARawBlockByDefault() throws IOException {
+        byte[] input = repeated(100_000);
+
+        byte[] compressed = BodyContentEncodingEncoder.encodeBody(input, "snappy");
+
+        assertThat(SnappyBlockOrFrameDecoder.isFramed(compressed), is(false));
+        assertThat(Snappy.uncompress(compressed), is(input));
+    }
+
+    @Test
+    public void shouldSnappyCompressTheFramingFormatWhenAsked() {
+        byte[] input = repeated(100_000);
+
+        byte[] compressed = BodyContentEncodingEncoder.encodeBody(input, "SNAPPY", true);
+
+        assertThat(SnappyBlockOrFrameDecoder.isFramed(compressed), is(true));
+        EmbeddedChannel channel = new EmbeddedChannel(new SnappyFrameDecoder());
+        try {
+            channel.writeInbound(Unpooled.wrappedBuffer(compressed));
+            ByteArrayOutputStream decoded = new ByteArrayOutputStream();
+            ByteBuf piece;
+            while ((piece = channel.readInbound()) != null) {
+                byte[] bytes = new byte[piece.readableBytes()];
+                piece.readBytes(bytes);
+                decoded.write(bytes, 0, bytes.length);
+                piece.release();
+            }
+            assertThat(decoded.toByteArray(), is(input));
+        } finally {
+            channel.finishAndReleaseAll();
+        }
+    }
+
+    private static byte[] repeated(int length) {
+        StringBuilder text = new StringBuilder();
+        for (int i = 0; text.length() < length; i++) {
+            text.append("sample ").append(i).append(' ');
+        }
+        return text.substring(0, length).getBytes(UTF_8);
     }
 
     @Test

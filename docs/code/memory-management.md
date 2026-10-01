@@ -362,7 +362,7 @@ graph LR
     LE --> EXP[expectation: Expectation]
 
     REQ --> HR["HttpRequest
-    ~108 B shell"]
+    ~116 B shell"]
     HR --> METHOD["method: NottableString
     ~176 B"]
     HR --> PATH["path: NottableString
@@ -416,7 +416,7 @@ graph LR
 
 | Component | Typical Size | Notes |
 |-----------|-------------|-------|
-| HttpRequest shell (19 fields) | ~108 B | Inherits from `Not` → `ObjectWithJsonToString` |
+| HttpRequest shell (19 fields) | ~116 B | Inherits from `Not` → `ObjectWithJsonToString`; includes 8 B for the two transient references `markBodyAsReceived()` sets (null unless the request arrived with a `Content-Encoding`) |
 | `method` (NottableString) | ~176 B | e.g., "GET" — NottableString + value String + json String |
 | `path` (NottableString) | ~200 B | e.g., "/api/users" |
 | `headers` (Headers + Guava LinkedHashMultimap) | ~3,000 B | 6 typical headers (Host, Content-Type, Accept, User-Agent, Content-Length, Connection) |

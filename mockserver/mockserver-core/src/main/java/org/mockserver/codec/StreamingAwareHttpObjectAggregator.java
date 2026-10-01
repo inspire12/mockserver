@@ -2,19 +2,24 @@ package org.mockserver.codec;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelPipeline;
+import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.*;
 import io.netty.handler.timeout.IdleStateHandler;
 import io.netty.handler.timeout.ReadTimeoutHandler;
 import io.netty.util.AttributeKey;
+import io.netty.util.ReferenceCountUtil;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.httpclient.HttpClientHandler;
 import org.mockserver.httpclient.StreamingResponseRelayHandler;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
+import org.mockserver.socket.NettyAllocator;
 import org.slf4j.event.Level;
 
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
@@ -163,11 +168,15 @@ public class StreamingAwareHttpObjectAggregator extends CoalescingHttpObjectAggr
      * and is used on the CONNECT-proxy loopback relay path, where the request is a netty {@link FullHttpRequest}
      * rather than a MockServer {@code HttpRequest}. Reading the body via {@link ByteBuf#toString(java.nio.charset.Charset)}
      * is non-destructive (it does not advance the reader index), so the relayed request body is unaffected.
+     * A body with a {@code Content-Encoding} is scanned as it decompresses, in slices, without changing or keeping the
+     * request's bytes, and only up to {@code maxDecodedSize} decoded bytes (zero or less for no limit): the relay
+     * forwards the body still compressed, so MockServer decodes it again when it receives it.
      *
-     * @param request the netty request head (and, for body inspection, the {@link FullHttpRequest})
+     * @param request        the netty request head (and, for body inspection, the {@link FullHttpRequest})
+     * @param maxDecodedSize the most decoded bytes scanned, normally {@code maxRequestBodySize}
      * @return true when the response to this request should be relayed as a stream
      */
-    public static boolean requestExpectsStreamingResponse(HttpRequest request) {
+    public static boolean requestExpectsStreamingResponse(HttpRequest request, int maxDecodedSize) {
         if (request == null) {
             return false;
         }
@@ -180,6 +189,9 @@ public class StreamingAwareHttpObjectAggregator extends CoalescingHttpObjectAggr
             && request instanceof FullHttpRequest) {
             ByteBuf content = ((FullHttpRequest) request).content();
             if (content != null && content.isReadable()) {
+                if (request.headers().contains(HttpHeaderNames.CONTENT_ENCODING)) {
+                    return decodedBodyRequestsStreaming(request.headers().getAll(HttpHeaderNames.CONTENT_ENCODING), content, maxDecodedSize);
+                }
                 String body = content.toString(StandardCharsets.UTF_8);
                 if (STREAM_TRUE_IN_BODY.matcher(body).find()) {
                     return true;
@@ -187,6 +199,83 @@ public class StreamingAwareHttpObjectAggregator extends CoalescingHttpObjectAggr
             }
         }
         return false;
+    }
+
+    private static final int SCAN_SLICE_BYTES = 1024;
+
+    // A coding the decompressor does not decode passes through unchanged, and is scanned as it is, as before.
+    private static boolean decodedBodyRequestsStreaming(List<String> contentEncodings, ByteBuf content, int maxDecodedSize) {
+        StreamTrueScanner scanner = new StreamTrueScanner(maxDecodedSize > 0 ? maxDecodedSize : Long.MAX_VALUE);
+        EmbeddedChannel channel = new EmbeddedChannel(new MockServerHttpContentDecompressor(maxDecodedSize), scanner);
+        NettyAllocator.pin(channel);
+        try {
+            DefaultHttpRequest head = new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, "/", DefaultHttpHeadersFactory.headersFactory().withValidation(false));
+            for (String contentEncoding : contentEncodings) {
+                head.headers().add(HttpHeaderNames.CONTENT_ENCODING, contentEncoding);
+            }
+            channel.writeInbound(head);
+            int index = content.readerIndex();
+            int end = content.writerIndex();
+            while (index < end && !scanner.done) {
+                int length = Math.min(SCAN_SLICE_BYTES, end - index);
+                channel.writeInbound(new DefaultHttpContent(content.retainedSlice(index, length)));
+                index += length;
+            }
+            if (!scanner.done) {
+                channel.writeInbound(LastHttpContent.EMPTY_LAST_CONTENT);
+            }
+            return scanner.found;
+        } catch (RuntimeException corrupt) {
+            // MockServer rejects a body that cannot be decompressed when it receives it; no streaming signal
+            return scanner.found;
+        } finally {
+            try {
+                channel.finishAndReleaseAll();
+            } catch (RuntimeException ignored) {
+                // a decoder abandoned mid-body may fail as it closes
+            }
+        }
+    }
+
+    /**
+     * Looks for {@code "stream": true} across the decoded pieces, keeping only a short tail of the previous piece so a
+     * match split between two pieces is still found.
+     */
+    private static final class StreamTrueScanner extends ChannelInboundHandlerAdapter {
+
+        private static final int TAIL_CHARS = 256;
+
+        private final long maxDecodedSize;
+        private String tail = "";
+        private long scanned;
+        private boolean found;
+        private boolean done;
+
+        StreamTrueScanner(long maxDecodedSize) {
+            this.maxDecodedSize = maxDecodedSize;
+        }
+
+        @Override
+        public void channelRead(ChannelHandlerContext ctx, Object msg) {
+            try {
+                if (!done && msg instanceof HttpContent) {
+                    ByteBuf piece = ((HttpContent) msg).content();
+                    scanned += piece.readableBytes();
+                    // ISO-8859-1 maps each byte to one char, and the pattern is ASCII, so a UTF-8 body matches as it would decoded
+                    String window = tail + piece.toString(StandardCharsets.ISO_8859_1);
+                    if (STREAM_TRUE_IN_BODY.matcher(window).find()) {
+                        found = true;
+                        done = true;
+                    } else if (scanned >= maxDecodedSize) {
+                        done = true;
+                    } else {
+                        tail = window.substring(Math.max(0, window.length() - TAIL_CHARS));
+                    }
+                }
+            } finally {
+                ReferenceCountUtil.release(msg);
+            }
+        }
     }
 
     @Override

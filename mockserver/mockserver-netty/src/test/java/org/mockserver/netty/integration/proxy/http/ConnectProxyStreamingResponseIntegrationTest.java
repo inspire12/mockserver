@@ -6,6 +6,8 @@ import io.netty.channel.*;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
+import io.netty.handler.codec.compression.Zstd;
+import io.netty.handler.codec.compression.ZstdEncoder;
 import io.netty.handler.codec.http.*;
 import org.junit.AfterClass;
 import org.junit.Before;
@@ -79,7 +81,7 @@ public class ConnectProxyStreamingResponseIntegrationTest {
                 @Override
                 protected void initChannel(SocketChannel ch) {
                     ch.pipeline().addLast(new HttpServerCodec());
-                    ch.pipeline().addLast(new HttpObjectAggregator(65536));
+                    ch.pipeline().addLast(new HttpObjectAggregator(16 * 1024 * 1024));
                     ch.pipeline().addLast(new NoContentTypeSseUpstreamHandler());
                 }
             });
@@ -192,12 +194,16 @@ public class ConnectProxyStreamingResponseIntegrationTest {
     }
 
     private TimedResponse sendOverTunnelAndMeasure(String rawRequest, String terminalMarker) throws Exception {
+        return sendOverTunnelAndMeasure(rawRequest.getBytes(UTF_8), terminalMarker);
+    }
+
+    private TimedResponse sendOverTunnelAndMeasure(byte[] rawRequest, String terminalMarker) throws Exception {
         try (Socket socket = new Socket("127.0.0.1", mockServerPort)) {
             socket.setSoTimeout(15000);
             try (SSLSocket sslSocket = connectTunnel(socket)) {
                 OutputStream output = sslSocket.getOutputStream();
                 long start = System.currentTimeMillis();
-                output.write(rawRequest.getBytes(UTF_8));
+                output.write(rawRequest);
                 output.flush();
 
                 InputStream in = sslSocket.getInputStream();
@@ -260,5 +266,133 @@ public class ConnectProxyStreamingResponseIntegrationTest {
         assertThat("without a streaming request the response is buffered until completion (~"
                 + LATE_EVENT_DELAY_MS + "ms)",
             r.firstByteMs, greaterThanOrEqualTo(1500L));
+    }
+
+    @Test
+    public void shouldStreamThroughConnectProxyWhenAGzipRequestBodyAsksForStream() throws Exception {
+        TimedResponse r = sendOverTunnelAndMeasure(compressedJsonRequest("gzip", gzip(streamingBody(""))), "data: late");
+
+        assertStreamed(r);
+    }
+
+    @Test
+    public void shouldStreamThroughConnectProxyWhenAZstdRequestBodyAsksForStream() throws Exception {
+        assertThat("zstd-jni is on this module's classpath", Zstd.isAvailable(), is(true));
+
+        TimedResponse r = sendOverTunnelAndMeasure(compressedJsonRequest("zstd", zstd(streamingBody(""))), "data: late");
+
+        assertStreamed(r);
+    }
+
+    @Test
+    public void shouldStreamThroughConnectProxyWhenALargeGzipRequestBodyAsksForStreamAtItsEnd() throws Exception {
+        // a coding-CLI request: a large message history first, "stream": true last
+        StringBuilder history = new StringBuilder();
+        for (int i = 0; history.length() < 300_000; i++) {
+            history.append("{\"role\":\"user\",\"content\":\"message ").append(i).append(" ").append(Integer.toHexString(i * 7919)).append("\"},");
+        }
+
+        TimedResponse r = sendOverTunnelAndMeasure(compressedJsonRequest("gzip", gzip(streamingBody(history.toString()))), "data: late");
+
+        assertStreamed(r);
+    }
+
+    @Test
+    public void shouldAggregateThroughConnectProxyWhenAGzipRequestBodyDoesNotAskForStream() throws Exception {
+        byte[] body = gzip("{\"stream\":false,\"model\":\"x\"}".getBytes(UTF_8));
+
+        TimedResponse r = sendOverTunnelAndMeasure(compressedJsonRequest("gzip", body), "data: late");
+
+        assertThat(r.body, allOf(containsString("data: early"), containsString("data: late")));
+        assertThat(r.firstByteMs, greaterThanOrEqualTo(1500L));
+    }
+
+    @Test
+    public void shouldRelayAlikeThroughAnHttp2ConnectTunnelWhetherTheStreamingRequestIsGzippedOrNot() throws Exception {
+        byte[] plain = streamingBody("");
+
+        TimedResponse uncompressed = sendOverHttp2Tunnel(null, plain);
+        TimedResponse gzipped = sendOverHttp2Tunnel("gzip", gzip(plain));
+
+        assertThat(uncompressed.body, containsString("data: late"));
+        assertThat(gzipped.body, containsString("data: late"));
+        assertThat("a gzipped streaming request is relayed as promptly as an uncompressed one ("
+                + gzipped.firstByteMs + "ms against " + uncompressed.firstByteMs + "ms)",
+            gzipped.firstByteMs < 1500L, is(uncompressed.firstByteMs < 1500L));
+    }
+
+    private TimedResponse sendOverHttp2Tunnel(String contentEncoding, byte[] body) throws Exception {
+        java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
+            .version(java.net.http.HttpClient.Version.HTTP_2)
+            .proxy(java.net.ProxySelector.of(new InetSocketAddress("127.0.0.1", mockServerPort)))
+            .sslContext(org.mockserver.netty.MockServerCaTrustTestSupport.caTrustingSslContext())
+            .connectTimeout(java.time.Duration.ofSeconds(15))
+            .build();
+        java.net.http.HttpRequest.Builder request = java.net.http.HttpRequest.newBuilder(java.net.URI.create("https://127.0.0.1:443/codex-stream"))
+            .timeout(java.time.Duration.ofSeconds(15))
+            .header("content-type", "application/json")
+            .POST(java.net.http.HttpRequest.BodyPublishers.ofByteArray(body));
+        if (contentEncoding != null) {
+            request.header("content-encoding", contentEncoding);
+        }
+        long start = System.currentTimeMillis();
+        java.net.http.HttpResponse<InputStream> response = client.send(request.build(), java.net.http.HttpResponse.BodyHandlers.ofInputStream());
+        long headersMs = System.currentTimeMillis() - start;
+        assertThat(response.version(), is(java.net.http.HttpClient.Version.HTTP_2));
+        try (InputStream in = response.body()) {
+            return new TimedResponse(headersMs, new String(in.readAllBytes(), UTF_8));
+        }
+    }
+
+    private static void assertStreamed(TimedResponse r) {
+        assertThat("response should contain HTTP 200", r.body, containsString("200"));
+        assertThat("should receive the late event", r.body, containsString("data: late"));
+        assertThat("response head should arrive promptly (streaming), not after the " + LATE_EVENT_DELAY_MS
+                + "ms upstream completion",
+            r.firstByteMs, lessThan(1500L));
+    }
+
+    private static byte[] streamingBody(String messages) {
+        return ("{\"model\":\"x\",\"messages\":[" + messages + "{\"role\":\"user\",\"content\":\"hi\"}],\"stream\": true}").getBytes(UTF_8);
+    }
+
+    private static byte[] compressedJsonRequest(String contentEncoding, byte[] body) throws java.io.IOException {
+        String head = "POST /codex-stream HTTP/1.1\r\n" +
+            "Host: 127.0.0.1\r\n" +
+            "Content-Type: application/json\r\n" +
+            "Content-Encoding: " + contentEncoding + "\r\n" +
+            "Content-Length: " + body.length + "\r\n" +
+            "\r\n";
+        java.io.ByteArrayOutputStream request = new java.io.ByteArrayOutputStream();
+        request.write(head.getBytes(UTF_8));
+        request.write(body);
+        return request.toByteArray();
+    }
+
+    private static byte[] gzip(byte[] plain) throws java.io.IOException {
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        try (java.util.zip.GZIPOutputStream gzip = new java.util.zip.GZIPOutputStream(out)) {
+            gzip.write(plain);
+        }
+        return out.toByteArray();
+    }
+
+    private static byte[] zstd(byte[] plain) {
+        io.netty.channel.embedded.EmbeddedChannel channel = new io.netty.channel.embedded.EmbeddedChannel(new ZstdEncoder());
+        try {
+            channel.writeOutbound(Unpooled.wrappedBuffer(plain));
+            channel.finish();
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            io.netty.buffer.ByteBuf piece;
+            while ((piece = channel.readOutbound()) != null) {
+                byte[] bytes = new byte[piece.readableBytes()];
+                piece.readBytes(bytes);
+                out.writeBytes(bytes);
+                piece.release();
+            }
+            return out.toByteArray();
+        } finally {
+            channel.finishAndReleaseAll();
+        }
     }
 }

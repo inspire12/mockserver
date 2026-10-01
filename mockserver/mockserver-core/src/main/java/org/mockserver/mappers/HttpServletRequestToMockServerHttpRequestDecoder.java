@@ -48,6 +48,10 @@ public class HttpServletRequestToMockServerHttpRequestDecoder {
         request.withProtocol(Protocol.HTTP_1_1);
         request.withLocalAddress(httpServletRequest.getLocalAddr() + ":" + httpServletRequest.getLocalPort());
         request.withRemoteAddress(httpServletRequest.getRemoteHost() + ":" + httpServletRequest.getRemotePort());
+        if (httpServletRequest.getHeader("Content-Encoding") != null) {
+            // the container does not decompress a request body, so it is still in its Content-Encoding
+            request.markBodyAsReceived();
+        }
         return request;
     }
 

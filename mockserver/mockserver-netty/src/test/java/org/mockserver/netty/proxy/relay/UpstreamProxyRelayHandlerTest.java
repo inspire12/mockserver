@@ -44,6 +44,8 @@ import static org.mockito.ArgumentMatchers.any;
  */
 public class UpstreamProxyRelayHandlerTest {
 
+    private static final int MAX_REQUEST_BODY_SIZE = 10 * 1024 * 1024;
+
     private EmbeddedChannel upstreamChannel;
     private EmbeddedChannel downstreamChannel;
     private MockServerLogger mockServerLogger;
@@ -56,7 +58,7 @@ public class UpstreamProxyRelayHandlerTest {
         upstreamChannel = new EmbeddedChannel();
         downstreamChannel = new EmbeddedChannel();
         EmbeddedChannel handlerChannel = new EmbeddedChannel(
-            new UpstreamProxyRelayHandler(mockServerLogger, upstreamChannel, downstreamChannel, "backend.example.com", 443)
+            new UpstreamProxyRelayHandler(mockServerLogger, upstreamChannel, downstreamChannel, "backend.example.com", 443, MAX_REQUEST_BODY_SIZE)
         );
         // Store the handler channel as upstreamChannel for test purposes - the handler is
         // added to the channel that receives decoded FullHttpRequest from the proxy client.
@@ -147,7 +149,7 @@ public class UpstreamProxyRelayHandlerTest {
         when(logger.isEnabledForInstance(any(Level.class))).thenReturn(true);
         EmbeddedChannel downstream = new EmbeddedChannel();
         EmbeddedChannel channel = new EmbeddedChannel(
-            new UpstreamProxyRelayHandler(logger, new EmbeddedChannel(), downstream, "backend.example.com", 443)
+            new UpstreamProxyRelayHandler(logger, new EmbeddedChannel(), downstream, "backend.example.com", 443, MAX_REQUEST_BODY_SIZE)
         );
 
         // when - a genuine decoder fault is caught
@@ -171,7 +173,7 @@ public class UpstreamProxyRelayHandlerTest {
         when(logger.isEnabledForInstance(any(Level.class))).thenReturn(true);
         EmbeddedChannel downstream = new EmbeddedChannel();
         EmbeddedChannel channel = new EmbeddedChannel(
-            new UpstreamProxyRelayHandler(logger, new EmbeddedChannel(), downstream, "backend.example.com", 443)
+            new UpstreamProxyRelayHandler(logger, new EmbeddedChannel(), downstream, "backend.example.com", 443, MAX_REQUEST_BODY_SIZE)
         );
 
         // when - a throwable whose cause is an SSLException is caught
@@ -195,7 +197,7 @@ public class UpstreamProxyRelayHandlerTest {
         when(logger.isEnabledForInstance(any(Level.class))).thenReturn(true);
         EmbeddedChannel downstream = new EmbeddedChannel();
         EmbeddedChannel channel = new EmbeddedChannel(
-            new UpstreamProxyRelayHandler(logger, new EmbeddedChannel(), downstream, "backend.example.com", 443)
+            new UpstreamProxyRelayHandler(logger, new EmbeddedChannel(), downstream, "backend.example.com", 443, MAX_REQUEST_BODY_SIZE)
         );
 
         // when - a benign connection reset is caught
@@ -217,7 +219,7 @@ public class UpstreamProxyRelayHandlerTest {
         when(logger.isEnabledForInstance(any(Level.class))).thenReturn(true);
         EmbeddedChannel downstream = new EmbeddedChannel();
         EmbeddedChannel channel = new EmbeddedChannel(
-            new UpstreamProxyRelayHandler(logger, new EmbeddedChannel(), downstream, "backend.example.com", 443)
+            new UpstreamProxyRelayHandler(logger, new EmbeddedChannel(), downstream, "backend.example.com", 443, MAX_REQUEST_BODY_SIZE)
         );
 
         // when - an unexpected exception is caught
@@ -269,7 +271,7 @@ public class UpstreamProxyRelayHandlerTest {
         };
 
         EmbeddedChannel handlerChannel = new EmbeddedChannel(
-            new UpstreamProxyRelayHandler(logger, proxyClientChannel, downstream, "backend.example.com", 443)
+            new UpstreamProxyRelayHandler(logger, proxyClientChannel, downstream, "backend.example.com", 443, MAX_REQUEST_BODY_SIZE)
         );
         AttributeKey<NettySslContextFactory> factoryKey = AttributeKey.valueOf("NETTY_SSL_CONTEXT_FACTORY");
         handlerChannel.attr(factoryKey).set(clientFactory);

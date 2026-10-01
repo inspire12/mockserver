@@ -30,6 +30,8 @@ import static org.mockserver.configuration.Configuration.configuration;
 
 public class UpstreamProxyRelayHandlerLoggedRequestTest {
 
+    private static final int MAX_REQUEST_BODY_SIZE = 10 * 1024 * 1024;
+
     private static final Configuration REDACTING = configuration().redactSecretsInLog(true);
 
     private static FullHttpRequest relayedRequest(String uri) {
@@ -85,7 +87,7 @@ public class UpstreamProxyRelayHandlerLoggedRequestTest {
     public void shouldRelayAndReleaseRequestsWithMalformedEscapes() {
         for (String uri : new String[]{"/files/100%?key=QUERY-SECRET-5", "/a%zz?key=QUERY-SECRET-5&x=%zz", "/ok?key=QUERY-SECRET-5&x=50%"}) {
             EmbeddedChannel downstream = new EmbeddedChannel();
-            EmbeddedChannel handler = new EmbeddedChannel(new UpstreamProxyRelayHandler(new MockServerLogger(), new EmbeddedChannel(), downstream, null, 0));
+            EmbeddedChannel handler = new EmbeddedChannel(new UpstreamProxyRelayHandler(new MockServerLogger(), new EmbeddedChannel(), downstream, null, 0, MAX_REQUEST_BODY_SIZE));
             FullHttpRequest request = relayedRequest(uri);
 
             handler.writeInbound(request);
@@ -113,7 +115,7 @@ public class UpstreamProxyRelayHandlerLoggedRequestTest {
                 promise.setFailure(new IOException("write failed"));
             }
         });
-        EmbeddedChannel handler = new EmbeddedChannel(new UpstreamProxyRelayHandler(logger, new EmbeddedChannel(), downstream, null, 0));
+        EmbeddedChannel handler = new EmbeddedChannel(new UpstreamProxyRelayHandler(logger, new EmbeddedChannel(), downstream, null, 0, MAX_REQUEST_BODY_SIZE));
         FullHttpRequest request = relayedRequest("/v1/models?key=QUERY-SECRET-5&x=50%");
 
         handler.writeInbound(request);

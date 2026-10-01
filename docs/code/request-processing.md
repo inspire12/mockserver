@@ -486,7 +486,7 @@ Deserialization is handled by `LogEntrySerializer.deserializeArray()` using Jack
 
 > **Recorded-request retrieval and `rawBytes` serialization.** `RequestDefinitionSerializer.retrieveRequests(...)` serializes the recorded `HttpRequest` list using `objectWriter.withAttribute("emitRawBytes", Boolean.TRUE)`. The body serializers `JsonBodySerializer` and `JsonBodyDTOSerializer` gate emission of the base64 `rawBytes` field on this per-call Jackson `SerializerProvider` attribute; the attribute is absent on the normal write path so raw bytes are never emitted there. This ensures that a request body whose on-wire bytes differ from the canonical JSON representation (for example, a body with unconventional whitespace) round-trips faithfully when retrieved via `PUT /mockserver/retrieve?type=REQUESTS`.
 
-> **Mock response body encoding (double-gzip prevention).** `MockServerHttpResponseToFullHttpResponse.getBody()` writes the mock response body bytes verbatim to the wire. Unlike the forward path — where the inbound decompressor strips `Content-Encoding` and the upstream-bound request must be re-compressed — a mock response is never re-encoded. The `Content-Encoding` header is emitted as-is from the expectation, giving callers byte-level control over the response body with no risk of double-compression (issue #2375).
+> **Mock response body encoding (double-gzip prevention).** `MockServerHttpResponseToFullHttpResponse.getBody()` writes the mock response body bytes verbatim to the wire. Unlike the forward path — where the inbound decompressor decodes a `Content-Encoding` body, so a forwarded request is sent as its original wire bytes or, if changed, encoded again (see [Bodies with a Content-Encoding](#bodies-with-a-content-encoding)) — a mock response is never re-encoded. The `Content-Encoding` header is emitted as-is from the expectation, giving callers byte-level control over the response body with no risk of double-compression (issue #2375).
 
 ```mermaid
 sequenceDiagram
@@ -1093,6 +1093,91 @@ prompt where it used to be sent as lossy text — the safe direction for a body 
 A body whose `Content-Type` declares JSON or XML without a charset is still decoded as UTF-8; if its
 bytes are not valid UTF-8 they are still re-encoded lossily (out of scope: that content is malformed
 for its declared type).
+
+### Bodies with a Content-Encoding
+
+A request body sent with a `Content-Encoding` is forwarded as the exact bytes the client sent, on
+HTTP/1.1, HTTP/2 and HTTP/3, sent directly or through a CONNECT or SOCKS tunnel, unless MockServer changed
+it; a changed body is encoded in its coding again.
+
+```mermaid
+flowchart TD
+    A["forwarded request with a Content-Encoding"] --> B{"body and Content-Encoding\nunchanged since received?"}
+    B -->|yes| C["send getBodyAsOriginalRawBytes()\n(the wire bytes)"]
+    B -->|no| D{"first Content-Encoding value is one\nthe inbound decompressor decodes?"}
+    D -->|yes| E["encode the body in that coding"]
+    D -->|no| F["send the body as it is"]
+```
+
+| First `Content-Encoding` value | Decoded on the way in | Forwarded unchanged | Forwarded after an override, template or callback changed the body |
+|---|---|---|---|
+| `gzip`, `x-gzip`, `deflate`, `x-deflate` | yes | wire bytes | gzip / zlib of the new body |
+| `snappy` (raw block, as Prometheus remote-write sends, or framing format) | yes | wire bytes | the new body as a raw block, or framed if the original was framed |
+| `zstd`, `br` | when zstd-jni / Brotli4j load (zstd-jni ships in the jar through `kafka-clients`) | wire bytes | the new body in that coding, when the library loads |
+| a coding list in one value (`gzip, br`), `identity`, unknown | no | wire bytes | the body as it is, never encoded again |
+
+Only the first value counts, because that is the one Netty's decompressor reads: with two
+`Content-Encoding` headers the body is decoded (and, if changed, encoded again) by the first.
+
+**How "unchanged" is known.** The transports call `HttpRequest.markBodyAsReceived()` on a request that
+arrived with a `Content-Encoding`: `FullHttpRequestToMockServerHttpRequest` for HTTP/1.1 and HTTP/2,
+`Http3MockServerHandler` for HTTP/3 (from the `content-encoding` flag `Http3RequestBridge.parseHeaders`
+sets in its one pass over the headers), and `HttpServletRequestToMockServerHttpRequestDecoder` for the
+WAR, whose container never decompresses. It records the body instance and the `Content-Encoding`
+values, and records nothing for a request without a body or a `Content-Encoding`. `isBodyAsReceived()`
+holds while both are the same, compared by identity for the body, so any `withBody` ends it; it is false
+for an unmarked request before any header is looked up, and the forward path reads the
+`Content-Encoding` header of an unmarked request only once, with no allocation. The record is transient
+(not serialised, compared or logged), and `clone()` / `shallowClone()` carry it, so an override that
+leaves the body alone still forwards the wire bytes. A request rebuilt from JSON (a template, a
+callback, a replay) is never marked, so its body is encoded from its decoded form rather than trusting
+a serialised original body.
+
+**CONNECT and SOCKS tunnels.** `RelayConnectHandler` decodes the tunnelled client's HTTP and relays
+each request to MockServer over a loopback connection. It no longer decompresses that request: on
+HTTP/1.1 it installs no decompressor, and on HTTP/2 it uses `InboundHttp2ToHttpAdapter` without a
+`DelegatingDecompressorFrameListener`. The request reaches MockServer still in its coding, with its
+`Content-Encoding`, and is decompressed and marked there like any other, so a tunnelled request is
+matched, recorded and forwarded exactly as a direct one. (Before, the relay decompressed with Netty's
+decompressor and dropped the header, so a tunnelled gzip body reached the upstream decompressed and a
+raw-block Snappy body was rejected.) The relay's response side, which decompresses MockServer's
+responses on their way back to the client, is unchanged.
+
+The relay still needs the decoded body for one thing: `UpstreamProxyRelayHandler` asks
+`StreamingAwareHttpObjectAggregator.requestExpectsStreamingResponse` whether a JSON body says
+`"stream": true`, so a streamed response with no `text/event-stream` content type (the OpenAI Codex
+backend) is relayed as it arrives rather than buffered. For a body with a `Content-Encoding` that check
+runs `MockServerHttpContentDecompressor` over the compressed bytes in 1 KiB slices, scanning each decoded
+piece (with a 256-character overlap, so a match split between pieces is found) and stopping at the first
+match, at `maxRequestBodySize` decoded bytes, or at a decoding error. The decoded pieces are released as
+they are scanned and the relayed bytes are never changed, so memory stays at one slice's output and the
+whole body is still searched, as it was when the relay decompressed it. Choosing to decode a bounded
+prefix was rejected because coding CLIs send `"stream": true` after a long message history; signalling
+from MockServer's side of the loopback was rejected because it needs a new internal header that must never
+reach a client. (Streaming of tunnelled responses is an HTTP/1.1-tunnel feature: the HTTP/2 loopback
+aggregates every response, compressed request or not.)
+
+**Why a coding list is not encoded.** `MockServerHttpContentDecompressor`, like Netty's decompressor,
+compares the trimmed first value whole, so it never decodes a list in one value; a body under one is
+still in it, whether it came off the wire or was supplied by an override. Encoding it again was the old
+substring match's bug (`gzip, br` was gzipped a second time). `BodyContentEncodingEncoder` encodes
+exactly the codings the decompressor decodes, so a decoded body can always be encoded again, and
+nothing claims a coding MockServer cannot produce. A user who supplies an unencoded body under a
+coding list gets it forwarded unencoded: MockServer cannot tell it from an encoded one.
+
+**Raw Snappy blocks.** Netty's `SnappyFrameDecoder` accepts only the framing format and rejected a
+remote-write body ("…tag before STREAM_IDENTIFIER"), closing the HTTP/1.1 connection, resetting the
+HTTP/2 stream or closing the HTTP/3 stream, so a remote-write receiver could not be mocked.
+`SnappyBlockOrFrameDecoder` hands a body that starts with the framing format's stream identifier to
+`SnappyFrameDecoder` and decodes anything else as one block once the body ends. A block's varint
+preamble declares its decoded size, and before decoding it is refused as corrupt if that size is over
+`maxRequestBodySize`, or over 22 times the block's own length (Snappy writes at most 64 bytes per 3-byte
+element, so a short body cannot hold more). Netty's decoder reserves the whole declared size as soon as
+it reads the preamble, so these checks are what bound the allocation. The output buffer is capped at the
+declared size, so a block that decodes past it is refused too. A remote-write receiver is therefore
+limited by `maxRequestBodySize`, but an oversized block is refused like a corrupt body rather than
+answered 413. A body re-encoded as `snappy` uses the raw block format (`SnappyBlock`, the same
+snappy-java call MockServer's own remote-write exporter makes) unless the original body was framed.
 
 ### ProxyPass (Reverse Proxy)
 

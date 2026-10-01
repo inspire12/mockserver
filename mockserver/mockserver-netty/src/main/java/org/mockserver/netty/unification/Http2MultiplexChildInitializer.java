@@ -3,13 +3,13 @@ package org.mockserver.netty.unification;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPipeline;
-import io.netty.handler.codec.http.HttpContentDecompressor;
 import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http2.Http2StreamChannel;
 import io.netty.handler.codec.http2.Http2StreamFrameToHttpObjectCodec;
 import io.netty.util.Attribute;
 import io.netty.util.AttributeKey;
 import org.mockserver.codec.HttpObjectAggregators;
+import org.mockserver.codec.MockServerHttpContentDecompressor;
 import org.mockserver.codec.MockServerHttpServerCodec;
 import org.mockserver.codec.PreserveHeadersNettyRemoves;
 import org.mockserver.configuration.Configuration;
@@ -263,27 +263,14 @@ public class Http2MultiplexChildInitializer extends ChannelInitializer<Http2Stre
         // HttpContent branch hard-codes endStream=false), the stream never closes, and the client
         // hangs until it times out with nothing logged. See StreamAddressedContentHandler.
         pipeline.addLast(StreamAddressedContentHandler.INSTANCE);
-        // Decompress content-encoding (gzip/deflate/br/...) request bodies and strip the header,
-        // mirroring the HTTP/1.1 path (PortUnificationHandler.switchToHttp adds HttpContentDecompressor
-        // before its aggregator) and the connection-adapter path's DelegatingDecompressorFrameListener.
-        // This multiplex pipeline carries ordinary HTTP streams too, so without it a request sent with
-        // content-encoding: gzip reaches the matchers as compressed bytes and a withBody(...) expectation
-        // silently fails to match. Placed AFTER StreamAddressedContentHandler so that handler stays
-        // immediately adjacent to the codec on the outbound path (HttpContentDecompressor is inbound-only,
-        // a pass-through on writes, so it does not disturb the outbound endStream translation), and BEFORE
-        // the aggregator so decompression happens before the body is aggregated. Inert for gRPC, whose
-        // compression is carried by grpc-encoding (handled in GrpcFrameCodec), not content-encoding.
-        // MUST precede HttpContentDecompressor: the decompressor STRIPS content-encoding (and
-        // transfer-encoding) once it installs a decoder, so without this an expectation matching on
-        // `content-encoding: gzip` never sees the header and silently fails to match (404). This is
-        // the same handler, in the same relative position, that the HTTP/1.1 pipeline uses
-        // (PortUnificationHandler.switchToHttp: codec -> preserveHeadersNettyRemoves -> decompressor).
-        // It also captures the original still-compressed body bytes for rawBytes fidelity.
-        // A fresh instance per child channel: it is not @Sharable and holds per-channel state in fields
-        // (the raw-body accumulator and its attribute handle). It publishes to the stream child's own
-        // channel attribute, where NettyHttpToMockServerHttpRequestDecoder reads it back (ctx.channel()).
+        // Decompress a content-encoding request body as the HTTP/1.1 path does (PortUnificationHandler.switchToHttp:
+        // codec -> PreserveHeadersNettyRemoves -> MockServerHttpContentDecompressor -> aggregator), or a gzip body
+        // reaches the matchers compressed. After StreamAddressedContentHandler, which must stay next to the codec for
+        // outbound writes (the decompressor is inbound-only), and before the aggregator. Inert for gRPC (grpc-encoding).
+        // PreserveHeadersNettyRemoves MUST precede the decompressor, which strips content-encoding once it decodes; it
+        // also keeps the compressed bytes. A fresh instance per stream: it holds per-channel state.
         pipeline.addLast(new PreserveHeadersNettyRemoves());
-        pipeline.addLast(new HttpContentDecompressor());
+        pipeline.addLast(new MockServerHttpContentDecompressor(configuration.maxRequestBodySize()));
         pipeline.addLast(HttpObjectAggregators.streamHttpObjectAggregator(configuration.maxRequestBodySize()));
 
         // Downstream chain -- identical to the existing switchToHttp2/switchToH2c post-adapter chain

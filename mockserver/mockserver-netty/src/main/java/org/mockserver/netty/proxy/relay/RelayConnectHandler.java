@@ -390,18 +390,17 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
             pipelineToProxyClient.addLast(new LoggingHandler(RelayConnectHandler.class.getName() + "-upstream <-- "));
         }
 
+        // The client's request is relayed to MockServer still in its Content-Encoding: MockServer decompresses it
+        // as it does any request, so an unchanged forward sends the client's bytes and raw-block snappy is decoded.
         if (http2EnabledDownstream) {
             final Http2Connection connection = new DefaultHttp2Connection(true);
             final HttpToHttp2ConnectionHandlerBuilder http2ConnectionHandlerBuilder = new HttpToHttp2ConnectionHandlerBuilder()
                 .frameListener(
-                    new DelegatingDecompressorFrameListener(
-                        connection,
-                        new InboundHttp2ToHttpAdapterBuilder(connection)
-                            .maxContentLength(configuration.maxRequestBodySize())
-                            .propagateSettings(true)
-                            .validateHttpHeaders(false)
-                            .build()
-                    )
+                    new InboundHttp2ToHttpAdapterBuilder(connection)
+                        .maxContentLength(configuration.maxRequestBodySize())
+                        .propagateSettings(true)
+                        .validateHttpHeaders(false)
+                        .build()
                 );
             if (mockServerLogger.isEnabledForInstance(TRACE)) {
                 http2ConnectionHandlerBuilder.frameLogger(new Http2FrameLogger(LogLevel.TRACE, RelayConnectHandler.class.getName()));
@@ -409,11 +408,10 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
             pipelineToProxyClient.addLast(http2ConnectionHandlerBuilder.connection(connection).build());
         } else {
             pipelineToProxyClient.addLast(new HttpServerCodec(configuration.maxInitialLineLength(), configuration.maxHeaderSize(), configuration.maxChunkSize()));
-            pipelineToProxyClient.addLast(new HttpContentDecompressor());
             pipelineToProxyClient.addLast(HttpObjectAggregators.httpObjectAggregator(configuration.maxRequestBodySize()));
         }
 
-        pipelineToProxyClient.addLast(new UpstreamProxyRelayHandler(mockServerLogger, proxyClientCtx.channel(), mockServerCtx.channel(), host, port));
+        pipelineToProxyClient.addLast(new UpstreamProxyRelayHandler(mockServerLogger, proxyClientCtx.channel(), mockServerCtx.channel(), host, port, configuration.maxRequestBodySize()));
     }
 
     private void configureHttp1LoopbackPipeline(ChannelPipeline pipelineToMockServer, ChannelHandlerContext proxyClientCtx) {

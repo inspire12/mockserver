@@ -4,7 +4,6 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.*;
 import io.netty.handler.codec.ReplayingDecoder;
-import io.netty.handler.codec.http.HttpContentDecompressor;
 import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http2.*;
 import io.netty.handler.codec.socksx.v4.Socks4ServerDecoder;
@@ -16,6 +15,7 @@ import io.netty.handler.ssl.SslHandler;
 import io.netty.util.AttributeKey;
 import org.apache.commons.lang3.StringUtils;
 import org.mockserver.codec.HttpObjectAggregators;
+import org.mockserver.codec.MockServerHttpContentDecompressor;
 import org.mockserver.codec.MockServerHttpServerCodec;
 import org.mockserver.codec.PreserveHeadersNettyRemoves;
 import org.mockserver.configuration.Configuration;
@@ -483,7 +483,7 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
                 addLastIfNotPresent(pipeline, new HttpTransportTimer());
             }
             addLastIfNotPresent(pipeline, preserveHeadersNettyRemoves);
-            addLastIfNotPresent(pipeline, new HttpContentDecompressor());
+            addLastIfNotPresent(pipeline, new MockServerHttpContentDecompressor(configuration.maxRequestBodySize()));
             addLastIfNotPresent(pipeline, httpContentLengthRemover);
             addLastIfNotPresent(pipeline, new EarlyMatchingHandler(configuration, httpState, actionHandler, isSslEnabledUpstream(ctx.channel())));
             addLastIfNotPresent(pipeline, HttpObjectAggregators.httpObjectAggregator(configuration.maxRequestBodySize()));

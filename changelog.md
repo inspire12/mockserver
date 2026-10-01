@@ -268,6 +268,22 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   size and `content-encoding` kept. `maxRequestBodySize` now also limits the decompressed size, so a
   small compressed body that expands past it is rejected with `413`, and a body that cannot be
   decompressed is dropped without a response, as on the other protocols.
+- **A forwarded request body with a `Content-Encoding` now reaches the upstream intact, and a Prometheus
+  remote-write receiver can now be mocked**, over HTTP/1.1, HTTP/2 and HTTP/3, sent directly or through a
+  CONNECT or SOCKS tunnel. A forward re-compressed only `gzip` and `deflate`: a `snappy` or `zstd` body was
+  decompressed on the way in and forwarded decompressed under its original `content-encoding`, so the
+  upstream could not decode it, and a body sent with a list of codings such as `gzip, br`, which is never
+  decompressed, was gzipped a second time. Through a CONNECT or SOCKS tunnel every compressed body was
+  forwarded decompressed and without its `content-encoding` header. A request forwarded or proxied without
+  its body being changed now sends the exact bytes the client sent, whatever the coding; a body changed by
+  an override, template or callback is compressed again in its coding (the first `content-encoding` value,
+  which is the one MockServer decompresses), and a body under a coding list or a coding MockServer does
+  not decompress is forwarded as it is. A WAR deployment no longer gzips an already-gzipped forwarded body
+  a second time. A `snappy` body in the raw block format, which Prometheus remote-write sends, was
+  rejected and its connection closed (its HTTP/2 or HTTP/3 stream reset); it is now decompressed and
+  matched like any other, so an expectation can answer `POST /api/v1/write`. A raw block that declares a
+  decompressed size over `maxRequestBodySize` is refused before it is decompressed, closing the connection
+  or stream rather than answering `413`.
 - **arm64 Docker images now carry the arm64 native TLS library.** The Dockerfiles defaulted the target
   architecture to amd64, and that default overrode the one Docker supplies, so an arm64 build copied the
   x86_64 build of `netty-tcnative` into `/usr/lib`. This affects the published arm64 `-graaljs` and

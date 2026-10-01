@@ -135,7 +135,9 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
         // the bidi handler instead of being accumulated for one-shot processing.
         if (!tryBeginGrpcBidi(ctx)) {
             // HTTP/1.1 and HTTP/2 decompress with HttpContentDecompressor ahead of their aggregator; this is that step
-            decompressor = Http3RequestDecompressor.forHeaders(parsedHeaders.headers(), ctx.alloc(), configuration.maxRequestBodySize(), bodyComponentLimit);
+            decompressor = parsedHeaders.contentEncoded()
+                ? Http3RequestDecompressor.forHeaders(parsedHeaders.headers(), ctx.alloc(), configuration.maxRequestBodySize(), bodyComponentLimit)
+                : null;
         }
     }
 
@@ -245,6 +247,10 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
                 bodyAccumulator,
                 decompressor != null ? decompressor.body() : null
             );
+            if (parsedHeaders.contentEncoded()) {
+                // as HTTP/1.1 and HTTP/2 do, so an unchanged forward sends the bytes the client sent
+                request.markBodyAsReceived();
+            }
 
             // mTLS client-certificate capture: extract the peer certificate chain
             // from the QUIC SSLEngine (analogous to the TCP path's

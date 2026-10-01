@@ -371,5 +371,9 @@ public class FullHttpRequestToMockServerHttpRequest {
         if (originalRawBody != null && originalRawBody.length > 0 && !Arrays.equals(originalRawBody, decompressedBytes)) {
             httpRequest.withOriginalBody(originalRawBody);
         }
+        // the raw body is captured only for a request with a Content-Encoding, the only kind a forward re-encodes
+        if (originalRawBody != null) {
+            httpRequest.markBodyAsReceived();
+        }
     }
 }

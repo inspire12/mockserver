@@ -6,6 +6,7 @@ import io.netty.handler.codec.http.*;
 import io.netty.handler.codec.http2.HttpConversionUtil;
 import org.mockserver.codec.BodyContentEncodingEncoder;
 import org.mockserver.codec.BodyDecoderEncoder;
+import org.mockserver.codec.SnappyBlockOrFrameDecoder;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpRequest;
@@ -21,6 +22,7 @@ import static io.netty.handler.codec.http.HttpHeaderNames.*;
 import static io.netty.handler.codec.http.HttpHeaderValues.KEEP_ALIVE;
 import static io.netty.handler.codec.http.HttpHeaderValues.*;
 import static io.netty.handler.codec.http.HttpUtil.isKeepAlive;
+import static org.apache.commons.lang3.StringUtils.isBlank;
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
 
 /**
@@ -92,16 +94,21 @@ public class MockServerHttpRequestToFullHttpRequest {
     }
 
     private ByteBuf getBody(HttpRequest httpRequest) {
-        ByteBuf bodyByteBuf = bodyDecoderEncoder.bodyToByteBuf(httpRequest.getBody(), httpRequest.getFirstHeader(CONTENT_TYPE.toString()));
-        String contentEncoding = httpRequest.getFirstHeader(CONTENT_ENCODING.toString());
-        if (isNotBlank(contentEncoding) && bodyByteBuf.readableBytes() > 0) {
-            byte[] decodedBody = new byte[bodyByteBuf.readableBytes()];
-            bodyByteBuf.readBytes(decodedBody);
-            bodyByteBuf.release();
-            byte[] reEncoded = BodyContentEncodingEncoder.encodeBody(decodedBody, contentEncoding);
-            return Unpooled.copiedBuffer(reEncoded);
+        if (httpRequest.isBodyAsReceived()) {
+            // unchanged since it was received with a Content-Encoding, so send the bytes the client sent
+            return Unpooled.wrappedBuffer(httpRequest.getBodyAsOriginalRawBytes());
         }
-        return bodyByteBuf;
+        ByteBuf bodyByteBuf = bodyDecoderEncoder.bodyToByteBuf(httpRequest.getBody(), httpRequest.getFirstHeader(CONTENT_TYPE.toString()));
+        // the first value, as the inbound decompressor reads it, so the encoding is the inverse of the decoding
+        String contentEncoding = httpRequest.getFirstHeader(CONTENT_ENCODING.toString());
+        if (bodyByteBuf.readableBytes() == 0 || isBlank(contentEncoding)) {
+            return bodyByteBuf;
+        }
+        byte[] decodedBody = new byte[bodyByteBuf.readableBytes()];
+        bodyByteBuf.readBytes(decodedBody);
+        bodyByteBuf.release();
+        byte[] encoded = BodyContentEncodingEncoder.encodeBody(decodedBody, contentEncoding, SnappyBlockOrFrameDecoder.isFramed(httpRequest.getOriginalBody()));
+        return Unpooled.wrappedBuffer(encoded);
     }
 
     private void setCookies(HttpRequest httpRequest, FullHttpRequest request) {

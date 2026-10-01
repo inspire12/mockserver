@@ -54,7 +54,7 @@ import static org.mockserver.stop.Stop.stopQuietly;
  * just gRPC. Before the fix its per-stream child pipeline installed no decompressor, so a gzipped body
  * reached the matchers as compressed bytes (with {@code content-encoding: gzip} still on the request),
  * and a {@code withBody(...)} expectation silently failed to match — MockServer answered 404. The fix
- * inserts an {@link io.netty.handler.codec.http.HttpContentDecompressor} between the stream-frame codec
+ * inserts an {@link org.mockserver.codec.MockServerHttpContentDecompressor} between the stream-frame codec
  * and the aggregator (mirroring the HTTP/1.1 ordering), so the body is decompressed before matching.
  * <p>
  * A raw in-JVM Netty h2c multiplex client is used so the gzipped bytes are put on the wire verbatim

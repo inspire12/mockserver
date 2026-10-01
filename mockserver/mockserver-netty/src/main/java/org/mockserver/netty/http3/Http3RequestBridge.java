@@ -241,15 +241,17 @@ public final class Http3RequestBridge {
         String authority = charSeqToString(h3Headers.authority());
 
         List<Map.Entry<String, String>> regularHeaders = new ArrayList<>();
-        h3Headers.forEach(entry -> {
+        boolean contentEncoded = false;
+        for (Map.Entry<CharSequence, CharSequence> entry : h3Headers) {
             String name = entry.getKey().toString();
             // skip pseudo-headers (they start with ':')
             if (!name.startsWith(":")) {
                 regularHeaders.add(new AbstractMap.SimpleImmutableEntry<>(name, entry.getValue().toString()));
+                contentEncoded |= CONTENT_ENCODING.equalsIgnoreCase(name);
             }
-        });
+        }
 
-        return new ParsedHeaders(method, path, scheme, authority, regularHeaders);
+        return new ParsedHeaders(method, path, scheme, authority, regularHeaders, contentEncoded);
     }
 
     /**
@@ -454,13 +456,22 @@ public final class Http3RequestBridge {
         private final String scheme;
         private final String authority;
         private final List<Map.Entry<String, String>> headers;
+        private final boolean contentEncoded;
 
-        public ParsedHeaders(String method, String path, String scheme, String authority, List<Map.Entry<String, String>> headers) {
+        public ParsedHeaders(String method, String path, String scheme, String authority, List<Map.Entry<String, String>> headers, boolean contentEncoded) {
             this.method = method;
             this.path = path;
             this.scheme = scheme;
             this.authority = authority;
             this.headers = headers;
+            this.contentEncoded = contentEncoded;
+        }
+
+        /**
+         * Whether the request has a {@code content-encoding} header.
+         */
+        public boolean contentEncoded() {
+            return contentEncoded;
         }
 
         public String method() {

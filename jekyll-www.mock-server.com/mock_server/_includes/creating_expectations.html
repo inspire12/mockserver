@@ -442,6 +442,25 @@ $client-&gt;when(
 
 <p><strong>Bodies sent without a <span class="inline_code">Content-Type</span> header</strong> are kept exactly as they were sent, so MockServer forwards and proxies them byte for byte. If the body is valid UTF-8 text (for example JSON or plain text), it is treated as text, so string, regex, JSON and XML matchers work on it as usual. Otherwise (for example an image, a compressed file, or text in another character set) it is treated as binary: <a href="#button_match_request_by_binary_body">binary</a> matchers compare its exact bytes, text matchers still see it decoded as UTF-8, and the retrieve API and dashboard show it as a <span class="inline_code">BINARY</span> body (base64), and <a href="/mock_server/response_templates.html">response templates</a>, callbacks and WASM rules receive it as base64 text. To have a body treated as text in a specific character set, send a <span class="inline_code">Content-Type</span> header with a <span class="inline_code">charset</span>, for example <span class="inline_code">text/plain; charset=ISO-8859-1</span>.</p>
 
+<a id="compressed_request_bodies" class="anchor" href="#compressed_request_bodies">&nbsp;</a>
+
+<p><strong>Compressed request bodies</strong> (sent with a <span class="inline_code">Content-Encoding</span> of <span class="inline_code">gzip</span>, <span class="inline_code">x-gzip</span>, <span class="inline_code">deflate</span>, <span class="inline_code">x-deflate</span>, <span class="inline_code">snappy</span> or <span class="inline_code">zstd</span>) are decompressed before matching, over HTTP/1.1, HTTP/2 and HTTP/3, including requests sent through MockServer as an HTTPS (CONNECT) or SOCKS proxy, so body matchers see the decompressed content; a <a href="#button_match_request_by_binary_body">binary</a> matcher matches either the decompressed or the compressed bytes. <span class="inline_code">br</span> is decompressed only when the Brotli4j library is on the classpath. <span class="inline_code">snappy</span> accepts both the raw block format, which Prometheus remote-write sends, and the framed format, so MockServer can stand in for a Prometheus remote-write receiver:</p>
+
+<pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/expectation" -d '{
+    "httpRequest" : {
+        "method" : "POST",
+        "path" : "/api/v1/write",
+        "headers" : {
+            "Content-Encoding" : [ "snappy" ]
+        }
+    },
+    "httpResponse" : {
+        "statusCode" : 204
+    }
+}'</code></pre>
+
+<p>When a compressed request is forwarded or proxied unchanged, the upstream receives exactly the bytes the client sent. If an override, template or callback changes the body, MockServer compresses the new body with the same <span class="inline_code">Content-Encoding</span> (with more than one <span class="inline_code">Content-Encoding</span> header, the first one is used, both to decompress and to compress). A body sent with a list of codings (for example <span class="inline_code">gzip, br</span>) or with a coding MockServer does not decompress is matched, recorded and forwarded exactly as it was sent. <a href="/mock_server/configuration_properties.html#button_configuration_max_request_body_size">maxRequestBodySize</a> limits the decompressed size: a larger body is answered with <span class="inline_code">413</span>, except a <span class="inline_code">snappy</span> remote-write body that declares a larger size, whose connection (or HTTP/2 or HTTP/3 stream) is closed without a response.</p>
+
 <a id="graphql_body_matching" class="anchor" href="#graphql_body_matching">&nbsp;</a>
 
 <h4>GraphQL Body Matching</h4>

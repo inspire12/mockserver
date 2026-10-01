@@ -34,9 +34,15 @@ public class UpstreamProxyRelayHandler extends SimpleChannelInboundHandler<FullH
     private final Channel downstreamChannel;
     private final String host;
     private final int port;
+    private final int maxRequestBodySize;
 
-    public UpstreamProxyRelayHandler(MockServerLogger mockServerLogger, Channel upstreamChannel, Channel downstreamChannel, String host, int port) {
+    /**
+     * @param maxRequestBodySize the most decoded bytes of a compressed request body scanned for a streaming request;
+     *                           zero or less for no limit
+     */
+    public UpstreamProxyRelayHandler(MockServerLogger mockServerLogger, Channel upstreamChannel, Channel downstreamChannel, String host, int port, int maxRequestBodySize) {
         super(false);
+        this.maxRequestBodySize = maxRequestBodySize;
         this.upstreamChannel = upstreamChannel;
         this.downstreamChannel = downstreamChannel;
         this.host = host;
@@ -73,7 +79,7 @@ public class UpstreamProxyRelayHandler extends SimpleChannelInboundHandler<FullH
         // opencode CLI). Set per-request (overwritten on every request, true OR cleared to null) so a
         // keep-alive tunnel carrying many requests applies the intent only to the response it belongs to.
         downstreamChannel.attr(StreamingAwareHttpObjectAggregator.EXPECT_STREAMING_RESPONSE)
-            .set(StreamingAwareHttpObjectAggregator.requestExpectsStreamingResponse(request) ? Boolean.TRUE : null);
+            .set(StreamingAwareHttpObjectAggregator.requestExpectsStreamingResponse(request, maxRequestBodySize) ? Boolean.TRUE : null);
         // Diagnostic only — record the forward time and request line so the relay-only
         // StreamingAwareHttpObjectAggregator can report a time-to-first-byte in its DEBUG
         // streaming-decision log when the matching response head arrives. Behaviour-preserving.
