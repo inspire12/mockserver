@@ -194,6 +194,19 @@ RUN_ID="${BUILDKITE_BUILD_ID:-local}-$$"
 NETWORK="mockserver-perf-${RUN_ID}"
 SERVER="mockserver-perf-${RUN_ID}"
 UPSTREAM="mockserver-upstream-${RUN_ID}"
+# Clients reach the upstream by this alias, never by $UPSTREAM: once the agent's PID has 7
+# digits the container name is 64 characters, over the 63-character DNS label limit, so
+# Docker's embedded DNS cannot resolve it (curl exit 6).
+UPSTREAM_ALIAS="mockserver-upstream"
+# Refuses a hostname (host or host:port) that cannot fit one DNS label.
+require_dns_hostname() {
+  local host="${1%:*}"
+  if [ "${#host}" -gt 63 ]; then
+    echo "ERROR: hostname '$host' is ${#host} characters. A DNS label caps at 63 (RFC 1035), so" >&2
+    echo "       Docker's embedded DNS cannot resolve it. Reach containers by --network-alias, not by name." >&2
+    return 1
+  fi
+}
 # item 12 — the background k6 that drives the streaming concurrency load, and a
 # DEDICATED, deliberately CONSTRAINED SUT it drives (low CPU + a small
 # action-handler pool) so the scheduler saturates at a modest, DETERMINISTIC
@@ -960,6 +973,7 @@ start_mockserver() {
     combined_java_opts="$(compose_java_tool_options "$SUT_IMAGE_JAVA_TOOL_OPTIONS" "$combined_java_opts")"
     java_opts_arg=(-e "JAVA_TOOL_OPTIONS=$combined_java_opts")
   fi
+  [ "$PERF_NETWORK_MODE" = host ] || require_dns_hostname "$alias" || return 1
   # host mode: no user-defined bridge, so no network-scoped alias and no port
   # publish (the SUT is already on the host at 127.0.0.1:$port). bridge mode expands
   # to the exact prior tokens.
@@ -1041,8 +1055,9 @@ if [ "$PERF_NETWORK_MODE" = host ]; then
   UPSTREAM_HOSTPORT="127.0.0.1:${UPSTREAM_PORT}"
 else
   SUT_BASE_HTTP="http://${SERVER_ALIAS}:1080"; SUT_BASE_HTTPS="https://${SERVER_ALIAS}:1080"
-  UPSTREAM_HOSTPORT="${UPSTREAM}:1080"
+  UPSTREAM_HOSTPORT="${UPSTREAM_ALIAS}:1080"
 fi
+require_dns_hostname "$UPSTREAM_HOSTPORT" || exit 1
 
 # --- SUT image freshness: pull the mutable tag before measuring (part D) --------
 # MOCKSERVER_IMAGE is a MUTABLE tag (mockserver-snapshot-graaljs) rebuilt on every
@@ -1104,7 +1119,7 @@ fi
 SUT_IMAGE_JAVA_TOOL_OPTIONS="$(image_java_tool_options "$MOCKSERVER_IMAGE")"
 
 echo "--- starting upstream + MockServer ($MOCKSERVER_IMAGE)"
-start_mockserver "$UPSTREAM" "$UPSTREAM_CPUS" "mockserver-upstream" "" "" "" "ERROR" "" "keep" "$UPSTREAM_PORT"
+start_mockserver "$UPSTREAM" "$UPSTREAM_CPUS" "$UPSTREAM_ALIAS" "" "" "" "ERROR" "" "keep" "$UPSTREAM_PORT"
 start_mockserver "$SERVER" "$SERVER_CPUS" "$SERVER_ALIAS" "publish" "$SERVER_MEMORY" "$FILE_BODY_MOUNT" "ERROR" "sut" "" "$SUT_PORT"
 # Follow the SUT's stdout/stderr into a host file from the moment it starts. The follow stream ENDS
 # when the container dies, so the file survives the container's reaping and captures the JVM's dying
@@ -1759,21 +1774,22 @@ echo "--- config resolved: ${MS_VERSION} gc='${GC_IN_USE}' heap_max=${HEAP_MAX_B
 echo "--- seeding upstream /simple (forward target)"
 # Fail closed: the whole run forwards through this expectation, so an unseeded upstream must abort
 # HERE, after printing the upstream's post-mortem (the --rm-dropped container's .State + last logs).
-# curl exit 6 (unresolved host) prints 000; one cheap retry covers a transient.
+# Prints "<http_code> <curl exit code> <curl error>", so a failure says WHY (exit 6 = unresolved
+# host prints http_code 000); one cheap retry covers a transient.
 seed_upstream() {
-  docker run --rm "${NET_CLIENT[@]}" curlimages/curl:8.11.1 -s -o /dev/null -w '%{http_code}' -X PUT \
+  docker run --rm "${NET_CLIENT[@]}" curlimages/curl:8.11.1 -s -o /dev/null -w '%{http_code} %{exitcode} %{errormsg}' -X PUT \
     "http://${UPSTREAM_HOSTPORT}/mockserver/expectation" -H 'Content-Type: application/json' \
-    -d '[{"httpRequest":{"path":"/simple"},"httpResponse":{"statusCode":200,"body":"upstream"},"times":{"unlimited":true}}]' 2>/dev/null || true
+    -d '[{"httpRequest":{"path":"/simple"},"httpResponse":{"statusCode":200,"body":"upstream"},"times":{"unlimited":true}}]' || true
 }
-UPSTREAM_SEED_CODE="$(seed_upstream)"
-if ! grep -qE '^2[0-9][0-9]$' <<<"$UPSTREAM_SEED_CODE"; then
-  echo "WARNING: upstream seed HTTP ${UPSTREAM_SEED_CODE:-000} — retrying once after 3s" >&2
+UPSTREAM_SEED_RESULT="$(seed_upstream)"
+if ! grep -qE '^2[0-9][0-9]( |$)' <<<"$UPSTREAM_SEED_RESULT"; then
+  echo "WARNING: upstream seed failed (http_code exitcode errormsg: '${UPSTREAM_SEED_RESULT}') — retrying once after 3s" >&2
   sleep 3
-  UPSTREAM_SEED_CODE="$(seed_upstream)"
+  UPSTREAM_SEED_RESULT="$(seed_upstream)"
 fi
-echo "upstream seed HTTP ${UPSTREAM_SEED_CODE:-000}"
-if ! grep -qE '^2[0-9][0-9]$' <<<"$UPSTREAM_SEED_CODE"; then
-  echo "ERROR: upstream seeding failed (HTTP ${UPSTREAM_SEED_CODE:-000}) — capturing upstream post-mortem before aborting" >&2
+echo "upstream seed (http_code exitcode errormsg): ${UPSTREAM_SEED_RESULT}"
+if ! grep -qE '^2[0-9][0-9]( |$)' <<<"$UPSTREAM_SEED_RESULT"; then
+  echo "ERROR: upstream seeding failed (http_code exitcode errormsg: '${UPSTREAM_SEED_RESULT}') — capturing upstream post-mortem before aborting" >&2
   print_container_postmortem "$UPSTREAM"
   exit 1
 fi
@@ -2673,7 +2689,7 @@ if [ "$PERF_NETWORK_MODE" != host ] && ! arm_only; then
     -v "$REPO_ROOT/mockserver-performance-test/k6:/k6:ro" \
     -v "$OUT_DIR:/out" \
     -e "BASE_URL=$SUT_BASE_HTTP" \
-    -e "FORWARD_UPSTREAM_HOST=mockserver-upstream:1080" \
+    -e "FORWARD_UPSTREAM_HOST=${UPSTREAM_ALIAS}:1080" \
     -e "K6_FORWARD_RESULT_PATH=/out/forward.json" \
     ${K6_FWD_PEAK_RATE:+-e K6_FWD_PEAK_RATE="$K6_FWD_PEAK_RATE"} \
     ${K6_FWD_HOLD:+-e K6_FWD_HOLD="$K6_FWD_HOLD"} \
@@ -2729,7 +2745,7 @@ if [ "${PERF_PROXY_PROFILE:-true}" = "true" ]; then
     -e "HTTP_PROXY=http://${SERVER_ALIAS}:1080" -e "HTTPS_PROXY=http://${SERVER_ALIAS}:1080" \
     -e "http_proxy=http://${SERVER_ALIAS}:1080" -e "https_proxy=http://${SERVER_ALIAS}:1080" \
     -e "NO_PROXY=" -e "no_proxy=" \
-    -e "FORWARD_UPSTREAM_HOST=mockserver-upstream:1080" \
+    -e "FORWARD_UPSTREAM_HOST=${UPSTREAM_ALIAS}:1080" \
     -e "K6_PROXY_RESULT_PATH=/out/proxy-forward.json" \
     ${K6_PROXY_RATE:+-e K6_PROXY_RATE="$K6_PROXY_RATE"} \
     ${K6_PROXY_DURATION:+-e K6_PROXY_DURATION="$K6_PROXY_DURATION"} \
@@ -2951,9 +2967,9 @@ if [ "$PERF_WORKLOAD" = "forward" ] && [ "$PERF_NETWORK_MODE" != host ]; then
   # reds the run rather than leaving the old fast /simple shadowing the slow one.
   echo "--- resetting SUT + re-seeding upstream /simple with ${PERF_UPSTREAM_DELAY_MS}ms delay (unit-21 slow upstream)"
   SUT_RESET_CODE="$(docker run --rm --network "$NETWORK" curlimages/curl:8.11.1 -s -o /dev/null -w '%{http_code}' -X PUT "http://${SERVER_ALIAS}:1080/mockserver/reset")"
-  UP_RESET_CODE="$(docker run --rm --network "$NETWORK" curlimages/curl:8.11.1 -s -o /dev/null -w '%{http_code}' -X PUT "http://${UPSTREAM}:1080/mockserver/reset")"
+  UP_RESET_CODE="$(docker run --rm --network "$NETWORK" curlimages/curl:8.11.1 -s -o /dev/null -w '%{http_code}' -X PUT "http://${UPSTREAM_HOSTPORT}/mockserver/reset")"
   UP_SEED_CODE="$(docker run --rm --network "$NETWORK" curlimages/curl:8.11.1 -s -o /dev/null -w '%{http_code}' -X PUT \
-    "http://${UPSTREAM}:1080/mockserver/expectation" -H 'Content-Type: application/json' \
+    "http://${UPSTREAM_HOSTPORT}/mockserver/expectation" -H 'Content-Type: application/json' \
     -d "[{\"httpRequest\":{\"path\":\"/simple\"},\"httpResponse\":{\"statusCode\":200,\"body\":\"upstream\",\"delay\":{\"timeUnit\":\"MILLISECONDS\",\"value\":${PERF_UPSTREAM_DELAY_MS}}},\"times\":{\"unlimited\":true}}]")"
   echo "--- SUT reset=${SUT_RESET_CODE} upstream reset=${UP_RESET_CODE} upstream slow-seed=${UP_SEED_CODE}"
   WL_SETUP_OK=true
@@ -2971,7 +2987,7 @@ if [ "$PERF_WORKLOAD" = "forward" ] && [ "$PERF_NETWORK_MODE" != host ]; then
       -e "HTTP_PROXY=http://${SERVER_ALIAS}:1080" -e "HTTPS_PROXY=http://${SERVER_ALIAS}:1080" \
       -e "http_proxy=http://${SERVER_ALIAS}:1080" -e "https_proxy=http://${SERVER_ALIAS}:1080" \
       -e "NO_PROXY=" -e "no_proxy=" \
-      -e "FORWARD_UPSTREAM_HOST=mockserver-upstream:1080" \
+      -e "FORWARD_UPSTREAM_HOST=${UPSTREAM_ALIAS}:1080" \
       -e "K6_PROXY_RATE=$WL_FWD_RATE" \
       -e "K6_PROXY_PRE_VUS=$WL_FWD_VUS" -e "K6_PROXY_MAX_VUS=$WL_FWD_VUS" \
       -e "K6_PROXY_DURATION=$WL_FWD_DURATION" \

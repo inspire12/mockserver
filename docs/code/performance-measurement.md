@@ -69,6 +69,13 @@ daily run, but it does matter for a close A/B: VM-to-VM variance is a few percen
 arms within one job on one machine (a within-run A/B, like the clustered-state arm) or repeat each
 arm, rather than comparing two separate builds.
 
+`perf-test-run.sh` clients reach every container by its short `--network-alias` (for example
+`mockserver-upstream`), never by its container name. A name carries the build ID and the agent's
+PID, so it exceeds the 63-character DNS label limit once the PID has 7 digits, and Docker's
+embedded DNS cannot resolve it. `require_dns_hostname` refuses such a hostname before any container
+starts, and `.buildkite/scripts/test/perf-upstream-alias-test.sh` fails lint if a `${RUN_ID}` container-name
+variable is used as a hostname.
+
 ### Which queue runs which arm
 
 Every arm runs on the `perf` queue (c5.12xlarge) by default. `PERF_XL=true` moves two opt-in arms

@@ -69,6 +69,9 @@ bash "$REPO_ROOT/.buildkite/scripts/test/perf-k6-runtime-test.sh"
 echo "--- perf-test-run start-up checks (diagnostics tiers, env guards, wait_ready states)"
 bash "$REPO_ROOT/.buildkite/scripts/test/perf-run-ready-test.sh"
 
+echo "--- perf-test-run upstream alias checks (containers reached by alias, DNS-label guard, seed evidence)"
+bash "$REPO_ROOT/.buildkite/scripts/test/perf-upstream-alias-test.sh"
+
 echo "--- INFO-arm event-log budget checks (item 40: shipped default on the INFO SUT, info_* baseline key)"
 bash "$REPO_ROOT/.buildkite/scripts/test/perf-info-budget-test.sh"
 

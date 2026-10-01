@@ -336,7 +336,7 @@ cov_run_capture() {
   cov_sampler_start "$COV_CAPTURE_SUT" "$url" "$csv"
   cov_k6 capture capture cov-capture.json \
     -e "HTTP_PROXY=http://mockserver-cov-capture:1080" -e "http_proxy=http://mockserver-cov-capture:1080" \
-    -e "NO_PROXY=" -e "no_proxy=" -e "FORWARD_UPSTREAM_HOST=mockserver-upstream:1080" || rc=$?
+    -e "NO_PROXY=" -e "no_proxy=" -e "FORWARD_UPSTREAM_HOST=${UPSTREAM_ALIAS}:1080" || rc=$?
   # The recorded-request consumer drains the ring asynchronously; count the file
   # only once the ring is empty (bounded wait), and report how long that took.
   local drain_s=0 occ

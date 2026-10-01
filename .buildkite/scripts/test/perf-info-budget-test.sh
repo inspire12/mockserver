@@ -33,7 +33,7 @@ call_site() { # file regex -> the first non-comment match from the regex on, cut
 }
 
 echo "--- 1. which SUTs are handed MOCKSERVER_MAX_EVENT_LOG_SIZE_IN_BYTES"
-for fn in start_mockserver cpuset_arg; do
+for fn in start_mockserver cpuset_arg require_dns_hostname; do
   body="$(extract "$fn")"
   if [ -z "$body" ]; then bad "function $fn not found in $F"; continue; fi
   eval "$body"
@@ -57,7 +57,7 @@ args_of() { # site [VAR=value ...] -> the docker run arguments of that call site
     unset PERF_MAX_EVENT_LOG_BYTES PERF_INFO_MAX_EVENT_LOG_BYTES
     for kv in "$@"; do export "${kv?}"; done
     eval "$ENV_BLOCK"
-    UPSTREAM=up SERVER=sut INFO_SERVER=info name=cov COV_DL_UPSTREAM=covdl fdir="$WORK" UPSTREAM_CPUS="" SERVER_CPUS="" UPSTREAM_PORT=1080 SUT_PORT=1080
+    UPSTREAM=up UPSTREAM_ALIAS=mockserver-upstream SERVER=sut INFO_SERVER=info name=cov COV_DL_UPSTREAM=covdl fdir="$WORK" UPSTREAM_CPUS="" SERVER_CPUS="" UPSTREAM_PORT=1080 SUT_PORT=1080
     INFO_SERVER_ALIAS=mockserver-info SERVER_ALIAS=mockserver alias=cov SERVER_MEMORY=2g mem=2g FILE_BODY_MOUNT="" mount="" level=ERROR
     NETWORK=n PERF_NETWORK_MODE=bridge DIAG_DIR="$WORK/diag" MOCKSERVER_IMAGE=img SUT_IMAGE_JAVA_TOOL_OPTIONS="" START_EXTRA_ENV=()
     : > "$WORK/run.args"
