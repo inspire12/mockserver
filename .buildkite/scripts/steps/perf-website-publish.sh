@@ -261,9 +261,12 @@ fi
 # The hardware-size table (item 27) comes only from a manual matrix run, so a daily
 # run carries none: keep the committed table rather than blanking it. It has its own
 # source block, so the page still says which run measured it.
+# HW_ORIGIN is display text only; decisions test HW_FRESH (a matrix from this run, live or offline).
 HW_ORIGIN="none"
+HW_FRESH=false
 if jq -e '.hw_matrix != null' "$WORK/candidate.json" >/dev/null 2>&1; then
   HW_ORIGIN="this run"
+  HW_FRESH=true
   HW_ASSEMBLY="$(jq -r '.hw_matrix.source | if .assembly == "offline" then "re-assembled offline" + (if .inputs then ", inputs " + .inputs else "" end) else empty end' "$WORK/candidate.json")"
   if [ -n "$HW_ASSEMBLY" ]; then
     HW_ORIGIN="this run (${HW_ASSEMBLY})"
@@ -348,7 +351,7 @@ echo "--- trigger: ${REASON_STR}"
 HEADLINE_HELD=false
 if jq -e '.headline.lower_bound == true' "$WORK/candidate.json" >/dev/null 2>&1 && [ -f "$DATA_FILE" ]; then
   OLD_HC="$(jq -r '.headline.healthy_ceiling_rps | if type == "number" then . else "invalid" end' "$DATA_FILE" 2>/dev/null || echo invalid)"
-  if [ "$OLD_HC" != invalid ] && [ "$HW_ORIGIN" = "this run" ] && [ "$OLD_HW" != "$NEW_HW" ] \
+  if [ "$OLD_HC" != invalid ] && [ "$HW_FRESH" = true ] && [ "$OLD_HW" != "$NEW_HW" ] \
      && awk -v n="$HC" -v o="$OLD_HC" 'BEGIN{exit !(n+0 < o+0)}'; then
     HELD_REASON="$(jq -r '.headline.lower_bound_reason' "$WORK/candidate.json")"
     jq --slurpfile new "$WORK/candidate.json" '.hw_matrix = $new[0].hw_matrix' "$DATA_FILE" > "$WORK/candidate.held.json" \

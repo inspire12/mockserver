@@ -2,8 +2,8 @@
 # Fixture tests for the hardware matrix (performance programme item 27), no Docker needed:
 #   1. lib/perf-hw-matrix-rw.jq: each lower-bound reason from a synthetic rw-multi-k6 result;
 #   2. lib/perf-website-figures.jq: the hw_matrix display fields (scaling, peak, reason text);
-#   3. perf-website-publish.sh: a lower-bound headline plus a new matrix emits an hw_matrix-only
-#      patch, and without a new matrix still holds (exit 1, nothing written).
+#   3. perf-website-publish.sh: a lower-bound headline plus a new matrix (live or re-assembled
+#      offline) emits an hw_matrix-only patch, and without a new matrix still holds (exit 1).
 # Run: .buildkite/scripts/test/perf-hw-matrix-test.sh
 set -euo pipefail
 
@@ -266,10 +266,30 @@ check "a re-assembled matrix publishes assembly=offline, live inputs unnamed" "o
 jq '.serving_hw_matrix.points[1].inputs_source = "reconstructed from the run log"' "$T/run-re.json" > "$T/run-rec.json"
 check "reconstructed inputs are named in the published source" "offline reconstructed from run log" \
   "$(figs "$T/run-rec.json" | jq -r '"\(.assembly) \(.inputs)"')"
-jq --slurpfile hw "$T/re.json" '.serving_hw_matrix = $hw[0]' "$T/run-with-matrix.json" > "$T/run-offline.json"
-publish "$T/run-offline.json" PERF_PUBLISH_DRY_RUN=true PERF_PUBLISH_OUT="$T/dry-offline.json" || true
-check "publish says the matrix was re-assembled offline" "yes" \
-  "$(grep -q 'NOTE: hw_matrix was re-assembled offline' "$T/publish.log" && echo yes || echo no)"
+# An offline matrix is as new as a live one: with a lower-bound headline below the committed one it
+# must take the hold-and-refresh path (exit 0, hw_matrix only), not the refuse path (exit 1).
+jq --slurpfile hw "$T/re.json" '.serving_hw_matrix = $hw[0]
+  | .serving_hw_matrix.points[1].inputs_source = "reconstructed from the run log"' "$T/run-with-matrix.json" > "$T/run-offline.json"
+held_line() { grep -Eq '^HELD: headline [0-9.]+ carried forward; hw_matrix refreshed$' "$T/publish.log" && echo yes || echo no; }
+rc=0; publish "$T/run-offline.json" PERF_PUBLISH_DRY_RUN=true PERF_PUBLISH_OUT="$T/dry-offline.json" || rc=$?
+check "offline matrix: dry-run exits 0" "0" "$rc"
+check "publish says the matrix was re-assembled offline, inputs reconstructed" "yes" \
+  "$(grep -q 'NOTE: hw_matrix was re-assembled offline, inputs reconstructed from run log' "$T/publish.log" && echo yes || echo no)"
+check "offline matrix: dry-run holds the headline" "yes" "$(held_line)"
+check "offline matrix: dry-run candidate differs from committed in hw_matrix only" "hw_matrix" \
+  "$(jq -rn --slurpfile a "$COMMITTED" --slurpfile b "$T/dry-offline.json" '[($a[0] + $b[0] | keys[]) as $k | select($a[0][$k] != $b[0][$k]) | $k] | join(",")')"
+rc=0; publish "$T/run-offline.json" || rc=$?
+check "offline matrix: held-headline publish exits 0" "0" "$rc"
+check "offline matrix: publish holds the headline" "yes" "$(held_line)"
+check "offline matrix: patch touches the figures and the hw chart data only" \
+  "jekyll-www.mock-server.com/_data/perf_figures.json jekyll-www.mock-server.com/images/perf-charts/data/perf-hw-matrix.json " \
+  "$(git -C "$R" diff --name-only HEAD~1 HEAD 2>/dev/null | { grep -v 'perf_hw_matrix.png$' || true; } | tr '\n' ' ')"
+check "offline matrix: committed figures change in hw_matrix only" "hw_matrix" \
+  "$(git -C "$R" show HEAD~1:jekyll-www.mock-server.com/_data/perf_figures.json > "$T/before.json"; jq -rn --slurpfile a "$T/before.json" --slurpfile b "$COMMITTED" '[($a[0] + $b[0] | keys[]) as $k | select($a[0][$k] != $b[0][$k]) | $k] | join(",")')"
+check "offline matrix: published source records the offline assembly" "offline reconstructed from run log" \
+  "$(jq -r '.hw_matrix.source | "\(.assembly) \(.inputs)"' "$COMMITTED")"
+OFFLINE_BRANCH="$(git -C "$R" branch --format='%(refname:short)' | { grep perf/ || true; })"
+[ -z "$OFFLINE_BRANCH" ] || { git -C "$R" checkout -q - && git -C "$R" branch -q -D "$OFFLINE_BRANCH"; }
 check "a live matrix publishes no assembly marker" "null" \
   "$(jq 'del(.serving_hw_matrix.reassembled_from)' "$T/run-re.json" > "$T/run-live.json"; figs "$T/run-live.json" | jq -r '.assembly')"
 

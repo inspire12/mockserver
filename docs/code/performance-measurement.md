@@ -1158,7 +1158,8 @@ chart hatches them and draws a dashed ideal-linear line (1-core rate × cores). 
 no matrix, so the publish step keeps the committed `hw_matrix`. A matrix run's own headline is
 usually a client-limited lower bound: the publish hold covers the headline only, so when a new
 matrix arrives with a held headline the patch refreshes `hw_matrix` (and `perf-hw-matrix.json`
-and `perf_hw_matrix.png`) alone and carries every other committed figure forward. With no data
+and `perf_hw_matrix.png`) alone and carries every other committed figure forward. A matrix
+re-assembled offline counts as new in the same way as one assembled on the rig. With no data
 the page shows "Not yet measured". `perf-test-compare.sh` keys the matrix's p50-gated metrics
 on the load client as well as the sweep settle, so multi-k6 points never share a baseline with
 single-k6 ones. `.buildkite/scripts/test/perf-hw-matrix-test.sh` (run by
