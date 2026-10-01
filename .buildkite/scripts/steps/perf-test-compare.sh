@@ -1248,8 +1248,8 @@ EXTRA="$(jq -r '
      | if $fg.status == "infra_error"
        then "\n\n:warning: **Forward-pool guard did NOT run this build** (k6 exit \($fg.k6_exit), no error_rate — upstream/container infra error, not a pool breach). The forward.error_rate row is therefore ABSENT, so the pool-exhaustion regression was NOT checked this run — investigate before trusting it."
        else "" end) as $fginfra
-  | ([ (.sweep_tail.rungs // [])[] | select(.client_over_5ms_frac != null or .server_over_5ms_frac != null)
-       | "| \(.offered_rps) | \(.client_over_5ms_frac | pct) | \(.server_over_5ms_frac | pct) |" ]) as $tail
+  | ([ (.sweep_tail.rungs // [])[] | select(.client_over_5ms_frac != null or .server_over_5ms_frac != null or .server_transport_over_5ms_frac != null)
+       | "| \(.offered_rps) | \(.client_over_5ms_frac | pct) | \(.server_over_5ms_frac | pct) | \(.server_transport_over_5ms_frac | pct) |" ]) as $tail
   | ((.saturation.server_headroom_test // null) as $sht
      | if $sht == null or $sht == "active" then ""
        else "\n\n:warning: **Sweep server-headroom test was \($sht)**: rungs without server CPU samples were judged by the k6 CPU test alone, so a client-limited rung may count as rig-valid." end) as $shtnote
@@ -1257,7 +1257,7 @@ EXTRA="$(jq -r '
     + $shtnote
     + (if ($dr|length) > 0 then "\n\n**Delivery ratio** (throughput/offered; a shortfall with dropped>0 is a CLIENT/VU limit, not a server regression):\n" + ($dr|join("\n")) else "" end)
     + $fginfra
-    + (if ($tail|length) > 0 then "\n\n**Where the tail is** (share of requests over 5 ms per rung; notify-only): k6 after the settle window, beside the MockServer request-duration histogram, which times only the request handler, from the decoded request to the response hand-off. A client tail with no server tail is outside the handler: the rig, the network, or MockServer event-loop queueing, decode or flush. Tell them apart with k6 CPU against its pin (the excluded-rung reasons) and per-worker event-loop CPU (the deep run ceiling per-thread table).\n\n| Offered rps | k6 > 5 ms | Server > 5 ms |\n|---:|---:|---:|\n" + ($tail|join("\n")) else "" end))
+    + (if ($tail|length) > 0 then "\n\n**Where the tail is** (share of requests over 5 ms per rung; notify-only): k6 after the settle window, beside two MockServer histograms: the request handler (decoded request to response hand-off) and the transport (decoded request head to the last response byte written to the socket, so it adds aggregation, encoding, the write and a slow reader). A client tail with no transport tail is outside MockServer once it has read the request: the rig, the network, the kernel, or the event loop not yet reading the socket. Tell those apart with k6 CPU against its pin (the excluded-rung reasons) and per-worker event-loop CPU (the deep run ceiling per-thread table).\n\n| Offered rps | k6 > 5 ms | Handler > 5 ms | Transport > 5 ms |\n|---:|---:|---:|---:|\n" + ($tail|join("\n")) else "" end))
 ' "$RESULT" 2>/dev/null || echo "")"
 
 # item 12 — surface the streaming caveats in the RENDERED annotation, not only in

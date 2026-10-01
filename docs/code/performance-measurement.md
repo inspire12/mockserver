@@ -184,7 +184,8 @@ between 4.8 ms (44k) and 18.4 ms (48k). A bound under 2 ms would also have separ
 single-process data, but 2-core runs 448–450 read p99 4–9 ms at their lowest rung (rung onset
 included), so it could not carry over to the smaller hardware-matrix sizes. The 48k tail is
 outside MockServer's handler timer (none over 5 ms at any multi-k6 rung up to 96k), so it is the
-client or the transport; the arm's per-rung tail localisation (below) is what separates the two.
+client or the transport; the arm's per-rung tail localisation (below), whose transport column times
+MockServer's I/O path, is what separates the two.
 
 **Rig validity and the `vus_active_p95` criterion.** A rung is rig-valid when the k6 client had
 CPU headroom, low errors, and the VU pool was not exhausted. The original check keyed off
@@ -282,24 +283,31 @@ finer rungs at 39,000 and 41,000, the reported healthy ceiling would have been ~
 41,000. When placing rungs near a suspected knee, use gaps of 1,000 rps or smaller.
 
 **Where the tail is (notify-only, every daily run).** k6 counts a request over 5 ms as a stall;
-the server records `mock_server_request_duration_seconds`, scraped into `diag-samples.csv`. Per rung,
-the run sets the two side by side as `sweep_tail.rungs[]` in `perf-result.json`
+the server records two histograms, both scraped into `diag-samples.csv`:
+`mock_server_request_duration_seconds` (the handler) and `mock_server_request_transport_duration_seconds`
+(decoded request head to the response's last byte written to the socket). Per rung,
+the run sets them side by side as `sweep_tail.rungs[]` in `perf-result.json`
 (`client_over_5ms_frac` is `stalls_post_settle / measured_sample_count`, or null when the stall
 count is null; `server_over_5ms_frac` is
 the `req_dur_le_5ms` delta between the first and last `diag-samples.csv` rows inside the rung's
 post-settle window, with `server_window_s` and `server_requests` saying how much of the rung that
-covers), and the compare annotation prints them as a table. Rung windows come from each point's
+covers; `server_transport_over_5ms_frac` and `server_transport_requests` are the same from
+`req_transport_le_5ms` and `req_transport_count`, null on an image without the transport histogram),
+and the compare annotation prints them as a table. The multi-k6 arm carries the same fields in
+`.serving_rw_multik6.tail_localisation`. Rung windows come from each point's
 `start_epoch_ms` (the k6 scenario's own start), not from the host clock before `docker run`, which
 precedes it by k6 start-up and `setup()`. A rung with fewer than two scrapes in its window reads
 `n/a` on the server side. Nothing is budgeted or compared.
 
-The server column covers only MockServer's request handler: the histogram starts when
+The handler column covers only MockServer's request handler: the histogram starts when
 `HttpRequestHandler.channelRead0` builds its response writer, after the socket read, HTTP decode and
-aggregation, and stops at the response hand-off, before the flush. Event-loop queueing, decode, the
-flush and any pause outside that span are not in it. So a client tail with no server tail is outside
-the handler — the rig, the network, **or** MockServer's own event-loop queueing, decode or flush — and
-a saturated worker event loop would look exactly the same. To tell them apart, read k6 CPU against
-its pin (the sweep's exclusion reasons) and per-worker event-loop CPU (the deep run's ceiling
+aggregation, and stops at the response hand-off, before the flush. The transport column adds the
+aggregation, the event-loop hand-off of a response written from another thread, the encode, the write
+and a reader too slow to take it (see [metrics.md](metrics.md#transport-inclusive-request-latency-histogram)).
+So a client tail with a transport tail but no handler tail is MockServer's I/O path; a client tail with
+neither is outside MockServer once it has read the request — the rig, the network, the kernel, **or** a
+worker event loop too busy to read the socket yet, which no server-side timer sees. To tell them apart,
+read k6 CPU against its pin (the sweep's exclusion reasons) and per-worker event-loop CPU (the deep run's ceiling
 per-thread table). Build 502 is the worked case: from 44,000 rps up k6 saw 19–27% of requests over
 5 ms and the handler at most 0.004% (rung starts reconstructed, since that run predates
 `start_epoch_ms`), and its ceiling JFR showed no thread above ~45% of a core with the server at 275% of

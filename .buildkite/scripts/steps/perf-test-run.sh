@@ -1689,6 +1689,9 @@ run_regression() {
 #   scrape_ts                     when the metrics scrape started, i.e. when docker stats returned, so
 #                                 also the end of cpu_pct's ~1 s interval; `ts` precedes it by the
 #                                 docker-stats call (1-3 s), so place a row inside a sweep rung by scrape_ts
+#   req_transport_count/_sum/_le_5ms  the transport-inclusive histogram (request head decoded -> last
+#                                 response byte written), so a tail outside the handler can still be
+#                                 placed inside MockServer; blank on an image that predates it
 # A BLANK JVM-metric column has THREE distinct meanings, all preserved and NOT conflated: (1) the
 # metric is absent on an older image; (2) the scrape TIMED OUT (--max-time 4) because the SUT was
 # thrashing in GC near death — common in the final rows, and itself a death signal; (3) a genuine
@@ -1703,10 +1706,11 @@ to_bytes() { awk -v s="$1" 'BEGIN{
   printf "%d", n*m }'; }
 diag_sampler() {
   local t0; t0="$(date -u +%s)"
-  echo "ts,elapsed_s,container_mem_bytes,container_mem_limit_bytes,cpu_pct,heap_used_bytes,heap_max_bytes,nonheap_used_bytes,gc_seconds,gc_count,threads,dropped_log_events,ring_occupancy,ring_capacity,in_flight_bytes,max_in_flight_bytes,retained_entries,retained_bytes,max_retained_bytes,max_retained_entries,evicted_log_entries,req_dur_count,req_dur_sum,req_dur_le_5ms,req_dur_le_10ms,req_dur_le_25ms,req_dur_le_50ms,req_dur_le_100ms,jvm_allocated_bytes,direct_buffer_used_bytes,direct_buffer_count,netty_direct_used_bytes,scrape_ts" > "$DIAG_SAMPLE_LOG"
+  echo "ts,elapsed_s,container_mem_bytes,container_mem_limit_bytes,cpu_pct,heap_used_bytes,heap_max_bytes,nonheap_used_bytes,gc_seconds,gc_count,threads,dropped_log_events,ring_occupancy,ring_capacity,in_flight_bytes,max_in_flight_bytes,retained_entries,retained_bytes,max_retained_bytes,max_retained_entries,evicted_log_entries,req_dur_count,req_dur_sum,req_dur_le_5ms,req_dur_le_10ms,req_dur_le_25ms,req_dur_le_50ms,req_dur_le_100ms,jvm_allocated_bytes,direct_buffer_used_bytes,direct_buffer_count,netty_direct_used_bytes,scrape_ts,req_transport_count,req_transport_sum,req_transport_le_5ms" > "$DIAG_SAMPLE_LOG"
   while true; do
     local ts stats cpu memu meml metrics heap heapmax nonheap gc gcc threads dropped occ cap inflt maxinflt retent retbytes maxretbytes maxretent
     local evicted hist rq_count rq_sum rq_le5 rq_le10 rq_le25 rq_le50 rq_le100 allocd dbuf_used dbuf_count netty_direct scrape_ts
+    local tr_count tr_sum tr_le5
     ts="$(date -u +%s)"
     # Authoritative liveness: docker inspect .State, NOT the metrics scrape (which
     # also fails when the JVM thrashes in GC while alive). Only a readable state with
@@ -1771,9 +1775,12 @@ diag_sampler() {
       /^mock_server_request_duration_seconds_bucket\{le="0\.025"\}/{b25=$2}
       /^mock_server_request_duration_seconds_bucket\{le="0\.05"\}/{b50=$2}
       /^mock_server_request_duration_seconds_bucket\{le="0\.1"\}/{b100=$2}
-      END{print c"|"s"|"b5"|"b10"|"b25"|"b50"|"b100}')"
-    IFS='|' read -r rq_count rq_sum rq_le5 rq_le10 rq_le25 rq_le50 rq_le100 <<<"$hist"
-    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+      /^mock_server_request_transport_duration_seconds_count /{tc=$2}
+      /^mock_server_request_transport_duration_seconds_sum /{ts=$2}
+      /^mock_server_request_transport_duration_seconds_bucket\{le="0\.005"\}/{tb5=$2}
+      END{print c"|"s"|"b5"|"b10"|"b25"|"b50"|"b100"|"tc"|"ts"|"tb5}')"
+    IFS='|' read -r rq_count rq_sum rq_le5 rq_le10 rq_le25 rq_le50 rq_le100 tr_count tr_sum tr_le5 <<<"$hist"
+    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
       "$ts" "$((ts - t0))" \
       "$([ -n "$memu" ] && to_bytes "$memu" || echo '')" \
       "$([ -n "$meml" ] && to_bytes "$meml" || echo '')" \
@@ -1782,7 +1789,8 @@ diag_sampler() {
       "${retent:-}" "${retbytes:-}" "${maxretbytes:-}" "${maxretent:-}" \
       "${evicted:-}" "${rq_count:-}" "${rq_sum:-}" \
       "${rq_le5:-}" "${rq_le10:-}" "${rq_le25:-}" "${rq_le50:-}" "${rq_le100:-}" \
-      "${allocd:-}" "${dbuf_used:-}" "${dbuf_count:-}" "${netty_direct:-}" "$scrape_ts" >> "$DIAG_SAMPLE_LOG"
+      "${allocd:-}" "${dbuf_used:-}" "${dbuf_count:-}" "${netty_direct:-}" "$scrape_ts" \
+      "${tr_count:-}" "${tr_sum:-}" "${tr_le5:-}" >> "$DIAG_SAMPLE_LOG"
     sleep "$PERF_DIAG_SAMPLE_INTERVAL"
   done
 }
@@ -2061,9 +2069,9 @@ sweep_rung_windows() { # sweep_json -> [{offered_rps, start_epoch_ms, end_epoch_
 }
 
 # Notify-only. Per rung, the share of requests over 5 ms as k6 saw it (post-settle stalls) beside
-# the server's share from the req_dur histogram delta between the diag-samples.csv rows inside the
-# rung's post-settle window. req_dur times only the request handler (decoded request to response
-# hand-off), so a client-only tail may still be MockServer's event-loop queueing, decode or flush.
+# the server's shares from histogram deltas between the diag-samples.csv rows inside the rung's
+# post-settle window: req_dur times only the request handler (decoded request to response hand-off);
+# req_transport runs from the decoded request head to the last response byte written to the socket.
 sweep_tail_localisation() { # sweep_json diag_csv -> JSON
   local rungs
   rungs="$(jq -r --argjson step "$STEP_S" '(.points // [])[] | select(.start_epoch_ms != null)
@@ -2078,21 +2086,31 @@ sweep_tail_localisation() { # sweep_json diag_csv -> JSON
     FNR == NR { split($0, a, "\t"); nr++; off[nr] = a[1]; lo[nr] = a[2] / 1000 + settle; hi[nr] = a[3] / 1000 - 1; cl[nr] = a[4]; next }
     FNR == 1 { n = split($0, h, ","); for (i = 1; i <= n; i++) col[h[i]] = i
                tc = ("scrape_ts" in col) ? col["scrape_ts"] : col["ts"]
-               ok = ("req_dur_count" in col) && ("req_dur_le_5ms" in col); next }
-    ok { split($0, f, ","); t = f[tc]; c = f[col["req_dur_count"]]; b = f[col["req_dur_le_5ms"]]
-         if (t != "" && c != "" && b != "") { m++; T[m] = t + 0; C[m] = c + 0; B[m] = b + 0 } }
+               ok = ("req_dur_count" in col) && ("req_dur_le_5ms" in col)
+               tok = ("req_transport_count" in col) && ("req_transport_le_5ms" in col); next }
+    { split($0, f, ","); t = f[tc]
+      if (ok) { c = f[col["req_dur_count"]]; b = f[col["req_dur_le_5ms"]]
+                if (t != "" && c != "" && b != "") { m++; T[m] = t + 0; C[m] = c + 0; B[m] = b + 0 } }
+      if (tok) { c = f[col["req_transport_count"]]; b = f[col["req_transport_le_5ms"]]
+                 if (t != "" && c != "" && b != "") { k++; XT[k] = t + 0; XC[k] = c + 0; XB[k] = b + 0 } } }
     END { for (i = 1; i <= nr; i++) {
             first = 0; last = 0
             for (j = 1; j <= m; j++) if (T[j] >= lo[i] && T[j] <= hi[i]) { if (!first) first = j; last = j }
             srv = ""; req = 0; win = 0
             if (first && last > first && C[last] > C[first]) {
               req = C[last] - C[first]; srv = 1 - (B[last] - B[first]) / req; win = T[last] - T[first] }
-            printf "%s\t%s\t%s\t%d\t%d\n", off[i], cl[i], srv, req, win } }
+            first = 0; last = 0
+            for (j = 1; j <= k; j++) if (XT[j] >= lo[i] && XT[j] <= hi[i]) { if (!first) first = j; last = j }
+            xsrv = ""; xreq = 0
+            if (first && last > first && XC[last] > XC[first]) {
+              xreq = XC[last] - XC[first]; xsrv = 1 - (XB[last] - XB[first]) / xreq }
+            printf "%s\t%s\t%s\t%d\t%d\t%s\t%d\n", off[i], cl[i], srv, req, win, xsrv, xreq } }
   ' <(printf '%s\n' "$rungs") "$2" | jq -Rsc '
     def frac: if . == "" then null else (tonumber | . * 100000 | round / 100000) end;
     split("\n") | map(select(length > 0) | split("\t")
       | {offered_rps: (.[0] | tonumber), client_over_5ms_frac: (.[1] | frac), server_over_5ms_frac: (.[2] | frac),
-         server_requests: (.[3] | tonumber), server_window_s: (.[4] | tonumber)})
+         server_requests: (.[3] | tonumber), server_window_s: (.[4] | tonumber),
+         server_transport_over_5ms_frac: (.[5] | frac), server_transport_requests: (.[6] | tonumber)})
     | {threshold_ms: 5, rungs: .}' 2>/dev/null || echo '{}'
 }
 
@@ -2144,8 +2162,8 @@ printf '%s\n' "$SWEEP_RUNGS_JSON" > "$DIAG_DIR/sweep-rungs.json" 2>/dev/null || 
 SWEEP_TAIL_JSON="$(sweep_tail_localisation "$OUT_DIR/sweep.json" "$DIAG_SAMPLE_LOG" || true)"
 # Exactly one JSON object, or '{}': a partial pipeline can emit two documents, which --argjson rejects.
 jq -se 'length == 1 and (.[0] | type) == "object"' >/dev/null 2>&1 <<<"$SWEEP_TAIL_JSON" || SWEEP_TAIL_JSON='{}'
-echo "--- tail localisation (share of requests over 5 ms; client = k6 post-settle, server = MockServer histogram; notify-only):"
-jq -r '(.rungs // [])[] | "    \(.offered_rps) rps: client \(.client_over_5ms_frac // "n/a") server \(.server_over_5ms_frac // "n/a") (n=\(.server_requests) over \(.server_window_s)s)"' <<<"$SWEEP_TAIL_JSON" || true
+echo "--- tail localisation (share of requests over 5 ms; client = k6 post-settle, server = MockServer handler histogram, transport = decoded request to last byte written; notify-only):"
+jq -r '(.rungs // [])[] | "    \(.offered_rps) rps: client \(.client_over_5ms_frac // "n/a") server \(.server_over_5ms_frac // "n/a") transport \(.server_transport_over_5ms_frac // "n/a") (n=\(.server_requests) over \(.server_window_s)s)"' <<<"$SWEEP_TAIL_JSON" || true
 dump_ceiling_jfr "$SWEEP_RUNGS_JSON" "$SATURATION_RPS"
 
 # --- OPT-IN item 31: this ladder from N k6 processes merged in Prometheus
@@ -2185,8 +2203,8 @@ if [ "${PERF_SERVING_RW_MULTIK6:-false}" = "true" ]; then
     RW_TAIL_JSON="$(sweep_tail_localisation "$OUT_DIR/serving-rw-multik6-rungs.json" "$DIAG_SAMPLE_LOG" || true)"
     jq -se 'length == 1 and (.[0] | type) == "object"' >/dev/null 2>&1 <<<"$RW_TAIL_JSON" || RW_TAIL_JSON='{}'
     SERVING_RW_MULTIK6_JSON="$(jq -c --argjson t "$RW_TAIL_JSON" '. + {tail_localisation: $t}' <<<"$SERVING_RW_MULTIK6_JSON")"
-    echo "--- rw multi-k6 tail localisation (share of requests over 5 ms; client = merged k6 histogram, server = MockServer histogram; notify-only):"
-    jq -r '(.rungs // [])[] | "    \(.offered_rps) rps: client \(.client_over_5ms_frac // "unavailable") server \(.server_over_5ms_frac // "unavailable") (n=\(.server_requests) over \(.server_window_s)s)"' <<<"$RW_TAIL_JSON" || true
+    echo "--- rw multi-k6 tail localisation (share of requests over 5 ms; client = merged k6 histogram, server = MockServer handler histogram, transport = decoded request to last byte written; notify-only):"
+    jq -r '(.rungs // [])[] | "    \(.offered_rps) rps: client \(.client_over_5ms_frac // "unavailable") server \(.server_over_5ms_frac // "unavailable") transport \(.server_transport_over_5ms_frac // "unavailable") (n=\(.server_requests) over \(.server_window_s)s)"' <<<"$RW_TAIL_JSON" || true
     echo "--- serving_rw_multik6: rc=$rw_rc valid=$(jq -r '.valid | if . == null then "?" else tostring end' <<<"$SERVING_RW_MULTIK6_JSON") $(jq -r 'if .valid == true then "healthy_ceiling=\(.headline.healthy_ceiling_rps // "?")" else "healthy_ceiling_if_valid=\(.headline_if_valid.healthy_ceiling_rps // "?") (NOT a result: the run is invalid)" end' <<<"$SERVING_RW_MULTIK6_JSON") rig_valid_peak=$(jq -r '.rig_valid_peak_achieved_rps // "?"' <<<"$SERVING_RW_MULTIK6_JSON") (single-process: ${PEAK_ACHIEVED_RPS}) cross_check_equivalent=$(jq -r '.cross_check.equivalent | if . == null then "?" else tostring end' <<<"$SERVING_RW_MULTIK6_JSON") cross_run_agrees=$(jq -r '.cross_check.cross_run.agrees | if . == null then "?" else tostring end' <<<"$SERVING_RW_MULTIK6_JSON")"
     abort_if_sut_died
   fi
