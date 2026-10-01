@@ -155,8 +155,15 @@ K6_IMAGE="${PERF_PERCORE_K6_IMAGE:-grafana/k6:1.7.1@sha256:4fd3a694926b064d3491d
 PROBE_JDK_IMAGE="${PERF_PERCORE_JDK_IMAGE:-eclipse-temurin:17-jdk}"
 K6_DIR="$REPO_ROOT/mockserver-performance-test/k6"
 
-HOST_CORES="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 0)"
+HOST_CORES="${PERF_TEST_HOST_CORES:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 0)}"
 [ -n "$REASSEMBLE_DIR" ] && HOST_CORES="$(jq -r '.resolved.host_cores // 0' "$RUN_INPUTS")"
+# Which NUMA node k6 runs on when the host has two: other (default) or same (the SUT's node,
+# the interference A/B; never a baseline run). See numa_placement_check.
+K6_NUMA_NODE="${PERF_K6_NUMA_NODE:-other}"
+[ -n "$REASSEMBLE_DIR" ] && K6_NUMA_NODE="$(jq -r '.resolved.k6_numa_node // "other"' "$RUN_INPUTS")"
+case "$K6_NUMA_NODE" in other|same) ;; *) echo "ERROR: PERF_K6_NUMA_NODE='$K6_NUMA_NODE' (expected other or same)" >&2; exit 2 ;; esac
+PLACEMENT_ONLY="${PERF_PERCORE_TEST_PLACEMENT_ONLY:-}"
+case "$PLACEMENT_ONLY" in ""|true) ;; *) echo "ERROR: PERF_PERCORE_TEST_PLACEMENT_ONLY='$PLACEMENT_ONLY' (expected empty or true)" >&2; exit 2 ;; esac
 
 # The core ladder item 18 names. C=16 is included so the artifact records it as
 # skipped-with-reason on a box that cannot host it, rather than omitting the rung.
@@ -376,14 +383,28 @@ GAP_S="$(to_secs "$SWEEP_GAP")"
 # On the c5.12xlarge (48 logical cpus, siblings N / N+24): the SUT on physical cores 0..C-1
 # (siblings idle), four k6 processes on four physical cores each (both hyperthreads) across
 # 7-22, Prometheus on 23; cores C..6 stay idle (the paused main SUT and upstream sit there).
+# A host with two or more NUMA nodes takes the multi-k6 arm's layout from the node map
+# (numa_split_layout: Prometheus on node 0 after the SUT and upstream slots, k6 on node 1).
 # Any other host gets a logical-id layout above the matrix's largest point; it is not
 # hyperthread-aware (the physical-disjointness proof below still refuses an overlapping point), so
 # set PERF_HW_MATRIX_K6_CPUSETS / PERF_HW_MATRIX_PROM_CPUS for a sibling-aware layout there.
+numa_map_prime
 HW_MAX_POINT_CORES=0
 for _c in "${P_CORES[@]}"; do [ "$_c" -gt "$HW_MAX_POINT_CORES" ] && HW_MAX_POINT_CORES="$_c"; done
 HW_K6_SETS=(); HW_PROM_CPUS=""
+HW_LAYOUT=""
 if [ "$HW_CLIENT" = multik6 ]; then
-  if [ "$HOST_CORES" -eq 48 ]; then
+  _slots="$HW_MAX_POINT_CORES"; [ "$_slots" -lt 6 ] && _slots=6
+  _lrc=0
+  _numa_layout="$(numa_split_layout "$_slots" "${PERF_HW_MATRIX_PROCS:-4}" "$K6_NUMA_NODE" "${PERF_HW_MATRIX_K6_CORES_PER_PROC:-}")" || _lrc=$?
+  [ -n "$REASSEMBLE_DIR" ] && _lrc=1 # the host's layout is restored from matrix-inputs.json below
+  if [ "$_lrc" -eq 0 ]; then
+    _def_k6="$(layout_value k6 "$_numa_layout")"; _def_prom="$(layout_value prometheus "$_numa_layout")"
+    HW_LAYOUT="$([ "$K6_NUMA_NODE" = same ] && echo numa_same_node || echo numa_split)"
+  elif [ "$_lrc" -ne 1 ] && { [ -z "${PERF_HW_MATRIX_K6_CPUSETS:-}" ] || [ -z "${PERF_HW_MATRIX_PROM_CPUS:-}" ]; }; then
+    echo "ERROR: the NUMA layout does not fit this host (above); set PERF_HW_MATRIX_K6_CPUSETS and PERF_HW_MATRIX_PROM_CPUS" >&2
+    exit 2
+  elif [ "$HOST_CORES" -eq 48 ]; then
     _def_k6="7-10,31-34;11-14,35-38;15-18,39-42;19-22,43-46"; _def_prom="23,47"
   else
     _def_prom="$(( HOST_CORES - 1 ))"; _first=$(( HW_MAX_POINT_CORES + 1 )); _avail=$(( HOST_CORES - 1 - _first ))
@@ -396,12 +417,25 @@ if [ "$HW_CLIENT" = multik6 ]; then
       done
     fi
   fi
+  if [ -n "$REASSEMBLE_DIR" ] && jq -e '.resolved.hw_k6_cpusets | type == "string"' "$RUN_INPUTS" >/dev/null 2>&1; then
+    _def_k6="$(jq -r '.resolved.hw_k6_cpusets' "$RUN_INPUTS")"; _def_prom="$(jq -r '.resolved.hw_prom_cpus' "$RUN_INPUTS")"
+  fi
   IFS=';' read -ra HW_K6_SETS <<< "${PERF_HW_MATRIX_K6_CPUSETS:-$_def_k6}"
   HW_PROM_CPUS="${PERF_HW_MATRIX_PROM_CPUS:-$_def_prom}"
   if [ "${#HW_K6_SETS[@]}" -lt 1 ] || [ -z "$HW_PROM_CPUS" ]; then
     echo "ERROR: no room for the multik6 client on ${HOST_CORES} cpus (largest point ${HW_MAX_POINT_CORES} cores); set PERF_HW_MATRIX_K6_CPUSETS and PERF_HW_MATRIX_PROM_CPUS" >&2
     exit 2
   fi
+  [ -n "${PERF_HW_MATRIX_K6_CPUSETS:-}" ] && HW_LAYOUT=explicit
+fi
+if [ -z "$HW_LAYOUT" ]; then
+  # The single-k6 client's NUMA layout is select_cpusets' node split below.
+  case "$(numa_node_count)" in
+    0) HW_LAYOUT=topology_unknown ;;
+    1) HW_LAYOUT=single_node ;;
+    *) HW_LAYOUT="$([ "$K6_NUMA_NODE" = same ] && echo numa_same_node || echo numa_split)" ;;
+  esac
+  [ -n "$REASSEMBLE_DIR" ] && HW_LAYOUT="$(jq -r '.resolved.layout // "unrecorded"' "$RUN_INPUTS")"
 fi
 HW_K6_SPEC="$(IFS=';'; echo "${HW_K6_SETS[*]:-}")"
 
@@ -451,7 +485,8 @@ fi
 
 # Report a JVM's availableProcessors for a cpuset, using the SUT image's own JVM.
 probe_processors() { # cpuset
-  docker run --rm --cpuset-cpus="$1" --entrypoint java \
+  local mems; mems="$(numa_mems_flag "$1")"
+  docker run --rm --cpuset-cpus="$1" ${mems:+"$mems"} --entrypoint java \
     -v "$WORK:/probe:ro" "$MOCKSERVER_IMAGE" -cp /probe AvailableProcessors 2>/dev/null \
     | sed -n 's/^availableProcessors=//p' | head -1
 }
@@ -482,17 +517,37 @@ if [ "$MODE" = hw_matrix ] && [ -z "$REASSEMBLE_DIR" ] && [ -n "${PERF_HW_MATRIX
   jq -n --arg re "$RUN_INPUTS_KEYS_RE" --argjson ex "$RUN_INPUTS_EXCLUDED" --argjson hc "$HOST_CORES" \
     --argjson hpc "$HOST_PHYS_CORES" --argjson topo "$TOPO_KNOWN" --argjson k6p "$K6_PHYS_CORES" \
     --arg img "$MOCKSERVER_IMAGE" --arg ijto "$SUT_IMAGE_JTO" --arg jto "$SUT_JTO" \
+    --arg k6sets "$HW_K6_SPEC" --arg promcpus "$HW_PROM_CPUS" --arg layout "$HW_LAYOUT" --arg k6node "$K6_NUMA_NODE" \
     --argjson paused "$([ "${PERF_HW_MATRIX_RIG_PAUSED:-false}" = true ] && echo true || echo false)" '
     {source:"live",
      env:($ENV | with_entries(select((.key | test($re)) and (.key as $k | $ex | index($k) | not)))),
      resolved:{host_cores:$hc, host_physical_cores:$hpc, topology_known:$topo, k6_physical_cores:$k6p,
-               image:$img, image_java_tool_options:$ijto, java_tool_options:$jto, rig_paused:$paused}}' \
+               image:$img, image_java_tool_options:$ijto, java_tool_options:$jto, rig_paused:$paused,
+               hw_k6_cpusets:$k6sets, hw_prom_cpus:$promcpus, layout:$layout, k6_numa_node:$k6node}}' \
     > "$PERF_HW_MATRIX_DEBUG_DIR/matrix-inputs.json" \
     || echo "WARNING: could not write $PERF_HW_MATRIX_DEBUG_DIR/matrix-inputs.json — this matrix cannot be re-assembled offline" >&2
 fi
 # echoes "<server cpuset> <k6 cpuset> <k6 core count>"; k6 cpuset "-" when none fit.
+# On a host with two or more NUMA nodes the SUT takes its cores from the first node and k6 from
+# the second (or, PERF_K6_NUMA_NODE=same, from what the first has left); on one node both
+# choose from every cpu, as before.
+SUT_CANDIDATES=""; K6_CANDIDATES=""; CPU_KEYS=""
+if [ "$TOPO_KNOWN" = true ] && [ -z "$REASSEMBLE_DIR" ]; then
+  # "<cpu> <physical core key>" for every readable cpu, read once (select_cpusets runs per point).
+  for ((_cpu=0; _cpu<HOST_CORES; _cpu++)); do
+    _key="$(phys_core_key "$_cpu")" && CPU_KEYS="$CPU_KEYS$_cpu $_key"$'\n'
+  done
+  SUT_CANDIDATES="$(seq 0 $(( HOST_CORES - 1 )) | paste -sd' ' -)"; K6_CANDIDATES="$SUT_CANDIDATES"
+  if [ "$(numa_node_count)" -ge 2 ]; then
+    _nodes="$(numa_nodes)"; _n0="$(awk '{print $1}' <<<"$_nodes")"
+    SUT_CANDIDATES="$(numa_node_cpus "$_n0")"
+    if [ "$K6_NUMA_NODE" = same ]; then K6_CANDIDATES="$SUT_CANDIDATES"
+    elif _n1="$(numa_other_socket_node "$_n0")"; then K6_CANDIDATES="$(numa_node_cpus "$_n1")"
+    else K6_CANDIDATES=""; fi # no other socket: no k6 cores, so every point is infeasible
+  fi
+fi
 select_cpusets() {
-  local c="$1" cpu key s="" k="" skeys="" kkeys="" sn=0 kn=0 klist=() i
+  local c="$1" s="" k=""
   if [ "$TOPO_KNOWN" != true ]; then
     local w=$(( HOST_CORES - c - K6_RESERVE ))
     [ "$w" -gt "$K6_MAX_CORES" ] && w="$K6_MAX_CORES"
@@ -501,21 +556,21 @@ select_cpusets() {
     if [ "$w" -eq 1 ]; then k="$c"; else k="$c-$((c+w-1))"; fi
     echo "$s $k $w"; return
   fi
-  for ((cpu=0; cpu<HOST_CORES; cpu++)); do
-    key="$(phys_core_key "$cpu")" || continue
-    if [ "$sn" -lt "$c" ]; then
-      grep -qxF "$key" <<<"$skeys" && continue
-      skeys="$skeys$key"$'\n'; s="${s:+$s,}$cpu"; sn=$((sn+1))
-    else
-      grep -qxF "$key" <<<"$skeys" && continue
-      grep -qxF "$key" <<<"$kkeys" && continue
-      kkeys="$kkeys$key"$'\n'; klist+=("$cpu"); kn=$((kn+1))
-    fi
-  done
-  kn=$(( kn - K6_RESERVE )); [ "$kn" -gt "$K6_MAX_CORES" ] && kn="$K6_MAX_CORES"
-  [ "$sn" -lt "$c" ] && kn=0
-  for ((i=0; i<kn; i++)); do k="${k:+$k,}${klist[$i]}"; done
-  echo "${s:--} ${k:--} $kn"
+  # SUT: the first C candidates on distinct physical cores. k6: one thread on every other physical
+  # core among its candidates, minus the reserve, capped at K6_MAX_CORES.
+  awk -v c="$c" -v sc="$SUT_CANDIDATES" -v kc="$K6_CANDIDATES" -v reserve="$K6_RESERVE" -v max="$K6_MAX_CORES" '
+    NF == 2 { key[$1] = $2 }
+    END {
+      ns = split(sc, S, " "); sn = 0; s = ""
+      for (i = 1; i <= ns && sn < c; i++) { x = S[i]; if (!(x in key) || (key[x] in sk)) continue
+        sk[key[x]] = 1; s = s (s == "" ? "" : ",") x; sn++ }
+      nk = split(kc, K, " "); kn = 0
+      for (i = 1; i <= nk; i++) { x = K[i]; if (!(x in key) || (key[x] in sk) || (key[x] in kseen)) continue
+        kseen[key[x]] = 1; kl[++kn] = x }
+      kn -= reserve; if (kn > max + 0) kn = max + 0; if (sn < c) kn = 0
+      k = ""; for (i = 1; i <= kn; i++) k = k (k == "" ? "" : ",") kl[i]
+      printf "%s %s %d\n", (s == "" ? "-" : s), (k == "" ? "-" : k), kn }' <<<"$CPU_KEYS"
+  return 0
 }
 
 # The SUT container's end state: still running, OOM-killed, exit code, restarts, when it
@@ -664,8 +719,9 @@ write_point_inputs() {
     --arg scpu "$SCPU" --argjson k6c "$k6w" --argjson avail "$AVAIL" --argjson sphys "${SPHYS:-null}" \
     --argjson resolved "$RESOLVED_JSON" --argjson body "$BODY_BYTES" --argjson assumed "$ASSUMED_MAX_LOG_ENTRIES" \
     --argjson state "$STATE_JSON" --argjson rc "$RW_RC" --arg xrates "$XRATES" --argjson cg "$SUT_CGROUP_READABLE" \
-    --argjson mempeak "${MEM_PEAK:-null}" --argjson retpeak "${RETAINED_PEAK:-null}" --argjson retbpeak "${RETAINED_BYTES_PEAK:-null}" '
-    {source:"live", key:$meta.key, meta:$meta, sweep_rates:$rates, warmup_rate:$wrate, server_cpus:$scpu,
+    --argjson mempeak "${MEM_PEAK:-null}" --argjson retpeak "${RETAINED_PEAK:-null}" --argjson retbpeak "${RETAINED_BYTES_PEAK:-null}" \
+    --argjson placement "${POINT_PLACEMENT:-null}" '
+    {source:"live", key:$meta.key, meta:$meta, sweep_rates:$rates, warmup_rate:$wrate, server_cpus:$scpu, placement:$placement,
      k6_cores:$k6c, available_processors:$avail, server_physical_cores:$sphys, resolved:$resolved,
      body_bytes:$body, assumed_max_log_entries:$assumed, sut_state:$state, rw_exit_code:$rc,
      cross_check_rates:$xrates, cgroup_readable:$cg, memory_peak_bytes:$mempeak,
@@ -699,6 +755,7 @@ load_point_inputs() {
   MEM_PEAK="$(jq -r '.memory_peak_bytes // empty' "$f")"; RETAINED_PEAK="$(jq -r '.retained_entries_peak // empty' "$f")"
   RETAINED_BYTES_PEAK="$(jq -r '.retained_bytes_peak // empty' "$f")"
   INPUTS_SOURCE="$(jq -r '.source // "unknown"' "$f")"
+  POINT_PLACEMENT="$(jq -c '.placement // null' "$f")"
   return 0
 }
 
@@ -762,8 +819,8 @@ assemble_point_multik6() {
   AGG="$(jq -c --arg scpu "$SCPU" --arg kcpu "$HW_K6_SPEC" --argjson k6c "$k6w" --argjson avail "$AVAIL" \
     --argjson warm "$warm" --argjson wrate "$POINT_WARMUP_RATE" --argjson rc "$RW_RC" --arg xrates "$XRATES" \
     --argjson rjvm "${rung_jvm:-null}" --arg jto "$SUT_JTO" --argjson gclog "$([ "$HW_GC_LOG" = true ] && echo true || echo false)" \
-    --argjson cg "$SUT_CGROUP_READABLE" '
-    .server_cpus=$scpu | .k6_cpus=$kcpu | .k6_cores=$k6c | .available_processors=$avail
+    --argjson cg "$SUT_CGROUP_READABLE" --argjson placement "${POINT_PLACEMENT:-null}" '
+    .server_cpus=$scpu | .k6_cpus=$kcpu | .k6_cores=$k6c | .available_processors=$avail | .placement=$placement
     | .jvm = {java_tool_options:(if $jto == "" then null else $jto end), gc_log:$gclog, cgroup_readable:$cg}
     | .rung_jvm = $rjvm
     | .measurement += {rw_exit_code:$rc, cross_check_rates:$xrates}
@@ -930,6 +987,20 @@ for PI in "${!P_CORES[@]}"; do
     SKIPPED+=("$(jq -c '. + {reason:"server and k6 cpusets share a physical core", type:"failure"}' <<<"$POINT_META")")
     continue
   fi
+  # NUMA guard: the SUT and each k6 cpuset on one node, k6 on another node when there is one.
+  IFS=';' read -ra _k6_sets <<< "$KCPU"
+  if ! numa_placement_check "$K6_NUMA_NODE" "$SCPU" "${_k6_sets[@]}" >&2 \
+     || { [ "$HW_CLIENT" = multik6 ] && ! assert_cpuset_single_node prometheus "$HW_PROM_CPUS" >&2; }; then
+    SKIPPED+=("$(jq -c '. + {reason:"the SUT, k6 or Prometheus cpusets fail the NUMA placement guard (a cpuset straddles nodes, or k6 shares the SUT node)", type:"failure"}' <<<"$POINT_META")")
+    continue
+  fi
+  POINT_PLACEMENT="$(numa_placement_json "$HW_LAYOUT" "$K6_NUMA_NODE" "$SCPU" "${_k6_sets[@]}")"
+  SUT_MEMS="$(numa_mems_flag "$SCPU")"; K6_MEMS="$(numa_mems_flag "${KCPU//;/,}")"
+  if [ "$PLACEMENT_ONLY" = true ]; then
+    POINTS+=("$(jq -c --arg s "$SCPU" --arg k "$KCPU" --arg sm "$SUT_MEMS" --arg km "$K6_MEMS" --argjson pl "$POINT_PLACEMENT" \
+      '. + {server_cpus:$s, k6_cpus:$k, mems:{server:$sm, k6:$km}, placement:$pl}' <<<"$POINT_META")")
+    continue
+  fi
   SPHYS="$(phys_core_count "$SCPU")"
 
   echo "+++ $LBL  server_cpus=$SCPU  k6_cpus=$KCPU (${k6w} client cores)  rates=$POINT_RATES" >&2
@@ -957,7 +1028,7 @@ for PI in "${!P_CORES[@]}"; do
     [ -n "$SUT_JTO" ] && sut_extra+=(-e "JAVA_TOOL_OPTIONS=$SUT_JTO")
   fi
   docker run -d --name "$SERVER" --network "$NETWORK" --network-alias mockserver \
-    --cpuset-cpus="$SCPU" --memory="$MEM" --memory-swap="$MEM" -p 127.0.0.1::1080 \
+    --cpuset-cpus="$SCPU" ${SUT_MEMS:+"$SUT_MEMS"} --memory="$MEM" --memory-swap="$MEM" -p 127.0.0.1::1080 \
     ${sut_extra[@]+"${sut_extra[@]}"} \
     -e MOCKSERVER_LOG_LEVEL=ERROR -e MOCKSERVER_DISABLE_SYSTEM_OUT=true \
     -e MOCKSERVER_METRICS_ENABLED=true \
@@ -1016,7 +1087,7 @@ for PI in "${!P_CORES[@]}"; do
   # --- warm-up drive (NEVER measured): remove the JIT/first-touch transient so
   # the sweep's first rung is not systematically slow. ------------------------
   WARMUP_JSON="$WORK/warmup-${PKEY}.json"
-  docker run --rm --network "$NETWORK" --cpuset-cpus="$KCPU" \
+  docker run --rm --network "$NETWORK" --cpuset-cpus="$KCPU" ${K6_MEMS:+"$K6_MEMS"} \
     -v "$K6_DIR:/k6:ro" -v "$WORK:/out" \
     -e "BASE_URL=http://mockserver:1080" -e "PROTO=http" \
     -e "K6_SWEEP_RATES=$POINT_WARMUP_RATE" -e "K6_SWEEP_STEP=$WARMUP_DURATION" -e "K6_SWEEP_GAP=1s" \
@@ -1030,7 +1101,7 @@ for PI in "${!P_CORES[@]}"; do
 
   SWEEP_JSON="$WORK/sweep-${PKEY}.json"
   T0="$(date -u +%s)"
-  docker run --rm --name "$K6_NAME" --network "$NETWORK" --cpuset-cpus="$KCPU" \
+  docker run --rm --name "$K6_NAME" --network "$NETWORK" --cpuset-cpus="$KCPU" ${K6_MEMS:+"$K6_MEMS"} \
     -v "$K6_DIR:/k6:ro" -v "$WORK:/out" \
     -e "BASE_URL=http://mockserver:1080" -e "PROTO=http" \
     -e "K6_SWEEP_RATES=$POINT_RATES" -e "K6_SWEEP_STEP=$SWEEP_STEP" -e "K6_SWEEP_GAP=$SWEEP_GAP" \
@@ -1270,9 +1341,9 @@ for PI in "${!P_CORES[@]}"; do
 
   # stitch in the shell-known cpusets, the proven processor count, and warm-up.
   AGG="$(jq -c \
-    --arg scpu "$SCPU" --arg kcpu "$KCPU" --argjson avail "$AVAIL" \
+    --arg scpu "$SCPU" --arg kcpu "$KCPU" --argjson avail "$AVAIL" --argjson placement "${POINT_PLACEMENT:-null}" \
     --argjson wup_p50 "${WARMUP_P50:-null}" --argjson wup_ach "${WARMUP_ACH:-null}" '
-    .server_cpus=$scpu | .k6_cpus=$kcpu | .available_processors=$avail
+    .server_cpus=$scpu | .k6_cpus=$kcpu | .available_processors=$avail | .placement=$placement
     | (.ladder[0].p50_ms) as $r1
     | (.ladder[1].p50_ms // null) as $r2
     | .warmup={
@@ -1287,6 +1358,13 @@ for PI in "${!P_CORES[@]}"; do
   fi # ---- end single-k6 client ----
   finish_point || continue
 done
+if [ "$PLACEMENT_ONLY" = true ]; then # test hook: the per-point placement and the fixed client layout; nothing started
+  printf '%s\n' "${POINTS[@]+"${POINTS[@]}"}" "${SKIPPED[@]+"${SKIPPED[@]}"}" | sed '/^$/d' \
+    | jq -sc --arg k6sets "$HW_K6_SPEC" --arg prom "$HW_PROM_CPUS" --arg layout "$HW_LAYOUT" --arg mode "$MODE" '
+      {mode:$mode, layout:$layout, k6_cpusets:($k6sets | split(";") | map(select(. != ""))), prometheus_cpus:$prom,
+       points:map(select(.reason == null)), skipped:map(select(.reason != null))}'
+  exit 0
+fi
 
 # --- assemble the serving_percore / serving_hw_matrix block --------------------
 # Points and skips go to jq as FILES: together they easily exceed the kernel's per-argument limit
@@ -1321,6 +1399,7 @@ jq -nc \
   --arg ladder "$CORE_LADDER" \
   --arg rates "$([ "$HW_CLIENT" = multik6 ] || echo "$SWEEP_RATES")" \
   --arg client "$HW_CLIENT" --arg k6sets "$HW_K6_SPEC" --arg promcpus "$HW_PROM_CPUS" \
+  --arg layout "$HW_LAYOUT" --arg k6node "$K6_NUMA_NODE" \
   --argjson k6phys "$K6_PHYS_CORES" --arg anchors "$HW_LADDER_ANCHORS" --arg reassembled "${REASSEMBLE_DIR:+$(basename "$REASSEMBLE_DIR")}" \
   --arg ref "$HW_RPS_PER_CORE_REF" --arg lo "$HW_LADDER_LO" --arg hi "$HW_LADDER_HI" --arg rungs "$HW_LADDER_RUNGS" \
   --arg explicit_rates "${PERF_HW_MATRIX_SWEEP_RATES:-}" \
@@ -1340,6 +1419,8 @@ jq -nc \
     # latency_settle_s: the methodology fingerprint perf-test-compare.sh keys the
     # p50-derived healthy-ceiling metrics on.
     sweep:{rates:$rates, step:$step, gap:$gap, latency_settle_s:$settle},
+    # false for PERF_K6_NUMA_NODE=same (the same-socket interference A/B); per point in .points[].placement.
+    baseline_eligible:($k6node != "same"),
     healthy_ceiling_definition:"lib/perf-website-figures.jq headline (Finding 1: highest rung achieved>=0.95*offered, zero errors, p50<=3x flat-region p50) — reused, not re-implemented",
     skipped:$skipped
   }
@@ -1350,7 +1431,8 @@ jq -nc \
     }
     + (if $client == "multik6" then {
         # Every point: the same N k6 processes and Prometheus on fixed cpusets; its own rates in .points[].sweep_rates.
-        client_placement:{k6_cpusets:($k6sets | split(";")), k6_physical_cores:$k6phys, prometheus_cpus:$promcpus},
+        client_placement:{k6_cpusets:($k6sets | split(";")), k6_physical_cores:$k6phys, prometheus_cpus:$promcpus,
+                          layout:$layout, k6_numa_node:$k6node},
         ladder:(if $explicit_rates != "" then {explicit:$explicit_rates}
                 else {rps_per_core_ref:($ref | tonumber), lo:($lo | tonumber), hi:($hi | tonumber), rungs:($rungs | tonumber),
                       anchors:($anchors | split(",") | map(tonumber)),

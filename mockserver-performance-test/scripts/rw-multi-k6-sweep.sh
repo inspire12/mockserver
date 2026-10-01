@@ -98,6 +98,13 @@ esac
 if [ "${PERF_RW_TEST_RESOLVE_ONLY:-}" = true ] && [ "$OUT_FILE" != /dev/stdout ]; then
   echo ":x: PERF_RW_TEST_RESOLVE_ONLY=true takes no output file (got '$OUT_FILE'): it measures nothing" >&2; exit 2
 fi
+case "${PERF_RW_TEST_PLACEMENT_ONLY:-}" in
+  ""|true) ;;
+  *) echo ":x: PERF_RW_TEST_PLACEMENT_ONLY='$PERF_RW_TEST_PLACEMENT_ONLY' must be empty or true" >&2; exit 2 ;;
+esac
+if [ "${PERF_RW_TEST_PLACEMENT_ONLY:-}" = true ] && [ "$OUT_FILE" != /dev/stdout ]; then
+  echo ":x: PERF_RW_TEST_PLACEMENT_ONLY=true takes no output file (got '$OUT_FILE'): it measures nothing" >&2; exit 2
+fi
 if [ -n "${PERF_RW_TEST_FAIL_STEP:-}" ]; then
   case " $SOFT_STEPS " in
     *" $PERF_RW_TEST_FAIL_STEP "*) ;;
@@ -144,16 +151,28 @@ NETWORK_IN="${PERF_RW_NETWORK:-}"
 TARGET_URL="${PERF_RW_TARGET_URL:-}"
 SUT_CONTAINER="${PERF_RW_SUT_CONTAINER:-}"
 
-# Placement. The c5.12xlarge rig has 48 logical cpus, siblings at N and N+24: SUT on
-# physical cores 0-5 (siblings idle), perf-test-run.sh's upstream on 6, Prometheus on 23,
-# and four k6 processes on four physical cores each (both hyperthreads) across 7-22, which
-# is every core left. Eight processes on two cores each cost more k6 CPU per request
-# (docs/code/performance-measurement.md, "Placement"). Smaller hosts get a proportional layout.
-if [ "$HOST_CORES" -ge 48 ]; then
-  DEF_SERVER="0-5"; DEF_PROM="23,47"
+# Placement (docs/code/performance-measurement.md, "Placement"). One NUMA node: fixed strings; on
+# the c5.12xlarge (siblings N, N+24) SUT on cores 0-5 (siblings idle), upstream 6, Prometheus 23,
+# four k6 processes on four whole cores each across 7-22; smaller hosts are proportional. Two or
+# more nodes (perf-xl): numa_split_layout, SUT/upstream/Prometheus on node 0 and k6 on node 1.
+K6_NUMA_NODE="${PERF_K6_NUMA_NODE:-other}"
+case "$K6_NUMA_NODE" in other|same) ;; *) echo ":x: PERF_K6_NUMA_NODE='$K6_NUMA_NODE' must be other or same" >&2; exit 2 ;; esac
+HOST_CORES="${PERF_TEST_HOST_CORES:-$HOST_CORES}"
+numa_map_prime
+NUMA_LAYOUT=""; _lrc=0
+NUMA_LAYOUT="$(numa_split_layout 6 "${PERF_RW_PROCS:-4}" "$K6_NUMA_NODE" "${PERF_RW_K6_CORES_PER_PROC:-}")" || _lrc=$?
+if [ "$_lrc" -eq 0 ]; then
+  DEF_SERVER="$(layout_value server "$NUMA_LAYOUT")"; DEF_PROM="$(layout_value prometheus "$NUMA_LAYOUT")"
+  DEF_K6="$(layout_value k6 "$NUMA_LAYOUT")"; DEF_UPSTREAM="$(layout_value upstream "$NUMA_LAYOUT")"
+  PLACEMENT_LAYOUT="$([ "$K6_NUMA_NODE" = same ] && echo numa_same_node || echo numa_split)"
+elif [ "$_lrc" -ne 1 ] && { [ -z "${PERF_RW_SERVER_CPUS:-}" ] || [ -z "${PERF_RW_PROM_CPUS:-}" ] || [ -z "${PERF_RW_K6_CPUSETS:-}" ]; }; then
+  echo ":x: the NUMA layout does not fit this host (above); set PERF_RW_SERVER_CPUS, PERF_RW_PROM_CPUS and PERF_RW_K6_CPUSETS" >&2
+  exit 1
+elif [ "$HOST_CORES" -ge 48 ]; then
+  DEF_SERVER="0-5"; DEF_PROM="23,47"; DEF_UPSTREAM="6"
   DEF_K6="7-10,31-34;11-14,35-38;15-18,39-42;19-22,43-46"
 else
-  DEF_SERVER="0-3"; DEF_PROM="4"
+  DEF_SERVER="0-3"; DEF_PROM="4"; DEF_UPSTREAM=""
   _n="${PERF_RW_PROCS:-3}"; _avail=$(( HOST_CORES - 6 )); _w=$(( _avail / _n )); [ "$_w" -lt 1 ] && _w=1
   DEF_K6=""
   for ((i=0;i<_n;i++)); do
@@ -161,6 +180,10 @@ else
     DEF_K6="${DEF_K6:+$DEF_K6;}$([ "$_w" -eq 1 ] && echo "$_s" || echo "$_s-$_e")"
   done
 fi
+if [ -z "${PLACEMENT_LAYOUT:-}" ]; then
+  case "$(numa_node_count)" in 0) PLACEMENT_LAYOUT=topology_unknown ;; 1) PLACEMENT_LAYOUT=single_node ;; *) PLACEMENT_LAYOUT=explicit ;; esac
+fi
+[ -n "${PERF_RW_K6_CPUSETS:-}" ] && PLACEMENT_LAYOUT=explicit
 SERVER_CPUS="${PERF_RW_SERVER_CPUS:-$DEF_SERVER}"
 PROM_CPUS="${PERF_RW_PROM_CPUS:-$DEF_PROM}"
 # Another container left running on the host (perf-test-run.sh's upstream), proven disjoint too.
@@ -243,8 +266,9 @@ write_fallback_result() { # rc failed_command
   [ -s "$merged" ] || merged=/dev/null
   fallback_json() { # merged_file
     jq -n --arg err "$err" --argjson n "${N:-0}" --slurpfile merged "$1" --argjson k6rt "$(k6_runtime_json 2>/dev/null || echo null)" \
+      --argjson placement "${PLACEMENT_JSON:-null}" \
       --arg hook_cut "${PERF_RW_TEST_CUT_FAULT:-}" --arg hook_step "${PERF_RW_TEST_FAIL_STEP:-}" --arg hook_null "${PERF_RW_TEST_NULL_RUNG:-}" --arg hook_zero "${PERF_RW_TEST_ZERO_TAIL:-}" '
-      {attempted:true, valid:false, headline:null, config:{k6_runtime:$k6rt},
+      {attempted:true, valid:false, headline:null, config:{k6_runtime:$k6rt}, placement:$placement,
        invalid_reasons:["rw_harness_completed: the harness aborted before assembling its result (\($err))"],
        validity:{valid:false, checks:[{name:"rw_harness_completed", ok:false, detail:$err}]},
        method:{method:"remote_write_multi_k6", procs:$n,
@@ -316,6 +340,25 @@ for ((i=0;i<N;i++)); do PAIRS+=("k6_$i" "${K6_SETS[$i]}"); done
 if ! cpusets_physically_disjoint "${PAIRS[@]}" >&2; then
   die "SUT / Prometheus / upstream / k6 cpusets are not physically disjoint — refusing to measure contention"
 fi
+# --- NUMA guard: the SUT, Prometheus and each k6 (cross-check included) on one node each, and k6
+# on another node from the SUT whenever there is one (PERF_K6_NUMA_NODE=same is the explicit A/B).
+if ! numa_placement_check "$K6_NUMA_NODE" "$SERVER_CPUS" "${K6_SETS[@]}" "$XCHECK_CPUS" >&2; then
+  die "the SUT / k6 cpusets fail the NUMA placement guard — refusing to measure across sockets"
+fi
+assert_cpuset_single_node prometheus "$PROM_CPUS" >&2 || die "the Prometheus cpuset straddles NUMA nodes"
+PLACEMENT_JSON="$(numa_placement_json "$PLACEMENT_LAYOUT" "$K6_NUMA_NODE" "$SERVER_CPUS" "${K6_SETS[@]}")"
+# Each container's memory on the node it runs on; empty (no flag) where the node map is unreadable.
+SUT_MEMS="$(numa_mems_flag "$SERVER_CPUS")"; PROM_MEMS="$(numa_mems_flag "$PROM_CPUS")"
+XCHECK_MEMS="$(numa_mems_flag "$XCHECK_CPUS")"
+echo "--- placement: $PLACEMENT_JSON mems: server=${SUT_MEMS:-none} prometheus=${PROM_MEMS:-none} xcheck=${XCHECK_MEMS:-none}" >&2
+if [ "${PERF_RW_TEST_PLACEMENT_ONLY:-}" = true ]; then # test hook: print the resolved placement, start nothing
+  jq -nc --arg s "$SERVER_CPUS" --arg p "$PROM_CPUS" --arg u "${DEF_UPSTREAM:-}" --arg k "$(IFS=';'; echo "${K6_SETS[*]}")" \
+    --arg x "$XCHECK_CPUS" --arg sm "$SUT_MEMS" --arg pm "$PROM_MEMS" --arg xm "$XCHECK_MEMS" \
+    --arg km "$(for _k in "${K6_SETS[@]}"; do numa_mems_flag "$_k"; echo; done)" --argjson placement "$PLACEMENT_JSON" '
+    {server:$s, prometheus:$p, upstream_default:$u, k6:($k | split(";")), xcheck:$x,
+     mems:{server:$sm, prometheus:$pm, xcheck:$xm, k6:($km | split("\n") | map(select(. != "")))}, placement:$placement}'
+  RESULT_WRITTEN=1; exit 0
+fi
 
 # --- container-side URLs: every host a k6 container resolves --------------------
 # Go's resolver (k6) refuses a DNS label over 63 characters, so a long alias turns every push
@@ -358,7 +401,7 @@ ALL_NAMES="$ALL_NAMES $PROM_NAME"
 # Native histograms on; the lookback is long so each rung's final cumulative value is
 # readable at any instant after the run without a per-rung query time.
 docker run -d --name "$PROM_NAME" --network "$NETWORK" --network-alias "$PROM_ALIAS" \
-  --cpuset-cpus="$PROM_CPUS" -p 127.0.0.1::9090 \
+  --cpuset-cpus="$PROM_CPUS" ${PROM_MEMS:+"$PROM_MEMS"} -p 127.0.0.1::9090 \
   -v "$WORK/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
   "$PROM_IMAGE" --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/prometheus \
   --web.enable-remote-write-receiver --enable-feature=native-histograms \
@@ -383,7 +426,7 @@ preflight_remote_write() {
   local tag="preflight" name="${K6_PREFIX}-preflight" log="$WORK/preflight.log" got="" fails
   ALL_NAMES="$ALL_NAMES $name"
   printf 'export default function () {}\n' | docker run -i --rm --name "$name" --network "$NETWORK" \
-    --cpuset-cpus="$XCHECK_CPUS" -e "K6_PROMETHEUS_RW_SERVER_URL=$RW_URL" \
+    --cpuset-cpus="$XCHECK_CPUS" ${XCHECK_MEMS:+"$XCHECK_MEMS"} -e "K6_PROMETHEUS_RW_SERVER_URL=$RW_URL" \
     -e "K6_PROMETHEUS_RW_PUSH_INTERVAL=${PUSH_S}s" -e "K6_PROMETHEUS_RW_STALE_MARKERS=false" \
     "$K6_IMAGE" run --quiet --vus 1 --iterations 1 --tag "proc=$tag" -o experimental-prometheus-rw - > "$log" 2>&1 \
     || die "remote-write pre-flight: the k6 container failed to run (see preflight.log): $(tail -n 3 "$log" | tr '\n' ' ')"
@@ -415,7 +458,7 @@ wait_ready() {
 if [ -n "$LAUNCH_SUT" ]; then
   ALL_NAMES="$ALL_NAMES $SUT_NAME"
   docker run -d --name "$SUT_NAME" --network "$NETWORK" --network-alias "$SUT_ALIAS" \
-    --cpuset-cpus="$SERVER_CPUS" --memory="$SERVER_MEMORY" -p 127.0.0.1::1080 \
+    --cpuset-cpus="$SERVER_CPUS" ${SUT_MEMS:+"$SUT_MEMS"} --memory="$SERVER_MEMORY" -p 127.0.0.1::1080 \
     -e MOCKSERVER_LOG_LEVEL=ERROR -e MOCKSERVER_DISABLE_SYSTEM_OUT=true -e MOCKSERVER_METRICS_ENABLED=true \
     "$MOCKSERVER_IMAGE" -serverPort 1080 >/dev/null
   SUT_CONTAINER="$SUT_NAME"
@@ -494,14 +537,15 @@ run_phase() {
   local rungs="${#agg_arr[@]}"
   local start_s=$(( $(date +%s) + START_LEAD_S ))
   local ladder_end_s=$(( start_s + (rungs - 1) * (STEP_S + GAP_S) + STEP_S ))
-  local names="" i
+  local names="" i mems
   echo "+++ phase=$phase N=$n per_process_rates=$pp window=$wmode lean=$lean start_at=$start_s ladder_end=$ladder_end_s" >&2
   for ((i=0;i<n;i++)); do
     local kname="${K6_PREFIX}-${phase}-p${i}"
     names="${names:+$names }$kname"
     ALL_NAMES="$ALL_NAMES $kname"; echo "$kname" >> "$WORK/containers.txt"
     # No --quiet: k6's progress line is its only report of interrupted iterations.
-    docker run -d --name "$kname" --network "$NETWORK" --cpuset-cpus="${set_arr[$i]}" \
+    mems="$(numa_mems_flag "${set_arr[$i]}")"
+    docker run -d --name "$kname" --network "$NETWORK" --cpuset-cpus="${set_arr[$i]}" ${mems:+"$mems"} \
       -v "$K6_DIR:/k6:ro" -v "$WORK:/out" \
       -e "BASE_URL=$TARGET_URL" -e "PROTO=http" \
       -e "K6_SWEEP_RATES=$pp" -e "K6_SWEEP_STEP=${STEP_S}s" -e "K6_SWEEP_GAP=${GAP_S}s" \
@@ -782,7 +826,7 @@ cpu_cost_json() { # phase
 # --- warm-up (never measured) --------------------------------------------------
 if [ "$(to_secs "$WARMUP_DURATION")" -gt 0 ]; then
   echo "--- warm-up: ${WARMUP_RATE} rps for $WARMUP_DURATION (not measured)" >&2
-  docker run --rm --network "$NETWORK" --cpuset-cpus="$XCHECK_CPUS" -v "$K6_DIR:/k6:ro" -v "$WORK:/out" \
+  docker run --rm --network "$NETWORK" --cpuset-cpus="$XCHECK_CPUS" ${XCHECK_MEMS:+"$XCHECK_MEMS"} -v "$K6_DIR:/k6:ro" -v "$WORK:/out" \
     -e "BASE_URL=$TARGET_URL" -e "PROTO=http" -e "K6_SWEEP_RATES=$WARMUP_RATE" -e "K6_SWEEP_STEP=$WARMUP_DURATION" \
     -e "K6_SWEEP_GAP=1s" -e "K6_SWEEP_SETTLE=0s" -e "K6_SWEEP_RESULT_PATH=/out/warmup.json" \
     "$K6_IMAGE" run --quiet /k6/sweep.js >/dev/null 2>&1 || true
@@ -1111,7 +1155,7 @@ jq -n --argjson synth "$SYNTH" --argjson headline "$HEADLINE" --slurpfile m "$WO
   --argjson cpusamples "$CPU_SAMPLES" --argjson t0 "$T0_S" --arg p99max "$P99_MAX_MS" \
   --argjson slow "$SLOW_FLUSHES" --argjson rwfail "${RW_FAILURES:-0}" --argjson k6gc "$K6_GC" --argjson k6int "$K6_INTERRUPTED" \
   --arg hook_cut "${PERF_RW_TEST_CUT_FAULT:-}" --arg hook_step "${PERF_RW_TEST_FAIL_STEP:-}" --arg hook_null "${PERF_RW_TEST_NULL_RUNG:-}" --arg hook_zero "${PERF_RW_TEST_ZERO_TAIL:-}" \
-  --argjson promwarn "$(head -n 50 "$PROM_WARNINGS" | jq -R . | jq -sc .)" '
+  --argjson promwarn "$(head -n 50 "$PROM_WARNINGS" | jq -R . | jq -sc .)" --argjson placement "$PLACEMENT_JSON" '
   ($m[0].points) as $P
   | $synth + {
       rig_valid_peak_achieved_rps: $synth.saturation.rig_valid_peak_achieved_rps,
@@ -1122,6 +1166,7 @@ jq -n --argjson synth "$SYNTH" --argjson headline "$HEADLINE" --slurpfile m "$WO
       valid: $validity.valid,
       invalid_reasons: $validity.reasons,
       validity: {valid: $validity.valid, checks: $validity.checks},
+      placement: $placement,
       method: {
         method: "remote_write_multi_k6", procs: $n, push_interval_s: $push, quiet_s: $quiet,
         window_mode: $wmode, lean_summary: true, vu_diagnostics: ($vudiag == "true"),

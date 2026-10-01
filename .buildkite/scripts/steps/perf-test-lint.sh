@@ -66,6 +66,9 @@ bash "$REPO_ROOT/.buildkite/scripts/test/perf-k6-interrupted-test.sh"
 echo "--- rw-multi-k6 default k6 runtime fixture checks (item 31: lib/perf-k6-runtime.sh)"
 bash "$REPO_ROOT/.buildkite/scripts/test/perf-k6-runtime-test.sh"
 
+echo "--- NUMA placement fixture checks (items 31/44: lib/perf-cpu-topology.sh on fake sysfs, both arms' layouts)"
+bash "$REPO_ROOT/.buildkite/scripts/test/perf-cpu-topology-test.sh"
+
 echo "--- perf-test-run start-up checks (diagnostics tiers, env guards, wait_ready states)"
 bash "$REPO_ROOT/.buildkite/scripts/test/perf-run-ready-test.sh"
 

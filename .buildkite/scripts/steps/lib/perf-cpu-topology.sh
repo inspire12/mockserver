@@ -40,8 +40,14 @@ expand_cpuset() {
 # REAL topology from sysfs rather than assuming an enumeration, so it holds whatever
 # the sibling mapping turns out to be. PERF_SYSFS_CPU_ROOT exists so the guard itself
 # can be tested against a SIMULATED topology; it defaults to the real sysfs path.
+# PERF_SYSFS_ROOT moves the whole tree (cpu and node) for the NUMA fixture tests; the narrower
+# PERF_SYSFS_CPU_ROOT still wins for the cpu half, so existing callers keep working.
+perf_sysfs_cpu_root() { echo "${PERF_SYSFS_CPU_ROOT:-${PERF_SYSFS_ROOT:-/sys}/devices/system/cpu}"; }
+perf_sysfs_node_root() { echo "${PERF_SYSFS_NODE_ROOT:-${PERF_SYSFS_ROOT:-/sys}/devices/system/node}"; }
+
 phys_core_key() {
-  local cpu="$1" base="${PERF_SYSFS_CPU_ROOT:-/sys/devices/system/cpu}/cpu$1/topology"
+  local cpu="$1" base
+  base="$(perf_sysfs_cpu_root)/cpu$1/topology"
   [ -r "$base/core_id" ] || return 1
   printf '%s:%s' "$(cat "$base/physical_package_id" 2>/dev/null || echo 0)" "$(cat "$base/core_id")"
 }
@@ -147,4 +153,310 @@ phys_core_count() {
     keys="$keys$key"$'\n'
   done
   printf '%s' "$keys" | sort -u | sed '/^$/d' | wc -l | tr -d ' '
+}
+
+# --- NUMA placement (performance programme items 31 / 44: the two-socket perf-xl rig) ---------
+# Disjoint physical cores are not enough on a two-socket host: a cpuset that straddles nodes
+# splits one role across two LLCs and remote memory, and a k6 on the SUT's socket competes with
+# it for memory bandwidth and LLC. Everything below reads the node map from sysfs
+# (node*/cpulist, cpu*/topology/thread_siblings_list), never from cpu numbering.
+
+# Compress cpu ids (space-separated, any order) into a cpuset spec: "7 8 9 10 31" -> "7-10,31".
+compress_cpulist() {
+  tr ' ' '\n' <<<"$1" | sed '/^$/d' | sort -n -u | awk '
+    function emit() { out = out (out == "" ? "" : ",") (s == e ? s : s "-" e) }
+    NR == 1 { s = $1; e = $1; next }
+    $1 == e + 1 { e = $1; next }
+    { emit(); s = $1; e = $1 }
+    END { if (NR > 0) { emit(); print out } }'
+}
+
+# The node map, one "<cpu> <node> <package>" line per cpu, ascending by cpu (the package is
+# physical_package_id, 0 where unreadable, as in phys_core_key). A kernel built without NUMA has
+# no node directory: with readable cpu topology that host is one node, 0. Empty when nothing is
+# readable (e.g. a macOS Docker Desktop run).
+_numa_map_compute() {
+  local root d nodes
+  root="$(perf_sysfs_node_root)"
+  set -- "$root"/node[0-9]*/cpulist
+  if [ -e "$1" ]; then
+    nodes="$(awk '{ n = FILENAME; sub(/\/cpulist$/, "", n); sub(/.*\/node/, "", n); gsub(/[[:space:]]/, "")
+           k = split($0, part, ",")
+           for (i = 1; i <= k; i++) { if (part[i] == "") continue
+             m = split(part[i], r, "-"); b = (m > 1 ? r[2] : r[1])
+             for (c = r[1] + 0; c <= b + 0; c++) print c, n } }' "$@" 2>/dev/null)"
+  elif [ ! -d "$root" ] && phys_core_key 0 >/dev/null 2>&1; then
+    nodes="$(for d in "$(perf_sysfs_cpu_root)"/cpu[0-9]*; do [ -r "$d/topology/core_id" ] && echo "${d##*/cpu} 0"; done)"
+  fi
+  [ -n "${nodes:-}" ] || return 0
+  set -- "$(perf_sysfs_cpu_root)"/cpu[0-9]*/topology/physical_package_id
+  { [ -e "$1" ] && awk '{ c = FILENAME; sub(/\/topology\/physical_package_id$/, "", c); sub(/.*\/cpu/, "", c); print "P", c, $1 }' "$@" 2>/dev/null
+    printf '%s\n' "$nodes"; } \
+    | awk '$1 == "P" { pkg[$2] = $3; next } NF == 2 { print $1, $2, (($1 in pkg) ? pkg[$1] : 0) }' | sort -n -k1,1
+  return 0
+}
+_numa_map_key() { echo "${PERF_SYSFS_NODE_ROOT:-${PERF_SYSFS_ROOT:-/sys}/devices/system/node}|$(perf_sysfs_cpu_root)"; }
+# The map is static for a run, so a caller primes it once; every later lookup (each in its own
+# $(...) subshell) then reads the variable instead of sysfs. A different sysfs root recomputes.
+numa_map_prime() { _NUMA_MAP="$(_numa_map_compute)"; _NUMA_MAP_KEY="$(_numa_map_key)"; }
+numa_map() {
+  if [ -n "${_NUMA_MAP_KEY:-}" ] && [ "$_NUMA_MAP_KEY" = "$(_numa_map_key)" ]; then
+    [ -n "$_NUMA_MAP" ] && printf '%s\n' "$_NUMA_MAP"
+  else
+    _numa_map_compute
+  fi
+  return 0
+}
+
+# Node ids that own at least one cpu, ascending ("0 1"); empty when the map is unreadable.
+numa_nodes() { numa_map | awk '{print $2}' | sort -n -u | paste -sd' ' -; }
+numa_node_count() { local n; n="$(numa_nodes)"; wc -w <<<"$n" | tr -d ' '; }
+numa_package_count() { numa_map | awk '{print $3}' | sort -u | sed '/^$/d' | wc -l | tr -d ' '; }
+
+# The distinct packages (sockets) a cpuset spec or a node occupies, ascending.
+cpuset_packages() { # spec
+  local cpus; cpus="$(expand_cpuset "$1")"; [ -n "$cpus" ] || return 3
+  numa_map | awk -v want="$cpus" 'BEGIN { k = split(want, w, " "); for (i = 1; i <= k; i++) on[w[i]] = 1 }
+    ($1 in on) { print $3 }' | sort -n -u | paste -sd' ' -
+}
+numa_node_packages() { numa_map | awk -v n="$1" '$2 == n { print $3 }' | sort -n -u | paste -sd' ' -; } # node
+
+# A node's cpus, ascending; returns 1 for a node with none.
+numa_node_cpus() {
+  local out
+  out="$(numa_map | awk -v n="$1" '$2 == n {print $1}' | paste -sd' ' -)"
+  [ -n "$out" ] || return 1
+  echo "$out"
+}
+
+# The distinct nodes a cpuset spec occupies, ascending ("0" / "0 1"). Returns 1 when the node
+# map is unreadable, 2 when a cpu is in no node (offline or absent), 3 when the spec is empty.
+cpuset_numa_nodes() {
+  local cpus map out
+  cpus="$(expand_cpuset "$1")"; [ -n "$cpus" ] || return 3
+  map="$(numa_map)"; [ -n "$map" ] || return 1
+  out="$(awk -v want="$cpus" '
+    BEGIN { k = split(want, w, " ") }
+    { node[$1] = $2 }
+    END { for (i = 1; i <= k; i++) { if (!(w[i] in node)) { print "MISSING"; exit } seen[node[w[i]]] = 1 }
+          for (x in seen) print x }' <<<"$map" | sort -n | paste -sd' ' -)"
+  case "$out" in *MISSING*) return 2 ;; esac
+  echo "$out"
+}
+
+# Unprovable socket placement: a limitation off-CI (warn, 0), a refused run in CI (1).
+_numa_unproven() { # reason
+  if [ "${BUILDKITE:-}" = "true" ]; then
+    echo "^^^ +++"
+    echo ":x: $1; refusing to produce benchmark figures whose socket placement cannot be shown" >&2
+    return 1
+  fi
+  echo "--- WARNING: $1 (expected off-CI)"
+  return 0
+}
+_numa_unknown() { _numa_unproven "the NUMA node map is unreadable, so cannot verify $1"; } # what
+
+# GUARD: one role's cpuset sits on ONE node. An empty (unpinned) spec passes only on a host
+# with at most one node. Fails closed on a straddle, an offline cpu or a malformed spec.
+assert_cpuset_single_node() { # role spec
+  local role="$1" spec="$2" nodes rc=0
+  if [ -z "$spec" ]; then
+    if [ "$(numa_node_count)" -gt 1 ]; then
+      echo "^^^ +++"
+      echo ":x: the $role is unpinned on a $(numa_node_count)-node host, so it would float across NUMA nodes" >&2
+      return 1
+    fi
+    return 0
+  fi
+  nodes="$(cpuset_numa_nodes "$spec")" || rc=$?
+  case "$rc" in
+    0) ;;
+    1) _numa_unknown "that the $role cpuset $spec is on one NUMA node"; return ;;
+    2) echo ":x: the $role cpuset '$spec' names a cpu that is in no NUMA node (offline or absent)" >&2; return 1 ;;
+    *) echo ":x: the $role cpuset '$spec' expands to no cpus (a reversed or malformed range?)" >&2; return 1 ;;
+  esac
+  if [ "$(wc -w <<<"$nodes" | tr -d ' ')" -ne 1 ]; then
+    echo "^^^ +++"
+    echo ":x: the $role cpuset '$spec' straddles NUMA nodes ${nodes// /, }: its threads would split across sockets (two LLCs, remote memory), so it would not measure one $role" >&2
+    return 1
+  fi
+  echo "--- verified: $role cpuset $spec is on NUMA node $nodes"
+}
+
+# GUARD: two cpusets share no NUMA node (k6 on the other socket from the SUT).
+assert_nodes_disjoint() { # role_a spec_a role_b spec_b
+  if [ "$#" -ne 4 ]; then
+    echo ":x: assert_nodes_disjoint needs role/spec, role/spec (4 arguments), got $#" >&2; return 1
+  fi
+  local a="" b="" rc=0 n shared=""
+  a="$(cpuset_numa_nodes "$2")" || rc=$?
+  if [ "$rc" -eq 0 ]; then b="$(cpuset_numa_nodes "$4")" || rc=$?; fi
+  case "$rc" in
+    0) ;;
+    1) _numa_unknown "that $1 and $3 are on different NUMA nodes"; return ;;
+    2) echo ":x: the $1 or $3 cpuset names a cpu that is in no NUMA node (offline or absent)" >&2; return 1 ;;
+    *) echo ":x: the $1 or $3 cpuset expands to no cpus (an empty, reversed or malformed spec?)" >&2; return 1 ;;
+  esac
+  for n in $a; do case " $b " in *" $n "*) shared="$shared $n" ;; esac; done
+  if [ -n "$shared" ]; then
+    echo "^^^ +++"
+    echo ":x: $1 ($2, node ${a// /, }) and $3 ($4, node ${b// /, }) share NUMA node${shared}: they would contend for one socket's memory bandwidth and LLC" >&2
+    return 1
+  fi
+  echo "--- verified: $1 on NUMA node ${a// /, }, $3 on node ${b// /, }"
+}
+
+# A node's physical cores in ascending order of their lowest cpu, one per line:
+# "<first cpu> <its hyperthread siblings on this node...>". Siblings come from
+# thread_siblings_list, or from the core keys above where that is unreadable.
+numa_node_phys_cores() { # node
+  local cpus c root files=() pairs=""
+  cpus="$(numa_node_cpus "$1")" || return 1
+  root="$(perf_sysfs_cpu_root)"
+  for c in $cpus; do files+=("$root/cpu$c/topology/thread_siblings_list"); done
+  if [ -r "${files[0]}" ] && awk 'END{}' "${files[@]}" 2>/dev/null; then
+    pairs="$(awk '{ c = FILENAME; sub(/\/topology\/thread_siblings_list$/, "", c); sub(/.*\/cpu/, "", c)
+                    gsub(/[[:space:]]/, ""); print c, $0 }' "${files[@]}")"
+  else
+    for c in $cpus; do pairs="$pairs$c $(phys_core_key "$c" || echo "?$c")"$'\n'; done
+    pairs="$(awk '{ key[NR] = $2; cpu[NR] = $1 } END { for (i = 1; i <= NR; i++) { l = ""
+               for (j = 1; j <= NR; j++) if (key[j] == key[i]) l = l (l == "" ? "" : ",") cpu[j]
+               print cpu[i], l } }' <<<"$pairs")"
+  fi
+  awk -v cpus="$cpus" '
+    BEGIN { k = split(cpus, order, " "); for (i = 1; i <= k; i++) on[order[i]] = 1 }
+    { sib[$1] = $2 }
+    END { for (i = 1; i <= k; i++) { c = order[i]; if (c in seen) continue
+            line = c; seen[c] = 1; m = split(sib[c], part, ",")
+            for (j = 1; j <= m; j++) { q = split(part[j], r, "-"); b = (q > 1 ? r[2] : r[1])
+              for (s = r[1] + 0; s <= b + 0; s++) if ((s in on) && !(s in seen)) { line = line " " s; seen[s] = 1 } }
+            print line } }' <<<"$pairs"
+}
+
+# k6's node: the first node on a socket <node> is not on. Sub-NUMA clustering splits one socket
+# into several nodes, so the next node id can be the same socket. Returns 1 when there is none.
+numa_other_socket_node() { # node
+  local n v p0
+  p0=" $(numa_node_packages "$1") "
+  for n in $(numa_nodes); do
+    [ "$n" = "$1" ] && continue
+    for v in $(numa_node_packages "$n"); do case "$p0" in *" $v "*) continue 2 ;; esac; done
+    echo "$n"; return 0
+  done
+  return 1
+}
+
+# The two-socket layout of the multi-k6 arm and the hardware matrix, from the node map:
+#   server      the first <sut_cores> physical cores of the first node, one thread each
+#   upstream    the next core, one thread;  prometheus  the core after it, both threads
+#   k6          <procs> groups of <per> physical cores, both threads: on the second node (mode
+#               other), or on what the first node has left (mode same, the interference A/B)
+# <per> defaults to the k6 node's free cores / procs. Prints key=value lines (server, upstream,
+# prometheus, k6 (';'-joined), sut_node, k6_node, per_proc). Returns 1 on a host with fewer
+# than two nodes (the caller keeps its single-node layout) and 2 when the layout cannot fit.
+numa_split_layout() { # sut_cores procs mode [per]
+  local sut_cores="$1" procs="$2" mode="$3" per="${4:-}" nodes n0 n1 lines k6lines k6node
+  local total0 need0 avail i g v server up prom k6=""
+  nodes="$(numa_nodes)"
+  [ "$(wc -w <<<"$nodes" | tr -d ' ')" -ge 2 ] || return 1
+  for v in "$sut_cores" "$procs" ${per:+"$per"}; do
+    [[ "$v" =~ ^[1-9][0-9]*$ ]] || { echo ":x: numa_split_layout: '$v' is not a positive whole number" >&2; return 2; }
+  done
+  n0="$(awk '{print $1}' <<<"$nodes")"; n1="$(numa_other_socket_node "$n0")" || n1=""
+  lines="$(numa_node_phys_cores "$n0")" || { echo ":x: cannot read the physical cores of NUMA node $n0" >&2; return 2; }
+  total0="$(sed '/^$/d' <<<"$lines" | wc -l | tr -d ' ')"; need0=$(( sut_cores + 2 ))
+  if [ "$total0" -lt "$need0" ]; then
+    echo ":x: NUMA node $n0 has $total0 physical cores; the SUT ($sut_cores), upstream (1) and Prometheus (1) need $need0" >&2; return 2
+  fi
+  server="$(compress_cpulist "$(head -n "$sut_cores" <<<"$lines" | awk '{print $1}' | paste -sd' ' -)")"
+  up="$(sed -n "$(( sut_cores + 1 ))p" <<<"$lines" | awk '{print $1}')"
+  prom="$(compress_cpulist "$(sed -n "$(( sut_cores + 2 ))p" <<<"$lines")")"
+  case "$mode" in
+    other)
+      [ -n "$n1" ] || { echo ":x: no NUMA node is on another socket from node $n0 (one socket split into nodes?)" >&2; return 2; }
+      k6node="$n1"; k6lines="$(numa_node_phys_cores "$n1")" || { echo ":x: cannot read the physical cores of NUMA node $n1" >&2; return 2; } ;;
+    same)  k6node="$n0"; k6lines="$(tail -n +"$(( need0 + 1 ))" <<<"$lines")" ;;
+    *) echo ":x: k6 NUMA node mode '$mode' must be other or same" >&2; return 2 ;;
+  esac
+  avail="$(sed '/^$/d' <<<"$k6lines" | wc -l | tr -d ' ')"
+  [ -n "$per" ] || per=$(( avail / procs ))
+  if [ "$per" -lt 1 ] || [ $(( per * procs )) -gt "$avail" ]; then
+    echo ":x: NUMA node $k6node has $avail free physical cores; $procs k6 process(es) x ${per} core(s) do not fit" >&2; return 2
+  fi
+  for ((i = 0; i < procs; i++)); do
+    g="$(sed -n "$(( i * per + 1 )),$(( (i + 1) * per ))p" <<<"$k6lines" | paste -sd' ' -)"
+    k6="${k6:+$k6;}$(compress_cpulist "$g")"
+  done
+  printf 'server=%s\nupstream=%s\nprometheus=%s\nk6=%s\nsut_node=%s\nk6_node=%s\nper_proc=%s\n' \
+    "$server" "$up" "$prom" "$k6" "$n0" "$k6node" "$per"
+}
+layout_value() { sed -n "s/^$1=//p" <<<"$2"; } # key layout_text
+
+# "--cpuset-mems=<node>" for a cpuset on one known node; nothing when that cannot be shown.
+numa_mems_flag() { # spec
+  local n
+  n="$(cpuset_numa_nodes "$1" 2>/dev/null)" || return 0
+  case "$n" in ""|*" "*) return 0 ;; esac
+  printf -- '--cpuset-mems=%s' "$n"
+}
+
+# GUARD for one arm: the SUT and every k6 cpuset each on one node, and k6 on a node the SUT
+# is not on whenever the host has two (mode other) — or on the SUT's node (mode same).
+numa_placement_check() { # mode sut_spec k6_spec...
+  local mode="$1" sut="$2" k i=0 all="" sn kn v
+  shift 2
+  case "$mode" in other|same) ;; *) echo ":x: PERF_K6_NUMA_NODE='$mode' must be other or same" >&2; return 1 ;; esac
+  [ "$#" -ge 1 ] || { echo ":x: numa_placement_check needs at least one k6 cpuset" >&2; return 1; }
+  if [ -z "$(numa_map)" ]; then _numa_unknown "the SUT and k6 NUMA placement"; return; fi
+  # More sockets than nodes (numa=off, a NUMA-less kernel): the node map cannot show the split.
+  if [ "$(numa_package_count)" -gt "$(numa_node_count)" ]; then
+    _numa_unproven "the host has $(numa_package_count) sockets but $(numa_node_count) NUMA node(s), so the node map cannot show which socket k6 is on"
+    return
+  fi
+  assert_cpuset_single_node server "$sut" || return 1
+  for k in "$@"; do
+    assert_cpuset_single_node "k6_$i" "$k" || return 1
+    all="${all:+$all,}$k"; i=$(( i + 1 ))
+  done
+  [ "$(numa_node_count)" -ge 2 ] || return 0
+  if [ "$mode" = other ]; then
+    if ! assert_nodes_disjoint server "$sut" k6 "$all"; then
+      echo "    k6 must run on another NUMA node from the SUT on a multi-node host; PERF_K6_NUMA_NODE=same is the explicit same-socket A/B" >&2
+      return 1
+    fi
+    sn=" $(cpuset_packages "$sut") "; kn="$(cpuset_packages "$all")"
+    for v in $kn; do
+      case "$sn" in *" $v "*)
+        echo "^^^ +++"
+        echo ":x: k6 ($all) is on another NUMA node but the same socket ($v) as the SUT ($sut): sub-NUMA clustering splits a socket, so k6 would still share its memory controller and LLC" >&2
+        return 1 ;;
+      esac
+    done
+  else
+    sn="$(cpuset_numa_nodes "$sut")"; kn="$(cpuset_numa_nodes "$all")"
+    if [ "$sn" != "$kn" ]; then
+      echo "^^^ +++"
+      echo ":x: PERF_K6_NUMA_NODE=same but k6 is on NUMA node ${kn// /, } and the SUT on ${sn// /, }" >&2
+      return 1
+    fi
+    echo "--- verified: k6 on the SUT's NUMA node $sn (PERF_K6_NUMA_NODE=same: an interference A/B, never a baseline run)"
+  fi
+}
+
+# The result's placement record: {numa_nodes, sut_node, k6_node, k6_nodes, layout, k6_numa_node,
+# baseline_eligible}. numa_nodes is null when the node map is unreadable.
+numa_placement_json() { # layout mode sut_spec k6_spec...
+  local layout="$1" mode="$2" sut="$3" k all="" sn kn
+  shift 3
+  for k in "$@"; do all="${all:+$all,}$k"; done
+  sn="$(cpuset_numa_nodes "$sut" 2>/dev/null)" || sn=""
+  kn="$(cpuset_numa_nodes "$all" 2>/dev/null)" || kn=""
+  jq -nc --arg layout "$layout" --arg mode "$mode" --arg count "$(numa_node_count)" --arg sn "$sn" --arg kn "$kn" '
+    def ids: if . == "" then [] else split(" ") | map(tonumber) end;
+    ($sn | ids) as $s | ($kn | ids) as $k
+    | {numa_nodes:(if $count == "0" then null else ($count | tonumber) end),
+       sut_node:(if ($s | length) == 1 then $s[0] else null end),
+       k6_node:(if ($k | length) == 1 then $k[0] else null end),
+       k6_nodes:$k, layout:$layout, k6_numa_node:$mode,
+       baseline_eligible:($mode != "same")}'
 }
