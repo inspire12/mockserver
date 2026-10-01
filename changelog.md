@@ -176,10 +176,13 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   packet-sized pieces, is copied about once instead of repeatedly as it arrives. An HTTP/2 upload sent as
   many small DATA frames is now copied at most about twice (at most 1.8× its size in the mixes measured,
   against up to 160× before; 10 MiB in one-byte frames used to cost about 54 GB of copying and now costs
-  10 MiB), and the most it holds stayed within about twice the body, the old worst case, in tests that gave
-  each frame a buffer of its own, though some mixes of small and larger frames now peak higher than before
-  (frames that share the connection's reads have not yet been measured); a body in 16 KiB frames, including the shorter frames
-  the flow-control window cuts, is still not copied. An HTTP/1.1 upload, a forwarded or tunnelled response,
+  10 MiB). Measured through the real HTTP/2 connection without TLS, where each frame keeps the network read it
+  arrived in allocated, an upload holds at most about 3.1× its size in the mixes measured with frames sent in
+  ordinary reads: less than before for uploads of tiny frames, including several on one connection (1.6×
+  against 5.3× beside an upload in 16 KiB frames), but more for an upload mixing runs of frames under 1 KiB with
+  1 KiB frames (3.1× against 1.4×). An ordinary upload in 16 KiB frames, including the shorter frames the
+  flow-control window cuts, is still not copied, and holds up to about 1.75× its size in network buffers, as
+  before. An HTTP/1.1 upload, a forwarded or tunnelled response,
   or a response on the forward client's own HTTP/2 stream, sent as many tiny chunks, is now copied about once
   instead of in full each time it passes the limit on body pieces (a 10 MiB upload in one-byte chunks
   used to cost about 5.4 GB of copying and a 50 MiB forwarded response about 27 GB), and never copies more,
