@@ -2,6 +2,8 @@ package org.mockserver.netty.connection;
 
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.DefaultFullHttpResponse;
@@ -14,11 +16,15 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockserver.metrics.Metrics;
+import org.mockserver.responsewriter.HttpExchangeEndedEvent;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 
 import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.core.Is.is;
 import static org.mockserver.configuration.Configuration.configuration;
@@ -136,6 +142,57 @@ public class HttpTransportTimerTest {
 
         assertThat(count(TRANSPORT), is(0L));
         assertThat(channel.pipeline().get(HttpTransportTimer.class), nullValue());
+    }
+
+    @Test
+    public void shouldTimeTheNextKeepAliveRequestFromItsOwnStartAfterAnExchangeEndsOutsideTheCodec() throws InterruptedException {
+        readRequest();
+        Thread.sleep(GAP_MILLIS);
+        channel.pipeline().fireUserEventTriggered(HttpExchangeEndedEvent.INSTANCE);
+        assertThat("an exchange answered with raw bytes is not recorded", count(TRANSPORT), is(0L));
+
+        readRequest();
+        writeAndFlush(response(HttpResponseStatus.OK));
+
+        assertThat(count(TRANSPORT), is(1L));
+        assertThat("timed from its own request, not the raw-bytes one before it", countOver(TRANSPORT, UNDER_GAP_SECONDS), is(0L));
+    }
+
+    @Test
+    public void shouldEndOnlyTheOldestPipelinedExchangeOnAnExchangeEndedEvent() throws InterruptedException {
+        readRequest();
+        Thread.sleep(GAP_MILLIS);
+        readRequest();
+        channel.pipeline().fireUserEventTriggered(HttpExchangeEndedEvent.INSTANCE);
+
+        writeAndFlush(response(HttpResponseStatus.OK));
+
+        assertThat(count(TRANSPORT), is(1L));
+        assertThat(countOver(TRANSPORT, UNDER_GAP_SECONDS), is(0L));
+    }
+
+    @Test
+    public void shouldIgnoreAnExchangeEndedEventWithNoExchangeOutstanding() {
+        channel.pipeline().fireUserEventTriggered(HttpExchangeEndedEvent.INSTANCE);
+        readRequest();
+        writeAndFlush(response(HttpResponseStatus.OK));
+
+        assertThat("the request that followed is still timed", count(TRANSPORT), is(1L));
+    }
+
+    @Test
+    public void shouldPassTheExchangeEndedEventOn() {
+        List<Object> events = new ArrayList<>();
+        channel.pipeline().addLast(new ChannelInboundHandlerAdapter() {
+            @Override
+            public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
+                events.add(evt);
+            }
+        });
+
+        channel.pipeline().fireUserEventTriggered(HttpExchangeEndedEvent.INSTANCE);
+
+        assertThat(events, contains((Object) HttpExchangeEndedEvent.INSTANCE));
     }
 
     private void readRequest() {

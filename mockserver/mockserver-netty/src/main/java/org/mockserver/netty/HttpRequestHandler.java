@@ -575,6 +575,9 @@ public class HttpRequestHandler extends SimpleChannelInboundHandler<HttpRequest>
                                     .setArguments(request, throwable.getMessage())
                                     .setThrowable(throwable)
                             );
+                            // answer, as the other error paths here do, so the client is not left waiting
+                            // and the connection's exchange tracking stays paired
+                            responseWriter.writeResponse(request, response().withStatusCode(INTERNAL_SERVER_ERROR.code()), false);
                         }
                     }
 

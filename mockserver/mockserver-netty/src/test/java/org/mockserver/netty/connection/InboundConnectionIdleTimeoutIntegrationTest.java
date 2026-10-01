@@ -27,6 +27,7 @@ import static org.hamcrest.Matchers.lessThan;
 import static org.hamcrest.core.Is.is;
 import static org.junit.Assert.fail;
 import static org.mockserver.configuration.Configuration.configuration;
+import static org.mockserver.model.HttpError.error;
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
 import static org.mockserver.model.HttpSseResponse.sseResponse;
@@ -98,6 +99,22 @@ public class InboundConnectionIdleTimeoutIntegrationTest {
             long answered = System.nanoTime();
 
             assertThat(socket.getInputStream().read(), is(-1));
+            assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - answered), greaterThanOrEqualTo(IDLE_MILLIS - 50));
+        }
+    }
+
+    @Test
+    public void shouldCloseKeepAliveConnectionOnceIdleAfterARawBytesResponse() throws Exception {
+        startServer(IDLE_MILLIS);
+        mockServerClient.when(request().withPath("/raw")).error(error()
+            .withResponseBytes("HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nraw".getBytes(StandardCharsets.UTF_8)));
+        try (Socket socket = new Socket("localhost", port)) {
+            socket.setSoTimeout(5_000);
+
+            assertThat(exchange(socket, "/raw"), containsString("raw"));
+            long answered = System.nanoTime();
+
+            assertThat("the raw-bytes exchange no longer keeps the connection busy forever", socket.getInputStream().read(), is(-1));
             assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - answered), greaterThanOrEqualTo(IDLE_MILLIS - 50));
         }
     }

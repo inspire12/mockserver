@@ -24,6 +24,7 @@ import org.mockserver.model.HttpResponse;
 import org.mockserver.model.StreamingBody;
 import org.mockserver.model.TcpChaosProfile;
 import org.mockserver.netty.unification.Http2GoAwayEmitter;
+import org.mockserver.responsewriter.HttpExchangeEndedEvent;
 import org.mockserver.responsewriter.ResponseWriter;
 import org.mockserver.scheduler.Scheduler;
 
@@ -88,6 +89,15 @@ public class NettyResponseWriter extends ResponseWriter {
         } else {
             writeAndCloseSocket(ctx, request, response);
         }
+        if (isFinalInformationalResponse(response)) {
+            // the exchange handlers after HttpServerCodec take any 1xx but 101 for an interim response
+            HttpExchangeEndedEvent.fire(ctx);
+        }
+    }
+
+    private static boolean isFinalInformationalResponse(HttpResponse response) {
+        Integer statusCode = response.getStatusCode();
+        return statusCode != null && statusCode >= 100 && statusCode < 200 && statusCode != HttpResponseStatus.SWITCHING_PROTOCOLS.code();
     }
 
     /**

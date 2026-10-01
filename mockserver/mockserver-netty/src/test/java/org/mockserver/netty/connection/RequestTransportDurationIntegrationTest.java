@@ -10,6 +10,7 @@ import org.mockserver.netty.MockServer;
 import org.mockserver.netty.MockServerCaTrustTestSupport;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
@@ -19,15 +20,20 @@ import java.net.http.HttpClient;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.allOf;
+import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
+import static org.hamcrest.Matchers.startsWith;
 import static org.hamcrest.core.Is.is;
 import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.model.ConnectionOptions.connectionOptions;
+import static org.mockserver.model.HttpError.error;
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
 import static org.mockserver.netty.connection.RecordedDurations.HANDLER;
@@ -39,7 +45,8 @@ import static org.mockserver.stop.Stop.stopQuietly;
 /**
  * {@code mock_server_request_transport_duration_seconds} over real sockets: time MockServer spends after
  * its request handler returns (a chunk-delayed body, a client that will not read) is in the transport
- * histogram and not in the handler histogram, and HTTP/2 streams are timed one by one.
+ * histogram and not in the handler histogram, HTTP/2 streams are timed one by one, and a raw-bytes
+ * response does not shift the timing of the keep-alive requests after it.
  */
 public class RequestTransportDurationIntegrationTest {
 
@@ -120,6 +127,75 @@ public class RequestTransportDurationIntegrationTest {
     }
 
     @Test
+    public void shouldTimeAKeepAliveRequestAfterARawBytesResponseFromItsOwnStart() throws Exception {
+        mockServerClient.when(request().withPath("/raw")).error(error()
+            .withResponseBytes("HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nraw".getBytes(StandardCharsets.UTF_8)));
+        mockServerClient.when(request().withPath("/normal")).respond(response().withBody("normal"));
+        settle();
+        long transportBefore = count(TRANSPORT);
+        long transportSlowBefore = countOver(TRANSPORT, HALF_SECOND);
+
+        try (Socket socket = new Socket("localhost", port)) {
+            socket.setSoTimeout(10_000);
+            assertThat(exchange(socket, "/raw"), endsWith("raw"));
+
+            Thread.sleep(1_000);
+
+            assertThat(exchange(socket, "/normal"), endsWith("normal"));
+        }
+        awaitTrue(() -> count(TRANSPORT) > transportBefore);
+        Thread.sleep(200);
+        assertThat("only the normal response is recorded", count(TRANSPORT) - transportBefore, is(1L));
+        assertThat("timed from its own request, not from the raw-bytes request a second earlier", countOver(TRANSPORT, HALF_SECOND) - transportSlowBefore, is(0L));
+    }
+
+    @Test
+    public void shouldTimeAKeepAliveRequestAfterADelayedRawBytesResponseFromItsOwnStart() throws Exception {
+        mockServerClient.when(request().withPath("/raw-delayed")).error(error()
+            .withResponseBytes("HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nraw".getBytes(StandardCharsets.UTF_8))
+            .withDelay(TimeUnit.MILLISECONDS, 600));
+        mockServerClient.when(request().withPath("/normal")).respond(response().withBody("normal"));
+        settle();
+        long transportBefore = count(TRANSPORT);
+        long transportSlowBefore = countOver(TRANSPORT, HALF_SECOND);
+
+        try (Socket socket = new Socket("localhost", port)) {
+            socket.setSoTimeout(10_000);
+            assertThat(exchange(socket, "/raw-delayed"), endsWith("raw"));
+            // straight away: the raw bytes are written off the event loop, so the next request races the end of their exchange
+            assertThat(exchange(socket, "/normal"), endsWith("normal"));
+        }
+        awaitTrue(() -> count(TRANSPORT) > transportBefore);
+        Thread.sleep(200);
+        assertThat(count(TRANSPORT) - transportBefore, is(1L));
+        assertThat("timed from its own request, not from the delayed raw-bytes request", countOver(TRANSPORT, HALF_SECOND) - transportSlowBefore, is(0L));
+    }
+
+    @Test
+    public void shouldWriteALargeRawBytesResponseToASlowReaderAndKeepTheConnectionInStep() throws Exception {
+        int bodyBytes = 1024 * 1024;
+        byte[] head = ("HTTP/1.1 200 OK\r\nContent-Length: " + bodyBytes + "\r\n\r\n").getBytes(StandardCharsets.UTF_8);
+        byte[] rawResponse = Arrays.copyOf(head, head.length + bodyBytes);
+        Arrays.fill(rawResponse, head.length, rawResponse.length, (byte) 'x');
+        mockServerClient.when(request().withPath("/raw-large")).error(error().withResponseBytes(rawResponse));
+        mockServerClient.when(request().withPath("/normal")).respond(response().withBody("normal"));
+        settle();
+        long transportBefore = count(TRANSPORT);
+
+        try (Socket socket = new Socket()) {
+            socket.setReceiveBufferSize(4096);
+            socket.connect(new InetSocketAddress("localhost", port), 10_000);
+            socket.setSoTimeout(10_000);
+            assertThat(exchange(socket, "/raw-large").length(), is(rawResponse.length));
+            assertThat("the next response on the connection is its own, with nothing stray before it",
+                exchange(socket, "/normal"), allOf(startsWith("HTTP/1.1 200"), endsWith("normal")));
+        }
+        awaitTrue(() -> count(TRANSPORT) > transportBefore);
+        Thread.sleep(200);
+        assertThat("only the normal response is recorded", count(TRANSPORT) - transportBefore, is(1L));
+    }
+
+    @Test
     public void shouldTimeEachHttp2StreamSeparately() throws Exception {
         mockServerClient.when(request().withPath("/h2-fast")).respond(response().withBody("fast"));
         mockServerClient.when(request().withPath("/h2-slow")).respond(response().withBody("slow").withDelay(TimeUnit.MILLISECONDS, 600));
@@ -145,6 +221,28 @@ public class RequestTransportDurationIntegrationTest {
 
     private java.net.http.HttpRequest h2Request(String path) {
         return java.net.http.HttpRequest.newBuilder(URI.create("https://localhost:" + port + path)).timeout(Duration.ofSeconds(10)).build();
+    }
+
+    private String exchange(Socket socket, String path) throws IOException {
+        OutputStream output = socket.getOutputStream();
+        output.write(("GET " + path + " HTTP/1.1\r\nHost: localhost:" + port + "\r\n\r\n").getBytes(StandardCharsets.UTF_8));
+        output.flush();
+        InputStream input = socket.getInputStream();
+        ByteArrayOutputStream head = new ByteArrayOutputStream();
+        while (!head.toString(StandardCharsets.UTF_8).endsWith("\r\n\r\n")) {
+            int next = input.read();
+            if (next == -1) {
+                throw new IOException("connection closed while reading response head: " + head);
+            }
+            head.write(next);
+        }
+        int contentLength = 0;
+        for (String line : head.toString(StandardCharsets.UTF_8).split("\r\n")) {
+            if (line.toLowerCase().startsWith("content-length:")) {
+                contentLength = Integer.parseInt(line.substring("content-length:".length()).trim());
+            }
+        }
+        return head.toString(StandardCharsets.UTF_8) + new String(input.readNBytes(contentLength), StandardCharsets.UTF_8);
     }
 
     private static long readResponseBytes(InputStream input, int bodyBytes) throws Exception {

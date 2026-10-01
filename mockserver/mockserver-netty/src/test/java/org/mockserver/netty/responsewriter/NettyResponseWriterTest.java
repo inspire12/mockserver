@@ -3,6 +3,7 @@ package org.mockserver.netty.responsewriter;
 import io.netty.channel.*;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.HttpHeaderNames;
+import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http.LastHttpContent;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.ReferenceCounted;
@@ -15,10 +16,12 @@ import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.Delay;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
+import org.mockserver.responsewriter.HttpExchangeEndedEvent;
 import org.mockserver.scheduler.Scheduler;
 
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -434,4 +437,39 @@ public class NettyResponseWriterTest {
         );
     }
 
+    @Test
+    public void shouldEndTheExchangeAfterAFinalInformationalResponse() {
+        assertThat(exchangeEndedEventsAfterWriting(102), is(1));
+        assertThat(exchangeEndedEventsAfterWriting(103), is(1));
+    }
+
+    @Test
+    public void shouldNotEndTheExchangeSeparatelyForAResponseTheCodecHandlersSeeEnd() {
+        assertThat(exchangeEndedEventsAfterWriting(200), is(0));
+        assertThat("a 101 makes the connection a WebSocket instead", exchangeEndedEventsAfterWriting(101), is(0));
+    }
+
+    private int exchangeEndedEventsAfterWriting(int statusCode) {
+        AtomicInteger events = new AtomicInteger();
+        EmbeddedChannel channel = new EmbeddedChannel(
+            new HttpServerCodec(),
+            new ChannelInboundHandlerAdapter() {
+                @Override
+                public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
+                    if (evt == HttpExchangeEndedEvent.INSTANCE) {
+                        events.incrementAndGet();
+                    }
+                }
+            },
+            new ChannelOutboundHandlerAdapter()
+        );
+        try {
+            new NettyResponseWriter(configuration(), new MockServerLogger(), channel.pipeline().lastContext(), scheduler)
+                .writeResponse(request("/informational").withKeepAlive(true), response().withStatusCode(statusCode), false);
+            channel.runPendingTasks();
+            return events.get();
+        } finally {
+            channel.finishAndReleaseAll();
+        }
+    }
 }

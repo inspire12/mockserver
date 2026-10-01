@@ -9,6 +9,7 @@ import io.netty.handler.codec.http.HttpResponse;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpStatusClass;
 import io.netty.handler.codec.http.LastHttpContent;
+import org.mockserver.responsewriter.HttpExchangeEndedEvent;
 
 /**
  * Counts HTTP/1.1 exchanges in progress on a connection for {@link InboundConnectionIdleHandler}: an
@@ -18,9 +19,10 @@ import io.netty.handler.codec.http.LastHttpContent;
  * Must sit directly after {@code HttpServerCodec}, so it sees every decoded request and every
  * encoded response whichever handler writes it. A {@code 101 Switching Protocols} response makes the
  * connection long-lived (it is a WebSocket from then on); other {@code 1xx} responses, such as
- * {@code 100 Continue}, precede the real response and do not end the exchange. A response written as
- * raw bytes rather than HTTP objects never ends its exchange, which leaves that connection exempt:
- * the safe direction to be wrong in.
+ * {@code 100 Continue}, precede the real response and do not end the exchange. An exchange that ends
+ * without a {@code LastHttpContent} passing through (a raw-bytes {@code HttpError}, an abandoned
+ * exchange, a final {@code 1xx}) is ended by {@link HttpExchangeEndedEvent}; without it the connection
+ * would count as busy for the rest of its life and never be closed as idle.
  */
 @ChannelHandler.Sharable
 public final class HttpExchangeTracker extends ChannelDuplexHandler {
@@ -39,6 +41,17 @@ public final class HttpExchangeTracker extends ChannelDuplexHandler {
             }
         }
         ctx.fireChannelRead(msg);
+    }
+
+    @Override
+    public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
+        if (evt == HttpExchangeEndedEvent.INSTANCE) {
+            InboundConnectionActivity activity = InboundConnectionActivity.of(ctx.channel());
+            if (activity != null) {
+                activity.httpExchangeCompleted();
+            }
+        }
+        ctx.fireUserEventTriggered(evt);
     }
 
     @Override

@@ -653,7 +653,7 @@ The `FORWARD` action type (`HttpForwardActionHandler`) has always adjusted the H
 
 | Type | Handler | Description |
 |------|---------|-------------|
-| `ERROR` | `HttpErrorActionHandler` | Writes raw bytes and/or drops the connection |
+| `ERROR` | `HttpErrorActionHandler` | Writes raw bytes and/or drops the connection. On HTTP/1.1, when the connection stays open, it fires `HttpExchangeEndedEvent` so the exchange tracker and transport timer end the exchange the raw bytes (or the missing response) stood in for |
 
 ### LLM Response Action
 

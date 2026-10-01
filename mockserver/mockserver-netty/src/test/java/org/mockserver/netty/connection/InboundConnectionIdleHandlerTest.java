@@ -21,6 +21,7 @@ import io.netty.util.ReferenceCountUtil;
 import org.junit.After;
 import org.junit.Test;
 import org.mockserver.logging.MockServerLogger;
+import org.mockserver.responsewriter.HttpExchangeEndedEvent;
 import org.mockserver.socket.tls.SniHandler;
 
 import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
@@ -223,6 +224,45 @@ public class InboundConnectionIdleHandlerTest {
         sendResponse(HttpResponseStatus.OK);
         idleFor(IDLE_MILLIS);
         assertThat(channel.isOpen(), is(false));
+    }
+
+    @Test
+    public void shouldCloseKeepAliveConnectionOnceIdleAfterAnExchangeEndsOutsideTheCodec() {
+        httpConnection();
+        receiveRequest();
+        channel.pipeline().fireUserEventTriggered(HttpExchangeEndedEvent.INSTANCE);
+
+        idleFor(IDLE_MILLIS - 1);
+        assertThat(channel.isOpen(), is(true));
+
+        idleFor(1);
+        assertThat("an exchange answered with raw bytes no longer keeps the connection busy forever", channel.isOpen(), is(false));
+    }
+
+    @Test
+    public void shouldEndOnlyOneExchangeOnAnExchangeEndedEvent() {
+        httpConnection();
+        receiveRequest();
+        receiveRequest();
+        channel.pipeline().fireUserEventTriggered(HttpExchangeEndedEvent.INSTANCE);
+
+        idleFor(IDLE_MILLIS * 10);
+        assertThat("the second pipelined request is still outstanding", channel.isOpen(), is(true));
+
+        sendResponse(HttpResponseStatus.OK);
+        idleFor(IDLE_MILLIS);
+        assertThat(channel.isOpen(), is(false));
+    }
+
+    @Test
+    public void shouldIgnoreExchangeEndedEventWithNoExchangeRatherThanGoNegative() {
+        httpConnection();
+        channel.pipeline().fireUserEventTriggered(HttpExchangeEndedEvent.INSTANCE);
+        receiveRequest();
+
+        idleFor(IDLE_MILLIS * 10);
+
+        assertThat("the unanswered request must still count", channel.isOpen(), is(true));
     }
 
     @Test

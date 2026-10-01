@@ -2,17 +2,23 @@ package org.mockserver.mock.action.http;
 
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http2.DefaultHttp2ResetFrame;
 import io.netty.handler.codec.http2.Http2ConnectionHandler;
 import io.netty.handler.codec.http2.Http2StreamChannel;
 import org.mockserver.model.HttpError;
 import org.mockserver.model.HttpRequest;
+import org.mockserver.responsewriter.HttpExchangeEndedEvent;
 
 /**
  * Applies an {@link HttpError} action to the underlying Netty channel: writes raw response bytes,
  * resets the request stream (HTTP/2 RST_STREAM, written here; HTTP/3 RESET_STREAM, handled by the
  * HTTP/3 response writer seam in mockserver-netty), and/or drops the connection.
+ * <p>
+ * On HTTP/1.1 it fires {@link HttpExchangeEndedEvent} when raw bytes are written, as their write completes
+ * and before any stream error or drop is applied, and when nothing at all is written and the connection
+ * stays open. A stream error or drop with no raw bytes fires nothing: the connection's state closes with it.
  *
  * @author jamesdbloom
  */
@@ -27,9 +33,28 @@ public class HttpErrorActionHandler {
             // write byte directly by skipping over HTTP codec
             ChannelHandlerContext httpCodecContext = ctx.pipeline().context(HttpServerCodec.class);
             if (httpCodecContext != null) {
-                httpCodecContext.writeAndFlush(Unpooled.wrappedBuffer(httpError.getResponseBytes())).awaitUninterruptibly();
+                // The listener is registered before the write is issued, so it runs on the event loop as the
+                // write completes, ahead of anything that reads the client's next request. Chaining the
+                // stream error or drop on it keeps the bytes ahead of the close without blocking the caller.
+                ChannelPromise written = httpCodecContext.newPromise();
+                written.addListener(future -> {
+                    httpCodecContext.fireUserEventTriggered(HttpExchangeEndedEvent.INSTANCE);
+                    resetStreamOrDropConnection(httpError, request, ctx);
+                });
+                httpCodecContext.writeAndFlush(Unpooled.wrappedBuffer(httpError.getResponseBytes()), written);
+                return;
             }
         }
+        if (!resetStreamOrDropConnection(httpError, request, ctx)) {
+            // nothing is written and the connection stays open: this exchange is abandoned
+            HttpExchangeEndedEvent.fire(ctx);
+        }
+    }
+
+    /**
+     * Apply the stream error or connection drop, returning true if either was applied.
+     */
+    private boolean resetStreamOrDropConnection(HttpError httpError, HttpRequest request, ChannelHandlerContext ctx) {
         if (httpError.getStreamError() != null) {
             // reset only this stream, leaving other multiplexed streams on the connection alive.
             // HTTP/3 (QuicStreamChannel) is handled earlier by the StreamErrorWriter seam in the
@@ -42,12 +67,14 @@ public class HttpErrorActionHandler {
                 ctx.disconnect();
                 ctx.close();
             }
-            return;
+            return true;
         }
         if (httpError.getDropConnection() != null && httpError.getDropConnection()) {
             ctx.disconnect();
             ctx.close();
+            return true;
         }
+        return false;
     }
 
     /**
