@@ -4,7 +4,6 @@ import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.nio.NioEventLoopGroup;
-import io.netty.channel.socket.nio.NioDatagramChannel;
 import io.netty.handler.codec.http3.DefaultHttp3HeadersFrame;
 import io.netty.handler.codec.http3.Http3;
 import io.netty.handler.codec.http3.Http3ClientConnectionHandler;
@@ -26,6 +25,7 @@ import org.mockserver.netty.MockServer;
 import org.mockserver.model.Format;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.Protocol;
+import org.mockserver.testing.socket.Ipv4DatagramChannelFactory;
 
 import java.net.InetSocketAddress;
 import java.util.concurrent.BlockingQueue;
@@ -143,7 +143,7 @@ public class Http3ProtocolVerificationIntegrationTest {
 
         Channel clientChannel = new Bootstrap()
             .group(clientGroup)
-            .channel(NioDatagramChannel.class)
+            .channelFactory(Ipv4DatagramChannelFactory.INSTANCE)
             .handler(Http3.newQuicClientCodecBuilder()
                 .sslContext(clientSslContext)
                 .maxIdleTimeout(30000, TimeUnit.MILLISECONDS)

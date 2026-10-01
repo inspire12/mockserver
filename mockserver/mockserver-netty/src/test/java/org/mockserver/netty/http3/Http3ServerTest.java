@@ -6,7 +6,6 @@ import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.nio.NioEventLoopGroup;
-import io.netty.channel.socket.nio.NioDatagramChannel;
 import io.netty.handler.codec.http3.DefaultHttp3DataFrame;
 import io.netty.handler.codec.http3.DefaultHttp3HeadersFrame;
 import io.netty.handler.codec.http3.Http3;
@@ -26,6 +25,7 @@ import org.junit.Test;
 import org.mockserver.client.MockServerClient;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.netty.MockServer;
+import org.mockserver.testing.socket.Ipv4DatagramChannelFactory;
 
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
@@ -78,9 +78,12 @@ public class Http3ServerTest {
     @Test
     public void shouldServeHttp3EchoResponse() throws Exception {
         // start server in echo-only mode (legacy constructor)
+        // a found port rather than start(0): on macOS a dual-stack ephemeral bind can share its port
+        // with another process's IPv4 socket, which then receives the 127.0.0.1 traffic (see TestPortFactory)
+        int requestedPort = findAvailableUdpPort();
         standaloneServer = new Http3Server();
-        int port = standaloneServer.start(0);
-        assertThat("server should bind to a port", port > 0, is(true));
+        int port = standaloneServer.start(requestedPort);
+        assertThat("server should bind the requested port", port, is(requestedPort));
         assertThat("getPort should return the bound port", standaloneServer.getPort(), is(port));
 
         // verify echo response
@@ -413,7 +416,7 @@ public class Http3ServerTest {
 
         Channel clientChannel = new Bootstrap()
             .group(clientGroup)
-            .channel(NioDatagramChannel.class)
+            .channelFactory(Ipv4DatagramChannelFactory.INSTANCE)
             .handler(Http3.newQuicClientCodecBuilder()
                 .sslContext(clientSslContext)
                 .maxIdleTimeout(30000, TimeUnit.MILLISECONDS)

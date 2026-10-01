@@ -1,7 +1,9 @@
 package org.mockserver.testing.socket;
 
 import java.io.IOException;
-import java.net.DatagramSocket;
+import java.net.InetSocketAddress;
+import java.net.StandardProtocolFamily;
+import java.nio.channels.DatagramChannel;
 import java.util.Random;
 
 /**
@@ -13,15 +15,20 @@ import java.util.Random;
  * and the real bind another process can take the port. Binding the real socket directly is the only
  * fully race-free option, so callers that can retry on {@code BindException} should.
  *
+ * <p><strong>Why candidates come from an IPv4 socket.</strong> A server bound to the dual-stack wildcard
+ * (as MockServer's HTTP/3 server is) can, on macOS, bind a port that another process holds with an IPv4
+ * UDP socket, without a {@code BindException}; datagrams sent to {@code 127.0.0.1:port} then reach that
+ * other socket instead. The dual-stack allocator behind a plain {@code new DatagramSocket(0)} can hand
+ * out such a port, but the IPv4 allocator cannot, so candidates are taken from it (as
+ * {@code PortFactory} does for TCP). Test clients have the same problem; see {@link Ipv4DatagramChannelFactory}.
+ *
  * <p><strong>Why these probes deliberately do not set {@code SO_REUSEADDR}.</strong> {@code PortFactory}
  * sets it on its TCP probes so a caller can re-bind a just-released port without waiting for
  * {@code TIME_WAIT}. That reasoning does <em>not</em> carry over to UDP. On BSD-derived systems (macOS)
  * two UDP sockets that both set {@code SO_REUSEADDR} can bind the same port <em>simultaneously and
  * silently</em>, with no {@code BindException} - datagrams then reach only one of them. Setting it here
  * would let two concurrent probes "find" the same port and both believe they owned it, manufacturing
- * the collision this class exists to avoid. Netty's {@code NioDatagramChannel} also leaves it off by
- * default, so a genuine UDP collision surfaces as a {@code BindException} rather than as silent
- * traffic loss. Keep it off.
+ * the collision this class exists to avoid. Keep it off.
  */
 public class TestPortFactory {
 
@@ -49,22 +56,27 @@ public class TestPortFactory {
         // delaying between releasing the ports and returning one only widens the window in which
         // another process can claim it.
         int count = 1 + RANDOM.nextInt(60);
-        DatagramSocket[] sockets = new DatagramSocket[count];
+        DatagramChannel[] sockets = new DatagramChannel[count];
         int[] ports = new int[count];
         try {
             for (int i = 0; i < count; i++) {
-                DatagramSocket socket = new DatagramSocket(0);
+                DatagramChannel socket = DatagramChannel.open(StandardProtocolFamily.INET);
                 // store immediately so the finally block closes it even if a later iteration throws
                 sockets[i] = socket;
-                ports[i] = socket.getLocalPort();
+                socket.bind(new InetSocketAddress(0));
+                ports[i] = ((InetSocketAddress) socket.getLocalAddress()).getPort();
             }
             return ports[RANDOM.nextInt(count)];
         } catch (IOException e) {
             throw new IllegalStateException("Exception while trying to find a free UDP port", e);
         } finally {
-            for (DatagramSocket socket : sockets) {
+            for (DatagramChannel socket : sockets) {
                 if (socket != null) {
-                    socket.close();
+                    try {
+                        socket.close();
+                    } catch (IOException ignore) {
+                        // best effort - the port has already been recorded
+                    }
                 }
             }
         }

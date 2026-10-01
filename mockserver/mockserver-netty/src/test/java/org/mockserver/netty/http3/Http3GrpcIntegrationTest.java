@@ -6,7 +6,6 @@ import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.nio.NioEventLoopGroup;
-import io.netty.channel.socket.nio.NioDatagramChannel;
 import io.netty.handler.codec.http3.DefaultHttp3DataFrame;
 import io.netty.handler.codec.http3.DefaultHttp3HeadersFrame;
 import io.netty.handler.codec.http3.Http3;
@@ -31,6 +30,7 @@ import org.mockserver.grpc.GrpcProtoDescriptorStore;
 import org.mockserver.grpc.GrpcStatusMapper;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.netty.MockServer;
+import org.mockserver.testing.socket.Ipv4DatagramChannelFactory;
 
 import java.io.ByteArrayOutputStream;
 import java.net.InetSocketAddress;
@@ -706,7 +706,7 @@ public class Http3GrpcIntegrationTest {
             try {
                 clientChannel = new Bootstrap()
                     .group(clientGroup)
-                    .channel(NioDatagramChannel.class)
+                    .channelFactory(Ipv4DatagramChannelFactory.INSTANCE)
                     .handler(Http3.newQuicClientCodecBuilder()
                         .sslContext(clientSslContext)
                         // generous idle headroom over the 8s per-attempt connect deadline so an

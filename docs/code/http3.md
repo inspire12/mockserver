@@ -320,6 +320,18 @@ makes a real HTTP/3 request to a `-http3` container with the JDK's own HTTP/3 cl
 with the message. The per-merge `snapshot-http3` publish stays non-blocking until plan item 41
 (performance-programme.md §6) makes it blocking after 5 green master runs.
 
+### Test UDP sockets (macOS port shadowing)
+
+HTTP/3 tests must take a server's UDP port from `TestPortFactory.findFreeUdpPort()` and build every
+test-side datagram channel (QUIC clients, test QUIC servers, UDP echo targets) with
+`.channelFactory(Ipv4DatagramChannelFactory.INSTANCE)`, never a plain `NioDatagramChannel` bound to
+port 0. On macOS a dual-stack socket's port allocator ignores IPv4 sockets, so it can hand out a port
+that another process (for example `homed`) holds on IPv4, and datagrams to `127.0.0.1:port` then go to
+that process. A QUIC client affected this way never sees the server's reply, and the test fails with
+`TimeoutException` in `QuicChannel` connect. On a developer Mac about 0.1% of dual-stack client binds
+and 0.15% of dual-stack port probes were affected, with or without CPU load, which is consistent with
+about one HTTP/3 test failing per full `mockserver-netty` run. Linux never hands out such a port.
+
 ## Dependencies
 
 | Artifact | Version | Scope |
@@ -593,6 +605,11 @@ bidi-streaming) work over HTTP/3, matching the TCP (HTTP/1.1 and HTTP/2) path.
 
 - **Native library compatibility**: the QUIC native (BoringSSL) must be available
   for the target platform. Missing natives will prevent the HTTP/3 server from starting.
+- **macOS port shadowing**: on macOS the HTTP/3 server's dual-stack wildcard bind succeeds on a UDP
+  port that another process holds on the IPv4 wildcard (`0.0.0.0`), and HTTP/3 traffic to `127.0.0.1`
+  then reaches that process instead. The TCP listeners detect the equivalent case at start-up
+  (`LoopbackShadowProbe`) and refuse an explicit port; the HTTP/3 server does not yet. Linux refuses
+  the bind, so there it fails loudly.
 - **API stability**: `netty-codec-http3` has graduated from the incubator into
   mainline Netty 4.2, but the HTTP/3 API may still evolve in future 4.2.x releases.
 - **Netty version coupling**: the HTTP/3 codec version is now aligned with the

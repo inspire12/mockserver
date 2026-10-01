@@ -8,7 +8,6 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.DatagramPacket;
-import io.netty.channel.socket.nio.NioDatagramChannel;
 import io.netty.handler.codec.http3.DefaultHttp3DataFrame;
 import io.netty.handler.codec.http3.DefaultHttp3HeadersFrame;
 import io.netty.handler.codec.http3.Http3;
@@ -28,6 +27,7 @@ import org.junit.Test;
 import org.mockserver.client.MockServerClient;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.netty.MockServer;
+import org.mockserver.testing.socket.Ipv4DatagramChannelFactory;
 
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -278,7 +278,7 @@ public class Http3ConnectUdpIntegrationTest {
         echoGroup = new NioEventLoopGroup(1);
         udpEchoChannel = new Bootstrap()
             .group(echoGroup)
-            .channel(NioDatagramChannel.class)
+            .channelFactory(Ipv4DatagramChannelFactory.INSTANCE)
             .handler(new ChannelInboundHandlerAdapter() {
                 @Override
                 public void channelRead(ChannelHandlerContext ctx, Object msg) {
@@ -320,7 +320,7 @@ public class Http3ConnectUdpIntegrationTest {
 
         Channel clientChannel = new Bootstrap()
             .group(clientGroup)
-            .channel(NioDatagramChannel.class)
+            .channelFactory(Ipv4DatagramChannelFactory.INSTANCE)
             .handler(Http3.newQuicClientCodecBuilder()
                 .sslContext(clientSslContext)
                 .maxIdleTimeout(30000, TimeUnit.MILLISECONDS)
@@ -421,7 +421,7 @@ public class Http3ConnectUdpIntegrationTest {
 
         Channel clientChannel = new Bootstrap()
             .group(clientGroup)
-            .channel(NioDatagramChannel.class)
+            .channelFactory(Ipv4DatagramChannelFactory.INSTANCE)
             .handler(Http3.newQuicClientCodecBuilder()
                 .sslContext(clientSslContext)
                 .maxIdleTimeout(30000, TimeUnit.MILLISECONDS)
@@ -508,7 +508,7 @@ public class Http3ConnectUdpIntegrationTest {
 
         Channel clientChannel = new Bootstrap()
             .group(clientGroup)
-            .channel(NioDatagramChannel.class)
+            .channelFactory(Ipv4DatagramChannelFactory.INSTANCE)
             .handler(Http3.newQuicClientCodecBuilder()
                 .sslContext(clientSslContext)
                 .maxIdleTimeout(30000, TimeUnit.MILLISECONDS)
@@ -592,7 +592,7 @@ public class Http3ConnectUdpIntegrationTest {
 
         Channel clientChannel = new Bootstrap()
             .group(clientGroup)
-            .channel(NioDatagramChannel.class)
+            .channelFactory(Ipv4DatagramChannelFactory.INSTANCE)
             .handler(Http3.newQuicClientCodecBuilder()
                 .sslContext(clientSslContext)
                 .maxIdleTimeout(30000, TimeUnit.MILLISECONDS)

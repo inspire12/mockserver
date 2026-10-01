@@ -7,7 +7,6 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.nio.NioEventLoopGroup;
-import io.netty.channel.socket.nio.NioDatagramChannel;
 import io.netty.handler.codec.http3.DefaultHttp3DataFrame;
 import io.netty.handler.codec.http3.DefaultHttp3HeadersFrame;
 import io.netty.handler.codec.http3.Http3;
@@ -31,6 +30,7 @@ import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.model.StreamingBody;
+import org.mockserver.testing.socket.Ipv4DatagramChannelFactory;
 
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -174,7 +174,7 @@ public class Http3StreamingIntegrationTest {
 
         serverChannel = new Bootstrap()
             .group(serverGroup)
-            .channel(NioDatagramChannel.class)
+            .channelFactory(Ipv4DatagramChannelFactory.INSTANCE)
             .handler(Http3.newQuicServerCodecBuilder()
                 .sslContext(sslContext)
                 .maxIdleTimeout(30000, TimeUnit.MILLISECONDS)
@@ -272,7 +272,7 @@ public class Http3StreamingIntegrationTest {
 
         Channel clientChannel = new Bootstrap()
             .group(clientGroup)
-            .channel(NioDatagramChannel.class)
+            .channelFactory(Ipv4DatagramChannelFactory.INSTANCE)
             .handler(Http3.newQuicClientCodecBuilder()
                 .sslContext(clientSslContext)
                 .maxIdleTimeout(30000, TimeUnit.MILLISECONDS)

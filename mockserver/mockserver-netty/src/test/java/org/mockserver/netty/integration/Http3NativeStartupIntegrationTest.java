@@ -6,11 +6,11 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.mockserver.netty.http3.Http3NativeUnavailableException;
+import org.mockserver.testing.socket.TestPortFactory;
 import org.mockserver.version.Version;
 
 import java.io.File;
 import java.io.IOException;
-import java.net.DatagramSocket;
 import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -144,9 +144,7 @@ public class Http3NativeStartupIntegrationTest {
         }
     }
 
-    private static int freeUdpPort() throws IOException {
-        try (DatagramSocket socket = new DatagramSocket(0)) {
-            return socket.getLocalPort();
-        }
+    private static int freeUdpPort() {
+        return TestPortFactory.findFreeUdpPort();
     }
 }
