@@ -307,28 +307,50 @@ Before, the upload at 512 MiB survived only because the heap was nearly empty (8
 full heap the same direct growth would not fit. The download direct figure after the change (20 MiB) is
 the pooled chunks left from loading the 11 MiB expectation, not per-connection buffering.
 
-#### Decompressed request bodies
+#### Decompressed bodies
 
-**A compressed request body cannot make MockServer allocate more than `maxRequestBodySize` for it, plus
-one decoder buffer.** Every inbound protocol (HTTP/1.1, HTTP/2 and HTTP/3) and the relay's streaming
-scan decompress with `MockServerHttpContentDecompressor`, whose decoders pass their output on in pieces as
-they produce it, and the aggregator after it refuses the request once the decompressed size passes
-`maxRequestBodySize`: a 256 MiB zstd bomb (8 KiB on the wire) gets `413` over HTTP/1.1 and HTTP/2 at
-`-Xmx256m`.
+**A compressed request, or an aggregated upstream response, cannot make MockServer allocate more than its
+body-size limit for it, plus one decoder buffer. A streamed upstream response has no total bound, and one
+read of it can decode to about 2 GiB (see Not covered).**
 
-For `zstd` one piece is at most 64 KiB (`MockServerHttpContentDecompressor.ZSTD_MAX_ALLOCATION`). Netty's
-`ZstdDecoder(0)`, which `HttpContentDecompressor`'s defaults use, allocates whatever content size the
-frame header declares as one buffer, so before this bound a 17-byte body declaring 1.5 GiB threw
-`OutOfMemoryError` at `-Xmx256m` over HTTP/1.1 and HTTP/2. The other codings size their buffers from the
-input they have received, except a raw Snappy block, whose declared size is checked against
-`maxRequestBodySize` before it is allocated. `zstd` is decoded only where zstd-jni is on the classpath, as it is in the
-shaded jar and the images (through `kafka-clients`).
+| Body | Decompressor | Total bounded by |
+|---|---|---|
+| Request, every inbound protocol (HTTP/1.1, HTTP/2, HTTP/3) and the relay's streaming scan | `MockServerHttpContentDecompressor` | `maxRequestBodySize` (`413`) |
+| Forwarded response, HTTP/1.1 and HTTP/2 (`HttpClientInitializer`, `Http2ForwardStreamChildInitializer`) | `BoundedZstdHttpContentDecompressor` | `maxResponseBodySize` (`502`) |
+| MockServer's own response on the CONNECT relay's loopback, HTTP/1.1 / HTTP/2 (`RelayConnectHandler`) | `BoundedZstdHttpContentDecompressor` / `BoundedZstdDecompressorFrameListener` | `maxRequestBodySize` |
+| Streamed response (`text/event-stream`, or a client that asked to stream) | the forward client's, as above | nothing (see below) |
+
+Each decoder passes its output on in pieces as it produces it, and the aggregator after it refuses the
+body once the decompressed size passes the limit: a 256 MiB zstd bomb (8 KiB on the wire) gets `413` over
+HTTP/1.1 and HTTP/2 at `-Xmx256m`, and a 1 GiB zstd response bomb forwarded at `-Xmx256m` gets `502` at a
+heap peak of 108 MiB.
+
+For `zstd` one piece is at most 64 KiB (`BoundedZstdHttpContentDecompressor.ZSTD_MAX_ALLOCATION`, which all
+four decompressors share). Netty's `ZstdDecoder(0)`, which `HttpContentDecompressor`'s and
+`DelegatingDecompressorFrameListener`'s defaults use, allocates whatever content size the frame header
+declares as one buffer, so before this bound a 17-byte body declaring 1.5 GiB threw `OutOfMemoryError` at
+`-Xmx256m`, as a request over HTTP/1.1 and HTTP/2 and as an upstream response proxied through the CLI.
+The response decompressors differ from Netty's only for `zstd`: a response's `snappy` is still decoded by
+Netty's framing-only `SnappyFrameDecoder`, and the other codings size their buffers from the input they
+have received. On requests a raw Snappy block is also accepted, and its declared size is checked against
+`maxRequestBodySize` before it is allocated. `zstd` is decoded only where zstd-jni is on the classpath, as
+it is in the shaded jar and the images (through `kafka-clients`).
 
 **Not covered.** A zstd decoder's window is native memory allocated by zstd-jni, outside the heap and the
-direct-memory cap; Netty accepts windows up to 128 MiB (`Window_Log` 27). Upstream **responses** are
-decompressed by the forward client (`HttpClientInitializer`, `Http2ForwardStreamChildInitializer`) and the
-relay's loopback pipeline with Netty's own decompressors, so an upstream `zstd` response declaring a huge
-content size still throws `OutOfMemoryError` (seen at `-Xmx256m` proxying a 17-byte response).
+direct-memory cap; Netty accepts windows up to 128 MiB (`Window_Log` 27). A **streamed** response is not
+aggregated, so no limit applies to its total, and a decoder decompresses everything one upstream read
+delivered before backpressure can act: each 64 KiB piece is copied and queued for the client at once
+(`StreamingResponseRelayHandler` → `StreamingBody` → `NettyResponseWriter`). With gzip (at most about
+1,000:1) that is bounded per read and a 1 GiB gzip stream (1 MiB on the wire) relayed at a heap peak of
+88 MiB at `-Xmx256m`; zstd reaches about 32,000:1, so a 256 MiB zstd stream (8 KiB on the wire) arrives
+in one read and exhausted a 256 MiB heap. The ceiling per read is about 2 GiB (2 GiB of zeros is about
+64 KiB of zstd, one ordinary read), so no heap size makes this safe. Streaming is on by default
+(`streamingResponsesEnabled`) and the upstream chooses it with `Content-Type: text/event-stream`. Read
+pacing already exists (auto-read off, `StreamingBody.requestMore()`); the amplification is inside one
+read, so the bound belongs at or right after the decoder (performance-programme #63). The CONNECT relay's HTTP/1.1 loopback streams a
+`text/event-stream` response the same way, though it decodes only MockServer's own responses (a forwarded
+response reaches it already decoded). The declared-size allocation is bounded on these paths too; the
+total is not.
 
 ### Connection Memory
 

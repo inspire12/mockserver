@@ -5,13 +5,13 @@ import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.handler.codec.http.HttpClientCodec;
-import io.netty.handler.codec.http.HttpContentDecompressor;
 import io.netty.handler.codec.http2.*;
 import io.netty.handler.logging.LogLevel;
 import io.netty.handler.proxy.HttpProxyHandler;
 import io.netty.handler.proxy.Socks5ProxyHandler;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.timeout.ReadTimeoutHandler;
+import org.mockserver.codec.BoundedZstdHttpContentDecompressor;
 import org.mockserver.codec.MockServerBinaryClientCodec;
 import org.mockserver.codec.MockServerHttpClientCodec;
 import org.mockserver.codec.StreamingAwareHttpObjectAggregator;
@@ -153,7 +153,7 @@ public class HttpClientInitializer extends ChannelInitializer<SocketChannel> {
     private void configureHttp1Pipeline(ChannelPipeline pipeline) {
         addReadTimeoutHandlerIfNotPooled(pipeline);
         pipeline.addLast(new HttpClientCodec());
-        pipeline.addLast(new HttpContentDecompressor());
+        pipeline.addLast(new BoundedZstdHttpContentDecompressor());
         pipeline.addLast(new TimeToFirstByteHandler());
         if (configuration != null) {
             pipeline.addLast(new StreamingAwareHttpObjectAggregator(configuration.maxResponseBodySize(), configuration, mockServerLogger));

@@ -66,12 +66,18 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
 - **The dashboard (`mockserver-ui`) now resolves `dompurify` 3.4.16**, which fixes a DOM XSS where an
   `IN_PLACE` sanitize with a node-removing `afterSanitize` hook left event handlers armed on the removed
   subtree (Dependabot alert 593).
-- **A tiny `zstd` request body can no longer exhaust MockServer's memory.** A `zstd` body's frame header
-  declares its decompressed size, and MockServer allocated that much at once before decompressing
-  anything, so a 17-byte request claiming 1.5 GB threw `OutOfMemoryError` with a 256 MB heap, over
-  HTTP/1.1, HTTP/2 and HTTP/3 and through the proxy. MockServer now decompresses `zstd` in pieces of at
-  most 64 KB, and `maxRequestBodySize` limits the total as for every other coding, answering `413`.
-  `zstd` *responses* from an upstream are not yet covered.
+- **A `zstd` request or upstream response can no longer make MockServer allocate the size its frame
+  header declares.** A `zstd` body's frame header declares its decompressed size, and MockServer allocated
+  that much at once before decompressing anything, so 17 bytes claiming 1.5 GB threw `OutOfMemoryError`
+  with a 256 MB heap: as a request over HTTP/1.1, HTTP/2 and HTTP/3 and through the proxy, and as the
+  response of any server MockServer forwarded or proxied to, over HTTP/1.1 and HTTP/2 and through a
+  `CONNECT` tunnel. Anyone who could make MockServer forward to a server they control could do this.
+  MockServer now decompresses `zstd` in pieces of at most 64 KB; `maxRequestBodySize` limits a request's
+  total (`413`) and `maxResponseBodySize` a forwarded response's (`502`), as for every other coding.
+  **Not yet fixed:** a streamed upstream response has no total limit. Streaming is on by default and an
+  upstream chooses it by answering `Content-Type: text/event-stream`, and one network read of a `zstd`
+  body (about 64 KB) can decompress to about 2 GB, so such an upstream can still exhaust MockServer's
+  memory whatever its heap size.
 
 ### Added
 

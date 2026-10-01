@@ -4,12 +4,12 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPipeline;
-import io.netty.handler.codec.http.HttpContentDecompressor;
 import io.netty.handler.codec.http2.Http2FrameStream;
 import io.netty.handler.codec.http2.Http2StreamChannel;
 import io.netty.handler.codec.http2.Http2StreamFrameToHttpObjectCodec;
 import io.netty.handler.timeout.ReadTimeoutHandler;
 import io.netty.util.AttributeKey;
+import org.mockserver.codec.BoundedZstdHttpContentDecompressor;
 import org.mockserver.codec.HttpObjectAggregators;
 import org.mockserver.codec.MockServerHttpClientCodec;
 import org.mockserver.codec.StreamingAwareHttpObjectAggregator;
@@ -37,7 +37,7 @@ import static org.mockserver.httpclient.NettyHttpClient.RESPONSE_FUTURE;
  * <p>
  * An HTTP/2 stream channel is decoded into the same unaggregated {@code HttpObject}s that the
  * HTTP/1.1 path produces ({@link Http2StreamFrameToHttpObjectCodec} in CLIENT, non-aggregating mode),
- * then the identical shared streaming machinery is reused: {@link HttpContentDecompressor},
+ * then the identical shared streaming machinery is reused: {@link BoundedZstdHttpContentDecompressor},
  * {@link TimeToFirstByteHandler}, {@link StreamingAwareHttpObjectAggregator} (which relays
  * {@code text/event-stream} / client-requested streams via {@link StreamingResponseRelayHandler} and
  * aggregates everything else to a {@code FullHttpResponse}), {@link MockServerHttpClientCodec}, and the
@@ -103,7 +103,7 @@ public class Http2ForwardStreamChildInitializer extends ChannelInitializer<Http2
         // (HttpResponse head, HttpContent chunks, LastHttpContent) and encode the outbound
         // FullHttpRequest to HEADERS + DATA frames.
         pipeline.addLast(new Http2StreamFrameToHttpObjectCodec(false));
-        pipeline.addLast(new HttpContentDecompressor());
+        pipeline.addLast(new BoundedZstdHttpContentDecompressor());
         pipeline.addLast(new TimeToFirstByteHandler());
         StreamingAwareHttpObjectAggregator aggregator = configuration != null
             ? new StreamingAwareHttpObjectAggregator(configuration.maxResponseBodySize(), configuration, mockServerLogger)

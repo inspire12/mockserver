@@ -8,11 +8,12 @@ import io.netty.channel.*;
 import io.netty.handler.codec.ByteToMessageDecoder;
 import io.netty.handler.codec.socksx.v4.Socks4ServerDecoder;
 import io.netty.handler.codec.socksx.v5.Socks5CommandRequestDecoder;
+import org.mockserver.codec.BoundedZstdDecompressorFrameListener;
+import org.mockserver.codec.BoundedZstdHttpContentDecompressor;
 import org.mockserver.codec.HttpObjectAggregators;
 import org.mockserver.socket.NettyAllocator;
 import org.mockserver.socket.NettyTransport;
 import io.netty.handler.codec.http.HttpClientCodec;
-import io.netty.handler.codec.http.HttpContentDecompressor;
 import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http2.*;
 import io.netty.handler.logging.LogLevel;
@@ -416,7 +417,7 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
 
     private void configureHttp1LoopbackPipeline(ChannelPipeline pipelineToMockServer, ChannelHandlerContext proxyClientCtx) {
         pipelineToMockServer.addLast(new HttpClientCodec(configuration.maxInitialLineLength(), configuration.maxHeaderSize(), configuration.maxChunkSize()));
-        pipelineToMockServer.addLast(new HttpContentDecompressor());
+        pipelineToMockServer.addLast(new BoundedZstdHttpContentDecompressor());
         pipelineToMockServer.addLast(new StreamingAwareHttpObjectAggregator(configuration.maxRequestBodySize(), configuration, mockServerLogger, true));
         pipelineToMockServer.addLast(new DownstreamProxyRelayHandler(mockServerLogger, proxyClientCtx.channel()));
     }
@@ -425,7 +426,7 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
         final Http2Connection connection = new DefaultHttp2Connection(false);
         final HttpToHttp2ConnectionHandlerBuilder http2ConnectionHandlerBuilder = new HttpToHttp2ConnectionHandlerBuilder()
             .frameListener(
-                new DelegatingDecompressorFrameListener(
+                new BoundedZstdDecompressorFrameListener(
                     connection,
                     new InboundHttp2ToHttpAdapterBuilder(connection)
                         .maxContentLength(configuration.maxRequestBodySize())
