@@ -123,6 +123,35 @@ module "buildkite_perf_stack" {
   ]
 }
 
+# Extra-large PERFORMANCE queue, the counterpart to `perf` for runs that need far
+# more cores than one c5.12xlarge. Same rules as perf: one fixed instance type,
+# 100% on-demand, one agent per instance, scale-to-zero, same policies except
+# the write API token, which nothing on the perf queues uses.
+module "buildkite_perf_xl_stack" {
+  source  = "buildkite/elastic-ci-stack-for-aws/buildkite"
+  version = "~> 0.12.0"
+
+  stack_name            = "buildkite-mockserver-perf-xl"
+  buildkite_agent_token = var.buildkite_agent_token
+  buildkite_queue       = "perf-xl"
+
+  instance_types          = var.perf_xl_instance_types
+  min_size                = var.perf_xl_min_size # MUST stay 0 (scale to zero)
+  max_size                = var.perf_xl_max_size
+  on_demand_percentage    = 100 # on-demand only — a Spot reclaim would poison the baseline
+  on_demand_base_capacity = 0   # base 0 so it truly scales to zero
+
+  agents_per_instance         = 1
+  associate_public_ip_address = true
+  imdsv2_tokens               = "required"
+  bootstrap_script_url        = local.imds_bootstrap_url
+  managed_policy_arns = [
+    local.policy_arn.read_buildkite_api_token_readonly, # read-only token for change-detection comparisons
+    local.policy_arn.perf_results,                      # S3 results history bucket
+    local.policy_arn.imds_hardening,
+  ]
+}
+
 module "buildkite_release_stack" {
   source  = "buildkite/elastic-ci-stack-for-aws/buildkite"
   version = "~> 0.12.0"

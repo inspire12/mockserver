@@ -25,6 +25,11 @@ release_max_size     = 2
 trigger_instance_types = "t3.small,t3a.small,t3.micro"
 trigger_max_size       = 4
 
+# perf-xl queue: one fixed on-demand type, scale-to-zero. min MUST stay 0.
+perf_xl_instance_types = "c6i.32xlarge"
+perf_xl_min_size       = 0
+perf_xl_max_size       = 1
+
 # Email address for infrastructure alerts (SNS notifications)
 # Leave empty ("") to skip email subscription
 alert_email = "your-email@example.com"

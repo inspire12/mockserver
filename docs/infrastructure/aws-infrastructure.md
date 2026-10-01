@@ -13,6 +13,7 @@ buildkite-agents/"]
         ASG_D["ASG default queue"]
         ASG_T["ASG trigger queue"]
         ASG_P["ASG perf queue"]
+        ASG_PXL["ASG perf-xl queue"]
         SCALER["Lambda Autoscaler"]
         AZ_LAMBDA["Lambda AZ Rebalance
 Suspender"]
@@ -22,8 +23,11 @@ Suspender"]
         EC2_T["EC2 t3 instances
 0–4 trigger agents
 100% spot, 4 agents/instance"]
-        EC2_P["EC2 c5.4xlarge
-0–1 perf agent
+        EC2_P["EC2 c5.12xlarge
+0–3 perf agents
+100% on-demand"]
+        EC2_PXL["EC2 c6i.32xlarge
+0–1 perf-xl agent
 100% on-demand"]
         S3_PERF["S3 Bucket
 perf-results history"]
@@ -66,16 +70,20 @@ mock-server.com + wildcard"]
     TF -->|provisions| ASG_D
     TF -->|provisions| ASG_T
     TF -->|provisions| ASG_P
+    TF -->|provisions| ASG_PXL
     TF -->|provisions| SCALER
     TF -->|state| S3_STATE
     EB -->|triggers| SCALER
     SCALER -->|scales| ASG_D
     SCALER -->|scales| ASG_T
     SCALER -->|scales| ASG_P
+    SCALER -->|scales| ASG_PXL
     ASG_P -->|manages| EC2_P
     EC2_P -->|reads token| SSM
     EC2_P -->|reads secrets| S3_SECRETS
     EC2_P -->|reads/writes| S3_PERF
+    ASG_PXL -->|manages| EC2_PXL
+    EC2_PXL -->|reads/writes| S3_PERF
     ASG_D -->|uses| LT
     ASG_D -->|manages| EC2
     ASG_T -->|manages| EC2_T
@@ -116,7 +124,7 @@ flowchart TB
     subgraph "Buildkite Cloud"
         BK_API[Buildkite API]
         BK_QUEUE["Job Queues
-default · trigger · release · perf"]
+default · trigger · release · perf · perf-xl"]
     end
 
     subgraph "AWS eu-west-2"
@@ -141,7 +149,10 @@ SSM · SSM Messages · EC2 Messages"]
 0–4 t3 instances
 4 agents/instance"]
         ASG_P["ASG perf
-0–1 c5.4xlarge
+0–3 c5.12xlarge
+100% on-demand"]
+        ASG_PXL["ASG perf-xl
+0–1 c6i.32xlarge
 100% on-demand"]
         SCALER["Lambda Autoscaler
 Runs every minute"]
@@ -159,6 +170,7 @@ rate 1 min"]
     SCALER -->|set desired| ASG_D
     SCALER -->|set desired| ASG_T
     SCALER -->|set desired| ASG_P
+    SCALER -->|set desired| ASG_PXL
     ASG_D -->|manages| EC2_1 & EC2_2
     EC2_1 & EC2_2 -->|poll for jobs| BK_QUEUE
     EC2_1 & EC2_2 -->|read token via| VPCE
@@ -177,8 +189,9 @@ rate 1 min"]
 | ASG `trigger` | Min 0, Max 4, 100% Spot, t3.small/t3a.small/t3.micro, 4 agents/instance — cheap instances for trigger polling jobs |
 | ASG `release` | Min 0, Max 2, 100% on-demand, same instance types as default, 1 agent/instance |
 | ASG `perf` | Min 0, Max 3, 100% on-demand, c5.12xlarge, on-demand base 0, 1 agent/instance — scale-to-zero; up to three concurrent perf jobs, each on its own machine |
+| ASG `perf-xl` | Min 0, Max 1, 100% on-demand, c6i.32xlarge, on-demand base 0, 1 agent/instance — scale-to-zero; one large perf job at a time |
 | Launch Template | c5.2xlarge (primary for default/release), t3.small (primary for trigger), 250 GiB gp3 root volume, delete-on-termination |
-| EC2 Instances | 0–10 default + 0–4 trigger + 0–2 release + 0–3 perf (ephemeral), all scale to zero when idle |
+| EC2 Instances | 0–10 default + 0–4 trigger + 0–2 release + 0–3 perf + 0–1 perf-xl (ephemeral), all scale to zero when idle |
 
 #### Networking
 
@@ -265,7 +278,7 @@ Policies are scoped per queue — each agent role receives only the secrets and 
 | IAM Policy (`buildkite-ecr-public-push`) | Allows agents to push Docker images to ECR Public | default, release |
 | IAM Policy (`buildkite-ecr-pull-through`) | Allows agents to pull CI Testcontainers images through the ECR pull-through cache and trigger first-miss imports (scoped to the `docker-hub/*` and `quay/*` cache repos; no `mcr/*` — mcr.microsoft.com is not a supported upstream) | default, release |
 | IAM Policy (`buildkite-dependency-cache`) | Allows agents to read/write the CI dependency cache S3 bucket — DETACHED (runtime wiring reverted; re-attach when cache integrity is implemented) | none |
-| IAM Policy (`buildkite-perf-results`) | Allows perf-queue agents to Get/Put/List objects in `mockserver-ci-perf-results` | perf |
+| IAM Policy (`buildkite-perf-results`) | Allows perf-queue agents to Get/Put/List objects in `mockserver-ci-perf-results` | perf, perf-xl |
 | IAM Policy (`buildkite-release-website-tfstate`) | Allows release agents to read/write website Terraform state and lock file | release |
 | Service-linked roles | AutoScaling, EC2Spot, Organizations, SSO, Support, TrustedAdvisor, ResourceExplorer, ECR Pull-Through Cache (`AWSServiceRoleForECRPullThroughCache` — reads the upstream credential secret + creates cache repos; managed in `ecr-pull-through-cache.tf`, import if it already exists) | account |
 
@@ -277,7 +290,7 @@ Policies are scoped per queue — each agent role receives only the secrets and 
 | CloudTrail | `mockserver-management-trail` — multi-region, log file validation, KMS-encrypted; management events (incl. Secrets Manager access) + S3 data events on the tfstate bucket |
 | GuardDuty | Enabled with S3 data events; HIGH/CRITICAL findings alert via EventBridge -> SNS |
 | Access Analyzer | Account-level analyzer enabled |
-| VPC flow logs | ALL traffic logged to CloudWatch on all 4 VPCs (default, trigger, release, perf) |
+| VPC flow logs | ALL traffic logged to CloudWatch on all 5 VPCs (default, trigger, release, perf, perf-xl). perf-xl's flow log is keyed by stack name (`agent_vpc_ids_by_stack` in `security-hardening.tf`) so it plans before its VPC exists |
 | SNS encryption | `alias/aws/sns` KMS encryption on alerts topic |
 | State bucket encryption | KMS CMK (`alias/mockserver-terraform-state`) with key rotation |
 | Config bucket encryption | KMS CMK (shared with CloudTrail) |
@@ -309,12 +322,22 @@ Policies are scoped per queue — each agent role receives only the secrets and 
 - **Capacity mix:** 100% on-demand (spot interruptions mid-benchmark would corrupt results)
 - **On-demand base capacity:** 0
 - **Single-AZ pinning:** not implemented (one agent per instance + a single instance type already gives strong run-to-run reproducibility)
-- **Managed policies:** `read_buildkite_api_token`, `buildkite-perf-results`
+- **Managed policies:** `read_buildkite_api_token`, `read_buildkite_api_token_readonly`, `buildkite-perf-results`, `buildkite-imds-hardening`
+
+#### Perf-XL Queue (large benchmarks)
+- **Purpose:** performance runs that need far more cores than one c5.12xlarge — the counterpart to `perf`, with the same rules
+- **Minimum:** 0 instances (scale-to-zero — mandatory, see AGENTS.md)
+- **Maximum:** 1 instance, 1 agent per instance
+- **Instance type:** c6i.32xlarge (128 vCPU across 64 physical cores, 256 GiB, 50 Gbit/s). It is Ice Lake rather than perf's Cascade Lake, so numbers from the two queues are not comparable
+- **Capacity mix:** 100% on-demand, on-demand base capacity 0
+- **Managed policies:** `read_buildkite_api_token_readonly`, `buildkite-perf-results`, `buildkite-imds-hardening` (perf's set without the write API token, which nothing on the perf queues uses)
+- **Cost:** $6.464/hr on-demand in eu-west-2 (AWS Pricing API, price list of 2026-09-25), billed only while a job holds the box. Like every stack, its own VPC carries three SSM interface endpoints across two subnets, about $0.066/hr (~$48/month) even at zero instances
+- **vCPU quota:** shares the account's "Running On-Demand Standard" quota (384 vCPU in eu-west-2 at the time of writing) with the other on-demand queues. perf at full scale (3 × 48) plus perf-xl (128) is 272 vCPU. With the default and release queues' on-demand instances running too, the realistic peak is about 344 of 384, a margin of about 40 vCPU
 
 #### Common
 - **Scaling frequency:** Every 60 seconds
 - **Scale trigger:** Buildkite job queue depth
-- **Idle cost:** $0 (all queues scale to zero)
+- **Idle cost:** $0 for instances (all queues scale to zero). Each stack's VPC still pays for its three SSM interface endpoints, about $0.066/hr per stack
 
 ### Build Flow
 
@@ -404,6 +427,9 @@ The bootstrap (`terraform/buildkite-agents/bootstrap/`) uses `import` blocks, ma
 | `trigger_max_size` | `number` | `4` | Maximum trigger queue instances |
 | `release_min_size` | `number` | `0` | Minimum release queue instances |
 | `release_max_size` | `number` | `2` | Maximum release queue instances |
+| `perf_xl_instance_types` | `string` | `c6i.32xlarge` | EC2 instance type for the perf-xl queue (a single fixed type) |
+| `perf_xl_min_size` | `number` | `0` | Minimum perf-xl queue instances (must remain 0) |
+| `perf_xl_max_size` | `number` | `1` | Maximum perf-xl queue instances |
 | `alert_email` | `string` | `""` | Email address for infrastructure alerts |
 
 #### Buildkite Agent Token Security
@@ -419,7 +445,7 @@ export TF_VAR_buildkite_agent_token=$(aws ssm get-parameter \
 
 The `run.sh` wrapper does this automatically (it loads the parameter into `TF_VAR_buildkite_agent_token` before every `init`/`plan`/`apply`).
 
-**Cluster migration:** Buildkite deprecated unclustered (organization-level) agents, so all pipelines and agents now live in the **Default cluster**. The token above is a *cluster* agent token, minted by the `terraform/buildkite-pipelines` stack (`buildkite_cluster_agent_token`) and published to the SSM SecureString `/buildkite/buildkite/agent-token`. That stack also defines the four cluster queues (`default`, `trigger`, `release`, `perf`) and assigns every pipeline to the cluster via `cluster_id`. Apply order: `buildkite-pipelines` (mints token + queues) **before** `buildkite-agents` (consumes the token from SSM).
+**Cluster migration:** Buildkite deprecated unclustered (organization-level) agents, so all pipelines and agents now live in the **Default cluster**. The token above is a *cluster* agent token, minted by the `terraform/buildkite-pipelines` stack (`buildkite_cluster_agent_token`) and published to the SSM SecureString `/buildkite/buildkite/agent-token`. That stack also defines the cluster queues (`default`, `trigger`, `release`, `perf`, `perf-xl`) and assigns every pipeline to the cluster via `cluster_id`. Apply order: `buildkite-pipelines` (mints token + queues) **before** `buildkite-agents` (consumes the token from SSM).
 
 ### Quick Start
 

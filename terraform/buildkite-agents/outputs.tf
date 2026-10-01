@@ -58,6 +58,16 @@ output "perf_lambda_scaler_arn" {
   value       = module.buildkite_perf_stack.scaler_lambda_function_arn
 }
 
+output "perf_xl_auto_scaling_group_name" {
+  description = "Name of the perf-xl agent ASG"
+  value       = module.buildkite_perf_xl_stack.auto_scaling_group_name
+}
+
+output "perf_xl_lambda_scaler_arn" {
+  description = "ARN of the Lambda scaler function (perf-xl queue)"
+  value       = module.buildkite_perf_xl_stack.scaler_lambda_function_arn
+}
+
 output "perf_results_bucket" {
   description = "S3 bucket name for performance-regression result history"
   value       = aws_s3_bucket.perf_results.id

@@ -136,7 +136,7 @@ The heavy run is gated so it does not fire on ordinary commits. There are three 
     -d '{"commit":"<sha>","branch":"master","message":"[perf-run] manual run"}'
   ```
 
-`ui` and `[perf-run]` set `FORCE_RUN=true` in `perf-test-guard.sh`, bypassing the "new commit since last run" check; a `schedule` build respects it. The guard runs on the cheap `trigger` queue; only the dispatched run/microbench/compare steps consume the `perf` queue (a c5.4xlarge that scales from zero, so allow a few minutes for the agent to launch).
+`ui` and `[perf-run]` set `FORCE_RUN=true` in `perf-test-guard.sh`, bypassing the "new commit since last run" check; a `schedule` build respects it. The guard runs on the cheap `trigger` queue; only the dispatched run/microbench/compare steps consume the `perf` queue (up to three c5.12xlarge agents that scale from zero, so allow a few minutes for an agent to launch).
 
 ### Behaviours measured
 

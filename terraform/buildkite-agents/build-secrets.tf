@@ -12,6 +12,8 @@
 #   trigger:  buildkite-api-token (trigger-pipeline.sh orchestration, write),
 #             buildkite-api-token-readonly (perf-test-guard.sh change detection)
 #   perf:     buildkite-api-token-readonly (perf-test-guard.sh commit comparison)
+#             (perf also attaches the write buildkite-api-token, which looks unused; to review)
+#   perf-xl:  buildkite-api-token-readonly only
 #   release:  buildkite-api-token, dockerhub, sonatype, pypi, rubygems,
 #             plus release-only secrets in read_release_secrets
 #

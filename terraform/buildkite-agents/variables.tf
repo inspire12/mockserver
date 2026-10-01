@@ -132,6 +132,28 @@ variable "perf_max_size" {
   default     = 3
 }
 
+variable "perf_xl_instance_types" {
+  description = "EC2 instance type for the perf-xl queue — a SINGLE fixed-performance type (no comma list) for reproducible benchmark numbers"
+  type        = string
+  # 128 vCPU / 64 physical cores across two sockets (two NUMA nodes), unlike the
+  # single-socket perf box, so cpusets must be NUMA-aware. Results share the perf
+  # S3 history: metrics without an `hw` flag in perf-budgets.json would compare
+  # across both queues (see the note on perf_instance_types).
+  default = "c6i.32xlarge"
+}
+
+variable "perf_xl_min_size" {
+  description = "Minimum perf-xl agent instances. MUST be 0 (scale to zero — zero idle cost; AGENTS.md hard constraint)"
+  type        = number
+  default     = 0
+}
+
+variable "perf_xl_max_size" {
+  description = "Maximum perf-xl agent instances. One agent per instance; capped at 1 because each box is 128 vCPU of on-demand capacity"
+  type        = number
+  default     = 1
+}
+
 variable "alert_email" {
   description = "Email address for infrastructure alerts (SNS notifications)"
   type        = string

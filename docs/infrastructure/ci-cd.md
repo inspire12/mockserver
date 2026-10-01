@@ -47,7 +47,7 @@ All custom CI pipelines run on Buildkite with self-managed EC2 agents. This keep
 
 ## Buildkite Pipelines
 
-The monorepo uses a path-based pipeline orchestrator that dynamically triggers separate child pipelines based on changed files. Each child pipeline appears individually in the Buildkite dashboard, giving per-project visibility. Three agent queues are used:
+The monorepo uses a path-based pipeline orchestrator that dynamically triggers separate child pipelines based on changed files. Each child pipeline appears individually in the Buildkite dashboard, giving per-project visibility. These agent queues are used:
 
 | Queue | Instance Types | Purpose |
 |-------|---------------|---------|
@@ -55,6 +55,7 @@ The monorepo uses a path-based pipeline orchestrator that dynamically triggers s
 | `trigger` | `t3.small`, `t3a.small`, `t3.micro` | Trigger polling jobs (`sleep` + `curl` loops) |
 | `release` | Same as `default` | Release pipeline steps that access release secrets |
 | `perf` | `c5.12xlarge` | Daily performance-regression benchmarks (k6 + JMH); scale-to-zero, max 3 with one agent per instance, 100% on-demand |
+| `perf-xl` | `c6i.32xlarge` | Performance runs that need more cores than one `perf` box (128 vCPU / 64 physical cores); scale-to-zero, max 1, one agent per instance, 100% on-demand. About $6.46/hr while running (eu-west-2 on-demand) |
 
 Trigger jobs (which poll child builds via the Buildkite API) run on cheap `trigger` queue instances to avoid starving build agents. See [Agent Starvation](#agent-starvation-from-script-based-triggers-resolved) for background.
 

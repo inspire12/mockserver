@@ -5,7 +5,7 @@
 # agents are migrated onto the pre-existing "Default cluster":
 #
 #   - every pipeline is assigned to the cluster (cluster_id in pipelines.tf)
-#   - the four agent queues are created as cluster queues
+#   - the agent queues are created as cluster queues
 #   - a single cluster agent token is minted and published to SSM, where the
 #     buildkite-agents stack's run.sh reads it (TF_VAR_buildkite_agent_token).
 #     This also removes the inline token from buildkite-agents/terraform.tfvars
@@ -25,7 +25,7 @@ data "buildkite_cluster" "default" {
 # agents with these queue keys). The cluster's auto-created "default-queue" is
 # left as-is; our agents use the "default" key below.
 locals {
-  agent_queues = ["default", "trigger", "release", "perf"]
+  agent_queues = ["default", "trigger", "release", "perf", "perf-xl"]
 }
 
 resource "buildkite_cluster_queue" "agents" {

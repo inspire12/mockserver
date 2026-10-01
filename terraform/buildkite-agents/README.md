@@ -169,6 +169,9 @@ flowchart LR
 | `perf_instance_types` | `string` | `c5.12xlarge` | EC2 instance type for the perf queue. Must have enough PHYSICAL cores for the run's cpusets — see the note on the variable; `perf-test-run.sh` fails the build if they overlap |
 | `perf_min_size` | `number` | `0` | Minimum perf queue instances (must remain 0) |
 | `perf_max_size` | `number` | `3` | Maximum perf queue instances. One agent per instance, so concurrent perf jobs always run on separate machines |
+| `perf_xl_instance_types` | `string` | `c6i.32xlarge` | EC2 instance type for the perf-xl queue (a single fixed type) |
+| `perf_xl_min_size` | `number` | `0` | Minimum perf-xl queue instances (must remain 0) |
+| `perf_xl_max_size` | `number` | `1` | Maximum perf-xl queue instances |
 | `alert_email` | `string` | `""` | Email address for infrastructure alerts |
 
 ## Outputs
@@ -182,6 +185,8 @@ flowchart LR
 | `sns_topic_arn` | SNS topic ARN for infrastructure alerts |
 | `perf_auto_scaling_group_name` | Name of the perf queue AutoScaling Group |
 | `perf_lambda_scaler_arn` | ARN of the perf queue Lambda autoscaler |
+| `perf_xl_auto_scaling_group_name` | Name of the perf-xl queue AutoScaling Group |
+| `perf_xl_lambda_scaler_arn` | ARN of the perf-xl queue Lambda autoscaler |
 | `perf_results_bucket` | Name of the S3 bucket storing perf regression run history |
 
 ## Monitoring and Alerts
@@ -199,7 +204,7 @@ The infrastructure includes CloudWatch alarms and SNS email notifications for:
 
 ## Agent Queues
 
-Four agent queues separate workloads by resource needs:
+Five agent queues separate workloads by resource needs:
 
 | Queue | Instance | Capacity mix | Max | Agents/instance | Purpose |
 |-------|----------|-------------|-----|-----------------|---------|
@@ -207,17 +212,21 @@ Four agent queues separate workloads by resource needs:
 | `trigger` | t3.small / t3a.small / t3.micro | 100% Spot | 4 | 4 | Trigger polling jobs (`sleep` + `curl` loops) |
 | `release` | Same as `default` | 100% on-demand | 2 | 1 | Release pipeline steps with release secrets |
 | `perf` | c5.12xlarge | 100% on-demand | 3 | 1 | Daily performance-regression benchmarks (k6 + JMH); up to three perf jobs at once, each with a whole machine to itself. 24 physical cores, so the server, upstream and k6 cpusets land on genuinely disjoint cores |
+| `perf-xl` | c6i.32xlarge | 100% on-demand | 1 | 1 | Performance runs that need more cores than one `perf` box: 128 vCPU across 64 physical cores. Same rules as `perf`; same policies minus the write API token |
 
 All queues have `min_size = 0` (scale-to-zero). This is a hard constraint — do not set `min_size` to a non-zero value.
 
-The `perf` queue uses `perf-results.tf` (S3 bucket `mockserver-ci-perf-results` + IAM policy `buildkite-perf-results`) to persist historical run JSON for rolling-baseline comparison. The `perf` stack is defined as `module "buildkite_perf_stack"` in `main.tf`.
+The `perf` queue uses `perf-results.tf` (S3 bucket `mockserver-ci-perf-results` + IAM policy `buildkite-perf-results`) to persist historical run JSON for rolling-baseline comparison. The `perf` stack is defined as `module "buildkite_perf_stack"` in `main.tf`; `perf-xl` is `module "buildkite_perf_xl_stack"` and shares the same bucket and policy. A new queue also needs a cluster queue of the same key in `terraform/buildkite-pipelines/clusters.tf`, applied first, or its agents cannot register.
+
+**Rolling back perf-xl.** The clean rollback is `perf_xl_max_size = 0`, which stops any instance launching. Full removal also deletes the `perf-xl` entry from `agent_vpc_ids_by_stack` in `security-hardening.tf`. Before destroying, empty the module's versioned managed-secrets and secrets-logging S3 buckets, including every object version. Remove the `perf-xl` cluster queue from `terraform/buildkite-pipelines/clusters.tf` only after the agents stack is gone.
 
 ## Cost
 
 Current configuration (`min_size = 0`, `on_demand_percentage = 20`, diversified instance types):
-- **Idle cost:** ~$0 (scales to zero when no builds queued) + minimal CloudWatch alarm costs
+- **Idle cost:** $0 for instances (every queue scales to zero when no builds are queued), plus about $0.066/hr per stack for its VPC's three SSM interface endpoints, plus minimal CloudWatch alarm costs
 - **Build cost:** ~$0.03–0.10/hr per agent (20% on-demand, 80% spot, c5/m5 family)
 - **Perf queue cost:** ~$2.42/hr when active (c5.12xlarge on-demand, eu-west-2 — verified against the AWS Pricing API), runs at most once per day when master has new commits. It was c5.4xlarge at $0.81/hr; the move is a measurement-correctness fix, because eight physical cores could not hold the run's thirteen-core cpusets and the load generator shared cores with the server it was measuring
+- **Perf-xl queue cost:** $6.464/hr when active (c6i.32xlarge on-demand, eu-west-2, AWS Pricing API). Max 1 instance. Its VPC endpoints add about $0.066/hr even at zero instances, as every stack's do
 - **Monitoring cost:** <$1/month (alarms + dashboard + SNS)
 - Agents take 2–3 minutes to launch from cold start
 

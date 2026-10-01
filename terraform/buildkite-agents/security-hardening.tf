@@ -44,6 +44,14 @@ locals {
     try(module.buildkite_release_stack.vpc_id, null),
     try(module.buildkite_perf_stack.vpc_id, null),
   ])
+
+  # Stacks added after the flow logs above go here instead: keyed by a static
+  # stack name, so for_each still plans while the new VPC id is unknown (the
+  # toset above cannot take an unknown id). Re-keying the existing entries would
+  # need moved blocks naming real VPC ids, so they stay as they are.
+  agent_vpc_ids_by_stack = {
+    perf-xl = module.buildkite_perf_xl_stack.vpc_id
+  }
 }
 
 resource "aws_cloudwatch_log_group" "vpc_flow_logs" {
@@ -92,6 +100,22 @@ resource "aws_flow_log" "vpc" {
 
   log_destination_type = "cloud-watch-logs"
   log_destination      = aws_cloudwatch_log_group.vpc_flow_logs[each.value].arn
+  iam_role_arn         = aws_iam_role.vpc_flow_log[0].arn
+  traffic_type         = "ALL"
+  vpc_id               = each.value
+}
+
+resource "aws_cloudwatch_log_group" "vpc_flow_logs_by_stack" {
+  for_each          = local.agent_vpc_ids_by_stack
+  name              = "/aws/vpc/flow-logs/${each.value}"
+  retention_in_days = 30
+}
+
+resource "aws_flow_log" "vpc_by_stack" {
+  for_each = local.agent_vpc_ids_by_stack
+
+  log_destination_type = "cloud-watch-logs"
+  log_destination      = aws_cloudwatch_log_group.vpc_flow_logs_by_stack[each.key].arn
   iam_role_arn         = aws_iam_role.vpc_flow_log[0].arn
   traffic_type         = "ALL"
   vpc_id               = each.value
