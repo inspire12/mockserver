@@ -38,82 +38,86 @@ public class Configuration {
         return new Configuration();
     }
 
+    // Every mutable field is volatile: PUT /mockserver/configuration writes them on one thread while
+    // request handling and control-plane enforcement read them on others without a lock, so a plain
+    // field would not be guaranteed to publish the change. ConfigurationFieldPublicationTest enforces it.
+
     // logging
-    private Level logLevel;
+    private volatile Level logLevel;
     // Memo of the JVM-wide logLevel default, re-resolved when ConfigurationProperties.modificationCount()
     // changes. The value may be null (OFF), so the holder reference, not the value, marks "resolved".
     private volatile ResolvedLogLevel resolvedLogLevel;
-    private Consumer<LogEntry> logEventListener;
-    private Boolean disableSystemOut;
-    private Boolean disableLogging;
-    private Boolean detailedMatchFailures;
-    private Boolean launchUIForLogLevelDebug;
-    private Boolean metricsEnabled;
+    private volatile Consumer<LogEntry> logEventListener;
+    private volatile Boolean disableSystemOut;
+    private volatile Boolean disableLogging;
+    private volatile Boolean detailedMatchFailures;
+    private volatile Boolean launchUIForLogLevelDebug;
+    private volatile Boolean metricsEnabled;
     // Memo of the JVM-wide default, read several times per request; see ResolvedDefault.
     private volatile ResolvedDefault<Boolean> resolvedMetricsEnabled;
-    private Boolean dashboardAnalyticsEnabled;
-    private String dashboardAnalyticsEndpoint;
-    private String dashboardAnalyticsKey;
-    private String dashboardAnalyticsDistribution;
-    private Long slowRequestThresholdMillis;
-    private Boolean metricsRequestDurationRouteLabels;
-    private Boolean chaosAutoHaltEnabled;
-    private Long chaosAutoHaltErrorThreshold;
-    private Long chaosAutoHaltWindowMillis;
-    private Integer rateLimitMaxNamedQuotas;
-    private Boolean connectionLifecycleChaosEnabled;
-    private Long preemptionSimulationMaxDrainMillis;
-    private Long stopDrainMillis;
-    private Boolean connectionLifecycleAutoHaltCountsRst;
-    private Boolean sloTrackingEnabled;
-    private Long sloWindowRetentionMillis;
-    private Integer sloWindowMaxSamples;
-    private Boolean loadGenerationEnabled;
-    private Boolean loadGenerationSuppressEventLog;
-    private Integer loadGenerationMaxVirtualUsers;
-    private Integer loadGenerationMaxInFlightRequests;
-    private Integer loadGenerationMaxRequestsPerSecond;
-    private Long loadGenerationMaxDurationMillis;
-    private Integer loadGenerationMaxSteps;
-    private Double loadGenerationMaxRate;
-    private Integer loadGenerationMaxStages;
-    private Integer loadGenerationMaxConcurrentScenarios;
-    private java.util.List<String> loadGenerationMetricLabels;
-    private String loadScenarioInitializationJsonPath;
-    private Boolean llmMetricsEnabled;
-    private Boolean perExpectationMetricsEnabled;
-    private Boolean deduplicateRecordedExpectations;
-    private Boolean templatizeRecordedValues;
-    private Boolean redactSecretsInRecordedExpectations;
-    private Boolean redactSecretsInLog;
-    private Double llmCostBudgetUsd;
-    private Boolean otelPropagateTraceContext;
+    private volatile Boolean dashboardAnalyticsEnabled;
+    private volatile String dashboardAnalyticsEndpoint;
+    private volatile String dashboardAnalyticsKey;
+    private volatile String dashboardAnalyticsDistribution;
+    private volatile Long slowRequestThresholdMillis;
+    private volatile Boolean metricsRequestDurationRouteLabels;
+    private volatile Boolean chaosAutoHaltEnabled;
+    private volatile Long chaosAutoHaltErrorThreshold;
+    private volatile Long chaosAutoHaltWindowMillis;
+    private volatile Integer rateLimitMaxNamedQuotas;
+    private volatile Boolean connectionLifecycleChaosEnabled;
+    private volatile Long preemptionSimulationMaxDrainMillis;
+    private volatile Long stopDrainMillis;
+    private volatile Boolean connectionLifecycleAutoHaltCountsRst;
+    private volatile Boolean sloTrackingEnabled;
+    private volatile Long sloWindowRetentionMillis;
+    private volatile Integer sloWindowMaxSamples;
+    private volatile Boolean loadGenerationEnabled;
+    private volatile Boolean loadGenerationSuppressEventLog;
+    private volatile Integer loadGenerationMaxVirtualUsers;
+    private volatile Integer loadGenerationMaxInFlightRequests;
+    private volatile Integer loadGenerationMaxRequestsPerSecond;
+    private volatile Long loadGenerationMaxDurationMillis;
+    private volatile Integer loadGenerationMaxSteps;
+    private volatile Double loadGenerationMaxRate;
+    private volatile Integer loadGenerationMaxStages;
+    private volatile Integer loadGenerationMaxConcurrentScenarios;
+    private volatile java.util.List<String> loadGenerationMetricLabels;
+    private volatile String loadScenarioInitializationJsonPath;
+    private volatile Boolean llmMetricsEnabled;
+    private volatile Boolean perExpectationMetricsEnabled;
+    private volatile Boolean deduplicateRecordedExpectations;
+    private volatile Boolean templatizeRecordedValues;
+    private volatile Boolean redactSecretsInRecordedExpectations;
+    private volatile Boolean redactSecretsInLog;
+    private volatile Double llmCostBudgetUsd;
+    private volatile Boolean otelPropagateTraceContext;
     private volatile ResolvedDefault<Boolean> resolvedOtelPropagateTraceContext;
-    private Boolean otelGenerateTraceId;
-    private Boolean mcpEnabled;
-    private Long breakpointTimeoutMillis;
-    private Integer breakpointMaxHeld;
-    private Boolean wasmEnabled;
-    private Integer wasmMaxMemoryPages;
-    private Long wasmExecutionTimeoutMillis;
-    private String grpcDescriptorDirectory;
-    private String grpcProtoDirectory;
-    private Boolean grpcEnabled;
-    private String grpcProtocPath;
-    private Boolean grpcBidiStreamingEnabled;
-    private Boolean dnsEnabled;
-    private Integer dnsPort;
-    private Integer http3Port;
-    private Long http3MaxIdleTimeout;
-    private Long http3InitialMaxData;
-    private Long http3InitialMaxStreamDataBidirectional;
-    private Long http3InitialMaxStreamsBidirectional;
-    private Long http3QpackMaxTableCapacity;
-    private Boolean http3ConnectUdpEnabled;
-    private String http3ConnectUdpAllowedTargets;
-    private Long http3AltSvcMaxAge;
-    private Boolean http3AdvertiseAltSvc;
-    private Map<String, String> logLevelOverrides;
+    private volatile Boolean otelGenerateTraceId;
+    private volatile Boolean mcpEnabled;
+    private volatile Long breakpointTimeoutMillis;
+    private volatile Integer breakpointMaxHeld;
+    private volatile Boolean wasmEnabled;
+    private volatile Integer wasmMaxMemoryPages;
+    private volatile Long wasmExecutionTimeoutMillis;
+    private volatile String grpcDescriptorDirectory;
+    private volatile String grpcProtoDirectory;
+    private volatile Boolean grpcEnabled;
+    private volatile String grpcProtocPath;
+    private volatile Boolean grpcBidiStreamingEnabled;
+    private volatile Boolean dnsEnabled;
+    private volatile Integer dnsPort;
+    private volatile Integer http3Port;
+    private volatile Long http3MaxIdleTimeout;
+    private volatile Long http3InitialMaxData;
+    private volatile Long http3InitialMaxStreamDataBidirectional;
+    private volatile Long http3InitialMaxStreamsBidirectional;
+    private volatile Long http3QpackMaxTableCapacity;
+    private volatile Boolean http3ConnectUdpEnabled;
+    private volatile String http3ConnectUdpAllowedTargets;
+    private volatile Long http3AltSvcMaxAge;
+    private volatile Boolean http3AdvertiseAltSvc;
+    private volatile Map<String, String> logLevelOverrides;
     // Memoised resolution of the JVM-wide logLevelOverrides default, consulted once per log entry by the
     // single event-log consumer thread via writeToSystemOut(). Only used when this instance has no
     // override of its own (logLevelOverrides == null); refreshed when the global configuration changes,
@@ -122,112 +126,112 @@ public class Configuration {
     // reader can never observe a torn (value, generation) pair while a control-plane thread publishes a
     // new one. See logLevelOverrides().
     private volatile ResolvedLogLevelOverrides resolvedLogLevelOverrides;
-    private Boolean compactLogFormat;
+    private volatile Boolean compactLogFormat;
 
     // dev mode
-    private Boolean devMode;
+    private volatile Boolean devMode;
 
     // memory usage
-    private Integer maxExpectations;
-    private Long maxExpectationsSizeInBytes;
-    private Integer maxLogEntries;
-    private Long maxEventLogSizeInBytes;
-    private Integer maxLoggedBodyBytes;
-    private Integer ringBufferSize;
-    private Integer maxWebSocketExpectations;
-    private Integer webSocketProxyMaxRecordedFrames;
-    private Integer webSocketProxyIdleTimeoutSeconds;
-    private Boolean outputMemoryUsageCsv;
-    private String memoryUsageCsvDirectory;
+    private volatile Integer maxExpectations;
+    private volatile Long maxExpectationsSizeInBytes;
+    private volatile Integer maxLogEntries;
+    private volatile Long maxEventLogSizeInBytes;
+    private volatile Integer maxLoggedBodyBytes;
+    private volatile Integer ringBufferSize;
+    private volatile Integer maxWebSocketExpectations;
+    private volatile Integer webSocketProxyMaxRecordedFrames;
+    private volatile Integer webSocketProxyIdleTimeoutSeconds;
+    private volatile Boolean outputMemoryUsageCsv;
+    private volatile String memoryUsageCsvDirectory;
 
     // scalability
-    private Boolean useNativeTransport;
-    private Integer nioEventLoopThreadCount;
-    private Integer soBacklog;
-    private Long inboundConnectionIdleTimeoutMillis;
-    private Integer maxInboundConnections;
-    private Integer actionHandlerThreadCount;
-    private Integer maxPendingDelayedResponses;
-    private Integer maxQueuedTemplateActions;
-    private Integer clientNioEventLoopThreadCount;
-    private Integer webSocketClientEventLoopThreadCount;
-    private Long maxFutureTimeoutInMillis;
-    private Boolean matchersFailFast;
-    private Boolean matchExactCase;
-    private Boolean forwardConnectionPoolEnabled;
-    private Integer forwardConnectionPoolMaxIdlePerKey;
-    private Long forwardConnectionPoolIdleTimeoutMillis;
-    private Boolean forwardConnectionPoolKeepAlive;
-    private Integer forwardConnectionPoolMaxTotalPerKey;
-    private Boolean forwardSocketKeepAlive;
-    private Integer forwardSocketKeepAliveIdleSeconds;
-    private Integer forwardSocketKeepAliveIntervalSeconds;
-    private Integer forwardSocketKeepAliveCount;
-    private Integer forwardProxyRetryCount;
-    private Long forwardProxyRetryBackoffMillis;
-    private Boolean forwardProxyHttp2Enabled;
-    private Boolean forwardProxyHttp2Upgrade;
-    private Boolean forwardProxyCircuitBreakerEnabled;
-    private Integer forwardProxyCircuitBreakerFailureThreshold;
-    private Long forwardProxyCircuitBreakerWindowMillis;
-    private Boolean enforceResponseValidationForMocks;
+    private volatile Boolean useNativeTransport;
+    private volatile Integer nioEventLoopThreadCount;
+    private volatile Integer soBacklog;
+    private volatile Long inboundConnectionIdleTimeoutMillis;
+    private volatile Integer maxInboundConnections;
+    private volatile Integer actionHandlerThreadCount;
+    private volatile Integer maxPendingDelayedResponses;
+    private volatile Integer maxQueuedTemplateActions;
+    private volatile Integer clientNioEventLoopThreadCount;
+    private volatile Integer webSocketClientEventLoopThreadCount;
+    private volatile Long maxFutureTimeoutInMillis;
+    private volatile Boolean matchersFailFast;
+    private volatile Boolean matchExactCase;
+    private volatile Boolean forwardConnectionPoolEnabled;
+    private volatile Integer forwardConnectionPoolMaxIdlePerKey;
+    private volatile Long forwardConnectionPoolIdleTimeoutMillis;
+    private volatile Boolean forwardConnectionPoolKeepAlive;
+    private volatile Integer forwardConnectionPoolMaxTotalPerKey;
+    private volatile Boolean forwardSocketKeepAlive;
+    private volatile Integer forwardSocketKeepAliveIdleSeconds;
+    private volatile Integer forwardSocketKeepAliveIntervalSeconds;
+    private volatile Integer forwardSocketKeepAliveCount;
+    private volatile Integer forwardProxyRetryCount;
+    private volatile Long forwardProxyRetryBackoffMillis;
+    private volatile Boolean forwardProxyHttp2Enabled;
+    private volatile Boolean forwardProxyHttp2Upgrade;
+    private volatile Boolean forwardProxyCircuitBreakerEnabled;
+    private volatile Integer forwardProxyCircuitBreakerFailureThreshold;
+    private volatile Long forwardProxyCircuitBreakerWindowMillis;
+    private volatile Boolean enforceResponseValidationForMocks;
 
     // socket
-    private Long maxSocketTimeoutInMillis;
-    private Long socketConnectionTimeoutInMillis;
-    private Delay connectionDelay;
-    private Boolean alwaysCloseSocketConnections;
-    private String localBoundIP;
+    private volatile Long maxSocketTimeoutInMillis;
+    private volatile Long socketConnectionTimeoutInMillis;
+    private volatile Delay connectionDelay;
+    private volatile Boolean alwaysCloseSocketConnections;
+    private volatile String localBoundIP;
 
     // http request parsing
-    private Integer maxInitialLineLength;
-    private Integer maxHeaderSize;
-    private Integer maxChunkSize;
-    private Integer maxRequestBodySize;
-    private Integer maxGrpcMessageSize;
-    private Integer maxResponseBodySize;
-    private Integer maxLlmConversationBodySize;
-    private Boolean driftDetectionEnabled;
-    private Double driftSampleRate;
-    private Boolean driftSemanticAnalysisEnabled;
-    private Long driftResponseTimeThresholdMs;
-    private Boolean driftAlertWebhookEnabled;
-    private String driftAlertWebhookUrl;
-    private String driftAlertSeverityThreshold;
-    private Long driftAlertCooldownMillis;
-    private Boolean controlPlaneAuditEnabled;
-    private Integer controlPlaneAuditMaxEntries;
-    private Boolean controlPlaneAuditReads;
-    private String auditLogFile;
-    private Boolean useSemicolonAsQueryParameterSeparator;
-    private Boolean startupWarmup;
-    private Boolean assumeAllRequestsAreHttp;
-    private Boolean http2Enabled;
+    private volatile Integer maxInitialLineLength;
+    private volatile Integer maxHeaderSize;
+    private volatile Integer maxChunkSize;
+    private volatile Integer maxRequestBodySize;
+    private volatile Integer maxGrpcMessageSize;
+    private volatile Integer maxResponseBodySize;
+    private volatile Integer maxLlmConversationBodySize;
+    private volatile Boolean driftDetectionEnabled;
+    private volatile Double driftSampleRate;
+    private volatile Boolean driftSemanticAnalysisEnabled;
+    private volatile Long driftResponseTimeThresholdMs;
+    private volatile Boolean driftAlertWebhookEnabled;
+    private volatile String driftAlertWebhookUrl;
+    private volatile String driftAlertSeverityThreshold;
+    private volatile Long driftAlertCooldownMillis;
+    private volatile Boolean controlPlaneAuditEnabled;
+    private volatile Integer controlPlaneAuditMaxEntries;
+    private volatile Boolean controlPlaneAuditReads;
+    private volatile String auditLogFile;
+    private volatile Boolean useSemicolonAsQueryParameterSeparator;
+    private volatile Boolean startupWarmup;
+    private volatile Boolean assumeAllRequestsAreHttp;
+    private volatile Boolean http2Enabled;
 
     // matcher safety — global only (ConfigurationProperties), no per-instance override:
     // RegexStringMatcher and XPathEvaluator are constructed without a Configuration handle
     // and read directly from ConfigurationProperties, so per-instance setters would be dead API.
 
     // streaming proxy
-    private Boolean streamingResponsesEnabled;
-    private Integer maxStreamingCaptureBytes;
-    private Integer streamIdleTimeoutSeconds;
+    private volatile Boolean streamingResponsesEnabled;
+    private volatile Integer maxStreamingCaptureBytes;
+    private volatile Integer streamIdleTimeoutSeconds;
 
     // non http proxying
-    private Boolean forwardBinaryRequestsWithoutWaitingForResponse;
-    private BinaryProxyListener binaryProxyListener;
+    private volatile Boolean forwardBinaryRequestsWithoutWaitingForResponse;
+    private volatile BinaryProxyListener binaryProxyListener;
 
     // CORS
-    private Boolean enableCORSForAPI;
-    private Boolean enableCORSForAllResponses;
-    private String corsAllowOrigin;
-    private String corsAllowMethods;
-    private String corsAllowHeaders;
-    private Boolean corsAllowCredentials;
-    private Integer corsMaxAgeInSeconds;
+    private volatile Boolean enableCORSForAPI;
+    private volatile Boolean enableCORSForAllResponses;
+    private volatile String corsAllowOrigin;
+    private volatile String corsAllowMethods;
+    private volatile String corsAllowHeaders;
+    private volatile Boolean corsAllowCredentials;
+    private volatile Integer corsMaxAgeInSeconds;
 
     // default response headers
-    private String defaultResponseHeaders;
+    private volatile String defaultResponseHeaders;
     private volatile ResolvedDefault<String> resolvedDefaultResponseHeaders;
     // memoised parse of defaultResponseHeaders() so the pipe-split parse runs once per distinct
     // resolved value rather than per HTTP request (DefaultResponseHeaders is constructed per request).
@@ -236,155 +240,155 @@ public class Configuration {
     private volatile java.util.Map.Entry<String, List<Header>> parsedDefaultResponseHeaders;
 
     // template restrictions
-    private String javascriptDisallowedClasses;
-    private String javascriptAllowedClasses;
-    private String javascriptDisallowedText;
-    private Long javascriptTemplateExecutionTimeout;
-    private Boolean velocityDisallowClassLoading;
-    private String velocityDisallowedText;
-    private String mustacheDisallowedText;
-    private Long templateFakerSeed;
+    private volatile String javascriptDisallowedClasses;
+    private volatile String javascriptAllowedClasses;
+    private volatile String javascriptDisallowedText;
+    private volatile Long javascriptTemplateExecutionTimeout;
+    private volatile Boolean velocityDisallowClassLoading;
+    private volatile String velocityDisallowedText;
+    private volatile String mustacheDisallowedText;
+    private volatile Long templateFakerSeed;
 
     // mock initialization
-    private String initializationClass;
-    private String initializationJsonPath;
-    private String initializationOpenAPIPath;
-    private String openAPIContextPathPrefix;
-    private Boolean openAPIResponseValidation;
-    private Boolean validateRequestsAgainstOpenApiSpec;
+    private volatile String initializationClass;
+    private volatile String initializationJsonPath;
+    private volatile String initializationOpenAPIPath;
+    private volatile String openAPIContextPathPrefix;
+    private volatile Boolean openAPIResponseValidation;
+    private volatile Boolean validateRequestsAgainstOpenApiSpec;
     private volatile ResolvedDefault<Boolean> resolvedValidateRequestsAgainstOpenApiSpec;
-    private String validateProxyOpenAPISpec;
-    private Boolean validateProxyEnforce;
-    private Boolean generateRealisticExampleValues;
-    private Boolean watchInitializationJson;
-    private Long watchInitializationJsonPollPeriodMillis;
-    private Boolean failOnInitializationError;
+    private volatile String validateProxyOpenAPISpec;
+    private volatile Boolean validateProxyEnforce;
+    private volatile Boolean generateRealisticExampleValues;
+    private volatile Boolean watchInitializationJson;
+    private volatile Long watchInitializationJsonPollPeriodMillis;
+    private volatile Boolean failOnInitializationError;
 
     // mock persistence
-    private Boolean persistExpectations;
-    private String persistedExpectationsPath;
+    private volatile Boolean persistExpectations;
+    private volatile String persistedExpectationsPath;
 
     // recorded expectation persistence
-    private Boolean persistRecordedExpectations;
-    private String persistedRecordedExpectationsPath;
+    private volatile Boolean persistRecordedExpectations;
+    private volatile String persistedRecordedExpectationsPath;
 
-    private Boolean persistRecordedRequestsToDisk;
-    private String persistedRecordedRequestsPath;
+    private volatile Boolean persistRecordedRequestsToDisk;
+    private volatile String persistedRecordedRequestsPath;
 
     // state backend (G10 phase 2a)
-    private String stateBackend;
-    private String blobStoreType;
+    private volatile String stateBackend;
+    private volatile String blobStoreType;
 
     // cloud blob store configuration
-    private String blobStoreBucket;
-    private String blobStoreRegion;
-    private String blobStoreEndpoint;
-    private String blobStoreKeyPrefix;
-    private String blobStoreAccessKeyId;
-    private String blobStoreSecretAccessKey;
-    private String blobStoreContainer;
-    private String blobStoreConnectionString;
-    private String blobStoreProjectId;
-    private Integer blobStoreRestoreTimeoutSeconds;
+    private volatile String blobStoreBucket;
+    private volatile String blobStoreRegion;
+    private volatile String blobStoreEndpoint;
+    private volatile String blobStoreKeyPrefix;
+    private volatile String blobStoreAccessKeyId;
+    private volatile String blobStoreSecretAccessKey;
+    private volatile String blobStoreContainer;
+    private volatile String blobStoreConnectionString;
+    private volatile String blobStoreProjectId;
+    private volatile Integer blobStoreRestoreTimeoutSeconds;
 
     // clustering (G10 phase 2c) — opt-in, default OFF
-    private Boolean clusterEnabled;
-    private String clusterName;
-    private String clusterTransportConfig;
-    private Boolean clusterSharedTimesEnabled;
-    private Boolean clusterVerifyFanIn;
-    private String clusterVerifyFanInPeers;
-    private String clusterFanInPeerAuthToken;
+    private volatile Boolean clusterEnabled;
+    private volatile String clusterName;
+    private volatile String clusterTransportConfig;
+    private volatile Boolean clusterSharedTimesEnabled;
+    private volatile Boolean clusterVerifyFanIn;
+    private volatile String clusterVerifyFanInPeers;
+    private volatile String clusterFanInPeerAuthToken;
 
     // verification
-    private Integer maximumNumberOfRequestToReturnInVerificationFailure;
-    private Boolean detailedVerificationFailures;
-    private Boolean failVerificationOnEvictedLog;
-    private Boolean attachMismatchDiagnosticToResponse;
-    private Boolean closestMatchHintEnabled;
+    private volatile Integer maximumNumberOfRequestToReturnInVerificationFailure;
+    private volatile Boolean detailedVerificationFailures;
+    private volatile Boolean failVerificationOnEvictedLog;
+    private volatile Boolean attachMismatchDiagnosticToResponse;
+    private volatile Boolean closestMatchHintEnabled;
 
     // proxy
     // volatile: mutated at runtime via PUT /mockserver/mode (control-plane thread) and read on the
     // Netty request path (HttpActionHandler), so the write must be visible across I/O threads
     private volatile Boolean attemptToProxyIfNoMatchingExpectation;
-    private InetSocketAddress forwardHttpProxy;
-    private InetSocketAddress forwardHttpsProxy;
-    private InetSocketAddress forwardSocksProxy;
-    private String forwardProxyAuthenticationUsername;
-    private String forwardProxyAuthenticationPassword;
-    private String proxyAuthenticationRealm;
-    private String proxyAuthenticationUsername;
-    private String proxyAuthenticationPassword;
+    private volatile InetSocketAddress forwardHttpProxy;
+    private volatile InetSocketAddress forwardHttpsProxy;
+    private volatile InetSocketAddress forwardSocksProxy;
+    private volatile String forwardProxyAuthenticationUsername;
+    private volatile String forwardProxyAuthenticationPassword;
+    private volatile String proxyAuthenticationRealm;
+    private volatile String proxyAuthenticationUsername;
+    private volatile String proxyAuthenticationPassword;
 
     // data plane (mocked endpoint) authentication — opt-in, default off
-    private Boolean dataPlaneAuthenticationRequired;
+    private volatile Boolean dataPlaneAuthenticationRequired;
     private volatile ResolvedDefault<Boolean> resolvedDataPlaneAuthenticationRequired;
-    private String dataPlaneBasicAuthenticationUsername;
-    private String dataPlaneBasicAuthenticationPassword;
-    private String dataPlaneBasicAuthenticationRealm;
-    private String dataPlaneBearerAuthenticationToken;
-    private String dataPlaneApiKeyAuthenticationHeader;
-    private String dataPlaneApiKeyAuthenticationValue;
+    private volatile String dataPlaneBasicAuthenticationUsername;
+    private volatile String dataPlaneBasicAuthenticationPassword;
+    private volatile String dataPlaneBasicAuthenticationRealm;
+    private volatile String dataPlaneBearerAuthenticationToken;
+    private volatile String dataPlaneApiKeyAuthenticationHeader;
+    private volatile String dataPlaneApiKeyAuthenticationValue;
 
-    private String noProxyHosts;
+    private volatile String noProxyHosts;
     // volatile: proxyRemoteHost/proxyRemotePort can be set at runtime via the
     // retrieve ?forwardUnmatchedTo= record-and-forward convenience (control-plane
     // thread) and are read on the Netty request path (HttpActionHandler), so the
     // write must be visible across I/O threads.
     private volatile String proxyRemoteHost;
     private volatile Integer proxyRemotePort;
-    private Boolean forwardAdjustHostHeader;
-    private String forwardDefaultHostHeader;
-    private List<ProxyPassMapping> proxyPassMappings;
+    private volatile Boolean forwardAdjustHostHeader;
+    private volatile String forwardDefaultHostHeader;
+    private volatile List<ProxyPassMapping> proxyPassMappings;
 
     // global response delay
-    private Long globalResponseDelayMillis;
+    private volatile Long globalResponseDelayMillis;
 
     // liveness
-    private String livenessHttpGetPath;
+    private volatile String livenessHttpGetPath;
 
     // expectation namespacing / multi-tenancy
-    private String matchNamespaceHeader;
+    private volatile String matchNamespaceHeader;
 
     // control plane authentication
-    private Boolean controlPlaneTLSMutualAuthenticationRequired;
-    private String controlPlaneTLSMutualAuthenticationCAChain;
-    private String controlPlanePrivateKeyPath;
-    private String controlPlaneX509CertificatePath;
-    private Boolean controlPlaneJWTAuthenticationRequired;
-    private String controlPlaneJWTAuthenticationJWKSource;
-    private String controlPlaneJWTAuthenticationExpectedAudience;
-    private Map<String, String> controlPlaneJWTAuthenticationMatchingClaims;
-    private Set<String> controlPlaneJWTAuthenticationRequiredClaims;
-    private Boolean controlPlaneOidcAuthenticationRequired;
-    private String controlPlaneOidcIssuer;
-    private String controlPlaneOidcJwksUri;
-    private String controlPlaneOidcAudience;
-    private Set<String> controlPlaneOidcRequiredScopes;
-    private String controlPlaneOidcScopeClaim;
-    private Boolean controlPlaneAuthorizationEnabled;
-    private Map<String, org.mockserver.authentication.authorization.ControlPlaneRole> controlPlaneScopeMapping;
+    private volatile Boolean controlPlaneTLSMutualAuthenticationRequired;
+    private volatile String controlPlaneTLSMutualAuthenticationCAChain;
+    private volatile String controlPlanePrivateKeyPath;
+    private volatile String controlPlaneX509CertificatePath;
+    private volatile Boolean controlPlaneJWTAuthenticationRequired;
+    private volatile String controlPlaneJWTAuthenticationJWKSource;
+    private volatile String controlPlaneJWTAuthenticationExpectedAudience;
+    private volatile Map<String, String> controlPlaneJWTAuthenticationMatchingClaims;
+    private volatile Set<String> controlPlaneJWTAuthenticationRequiredClaims;
+    private volatile Boolean controlPlaneOidcAuthenticationRequired;
+    private volatile String controlPlaneOidcIssuer;
+    private volatile String controlPlaneOidcJwksUri;
+    private volatile String controlPlaneOidcAudience;
+    private volatile Set<String> controlPlaneOidcRequiredScopes;
+    private volatile String controlPlaneOidcScopeClaim;
+    private volatile Boolean controlPlaneAuthorizationEnabled;
+    private volatile Map<String, org.mockserver.authentication.authorization.ControlPlaneRole> controlPlaneScopeMapping;
 
     // TLS
-    private Boolean proactivelyInitialiseTLS;
+    private volatile Boolean proactivelyInitialiseTLS;
     private volatile boolean rebuildTLSContext;
     private volatile boolean rebuildServerTLSContext;
     // advanced AFTER each change to an input of the cached server TLS context; see serverTLSContextGeneration()
     private final AtomicLong serverTLSContextInputChanges = new AtomicLong();
-    private String tlsProtocols;
-    private Boolean tlsAllowInsecureProtocols;
+    private volatile String tlsProtocols;
+    private volatile Boolean tlsAllowInsecureProtocols;
 
     // inbound - dynamic CA
-    private Boolean dynamicallyCreateCertificateAuthorityCertificate;
-    private String directoryToSaveDynamicSSLCertificate;
+    private volatile Boolean dynamicallyCreateCertificateAuthorityCertificate;
+    private volatile String directoryToSaveDynamicSSLCertificate;
 
     // proxy setup convenience
-    private Boolean proxySetup;
-    private Boolean proxySetupLogging;
+    private volatile Boolean proxySetup;
+    private volatile Boolean proxySetupLogging;
 
     // inbound - dynamic private key & x509
-    private Boolean preventCertificateDynamicUpdate;
-    private String sslCertificateDomainName;
+    private volatile Boolean preventCertificateDynamicUpdate;
+    private volatile String sslCertificateDomainName;
     // volatile + mutated only through the synchronized add/clear methods below, so the null-then-assign
     // read-modify-write race that could drop a concurrently-added SAN disappears (defect C7)
     private volatile Set<String> sslSubjectAlternativeNameDomains;
@@ -398,82 +402,82 @@ public class Configuration {
     // synchronized add / clear / setter methods below; never read by the unsynchronized cert readers.
     private final Deque<String> dynamicSanDomainOrder = new ConcurrentLinkedDeque<>();
     private final Deque<String> dynamicSanIpOrder = new ConcurrentLinkedDeque<>();
-    private Integer maxSubjectAlternativeNames;
-    private Integer sslCertificateLeafValidityInDays;
+    private volatile Integer maxSubjectAlternativeNames;
+    private volatile Integer sslCertificateLeafValidityInDays;
 
     // inbound - fixed CA
-    private String certificateAuthorityPrivateKey;
-    private String certificateAuthorityCertificate;
+    private volatile String certificateAuthorityPrivateKey;
+    private volatile String certificateAuthorityCertificate;
 
     // inbound - fixed private key & x509
-    private String privateKeyPath;
-    private String x509CertificatePath;
+    private volatile String privateKeyPath;
+    private volatile String x509CertificatePath;
 
     // inbound - mTLS
-    private Boolean tlsMutualAuthenticationRequired;
-    private String tlsMutualAuthenticationCertificateChain;
+    private volatile Boolean tlsMutualAuthenticationRequired;
+    private volatile String tlsMutualAuthenticationCertificateChain;
 
     // outbound - CA
-    private ForwardProxyTLSX509CertificatesTrustManager forwardProxyTLSX509CertificatesTrustManagerType;
-    private Boolean forwardProxyTLSHostnameVerificationEnabled;
+    private volatile ForwardProxyTLSX509CertificatesTrustManager forwardProxyTLSX509CertificatesTrustManagerType;
+    private volatile Boolean forwardProxyTLSHostnameVerificationEnabled;
 
     // outbound - SSRF protection
-    private Boolean forwardProxyBlockPrivateNetworks;
+    private volatile Boolean forwardProxyBlockPrivateNetworks;
 
     // outbound - fixed CA
-    private String forwardProxyTLSCustomTrustX509Certificates;
+    private volatile String forwardProxyTLSCustomTrustX509Certificates;
 
     // outbound - fixed private key & x509
-    private String forwardProxyPrivateKey;
-    private String forwardProxyCertificateChain;
-    private String forwardProxyClientCertificatesByHost;
+    private volatile String forwardProxyPrivateKey;
+    private volatile String forwardProxyCertificateChain;
+    private volatile String forwardProxyClientCertificatesByHost;
 
     // service mesh / sidecar
-    private Boolean transparentProxyEnabled;
-    private Boolean transparentProxyTproxy;
-    private Boolean transparentProxyEbpf;
-    private String transparentProxyEbpfMapPath;
+    private volatile Boolean transparentProxyEnabled;
+    private volatile Boolean transparentProxyTproxy;
+    private volatile Boolean transparentProxyEbpf;
+    private volatile String transparentProxyEbpfMapPath;
 
     // async messaging defaults
-    private String asyncKafkaBootstrapServers;
-    private String asyncMqttBrokerUrl;
-    private String asyncAmqpUri;
-    private Integer asyncRecordedMessageMaxEntries;
+    private volatile String asyncKafkaBootstrapServers;
+    private volatile String asyncMqttBrokerUrl;
+    private volatile String asyncAmqpUri;
+    private volatile Integer asyncRecordedMessageMaxEntries;
 
     // runtime LLM backend
-    private String llmProvider;
-    private String llmApiKey;
-    private String llmModel;
-    private String llmBaseUrl;
-    private String llmBackendsConfig;
-    private Long llmRequestTimeoutMillis;
-    private Boolean llmSemanticMatchingEnabled;
-    private Boolean llmInferUsageEnabled;
-    private Boolean llmVcrStrict;
-    private Integer llmOptimisationMaxCalls;
-    private String fixtureBodyRedactFields;
+    private volatile String llmProvider;
+    private volatile String llmApiKey;
+    private volatile String llmModel;
+    private volatile String llmBaseUrl;
+    private volatile String llmBackendsConfig;
+    private volatile Long llmRequestTimeoutMillis;
+    private volatile Boolean llmSemanticMatchingEnabled;
+    private volatile Boolean llmInferUsageEnabled;
+    private volatile Boolean llmVcrStrict;
+    private volatile Integer llmOptimisationMaxCalls;
+    private volatile String fixtureBodyRedactFields;
 
     // OpenTelemetry
-    private String otelEndpoint;
-    private Boolean otelMetricsEnabled;
-    private Boolean otelTracesEnabled;
-    private Long otelMetricsExportIntervalSeconds;
-    private String otelMetricsTemporality;
+    private volatile String otelEndpoint;
+    private volatile Boolean otelMetricsEnabled;
+    private volatile Boolean otelTracesEnabled;
+    private volatile Long otelMetricsExportIntervalSeconds;
+    private volatile String otelMetricsTemporality;
 
     // Prometheus remote write
-    private Boolean prometheusRemoteWriteEnabled;
-    private String prometheusRemoteWriteUrl;
-    private Long prometheusRemoteWriteIntervalSeconds;
-    private String prometheusRemoteWriteBearerToken;
-    private String prometheusRemoteWriteBasicAuthUsername;
-    private String prometheusRemoteWriteBasicAuthPassword;
-    private String prometheusRemoteWriteHeaders;
-    private String prometheusRemoteWriteProtocolVersion;
+    private volatile Boolean prometheusRemoteWriteEnabled;
+    private volatile String prometheusRemoteWriteUrl;
+    private volatile Long prometheusRemoteWriteIntervalSeconds;
+    private volatile String prometheusRemoteWriteBearerToken;
+    private volatile String prometheusRemoteWriteBasicAuthUsername;
+    private volatile String prometheusRemoteWriteBasicAuthPassword;
+    private volatile String prometheusRemoteWriteHeaders;
+    private volatile String prometheusRemoteWriteProtocolVersion;
 
     // matching safety limits
-    private Long regexMatchingTimeoutMillis;
-    private Long xpathMatchingTimeoutMillis;
-    private String customJsonUnitMatchersClass;
+    private volatile Long regexMatchingTimeoutMillis;
+    private volatile Long xpathMatchingTimeoutMillis;
+    private volatile String customJsonUnitMatchersClass;
 
 
     public Level logLevel() {

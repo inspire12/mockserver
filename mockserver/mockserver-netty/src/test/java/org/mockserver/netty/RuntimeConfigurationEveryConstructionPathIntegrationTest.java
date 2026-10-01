@@ -1,6 +1,27 @@
 package org.mockserver.netty;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.netty.bootstrap.Bootstrap;
+import io.netty.buffer.Unpooled;
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.channel.ChannelInitializer;
+import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.socket.SocketChannel;
+import io.netty.channel.socket.nio.NioSocketChannel;
+import io.netty.handler.codec.http.HttpScheme;
+import io.netty.handler.codec.http2.DefaultHttp2DataFrame;
+import io.netty.handler.codec.http2.DefaultHttp2Headers;
+import io.netty.handler.codec.http2.DefaultHttp2HeadersFrame;
+import io.netty.handler.codec.http2.Http2DataFrame;
+import io.netty.handler.codec.http2.Http2FrameCodecBuilder;
+import io.netty.handler.codec.http2.Http2Headers;
+import io.netty.handler.codec.http2.Http2HeadersFrame;
+import io.netty.handler.codec.http2.Http2MultiplexHandler;
+import io.netty.handler.codec.http2.Http2StreamChannel;
+import io.netty.handler.codec.http2.Http2StreamChannelBootstrap;
+import io.netty.util.ReferenceCountUtil;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
 import org.junit.After;
@@ -17,18 +38,23 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.lang.reflect.Field;
 import java.net.HttpURLConnection;
 import java.net.ServerSocket;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.function.IntPredicate;
 import java.util.function.Supplier;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
+import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.lessThanOrEqualTo;
 import static org.hamcrest.Matchers.not;
@@ -43,33 +69,54 @@ import static org.mockserver.proxyconfiguration.ProxyConfiguration.proxyConfigur
  * {@link Configuration}. {@code LifeCycle} then built one instance for {@code HttpState} and the event
  * log while {@code MockServer} built a second for the request handlers. The PUT mutated the handlers'
  * copy (so it returned 200 and GET echoed it) while enforcement and capacity resizing read the other:
- * enabling control-plane authentication at runtime left the control plane open. Every check below
- * reads its subject through {@code HttpState}, so it goes red if any construction path splits again.
+ * enabling control-plane authentication at runtime left the control plane open. Each check reads its
+ * subject through the component that applies it ({@code HttpState}, the action handler, or the request
+ * handler an h2c connection gets), and one walks every {@code Configuration} the server holds, so the
+ * test goes red if any construction path, or any single component, splits again.
  */
 @RunWith(Parameterized.class)
 public class RuntimeConfigurationEveryConstructionPathIntegrationTest {
 
     private static final String SENSITIVE_CREDENTIAL = "Bearer runtime-config-split-secret";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final int RUNTIME_DELAY_MILLIS = 750;
 
     /** A started server, whichever API built it. {@code liveConfiguration} is null where none is exposed. */
     private static final class Started {
         final int port;
         final Configuration liveConfiguration;
+        final MockServer mockServer;
         final Runnable stop;
+        boolean forwardsThroughAnUpstreamProxy;
 
-        Started(int port, Configuration liveConfiguration, Runnable stop) {
+        Started(int port, Configuration liveConfiguration, MockServer mockServer, Runnable stop) {
             this.port = port;
             this.liveConfiguration = liveConfiguration;
+            this.mockServer = mockServer;
             this.stop = stop;
         }
 
         static Started of(MockServer mockServer) {
-            return new Started(mockServer.getLocalPort(), mockServer.getConfiguration(), mockServer::stop);
+            return new Started(mockServer.getLocalPort(), mockServer.getConfiguration(), mockServer, mockServer::stop);
         }
 
         static Started of(ClientAndServer clientAndServer) {
-            return new Started(clientAndServer.getLocalPort(), null, clientAndServer::stop);
+            return new Started(clientAndServer.getLocalPort(), null, underlyingMockServer(clientAndServer), clientAndServer::stop);
+        }
+
+        Started throughAnUpstreamProxy() {
+            forwardsThroughAnUpstreamProxy = true;
+            return this;
+        }
+
+        private static MockServer underlyingMockServer(ClientAndServer clientAndServer) {
+            try {
+                Field field = ClientAndServer.class.getDeclaredField("mockServer");
+                field.setAccessible(true);
+                return (MockServer) field.get(clientAndServer);
+            } catch (ReflectiveOperationException e) {
+                throw new IllegalStateException(e);
+            }
         }
     }
 
@@ -78,11 +125,11 @@ public class RuntimeConfigurationEveryConstructionPathIntegrationTest {
         return Arrays.asList(new Object[][]{
             {"MockServer(Integer...) [CLI, Docker, maven plugin]", (Supplier<Started>) () -> Started.of(new MockServer(0))},
             {"MockServer(remotePort, remoteHost, Integer...) [CLI -proxyRemotePort]", (Supplier<Started>) () -> Started.of(new MockServer(unusedPort(), "localhost", 0))},
-            {"MockServer(ProxyConfiguration, Integer...)", (Supplier<Started>) () -> Started.of(new MockServer(httpProxy(), 0))},
+            {"MockServer(ProxyConfiguration, Integer...)", (Supplier<Started>) () -> Started.of(new MockServer(httpProxy(), 0)).throughAnUpstreamProxy()},
             {"MockServer(Configuration, Integer...)", (Supplier<Started>) () -> Started.of(new MockServer(configuration(), 0))},
             {"MockServer(null Configuration, List<ProxyConfiguration>, Integer...)", (Supplier<Started>) () -> Started.of(new MockServer((Configuration) null, ImmutableList.<ProxyConfiguration>of(), 0))},
             {"MockServer(Configuration, remotePort, remoteHost, Integer...)", (Supplier<Started>) () -> Started.of(new MockServer(configuration(), unusedPort(), "localhost", 0))},
-            {"MockServer(Configuration, ProxyConfiguration, remoteHost, remotePort, Integer...)", (Supplier<Started>) () -> Started.of(new MockServer(configuration(), httpProxy(), "localhost", unusedPort(), 0))},
+            {"MockServer(Configuration, ProxyConfiguration, remoteHost, remotePort, Integer...)", (Supplier<Started>) () -> Started.of(new MockServer(configuration(), httpProxy(), "localhost", unusedPort(), 0)).throughAnUpstreamProxy()},
             {"MockServer(null Configuration, List<ProxyConfiguration>, remoteHost, remotePort, Integer...)", (Supplier<Started>) () -> Started.of(new MockServer((Configuration) null, ImmutableList.<ProxyConfiguration>of(), "localhost", unusedPort(), 0))},
             {"ClientAndServer.startClientAndServer(Integer...) [MockServerRule, MockServerExtension]", (Supplier<Started>) () -> Started.of(ClientAndServer.startClientAndServer(0))},
             {"ClientAndServer.startClientAndServer(Configuration, Integer...) [Spring]", (Supplier<Started>) () -> Started.of(ClientAndServer.startClientAndServer(configuration(), 0))},
@@ -145,8 +192,9 @@ public class RuntimeConfigurationEveryConstructionPathIntegrationTest {
             stats.maxRetainedEntries, is(10L));
         assertThat("mock_server_event_log_max_retained_bytes must report the runtime maxEventLogSizeInBytes",
             stats.maxRetainedBytes, is(5000L));
-        assertThat("mock_server_event_log_max_in_flight_bytes must report the runtime maxEventLogSizeInBytes",
-            stats.maxInFlightBytes, is(5000L));
+        // the in-flight cap is derived: the larger of maxEventLogSizeInBytes and a heap-derived floor
+        assertThat("mock_server_event_log_max_in_flight_bytes must report the cap derived from the runtime maxEventLogSizeInBytes",
+            stats.maxInFlightBytes, is(configuration().maxEventLogSizeInBytes(5000L).maxEventLogInFlightBytes()));
         assertThat("the event log must have evicted down to the runtime maxLogEntries",
             stats.retainedEntries, lessThanOrEqualTo(10L));
         assertThat("the event log must have evicted down to the runtime maxEventLogSizeInBytes",
@@ -182,6 +230,90 @@ public class RuntimeConfigurationEveryConstructionPathIntegrationTest {
         JsonNode served = OBJECT_MAPPER.readTree(send("GET", "/mockserver/configuration", "").body);
         assertThat("GET /mockserver/configuration must serve the same instance HttpState runs on",
             served.path("maxExpectations").asInt(), is(4321));
+    }
+
+    @Test
+    public void enablingControlPlaneMutualTlsAtRuntimeOverH2cMustRejectTheNextCallOnTheSameConnection() throws Exception {
+        // Every call is a stream on ONE cleartext HTTP/2 connection opened before the change. The PUT is
+        // served by the request handler the HTTP/2 multiplex child initializer built for this connection,
+        // so it must write the instance the control-plane gate reads; and the gate is re-derived per
+        // request, so the change applies to a connection that was already open.
+        try (H2cConnection h2c = new H2cConnection(server.port)) {
+            assertThat("baseline: the control plane is open by default over h2c",
+                h2c.send("PUT", "/mockserver/clear", "").status, is("200"));
+
+            H2cResponse put = h2c.send("PUT", "/mockserver/configuration", "{\"controlPlaneTLSMutualAuthenticationRequired\": true}");
+            assertThat(put.body, put.status, is("200"));
+
+            assertThat("the next control-plane call on the same h2c connection, without a client certificate, must be rejected",
+                h2c.send("PUT", "/mockserver/clear", "").status, is("401"));
+            assertThat("an expectation must not be creatable on it either",
+                h2c.send("PUT", "/mockserver/expectation", expectation("/after-h2c-lock")).status, is("401"));
+            assertThat("the rejection is per request: the connection stays open", h2c.isOpen(), is(true));
+        }
+        assertThat("and over a new HTTP/1.1 connection too",
+            send("PUT", "/mockserver/clear", "").statusCode, is(401));
+    }
+
+    @Test
+    public void aRuntimeGlobalResponseDelayMustDelayAMockedResponse() throws Exception {
+        // globalResponseDelayMillis is read by HttpActionHandler when it dispatches a mocked response
+        createExpectation(expectation("/delay-probe"));
+
+        Response put = send("PUT", "/mockserver/configuration", "{\"globalResponseDelayMillis\": " + RUNTIME_DELAY_MILLIS + "}");
+        assertThat(put.body, put.statusCode, is(200));
+
+        long start = System.nanoTime();
+        assertThat(send("GET", "/delay-probe", "").statusCode, is(200));
+        long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+        assertThat("the action handler must apply the runtime globalResponseDelayMillis",
+            elapsedMillis, greaterThanOrEqualTo((long) RUNTIME_DELAY_MILLIS));
+    }
+
+    @Test
+    public void aRuntimeProxyRemoteHostMustForwardAnUnmatchedRequest() throws Exception {
+        assumeTrue("a remote given at construction is bound to every connection and takes precedence",
+            server.mockServer.getRemoteAddress() == null);
+        assumeTrue("forwarding goes through the (unreachable) upstream proxy this shape configures",
+            !server.forwardsThroughAnUpstreamProxy);
+        MockServer upstream = new MockServer(configuration(), 0);
+        try {
+            Response upstreamExpectation = send(upstream.getLocalPort(), "PUT", "/mockserver/expectation",
+                "{\"httpRequest\": {\"path\": \"/forward-probe\"}, \"httpResponse\": {\"statusCode\": 200, \"body\": \"from-upstream\"}}", null);
+            assertThat(upstreamExpectation.body, upstreamExpectation.statusCode, is(201));
+            assertThat("baseline: an unmatched request is not forwarded", send("GET", "/forward-probe", "").statusCode, is(404));
+
+            Response put = send("PUT", "/mockserver/configuration",
+                "{\"proxyRemoteHost\": \"127.0.0.1\", \"proxyRemotePort\": " + upstream.getLocalPort() + "}");
+            assertThat(put.body, put.statusCode, is(200));
+
+            Response forwarded = send("GET", "/forward-probe", "");
+            assertThat("the action handler must forward an unmatched request to the runtime proxyRemoteHost",
+                forwarded.body, is("from-upstream"));
+        } finally {
+            upstream.stop();
+        }
+    }
+
+    @Test
+    public void everyConfigurationHoldingComponentMustBeTheServersInstance() throws Exception {
+        ServerConfigurationIdentity identity = ServerConfigurationIdentity.walk(server.mockServer);
+
+        assertThat("components holding a Configuration other than the server's would never see a runtime PUT",
+            identity.divergent(), empty());
+        for (String component : new String[]{
+            "HttpState.configuration",
+            "Scheduler.configuration",
+            "HttpActionHandler.configuration",
+            "NettyHttpClient.configuration",
+            "MockServerUnificationInitializer.configuration",
+            "InboundConnectionLimiter.configuration",
+            "PortUnificationHandler.configuration",
+            "HttpRequestHandler.configuration",
+            "Http2MultiplexChildInitializer.configuration",
+        }) {
+            assertThat("the walk must reach " + component, identity.matchedHolders(), hasItem(component));
+        }
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -232,7 +364,11 @@ public class RuntimeConfigurationEveryConstructionPathIntegrationTest {
     }
 
     private Response send(String method, String path, String body, String authorization) throws IOException {
-        HttpURLConnection connection = (HttpURLConnection) new URL("http://127.0.0.1:" + server.port + path).openConnection();
+        return send(server.port, method, path, body, authorization);
+    }
+
+    private static Response send(int port, String method, String path, String body, String authorization) throws IOException {
+        HttpURLConnection connection = (HttpURLConnection) new URL("http://127.0.0.1:" + port + path).openConnection();
         try {
             connection.setRequestMethod(method);
             connection.setConnectTimeout(10_000);
@@ -254,6 +390,95 @@ public class RuntimeConfigurationEveryConstructionPathIntegrationTest {
         } finally {
             connection.disconnect();
         }
+    }
+
+    /** A cleartext HTTP/2 connection with prior knowledge (no upgrade); each request opens a stream on it. */
+    private static final class H2cConnection implements AutoCloseable {
+        private final NioEventLoopGroup group = new NioEventLoopGroup(1);
+        private final Channel parent;
+        private final int port;
+
+        H2cConnection(int port) throws InterruptedException {
+            this.port = port;
+            this.parent = new Bootstrap()
+                .group(group)
+                .channel(NioSocketChannel.class)
+                .handler(new ChannelInitializer<SocketChannel>() {
+                    @Override
+                    protected void initChannel(SocketChannel ch) {
+                        ch.pipeline().addLast(Http2FrameCodecBuilder.forClient().build());
+                        ch.pipeline().addLast(new Http2MultiplexHandler(new ChannelInboundHandlerAdapter()));
+                    }
+                })
+                .connect("127.0.0.1", port).sync().channel();
+        }
+
+        H2cResponse send(String method, String path, String body) throws Exception {
+            CompletableFuture<H2cResponse> future = new CompletableFuture<>();
+            H2cResponse response = new H2cResponse();
+            StringBuilder collected = new StringBuilder();
+            Http2StreamChannel stream = new Http2StreamChannelBootstrap(parent)
+                .handler(new ChannelInboundHandlerAdapter() {
+                    @Override
+                    public void channelRead(ChannelHandlerContext ctx, Object msg) {
+                        try {
+                            if (msg instanceof Http2HeadersFrame) {
+                                Http2HeadersFrame headers = (Http2HeadersFrame) msg;
+                                if (headers.headers().status() != null) {
+                                    response.status = headers.headers().status().toString();
+                                }
+                                if (headers.isEndStream()) {
+                                    complete();
+                                }
+                            } else if (msg instanceof Http2DataFrame) {
+                                collected.append(((Http2DataFrame) msg).content().toString(StandardCharsets.UTF_8));
+                                if (((Http2DataFrame) msg).isEndStream()) {
+                                    complete();
+                                }
+                            }
+                        } finally {
+                            ReferenceCountUtil.release(msg);
+                        }
+                    }
+
+                    @Override
+                    public void channelInactive(ChannelHandlerContext ctx) {
+                        complete();
+                    }
+
+                    private void complete() {
+                        response.body = collected.toString();
+                        future.complete(response);
+                    }
+                })
+                .open().sync().getNow();
+            byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+            Http2Headers headers = new DefaultHttp2Headers()
+                .method(method)
+                .scheme(HttpScheme.HTTP.name())
+                .authority("127.0.0.1:" + port)
+                .path(path);
+            stream.writeAndFlush(new DefaultHttp2HeadersFrame(headers, bytes.length == 0));
+            if (bytes.length > 0) {
+                stream.writeAndFlush(new DefaultHttp2DataFrame(Unpooled.wrappedBuffer(bytes), true));
+            }
+            return future.get(20, TimeUnit.SECONDS);
+        }
+
+        boolean isOpen() {
+            return parent.isActive();
+        }
+
+        @Override
+        public void close() {
+            parent.close().awaitUninterruptibly(5, TimeUnit.SECONDS);
+            group.shutdownGracefully(0, 1, TimeUnit.SECONDS);
+        }
+    }
+
+    private static final class H2cResponse {
+        String status;
+        String body = "";
     }
 
     private static byte[] drain(InputStream in) throws IOException {
