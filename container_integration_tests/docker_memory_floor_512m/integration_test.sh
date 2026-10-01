@@ -39,19 +39,30 @@ PROBE="${RUN_ID}-probe"
 NET="${RUN_ID}-net"
 WORK_DIR="$(mktemp -d)"
 HEALTH_MONITOR_PID=""
+RESULT_RECORDED=false
+LAST_FAILED_COMMAND=""
 
 printMessage "Start: \"${SCRIPT_DIR/\//}\" image=${IMAGE} limit=${LIMIT_MIB}MiB rate=${RATE}/s vus=${VUS} ramp=${RAMP_S}s hold=${HOLD_S}s"
 
 # shellcheck disable=SC2329 # invoked via trap
 function cleanup() {
+  local rc=$?
+  # Any exit without a verdict (a `set -e` abort, an unbound variable, a signal) must still record a
+  # result, naming the failed command when one is known (only an ERR-trapped failure sets it).
+  if [[ "${RESULT_RECORDED}" != "true" ]]; then
+    record_result "$(( rc == 0 ? 1 : rc ))" "aborted before a verdict (exit ${rc})${LAST_FAILED_COMMAND:+ on a failed command: ${LAST_FAILED_COMMAND}}"
+    [[ "${rc}" != "0" ]] || rc=1
+  fi
   [[ -n "${HEALTH_MONITOR_PID}" ]] && kill "${HEALTH_MONITOR_PID}" 2>/dev/null || true
   docker rm -f "${SUT}" "${PROBE}" >/dev/null 2>&1 || true
   docker network rm "${NET}" >/dev/null 2>&1 || true
   rm -rf "${WORK_DIR}"
+  exit "${rc}"
 }
 
-function finish() {
+function record_result() {
   local exit_code="$1" reason="${2:-}"
+  RESULT_RECORDED=true
   if [[ "${exit_code}" != "0" ]]; then
     printFailureMessage "${TEST_CASE}: ${reason}"
     docker logs --tail 40 "${SUT}" 2>&1 || true
@@ -59,9 +70,13 @@ function finish() {
   if [[ "${MEMORY_FLOOR_BLOCKING:-false}" == "true" ]]; then
     logTestResult "${exit_code}" "${TEST_CASE}"
   else
-    logTestResultNonBlocking "${exit_code}" "${TEST_CASE}"
+    logTestResultNonBlocking "${exit_code}" "${TEST_CASE}" "${reason}"
   fi
-  exit "${exit_code}"
+}
+
+function finish() {
+  record_result "$@"
+  exit "$1"
 }
 
 # The server gets one logical CPU and its whole physical core: its hyperthread sibling stays idle and
@@ -79,7 +94,12 @@ function choose_cpusets() {
 }
 
 function integration_test() {
+  set -E
+  # Cleared after each guarded block below, so a stale command can never be blamed for a later abort.
+  trap 'LAST_FAILED_COMMAND="${BASH_COMMAND}"' ERR
   trap cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 
   local ncpu
   ncpu="$(docker info --format '{{.NCPU}}')"
@@ -89,8 +109,9 @@ function integration_test() {
   choose_cpusets "${ncpu}"
   cpusets_physically_disjoint server "${SUT_CPUS}" load "${LOAD_CPUS}" \
     || finish 1 "k6/sampler cpuset ${LOAD_CPUS} shares a physical core with the server (${SUT_CPUS})"
+  LAST_FAILED_COMMAND=""
 
-  docker network create "${NET}" >/dev/null
+  docker network create "${NET}" >/dev/null || finish 1 "could not create the Docker network ${NET}"
   docker run -d --name "${SUT}" --network "${NET}" --network-alias mockserver \
     --cpuset-cpus="${SUT_CPUS}" --memory="${LIMIT_MIB}m" --memory-swap="${LIMIT_MIB}m" -p 0:1080 \
     -e MOCKSERVER_LOG_LEVEL=ERROR -e MOCKSERVER_DISABLE_SYSTEM_OUT=true -e MOCKSERVER_METRICS_ENABLED=true \
@@ -107,6 +128,7 @@ function integration_test() {
   curl -sf -o /dev/null -X PUT "http://localhost:${host_port}/mockserver/expectation" -H 'Content-Type: application/json' \
     -d '[{"httpRequest":{"path":"/simple"},"httpResponse":{"statusCode":200,"body":"simple"},"times":{"unlimited":true}}]' \
     || finish 1 "could not create the expectation"
+  LAST_FAILED_COMMAND=""
 
   # The image's own HEALTHCHECK must report healthy before load starts (first probe runs after --interval).
   local health="starting"
@@ -116,13 +138,18 @@ function integration_test() {
     sleep 1
   done
   [[ "${health}" == "healthy" ]] || finish 1 "image HEALTHCHECK did not report healthy before load (status ${health})"
+  LAST_FAILED_COMMAND=""
 
   # The probe shares the server's PID namespace (/proc/1 is the JVM) and the host cgroup namespace,
-  # so it can read the container's cgroup v2 memory accounting every 200 ms.
-  docker run -d --name "${PROBE}" --privileged --pid="container:${SUT}" --cgroupns=host --cpuset-cpus="${LOAD_CPUS}" \
-    --entrypoint sleep "${PROBE_IMAGE}" 100000 >/dev/null
-  local cgroup_dir
-  cgroup_dir="/sys/fs/cgroup$(docker exec "${PROBE}" awk -F: '$1=="0"{print $3}' /proc/1/cgroup)"
+  # so it can read the container's cgroup v2 memory accounting every 200 ms. It must stay
+  # unprivileged: the CI agents' user-namespace-remapped daemon refuses --privileged.
+  docker run -d --name "${PROBE}" --pid="container:${SUT}" --cgroupns=host --cpuset-cpus="${LOAD_CPUS}" \
+    --entrypoint sleep "${PROBE_IMAGE}" 100000 >/dev/null \
+    || finish 1 "could not start the cgroup probe container — cannot measure, failing closed"
+  local cgroup_path cgroup_dir
+  cgroup_path="$(docker exec "${PROBE}" awk -F: '$1=="0"{print $3}' /proc/1/cgroup)" \
+    || finish 1 "could not read the server's cgroup from the probe — cannot measure, failing closed"
+  cgroup_dir="/sys/fs/cgroup${cgroup_path}"
   docker exec "${PROBE}" test -r "${cgroup_dir}/memory.stat" \
     || finish 1 "cgroup v2 memory accounting not readable at ${cgroup_dir} — cannot measure, failing closed"
   # shellcheck disable=SC2016
@@ -135,7 +162,8 @@ function integration_test() {
       conns=$(awk '\''NR>1 && $4=="01" {split($2,p,":"); if (p[2]=="0438") n++} END{print n+0}'\'' /proc/1/net/tcp /proc/1/net/tcp6)
       echo "$(date +%s) ${mem} ${rssfile:-0} ${conns}" >> /tmp/samples
       sleep 0.2
-    done' "${cgroup_dir}"
+    done' "${cgroup_dir}" || finish 1 "could not start the memory sampler — cannot measure, failing closed"
+  LAST_FAILED_COMMAND=""
 
   (
     while sleep 2; do
@@ -161,6 +189,7 @@ function integration_test() {
   running="$(docker inspect -f '{{.State.Running}}' "${SUT}")"
   docker cp "${PROBE}:/tmp/samples" "${WORK_DIR}/samples" >/dev/null 2>&1 || true
   [[ -s "${WORK_DIR}/samples" ]] || finish 1 "the memory sampler recorded nothing — cannot assert, failing closed"
+  LAST_FAILED_COMMAND=""
 
   local reqs failed
   reqs="$(echo "${k6_summary}" | sed -n 's/.*"reqs":\([0-9]*\).*/\1/p')"

@@ -782,6 +782,20 @@ function import_image_into_k3d() {
   return 1
 }
 
+# A non-blocking warning never fails the step, so on Buildkite it is also raised as a build
+# annotation: a log line alone let a test record no result on every master run unnoticed.
+function annotate_warnings() {
+  local warn_log="$1" lines
+  [[ -n "${BUILDKITE_JOB_ID:-}" ]] && command -v buildkite-agent >/dev/null 2>&1 || return 0
+  # Bounded below Buildkite's annotation size limit; backticks swapped so a line cannot close the fence.
+  lines="$(sed $'s/\x1b\\[[0-9;]*m//g' "${warn_log}" | tr '`' "'")"
+  {
+    printf '**%s: %s non-blocking warning(s).** These warnings do not fail the step; each line is a test that failed or measured nothing.\n\n' \
+      "${BUILDKITE_LABEL:-container integration tests}" "$(grep -c . <<<"${lines}")"
+    printf '```\n%s\n```\n' "$(head -c 60000 <<<"${lines}")"
+  } | buildkite-agent annotate --style warning --context "container-integration-warnings-${BUILDKITE_JOB_ID}" || true
+}
+
 function run_all_tests() {
   export PASS_LOG_FILE=$(mktemp)
   export FAIL_LOG_FILE=$(mktemp)
@@ -958,6 +972,7 @@ function run_all_tests() {
     printMessage "WARNINGS (non-blocking): ${NUMBER_OF_WARNED_TESTS}"
     cat "${WARN_LOG_FILE}"
     printf "\n\n"
+    annotate_warnings "${WARN_LOG_FILE}"
   fi
   rm -f "${WARN_LOG_FILE}"
   if [[ -s "${FAIL_LOG_FILE}" ]]; then

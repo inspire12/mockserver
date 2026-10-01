@@ -84,12 +84,15 @@ function logTestResult() {
 
 # Non-blocking variant: records pass to PASS_LOG but failure to WARN_LOG
 # instead of FAIL_LOG. Does NOT set EXIT_CODE — the check is advisory.
+# An optional third argument (the failure reason) is appended to the WARN_LOG line.
 function logTestResultNonBlocking() {
   local exit_code="${1}"
   local test_case="${2}"
+  local reason="${3:-}"
+  reason="${reason//$'\n'/ }"
   if [[ "${exit_code}" != "0" ]]; then
     printMessageWithColourAndBorders >&2 "Warning (non-blocking): ${test_case}" "\e[0;33m"
-    printMessageWithColour >&2 "  - ${test_case}" "\e[0;33m" >>"${WARN_LOG_FILE}" 2>&1
+    printMessageWithColour >&2 "  - ${test_case}${reason:+: ${reason}}" "\e[0;33m" >>"${WARN_LOG_FILE}" 2>&1
   else
     printPassMessage "Passed: ${test_case}"
     printPlainPassMessage "  - ${test_case}" >>"${PASS_LOG_FILE}" 2>&1
