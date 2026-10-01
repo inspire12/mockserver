@@ -1365,6 +1365,35 @@ the SUT's live log aside. The deep run therefore takes its recording with `jcmd 
 Current images run a static probe that ignores `JAVA_TOOL_OPTIONS`, so these precautions are now only
 needed when measuring an older image; they are harmless otherwise.
 
+### `PERF_SERVER_JAVA_OPTS` reaches the upstream too
+
+`PERF_SERVER_JAVA_OPTS` becomes `JAVA_TOOL_OPTIONS` on every container started through
+`start_mockserver`: the upstream, the main and INFO SUTs, and the path-coverage SUTs and download
+upstream. The upstream gets it so it keeps pace with a tuned SUT. The streaming, clustered, mTLS/JDK
+handshake and percore/hardware-matrix SUTs do not get it (the matrix takes
+`PERF_HW_MATRIX_SUT_JAVA_OPTS`). Only the main SUT and the INFO SUT mount `/diag`, so a file target
+under `/diag` stops the upstream JVM at start (build 542: `Error opening log file`).
+`perf-test-run.sh` now refuses such a value before starting any container. Pick the JVM-option knob
+by what it should reach:
+
+| Want | Use |
+|---|---|
+| The same JVM option on every `start_mockserver` container (GC choice, heap) | `PERF_SERVER_JAVA_OPTS` |
+| A GC log on every `start_mockserver` container | `PERF_SERVER_JAVA_OPTS='-Xlog:async -Xlog:gc*:stdout:time,uptime,level,tags'`; the SUT's lines land in `sut/sut-server.log` in the diagnostics bundle |
+| A GC log file for the main and INFO SUTs only | `PERF_JVM_DIAGNOSTICS=gc`: tier 1 plus the deep tier's `-Xlog:gc*` file log (`sut/gc-1.log`, `info/gc-1.log`), without NMT or JFR |
+| GC log, NMT and JFR | `PERF_JVM_DIAGNOSTICS=deep` |
+
+Every one of these makes the run ineligible for the baseline: `PERF_SERVER_JAVA_OPTS` marks it
+`config_profile: tuned`, and any `PERF_JVM_DIAGNOSTICS` other than `standard` sets
+`baseline_eligible: false`. Any other value of `PERF_JVM_DIAGNOSTICS` stops the run at start.
+
+A server container that exits, or is created but never starts, before it is ready now fails
+`wait_ready` at once, printing its `.State` and last 50 log lines. Before, a kept container that
+exited read `unhealthy`, never `missing`, and was polled for 120 s with no logs; one that never
+started read `created` with no health status and was reported ready. The `missing` check never
+matched either, because a failed `docker inspect` still prints an empty line. On any failed run the upstream's `.State` and log tail are also saved to `upstream/` in the
+diagnostics bundle, beside `sut/` and `info/`.
+
 ### `jcmd` attach needs an exact uid match
 
 `jcmd` inside a container requires an exact uid match with the target process. Running as root fails with `Unable to open socket file /tmp/.java_pid1`. Read the uid from the target's own `/proc/1/status` in the shared PID namespace before attaching.

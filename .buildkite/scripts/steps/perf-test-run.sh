@@ -139,6 +139,18 @@ PERF_STEADY_RATE="${PERF_STEADY_RATE:-}"
 if [ -n "$PERF_STEADY_RATE" ] && ! grep -Eq '^[1-9][0-9]*$' <<<"$PERF_STEADY_RATE"; then
   echo "ERROR: PERF_STEADY_RATE='$PERF_STEADY_RATE' is not a positive integer (requests/second)" >&2; exit 1
 fi
+# JVM diagnostics tier (described at the JVM-internals diagnostics block below).
+PERF_JVM_DIAGNOSTICS="${PERF_JVM_DIAGNOSTICS:-standard}"   # standard = tier 1; gc = tier 1 + GC file log; deep = tier 1 + tier 2
+case "$PERF_JVM_DIAGNOSTICS" in
+  standard|gc|deep) ;;
+  *) echo "ERROR: PERF_JVM_DIAGNOSTICS='$PERF_JVM_DIAGNOSTICS' — must be standard, gc or deep" >&2; exit 1 ;;
+esac
+# PERF_SERVER_JAVA_OPTS reaches every start_mockserver container, the upstream included, but only the
+# diag SUTs mount /diag, so a /diag file target there stops the upstream JVM at start.
+if [[ "${PERF_SERVER_JAVA_OPTS:-}" == *"/diag/"* ]]; then
+  echo "ERROR: PERF_SERVER_JAVA_OPTS writes under /diag/, which only the diagnostics SUTs mount — the upstream JVM would exit at start. For a GC file log use PERF_JVM_DIAGNOSTICS=gc (or deep); for GC logging on every container use the stdout form, e.g. '-Xlog:async -Xlog:gc*:stdout:time,uptime,level,tags'." >&2
+  exit 1
+fi
 PERF_STEADY_DURATION="${PERF_STEADY_DURATION:-5m}"
 PERF_STEADY_WARMUP="${PERF_STEADY_WARMUP:-30s}"
 if [ "$PERF_NETWORK_MODE" = host ]; then
@@ -246,10 +258,13 @@ PERF_SO_BACKLOG="${PERF_SO_BACKLOG:-}"
 
 # --- large-heap profile: measure the event log against a big heap + a low-pause GC ---------------
 # A large-heap run is expressed entirely through the levers that already exist: PERF_SERVER_MEMORY
-# (container --memory and hence the MaxRAMPercentage heap), PERF_SERVER_JAVA_OPTS (the SUT's
-# JAVA_TOOL_OPTIONS — carry the GC here, e.g. -XX:+UseZGC, and an explicit -Xmx/-XX:MaxRAMPercentage
-# if wanted), and PERF_MAX_EVENT_LOG_BYTES (the event-log byte budget). Each of these now flips
-# config_profile to "tuned" on its own (see the trigger below), so such a run is never baselined.
+# (container --memory and hence the MaxRAMPercentage heap), PERF_SERVER_JAVA_OPTS (JAVA_TOOL_OPTIONS
+# for every start_mockserver container — the main/INFO/path-coverage SUTs AND the upstreams; not the
+# stream, clustered, handshake or percore/hw-matrix SUTs — so carry the GC here, e.g. -XX:+UseZGC,
+# and an explicit -Xmx/-XX:MaxRAMPercentage if wanted, but never a /diag file target: for a SUT-only
+# GC log use PERF_JVM_DIAGNOSTICS=gc), and PERF_MAX_EVENT_LOG_BYTES (the event-log byte budget).
+# Each of these now flips config_profile to "tuned" on its own (see the trigger below), so such a
+# run is never baselined.
 # PERF_LARGE_HEAP_PROFILE=true additionally turns the event-log proportionality assertion into a
 # fail-closed gate (see the event-log scaling block near result assembly): it is the operator's
 # declaration that this run exists to prove the log scaled with the heap, so a run that leaves the
@@ -308,7 +323,10 @@ SAMPLE_LOG="$OUT_DIR/samples.csv"
 #                                   This is the ONLY live-set attribution available here: JFR's
 #                                   retention views are empty under ZGC (see live_heap_histo_sampler).
 #     ceiling JFR window            the sweep rungs from the knee to the top, cut to /diag/sut/ceiling.jfr
-PERF_JVM_DIAGNOSTICS="${PERF_JVM_DIAGNOSTICS:-standard}"   # standard = tier 1 only; deep = tier 1 + tier 2
+#
+#   PERF_JVM_DIAGNOSTICS=gc — tier 1 plus ONLY tier 2's -Xlog:gc* file log, for a run that needs the
+#   main SUT's GC trajectory without NMT/JFR. Like deep, it is never baselined.
+# PERF_JVM_DIAGNOSTICS is defaulted and validated with the other env checks near the top.
 PERF_DIAG_SAMPLE_INTERVAL="${PERF_DIAG_SAMPLE_INTERVAL:-2}" # dense enough to see the cliff APPROACH, not just its aftermath
 # Heap dumps are large (a dump can approach the 0.9 GiB heap); upload only when gzipped size is within this
 # cap so a diagnostics run never tries to push a multi-GB artifact. The raw dump always stays on the
@@ -356,26 +374,33 @@ tier1_jvm_opts() {
   local sub="$1"
   printf -- '-XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/diag/%s/heapdump.hprof' "$sub"
 }
-# Tier-2 JVM opts (only when PERF_JVM_DIAGNOSTICS=deep). Adds the throughput-costing diagnostics an
-# INVESTIGATION run wants: the per-GC-event trajectory to a file (the fine-grained approach-to-the-cliff
+# Tier-2 JVM opts (PERF_JVM_DIAGNOSTICS=deep; =gc takes only the GC log). Adds the throughput-costing
+# diagnostics an INVESTIGATION run wants: the per-GC-event trajectory to a file (the fine-grained approach-to-the-cliff
 # evidence), NMT, and JFR. JFR repository on the mounted volume so the chunk files survive a hard
 # ExitOnOutOfMemoryError exit. No filename/dumponexit: the SUT never exits gracefully (SIGKILL or
 # os::_exit), and on images older than the static /mockserver-healthcheck probe the HEALTHCHECK JVM
 # inherits JAVA_TOOL_OPTIONS, so a named dump file could hold a sub-second health-check recording.
 # dump_load_window_jfr() captures the SUT's. The GC log is per-PID (%p) for the same reason (an older
 # image's health-check JVM would rotate a shared log away). The SUT is pid 1, so its log is gc-1.log.
+gc_log_jvm_opts() {
+  printf -- '-Xlog:gc*,gc+heap=info:file=/diag/%s/gc-%%p.log:time,uptime,level,tags:filecount=5,filesize=20m' "$1"
+}
 tier2_jvm_opts() {
   local sub="$1"
   # -XX:+UnlockDiagnosticVMOptions MUST precede PrintNMTStatistics (it is a diagnostic flag; the JVM
   # refuses to start otherwise — caught by the local OOM proof). jdk.CPUTimeSample is JDK 25+ on
   # Linux; JDK 17 and 21 ignore an unknown event name here and start normally.
-  printf -- '-Xlog:gc*,gc+heap=info:file=/diag/%s/gc-%%p.log:time,uptime,level,tags:filecount=5,filesize=20m -XX:NativeMemoryTracking=summary -XX:+UnlockDiagnosticVMOptions -XX:+PrintNMTStatistics -XX:StartFlightRecording=name=perfdiag,settings=profile,maxsize=256m,jdk.JavaMonitorEnter#threshold=1ms,jdk.CPUTimeSample#enabled=true -XX:FlightRecorderOptions=repository=/diag/%s/jfr-repo,stackdepth=128' "$sub" "$sub"
+  printf -- '%s -XX:NativeMemoryTracking=summary -XX:+UnlockDiagnosticVMOptions -XX:+PrintNMTStatistics -XX:StartFlightRecording=name=perfdiag,settings=profile,maxsize=256m,jdk.JavaMonitorEnter#threshold=1ms,jdk.CPUTimeSample#enabled=true -XX:FlightRecorderOptions=repository=/diag/%s/jfr-repo,stackdepth=128' "$(gc_log_jvm_opts "$sub")" "$sub"
 }
-# Combined diagnostics JVM opts for a diag SUT ($1 = /diag subdir), honouring the tier flag.
+# Combined diagnostics JVM opts for a diag SUT ($1 = /diag subdir), honouring the tier flag. Only
+# start_mockserver's diag_subdir callers get these, and only they mount /diag.
 diag_jvm_opts() {
   local sub="$1" opts
   opts="$(tier1_jvm_opts "$sub")"
-  [ "$PERF_JVM_DIAGNOSTICS" = "deep" ] && opts="$opts $(tier2_jvm_opts "$sub")"
+  case "$PERF_JVM_DIAGNOSTICS" in
+    gc) opts="$opts $(gc_log_jvm_opts "$sub")" ;;
+    deep) opts="$opts $(tier2_jvm_opts "$sub")" ;;
+  esac
   printf '%s' "$opts"
 }
 
@@ -592,10 +617,10 @@ upload_diag_bundle() {
   fi
   if [ -n "$failure" ]; then
     echo "WARNING: $tgz was NOT uploaded ($failure) — see the lines above" >&2
-    printf '%s\n' ":warning: **JVM diagnostics bundle \`$tgz\` was not uploaded** ($failure). The measurement is unaffected, but the resource trajectory$([ "$PERF_JVM_DIAGNOSTICS" = deep ] && echo ', GC log, NMT and JFR recording') is unavailable for this run; see the step log." \
+    printf '%s\n' ":warning: **JVM diagnostics bundle \`$tgz\` was not uploaded** ($failure). The measurement is unaffected, but the resource trajectory$([ "$PERF_JVM_DIAGNOSTICS" = deep ] && echo ', GC log, NMT and JFR recording')$([ "$PERF_JVM_DIAGNOSTICS" = gc ] && echo ' and GC log') is unavailable for this run; see the step log." \
       | buildkite-agent annotate --style warning --context "perf-diag-bundle-${PERF_RUN_NAME:-default}" || true
   else
-    echo "--- uploaded $tgz ($(( $(wc -c < "$REPO_ROOT/$tgz") / 1024 )) KiB: resource trajectory, server logs, docker-inspect state, heap class-histogram if an OOM occurred$([ "$PERF_JVM_DIAGNOSTICS" = deep ] && echo ', gc log, NMT, load-window JFR, live-heap histogram'))" >&2
+    echo "--- uploaded $tgz ($(( $(wc -c < "$REPO_ROOT/$tgz") / 1024 )) KiB: resource trajectory, server logs, docker-inspect state, heap class-histogram if an OOM occurred$([ "$PERF_JVM_DIAGNOSTICS" = deep ] && echo ', gc log, NMT, load-window JFR, live-heap histogram')$([ "$PERF_JVM_DIAGNOSTICS" = gc ] && echo ', gc log'))" >&2
   fi
 }
 
@@ -613,7 +638,8 @@ capture_sut_diagnostics() {
   [ -n "$SUT_LOG_PID" ] && kill "$SUT_LOG_PID" >/dev/null 2>&1 || true; SUT_LOG_PID=""
   [ -n "$INFO_LOG_PID" ] && kill "$INFO_LOG_PID" >/dev/null 2>&1 || true; INFO_LOG_PID=""
   local pair c sub
-  for pair in "${SERVER:-}:sut" "${INFO_SERVER:-}:info"; do
+  # The upstream is kept (no --rm) too, and cleanup() force-removes it right after this.
+  for pair in "${SERVER:-}:sut" "${INFO_SERVER:-}:info" "${UPSTREAM:-}:upstream"; do
     c="${pair%%:*}"; sub="${pair##*:}"
     [ -n "$c" ] || continue
     mkdir -p "$DIAG_DIR/$sub" 2>/dev/null || true
@@ -866,16 +892,18 @@ start_mockserver() {
   # explicitly; nothing else does, so the ERROR baseline is unaffected.
   # PERF_SERVER_JAVA_OPTS (when set) is passed through as JAVA_TOOL_OPTIONS so a
   # re-run can opt into a tuned JVM (e.g. low-pause GC + a larger heap) for nicer
-  # documentation-site throughput/latency figures. Applied to BOTH the SUT and
-  # the upstream so the upstream never becomes the bottleneck under those tuned
-  # rates. Request logging is deliberately left ON (we don't disable it here) so
-  # the growth phase stays meaningful. Built as an array element so the value
+  # documentation-site throughput/latency figures. Applied to EVERY caller of this
+  # function — the SUTs and the upstreams — so the upstream never becomes the bottleneck
+  # under those tuned rates; only diag_subdir callers mount /diag, so SUT-only file
+  # diagnostics go through diag_jvm_opts (PERF_JVM_DIAGNOSTICS), never this variable.
+  # Request logging is deliberately left ON (we don't disable it here) so the growth
+  # phase stays meaningful. Built as an array element so the value
   # survives intact as a SINGLE -e pair even though it contains spaces; unset =>
   # the array is empty and no -e flag is added, identical behaviour.
   # When diag_subdir is set (the SUT and INFO SUT only) attach the JVM-internals diagnostics: mount
   # the host $DIAG_DIR so gc.log / heap dump / JFR survive the container's death, append the tier-1
-  # (and, when PERF_JVM_DIAGNOSTICS=deep, tier-2) JVM opts to JAVA_TOOL_OPTIONS, and — critically —
-  # DROP --rm so the dead container lingers long enough for capture_sut_diagnostics() to read its
+  # (plus the gc or deep tier when PERF_JVM_DIAGNOSTICS asks) JVM opts to JAVA_TOOL_OPTIONS, and —
+  # critically — DROP --rm so the dead container lingers long enough for capture_sut_diagnostics() to read its
   # post-mortem (docker inspect .State / docker logs). cleanup() force-removes it by name, so nothing
   # leaks. no_rm drops --rm without diag (the upstream, so a seed failure can inspect its corpse);
   # every OTHER container (stream/clustered/handshake SUTs) keeps --rm unchanged.
@@ -914,19 +942,43 @@ start_mockserver() {
     "$MOCKSERVER_IMAGE" -serverPort "$port" >/dev/null
 }
 
+# A container's .State verdict and last 50 log lines, to stderr.
+print_container_postmortem() {
+  local c="$1" st
+  if st="$(docker inspect --format '{{json .State}}' "$c" 2>/dev/null)"; then
+    echo "--- $c .State: $(printf '%s' "$st" | jq -rc '{OOMKilled,ExitCode,Status,Error,FinishedAt,Health:(.Health.Status // null)}' 2>/dev/null || printf '%s' "$st")" >&2
+    echo "--- $c last 50 log lines:" >&2
+    docker logs --tail 50 "$c" >&2 2>&1 || true
+  else
+    echo "--- container $c no longer exists — cannot inspect" >&2
+  fi
+}
+
+# A kept (non --rm) container that exits stays inspectable with health "unhealthy", so .State.Status
+# must be read too, or a JVM that died at start is polled for the full 120 s.
 wait_ready() {
-  local name="$1"
+  local name="$1" state status health
   for _ in $(seq 1 60); do
-    local status
-    status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}nohealth{{end}}' "$name" 2>/dev/null || echo missing)"
+    # Not `$(… || echo missing)`: a failed inspect still prints an empty line to stdout, so that
+    # form yields "\nmissing" and the missing branch never matched.
+    state="$(docker inspect --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}nohealth{{end}}' "$name" 2>/dev/null)" \
+      || state="missing missing"
+    status="${state%% *}"; health="${state#* }"
     case "$status" in
+      missing) echo "ERROR: container $name exited early" >&2; docker logs "$name" 2>&1 | tail -20 >&2 || true; return 1 ;;
+      exited|dead|removing|created) echo "ERROR: container $name is $status before becoming ready" >&2; print_container_postmortem "$name"; return 1 ;;
+    esac
+    case "$health" in
       healthy) return 0 ;;
       nohealth) sleep 10; return 0 ;;
-      missing) echo "ERROR: container $name exited early" >&2; docker logs "$name" 2>&1 | tail -20 >&2 || true; return 1 ;;
+      unhealthy)
+        if [ "$status" != running ]; then
+          echo "ERROR: container $name is unhealthy and not running (status=$status)" >&2; print_container_postmortem "$name"; return 1
+        fi ;;
     esac
     sleep 2
   done
-  echo "ERROR: $name did not become ready" >&2; return 1
+  echo "ERROR: $name did not become ready" >&2; print_container_postmortem "$name"; return 1
 }
 
 # The server's network alias is `mockserver`, which k6's config.js treats as a
@@ -1388,7 +1440,7 @@ else
 fi
 
 # --- baseline eligibility (part C): keep an INSTRUMENTED run out of the baseline
-# PERF_JVM_DIAGNOSTICS=deep enables tier-2 diagnostics (GC file logging + NMT + JFR)
+# PERF_JVM_DIAGNOSTICS=deep (GC file log + NMT + JFR) and =gc (GC file log only) add diagnostics
 # that cost throughput BY DESIGN, so a deep run that completes must be RECORDED but
 # NOT persisted into the baseline history — otherwise it silently shifts the series,
 # the exact contamination the tier split was created to prevent (as gc/jdk/heap were
@@ -1396,14 +1448,14 @@ fi
 # run is a VALID measurement of an instrumented server, not a broken rig, so it must
 # stay GREEN (the investigation run was triggered on purpose) — hence a separate
 # baseline_eligible flag consumed by compare, NOT a validity check (which would red
-# the build). Defensive: ineligible if the DECLARED tier is deep OR the SUT's
+# the build). Defensive: ineligible if the DECLARED tier is not standard OR the SUT's
 # OBSERVED JAVA_TOOL_OPTIONS actually carries tier-2 instrumentation — the safe
 # direction is to over-exclude, never to contaminate the baseline.
 BASELINE_ELIGIBLE="true"
-if [ "$PERF_JVM_DIAGNOSTICS" = "deep" ] \
-   || grep -q 'StartFlightRecording\|NativeMemoryTracking' <<<"$JAVA_TOOL_OPTS_VAL"; then
+OBSERVED_INSTRUMENTATION="$(grep -o 'StartFlightRecording\|NativeMemoryTracking\|Xlog:gc' <<<"$JAVA_TOOL_OPTS_VAL" | sort -u | paste -sd, - || true)"
+if [ "$PERF_JVM_DIAGNOSTICS" != "standard" ] || [ -n "$OBSERVED_INSTRUMENTATION" ]; then
   BASELINE_ELIGIBLE="false"
-  echo "--- baseline eligibility: NOT eligible (PERF_JVM_DIAGNOSTICS=$PERF_JVM_DIAGNOSTICS) — this run will be recorded but NOT persisted to the baseline"
+  echo "--- baseline eligibility: NOT eligible (PERF_JVM_DIAGNOSTICS=$PERF_JVM_DIAGNOSTICS${OBSERVED_INSTRUMENTATION:+, SUT JAVA_TOOL_OPTIONS carries $OBSERVED_INSTRUMENTATION}) — this run will be recorded but NOT persisted to the baseline"
 fi
 # Same reasoning for a TUNED server: a valid measurement, so green, but the baseline
 # series tracks the shipped default and a tuned point would raise its rolling median.
@@ -1607,13 +1659,7 @@ fi
 echo "upstream seed HTTP ${UPSTREAM_SEED_CODE:-000}"
 if ! grep -qE '^2[0-9][0-9]$' <<<"$UPSTREAM_SEED_CODE"; then
   echo "ERROR: upstream seeding failed (HTTP ${UPSTREAM_SEED_CODE:-000}) — capturing upstream post-mortem before aborting" >&2
-  if up_state="$(docker inspect --format '{{json .State}}' "$UPSTREAM" 2>/dev/null)"; then
-    echo "--- $UPSTREAM .State: $(printf '%s' "$up_state" | jq -rc '{OOMKilled,ExitCode,Status,Error,FinishedAt}' 2>/dev/null || printf '%s' "$up_state")" >&2
-    echo "--- $UPSTREAM last 50 log lines:" >&2
-    docker logs --tail 50 "$UPSTREAM" >&2 2>&1 || true
-  else
-    echo "--- upstream container $UPSTREAM no longer exists — cannot inspect" >&2
-  fi
+  print_container_postmortem "$UPSTREAM"
   exit 1
 fi
 
@@ -2320,8 +2366,9 @@ if [ "$PERF_INFO_ARM" = "true" ]; then
   # metrics endpoint); same memory bound + file-body mount + image as the ERROR SUT
   # so the JS-template and file-body arms behave identically. Guarded with `|| true`
   # so a docker-run failure here degrades the (notify-only) INFO arm rather than
-  # aborting the ERROR-baseline run under `set -e`; a failed start leaves no
-  # container, so wait_ready then reports not-ready and the arm records measured:false.
+  # aborting the ERROR-baseline run under `set -e`; a failed start leaves either no
+  # container or a kept one in `created`, both of which wait_ready fails at once, so the
+  # arm records measured:false.
   start_mockserver "$INFO_SERVER" "$SERVER_CPUS" "$INFO_SERVER_ALIAS" "" "$SERVER_MEMORY" "$FILE_BODY_MOUNT" "INFO" "info" \
     && { docker logs -f "$INFO_SERVER" > "$DIAG_DIR/info/info-server.log" 2>&1 & INFO_LOG_PID=$!; } \
     || echo "WARNING: INFO SUT failed to start — INFO arm will record measured:false" >&2
@@ -4138,9 +4185,9 @@ jq -n \
     # window plus their comparison (performance-programme.md §1). {} on a default run.
     steady_experiment: $steady,
     validity: $validity,
-    # Part C — baseline eligibility. false ONLY for an instrumented (PERF_JVM_DIAGNOSTICS
-    # =deep) run: perf-test-compare.sh records it but refuses to persist/compare it (and
-    # stays GREEN — a deep run is a deliberate investigation, not a failure), so tier-2
+    # Part C — baseline eligibility. false for any non-default run (PERF_JVM_DIAGNOSTICS
+    # gc or deep, a tuned server, a non-default rig, …): perf-test-compare.sh records it but
+    # refuses to persist/compare it (and stays GREEN — a deliberate run, not a failure), so
     # instrumentation overhead can never silently shift the baseline series. A run with
     # no baseline_eligible field (older producer) is treated as eligible, unchanged.
     baseline_eligible: $baseline_eligible,

@@ -60,6 +60,9 @@ bash "$REPO_ROOT/.buildkite/scripts/test/perf-hw-matrix-test.sh"
 echo "--- rw-multi-k6 same-requests cross-check fixture checks (item 31: lib/perf-rw-cross-check.jq)"
 bash "$REPO_ROOT/.buildkite/scripts/test/perf-rw-cross-check-test.sh"
 
+echo "--- perf-test-run start-up checks (diagnostics tiers, env guards, wait_ready states)"
+bash "$REPO_ROOT/.buildkite/scripts/test/perf-run-ready-test.sh"
+
 echo "--- byte-compiling the SSE fidelity reader (item 12)"
 # The reader is pure-stdlib python3 run on the perf agent by perf-test-run.sh; a
 # syntax error would only surface mid-run, so compile it here. Skip (do not fail)
