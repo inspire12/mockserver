@@ -3825,9 +3825,10 @@ HEAP_RATIO="$(ratio "$HEAP_MIN_LAST" "$HEAP_MIN_FIRST")"
 # --- event-log scaling: resolved bounds vs observed peak, and which bound bound ------------------
 # Both event-log bounds derive from the heap ceiling but scale DIFFERENTLY: maxLogEntries is
 # min(heapAvailableKB/8, 250000) and CAPS at 250000 (reached by ~1.9 GiB of heap), while maxEventLogSizeInBytes
-# is (heapAvailableKB/divisor)*1024 (divisor 7 at WARN/ERROR/OFF, 12 at INFO/DEBUG/TRACE) and scales with the
-# heap without limit. For the perf workload's small bodies the COUNT cap binds above ~1.9 GiB, so a
-# bigger heap buys no extra retention there — this block MEASURES that rather than assuming it. Resolved values come from the
+# is (heapAvailableKB/divisor)*1024 (divisor 20 at WARN/ERROR/OFF, 12 at INFO/DEBUG/TRACE) and scales with the
+# heap without limit. For the perf workload's small bodies (~1.3 KB per entry) the BYTE budget binds
+# first up to roughly a 6 GiB heap at WARN (~3.7 GiB at INFO), and the COUNT cap above that — this
+# block MEASURES which one binds rather than assuming it. Resolved values come from the
 # server's own gauges (max_retained_entries / max_retained_bytes in diag-samples.csv), the EFFECTIVE
 # figures the JVM applied, not the requested ones. On an older SUT image without those gauges the
 # columns are blank and samples_with_log_data is 0. Reads are safe here: the load phases (regression /
@@ -3835,7 +3836,7 @@ HEAP_RATIO="$(ratio "$HEAP_MIN_LAST" "$HEAP_MIN_FIRST")"
 # An unset level means the server default, INFO.
 case "$LOG_LEVEL_VAL" in
   INFO|DEBUG|TRACE|"") ELS_DIVISOR=12 ;;
-  *)                   ELS_DIVISOR=7 ;;
+  *)                   ELS_DIVISOR=20 ;;
 esac
 # Default heap-derived byte budget the server WOULD pick with no override: (heapAvailableKB/divisor)*1024,
 # where heapAvailableKB = heapBytes/1024 - 20480 (ConfigurationProperties.computeHeapAvailableInKB).

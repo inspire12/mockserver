@@ -408,7 +408,7 @@ The **in-flight site** is the disruptor ring — entries published but not yet p
 | `mock_server_event_log_ring_occupancy` | GaugeWithCallback | Disruptor ring slots currently occupied (published, not yet consumed). `getBufferSize() − remainingCapacity()`. Approaching `..._ring_capacity` means the single consumer cannot keep up — drops are imminent. A healthy server under load typically reads around `min(256, capacity / 4)` — the backlog at which a producer wakes the consumer, not a limit, because the consumer is woken in batches (see [event-system.md](event-system.md#consumer-wake-ups-coalescingwakewaitstrategy)). |
 | `mock_server_event_log_ring_capacity` | GaugeWithCallback | Ring total slot count (`ringBufferSize` in force). |
 | `mock_server_event_log_in_flight_bytes` | GaugeWithCallback | Request/response body bytes held by entries published to the ring but not yet processed (the in-flight backlog tracked by commit `49005f5c3`). |
-| `mock_server_event_log_max_in_flight_bytes` | GaugeWithCallback | In-flight body-byte budget in force (`maxEventLogSizeInBytes`); `0` means the in-flight bound is disabled. |
+| `mock_server_event_log_max_in_flight_bytes` | GaugeWithCallback | In-flight body-byte budget in force: the larger of `maxEventLogSizeInBytes` and a heap-derived cap (see [memory-management.md](memory-management.md#ring-in-flight-bounding-and-drops)); `0` means the in-flight bound is disabled. |
 
 The **retained site** is the backing deque — entries kept after processing:
 

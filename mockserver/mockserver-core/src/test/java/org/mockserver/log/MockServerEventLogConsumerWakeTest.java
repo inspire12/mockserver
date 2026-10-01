@@ -18,7 +18,6 @@ import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
 import static org.mockito.Mockito.mock;
-import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.log.model.LogEntry.LogMessageType.RECEIVED_REQUEST;
 import static org.mockserver.model.HttpRequest.request;
 
@@ -39,10 +38,16 @@ public class MockServerEventLogConsumerWakeTest {
         logs.forEach(MockServerEventLog::stop);
     }
 
-    private MockServerEventLog neverPollingLog(long maxEventLogSizeInBytes) {
-        Configuration configuration = configuration()
+    private MockServerEventLog neverPollingLog(long inFlightCap) {
+        // pins the in-flight cap directly: the derived one never falls below the heap-derived default
+        Configuration configuration = new Configuration() {
+            @Override
+            public long maxEventLogInFlightBytes() {
+                return inFlightCap;
+            }
+        }
             .maxLogEntries(1_000)
-            .maxEventLogSizeInBytes(maxEventLogSizeInBytes)
+            .maxEventLogSizeInBytes(inFlightCap)
             .logLevel(Level.WARN);
         MockServerEventLog log = new MockServerEventLog(
             configuration,

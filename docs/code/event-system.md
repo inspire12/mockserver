@@ -105,7 +105,7 @@ sequenceDiagram
 | Consumer state | When a producer publishes |
 |---|---|
 | Running | Nothing — it re-checks the cursor before it next parks |
-| Polling: idle under 50 ms, timed park backing off 1 ms → 10 ms | Wakes it only when the backlog reaches `min(256, ringSize / 4)` entries, when the in-flight bytes pass a quarter of `maxEventLogSizeInBytes` (`add()` calls `wakeConsumer()`), or for a control-plane publish; otherwise the next poll picks the entry up |
+| Polling: idle under 50 ms, timed park backing off 1 ms → 10 ms | Wakes it only when the backlog reaches `min(256, ringSize / 4)` entries, when the in-flight bytes pass a quarter of the in-flight cap (`add()` calls `wakeConsumer()`), or for a control-plane publish; otherwise the next poll picks the entry up |
 | Deep: idle 50 ms or more, parked with no timeout | Always wakes it, so an idle server spends no CPU on the consumer and the first entry after idle is processed at once |
 
 Every `RUNNABLE` (verify, retrieve, clear, reset, drain) is published through `publishControl()`, which calls `wakeConsumer()` after the publish, so control-plane reads see everything published before them with no added latency. Other consumers of the processed log (disk capture, stdout rendering, listeners, which are already debounced by 250 ms) see a data entry at most 10 ms after it is published.
@@ -191,7 +191,7 @@ If the upstream connection closes mid-stream (`channelInactive`), the relay hand
 `CircularConcurrentLinkedDeque<LogEntry>` is a bounded, thread-safe deque. When either bound is reached, the oldest entries are evicted and their `clear()` method is called (releasing references for GC):
 
 - **Count bound** — `maxLogEntries` (default: heap-based formula, up to 250,000).
-- **Byte-budget bound** — `maxEventLogSizeInBytes` (on by default: a seventh of the heap-ceiling budget at `WARN`/`ERROR`/`OFF`, a twelfth at `INFO`/`DEBUG`/`TRACE`; `0` disables it). The deque also tracks a running total of body bytes (`LogEntry.estimatedHeapSize()`) and evicts oldest-first when an incoming entry would push the total over the budget. The same budget separately caps the bytes waiting in the ring, so the divisors are sized for both together. See [memory-management.md](memory-management.md) for the full byte-budget eviction design.
+- **Byte-budget bound** — `maxEventLogSizeInBytes` (on by default: a twentieth of the heap-ceiling budget at `WARN`/`ERROR`/`OFF`, a twelfth at `INFO`/`DEBUG`/`TRACE`; `0` disables it). The deque also tracks a running total of body bytes (`LogEntry.estimatedHeapSize()`) and evicts oldest-first when an incoming entry would push the total over the budget. The bytes waiting in the ring have their own cap, `Configuration.maxEventLogInFlightBytes()`: the larger of this budget and a heap-derived default (a seventh at `WARN`/`ERROR`/`OFF`, a twelfth at `INFO`/`DEBUG`/`TRACE`), so the small `WARN` retention budget, which keeps entries from outliving a young-GC cycle under load, does not make a burst drop events. The divisors are sized for both together. See [memory-management.md](memory-management.md) for the full byte-budget eviction design.
 
 ### Filtering Predicates
 

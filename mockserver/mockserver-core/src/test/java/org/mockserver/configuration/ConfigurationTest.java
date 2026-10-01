@@ -713,6 +713,40 @@ public class ConfigurationTest {
     }
 
     @Test
+    public void shouldDeriveEventLogInFlightCapFromTheRetentionBudget() {
+        String originalLogLevel = ConfigurationProperties.logLevel().name();
+        try {
+            clearPropertyAndCache("mockserver.maxEventLogSizeInBytes");
+            ConfigurationProperties.logLevel("WARN");
+            long heapAvailableInKB = ConfigurationProperties.heapAvailableInKB();
+            long inFlightDefault = (heapAvailableInKB / 7) * 1024L;
+
+            // default: retention is heap/20, and the in-flight cap is the larger heap/7 default
+            assertThat(new Configuration().maxEventLogSizeInBytes(), equalTo((heapAvailableInKB / 20) * 1024L));
+            assertThat(new Configuration().maxEventLogInFlightBytes(), equalTo(inFlightDefault));
+            // per-instance log level selects the rendering-level in-flight default
+            assertThat(new Configuration().logLevel("INFO").maxEventLogInFlightBytes(), equalTo((heapAvailableInKB / 12) * 1024L));
+
+            // explicit static budget below the default: retention honours it, in-flight stays at the default
+            ConfigurationProperties.maxEventLogSizeInBytes(1048576L);
+            assertThat(new Configuration().maxEventLogSizeInBytes(), equalTo(1048576L));
+            assertThat(new Configuration().maxEventLogInFlightBytes(), equalTo(inFlightDefault));
+
+            // explicit instance budget above the default raises the in-flight cap with it
+            long large = inFlightDefault + 4096L;
+            assertThat(new Configuration().maxEventLogSizeInBytes(large).maxEventLogInFlightBytes(), equalTo(large));
+
+            // 0 disables both byte bounds, whether set statically or on the instance
+            assertThat(new Configuration().maxEventLogSizeInBytes(0L).maxEventLogInFlightBytes(), equalTo(0L));
+            ConfigurationProperties.maxEventLogSizeInBytes(0L);
+            assertThat(new Configuration().maxEventLogInFlightBytes(), equalTo(0L));
+        } finally {
+            clearPropertyAndCache("mockserver.maxEventLogSizeInBytes");
+            ConfigurationProperties.logLevel(originalLogLevel);
+        }
+    }
+
+    @Test
     public void shouldSetAndGetMaxExpectationsSizeInBytes() {
         try {
             // default — DISABLED (0). Opt-in: expectations are user state, so there is no heap-derived
@@ -763,13 +797,11 @@ public class ConfigurationTest {
 
     @Test
     public void shouldRecomputeLogLevelAwareDefaultOnEachReadNotFreezeAtFirstLevel() {
-        // The default is log-level-aware (heap/7 at a non-rendering level, heap/12 at a rendering level).
+        // The default is log-level-aware (heap/20 at a non-rendering level, heap/12 at a rendering level).
         // It must be recomputed from the CURRENT log level on every read — NOT resolved through the
         // caching property reader, which would freeze it JVM-wide at whatever level was in force on the
-        // first read. The dangerous direction: a first read at ERROR (heap/7) freezing that larger
-        // budget for a server later running at INFO (heap/12), silently disabling the OOM protection this
-        // default exists to provide. On the pre-fix (caching) tree the INFO read below returns the
-        // frozen ERROR budget and the second assertion fails.
+        // first read. On the pre-fix (caching) tree the INFO read below returns the frozen ERROR budget
+        // and the second assertion fails.
         String originalLogLevel = ConfigurationProperties.logLevel().name();
         try {
             clearPropertyAndCache("mockserver.maxEventLogSizeInBytes");
@@ -783,12 +815,12 @@ public class ConfigurationTest {
 
             assertThat(errorBudget, equalTo(ConfigurationProperties.defaultMaxEventLogSizeInBytes(heapAvailableInKB, Level.ERROR)));
             assertThat(infoBudget, equalTo(ConfigurationProperties.defaultMaxEventLogSizeInBytes(heapAvailableInKB, Level.INFO)));
-            // the live static path, not just the helper, applies a seventh at ERROR and a twelfth at INFO
-            assertThat(errorBudget, equalTo((heapAvailableInKB / 7) * 1024L));
+            // the live static path, not just the helper, applies a twentieth at ERROR and a twelfth at INFO
+            assertThat(errorBudget, equalTo((heapAvailableInKB / 20) * 1024L));
             assertThat(infoBudget, equalTo((heapAvailableInKB / 12) * 1024L));
 
             // and a per-instance server derives the default from ITS OWN log level, not the static one:
-            // static level ERROR, instance level INFO -> the instance must get the INFO (heap/12) budget
+            // static level ERROR, instance level INFO -> the instance must get the INFO budget
             ConfigurationProperties.logLevel("ERROR");
             assertThat(new Configuration().logLevel("INFO").maxEventLogSizeInBytes(),
                 equalTo(ConfigurationProperties.defaultMaxEventLogSizeInBytes(heapAvailableInKB, Level.INFO)));

@@ -77,6 +77,8 @@ public class MockServerEventLogEvictionSignalTest {
         assertThat(message, containsString("log level INFO"));
         assertThat(message, containsString("lowering the log level"));
         assertThat(message, containsString("does NOT affect what verify can find"));
+        // and warns that lowering the level shrinks the default byte budget, which may then bind
+        assertThat(message, containsString("the default byte budget is smaller at WARN"));
     }
 
     @Test

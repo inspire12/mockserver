@@ -2,6 +2,7 @@ package org.mockserver.log;
 
 import org.junit.Test;
 import org.mockserver.configuration.Configuration;
+import org.mockserver.configuration.ConfigurationProperties;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpRequest;
@@ -23,6 +24,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.lessThan;
+import static org.hamcrest.Matchers.lessThanOrEqualTo;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.Assert.fail;
 import static org.mockito.Mockito.mock;
@@ -219,9 +221,9 @@ public class MockServerEventLogInFlightBytesTest {
     public void shouldFailClosedUpperBoundVerifyAfterDroppingABodyBearingEntry() throws Exception {
         // A tiny in-flight budget so that, with the consumer held, admitting one oversized entry tips
         // the backlog over budget and every subsequent body-bearing entry is DROPPED before publish.
-        Configuration configuration = configuration()
+        Configuration configuration = withInFlightCap(1000L)
             .maxLogEntries(1000)
-            .maxEventLogSizeInBytes(1000L)
+            .maxEventLogSizeInBytes(500L)
             .maxLoggedBodyBytes(0);
         MockServerEventLog log = asynchronousEventLog(configuration);
         try {
@@ -245,12 +247,114 @@ public class MockServerEventLogInFlightBytesTest {
             assertThat(never, is(not("")));
             assertThat(never, containsString("could not be verified"));
             assertThat(never, containsString("DROPPED"));
+            // the message quotes the in-flight cap in force, not the (smaller) retention budget
+            assertThat(never, containsString("in-flight byte budget of 1000 bytes"));
             // atMost(0) is the same upper bound and must also fail closed
             assertThat(verify(log, verification().withRequest(request("/dropped")).withTimes(atMost(0))), containsString("DROPPED"));
 
             // after a reset the drop taint clears, so a later upper-bound verify can pass again
             log.reset();
             assertThat(verify(log, verification().withRequest(request("/dropped")).withTimes(never())), is(""));
+        } finally {
+            log.stop();
+        }
+    }
+
+    // ---- the in-flight cap is separate from, and never smaller than, the retention budget ----
+
+    @Test
+    public void shouldNotDropABurstThatExceedsASmallRetentionBudget() throws Exception {
+        // A retention budget that holds three entries, and a burst of twenty arriving while the
+        // consumer is busy. Retention still evicts down to its own budget once the burst is processed,
+        // but the burst itself must be recorded, not dropped, because the in-flight cap does not
+        // shrink with the retention budget.
+        int bodyBytes = 10_000;
+        int burst = 20;
+        long weight = receivedRequestWithBody("/burst", bodyBytes).estimatedHeapSize();
+        long retention = weight * 3;
+        Configuration configuration = configuration()
+            .logLevel(Level.WARN)
+            .maxLogEntries(1000)
+            .maxEventLogSizeInBytes(retention)
+            .maxLoggedBodyBytes(0);
+        MockServerEventLog log = asynchronousEventLog(configuration);
+        try {
+            assertThat(log.getMaxRetainedBytes(), is(retention));
+            assertThat(log.getMaxInFlightBytes(), is(greaterThan(burst * weight)));
+
+            CountDownLatch release = blockConsumer(log);
+            for (int i = 0; i < burst; i++) {
+                log.add(receivedRequestWithBody("/burst", bodyBytes));
+            }
+            assertThat(log.getDroppedLogEventCount(), is(0L));
+            release.countDown();
+            drain(log);
+
+            assertThat(log.getDroppedLogEventCount(), is(0L));
+            assertThat(log.getEvictedLogEntryCount(), is(greaterThan(0L)));
+            assertThat(log.getRetainedEntryCount() + log.getEvictedLogEntryCount(), is((long) burst));
+            assertThat(log.getRetainedBytes(), is(lessThanOrEqualTo(retention)));
+            assertThat(log.getInFlightBytes(), is(0L));
+        } finally {
+            log.stop();
+        }
+    }
+
+    @Test
+    public void shouldTakeTheInFlightCapFromConfigurationAndReapplyItOnACapacityChange() {
+        Configuration configuration = configuration()
+            .logLevel(Level.WARN)
+            .maxLogEntries(1000)
+            .maxLoggedBodyBytes(0);
+        MockServerEventLog log = asynchronousEventLog(configuration);
+        try {
+            // by default the in-flight cap is the larger heap-derived cap, not the retention budget
+            assertThat(log.getMaxInFlightBytes(), is(configuration.maxEventLogInFlightBytes()));
+            assertThat(log.getMaxInFlightBytes(), is(greaterThan(log.getMaxRetainedBytes())));
+
+            long large = configuration.maxEventLogInFlightBytes() + 4096L;
+            configuration.maxEventLogSizeInBytes(large);
+            log.applyConfigurationCapacity();
+            assertThat(log.getMaxRetainedBytes(), is(large));
+            assertThat(log.getMaxInFlightBytes(), is(large));
+
+            configuration.maxEventLogSizeInBytes(0L);
+            log.applyConfigurationCapacity();
+            assertThat(log.getMaxInFlightBytes(), is(0L));
+        } finally {
+            log.stop();
+        }
+    }
+
+    @Test
+    public void shouldKeepTheHeapDerivedInFlightFloorWhenARuntimeChangeShrinksTheRetentionBudget() {
+        Configuration configuration = configuration()
+            .logLevel(Level.WARN)
+            .maxLogEntries(1000)
+            .maxLoggedBodyBytes(0);
+        MockServerEventLog log = asynchronousEventLog(configuration);
+        try {
+            long warnFloor = configuration.maxEventLogInFlightBytes();
+            assertThat(warnFloor, is((ConfigurationProperties.heapAvailableInKB() / 7) * 1024L));
+            long small = 64L * 1024;
+            assertThat(small, is(lessThan(warnFloor)));
+
+            // a live change below the floor shrinks retention only; the in-flight cap is re-derived
+            configuration.maxEventLogSizeInBytes(small);
+            log.applyConfigurationCapacity();
+            assertThat(log.getMaxRetainedBytes(), is(small));
+            assertThat(log.getMaxInFlightBytes(), is(configuration.maxEventLogInFlightBytes()));
+            assertThat(log.getMaxInFlightBytes(), is(warnFloor));
+
+            // a WARN -> INFO change re-derives the floor at the rendering-level (heap/12) default
+            configuration.logLevel(Level.INFO);
+            log.applyConfigurationCapacity();
+            long infoFloor = configuration.maxEventLogInFlightBytes();
+            assertThat(infoFloor, is((ConfigurationProperties.heapAvailableInKB() / 12) * 1024L));
+            assertThat(infoFloor, is(lessThan(warnFloor)));
+            assertThat(infoFloor, is(greaterThan(small)));
+            assertThat(log.getMaxRetainedBytes(), is(small));
+            assertThat(log.getMaxInFlightBytes(), is(infoFloor));
         } finally {
             log.stop();
         }
@@ -377,6 +481,17 @@ public class MockServerEventLogInFlightBytesTest {
     }
 
     // ---- helpers ----
+
+    // The in-flight cap is derived and never below the heap-derived default, so a test that needs a
+    // tiny one to force drops pins it directly.
+    private static Configuration withInFlightCap(long inFlightCap) {
+        return new Configuration() {
+            @Override
+            public long maxEventLogInFlightBytes() {
+                return inFlightCap;
+            }
+        };
+    }
 
     private MockServerEventLog asynchronousEventLog(Configuration configuration) {
         // asynchronous (true) so add() publishes to the disruptor ring and the in-flight accounting is

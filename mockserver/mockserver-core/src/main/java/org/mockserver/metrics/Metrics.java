@@ -454,7 +454,7 @@ public class Metrics {
                         .register();
                     GaugeWithCallback.builder()
                         .name("mock_server_event_log_max_in_flight_bytes")
-                        .help("In-flight body-byte budget in force (maxEventLogSizeInBytes); 0 means the in-flight bound is disabled")
+                        .help("In-flight body-byte budget in force (the larger of maxEventLogSizeInBytes and a heap-derived cap); 0 means the in-flight bound is disabled")
                         .callback(callback -> callback.call(getEventLogRingStats().maxInFlightBytes))
                         .register();
                     // Callback gauges: the RETAINED (post-processing) event-log site — the deque that

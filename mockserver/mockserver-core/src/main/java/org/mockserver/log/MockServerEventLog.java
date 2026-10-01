@@ -197,11 +197,13 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
     // sustained large-body ingress faster than the consumer can drain (notably at INFO, where the
     // consumer also renders every entry to the log), that backlog — not the deque — is what exhausts
     // the heap. Tracking it lets add() drop, rather than OOM, once the in-flight bodies would exceed
-    // the same maxEventLogSizeInBytes budget. Incremented on a successful publish in add(), decremented
-    // in processLogEntry as each entry is consumed, by the weight add() memoised: translateTo carries it
-    // into the ring slot, so the two sides balance exactly and the counter returns to 0 when idle.
+    // the in-flight cap (configuration.maxEventLogInFlightBytes(), never smaller than the retention
+    // budget, so a small retention budget does not drop bursts). Incremented on a successful publish
+    // in add(), decremented in processLogEntry as each entry is consumed, by the weight add()
+    // memoised: translateTo carries it into the ring slot, so the two sides balance exactly and the
+    // counter returns to 0 when idle.
     private final AtomicLong inFlightBytes = new AtomicLong(0);
-    // The in-flight byte budget in force, mirrored from configuration.maxEventLogSizeInBytes() at
+    // The in-flight byte budget in force, mirrored from configuration.maxEventLogInFlightBytes() at
     // construction and refreshed by applyConfigurationCapacity() so a live PUT /mockserver/configuration
     // change tracks here too. <= 0 disables the in-flight bound (ring bounded by slot count only),
     // matching the deque byte budget's "0 disables" contract (e.g. a native image with no heap ceiling).
@@ -253,7 +255,7 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
             configuration.maxEventLogSizeInBytes(),
             LogEntry::estimatedHeapSize,
             LogEntry::clear);
-        this.maxInFlightBytes = configuration.maxEventLogSizeInBytes();
+        this.maxInFlightBytes = configuration.maxEventLogInFlightBytes();
         startRingBuffer(waitStrategyFactory);
     }
 
@@ -279,7 +281,7 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
             // Bound the in-flight backlog by BYTES, not just by the ring's slot count. The weight is
             // computed once here — before publish clears the source via translateTo — and always
             // tracked (increment on publish, decrement in processLogEntry) INDEPENDENT of the budget,
-            // so the counter cannot drift if maxEventLogSizeInBytes is changed at runtime; the budget
+            // so the counter cannot drift if the in-flight cap is changed at runtime; the budget
             // gates only the drop DECISION below. 0 for a pure diagnostic entry with no HTTP messages
             // (e.g. RUNNABLE/control events), so tracking is a no-op on the overwhelming majority of entries.
             long budget = maxInFlightBytes;
@@ -299,7 +301,7 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
                 droppedLogEventsSinceLogReset.incrementAndGet();
                 Metrics.incrementDroppedLogEvents();
                 if (inFlightBytesDropWarned.compareAndSet(false, true)) {
-                    logger.warn("Log event in-flight byte budget reached (maxEventLogSizeInBytes=" + budget + " bytes) — dropping log events whose request/response bodies would exceed it while they wait to be processed, to bound the ring backlog and avoid running out of memory. The bodies waiting to be logged are arriving faster than they can be processed and recorded (most acute at a verbose log level, which renders every entry). To keep more coverage, cheapest first: (1) record smaller bodies — set maxLoggedBodyBytes to truncate large bodies; (2) lower the log level (e.g. to WARN) so the log consumer drains the backlog faster; (3) if you have heap headroom, raise maxEventLogSizeInBytes, or set it to 0 to bound by ring slot count only. Dropped events are not retrievable and cannot be verified.");
+                    logger.warn("Log event in-flight byte budget reached (" + budget + " bytes, the larger of maxEventLogSizeInBytes and a heap-derived cap) — dropping log events whose request/response bodies would exceed it while they wait to be processed, to bound the ring backlog and avoid running out of memory. The bodies waiting to be logged are arriving faster than they can be processed and recorded (most acute at a verbose log level, which renders every entry). To keep more coverage, cheapest first: (1) record smaller bodies — set maxLoggedBodyBytes to truncate large bodies; (2) lower the log level (e.g. to WARN) so the log consumer drains the backlog faster; (3) if you have heap headroom, raise maxEventLogSizeInBytes above this budget, or set it to 0 to bound by ring slot count only. Dropped events are not retrievable and cannot be verified.");
                 }
                 // if dropping, only mirror WARN and ERROR to the logger (as the ring-full path does)
                 if (logEntry.getLogLevel().toInt() >= Level.WARN.toInt()) {
@@ -400,11 +402,10 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
     public void applyConfigurationCapacity() {
         eventLog.setMaxSize(configuration.maxLogEntries());
         eventLog.setMaxBytes(configuration.maxEventLogSizeInBytes());
-        // Keep the in-flight (ring backlog) byte bound in step with the retained (deque) byte bound;
-        // both are driven by maxEventLogSizeInBytes. A shrink of the in-flight bound cannot evict what
-        // is already in the ring (the ring is not resizable — see startRingBuffer), but it does apply
-        // to every subsequent publish, so the backlog trends down to the new bound as it drains.
-        this.maxInFlightBytes = configuration.maxEventLogSizeInBytes();
+        // The in-flight cap is derived from maxEventLogSizeInBytes, so re-derive it too. A shrink cannot
+        // evict what is already in the ring (the ring is not resizable — see startRingBuffer), but it
+        // applies to every subsequent publish, so the backlog trends down to the new bound as it drains.
+        this.maxInFlightBytes = configuration.maxEventLogInFlightBytes();
     }
 
     /**
@@ -809,7 +810,8 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
             message
                 .append("(1) record less — at log level ").append(logLevel).append(" each request also logs a diagnostic entry per non-matching expectation; ")
                 .append("lowering the log level (e.g. to WARN) stops recording those and cuts entries retained per request, and does NOT affect what verify can find ")
-                .append("(received requests and mocked/forwarded responses are recorded at every level); ")
+                .append("(received requests and mocked/forwarded responses are recorded at every level; ")
+                .append("note: the default byte budget is smaller at WARN, so raise maxEventLogSizeInBytes if it then binds); ")
                 .append("(2) if you have heap headroom, raise the limit maxLogEntries (currently ").append(maxLogEntries).append("); ")
                 .append("(3) clear/reset the event log between tests.");
         }
@@ -1533,8 +1535,8 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
         if (dropped > 0) {
             message
                 .append(dropped).append(dropped == 1 ? " log event was" : " log events were")
-                .append(" DROPPED before being recorded (incoming request/response bodies arrived faster than the log could process them and exceeded the in-flight byte budget maxEventLogSizeInBytes=")
-                .append(configuration.maxEventLogSizeInBytes()).append(" bytes, or the ring buffer was full). ");
+                .append(" DROPPED before being recorded (incoming request/response bodies arrived faster than the log could process them and exceeded the in-flight byte budget of ")
+                .append(maxInFlightBytes).append(" bytes, the larger of maxEventLogSizeInBytes and a heap-derived cap, or the ring buffer was full). ");
         }
         if (evicted > 0) {
             String boundDetail = byteBoundHit

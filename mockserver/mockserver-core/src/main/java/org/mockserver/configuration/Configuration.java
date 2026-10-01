@@ -1842,7 +1842,7 @@ public class Configuration {
             // Honour any EXPLICIT override first (programmatic set / system property / env), then derive
             // the default from THIS instance's log level — not the static ConfigurationProperties.logLevel()
             // — because the default is log-level-aware: a server configured via configuration.logLevel(INFO)
-            // must get the INFO (heap/12) budget even when the global level differs. Mirrors the way
+            // must get the INFO budget even when the global level differs. Mirrors the way
             // maxLogEntries()/maxExpectations() consult the instance devMode field to bypass the static value.
             Long explicit = ConfigurationProperties.explicitMaxEventLogSizeInBytes();
             if (explicit != null) {
@@ -1854,21 +1854,31 @@ public class Configuration {
     }
 
     /**
+     * The cap on bytes held by log entries published to the event log's ring but not yet processed.
+     * Derived, not settable: the larger of {@link #maxEventLogSizeInBytes()} and a heap-derived default
+     * (a seventh of the heap ceiling, a twelfth at INFO/DEBUG/TRACE), or {@code 0} (disabled) when
+     * {@link #maxEventLogSizeInBytes()} is {@code 0}. It is kept at least as large as the retention
+     * budget so that a small retention budget does not drop events during a burst.
+     */
+    public long maxEventLogInFlightBytes() {
+        return ConfigurationProperties.eventLogInFlightBytes(maxEventLogSizeInBytes(), ConfigurationProperties.heapAvailableInKB(), logLevel());
+    }
+
+    /**
      * <p>
      * Maximum total size in bytes of the request/response bodies the in-memory event log retains before
      * older entries are evicted (the oldest first). Bounds the log's memory when entries are large,
      * which {@link #maxLogEntries} cannot (a count cap treats a 10 MB body the same as a 10-byte one).
      * </p>
      * <p>
-     * The default is derived from the JVM heap ceiling and is on by default: a seventh of the
+     * The default is derived from the JVM heap ceiling and is on by default: a twentieth of the
      * ceiling-based budget that sizes {@link #maxLogEntries} at a non-rendering level (WARN/ERROR/OFF), and
      * a twelfth at a rendering level (INFO/DEBUG/TRACE). The budget counts an estimate of each entry's
      * size; the real heap the log holds is a multiple of it that depends on the traffic, and is larger
-     * at a rendering level, where every retained entry also keeps its formatted log message. The
-     * same budget also bounds the bytes held by entries waiting to be processed, so it caps both the
-     * retained log and the processing backlog; the defaults keep the two together at or below about a
-     * quarter of the ceiling at either level. Set it to 0 to disable the size-based limit
-     * and bound the log only by {@link #maxLogEntries}; whichever bound is reached first evicts.
+     * at a rendering level, where every retained entry also keeps its formatted log message. Entries
+     * waiting to be processed are bounded separately, by {@link #maxEventLogInFlightBytes()}. Set it to 0
+     * to disable both byte bounds and bound the log only by {@link #maxLogEntries}; whichever retention
+     * bound is reached first evicts.
      * </p>
      *
      * @param maxEventLogSizeInBytes maximum total size in bytes of the in-memory event log (0 disables the limit)
