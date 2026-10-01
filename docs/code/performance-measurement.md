@@ -387,12 +387,13 @@ each process's own count"]
 | `rw_no_slow_flushes` | No flush took longer than the push interval (k6 warns that samples may then be dropped); `.remote_write.slow_flushes` reports the count and the longest. This also catches Prometheus stalls of 1–2 s, too short for the cut gates. On a contended host it trips first; raise `PERF_RW_PUSH_INTERVAL_S` rather than loosen the gate |
 | `rw_no_interrupted_iterations` | No measured k6 process (main or cross-check) interrupted an iteration at a scenario's `gracefulStop`, read from k6's last progress line. An interrupted request reached the SUT but is in no k6 metric, so the accounting gate cannot see it. A process with no readable count fails too. See "k6 heap and GC" |
 
-**Fail fast before measuring.** Three checks stop the harness (`valid: false` with
+**Fail fast before measuring.** Four checks stop the harness (`valid: false` with
 `rw_harness_completed` naming the reason, exit 1) before it spends rig time on a result that
 cannot be valid:
 
 | Check | When | What it catches |
 |---|---|---|
+| Underivable `GOMEMLIMIT` | Before any container starts, when `PERF_RW_K6_GOMEMLIMIT` is unset | `docker info` reports no usable `MemTotal`, so the default k6 memory limit cannot be derived. The run stops rather than run k6 without a limit, and names `PERF_RW_K6_GOMEMLIMIT` as the way to set one (see "k6 heap and GC") |
 | DNS label guard | Before any container starts | A host in `RW_URL` or the target URL with a DNS label over 63 characters. k6's Go resolver refuses such a name, so every push fails with `no such host`. The check reads the assembled URLs, not the alias constants |
 | Remote-write pre-flight | Once Prometheus is ready, before the SUT, warm-up or any rung | One k6 inside the run's network pushes through the same `experimental-prometheus-rw` output and URL the ladder uses. Any push failure in its log, or its `k6_iterations_total{proc="preflight"}` not reaching Prometheus within 10 s, stops the run in seconds (`preflight.log` is kept) |
 | Cross-check push failures | After the cross-check phase, before the main phase | A push path that broke after the pre-flight. Stopping here saves the main phase and its merge, several minutes on the rig |
@@ -422,8 +423,11 @@ Unknown `PERF_RW_TEST_FAIL_STEP`, `PERF_RW_TEST_NULL_RUNG` or `PERF_RW_TEST_CUT_
 `PERF_RW_TEST_ZERO_TAIL` other than empty or `true`, a `PERF_RW_K6_GCTRACE` other than `true` or
 `false`, a `PERF_RW_K6_GOGC` other than a whole number or `off` (Go would silently use 100), a
 `PERF_RW_K6_GOMEMLIMIT` outside Go's syntax (`off`, or bytes with an optional `B`/`KiB`/`MiB`/`GiB`/`TiB`
-suffix), a `PERF_RW_K6_GRACEFUL_STOP` that is not whole `ms` or `s` of at least 1 s, and a `PERF_RW_P99_MAX_MS` that
-is not a positive decimal are rejected at startup with exit 2. The first 50 Prometheus query warnings (for example an
+suffix), a `PERF_RW_K6_GRACEFUL_STOP` that is not whole `ms` or `s` of at least 1 s, a
+`PERF_RW_TEST_RESOLVE_ONLY` other than empty or `true`, and a `PERF_RW_P99_MAX_MS` that
+is not a positive decimal are rejected at startup with exit 2. A default `GOMEMLIMIT` that cannot be
+derived (Docker reports no memory size) stops the run before any container starts, with an invalid
+result naming it. The first 50 Prometheus query warnings (for example an
 empty result from mixing float and histogram samples) are kept under `.prometheus.query_warnings`,
 and `.method.test_hooks` records any test hook that was set. In `perf-test-run.sh` every run, valid or
 not, also uploads `serving-rw-multik6-work.tgz` (`PERF_RW_DEBUG_DIR`): the
@@ -526,17 +530,33 @@ aggregate rate, and more above 25,600 rps per process, where one process's pool 
 below ~1,200 rps per process, where the 96-VU floor applies (Little's law holds per process too).
 With four processes the 128k top is 32,000 rps per process, whose pool caps at 2,048 VUs. k6
 initialises the largest sum of pools whose reservations overlap, about 6,000 VUs per process
-(1,920 + 2,048 + 2,048), unless the opt-in shorter `gracefulStop` is set (see "k6 heap and GC"
-below). A local run needs a short `PERF_RW_RATES`: the default ladder OOM-kills k6 containers in an
+(1,920 + 2,048 + 2,048) on k6's 30 s `gracefulStop`; the arm's default `gracefulStop` (the gap) cuts
+that to the largest pool (see "k6 heap and GC" below). A local run needs a short `PERF_RW_RATES`: the default ladder OOM-kills k6 containers in an
 8 GiB Docker Desktop VM. `Insufficient VUs` warnings on sub-knee rungs are the transient-stall signature
 the single-process ladder shows too (build 527: pool hit at 4k–24k with p95 active VUs 3–7). The
 occupancy rule reads them as stalls, so they are not a sizing fault.
 
-**k6 heap and GC.** Most of k6's live heap is the JavaScript runtimes of VUs initialised before the
-first rung. An opt-in shorter `gracefulStop` cuts that set to the largest pool, and `GOGC` /
-`GOMEMLIMIT` can be set per run. All three are off by default, for a rig A/B against today's
-behaviour. In build 537 Go's GC cost each k6 process ~55–60% of one CPU (3.25–3.6 s of CPU per
-cycle, about two cycles per rung) on a live heap of 1.8–3.0 GB.
+**k6 heap and GC.** The arm runs every measured k6 process with a `gracefulStop` equal to the gap
+(at least 1 s), `GOGC=400`, and a `GOMEMLIMIT` of half the Docker host's memory divided by N. On the
+c5.12xlarge (N=4) that is 5 s, 400 and about 12 GiB, the values the rig A/B below measured. Each stays
+overridable, and `PERF_RW_K6_GRACEFUL_STOP=30s PERF_RW_K6_GOGC=100 PERF_RW_K6_GOMEMLIMIT=off` restores
+k6's and Go's own defaults. The single-process published sweep is unchanged: `sweep.js` keeps k6's
+30 s `gracefulStop` unless `K6_SWEEP_GRACEFUL_STOP` is passed, and only this harness passes it or the
+Go knobs. Most of k6's live heap is the JavaScript runtimes of VUs initialised before the first
+rung; in build 537 (k6's defaults) Go's GC cost each k6 process ~55–60% of one CPU (3.25–3.6 s of
+CPU per cycle, about two cycles per rung) on a live heap of 1.8–3.0 GB.
+
+| | Build 552 (k6 defaults) | Build 553 (`5s`, `GOGC=400`, `GOMEMLIMIT=12GiB`) |
+|---|---|---|
+| `vus_initialized` per process | 6,016 | 2,049 |
+| k6 GC at 40–64k, per process | 55–60% of one CPU | ~10% |
+| `k6_cpu_us_per_request_mean` | 311 µs | 240 µs (−10 to −23% at matched rungs 32–72k) |
+| `client_limited_from_rps` / rig-valid peak | 64k / 55.9k | 80k / 71.5k |
+| Interrupted iterations | 0 | 0 |
+
+Both runs were `valid`. They ran on different VMs and images, and SUT CPU per request was 15–30%
+lower in 553 at 40–56k, which one run each cannot attribute, so treat the SUT-side figures as
+unconfirmed; the k6-side ones are what the default rests on.
 
 - **Where the heap goes.** A local heap profile (`k6 run --profiling-enabled`, then
   `/debug/pprof/heap`) put ~1.75 GB of the init heap in `sobek` (JavaScript runtime) objects: one
@@ -546,11 +566,12 @@ cycle, about two cycles per rung) on a live heap of 1.8–3.0 GB.
   end-of-test Trend storage (`metrics.(*TrendSink).Add`, ~72 bytes per request over the nine Trend
   metrics). The per-process summary needs it for the accounting gate, so it stays. The response
   body is 20 bytes, and in the local profile the remote-write output held nothing that grew.
-- **Opt-in: `gracefulStop` at or below the gap.** `PERF_RW_K6_GRACEFUL_STOP` (passed as
-  `K6_SWEEP_GRACEFUL_STOP`; whole `s` or `ms`, at least 1 s) sets each rung's `gracefulStop`. Unset,
-  k6 keeps its 30 s default. At or below the gap, reservations meet without overlapping, so k6
-  initialises 2,049 VUs per process (the top pool plus the quiet tail), and the init heap falls from
-  1.75 GB to 0.61 GB. `.per_process[].vus_initialized` records the count either way.
+- **Default: `gracefulStop` at or below the gap.** Each rung's `gracefulStop` defaults to the gap
+  in whole seconds, rounded down so it never exceeds the gap, and at least 1 s (`sweep.js`'s floor).
+  `PERF_RW_K6_GRACEFUL_STOP` (passed as `K6_SWEEP_GRACEFUL_STOP`; whole `s` or `ms`, at least 1 s)
+  overrides it, and `30s` restores k6's default. At or below the gap, reservations meet without
+  overlapping, so k6 initialises 2,049 VUs per process (the top pool plus the quiet tail), and the
+  init heap falls from 1.75 GB to 0.61 GB. `.per_process[].vus_initialized` records the count either way.
 - **What it can lose, and the check that shows it.** Each rung keeps the same arrival rate and the
   same fixed pool, but an iteration still running when its rung's `gracefulStop` expires is
   interrupted, and **an interrupted request is in no count**. It reached the SUT, but k6 emits no
@@ -565,16 +586,35 @@ cycle, about two cycles per rung) on a live heap of 1.8–3.0 GB.
   too, with the elapsed time of the first interruption). The `rw_no_interrupted_iterations` check
   fails on any interruption, and on a process whose count cannot be read. Locally, against a SUT
   delaying every response 2 s, a 1 s `gracefulStop` failed only this check (136 and 137
-  interrupted, every other gate green), and the same run on the default passed it. Build 537's worst
-  p99.9 was 204 ms (128k), so a 5 s `gracefulStop` should not interrupt anything there. The check is
-  what makes that claim testable on the rig.
-- **GC knobs.** `PERF_RW_K6_GOGC` and `PERF_RW_K6_GOMEMLIMIT` are passed to every measured k6
-  process (xcheck and main phases) as `GOGC` / `GOMEMLIMIT`. Empty (the default) leaves Go's
-  defaults (100, no limit). The applied values and the graceful stop (null = k6's 30 s) are
-  recorded under `.config.k6_runtime`, and each hardware-matrix point copies them to
-  `.measurement.k6_runtime`. `perf-test-run.sh` and `lib/perf-percore.sh` inherit the knobs from the
-  build environment. Raising `GOGC` only pays once the live heap is small: on the 6,016-VU heap,
-  `GOGC=400` left GC CPU per request unchanged and pushed the heap goal to 6.2 GB.
+  interrupted, every other gate green), and the same run on k6's 30 s default passed it. Build 537's worst
+  p99.9 was 204 ms (128k), so a 5 s `gracefulStop` should not interrupt anything there, and build
+  553 interrupted none. The check stays fail-closed on the default, so a run that does interrupt an
+  iteration is `valid: false`, never a quieter count.
+- **GC knobs.** Every measured k6 process (xcheck and main phases) gets `GOGC` and `GOMEMLIMIT`.
+  `PERF_RW_K6_GOGC` defaults to 400 (`100` is Go's default). Raising `GOGC` only pays once the live
+  heap is small: on the 6,016-VU heap, `GOGC=400` left GC CPU per request unchanged and pushed the
+  heap goal to 6.2 GB, which is why it ships together with the shorter `gracefulStop`.
+- **`GOMEMLIMIT` default: half the Docker host's memory over N.** Unset, `PERF_RW_K6_GOMEMLIMIT` is
+  `docker info`'s `MemTotal` × 50% ÷ N, in whole MiB (`lib/perf-k6-runtime.sh`): 12,288 MiB for a
+  full 96 GiB at N=4, ~1.3 GiB per process in an 8 GiB Docker Desktop VM at N=3. 12,288 MiB is the
+  formula's figure; the rig's `MemTotal` is slightly below 96 GiB, so its limit is a little lower, and
+  `.gomemlimit_basis` records the real `MemTotal`. `GOGC=400` sets each
+  heap goal at 5× the live heap, so without a limit four processes on a 3 GB live heap could aim at
+  60 GB together. The limit caps the k6 processes at half the host between them, and the other half
+  covers the SUT (2 GB by default, in `perf-test-run.sh` and at the hardware matrix's largest point),
+  Prometheus, the upstream, Docker, the OS and the page cache. It reads Docker's memory, not the
+  machine's, because under Docker Desktop the containers run in a smaller VM. `GOMEMLIMIT` is soft: a
+  live heap above it makes Go collect continuously (k6 CPU per request rises, which the run
+  records) rather than fail, so the harness warns when the derived value is under 1 GiB. `off`
+  removes the limit, and an explicit value is used as given without asking Docker.
+- **What is recorded.** `.config.k6_runtime` holds the applied `gogc`, `gomemlimit` and
+  `graceful_stop`, where each came from (`.source`: `default`, `derived` or `env`), and for a derived
+  limit `.gomemlimit_basis` (Docker's `MemTotal`, N and the 50%). Each hardware-matrix point copies it
+  to `.measurement.k6_runtime`. `perf-test-run.sh` and `lib/perf-percore.sh` pass none of the three, so
+  both the trial arm and every hardware-matrix point run on the defaults, and a value set in the build
+  environment reaches the harness unchanged. `.buildkite/scripts/test/perf-k6-runtime-test.sh` checks
+  the formula, the defaults, the overrides, the fail-closed paths and that wiring
+  (`PERF_RW_TEST_RESOLVE_ONLY=true` prints the resolved `.config.k6_runtime` and starts nothing).
 - **Side effects of the shorter `gracefulStop`.** These fall outside the measured window. The SUT
   holds at most about a third as many idle keep-alive connections. A rung may also draw more VUs
   that already hold a connection, so fewer connections open at rung onset. That falls inside the
@@ -585,14 +625,14 @@ CPU over the load window, GC CPU from `gctrace`; repeats agreed within ~5 µs):
 
 | Variant | VUs initialised | Max live heap | k6 µs/request | GC µs/request (share of k6 CPU) |
 |---|---|---|---|---|
-| `gracefulStop` 30 s (default), `GOGC` 100 | 2,884 | 1.1 GB | 172 | 26.5 (15%) |
+| `gracefulStop` 30 s, `GOGC` 100 (k6's defaults) | 2,884 | 1.1 GB | 172 | 26.5 (15%) |
 | `gracefulStop` 30 s, `GOGC` 400 | 2,884 | 1.2 GB (goal 6.2 GB) | 157 | 25.9 (17%), 44k dropped iterations |
 | `gracefulStop` 5 s, `GOGC` 100 | 963 | 0.44 GB | 156 | 19.3 (12%) |
 | 5 s, `GOGC` 200 | 963 | 0.46 GB | 160 | 11.5 (7%) |
 | 5 s, `GOGC` 400 | 963 | 0.44 GB (goal 2.1 GB) | 144 | 5.3 (4%) |
 | 5 s, `GOGC=off`, `GOMEMLIMIT=2GiB` | 963 | 0.43 GB (goal 1.8 GB) | 143 | 5.4 (4%) |
 
-Through the harness itself (N=2, per-process rungs 4k–12k, every run `valid`), the default measured
+Through the harness itself (N=2, per-process rungs 4k–12k, every run `valid`), k6's defaults measured
 162 µs/request on 2,561 VUs per process (`.k6_gc` up to 26% of one CPU per rung). A 5 s
 `gracefulStop` measured 140 µs on 962 VUs, adding `GOGC=400` measured 143 µs (GC at most 8%), and
 `GOGC=off` with `GOMEMLIMIT=2GiB` measured 131 µs.
@@ -1635,6 +1675,22 @@ failing. Build 535's published ladder, re-derived with the server placed by `scr
 server up to 55% higher from 16k to 64k (all still under 85% of its pin, so no rung's verdict
 changed); its k6 samples were not kept, so that half was not re-derived. `sweep-k6-cpu.csv` is now
 uploaded with the JVM diagnostics, so the next such break can be replayed in full.
+
+The k6 runtime default is a fifth break, in the multi-k6 client method. From the run that made
+`gracefulStop` = the gap, `GOGC=400` and a derived `GOMEMLIMIT` the arm's default, each k6 process
+costs less CPU per request (311 against 240 µs in the build 552/553 A/B), so the client limits the
+ladder later and rig validity moves up. In the trial arm that moved `client_limited_from_rps` from
+64k to 80k. This changes the `serving_hw_matrix.*` multi-k6 points (and `.serving_rw_multik6`, which
+compare does not budget). The compare step keys the hardware matrix's p50-derived metrics
+(`serving_hw_matrix.*.healthy_ceiling_rps`, `.healthy_ceiling_p50_ms`) on a k6-runtime signature as
+well as the settle and the client. The signature is built from the points'
+`.measurement.k6_runtime`: `gogc`, `graceful_stop`, and where `GOMEMLIMIT` came from (`off`,
+`derived` or `env`). It never includes the derived MiB value, which follows the host's memory. A
+point with no runtime counts as k6's and Go's defaults (100, 30 s, `off`), so a run that sets those
+back explicitly compares with the runs from before the change. Those metrics stay `:new:` (the
+"sweep latency baseline reset" annotation, now naming the k6 runtime) until `MIN_BASELINE` runs share
+the new signature. `.buildkite/scripts/test/perf-k6-runtime-test.sh` checks the signature. The
+other hardware-matrix figures built on rig validity are notify-only and annotate the move.
 
 ### GC log cycle times are not stop-the-world pause times
 

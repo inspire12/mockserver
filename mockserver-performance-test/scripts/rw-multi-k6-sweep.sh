@@ -16,7 +16,7 @@ REPO_ROOT="${PERF_RW_REPO_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 LIB_DIR="$REPO_ROOT/.buildkite/scripts/steps/lib"
 FIGURES_JQ="$LIB_DIR/perf-website-figures.jq"
 CROSS_JQ="$LIB_DIR/perf-rw-cross-check.jq"
-for lib in perf-cpu-topology.sh perf-sweep-window.sh perf-derive-saturation.sh perf-k6-interrupted.sh; do
+for lib in perf-cpu-topology.sh perf-sweep-window.sh perf-derive-saturation.sh perf-k6-interrupted.sh perf-k6-runtime.sh; do
   if [ ! -r "$LIB_DIR/$lib" ]; then
     echo ":x: $LIB_DIR/$lib not found — refusing to run without the shared guard" >&2
     exit 1
@@ -54,8 +54,10 @@ VU_DIAGNOSTICS="${PERF_RW_VU_DIAGNOSTICS:-true}"
 # Report-only: Go's GC trace in each k6 log (GODEBUG=gctrace=1), summarised per rung as .k6_gc.
 K6_GCTRACE="${PERF_RW_K6_GCTRACE:-true}"
 case "$K6_GCTRACE" in true|false) ;; *) echo ":x: PERF_RW_K6_GCTRACE must be true or false" >&2; exit 2 ;; esac
-# Go GC knobs passed to every k6 process as GOGC / GOMEMLIMIT; empty = Go's defaults (100, no limit).
-K6_GOGC="${PERF_RW_K6_GOGC:-}"
+# Go GC knobs passed to every measured k6 process as GOGC / GOMEMLIMIT. Unset GOMEMLIMIT is derived
+# from the Docker host's memory once N is known (lib/perf-k6-runtime.sh). Go's own defaults are
+# PERF_RW_K6_GOGC=100 and PERF_RW_K6_GOMEMLIMIT=off.
+K6_GOGC="${PERF_RW_K6_GOGC:-400}"
 K6_GOMEMLIMIT="${PERF_RW_K6_GOMEMLIMIT:-}"
 if [ -n "$K6_GOGC" ] && ! [[ "$K6_GOGC" =~ ^(off|[0-9]+)$ ]]; then
   echo ":x: PERF_RW_K6_GOGC='$K6_GOGC' must be a whole percentage or off (Go would silently use 100)" >&2; exit 2
@@ -88,6 +90,14 @@ case "${PERF_RW_TEST_ZERO_TAIL:-}" in
   ""|true) ;;
   *) echo ":x: PERF_RW_TEST_ZERO_TAIL='$PERF_RW_TEST_ZERO_TAIL' must be empty or true" >&2; exit 2 ;;
 esac
+case "${PERF_RW_TEST_RESOLVE_ONLY:-}" in
+  ""|true) ;;
+  *) echo ":x: PERF_RW_TEST_RESOLVE_ONLY='$PERF_RW_TEST_RESOLVE_ONLY' must be empty or true" >&2; exit 2 ;;
+esac
+# It prints and starts nothing, so with an output file it would leave a real run's result unwritten.
+if [ "${PERF_RW_TEST_RESOLVE_ONLY:-}" = true ] && [ "$OUT_FILE" != /dev/stdout ]; then
+  echo ":x: PERF_RW_TEST_RESOLVE_ONLY=true takes no output file (got '$OUT_FILE'): it measures nothing" >&2; exit 2
+fi
 if [ -n "${PERF_RW_TEST_FAIL_STEP:-}" ]; then
   case " $SOFT_STEPS " in
     *" $PERF_RW_TEST_FAIL_STEP "*) ;;
@@ -176,21 +186,25 @@ to_secs() {
 }
 STEP_S="$(to_secs "$SWEEP_STEP")"
 GAP_S="$(to_secs "$SWEEP_GAP")"
-# Opt-in: each rung's gracefulStop (empty = k6's 30s). At or below the gap, rung VU reservations
-# stop overlapping, so k6 initialises the largest pool, not the sum of ~3 adjacent ones; but a
-# request cut off at gracefulStop is in no count (rw_no_interrupted_iterations catches it).
-K6_GRACEFUL_STOP="${PERF_RW_K6_GRACEFUL_STOP:-}"
-if [ -n "$K6_GRACEFUL_STOP" ] && ! [[ "$K6_GRACEFUL_STOP" =~ ^([1-9][0-9]*s|[1-9][0-9]{3,}ms)$ ]]; then
+# Each rung's gracefulStop; unset = the gap (min 1s), k6's own default is 30s. At or below the gap,
+# rung VU reservations stop overlapping, so k6 initialises the largest pool, not the sum of ~3
+# adjacent ones; a request cut off at gracefulStop is in no count (rw_no_interrupted_iterations).
+K6_GRACEFUL_STOP="${PERF_RW_K6_GRACEFUL_STOP:-$(k6_graceful_stop_default "$GAP_S")}"
+if ! [[ "$K6_GRACEFUL_STOP" =~ ^([1-9][0-9]*s|[1-9][0-9]{3,}ms)$ ]]; then
   echo ":x: PERF_RW_K6_GRACEFUL_STOP='$K6_GRACEFUL_STOP' must be whole s or ms of at least 1s (e.g. 5s)" >&2; exit 2
 fi
-K6_GO_ENV=()
-[ -n "$K6_GOGC" ] && K6_GO_ENV+=(-e "GOGC=$K6_GOGC")
-[ -n "$K6_GOMEMLIMIT" ] && K6_GO_ENV+=(-e "GOMEMLIMIT=$K6_GOMEMLIMIT")
+K6_GOMEMLIMIT_BASIS=""
 k6_runtime_json() { # the result's .config.k6_runtime
-  jq -nc --arg gogc "$K6_GOGC" --arg gomem "$K6_GOMEMLIMIT" --arg gstop "$K6_GRACEFUL_STOP" '
-    {gogc:(if $gogc == "" then null else $gogc end), gomemlimit:(if $gomem == "" then null else $gomem end),
-     graceful_stop:(if $gstop == "" then null else $gstop end),
-     note:"applied to every measured k6 process (xcheck and main phases); null = Go defaults (GOGC 100, no memory limit) and k6 30s gracefulStop"}'
+  jq -nc --arg gogc "$K6_GOGC" --arg gomem "$K6_GOMEMLIMIT" --arg gstop "$K6_GRACEFUL_STOP" \
+    --arg basis "$K6_GOMEMLIMIT_BASIS" --arg s_gogc "${PERF_RW_K6_GOGC:+env}" \
+    --arg s_gomem "${PERF_RW_K6_GOMEMLIMIT:+env}" --arg s_gstop "${PERF_RW_K6_GRACEFUL_STOP:+env}" '
+    def v: if . == "" then null else . end;
+    {gogc:($gogc | v), gomemlimit:($gomem | v), graceful_stop:($gstop | v),
+     source:{gogc:($s_gogc | if . == "" then "default" else . end),
+             gomemlimit:($s_gomem | if . == "" then "derived" else . end),
+             graceful_stop:($s_gstop | if . == "" then "default (the gap)" else . end)},
+     gomemlimit_basis:(if $basis == "" then null else ($basis | fromjson) end),
+     note:"applied to every measured k6 process (xcheck and main phases); Go and k6 defaults are GOGC 100, GOMEMLIMIT off and gracefulStop 30s; null = not resolved before an abort"}'
 }
 case "$WINDOW_MODE" in wallclock|vu_tag) ;; *) echo ":x: PERF_RW_WINDOW_MODE must be wallclock or vu_tag" >&2; exit 1 ;; esac
 [[ "$PUSH_S" =~ ^[1-9][0-9]*$ ]] || { echo ":x: PERF_RW_PUSH_INTERVAL_S must be a whole number of seconds >= 1" >&2; exit 1; }
@@ -278,7 +292,22 @@ die() { LAST_ERR="$1"; echo ":x: $1" >&2; exit 1; } # a deliberate stop the fall
 proc_start() { ps -o lstart= -p "$1" 2>/dev/null | awk '{$1=$1; print}'; } # "" if gone or unsupported
 record_pid() { echo "$1 $(proc_start "$1")" >> "$WORK/pids.txt"; }
 
-echo "--- item 31 remote-write multi-k6 sweep: N=$N rates=$RATES step=$SWEEP_STEP gap=$SWEEP_GAP settle=${SETTLE_S}s push=${PUSH_S}s quiet=${QUIET_S}s window=$WINDOW_MODE server=$SERVER_CPUS prometheus=$PROM_CPUS upstream=${UPSTREAM_CPUS:-none} k6=${K6_SETS[*]} target=${TARGET_URL:-<launch SUT>} degrade=${DEGRADE:-none} k6_gogc=${K6_GOGC:-default} k6_gomemlimit=${K6_GOMEMLIMIT:-none} k6_graceful_stop=${K6_GRACEFUL_STOP:-k6-default}" >&2
+if [ -z "$K6_GOMEMLIMIT" ]; then
+  _mem="$(k6_docker_mem_bytes)" || _mem=""
+  K6_GOMEMLIMIT="$(k6_gomemlimit_default "$_mem" "$N")" \
+    || die "cannot derive the k6 GOMEMLIMIT: Docker reported MemTotal '${_mem}' for N=$N; set PERF_RW_K6_GOMEMLIMIT (e.g. 8GiB, or off)"
+  K6_GOMEMLIMIT_BASIS="$(jq -nc --argjson m "$_mem" --argjson n "$N" --argjson pct "$K6_GOMEMLIMIT_HOST_PCT" \
+    '{docker_mem_total_bytes:$m, procs:$n, host_pct:$pct}')"
+  if [ "${K6_GOMEMLIMIT%MiB}" -lt 1024 ]; then
+    echo "WARNING: derived k6 GOMEMLIMIT $K6_GOMEMLIMIT is under 1 GiB; if a k6 live heap reaches it, Go collects continuously and k6 CPU per request rises" >&2
+  fi
+fi
+K6_GO_ENV=(-e "GOGC=$K6_GOGC" -e "GOMEMLIMIT=$K6_GOMEMLIMIT")
+if [ "${PERF_RW_TEST_RESOLVE_ONLY:-}" = true ]; then # test hook: print .config.k6_runtime, start nothing
+  k6_runtime_json; RESULT_WRITTEN=1; exit 0
+fi
+
+echo "--- item 31 remote-write multi-k6 sweep: N=$N rates=$RATES step=$SWEEP_STEP gap=$SWEEP_GAP settle=${SETTLE_S}s push=${PUSH_S}s quiet=${QUIET_S}s window=$WINDOW_MODE server=$SERVER_CPUS prometheus=$PROM_CPUS upstream=${UPSTREAM_CPUS:-none} k6=${K6_SETS[*]} target=${TARGET_URL:-<launch SUT>} degrade=${DEGRADE:-none} k6_gogc=$K6_GOGC k6_gomemlimit=$K6_GOMEMLIMIT k6_graceful_stop=$K6_GRACEFUL_STOP" >&2
 
 # --- placement proof: SUT, Prometheus, upstream and every k6 on disjoint physical cores ---
 PAIRS=(server "$SERVER_CPUS" prometheus "$PROM_CPUS")

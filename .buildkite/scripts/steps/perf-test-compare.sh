@@ -979,8 +979,15 @@ def latfam: if IN("serving_percore.*.healthy_ceiling_rps", "serving_percore.*.rp
             else null end;
 # The hardware matrix also keys on its load client (single k6 or multi-k6): the two measure
 # different ceilings, so they never share a baseline. A block without .client was single-k6.
+# It keys on the k6 runtime of its points too (rw-multi-k6-sweep.sh .config.k6_runtime): GOGC,
+# gracefulStop and where GOMEMLIMIT came from, never the derived MiB, which follows host memory.
+# No runtime is k6 and Go defaults, so a run that sets them back explicitly matches older runs.
+def latk6rt($f): (first(.[$f].points[]?.measurement.k6_runtime | select(. != null)) // null) as $rt
+  | ($rt.gomemlimit // "off") as $mem
+  | "gogc=\($rt.gogc // "100"),graceful_stop=\($rt.graceful_stop // "30s"),gomemlimit="
+    + (if $mem == "off" then "off" else ($rt.source.gomemlimit // "env") end);
 def latfp($f): (.[$f].sweep.latency_settle_s // null) as $s
-  | if $f == "serving_hw_matrix" and $s != null then "\($s)|\(.[$f].client // "single")" else $s end;
+  | if $f == "serving_hw_matrix" and $s != null then "\($s)|\(.[$f].client // "single")|\(latk6rt($f))" else $s end;
 def latpresent($f): (((.[$f] // {}).points // []) | length) > 0;
 
 # JMH methodology fingerprint of the HEAD run (item 15c baseline-discontinuity guard).
@@ -1081,7 +1088,7 @@ def latpresent($f): (((.[$f] // {}).points // []) | length) > 0;
     head_k6fp_present: (($headarms | length) > 0),
     sweep_latency_reset: ([ $headmetrics[] | .bkey | latfam | select(. != null) ] | unique
       | map({family: ., head_settle_s: $headlat[.], comparable: $bmapLat[.].comparable, other: $bmapLat[.].other,
-             head_window: ($headlat[.] | if type == "string" then (split("|") | "settle \(.[0])s, \(.[1]) client")
+             head_window: ($headlat[.] | if type == "string" then (split("|") | "settle \(.[0])s, \(.[1]) client, k6 \(.[2] // "defaults")")
                                           else "settle \(. // "none")s" end)})
       | map(select(.other > 0))) } as $meta
 | if ($missing | length) > 0

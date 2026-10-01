@@ -63,6 +63,9 @@ bash "$REPO_ROOT/.buildkite/scripts/test/perf-rw-cross-check-test.sh"
 echo "--- rw-multi-k6 interrupted-iteration fixture checks (item 31: lib/perf-k6-interrupted.sh)"
 bash "$REPO_ROOT/.buildkite/scripts/test/perf-k6-interrupted-test.sh"
 
+echo "--- rw-multi-k6 default k6 runtime fixture checks (item 31: lib/perf-k6-runtime.sh)"
+bash "$REPO_ROOT/.buildkite/scripts/test/perf-k6-runtime-test.sh"
+
 echo "--- perf-test-run start-up checks (diagnostics tiers, env guards, wait_ready states)"
 bash "$REPO_ROOT/.buildkite/scripts/test/perf-run-ready-test.sh"
 
@@ -81,6 +84,8 @@ else
 fi
 
 echo "--- validating k6 scripts (k6 inspect)"
+# The remote-write inspect runs under that arm's default runtime: gracefulStop 5s (the default gap),
+# GOGC 400 and a GOMEMLIMIT in the MiB form the harness derives (Go aborts on a malformed one).
 # The single-quoted -c body is expanded by the container's sh, not the host —
 # $f must NOT expand here, so SC2016 is intentional.
 # shellcheck disable=SC2016
@@ -88,4 +93,4 @@ exec "$SCRIPT_DIR/../run-in-docker.sh" \
   -i grafana/k6:1.7.1@sha256:4fd3a694926b064d3491d9b02b01cde886583c4931f1223816e3d9a7bdfa7e0f \
   --entrypoint sh \
   -w /build/mockserver-performance-test \
-  -- -c 'set -e; for f in k6/smoke.js k6/load.js k6/stress.js k6/soak.js k6/regression.js k6/growth.js k6/sweep.js k6/forward.js k6/proxy.js k6/streaming.js k6/clustered_crossing.js k6/coverage.js; do echo "k6 inspect $f"; k6 inspect "$f" > /dev/null; done; echo "k6 inspect k6/sweep.js (remote-write multi-k6 mode)"; k6 inspect -e K6_SWEEP_WINDOW_MODE=wallclock -e K6_SWEEP_LEAN_SUMMARY=true -e K6_SWEEP_VU_DIAGNOSTICS=false -e K6_SWEEP_QUIET=5s -e K6_SWEEP_MANAGE_SUT=false -e K6_SWEEP_GRACEFUL_STOP=5s -e K6_SWEEP_START_AT_MS=$(( $(date +%s) * 1000 + 60000 )) k6/sweep.js > /dev/null'
+  -- -c 'set -e; for f in k6/smoke.js k6/load.js k6/stress.js k6/soak.js k6/regression.js k6/growth.js k6/sweep.js k6/forward.js k6/proxy.js k6/streaming.js k6/clustered_crossing.js k6/coverage.js; do echo "k6 inspect $f"; k6 inspect "$f" > /dev/null; done; echo "k6 inspect k6/sweep.js (remote-write multi-k6 mode)"; GOGC=400 GOMEMLIMIT=12288MiB k6 inspect -e K6_SWEEP_WINDOW_MODE=wallclock -e K6_SWEEP_LEAN_SUMMARY=true -e K6_SWEEP_VU_DIAGNOSTICS=false -e K6_SWEEP_QUIET=5s -e K6_SWEEP_MANAGE_SUT=false -e K6_SWEEP_GRACEFUL_STOP=5s -e K6_SWEEP_START_AT_MS=$(( $(date +%s) * 1000 + 60000 )) k6/sweep.js > /dev/null'
