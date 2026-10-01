@@ -23,6 +23,36 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
+# --- arm-only mode (the perf-xl steps perf-test-guard.sh dispatches) ----------
+# PERF_RUN_ARM=rw_multik6|hw_matrix measures ONE opt-in arm on the provenance-checked SUT and skips
+# every other phase. The result keeps the full schema with the other blocks empty, is never
+# baseline-eligible, and is uploaded under a PERF_RUN_NAME prefix that compare never downloads.
+# Arms and workloads inherited from the build env are other measurements, so they are forced off.
+PERF_RUN_ARM="${PERF_RUN_ARM:-}"
+case "$PERF_RUN_ARM" in
+  "") ;;
+  rw_multik6) PERF_SERVING_RW_MULTIK6=true; PERF_SERVING_HW_MATRIX=false ;;
+  hw_matrix) PERF_SERVING_HW_MATRIX=true; PERF_SERVING_RW_MULTIK6=false ;;
+  *) echo "ERROR: PERF_RUN_ARM='$PERF_RUN_ARM' is not one of: rw_multik6 | hw_matrix (empty = the full run)" >&2; exit 1 ;;
+esac
+if [ -n "$PERF_RUN_ARM" ]; then
+  if [ "$PERF_RUN_ARM" = rw_multik6 ] && [ "${PERF_NETWORK_MODE:-bridge}" = host ]; then
+    echo "ERROR: PERF_RUN_ARM=rw_multik6 needs bridge networking (PERF_NETWORK_MODE=host would skip the arm and measure nothing)" >&2; exit 1
+  fi
+  PERF_RUN_NAME="${PERF_RUN_NAME:-arm-${PERF_RUN_ARM}}"
+  PERF_INFO_ARM=false; PERF_STREAMING=false; PERF_CLUSTERED=false; PERF_PROXY_PROFILE=false
+  # shellcheck disable=SC2034  # read by lib/perf-path-coverage.sh, sourced below
+  PERF_COVERAGE=false
+  PERF_LAPTOP_PROFILE=false; PERF_LAPTOP_PARALLEL=false; PERF_LARGE_HEAP_PROFILE=false
+  PERF_SERVING_PERCORE=false; PERF_SERVING_MULTIPROC=false; PERF_WORKLOAD=""; PERF_STEADY_RATE=""
+  echo "--- arm-only run: PERF_RUN_ARM=$PERF_RUN_ARM (artifacts prefixed ${PERF_RUN_NAME}-, never baselined)"
+elif [ "${PERF_XL:-false}" = "true" ]; then
+  # PERF_XL=true runs these two arms as their own perf-xl steps (perf-test-guard.sh), not here.
+  PERF_SERVING_RW_MULTIK6=false; PERF_SERVING_HW_MATRIX=false
+  echo "--- PERF_XL=true: the multi-k6 arm and the hardware matrix run on the perf-xl queue, not in this step"
+fi
+arm_only() { [ -n "$PERF_RUN_ARM" ]; }
+
 # --- artifact-name prefixing (run identity) -----------------------------------
 # Every Buildkite artifact this script uploads is named from PERF_RUN_NAME. UNSET
 # (the standard daily `perf-run` step) leaves names byte-identical to before
@@ -1550,6 +1580,10 @@ if [ "${PERF_SERVING_RW_MULTIK6:-false}" = "true" ]; then
   BASELINE_ELIGIBLE="false"
   echo "--- baseline eligibility: NOT eligible (PERF_SERVING_RW_MULTIK6=true) — the remote-write multi-k6 trial adds load before growth"
 fi
+if arm_only; then
+  BASELINE_ELIGIBLE="false"
+  echo "--- baseline eligibility: NOT eligible (PERF_RUN_ARM=$PERF_RUN_ARM) — an arm-only run measures one arm, not the daily series"
+fi
 if [ "$RIG_PROFILE" != "default" ]; then
   BASELINE_ELIGIBLE="false"
   echo "--- baseline eligibility: NOT eligible (rig_profile=$RIG_PROFILE, cpusets server=${SERVER_CPUS} upstream=${UPSTREAM_CPUS} k6=${K6_CPUS}) — a run on a non-default cpuset measures different hardware and is NOT persisted to the baseline"
@@ -1972,8 +2006,12 @@ fi
 
 LOAD_WINDOW_START_EPOCH="$(date -u +%s)"
 LOAD_WINDOW_START_ISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-run_regression "http" "$SUT_BASE_HTTP" "false" "regression-http.json"
-run_regression "https_h2" "$SUT_BASE_HTTPS" "true" "regression-https.json"
+if arm_only; then
+  echo '{}' > "$OUT_DIR/regression-http.json"; echo '{}' > "$OUT_DIR/regression-https.json"
+else
+  run_regression "http" "$SUT_BASE_HTTP" "false" "regression-http.json"
+  run_regression "https_h2" "$SUT_BASE_HTTPS" "true" "regression-https.json"
+fi
 abort_if_sut_died
 
 # --- throughput-vs-latency sweep ----------------------------------------------
@@ -2127,52 +2165,56 @@ else
   exit 1
 fi
 
-echo "--- sweep.js (throughput-vs-latency knee curve; ladder=$SWEEP_RATES)"
-run_sweep "$SWEEP_K6" "$SERVER_ALIAS" "$OUT_DIR/sweep.json" "$SWEEP_CPU_LOG"
-abort_if_sut_died
-SWEEP_T0="$LAST_SWEEP_T0"
-SATURATION_JSON="$(derive_saturation "$OUT_DIR/sweep.json" "$SWEEP_CPU_LOG" "$SWEEP_T0" "$DIAG_SAMPLE_LOG")"
-# The k6 CPU trace rides in the diagnostics bundle so rig validity can be re-derived offline.
-cp "$SWEEP_CPU_LOG" "$DIAG_DIR/sweep-k6-cpu.csv" 2>/dev/null || true
-PEAK_ACHIEVED_RPS="$(jq -r '.rig_valid_peak_achieved_rps' <<<"$SATURATION_JSON")"
-SATURATION_RPS="$(jq -r '.saturation_rps' <<<"$SATURATION_JSON")"
-echo "--- rig_valid_peak_achieved_rps=$PEAK_ACHIEVED_RPS saturation_rps=$SATURATION_RPS (client pin=${K6_PIN_PCT}%, cores=$K6_CORES)"
-
-# Validity: at least one rung was measured with the client sound (headroom, no
-# drops, low errors). If EVERY rung was excluded the rig was compromised
-# throughout and no server figure is trustworthy. PROVOCATION (observed false):
-# a synthetic ladder with the k6 CPU above 85% of pin at every rung yields
-# rig_valid_rungs=0 and this check false (see the item's can-it-fail evidence).
-#
-# KEYED OFF THE RUNG COUNT, NOT off rig_valid_peak_achieved_rps > 0. Those are not the same
-# question. A rung can be rig-valid and still achieve 0 rps (a server that is down
-# rather than a client that is compromised), and the old form reported that as "every
-# rung excluded" — blaming the rig for a server failure. The count asks what the check
-# is actually named for: did ANY rung measure cleanly?
-#
-# The failure message now REPORTS the per-rung exclude_reason rather than asserting a
-# cause. The old text named "client CPU-pinned / VU-starved / erroring" unconditionally,
-# and that mis-diagnosed build #322: its 2,000 rung dropped 133 iterations (~0.4%), the
-# zero-tolerance no_drops clause excluded every rung, and the build failed pointing at
-# client CPU that was in fact 13.6% utilised. Each rung already carries the real reason;
-# print it instead of guessing.
-RIG_VALID_RUNGS="$(jq -r '.rig_valid_rungs // 0' <<<"$SATURATION_JSON")"
-# A server-headroom test that did not run on every rung is said so, not left implicit.
-SRV_TEST="$(jq -r '.server_headroom_test // "off"' <<<"$SATURATION_JSON")"
-SRV_TEST_NOTE=""; [ "$SRV_TEST" = active ] || SRV_TEST_NOTE="; server-headroom client-limited test ${SRV_TEST} (only the k6 CPU test judged the rungs it did not cover)"
-if awk -v v="$RIG_VALID_RUNGS" 'BEGIN{exit !(v+0>0)}'; then
-  add_check "sweep_client_had_headroom" true "${RIG_VALID_RUNGS} rung(s) measured with client headroom, no client-limited drops, low errors (rig_valid_peak_achieved_rps=${PEAK_ACHIEVED_RPS})${SRV_TEST_NOTE}"
+if arm_only; then
+  SATURATION_JSON='{}'; PEAK_ACHIEVED_RPS="n/a"; SATURATION_RPS=""
 else
-  SWEEP_EXCLUSIONS="$(jq -r '[.ladder[] | "\(.offered_rps): \(.exclude_reason // "?")"] | join("; ")' <<<"$SATURATION_JSON")"
-  add_check "sweep_client_had_headroom" false "every sweep rung was excluded, so no server throughput figure is trustworthy. Per-rung reasons — ${SWEEP_EXCLUSIONS}${SRV_TEST_NOTE}"
-fi
+  echo "--- sweep.js (throughput-vs-latency knee curve; ladder=$SWEEP_RATES)"
+  run_sweep "$SWEEP_K6" "$SERVER_ALIAS" "$OUT_DIR/sweep.json" "$SWEEP_CPU_LOG"
+  abort_if_sut_died
+  SWEEP_T0="$LAST_SWEEP_T0"
+  SATURATION_JSON="$(derive_saturation "$OUT_DIR/sweep.json" "$SWEEP_CPU_LOG" "$SWEEP_T0" "$DIAG_SAMPLE_LOG")"
+  # The k6 CPU trace rides in the diagnostics bundle so rig validity can be re-derived offline.
+  cp "$SWEEP_CPU_LOG" "$DIAG_DIR/sweep-k6-cpu.csv" 2>/dev/null || true
+  PEAK_ACHIEVED_RPS="$(jq -r '.rig_valid_peak_achieved_rps' <<<"$SATURATION_JSON")"
+  SATURATION_RPS="$(jq -r '.saturation_rps' <<<"$SATURATION_JSON")"
+  echo "--- rig_valid_peak_achieved_rps=$PEAK_ACHIEVED_RPS saturation_rps=$SATURATION_RPS (client pin=${K6_PIN_PCT}%, cores=$K6_CORES)"
 
-# Every request of a rung must land in exactly one latency window (lib/perf-sweep-window.sh);
-# otherwise the published percentiles are not the rung's post-settle window.
-if SWEEP_WINDOW_MISMATCH="$(sweep_window_mismatches "$OUT_DIR/sweep.json")"; then
-  add_check "sweep_latency_window_accounts_every_request" true "every rung: measured_sample_count + settle_excluded == sample_count"
-else
-  add_check "sweep_latency_window_accounts_every_request" false "sweep.js settle/steady windows are inconsistent, so the published percentiles cannot be trusted to cover each rung's post-settle window — ${SWEEP_WINDOW_MISMATCH}"
+  # Validity: at least one rung was measured with the client sound (headroom, no
+  # drops, low errors). If EVERY rung was excluded the rig was compromised
+  # throughout and no server figure is trustworthy. PROVOCATION (observed false):
+  # a synthetic ladder with the k6 CPU above 85% of pin at every rung yields
+  # rig_valid_rungs=0 and this check false (see the item's can-it-fail evidence).
+  #
+  # KEYED OFF THE RUNG COUNT, NOT off rig_valid_peak_achieved_rps > 0. Those are not the same
+  # question. A rung can be rig-valid and still achieve 0 rps (a server that is down
+  # rather than a client that is compromised), and the old form reported that as "every
+  # rung excluded" — blaming the rig for a server failure. The count asks what the check
+  # is actually named for: did ANY rung measure cleanly?
+  #
+  # The failure message now REPORTS the per-rung exclude_reason rather than asserting a
+  # cause. The old text named "client CPU-pinned / VU-starved / erroring" unconditionally,
+  # and that mis-diagnosed build #322: its 2,000 rung dropped 133 iterations (~0.4%), the
+  # zero-tolerance no_drops clause excluded every rung, and the build failed pointing at
+  # client CPU that was in fact 13.6% utilised. Each rung already carries the real reason;
+  # print it instead of guessing.
+  RIG_VALID_RUNGS="$(jq -r '.rig_valid_rungs // 0' <<<"$SATURATION_JSON")"
+  # A server-headroom test that did not run on every rung is said so, not left implicit.
+  SRV_TEST="$(jq -r '.server_headroom_test // "off"' <<<"$SATURATION_JSON")"
+  SRV_TEST_NOTE=""; [ "$SRV_TEST" = active ] || SRV_TEST_NOTE="; server-headroom client-limited test ${SRV_TEST} (only the k6 CPU test judged the rungs it did not cover)"
+  if awk -v v="$RIG_VALID_RUNGS" 'BEGIN{exit !(v+0>0)}'; then
+    add_check "sweep_client_had_headroom" true "${RIG_VALID_RUNGS} rung(s) measured with client headroom, no client-limited drops, low errors (rig_valid_peak_achieved_rps=${PEAK_ACHIEVED_RPS})${SRV_TEST_NOTE}"
+  else
+    SWEEP_EXCLUSIONS="$(jq -r '[.ladder[] | "\(.offered_rps): \(.exclude_reason // "?")"] | join("; ")' <<<"$SATURATION_JSON")"
+    add_check "sweep_client_had_headroom" false "every sweep rung was excluded, so no server throughput figure is trustworthy. Per-rung reasons — ${SWEEP_EXCLUSIONS}${SRV_TEST_NOTE}"
+  fi
+
+  # Every request of a rung must land in exactly one latency window (lib/perf-sweep-window.sh);
+  # otherwise the published percentiles are not the rung's post-settle window.
+  if SWEEP_WINDOW_MISMATCH="$(sweep_window_mismatches "$OUT_DIR/sweep.json")"; then
+    add_check "sweep_latency_window_accounts_every_request" true "every rung: measured_sample_count + settle_excluded == sample_count"
+  else
+    add_check "sweep_latency_window_accounts_every_request" false "sweep.js settle/steady windows are inconsistent, so the published percentiles cannot be trusted to cover each rung's post-settle window — ${SWEEP_WINDOW_MISMATCH}"
+  fi
 fi
 
 # --- per-rung wall-clock windows, tail localisation, ceiling JFR ---------------
@@ -2272,14 +2314,17 @@ dump_ceiling_jfr() { # rung_windows_json saturation_rps
   return 0
 }
 
-SWEEP_RUNGS_JSON="$(sweep_rung_windows "$OUT_DIR/sweep.json")"
-printf '%s\n' "$SWEEP_RUNGS_JSON" > "$DIAG_DIR/sweep-rungs.json" 2>/dev/null || true
-SWEEP_TAIL_JSON="$(sweep_tail_localisation "$OUT_DIR/sweep.json" "$DIAG_SAMPLE_LOG" || true)"
-# Exactly one JSON object, or '{}': a partial pipeline can emit two documents, which --argjson rejects.
-jq -se 'length == 1 and (.[0] | type) == "object"' >/dev/null 2>&1 <<<"$SWEEP_TAIL_JSON" || SWEEP_TAIL_JSON='{}'
-echo "--- tail localisation (share of requests over 5 ms; client = k6 post-settle, server = MockServer handler histogram, transport = decoded request to last byte written; notify-only):"
-jq -r '(.rungs // [])[] | "    \(.offered_rps) rps: client \(.client_over_5ms_frac // "n/a") server \(.server_over_5ms_frac // "n/a") transport \(.server_transport_over_5ms_frac // "n/a") (n=\(.server_requests) over \(.server_window_s)s)"' <<<"$SWEEP_TAIL_JSON" || true
-dump_ceiling_jfr "$SWEEP_RUNGS_JSON" "$SATURATION_RPS"
+SWEEP_TAIL_JSON='{}'
+if ! arm_only; then
+  SWEEP_RUNGS_JSON="$(sweep_rung_windows "$OUT_DIR/sweep.json")"
+  printf '%s\n' "$SWEEP_RUNGS_JSON" > "$DIAG_DIR/sweep-rungs.json" 2>/dev/null || true
+  SWEEP_TAIL_JSON="$(sweep_tail_localisation "$OUT_DIR/sweep.json" "$DIAG_SAMPLE_LOG" || true)"
+  # Exactly one JSON object, or '{}': a partial pipeline can emit two documents, which --argjson rejects.
+  jq -se 'length == 1 and (.[0] | type) == "object"' >/dev/null 2>&1 <<<"$SWEEP_TAIL_JSON" || SWEEP_TAIL_JSON='{}'
+  echo "--- tail localisation (share of requests over 5 ms; client = k6 post-settle, server = MockServer handler histogram, transport = decoded request to last byte written; notify-only):"
+  jq -r '(.rungs // [])[] | "    \(.offered_rps) rps: client \(.client_over_5ms_frac // "n/a") server \(.server_over_5ms_frac // "n/a") transport \(.server_transport_over_5ms_frac // "n/a") (n=\(.server_requests) over \(.server_window_s)s)"' <<<"$SWEEP_TAIL_JSON" || true
+  dump_ceiling_jfr "$SWEEP_RUNGS_JSON" "$SATURATION_RPS"
+fi
 
 # --- OPT-IN item 31: this ladder from N k6 processes merged in Prometheus
 # (scripts/rw-multi-k6-sweep.sh), against THIS SUT so both methods measure one server. On the
@@ -2296,12 +2341,14 @@ if [ "${PERF_SERVING_RW_MULTIK6:-false}" = "true" ]; then
     echo "--- item 31 remote-write multi-k6 sweep (opt-in; PERF_SERVING_RW_MULTIK6=true)"
     abort_if_sut_died
     rw_rc=0
+    # Arm-only: no regression or sweep load warmed this SUT first, so the harness warms it itself.
+    rw_warmup="0s"; arm_only && rw_warmup="60s"
     PERF_RW_REPO_ROOT="$REPO_ROOT" PERF_RW_NETWORK="$NETWORK" \
       PERF_RW_TARGET_URL="$SUT_BASE_HTTP" PERF_RW_TARGET_CURL_URL="http://${SERVER_METRICS:-127.0.0.1:1080}" \
       PERF_RW_SUT_CONTAINER="$SERVER" PERF_RW_SERVER_CPUS="$SERVER_CPUS" PERF_RW_UPSTREAM_CPUS="$UPSTREAM_CPUS" \
       PERF_RW_IMAGE="$MOCKSERVER_IMAGE" \
       PERF_RW_RATES="${PERF_RW_RATES:-${K6_SWEEP_RATES:-}}" PERF_RW_STEP="$SWEEP_STEP" PERF_RW_GAP="$SWEEP_GAP" \
-      PERF_RW_SETTLE_S="$SETTLE_S" PERF_RW_WARMUP_DURATION="${PERF_RW_WARMUP_DURATION:-0s}" \
+      PERF_RW_SETTLE_S="$SETTLE_S" PERF_RW_WARMUP_DURATION="${PERF_RW_WARMUP_DURATION:-$rw_warmup}" \
       PERF_RW_DEBUG_DIR="$OUT_DIR/serving-rw-multik6-work" \
       bash "$REPO_ROOT/mockserver-performance-test/scripts/rw-multi-k6-sweep.sh" "$OUT_DIR/serving-rw-multik6.json" || rw_rc=$?
     SERVING_RW_MULTIK6_JSON="$(cat "$OUT_DIR/serving-rw-multik6.json" 2>/dev/null || echo '{}')"
@@ -2586,22 +2633,26 @@ sampler() {
 }
 
 abort_if_sut_died
-echo "--- growth.js (sustained load + resource sampling)"
-sampler & SAMPLER_PID=$!
-# Closes 10 s before the load's scheduled end, so no sample meets growth.js's teardown reset.
-open_live_histo_window "$(( $(to_secs "${K6_GROWTH_DURATION:-6m}") - 10 ))"
-# shellcheck disable=SC2046
-docker run --rm "${NET_CLIENT[@]}" $(cpuset_arg "$K6_CPUS") \
-  -v "$REPO_ROOT/mockserver-performance-test/k6:/k6:ro" \
-  -v "$OUT_DIR:/out" \
-  -e "BASE_URL=$SUT_BASE_HTTP" \
-  -e "K6_GROWTH_RESULT_PATH=/out/growth.json" \
-  ${K6_GROWTH_DURATION:+-e K6_GROWTH_DURATION="$K6_GROWTH_DURATION"} \
-  ${K6_GROWTH_RATE:+-e K6_GROWTH_RATE="$K6_GROWTH_RATE"} \
-  ${K6_GROWTH_PROBE:+-e K6_GROWTH_PROBE="$K6_GROWTH_PROBE"} \
-  "$K6_IMAGE" run /k6/growth.js
-close_live_histo_window
-kill "$SAMPLER_PID" >/dev/null 2>&1 || true; SAMPLER_PID=""
+if arm_only; then
+  echo "ts,cpu_pct,heap_bytes,gc_seconds,threads" > "$SAMPLE_LOG"
+else
+  echo "--- growth.js (sustained load + resource sampling)"
+  sampler & SAMPLER_PID=$!
+  # Closes 10 s before the load's scheduled end, so no sample meets growth.js's teardown reset.
+  open_live_histo_window "$(( $(to_secs "${K6_GROWTH_DURATION:-6m}") - 10 ))"
+  # shellcheck disable=SC2046
+  docker run --rm "${NET_CLIENT[@]}" $(cpuset_arg "$K6_CPUS") \
+    -v "$REPO_ROOT/mockserver-performance-test/k6:/k6:ro" \
+    -v "$OUT_DIR:/out" \
+    -e "BASE_URL=$SUT_BASE_HTTP" \
+    -e "K6_GROWTH_RESULT_PATH=/out/growth.json" \
+    ${K6_GROWTH_DURATION:+-e K6_GROWTH_DURATION="$K6_GROWTH_DURATION"} \
+    ${K6_GROWTH_RATE:+-e K6_GROWTH_RATE="$K6_GROWTH_RATE"} \
+    ${K6_GROWTH_PROBE:+-e K6_GROWTH_PROBE="$K6_GROWTH_PROBE"} \
+    "$K6_IMAGE" run /k6/growth.js
+  close_live_histo_window
+  kill "$SAMPLER_PID" >/dev/null 2>&1 || true; SAMPLER_PID=""
+fi
 
 # --- forward.js (forward connection-pool regression guard) --------------------
 # Runs the previously-dark forward guard against the dedicated upstream already
@@ -2614,8 +2665,8 @@ kill "$SAMPLER_PID" >/dev/null 2>&1 || true; SAMPLER_PID=""
 # the validity block. Runs last: forward.js resets the SUT in teardown.
 abort_if_sut_died
 FORWARD_EXIT=0
-# Secondary phase: skipped under host mode (multi-SUT phases do not run there).
-if [ "$PERF_NETWORK_MODE" != host ]; then
+# Secondary phase: skipped under host mode (multi-SUT phases do not run there) and arm-only runs.
+if [ "$PERF_NETWORK_MODE" != host ] && ! arm_only; then
   echo "--- forward.js (forward connection-pool regression guard)"
   # shellcheck disable=SC2046
   docker run --rm "${NET_CLIENT[@]}" $(cpuset_arg "$K6_CPUS") \
@@ -3695,7 +3746,9 @@ fi
 # writes only its header row, wc -l is 1, and this check evaluates false — which
 # is exactly the empty-sample-log case the plan wants promoted from a warning to a
 # baseline refusal (a run with no resource trajectory cannot assess growth).
-if [ "$(wc -l < "$SAMPLE_LOG" 2>/dev/null || echo 0)" -le 1 ]; then
+if arm_only; then
+  : # no growth phase, so no resource trajectory to require
+elif [ "$(wc -l < "$SAMPLE_LOG" 2>/dev/null || echo 0)" -le 1 ]; then
   echo "WARNING: resource sample log is empty — growth resource metrics will be 0/null for this run" >&2
   add_check "resource_samples_present" false "resource sample log empty — CPU/heap growth metrics are 0/null (cannot assess growth)"
 else
@@ -4077,7 +4130,9 @@ SWEEP_JSON="$(cat "$OUT_DIR/sweep.json" 2>/dev/null || echo '{}')"
 # writes an empty behaviours object (or no file), the jq -e finds zero non-null
 # p95 entries and this check evaluates false — a run with no latency numbers must
 # not be baselined as if it had them.
-if jq -e '((.behaviours // {}) | to_entries | map(select(.value.p95_ms != null)) | length) > 0' \
+if arm_only; then
+  : # the arm's own presence check (below) replaces the regression and growth checks
+elif jq -e '((.behaviours // {}) | to_entries | map(select(.value.p95_ms != null)) | length) > 0' \
      "$OUT_DIR/regression-http.json" >/dev/null 2>&1; then
   add_check "regression_metrics_present" true "regression behaviours present with non-null latency percentiles"
 else
@@ -4092,10 +4147,30 @@ fi
 # future run. So gate on the live-set floor being a plausible non-zero value.
 # PROVOCATION (observed false): make /mockserver/metrics unreachable for the whole
 # growth phase — CPU rows still accrue but HEAP_MIN_LAST is 0 and this fails.
-if awk -v v="$HEAP_MIN_LAST" 'BEGIN{exit !(v+0>0)}'; then
+if arm_only; then
+  :
+elif awk -v v="$HEAP_MIN_LAST" 'BEGIN{exit !(v+0>0)}'; then
   add_check "growth_heap_sampled" true "live-set floor min_last_window=${HEAP_MIN_LAST} bytes (heap metrics captured)"
 else
   add_check "growth_heap_sampled" false "no heap samples during growth (/mockserver/metrics unreachable?) — live-set floor is 0, growth.live_set_bytes would poison the baseline as a zero"
+fi
+# Arm-only: no compare step reads this result, so the arm's own outcome is the run's validity.
+# hw_matrix mirrors perf-test-compare.sh's presence gate (a point with a ceiling, or one that ran out of memory).
+if [ "$PERF_RUN_ARM" = rw_multik6 ]; then
+  if jq -e '.valid == true' <<<"$SERVING_RW_MULTIK6_JSON" >/dev/null 2>&1; then
+    add_check "arm_rw_multik6_valid" true "rw-multi-k6-sweep.sh valid (healthy_ceiling_rps=$(jq -r '.headline.healthy_ceiling_rps // "none"' <<<"$SERVING_RW_MULTIK6_JSON"))"
+  else
+    add_check "arm_rw_multik6_valid" false "rw-multi-k6-sweep.sh result is not valid: $(jq -r '[(.validity.checks // [])[] | select(.ok == false) | .name] | if length == 0 then "no result block" else join(", ") end' <<<"$SERVING_RW_MULTIK6_JSON" 2>/dev/null || echo "no result block")"
+  fi
+elif [ "$PERF_RUN_ARM" = hw_matrix ]; then
+  HWM_USABLE="$(jq -r '[(.points // [])[] | select(.healthy_ceiling_rps != null or .oom_killed == true or .java_out_of_memory == true
+      or (.status // "") == "java_out_of_memory" or ((.status // "") == "sut_died" and ((.sut_state.java_oom_errors // 0) > 0)))] | length' \
+      <<<"$SERVING_HW_MATRIX_JSON" 2>/dev/null || echo 0)"
+  if ! jq -e 'has("error")' <<<"$SERVING_HW_MATRIX_JSON" >/dev/null 2>&1 && [ "${HWM_USABLE:-0}" -gt 0 ]; then
+    add_check "arm_hw_matrix_measured" true "${HWM_USABLE} hardware-matrix point(s) with a healthy ceiling or an out-of-memory verdict"
+  else
+    add_check "arm_hw_matrix_measured" false "hardware matrix measured no usable point: $(jq -r '.error_detail // .error // ([(.points // [], .skipped // [])[] | (.key // "?") + "=" + (.status // .type // "?")] | join(", "))' <<<"$SERVING_HW_MATRIX_JSON" 2>/dev/null || echo "no result block")"
+  fi
 fi
 # item 12 — streaming presence. Only asserted when the profile was ATTEMPTED
 # (PERF_STREAMING on AND python3 present); a deliberately-skipped profile is not a
@@ -4155,7 +4230,7 @@ jq -n \
   --arg build_number "${BUILDKITE_BUILD_NUMBER:-}" --arg build_url "${BUILDKITE_BUILD_URL:-}" \
   --arg instance_type "$INSTANCE_TYPE" --arg instance_type_src "$INSTANCE_TYPE_SRC" --arg image "$MOCKSERVER_IMAGE" \
   --arg server_cpus "${SERVER_CPUS:-none}" --arg k6_cpus "${K6_CPUS:-none}" \
-  --arg network_mode "$PERF_NETWORK_MODE" \
+  --arg network_mode "$PERF_NETWORK_MODE" --arg queue "${BUILDKITE_AGENT_META_DATA_QUEUE:-perf}" --arg run_arm "$PERF_RUN_ARM" \
   --argjson steady "$STEADY_JSON" \
   --argjson server_phys_cores "$SERVER_PHYS_CORES" --argjson k6_phys_cores "$K6_PHYS_CORES" \
   --slurpfile http "$OUT_DIR/regression-http.json" \
@@ -4217,7 +4292,7 @@ jq -n \
     schema_version: 3,
     commit: $commit, harness_commit: $harness_commit, branch: $branch, timestamp_utc: $ts,
     build_number: $build_number, build_url: $build_url,
-    agent: { instance_type: $instance_type, instance_type_source: $instance_type_src, queue: "perf",
+    agent: { instance_type: $instance_type, instance_type_source: $instance_type_src, queue: $queue,
              server_cpus: $server_cpus, k6_cpus: $k6_cpus, network_mode: $network_mode,
              server_physical_cores: $server_phys_cores, k6_physical_cores: $k6_phys_cores },
     config: $config,
@@ -4382,7 +4457,9 @@ jq -n \
     # provisional for when it does.
     info_log_level_arm: $info_log_level_arm,
     info_log_level_arm_attempted: $info_log_level_arm_attempted
-  }' > "$RESULT_JSON"
+  }
+  # Arm-only: growth and the forward guard never ran, so they carry no zero-filled stand-ins.
+  | if $run_arm == "" then . else . + {run_arm: $run_arm, growth: {}, forward_guard: {}} end' > "$RESULT_JSON"
 
 echo "--- result.json"
 cat "$RESULT_JSON"
@@ -4422,7 +4499,7 @@ dump_load_window_jfr
 if command -v buildkite-agent >/dev/null 2>&1; then
   cp "$RESULT_JSON" "$REPO_ROOT/perf-result.json"
   bk_upload_artifact "perf-result.json"
-  bk_upload_artifact "perf-sweep.json"
+  arm_only || bk_upload_artifact "perf-sweep.json"
   upload_diag_bundle
   [ -f "$REPO_ROOT/serving-percore.json" ] && bk_upload_artifact "serving-percore.json" || true
   [ -f "$REPO_ROOT/serving-hw-matrix.json" ] && bk_upload_artifact "serving-hw-matrix.json" || true
@@ -4436,12 +4513,28 @@ if command -v buildkite-agent >/dev/null 2>&1; then
   # master by a java-pipeline duration) would make LAST != HEAD on every quiet day
   # and dispatch the heavy run daily forever, defeating the commit-gate economy.
   # Keyed off real runs, NOT the lint build that passes on every push.
-  # A release run must not make the guard skip the next daily run of this commit.
-  if [ -z "$PERF_RELEASE_COMPARISON" ]; then
+  # A release run or an arm-only run must not make the guard skip the next daily run of this commit.
+  if [ -z "$PERF_RELEASE_COMPARISON" ] && ! arm_only; then
     buildkite-agent meta-data set "perf_regression_ran_commit" "$HARNESS_COMMIT" || true
   fi
 else
   cp "$RESULT_JSON" "$REPO_ROOT/perf-result.json"
   echo "(local run) result + sweep copied to $REPO_ROOT/perf-result.json, $REPO_ROOT/perf-sweep.json"
   upload_diag_bundle
+fi
+
+# Arm-only: nothing downstream gates this result, so this step reds on an invalid one.
+if arm_only; then
+  ARM_SUMMARY="$(jq -r '"\(.run_arm) on \(.agent.instance_type) (queue \(.agent.queue)): valid=\(.validity.valid); "
+    + ([.validity.checks[] | "\(.name)=\(.ok)"] | join(", "))' "$RESULT_JSON" 2>/dev/null || echo "result unreadable")"
+  if jq -e '.validity.valid == true' "$RESULT_JSON" >/dev/null 2>&1; then
+    echo "--- arm-only result: $ARM_SUMMARY"
+  else
+    echo "+++ :x: arm-only result is NOT valid: $ARM_SUMMARY" >&2
+    if command -v buildkite-agent >/dev/null 2>&1; then
+      printf '%s\n' ":x: **${PERF_RUN_NAME}** measured nothing trustworthy: ${ARM_SUMMARY}. Artifacts: \`${ARTIFACT_PREFIX}perf-result.json\` and the work files." \
+        | buildkite-agent annotate --style error --context "perf-arm-${PERF_RUN_NAME}" || true
+    fi
+    exit 1
+  fi
 fi

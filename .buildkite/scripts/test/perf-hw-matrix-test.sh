@@ -349,11 +349,11 @@ cp "$REPO_ROOT/.buildkite/scripts/steps/perf-test-allocprofile.sh" "$D/"
 cp "$LIB/perf-jfr-image.sh" "$D/lib/"
 printf '#!/usr/bin/env bash\nenv > "%s"\n' "$T/deep-env.txt" > "$D/perf-test-run.sh"; chmod +x "$D/perf-test-run.sh"
 ON=(); for a in $ARMS; do ON+=("$a=true"); done
-env PATH="$T/bin:$PATH" "${ON[@]}" PERF_WORKLOAD=forward PERF_STEADY_RATE=5000 bash "$D/perf-test-allocprofile.sh" > "$T/deep.log" 2>&1 || true
+env PATH="$T/bin:$PATH" "${ON[@]}" PERF_WORKLOAD=forward PERF_STEADY_RATE=5000 PERF_RUN_ARM=hw_matrix bash "$D/perf-test-allocprofile.sh" > "$T/deep.log" 2>&1 || true
 for a in $ARMS; do
   check "deep step: $a forced off" "false" "$(grep -E "^$a=" "$T/deep-env.txt" | cut -d= -f2-)"
 done
-for a in PERF_WORKLOAD PERF_STEADY_RATE; do
+for a in PERF_WORKLOAD PERF_STEADY_RATE PERF_RUN_ARM; do
   check "deep step: $a cleared" "" "$(grep -E "^$a=" "$T/deep-env.txt" | cut -d= -f2-)"
 done
 check "deep step: still a deep run" "deep allocprofile" \

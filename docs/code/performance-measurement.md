@@ -12,7 +12,7 @@ regressions hide and stale claims get published.
 | `regression.js` (HTTP + HTTPS/H2) | Per-behaviour latency percentiles and delivery ratio at 200 rps | Daily (perf queue) | No — notify-only |
 | `growth.js` | Latency slope as the event log fills | Daily (perf queue) | No — notify-only |
 | `sweep.js` | Throughput-vs-latency knee curve | Daily (perf queue) | No — notify-only |
-| `rw-multi-k6-sweep.sh` (`sweep.js` from N processes, merged in Prometheus) | The same knee curve without the single-k6 ceiling (item 31) | **Opt-in** (`PERF_SERVING_RW_MULTIK6=true`) | No — never published; exits 2 on its own accounting/skew/window/cross-check gates |
+| `rw-multi-k6-sweep.sh` (`sweep.js` from N processes, merged in Prometheus) | The same knee curve without the single-k6 ceiling (item 31) | **Opt-in**: `PERF_SERVING_RW_MULTIK6=true` inside `perf-run` on `perf`, or its own arm-only step on `perf-xl` with `PERF_XL=true` ([where each arm runs](#which-queue-runs-which-arm)) | No — never published; exits 2 on its own accounting/skew/window/cross-check gates; the perf-xl step fails when the arm is not `valid` |
 | `forward.js` | Forward connection-pool regression guard | Daily (perf queue) | `forward.error_rate` only |
 | `proxy.js` | Proxy and TLS handshake latency | Daily (perf queue) | No — notify-only |
 | `proxy.js` forward + slow upstream | Unmatched-proxy in-flight concurrency cap (unit 21) | **Opt-in** (`PERF_WORKLOAD=forward`) | `workload_forward_served_via_upstream` validity check |
@@ -31,7 +31,7 @@ regressions hide and stale claims get published.
 | `soak.js` | Sustained load over hours | Weekly (Sunday 08:00 UTC schedule, perf queue) and on demand in any build whose message contains `[perf-soak]` | Yes, for that build — k6 thresholds and a result-presence check; never compared or baselined |
 | `scripts/perf/bench_startup.py` | Launch-to-ready variant matrix | Never runs in CI | Never |
 | `inject` (`run-inject.sh`) | Load-injection ceiling | Opt-in | Never in daily pipeline |
-| Hardware matrix (`lib/perf-percore.sh` driving `rw-multi-k6-sweep.sh` per point, `PERF_SERVING_HW_MATRIX=true`) | Healthy ceiling per cores × container memory, for the public sizing table | Opt-in, manual build only | No — notify-only; only a wholesale producer failure reds (presence gate) |
+| Hardware matrix (`lib/perf-percore.sh` driving `rw-multi-k6-sweep.sh` per point, `PERF_SERVING_HW_MATRIX=true`) | Healthy ceiling per cores × container memory, for the public sizing table | Opt-in, manual build only; on `perf-xl` instead of `perf` when `PERF_XL=true` | No — notify-only; only a wholesale producer failure reds (presence gate in compare, or in the perf-xl step itself) |
 | `perf-test-allocprofile.sh` (deep JFR) | Allocation per request, peak direct memory, top allocation sites over the load window, retained-heap histogram, and the CPU / lock / GC profile of the ceiling rungs alone | Daily (perf queue), separate step | No — `soft_fail`, never baselined; an under-sized recording is reported INVALID |
 
 ## The Daily Pipeline
@@ -68,6 +68,28 @@ different VMs. That does not disturb the rolling baseline, which already spans a
 daily run, but it does matter for a close A/B: VM-to-VM variance is a few percent, so measure both
 arms within one job on one machine (a within-run A/B, like the clustered-state arm) or repeat each
 arm, rather than comparing two separate builds.
+
+### Which queue runs which arm
+
+Every arm runs on the `perf` queue (c5.12xlarge) by default. `PERF_XL=true` moves two opt-in arms
+to the `perf-xl` queue (one c6i.32xlarge, two NUMA nodes), each as its own arm-only step
+(`perf-test-run.sh` with `PERF_RUN_ARM`). `perf-test-run.sh` then drops both arms from `perf-run`.
+
+| Arm | `PERF_XL` unset | `PERF_XL=true` |
+|---|---|---|
+| regression, sweep, growth, forward, proxy, coverage, streaming, clustered, INFO arm | `perf-run` on `perf` | `perf-run` on `perf` (unchanged) |
+| micro-benchmarks, HTTP/2 multiplex, allocation profile | own steps on `perf` | own steps on `perf` (unchanged) |
+| multi-k6 arm (item 31) | inside `perf-run` when `PERF_SERVING_RW_MULTIK6=true` | step `perfxl-rw-multik6` on `perf-xl`, always |
+| hardware matrix (item 27) | inside `perf-run` when `PERF_SERVING_HW_MATRIX=true` | step `perfxl-hw-matrix` on `perf-xl`, when `PERF_SERVING_HW_MATRIX=true` |
+
+A perf-xl result is uploaded under a `perfxl-` prefix and is never compared, persisted or
+published, so it cannot enter the c5.12xlarge baseline or the website. As a second barrier,
+`perf-test-compare.sh` keeps one S3 history per agent queue (`runs/` for `perf`, `runs-<queue>/`
+for any other), so even a result that did reach it could not enter or crowd the perf window. The step fails on its own
+when the arm measured nothing trustworthy. The wiring and the isolation argument are in
+[ci-cd.md](../infrastructure/ci-cd.md#the-perf-xl-steps-opt-in). In arm-only mode the multi-k6
+arm runs on a SUT that no regression or sweep load has warmed, so it gets a 60 s warm-up of its
+own (`PERF_RW_WARMUP_DURATION`, which stays overridable). Inside `perf-run` that warm-up is 0 s.
 
 `perf-test-compare.sh` reads `behaviours.*`, `growth.*`, and `microbench.*` from the per-run
 artifacts and gates only the metrics explicitly marked `gating: true` in the compare script.
@@ -639,7 +661,8 @@ Through the harness itself (N=2, per-process rungs 4k–12k, every run `valid`),
 
 **Running it.** `PERF_SERVING_RW_MULTIK6=true` on a perf build runs it against the main SUT right
 after the published sweep and stores the result under `.serving_rw_multik6`
-and the `serving-rw-multik6.json` artifact; that run is not baseline-eligible. It uses the
+and the `serving-rw-multik6.json` artifact; that run is not baseline-eligible. With `PERF_XL=true` it runs instead as its own step on the `perf-xl` queue,
+and `perf-run` stays baseline-eligible ([which queue runs which arm](#which-queue-runs-which-arm)). It uses the
 harness's own ladder unless `PERF_RW_RATES` is set, or `K6_SWEEP_RATES` is set explicitly (the
 allocation-profile run's short ladder), in which case it follows that. It took ~10 min at N=4
 over 17 rungs (build 533) and ~11 min at N=8 over 19 (build 535); `perf-test-guard.sh` raises the
@@ -1110,6 +1133,11 @@ all); the guard raises the run step's timeout from 70 to 160 minutes only when
 daily build can hold all three `perf` agents, so a matrix build would queue behind it).
 `PERF_HW_MATRIX` overrides the points, as comma-separated
 `cores:memory[:control]` entries.
+
+Adding `-e PERF_XL=true` runs the matrix as its own step on the `perf-xl` queue instead (130-minute
+timeout), and the run step keeps its 70-minute timeout. That step's result never reaches compare or
+the website, so the published table keeps its last committed figures. The placement below is the
+c5.12xlarge's ([which queue runs which arm](#which-queue-runs-which-arm)).
 
 ```mermaid
 flowchart LR

@@ -72,6 +72,12 @@ bash "$REPO_ROOT/.buildkite/scripts/test/perf-run-ready-test.sh"
 echo "--- INFO-arm event-log budget checks (item 40: shipped default on the INFO SUT, info_* baseline key)"
 bash "$REPO_ROOT/.buildkite/scripts/test/perf-info-budget-test.sh"
 
+echo "--- perf-xl dispatch checks (guard YAML with and without PERF_XL, PERF_RUN_ARM switch)"
+bash "$REPO_ROOT/.buildkite/scripts/test/perf-xl-dispatch-test.sh"
+
+echo "--- compare queue-history checks (a perf-xl run never enters or displaces the perf baseline window)"
+bash "$REPO_ROOT/.buildkite/scripts/test/perf-compare-queue-history-test.sh"
+
 echo "--- allocation-profile annotation checks (item 28: ceiling views, size cap, degrade notes)"
 bash "$REPO_ROOT/.buildkite/scripts/test/perf-allocprofile-annotation-test.sh"
 

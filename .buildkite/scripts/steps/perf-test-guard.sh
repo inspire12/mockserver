@@ -52,6 +52,61 @@ steps:
 YAML
 }
 
+# --- OPT-IN: the perf-xl queue (one c6i.32xlarge, two NUMA nodes) -------------
+# PERF_XL=true runs the multi-k6 arm, and the hardware matrix when PERF_SERVING_HW_MATRIX=true, as
+# arm-only steps on perf-xl (perf-test-run.sh PERF_RUN_ARM); perf-test-run.sh then drops both arms from
+# the perf-run step. Their artifacts carry a perfxl- prefix that compare never downloads, so a perf-xl
+# result can neither enter the c5.12xlarge baseline nor reach the website.
+PERF_XL_ON=false
+if [ "${PERF_XL:-}" = "true" ]; then
+  PERF_XL_ON=true
+elif [ -n "${PERF_XL:-}" ]; then
+  echo "--- :warning: PERF_XL='${PERF_XL}' is not 'true'; perf-xl not dispatched"
+fi
+
+perf_xl_yaml() {
+  local arms=(rw_multik6) arm name label timeout
+  [ "${PERF_SERVING_HW_MATRIX:-false}" = "true" ] && arms+=(hw_matrix)
+  echo "steps:"
+  for arm in "${arms[@]}"; do
+    name="perfxl-${arm//_/-}"
+    # rw_multik6: SUT start-up + 60 s warm-up + ~12 min ladder. hw_matrix: ~10 min per point.
+    case "$arm" in
+      rw_multik6) label=":k6: perf-xl — multi-k6 arm (item 31)"; timeout=45 ;;
+      hw_matrix)  label=":straight_ruler: perf-xl — hardware matrix (item 27)"; timeout=130 ;;
+    esac
+    cat <<YAML
+  - label: "${label}"
+    key: "${name}"
+    command: ".buildkite/scripts/steps/perf-test-run.sh"
+    env:
+      PERF_RUN_ARM: "${arm}"
+      PERF_RUN_NAME: "${name}"
+    timeout_in_minutes: ${timeout}
+    agents:
+      queue: "perf-xl"
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+YAML
+  done
+}
+
+maybe_dispatch_perf_xl() {
+  if [ "$PERF_XL_ON" != true ]; then
+    return 0
+  fi
+  if ! command -v buildkite-agent >/dev/null 2>&1; then
+    echo "(local run) buildkite-agent unavailable — would dispatch the perf-xl arm steps"
+    return 0
+  fi
+  echo "--- :rocket: PERF_XL=true — dispatching the perf-xl arm steps"
+  perf_xl_yaml | buildkite-agent pipeline upload
+}
+
 # Forced/manual run: a UI ("New Build") build, or an API build whose message
 # carries the explicit `[perf-run]` marker, ALWAYS dispatches — even on the same
 # commit as the last run. This is the deliberate manual escape hatch. Scheduled
@@ -98,13 +153,14 @@ fi
 # PERF_SERVING_HW_MATRIX=true (a manual-build opt-in) adds six multi-k6 points of ~10 min each
 # (20 rungs x 20 s, a 3-rung cross-check, SUT and Prometheus start-up): ~60 min on the 70-min
 # base, with ~30 min margin.
+# Under PERF_XL=true both arms run on perf-xl instead, so neither extends this step.
 PERF_RUN_TIMEOUT=70
-if [ "${PERF_SERVING_HW_MATRIX:-false}" = "true" ]; then
+if [ "${PERF_SERVING_HW_MATRIX:-false}" = "true" ] && [ "$PERF_XL_ON" != true ]; then
   PERF_RUN_TIMEOUT=160
   echo "--- :straight_ruler: PERF_SERVING_HW_MATRIX=true — run step timeout ${PERF_RUN_TIMEOUT}m"
 fi
 # PERF_SERVING_RW_MULTIK6=true (item 31, opt-in) adds ~12 min; +20 leaves margin.
-if [ "${PERF_SERVING_RW_MULTIK6:-false}" = "true" ]; then
+if [ "${PERF_SERVING_RW_MULTIK6:-false}" = "true" ] && [ "$PERF_XL_ON" != true ]; then
   PERF_RUN_TIMEOUT=$(( PERF_RUN_TIMEOUT + 20 ))
   echo "--- :straight_ruler: PERF_SERVING_RW_MULTIK6=true — run step timeout ${PERF_RUN_TIMEOUT}m"
 fi
@@ -291,5 +347,6 @@ steps:
       queue: "perf"
 YAML
 
-# Honour the load-injection opt-in alongside the standard regression dispatch.
+# Honour the load-injection and perf-xl opt-ins alongside the standard regression dispatch.
 maybe_dispatch_inject
+maybe_dispatch_perf_xl

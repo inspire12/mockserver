@@ -10,7 +10,7 @@ set -euo pipefail
 #
 # Flow:
 #   1. gather this run's result.json (+ perf-microbench.json) and merge them
-#   2. persist to s3://<bucket>/runs/<branch>/<iso>__<sha>.json   (history)
+#   2. persist to s3://<bucket>/runs/<branch>/<iso>__<sha>.json   (history; runs-<queue>/ off the perf queue)
 #   3. pull the last N PRIOR runs; if < MIN_BASELINE, annotate "warming up"
 #   4. per metric: rolling baseline = median + MAD; flag a regression when the
 #      head value crosses max(median + 3·1.4826·MAD, percent-floor / abs-floor).
@@ -222,7 +222,16 @@ fi
 BRANCH="$(jq -r '.branch // "unknown"' "$RESULT")"
 COMMIT="$(jq -r '.commit // "unknown"' "$RESULT")"
 TS="$(jq -r '.timestamp_utc // "unknown"' "$RESULT")"
-KEY="runs/${BRANCH}/${TS//:/-}__${COMMIT:0:10}.json"
+# Each agent queue keeps its own history: a run from another queue (perf-xl) is persisted under
+# runs-<queue>/ and windows only against that prefix, so it can neither enter nor displace the perf
+# queue's window. perf keeps runs/, where perf-website-publish.sh reads. A result with no queue predates the field (perf).
+RUN_QUEUE="$(jq -r '.agent.queue // "perf"' "$RESULT")"
+if ! [[ "$RUN_QUEUE" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+  annotate "error" ":no_entry: **Perf result names an unusable agent queue — build FAILED, not baselined** — \`.agent.queue\` is \`${RUN_QUEUE}\`, which cannot select a history prefix, so the run cannot be kept apart from another queue's baseline."
+  exit 1
+fi
+HISTORY_PREFIX="runs"; [ "$RUN_QUEUE" = "perf" ] || HISTORY_PREFIX="runs-${RUN_QUEUE}"
+KEY="${HISTORY_PREFIX}/${BRANCH}/${TS//:/-}__${COMMIT:0:10}.json"
 
 # --- 1b. validity gate (item: refuse to baseline a compromised measurement) ---
 # The run's own `validity` block records whether the measurement RIG was sound
@@ -561,13 +570,25 @@ elif $HAVE_AWS; then
   # List, drop the just-uploaded current key, take the most recent N by name.
   # grep -vxF: exact whole-line fixed-string match (the key has dots — a plain
   # regex grep would treat them as wildcards and over-exclude).
-  mapfile -t KEYS < <(aws s3 ls "s3://${BUCKET}/runs/${BRANCH}/" --recursive 2>/dev/null | awk '{print $4}' | grep -vxF "$KEY" | sort | tail -n "$BASELINE_N")
+  mapfile -t KEYS < <(aws s3 ls "s3://${BUCKET}/${HISTORY_PREFIX}/${BRANCH}/" --recursive 2>/dev/null | awk '{print $4}' | grep -vxF "$KEY" | sort | tail -n "$BASELINE_N")
   for k in "${KEYS[@]:-}"; do
     [ -n "$k" ] || continue
     aws s3 cp "s3://${BUCKET}/${k}" "$BASE_DIR/$(basename "$k")" --only-show-errors 2>/dev/null || true
   done
 fi
 
+# Belt and braces for the prefix split (and the only split for PERF_BASELINE_DIR): drop any prior run
+# from another queue. An object whose queue cannot be read is not guessed at: it fails the step.
+for f in "$BASE_DIR"/*.json; do
+  [ -e "$f" ] || continue
+  if ! base_queue="$(jq -er '.agent.queue // "perf"' "$f" 2>/dev/null)"; then
+    annotate "error" ":no_entry: **Perf baseline object UNREADABLE — build FAILED** — \`$(basename "$f")\` from \`${HISTORY_PREFIX}/${BRANCH}/\` is not readable JSON, so its queue cannot be checked and the baseline window cannot be trusted. Inspect or remove that object."
+    exit 1
+  fi
+  [ "$base_queue" = "$RUN_QUEUE" ] && continue
+  echo "--- baseline: dropping $(basename "$f") — from queue ${base_queue}, not ${RUN_QUEUE}" >&2
+  rm -f "$f"
+done
 BASE_COUNT="$(find "$BASE_DIR" -name '*.json' | wc -l | tr -d ' ')"
 echo "--- baseline: $BASE_COUNT prior run(s) (min $MIN_BASELINE, window $BASELINE_N)"
 

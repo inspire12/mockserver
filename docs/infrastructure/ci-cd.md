@@ -55,7 +55,7 @@ The monorepo uses a path-based pipeline orchestrator that dynamically triggers s
 | `trigger` | `t3.small`, `t3a.small`, `t3.micro` | Trigger polling jobs (`sleep` + `curl` loops) |
 | `release` | Same as `default` | Release pipeline steps that access release secrets |
 | `perf` | `c5.12xlarge` | Daily performance-regression benchmarks (k6 + JMH); scale-to-zero, max 3 with one agent per instance, 100% on-demand |
-| `perf-xl` | `c6i.32xlarge` | Performance runs that need more cores than one `perf` box (128 vCPU / 64 physical cores); scale-to-zero, max 1, one agent per instance, 100% on-demand. About $6.46/hr while running (eu-west-2 on-demand) |
+| `perf-xl` | `c6i.32xlarge` | Opt-in (`PERF_XL=true`) multi-k6 arm and hardware matrix: performance runs that need more cores than one `perf` box (128 vCPU / 64 physical cores, two NUMA nodes); scale-to-zero, max 1, one agent per instance, 100% on-demand. About $6.46/hr while running (eu-west-2 on-demand) |
 
 Trigger jobs (which poll child builds via the Buildkite API) run on cheap `trigger` queue instances to avoid starving build agents. See [Agent Starvation](#agent-starvation-from-script-based-triggers-resolved) for background.
 
@@ -261,7 +261,7 @@ The pipeline's first step (`perf-test-guard.sh`, `trigger` queue) implements a "
 
 1. Calls `last_perf_run_commit` (in `lib/last-successful-commit.sh`) — resolves the commit the heavy regression run *last actually executed against*, by reading the most recent `perf_regression_ran_commit` Buildkite build meta-data (set by `perf-test-run.sh`) via the Buildkite API (token in AWS Secrets Manager `mockserver-build/buildkite-api-token`). This is deliberately distinct from the sibling `last_successful_commit` (last *passed build*, used by `generate-pipeline.sh`): the perf-test pipeline passes on its lint step on every push, so "last passed build" would almost always be `HEAD` and the guard would skip forever.
 2. If `HEAD` equals the last run commit, annotates "skipped" and exits 0 — no compute is consumed.
-3. Otherwise (new commit, or no prior run recorded) uses `buildkite-agent pipeline upload` to dynamically inject the run, microbench, HTTP/2-multiplex, and compare steps into the running build. These steps target the `perf` agent queue (c5.12xlarge, on-demand, up to three agents with one per machine), so the measurement steps of one build run in parallel on separate machines.
+3. Otherwise (new commit, or no prior run recorded) uses `buildkite-agent pipeline upload` to dynamically inject the run, microbench, HTTP/2-multiplex, and compare steps into the running build. These steps target the `perf` agent queue (c5.12xlarge, on-demand, up to three agents with one per machine), so the measurement steps of one build run in parallel on separate machines. With `PERF_XL=true` it also uploads the arm-only steps for the `perf-xl` queue (see [The perf-xl steps](#the-perf-xl-steps-opt-in)).
 
 This pattern avoids a fixed multi-step pipeline definition (which would always run all steps) while keeping the guard cheap on the `trigger` queue.
 
@@ -275,16 +275,58 @@ This pattern avoids a fixed multi-step pipeline definition (which would always r
 | `perf-test-h2multiplex.sh` | `perf` | HTTP/2 multiplex benchmark (issue #2669): N=1,10,100 concurrent streams over one h2c connection; runs the harness `selftest` then the sweep; uploads `perf-h2-multiplex.json`. Notify-only, **no threshold** (recorded for trend only); a non-zero exit is a harness self-validation failure (bad measurement), not a slowdown |
 | `perf-test-allocprofile.sh` | `perf` | Short deep-JFR run answering *what allocates* and *where the CPU goes at the ceiling*: JFR `settings=profile` (plus 1 ms monitor-enter threshold and the JDK 25 CPU-time sampler) dumped over the load window (`jcmd JFR.dump`), a second recording cut to the knee-to-top sweep rungs (`sut/ceiling.jfr`), NMT, `jcmd GC.class_histogram` during growth.js only (it is a stop-the-world pause); annotates allocation per request, peak direct memory, the top allocation sites, whether any heap inspection hit a sweep rung, and the ceiling's per-thread CPU, hot methods, contention, VM operations and GC pauses (read with a JDK 25 `jfr`), and reports a recording below its duration/sample floor as INVALID (see [performance-measurement.md](../code/performance-measurement.md#allocation-profile-step)). Deep profiling costs throughput, so it is `soft_fail`, gates nothing, and uploads under an `allocprofile-` prefix (`PERF_RUN_NAME`) so `perf-test-compare.sh` — which downloads `perf-result.json` by exact name — can never baseline it |
 | `perf-alloc-gate.sh` | `default` | JMH allocation gate: fails the build if any of its eight benchmark rows (including the `HEADERS_MISS` matching-scan arm) allocates above its budget; a row without `gating: true` would post a warning annotation instead |
+| `perf-test-run.sh` with `PERF_RUN_ARM` | `perf-xl` | Arm-only run, dispatched only when `PERF_XL=true`; see [The perf-xl steps](#the-perf-xl-steps-opt-in) |
 | `perf-test-compare.sh` | `perf` | Merge artifacts + S3 persist + rolling median+MAD compare + Buildkite annotation |
 | `perf-website-publish.sh` | `perf` | Tail step, `soft_fail`, non-gating. Regenerates `perf_figures.json` + chart data/PNGs from the newest valid S3 run; when the committed figures have drifted, emits the refresh as a `git format-patch` build artifact (the perf queue has no git/gh credentials, so it cannot push). Applying the patch is a manual step — see [Published Figures → Publishing a run's figures](../code/performance-measurement.md#published-figures) |
 | `lib/perf-budgets-validate.sh` | — | Sourced by the compare and allocation gates to schema-check `perf-budgets.json` before either compares anything (a quoted number in that file does not error in jq, it silently disables the budget). Runs its own `--self-test` on every build |
+
+#### The perf-xl steps (opt-in)
+
+**Outcome.** `PERF_XL=true` on a perf build moves the multi-k6 arm (item 31), and the hardware matrix (item 27) when `PERF_SERVING_HW_MATRIX=true` is also set, off the c5.12xlarge `perf-run` step and onto the `perf-xl` queue: a single on-demand c6i.32xlarge with two NUMA nodes. Every other arm stays on `perf`. With `PERF_XL` unset (or anything other than `true`), the guard uploads exactly what it did before. `perf-xl-dispatch-test.sh` checks that the main upload is byte-identical with and without the flag. The flag stays opt-in until the perf-xl rig trial passes. **Prerequisite:** apply both Terraform stacks before setting `PERF_XL=true`. Apply `terraform/buildkite-pipelines` first, for the `perf-xl` cluster queue, then `terraform/buildkite-agents`, for the c6i.32xlarge stack. Without them no `perf-xl` agent ever registers: the two perf-xl steps sit waiting for an agent and the build stays running. A step timeout only counts once a job has started, so it never fires here. Cancel the build, apply the stacks, and re-run.
+
+```mermaid
+flowchart LR
+  guard["perf-test-guard.sh
+PERF_XL=true"] --> main["perf-run and the rest
+queue perf, arms dropped"]
+  guard --> rw["perfxl-rw-multik6
+PERF_RUN_ARM=rw_multik6
+45 min"]
+  guard --> hwm["perfxl-hw-matrix
+PERF_RUN_ARM=hw_matrix
+130 min, only with PERF_SERVING_HW_MATRIX"]
+  main --> cmp["perf-test-compare.sh
+reads perf-result.json only"]
+  rw --> art["perfxl-* artifacts
+never compared, persisted or published"]
+  hwm --> art
+```
+
+| Step key | Command | Timeout | Artifacts |
+|---|---|---|---|
+| `perfxl-rw-multik6` | `perf-test-run.sh` with `PERF_RUN_ARM=rw_multik6` | 45 min | `perfxl-rw-multik6-perf-result.json`, `-serving-rw-multik6.json`, `-serving-rw-multik6-work.tgz`, `-perf-jvm-diagnostics.tgz` |
+| `perfxl-hw-matrix` | `perf-test-run.sh` with `PERF_RUN_ARM=hw_matrix` | 130 min | `perfxl-hw-matrix-perf-result.json`, `-serving-hw-matrix.json`, `-serving-hw-matrix-work.tgz`, `-perf-jvm-diagnostics.tgz` |
+
+The guard uploads them alongside the regression steps, so they follow the same commit guard: a manual (`ui`) build or a `[perf-run]` API build always gets them, and a scheduled build only when `master` moved. Both carry the standard agent-lost retry. With `max 1` on the queue, the two steps run one after the other.
+
+**Arm-only mode.** `PERF_RUN_ARM` makes `perf-test-run.sh` start the SUT and upstream, and resolve and record provenance, image freshness, the config block and the instance type exactly as the full run does. It then runs only the named arm. That arm keeps its tail localisation and work-file upload, and its result is written with the full run's schema, with the other blocks empty and a top-level `run_arm`. The arms and workloads the step would otherwise inherit from the build env are forced off. The multi-k6 arm gets a 60 s warm-up of its own, because no regression or sweep load ran before it. `agent.queue` is read from the agent's `queue` tag.
+
+**Why the results cannot mix with the c5.12xlarge baseline.** No compare or publish step reads a perf-xl result:
+
+- Every artifact name carries the `perfxl-` prefix (`PERF_RUN_NAME`). `perf-test-compare.sh` downloads `perf-result.json` by exact name, the same isolation the `allocprofile-` step relies on.
+- The result is `baseline_eligible: false`, so compare would not persist it even if it got one.
+- `perf-test-compare.sh` keeps one history per agent queue, read from `.agent.queue`. A `perf` run is stored under `runs/<branch>/`, as before, and any other queue's run under `runs-<queue>/<branch>/`. Each run is windowed only against its own prefix. That split is what guarantees a perf-xl run can neither enter nor push runs out of the perf queue's 10-run window. As a second check, a readable baseline object from another queue is dropped from the window, and an unreadable one fails the step rather than being guessed at. A queue name that cannot form a prefix also fails the step. `perf-compare-queue-history-test.sh` checks this against a stub bucket.
+- If a perf-xl result did reach compare, its hardware-sensitive metrics would still be kept apart. Every `serving_hw_matrix.*` and `rig_valid_peak_achieved_rps` budget is `hw: true`, so those metrics compare only against runs with the same `agent.instance_type`. The hardware-matrix metrics also key on the latency fingerprint (settle, load client, k6 runtime).
+- `perf-website-publish.sh` reads only S3, and nothing from perf-xl is written there. On a `PERF_XL` build the website's hardware table keeps its last committed figures.
+
+Nothing downstream gates these results, so the step gates itself. It fails when its validity is false: on `arm_rw_multik6_valid` (the harness's own `valid`), or on `arm_hw_matrix_measured` (at least one point with a healthy ceiling or an out-of-memory verdict, the same rule as compare's presence gate). It also fails on `source_provenance`, as the regression run does through compare. `config.image_stale` is recorded but, unlike in compare, does not fail the step. It does not record `perf_regression_ran_commit`, so it never makes the guard skip a later regression run.
 
 #### Concurrency on the `perf` queue
 
 The queue runs up to three agents, one per c5.12xlarge, so a perf job never shares its machine. What that relies on:
 
 - **Steps share nothing on disk.** Each measurement step builds or pulls what it needs; `perf-test-compare.sh` reads their results only through `buildkite-agent artifact download`, and `perf-website-publish.sh` only from S3. Either can land on any agent.
-- **The S3 history is append-only.** Each run writes its own `runs/<branch>/<ISO timestamp>__<commit>.json` key; no step rewrites a shared baseline object, and runs that are invalid or not baseline-eligible are never written. The baseline window is the newest N keys other than the run's own, so a concurrent build's run can fall in it — the same as a back-to-back run.
+- **The S3 history is append-only.** Each run writes its own `runs/<branch>/<ISO timestamp>__<commit>.json` key (`runs-<queue>/` for a queue other than `perf`); no step rewrites a shared baseline object, and runs that are invalid or not baseline-eligible are never written. The baseline window is the newest N keys other than the run's own, so a concurrent build's run can fall in it — the same as a back-to-back run.
 - **Close A/B comparisons need one machine or repeats.** Two builds that run at the same time land on different VMs, and VM-to-VM variance of a few percent can swamp a small effect. Measure both arms within one job (a within-run A/B), or repeat each arm.
 
 See [Performance Tuning](../operations/performance-tuning.md#performance-regression-pipeline) for the full description of behaviours, thresholds, result schema, and how to re-baseline.
