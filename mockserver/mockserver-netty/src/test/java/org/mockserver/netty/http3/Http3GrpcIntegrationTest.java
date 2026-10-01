@@ -532,7 +532,7 @@ public class Http3GrpcIntegrationTest {
         requestHeaders.headers().add("content-type", GrpcStatusMapper.GRPC_CONTENT_TYPE);
         requestHeaders.headers().add("te", "trailers");
 
-        requestStream.write(requestHeaders).sync();
+        requestStream.writeAndFlush(requestHeaders).sync();
         requestStream.writeAndFlush(new DefaultHttp3DataFrame(Unpooled.wrappedBuffer(grpcBody)))
             .addListener(QuicStreamChannel.SHUTDOWN_OUTPUT)
             .sync();

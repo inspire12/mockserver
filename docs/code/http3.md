@@ -345,6 +345,17 @@ another application's. Port 0 is bound as before, without the probe: `MockServer
 for an `http3Port` above 0, and tests take their port from `TestPortFactory.findFreeUdpPort()`. `MockServer` logs a failed HTTP/3 start as a warning and keeps serving TCP, so a refused
 `http3Port` disables HTTP/3 rather than failing start-up. `Http3ServerIpv4PortConflictTest` covers it.
 
+### Test QUIC client writes (flush every awaited write)
+
+A test that writes to a `QuicStreamChannel` from its own thread and then waits on the write must use
+`writeAndFlush(...)`, never `write(...).sync()`. Netty queues a write without a flush from outside the
+event loop as a lazy task that does not wake the loop. Once a QUIC connection has gone quiet, the next
+wake-up is the idle timer, so the write and the test stall for up to `maxIdleTimeout` (30 s in these
+tests). The tests still pass, because the write goes out when the timer wakes the loop, before the
+connection times out. Server code is not affected: each of its `ctx.write(...)` calls is followed by a
+`writeAndFlush` or `flush`, which wakes the loop and runs the queued write in order. Plan item 57
+(performance-programme.md) traced three tests that took about 30 s each in full-suite runs to this.
+
 ## Dependencies
 
 | Artifact | Version | Scope |

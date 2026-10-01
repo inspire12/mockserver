@@ -406,7 +406,7 @@ public class Http3MockingMatrixIntegrationTest {
         }
 
         if (requestBody != null) {
-            requestStream.write(requestHeaders).sync();
+            requestStream.writeAndFlush(requestHeaders).sync();
             requestStream.writeAndFlush(new DefaultHttp3DataFrame(Unpooled.wrappedBuffer(requestBody)))
                 .addListener(QuicStreamChannel.SHUTDOWN_OUTPUT)
                 .sync();

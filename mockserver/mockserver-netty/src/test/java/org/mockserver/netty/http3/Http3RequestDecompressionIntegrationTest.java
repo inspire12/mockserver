@@ -293,7 +293,7 @@ public class Http3RequestDecompressionIntegrationTest {
         }
         requestHeaders.headers().addInt("content-length", requestBody.length);
 
-        requestStream.write(requestHeaders).sync();
+        requestStream.writeAndFlush(requestHeaders).sync();
         requestStream.writeAndFlush(new DefaultHttp3DataFrame(Unpooled.wrappedBuffer(requestBody)))
             .addListener(QuicStreamChannel.SHUTDOWN_OUTPUT)
             .sync();

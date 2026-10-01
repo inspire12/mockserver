@@ -291,7 +291,7 @@ public class Http3DataPlaneAuthenticationIntegrationTest {
         }
 
         if (body != null && body.length > 0) {
-            requestStream.write(requestHeaders).sync();
+            requestStream.writeAndFlush(requestHeaders).sync();
             requestStream.writeAndFlush(new DefaultHttp3DataFrame(Unpooled.wrappedBuffer(body)))
                 .addListener(QuicStreamChannel.SHUTDOWN_OUTPUT)
                 .sync();

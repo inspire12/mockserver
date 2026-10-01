@@ -472,7 +472,7 @@ public class Http3ServerTest {
 
         if (body != null && body.length > 0) {
             requestHeaders.headers().add("content-type", "application/json");
-            requestStream.write(requestHeaders).sync();
+            requestStream.writeAndFlush(requestHeaders).sync();
             requestStream.writeAndFlush(new DefaultHttp3DataFrame(Unpooled.wrappedBuffer(body)))
                 .addListener(QuicStreamChannel.SHUTDOWN_OUTPUT)
                 .sync();

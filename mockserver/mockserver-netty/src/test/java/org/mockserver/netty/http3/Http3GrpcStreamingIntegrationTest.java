@@ -493,7 +493,7 @@ public class Http3GrpcStreamingIntegrationTest {
         requestHeaders.headers().authority("127.0.0.1:" + port);
         requestHeaders.headers().add("content-type", GrpcStatusMapper.GRPC_CONTENT_TYPE);
         requestHeaders.headers().add("te", "trailers");
-        requestStream.write(requestHeaders).sync();
+        requestStream.writeAndFlush(requestHeaders).sync();
 
         for (int i = 0; i < requestFrames.size(); i++) {
             DefaultHttp3DataFrame data = new DefaultHttp3DataFrame(Unpooled.wrappedBuffer(requestFrames.get(i)));
