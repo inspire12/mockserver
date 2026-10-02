@@ -2337,8 +2337,9 @@ public class ConfigurationProperties {
      * </p>
      * <p>
      * The value is rounded up to the next power of two (a Disruptor requirement). The default is
-     * {@code min(maxLogEntries, 16384)}. Increase it only if you see dropped log events under sustained
-     * extreme load (see the {@code mock_server_dropped_log_events} metric); decrease it to save memory.
+     * {@code min(maxLogEntries, 16384)}. Raising it absorbs a short burst of log events
+     * ({@code mock_server_dropped_log_events{reason="ring_full"}}); for drops under sustained load lower
+     * the log level instead. Decrease it to save memory.
      * </p>
      *
      * @param size number of slots in the log event ring buffer (rounded up to a power of two)

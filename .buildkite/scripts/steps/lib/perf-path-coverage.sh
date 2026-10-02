@@ -108,6 +108,10 @@ cov_metric() { # scrape series
   awk -v s="$2" '$1==s {printf "%.0f", $2+0; exit}' <<<"$1"
 }
 
+cov_counter_sum() { # scrape series -> the series summed over all its labels; empty when absent
+  awk -v s="$2" '$1==s || index($1, s "{")==1 {t += $2; n = 1} END {if (n) printf "%.0f", t}' <<<"$1"
+}
+
 cov_scrape() { curl -s --max-time 4 "$1" 2>/dev/null || true; }
 
 # Samples container RSS and the JVM's memory + event-log gauges every
@@ -126,7 +130,7 @@ cov_sampler() { # container metrics_url csv
       "$(cov_metric "$scrape" 'jvm_buffer_pool_used_bytes{pool="direct"}')" \
       "$(cov_metric "$scrape" mock_server_event_log_ring_occupancy)" \
       "$(cov_metric "$scrape" mock_server_event_log_ring_capacity)" \
-      "$(cov_metric "$scrape" mock_server_dropped_log_events_total)" \
+      "$(cov_counter_sum "$scrape" mock_server_dropped_log_events_total)" \
       "$(cov_metric "$scrape" mock_server_evicted_log_entries_total)" >> "$csv"
     sleep "$COV_SAMPLE_INTERVAL"
   done
@@ -357,7 +361,7 @@ cov_run_capture() {
   if [ -z "$req1" ]; then
     req0="$(cov_metric "$before" requests_received_count)"; req1="$(cov_metric "$after" requests_received_count)"
   fi
-  drop0="$(cov_metric "$before" mock_server_dropped_log_events_total)"; drop1="$(cov_metric "$after" mock_server_dropped_log_events_total)"
+  drop0="$(cov_counter_sum "$before" mock_server_dropped_log_events_total)"; drop1="$(cov_counter_sum "$after" mock_server_dropped_log_events_total)"
   ev0="$(cov_metric "$before" mock_server_evicted_log_entries_total)"; ev1="$(cov_metric "$after" mock_server_evicted_log_entries_total)"
   if [ -z "$req0" ] || [ -z "$req1" ]; then
     cov_problem "capture: the SUT request counter could not be scraped before and after the load - persisted_ratio and dropped_ratio will be null"

@@ -3,7 +3,7 @@
 `mockserver-server.json` is a standalone, importable Grafana dashboard for the
 **MockServer server metric family** — request throughput and match outcomes,
 request latency percentiles, registered expectations/actions, per-upstream
-forward/proxy health, reliability/saturation signals (dropped log events, chaos
+forward/proxy health, reliability/saturation signals (dropped log events by cause, chaos
 faults), JVM runtime (heap, GC, threads), and WebSocket callback levels.
 
 It charts only the server's own Prometheus metrics. For the k6 load-injection

@@ -286,6 +286,26 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   in JMH, reading the five settings fell from 11.4-13.6 ns to 4.0-4.2 ns (about 7-9 ns saved). At a
   fixed 20,000 requests per second on four CPUs, server CPU per request did not change measurably
   (49.5-54.1 us before, 49.3-51.5 us after, four interleaved runs each).
+- **The dropped-log-events metric now says why entries were dropped.** `mock_server_dropped_log_events_total`
+  carries a `reason` label: `ring_full` when log entries arrived faster than MockServer's single logging
+  thread could record them, and `in_flight_bytes` when the request and response bodies waiting to be logged
+  went over their memory limit. Both are reported, at 0, from the first scrape. `sum(mock_server_dropped_log_events_total)`
+  and alerts on the counter work as before; a script that looks for an exact
+  `mock_server_dropped_log_events_total <value>` line in the scrape text must now add up the labelled lines,
+  and a PromQL expression that combines this counter with another series (for example, dividing it by a request
+  count) must wrap it in `sum()` first, because its `reason` label no longer matches the other series' labels.
+  The example Grafana dashboard charts drops by reason. The once-only warning logged for each kind of drop
+  now gives that kind's fix: lower the log level when the logging thread falls behind (a larger
+  `ringBufferSize` only absorbs short bursts), and lower the log level or raise `maxEventLogSizeInBytes` for
+  large bodies. It no longer suggests `maxLoggedBodyBytes`, which shortens bodies only after they have
+  waited to be logged and so cannot prevent these drops.
+- **The dashboard's log warning now names the cause and the matching fix.** It was titled "Log events
+  evicted" and always advised raising `maxLogEntries` and `ringBufferSize`, which does not help when the
+  logging thread cannot keep up. It now shows **Log Events Dropped** with a line for each cause and its fix,
+  as above, and, as a notice rather than a warning, **Log Events Evicted** when the oldest entries were
+  removed to stay within `maxLogEntries` or `maxEventLogSizeInBytes`, which is when raising those keeps more
+  history. Once dismissed, it comes back for new drops but not for further evictions. Its "Learn more" link
+  now opens the MockServer website instead of a page the server does not have.
 
 ### Fixed
 

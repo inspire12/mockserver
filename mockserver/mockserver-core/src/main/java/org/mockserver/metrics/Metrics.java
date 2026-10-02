@@ -7,6 +7,7 @@ import io.prometheus.metrics.core.metrics.GaugeWithCallback;
 import io.prometheus.metrics.core.metrics.Histogram;
 import io.prometheus.metrics.model.registry.PrometheusRegistry;
 import org.mockserver.configuration.Configuration;
+import org.mockserver.log.MockServerEventLog;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.mock.Expectation;
@@ -57,9 +58,8 @@ public class Metrics {
     };
     // Counter for slow forwarded requests. Null until metrics are enabled.
     private static volatile Counter slowRequestTotal;
-    // Counter for log events dropped because the event-log disruptor ring buffer was full.
-    // Null until metrics are enabled. Makes the (previously silent for INFO/DEBUG) ring-buffer
-    // saturation cliff observable under load.
+    // Counter for log events dropped before being recorded, labelled by reason (ring_full or
+    // in_flight_bytes). Null until metrics are enabled.
     private static volatile Counter droppedLogEventsTotal;
     // Counter for event-log entries evicted because the event log reached its maximum size.
     // Null until metrics are enabled. Makes silent loss of retained evidence observable, which
@@ -273,8 +273,13 @@ public class Metrics {
                         .register();
                     droppedLogEventsTotal = Counter.builder()
                         .name("mock_server_dropped_log_events")
-                        .help("Total number of log events dropped because the event-log ring buffer was full")
+                        .help("Log events dropped before being recorded, by reason (ring_full: the event-log ring buffer was full; in_flight_bytes: the bodies waiting to be logged would have exceeded the in-flight byte cap)")
+                        .labelNames("reason")
                         .register();
+                    // Export every reason from the first scrape, so sum() and exact-series readers see 0, not nothing.
+                    for (MockServerEventLog.DropReason reason : MockServerEventLog.DropReason.values()) {
+                        droppedLogEventsTotal.labelValues(reason.metricLabel());
+                    }
                     evictedLogEntriesTotal = Counter.builder()
                         .name("mock_server_evicted_log_entries")
                         .help("Number of event log entries evicted because the event log reached its maximum size")
@@ -832,25 +837,25 @@ public class Metrics {
     }
 
     /**
-     * Increment the dropped-log-events counter (event-log ring buffer full).
-     * No-op unless metrics are enabled (the counter is null otherwise). The
-     * authoritative, always-available count is maintained on
-     * {@link org.mockserver.log.MockServerEventLog#getDroppedLogEventCount()};
+     * Count one log event dropped for {@code reason} (a {@link MockServerEventLog.DropReason#metricLabel()}).
+     * No-op unless metrics are enabled (the counter is null otherwise). The authoritative,
+     * always-available count is maintained on
+     * {@link MockServerEventLog#getDroppedLogEventCount(MockServerEventLog.DropReason)};
      * this mirrors it to Prometheus when metrics are on.
      */
-    public static void incrementDroppedLogEvents() {
+    public static void incrementDroppedLogEvents(String reason) {
         Counter counter = droppedLogEventsTotal;
-        if (counter != null) {
-            counter.inc();
+        if (counter != null && reason != null) {
+            counter.labelValues(reason).inc();
         }
     }
 
     /**
-     * Return the current dropped-log-events count, or 0 if metrics are disabled.
+     * Return the dropped-log-events count for {@code reason}, or 0 if metrics are disabled.
      */
-    public static long getDroppedLogEventCount() {
+    public static long getDroppedLogEventCount(String reason) {
         Counter counter = droppedLogEventsTotal;
-        return counter != null ? (long) counter.get() : 0L;
+        return counter != null ? (long) counter.labelValues(reason).get() : 0L;
     }
 
     /**

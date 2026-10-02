@@ -178,8 +178,13 @@ check "the hold writes nothing" "" "$(git -C "$R" status --porcelain)"
 echo "--- 4. knee diagnostics (lib/perf-hw-matrix-jvm.sh: scrape, cgroup and per-rung summary)"
 # shellcheck source=../steps/lib/perf-hw-matrix-jvm.sh
 . "$LIB/perf-hw-matrix-jvm.sh"
-check "metric columns from a scrape" "2.5,40,3,1200" "$(printf '%s\n' '# HELP x' 'jvm_gc_collection_seconds_sum 2.5' \
-  'jvm_gc_collection_count 40.0' 'mock_server_dropped_log_events_total 3.0' 'mock_server_evicted_log_entries_total 1200.0' | jvm_metric_cols)"
+check "metric columns from a scrape, drops summed over every reason" "2.5,40,3,1200" "$(printf '%s\n' '# HELP x' 'jvm_gc_collection_seconds_sum 2.5' \
+  'jvm_gc_collection_count 40.0' '# TYPE mock_server_dropped_log_events_total counter' \
+  'mock_server_dropped_log_events_total{reason="in_flight_bytes"} 1.0' 'mock_server_dropped_log_events_total{reason="ring_full"} 2.0' \
+  'mock_server_evicted_log_entries_total 1200.0' | jvm_metric_cols)"
+check "an unlabelled drop counter (older server) still reads" ",,3," "$(echo 'mock_server_dropped_log_events_total 3.0' | jvm_metric_cols)"
+check "zero drops read as 0, not blank" ",,0," "$(printf '%s\n' 'mock_server_dropped_log_events_total{reason="in_flight_bytes"} 0.0' \
+  'mock_server_dropped_log_events_total{reason="ring_full"} 0.0' | jvm_metric_cols)"
 check "metric columns blank when absent (never zero)" ",,," "$(echo 'other_metric 1' | jvm_metric_cols)"
 mkdir -p "$T/cg"
 printf 'low 0\nhigh 7\nmax 2\noom 0\noom_kill 0\noom_group_kill 0\n' > "$T/cg/memory.events"

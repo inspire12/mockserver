@@ -182,7 +182,7 @@ sampler() {
     m="$(curl -s --max-time 5 "$METRICS_URL" 2>/dev/null || echo '')"
     rr="$(printf '%s' "$m" | awk '/^requests_received_count /{print $2}')"
     heap="$(printf '%s' "$m" | awk -F' ' '/^jvm_memory_used_bytes\{area="heap"\}/{print $2}')"
-    dropped="$(printf '%s' "$m" | awk '/^mock_server_dropped_log_events/{print $2}')"
+    dropped="$(printf '%s' "$m" | awk '/^mock_server_dropped_log_events_total[{ ]/{t += $2; n = 1} END{if (n) printf "%.0f", t}')"
     threads="$(printf '%s' "$m" | awk '/^jvm_threads_current/{print $2}')"
     printf '%s,%s,%s,%s,%s\n' "$(date -u +%s)" "${rr:-}" "${heap:-}" "${dropped:-0}" "${threads:-}" >> "$SAMPLE_LOG"
     sleep "$SAMPLE_INTERVAL"
@@ -352,7 +352,7 @@ if command -v buildkite-agent >/dev/null 2>&1; then
     "| retrieve (10b) | \(.soak.retrieve.samples) | \(.soak.retrieve.p50_ms) | \(.soak.retrieve.p95_ms) | \(.soak.retrieve.p99_ms) | \(.soak.retrieve.drift_ratio) | \(.soak.retrieve.error_rate) |\n\n" +
     ( if .ring.dropped_log_events == 0
       then ":lock: **Ring-buffer bound held**: 0 dropped log events across \(.ring.requests_received_total) requests received — the count-bounded event log evicted rather than grew (live-set floor \(.ring.live_set_floor_bytes) bytes, heap \(.ring.heap_start_bytes)→\(.ring.heap_end_bytes)).\n\n"
-      else ":warning: **Event-log ring SATURATED**: \(.ring.dropped_log_events) dropped log events (\(.ring.requests_received_total) received) — the disruptor could not keep up; raise ringBufferSize or reduce log verbosity. (live-set floor \(.ring.live_set_floor_bytes) bytes, heap \(.ring.heap_start_bytes)→\(.ring.heap_end_bytes)).\n\n"
+      else ":warning: **Event-log ring SATURATED**: \(.ring.dropped_log_events) dropped log events (\(.ring.requests_received_total) received) — the disruptor could not keep up; lower the log level (raising ringBufferSize only absorbs bursts). (live-set floor \(.ring.live_set_floor_bytes) bytes, heap \(.ring.heap_start_bytes)→\(.ring.heap_end_bytes)).\n\n"
       end ) +
     "_Read the verify/retrieve **drift** column with care: those arms run at 1/s, so each drift window holds only ~300 samples and their p99 can swing on a single GC pause. The match arm runs at 200/s and its drift is the trustworthy one. All three are notify-only and cannot red the build on drift alone._\n\n" +
     "_Notify-only: soak metrics are not gated and not fed to the daily baseline compare until ~8 weekly runs of variance exist (~2 months)._"

@@ -237,6 +237,9 @@ public class MockServerEventLogInFlightBytesTest {
             }
             // drops are accounted on the producer thread inside add(), so they are already observable
             assertThat(log.getDroppedLogEventCount(), greaterThan(0L));
+            // and attributed to the in-flight byte cap, not to a full ring
+            assertThat(log.getDroppedLogEventCount(MockServerEventLog.DropReason.IN_FLIGHT_BYTES), is(log.getDroppedLogEventCount()));
+            assertThat(log.getDroppedLogEventCount(MockServerEventLog.DropReason.RING_FULL), is(0L));
 
             release.countDown();
             drain(log);

@@ -249,6 +249,29 @@ public class HttpRequestHandlerTest {
     }
 
     @Test
+    public void shouldServeDroppedLogEventsLabelledByReason() {
+        // given - both reasons are exported from the first scrape, and a drop counts only under its own reason
+        rebuildWithMetricsEnabled();
+        try {
+            Metrics.resetAdditionalMetricsForTesting();
+            new Metrics(configuration().metricsEnabled(true));
+            Metrics.incrementDroppedLogEvents("in_flight_bytes");
+
+            // when
+            embeddedChannel.writeInbound(request("/mockserver/metrics").withMethod("GET").withKeepAlive(true));
+
+            // then
+            String body = mapToWireResponse(embeddedChannel.readOutbound()).content().toString(CharsetUtil.UTF_8);
+            assertThat(body, containsString("mock_server_dropped_log_events_total{reason=\"in_flight_bytes\"} 1.0"));
+            assertThat(body, containsString("mock_server_dropped_log_events_total{reason=\"ring_full\"} 0.0"));
+            // no unlabelled sample line remains (HELP/TYPE comment lines still name the series)
+            assertThat(body, not(containsString("\nmock_server_dropped_log_events_total ")));
+        } finally {
+            Metrics.resetAdditionalMetricsForTesting();
+        }
+    }
+
+    @Test
     public void shouldServeOpenMetricsBodyWhenMetricsEnabledAndOpenMetricsAccept() {
         // given - metrics enabled; the handler selects the exposition writer from the Accept header
         // (MetricsHandler.renderMetrics -> ExpositionFormats.findWriter(Accept)), so an OpenMetrics

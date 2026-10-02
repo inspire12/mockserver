@@ -9,21 +9,35 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.ClassRule;
 import org.junit.Test;
+import org.mockserver.configuration.Configuration;
+import org.mockserver.log.MockServerEventLog;
+import org.mockserver.log.model.LogEntry;
+import org.mockserver.logging.MockServerLogger;
 import org.mockserver.mock.Expectation;
 import org.mockserver.mock.action.http.ServiceChaosRegistry;
 import org.mockserver.model.HttpChaosProfile;
 import org.mockserver.model.HttpError;
+import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
+import org.mockserver.scheduler.Scheduler;
+import org.slf4j.event.Level;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.core.Is.is;
 import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.mock.Expectation.when;
 import static org.mockserver.model.HttpChaosProfile.httpChaosProfile;
+import static org.mockito.Mockito.mock;
 import static org.mockserver.model.HttpRequest.request;
 
 public class MetricsTest {
@@ -420,6 +434,106 @@ public class MetricsTest {
         assertThat(Metrics.getWebSocketReadPausesCount() - pausesBefore, is(2L));
         assertThat(scrapeCounterTotal("mock_server_websocket_read_pauses"), is((double) pausesBefore + 2));
         assertThat(scrapeCounterValue("mock_server_overload_rejections", "reason", "websocket_replies"), greaterThanOrEqualTo(1.0));
+    }
+
+    @Test
+    public void exportsEveryDroppedLogEventReasonAtZeroBeforeAnyDrop() {
+        new Metrics(configuration().metricsEnabled(true));
+
+        assertThat(counterLabelValues("mock_server_dropped_log_events", "reason"), containsInAnyOrder("ring_full", "in_flight_bytes"));
+        assertThat(scrapeCounterValue("mock_server_dropped_log_events", "reason", "ring_full"), is(0.0));
+        assertThat(scrapeCounterValue("mock_server_dropped_log_events", "reason", "in_flight_bytes"), is(0.0));
+    }
+
+    @Test
+    public void countsEachEventLogDropPathUnderItsOwnReason() throws Exception {
+        new Metrics(configuration().metricsEnabled(true));
+
+        // in-flight byte cap: a roomy ring, a 1,000-byte cap; one oversized body is admitted into the
+        // empty backlog, so each of the next five is dropped by the byte cap, never by the ring
+        MockServerEventLog inFlightLog = asynchronousEventLog(withInFlightCap(1000L).maxLogEntries(1000));
+        try {
+            CountDownLatch release = blockConsumer(inFlightLog);
+            for (int i = 0; i < 6; i++) {
+                inFlightLog.add(receivedRequestWithBody(2000));
+            }
+            release.countDown();
+        } finally {
+            inFlightLog.stop();
+        }
+        assertThat(inFlightLog.getDroppedLogEventCount(MockServerEventLog.DropReason.IN_FLIGHT_BYTES), is(5L));
+        assertThat(scrapeCounterValue("mock_server_dropped_log_events", "reason", "in_flight_bytes"), is(5.0));
+        assertThat(scrapeCounterValue("mock_server_dropped_log_events", "reason", "ring_full"), is(0.0));
+        assertThat(Metrics.getDroppedLogEventCount("in_flight_bytes"), is(5L));
+
+        // full ring: a one-slot ring held by the blocked consumer, with the byte cap disabled
+        MockServerEventLog ringLog = asynchronousEventLog(withInFlightCap(0L).maxLogEntries(1));
+        long ringFullDrops;
+        try {
+            CountDownLatch release = blockConsumer(ringLog);
+            for (int i = 0; i < 3; i++) {
+                ringLog.add(receivedRequestWithBody(10));
+            }
+            ringFullDrops = ringLog.getDroppedLogEventCount(MockServerEventLog.DropReason.RING_FULL);
+            release.countDown();
+        } finally {
+            ringLog.stop();
+        }
+        assertThat(ringFullDrops, greaterThan(0L));
+        assertThat(scrapeCounterValue("mock_server_dropped_log_events", "reason", "ring_full"), is((double) ringFullDrops));
+        assertThat(scrapeCounterValue("mock_server_dropped_log_events", "reason", "in_flight_bytes"), is(5.0));
+    }
+
+    private static Configuration withInFlightCap(long inFlightCap) {
+        return new Configuration() {
+            @Override
+            public long maxEventLogInFlightBytes() {
+                return inFlightCap;
+            }
+        };
+    }
+
+    private static MockServerEventLog asynchronousEventLog(Configuration configuration) {
+        return new MockServerEventLog(configuration, new MockServerLogger(configuration, MockServerLogger.class), mock(Scheduler.class), true);
+    }
+
+    private static CountDownLatch blockConsumer(MockServerEventLog log) throws InterruptedException {
+        CountDownLatch consumerBlocked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        log.add(new LogEntry()
+            .setType(LogEntry.LogMessageType.RUNNABLE)
+            .setConsumer(() -> {
+                consumerBlocked.countDown();
+                try {
+                    release.await(10, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }));
+        assertThat(consumerBlocked.await(10, TimeUnit.SECONDS), is(true));
+        return release;
+    }
+
+    private static LogEntry receivedRequestWithBody(int bodyBytes) {
+        HttpRequest httpRequest = request().withMethod("POST").withPath("/dropped").withBody(new byte[bodyBytes]);
+        return new LogEntry()
+            .setType(LogEntry.LogMessageType.RECEIVED_REQUEST)
+            .setLogLevel(Level.INFO)
+            .setHttpRequest(httpRequest)
+            .setMessageFormat("received request:{}")
+            .setArguments(httpRequest);
+    }
+
+    private static List<String> counterLabelValues(String name, String labelName) {
+        List<String> values = new ArrayList<>();
+        for (MetricSnapshot snapshot : PrometheusRegistry.defaultRegistry.scrape()) {
+            if (snapshot.getMetadata().getName().equals(name) && snapshot instanceof CounterSnapshot counterSnapshot) {
+                for (CounterSnapshot.CounterDataPointSnapshot dataPoint : counterSnapshot.getDataPoints()) {
+                    values.add(dataPoint.getLabels().get(labelName));
+                }
+            }
+        }
+        return values;
     }
 
     private static double scrapeGauge(String name) {

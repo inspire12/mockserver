@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # Hardware-matrix knee diagnostics (performance programme item 51), sourced by
 # lib/perf-percore.sh; report-only, never a gate.
-# GC time and count, event-log drops and evictions from the metrics scrape the sampler already
+# GC time and count, event-log drops (summed over every reason) and evictions from the metrics scrape the sampler already
 # makes, plus the SUT cgroup's memory.events and PSI totals (us) when the host exposes them
 # (cgroup v2, systemd or cgroupfs driver); a blank cell is unreadable, never zero.
 # shellcheck disable=SC2034  # read by perf-percore.sh and the fixture test
@@ -16,8 +16,8 @@ sut_cgroup_dir() { # full container id -> its cgroup v2 dir on the host, or noth
 }
 jvm_metric_cols() { # metrics text on stdin
   awk '/^jvm_gc_collection_seconds_sum / { s = $2 } /^jvm_gc_collection_count / { c = $2 }
-       /^mock_server_dropped_log_events_total / { d = $2 } /^mock_server_evicted_log_entries_total / { e = $2 }
-       END { printf "%s,%s,%s,%s", s, (c == "" ? "" : sprintf("%.0f", c)), (d == "" ? "" : sprintf("%.0f", d)), (e == "" ? "" : sprintf("%.0f", e)) }'
+       /^mock_server_dropped_log_events_total[{ ]/ { d += $2; dn = 1 } /^mock_server_evicted_log_entries_total / { e = $2 }
+       END { printf "%s,%s,%s,%s", s, (c == "" ? "" : sprintf("%.0f", c)), (dn ? sprintf("%.0f", d) : ""), (e == "" ? "" : sprintf("%.0f", e)) }'
 }
 cgroup_cols() { # cgroup dir (may be empty)
   local m="" cp="" mp=""

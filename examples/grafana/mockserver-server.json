@@ -156,7 +156,7 @@
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 33 },
       "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 20, "showPoints": "never" } }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom", "calcs": [] }, "tooltip": { "mode": "multi", "sort": "desc" } },
-      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum(rate(mock_server_dropped_log_events_total[5m]))", "legendFormat": "dropped/s" } ]
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "sum by (reason) (rate(mock_server_dropped_log_events_total[5m]))", "legendFormat": "{{reason}}" } ]
     },
     {
       "id": 42, "type": "timeseries", "title": "HTTP chaos faults by type (faults/s)",

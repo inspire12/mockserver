@@ -192,12 +192,14 @@ check "the annotation body renders INFO_NOTE" "true" \
   "$(grep -qF '${INFO_NOTE}' <<<"$(grep -F '${PROVENANCE}' "$CMP")" && echo true || echo false)"
 
 echo "--- 6. event_log_budget derivation"
-for fn in info_els_method els_default_divisor event_log_counters event_log_peaks event_log_budget_json event_log_sampler start_info_els_sampler stop_info_els_sampler; do
+for fn in counter_sum info_els_method els_default_divisor event_log_counters event_log_peaks event_log_budget_json event_log_sampler start_info_els_sampler stop_info_els_sampler; do
   body="$(extract "$fn")"; [ -n "$body" ] && eval "$body" || bad "function $fn not found in $F"
 done
 check "no requested budget is shipped-default" "shipped-default" "$(info_els_method "")"
 check "a requested budget is fixed-<bytes>" "fixed-104857600" "$(info_els_method 104857600)"
-check "counters read by their exposed names" "2|1500" \
+check "counters read by their exposed names, drops summed over every reason" "3|1500" \
+  "$(printf 'mock_server_dropped_log_events_total{reason="in_flight_bytes"} 1.0\nmock_server_dropped_log_events_total{reason="ring_full"} 2.0\nmock_server_dropped_log_events_created{reason="ring_full"} 1.7E9\nmock_server_evicted_log_entries_total 1500.0\n' | event_log_counters)"
+check "an unlabelled drop counter (older server) still reads" "2|1500" \
   "$(printf 'mock_server_dropped_log_events_total 2.0\nmock_server_dropped_log_events_created 1.7E9\nmock_server_evicted_log_entries_total 1500.0\n' | event_log_counters)"
 check "absent counters are empty" "|" "$(event_log_counters <<<"")"
 printf '100 5\n300 2\n200 9\n' > "$WORK/peaks"; : > "$WORK/nopeaks"
@@ -228,7 +230,8 @@ mock_server_event_log_max_retained_entries 100000.0
 mock_server_event_log_retained_bytes 4096.0
 mock_server_event_log_retained_entries 7.0
 mock_server_event_log_in_flight_bytes 1.0
-mock_server_dropped_log_events_total 2.0
+mock_server_dropped_log_events_total{reason="in_flight_bytes"} 0.0
+mock_server_dropped_log_events_total{reason="ring_full"} 2.0
 mock_server_evicted_log_entries_total 1500.0
 jvm_memory_max_bytes{area="heap"} 9.66787072E8'
 # Stubbed as executables on PATH, not functions: bash 3.2 ends a backgrounded function after its
@@ -277,7 +280,8 @@ load_step() { # records whether the sampler was alive while a load phase ran
 run_regression() { load_step "regression-$1"; }
 run_sweep() { # the load also moves the counters, so the arm must read them after it
   load_step sweep
-  sed -e 's/^mock_server_dropped_log_events_total .*/mock_server_dropped_log_events_total 5.0/' \
+  sed -e 's/^mock_server_dropped_log_events_total{reason="ring_full"} .*/mock_server_dropped_log_events_total{reason="ring_full"} 3.0/' \
+      -e 's/^mock_server_dropped_log_events_total{reason="in_flight_bytes"} .*/mock_server_dropped_log_events_total{reason="in_flight_bytes"} 2.0/' \
       -e 's/^mock_server_evicted_log_entries_total .*/mock_server_evicted_log_entries_total 2500.0/' \
       "$WORK/metrics" > "$WORK/metrics.new" && mv "$WORK/metrics.new" "$WORK/metrics"
 }

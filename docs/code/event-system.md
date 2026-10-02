@@ -73,7 +73,7 @@ The Disruptor provides:
 - **Lock-free publishing**: Multiple Netty I/O threads can publish events without contention
 - **Single-writer principle**: One consumer thread processes all events, eliminating data races
 - **Pre-allocated objects**: Ring buffer slots are pre-allocated `LogEntry` instances, reducing GC pressure
-- **Backpressure**: `tryPublishEvent()` is non-blocking; if the ring buffer is full, low-priority events are dropped
+- **Backpressure**: `tryPublishEvent()` is non-blocking; if the ring buffer is full the event is dropped and counted as `mock_server_dropped_log_events{reason="ring_full"}` (an entry whose bodies would exceed the in-flight byte cap is dropped before publish, as `reason="in_flight_bytes"`; see [memory-management.md](memory-management.md#ring-in-flight-bounding-and-drops))
 
 ### Ring Buffer Mechanics
 
@@ -644,7 +644,7 @@ maxLoggedBodyBytes=0                    # keep in-memory bodies untruncated (bud
 
 The launcher `mockserver-ui/scripts/launch-with-llm-capture.sh` uses exactly this combination by default.
 
-**Throughput trade-off.** With `persistRecordedRequestsToDisk` enabled, every recorded exchange — including each mocked `EXPECTATION_RESPONSE`, of which a single streaming LLM/SSE/gRPC request can emit several — is serialised on the single Disruptor consumer thread, the same thread that retains every log entry, so capture cost is paid in ring-drain rate (and, once the ring fills, in dropped log entries, `mock_server_dropped_log_events`). The line is serialised compactly straight into a reused byte buffer (no pretty-printing, no regex, no `String`), and the flush — one syscall — is paid once per batch rather than per line; under load a batch holds many entries. The price is the durability window above: up to 8 KB of recent complete lines rather than none. `RecordedRequestsPersistenceBenchmark` (in `mockserver-benchmark`) measures the per-exchange cost.
+**Throughput trade-off.** With `persistRecordedRequestsToDisk` enabled, every recorded exchange — including each mocked `EXPECTATION_RESPONSE`, of which a single streaming LLM/SSE/gRPC request can emit several — is serialised on the single Disruptor consumer thread, the same thread that retains every log entry, so capture cost is paid in ring-drain rate (and, once the ring fills, in dropped log entries, `mock_server_dropped_log_events{reason="ring_full"}`). The line is serialised compactly straight into a reused byte buffer (no pretty-printing, no regex, no `String`), and the flush — one syscall — is paid once per batch rather than per line; under load a batch holds many entries. The price is the durability window above: up to 8 KB of recent complete lines rather than none. `RecordedRequestsPersistenceBenchmark` (in `mockserver-benchmark`) measures the per-exchange cost.
 
 ### File Persistence for Expectations
 

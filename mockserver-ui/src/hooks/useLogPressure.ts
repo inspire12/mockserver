@@ -1,19 +1,19 @@
 import { useEffect, useState } from 'react';
 import type { ConnectionParams } from './useConnectionParams';
 import { buildBaseUrl } from '../lib/mcpClient';
-import { parseDroppedLogEvents } from '../lib/droppedLogEvents';
+import { parseLogPressure, type LogPressure } from '../lib/logPressure';
 
 /**
- * Polls the dropped-log-events counter from the server's Prometheus metrics
- * endpoint so the traffic/log views can warn when the ring buffer has evicted
- * events (see {@link parseDroppedLogEvents}).
+ * Polls the event-log drop and eviction counters from the server's Prometheus
+ * metrics endpoint so the traffic/log views can warn when log events have been
+ * lost, and why (see {@link parseLogPressure}).
  *
  * Design notes:
  * - Reuses `GET /mockserver/metrics` (already polled by the Metrics view) rather
- *   than a bespoke endpoint. Polls slowly (default 15s): the counter only ever
- *   grows and the banner is advisory, so a low cadence keeps overhead trivial.
+ *   than a bespoke endpoint. Polls slowly (default 15s): the counters only ever
+ *   grow and the banner is advisory, so a low cadence keeps overhead trivial.
  * - Stops polling permanently on a 404 — that means the server was started
- *   without metrics enabled, so the counter is unavailable and the banner can
+ *   without metrics enabled, so the counters are unavailable and the banner can
  *   never fire; there is no point re-scraping.
  * - Pauses while the tab is hidden (mirrors {@link useMetricsPolling}).
  * - Returns `null` until the first successful scrape (and after a server change);
@@ -21,20 +21,20 @@ import { parseDroppedLogEvents } from '../lib/droppedLogEvents';
  */
 const DEFAULT_POLL_INTERVAL_MS = 15000;
 
-export function useDroppedLogEvents(
+export function useLogPressure(
   params: ConnectionParams,
   intervalMs: number = DEFAULT_POLL_INTERVAL_MS,
-): number | null {
+): LogPressure | null {
   const baseUrl = buildBaseUrl(params);
-  const [dropped, setDropped] = useState<number | null>(null);
+  const [pressure, setPressure] = useState<LogPressure | null>(null);
 
-  // Reset the count when the target server changes so a previous instance's
-  // eviction count never leaks into a freshly-connected server. (React's
+  // Reset the counts when the target server changes so a previous instance's
+  // counts never leak into a freshly-connected server. (React's
   // "adjust state while rendering" pattern — see useMetricsPolling.)
   const [prevBaseUrl, setPrevBaseUrl] = useState(baseUrl);
   if (prevBaseUrl !== baseUrl) {
     setPrevBaseUrl(baseUrl);
-    setDropped(null);
+    setPressure(null);
   }
 
   useEffect(() => {
@@ -61,14 +61,14 @@ export function useDroppedLogEvents(
         const res = await fetch(`${baseUrl}/mockserver/metrics`, { signal: controller.signal });
         if (cancelled) return;
         if (res.status === 404) {
-          // Metrics disabled — the counter is unavailable; stop polling for good.
+          // Metrics disabled — the counters are unavailable; stop polling for good.
           metricsDisabled = true;
           return;
         }
         if (!res.ok) return; // transient error — retry on the next tick
         const text = await res.text();
         if (cancelled) return;
-        setDropped(parseDroppedLogEvents(text));
+        setPressure(parseLogPressure(text));
       } catch {
         // Network failure or abort — swallow and retry on the next tick.
       } finally {
@@ -101,5 +101,5 @@ export function useDroppedLogEvents(
     };
   }, [baseUrl, intervalMs]);
 
-  return dropped;
+  return pressure;
 }

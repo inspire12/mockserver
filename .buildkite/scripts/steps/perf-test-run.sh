@@ -1205,6 +1205,9 @@ metric_heap_max() {
 gauge_value() { # exact_series_name  < metrics_text
   awk -v m="$1" '$1 == m && $2 != "" {printf "%.0f", $2 + 0; exit}' || true
 }
+counter_sum() { # series_name  < metrics_text -> summed over all its labels; empty when absent
+  awk -v m="$1" '($1 == m || index($1, m "{") == 1) && $2 != "" {t += $2; n = 1} END {if (n) printf "%.0f", t}' || true
+}
 # --- INFO-arm event-log budget helpers (perf-info-budget-test.sh runs each of them) ---
 # The info_* compare key: what the INFO SUT was handed, not what it resolved.
 info_els_method() { # requested_bytes -> shipped-default | fixed-<bytes>
@@ -1334,7 +1337,7 @@ growth_phase_json() { # reads GROWTH_EVENT_LOG_BYTES, GROWTH_ELS_* and PERF_EVEN
 }
 event_log_counters() { # < metrics_text -> "dropped|evicted", each empty when absent
   local m; m="$(cat)"
-  printf '%s|%s\n' "$(gauge_value mock_server_dropped_log_events_total <<<"$m")" \
+  printf '%s|%s\n' "$(counter_sum mock_server_dropped_log_events_total <<<"$m")" \
     "$(gauge_value mock_server_evicted_log_entries_total <<<"$m")"
 }
 # Appends "retained_bytes retained_entries" every 2 s until killed. The load phases reset the
@@ -2062,7 +2065,7 @@ diag_sampler() {
     gc="$(printf '%s' "$metrics" | awk -F' ' '/^jvm_gc_collection_seconds_sum/{s+=$2} END{print s}')"
     gcc="$(printf '%s' "$metrics" | awk -F' ' '/^jvm_gc_collection_count/{print $2}')"
     threads="$(printf '%s' "$metrics" | awk -F' ' '/^jvm_threads_current/{print $2}')"
-    dropped="$(printf '%s' "$metrics" | awk -F' ' '/^mock_server_dropped_log_events_total/{print $2}')"
+    dropped="$(printf '%s' "$metrics" | counter_sum mock_server_dropped_log_events_total)"
     occ="$(printf '%s' "$metrics" | awk -F' ' '/^mock_server_event_log_ring_occupancy/{print $2}')"
     cap="$(printf '%s' "$metrics" | awk -F' ' '/^mock_server_event_log_ring_capacity/{print $2}')"
     inflt="$(printf '%s' "$metrics" | awk -F' ' '/^mock_server_event_log_in_flight_bytes/{print $2}')"

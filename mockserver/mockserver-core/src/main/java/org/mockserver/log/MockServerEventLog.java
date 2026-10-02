@@ -72,6 +72,27 @@ import static org.mockserver.model.HttpRequest.request;
 @SuppressWarnings("FieldMayBeFinal")
 public class MockServerEventLog extends MockServerEventLogNotifier {
 
+    /**
+     * Why a log event was dropped before being recorded; {@link #metricLabel()} is the {@code reason}
+     * label of {@code mock_server_dropped_log_events}.
+     */
+    public enum DropReason {
+        /** The ring buffer had no free slot: events arrived faster than the logging thread drains them. */
+        RING_FULL("ring_full"),
+        /** Admitting the event's bodies would have exceeded the in-flight byte cap. */
+        IN_FLIGHT_BYTES("in_flight_bytes");
+
+        private final String metricLabel;
+
+        DropReason(String metricLabel) {
+            this.metricLabel = metricLabel;
+        }
+
+        public String metricLabel() {
+            return metricLabel;
+        }
+    }
+
     private static final Logger logger = LoggerFactory.getLogger(MockServerEventLog.class);
     /**
      * Hard upper bound (60s) on a server-side eventual-verification {@code timeout}. A client-supplied
@@ -175,16 +196,14 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
     // power-of-two array sized at construction, so this is the value in force for the lifetime of
     // the disruptor regardless of later configuration mutation — see getRingBufferSizeInForce().
     private int ringBufferSizeInForce;
-    // Count of INFO/DEBUG log events silently dropped because the disruptor ring buffer was full.
-    // Under sustained load the ring buffer can saturate and tryPublishEvent() fails; previously
-    // these drops were invisible (only WARN/ERROR drops were logged), so the saturation cliff was
-    // undetectable. This counter (plus a WARN logged once on the first drop and the
-    // mock_server_dropped_log_events Prometheus counter) makes the cliff observable.
-    private final AtomicLong droppedLogEvents = new AtomicLong(0);
+    // Log events dropped before being recorded, by cause (a full ring, or the in-flight byte cap).
+    // Monotonic, mirrored to mock_server_dropped_log_events{reason=...}; each cause also WARNs once.
+    private final AtomicLong ringFullDroppedLogEvents = new AtomicLong(0);
+    private final AtomicLong inFlightBytesDroppedLogEvents = new AtomicLong(0);
     private final AtomicBoolean droppedLogEventWarned = new AtomicBoolean(false);
     // Dropped log events since startup or the last reset()/clear-all — the resettable TAINT that feeds
     // the fail-closed verify path (upperBoundUnprovableAfterEviction), distinct from the monotonic
-    // droppedLogEvents metric above (which must never be reset, as it mirrors a Prometheus counter). A
+    // per-reason drop counters above (which must never be reset, as they mirror a Prometheus counter). A
     // drop means an incoming entry was NEVER recorded — the same loss of evidence as a deque eviction,
     // and just as fatal to proving absence — so an upper-bound verify (never/atMost/exactly/once/
     // between) must fail closed rather than pass on it. Reset alongside the deque's eviction counter on
@@ -297,11 +316,9 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
                 // the budget rather than at ringBufferSize (more slots would hold MORE large bodies,
                 // making the OOM worse). Like an eviction/ring-full drop this loses the entry, so a
                 // later verify against it cannot prove presence — announced, not silent.
-                droppedLogEvents.incrementAndGet();
-                droppedLogEventsSinceLogReset.incrementAndGet();
-                Metrics.incrementDroppedLogEvents();
+                recordDrop(DropReason.IN_FLIGHT_BYTES);
                 if (inFlightBytesDropWarned.compareAndSet(false, true)) {
-                    logger.warn("Log event in-flight byte budget reached (" + budget + " bytes, the larger of maxEventLogSizeInBytes and a heap-derived cap) — dropping log events whose request/response bodies would exceed it while they wait to be processed, to bound the ring backlog and avoid running out of memory. The bodies waiting to be logged are arriving faster than they can be processed and recorded (most acute at a verbose log level, which renders every entry). To keep more coverage, cheapest first: (1) record smaller bodies — set maxLoggedBodyBytes to truncate large bodies; (2) lower the log level (e.g. to WARN) so the log consumer drains the backlog faster; (3) if you have heap headroom, raise maxEventLogSizeInBytes above this budget, or set it to 0 to bound by ring slot count only. Dropped events are not retrievable and cannot be verified.");
+                    logger.warn("Log event in-flight byte budget reached (" + budget + " bytes, the larger of maxEventLogSizeInBytes and a heap-derived cap) — dropping log events whose request/response bodies would exceed it while they wait to be processed, to bound the ring backlog and avoid running out of memory. The bodies waiting to be logged are arriving faster than they can be processed and recorded (most acute at a verbose log level, which renders every entry). To keep more coverage, cheapest first: (1) lower the log level (e.g. to WARN), which widens this budget and drains the backlog faster; (2) if you have heap headroom, raise maxEventLogSizeInBytes above this budget, or set it to 0 to bound by ring slot count only. maxLoggedBodyBytes does not help here: it truncates bodies only after they leave this backlog. Dropped events are not retrievable and cannot be verified.");
                 }
                 // if dropping, only mirror WARN and ERROR to the logger (as the ring-full path does)
                 if (logEntry.getLogLevel().toInt() >= Level.WARN.toInt()) {
@@ -311,14 +328,11 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
             }
             if (!disruptor.getRingBuffer().tryPublishEvent(logEntry)) {
                 // ring buffer full: the event is dropped. Make the drop observable — count it,
-                // mirror it to the Prometheus mock_server_dropped_log_events counter (no-op when
-                // metrics are disabled), and WARN once so the saturation cliff surfaces in the log
-                // even for INFO/DEBUG events (which were previously dropped silently).
-                droppedLogEvents.incrementAndGet();
-                droppedLogEventsSinceLogReset.incrementAndGet();
-                Metrics.incrementDroppedLogEvents();
+                // mirror it to Prometheus (no-op when metrics are disabled), and WARN once so the
+                // saturation cliff surfaces in the log even for INFO/DEBUG events.
+                recordDrop(DropReason.RING_FULL);
                 if (droppedLogEventWarned.compareAndSet(false, true)) {
-                    logger.warn("Log event ring buffer full — dropping log events; increase ringBufferSize or reduce log verbosity to avoid losing events");
+                    logger.warn("Log event ring buffer full — dropping log events because they arrive faster than the single logging thread can record them. If this persists under steady load, lower the log level (e.g. to WARN or ERROR), which skips the per-expectation diagnostic entries that saturate that thread; raising ringBufferSize only absorbs short bursts. Dropped events are not retrievable and cannot be verified.");
                 }
                 // if ring buffer full only write WARN and ERROR to logger
                 if (logEntry.getLogLevel().toInt() >= Level.WARN.toInt()) {
@@ -364,14 +378,30 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
     }
 
     /**
-     * Number of log events dropped because the disruptor ring buffer was full. A non-zero, growing
-     * value indicates the event log cannot keep up with the incoming load — increase
-     * {@code ringBufferSize} or reduce log verbosity. Always available (independent of whether
-     * Prometheus metrics are enabled); also mirrored to the {@code mock_server_dropped_log_events}
-     * Prometheus counter when metrics are enabled.
+     * Number of log events dropped before being recorded, for every {@link DropReason}. A non-zero,
+     * growing value indicates the event log cannot keep up with the incoming load. Always available
+     * (independent of whether Prometheus metrics are enabled); also mirrored, by reason, to the
+     * {@code mock_server_dropped_log_events} Prometheus counter when metrics are enabled.
      */
     public long getDroppedLogEventCount() {
-        return droppedLogEvents.get();
+        return ringFullDroppedLogEvents.get() + inFlightBytesDroppedLogEvents.get();
+    }
+
+    /**
+     * Number of log events dropped for {@code reason} since startup (never reset).
+     */
+    public long getDroppedLogEventCount(DropReason reason) {
+        return droppedLogEventCounter(reason).get();
+    }
+
+    private AtomicLong droppedLogEventCounter(DropReason reason) {
+        return reason == DropReason.RING_FULL ? ringFullDroppedLogEvents : inFlightBytesDroppedLogEvents;
+    }
+
+    private void recordDrop(DropReason reason) {
+        droppedLogEventCounter(reason).incrementAndGet();
+        droppedLogEventsSinceLogReset.incrementAndGet();
+        Metrics.incrementDroppedLogEvents(reason.metricLabel());
     }
 
     /**

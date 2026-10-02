@@ -15,6 +15,8 @@ import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.is;
 import static org.mockito.Mockito.mock;
 import static org.mockserver.configuration.Configuration.configuration;
+import static org.mockserver.log.MockServerEventLog.DropReason.IN_FLIGHT_BYTES;
+import static org.mockserver.log.MockServerEventLog.DropReason.RING_FULL;
 import static org.mockserver.log.model.LogEntry.LogMessageType.RECEIVED_REQUEST;
 import static org.mockserver.model.HttpRequest.request;
 
@@ -71,6 +73,9 @@ public class MockServerEventLogDroppedEventsTest {
             assertThat(
                 "expected some INFO events to be dropped while the ring buffer was full",
                 eventLog.getDroppedLogEventCount(), greaterThan(0L));
+            // every drop here is attributed to the full ring, none to the in-flight byte cap
+            assertThat(eventLog.getDroppedLogEventCount(RING_FULL), is(eventLog.getDroppedLogEventCount()));
+            assertThat(eventLog.getDroppedLogEventCount(IN_FLIGHT_BYTES), is(0L));
         } finally {
             hold.countDown();
             eventLog.stop();

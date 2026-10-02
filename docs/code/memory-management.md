@@ -842,8 +842,8 @@ Two byte bounds apply to the event log: `maxEventLogSizeInBytes` to the deque (r
 
 **Drops are announced, not silent.**
 
-- A once-only `WARN` is logged on the first drop for each cause (ring full or in-flight byte budget), naming the budget, the current value, and remedies cheapest-first.
-- The `mock_server_dropped_log_events` Prometheus counter increments on every drop (never reset — mirrors a Prometheus counter's monotonic semantics).
+- A once-only `WARN` is logged on the first drop for each cause, with that cause's remedy: for a full ring, lower the log level (a bigger `ringBufferSize` only absorbs bursts); for the in-flight byte budget, which it names, lower the log level or raise `maxEventLogSizeInBytes` (not `maxLoggedBodyBytes`, which truncates only after the backlog).
+- The `mock_server_dropped_log_events` Prometheus counter increments on every drop, labelled `reason="ring_full"` or `reason="in_flight_bytes"` (never reset — mirrors a Prometheus counter's monotonic semantics); `getDroppedLogEventCount(DropReason)` keeps the same per-reason totals with metrics off. See [metrics.md](metrics.md#dropped-log-events-counter).
 - A separate `droppedLogEventsSinceLogReset` counter tracks drops since the last `reset()` or `clear(null)` — this is the **taint** that the fail-closed verify path reads.
 
 **Fail-closed verification.** `droppedLogEventsSinceLogReset > 0` is treated identically to a deque eviction for the purposes of upper-bound verification. A `verify` with `never()`, `atMost(n)`, `exactly(n)`, `once()`, or `between(a,b)` will **fail** once this counter is non-zero, because a dropped entry cannot be found even if the event actually happened. `atLeast(n)` and the bare `verify(request)` (which is `atLeast(1)`) are unaffected — they require presence, not absence.
@@ -1067,14 +1067,15 @@ overhead that does not grow with request volume.
 
 The ring buffer absorbs the **rate gap** between producers and the single consumer thread — it must be
 large enough that bursts of concurrent log writes do not overflow it (an overflow drops the event and
-increments `mock_server_dropped_log_events`; see [event-system.md](event-system.md)). That gap is a
+increments `mock_server_dropped_log_events{reason="ring_full"}`; see [event-system.md](event-system.md)). That gap is a
 function of *throughput*, not of *how long you retain history*. Slaving the ring to `maxLogEntries`
 therefore over-provisioned the ring for high-retention/low-burst deployments.
 
 - **Default `min(maxLogEntries, 16384)`** — small deployments keep their previous ring exactly; large
   retention settings stop inflating the ring.
-- **Raise it** only if you observe dropped log events (`mock_server_dropped_log_events` non-zero and
-  growing) under sustained extreme load.
+- **Raise it** only to absorb short bursts (`mock_server_dropped_log_events{reason="ring_full"}` rising
+  in spikes). Sustained ring-full drops at `INFO` mean the single consumer cannot keep up at any ring
+  size; lower the log level instead.
 - **Lower it** to shave fixed memory if you have a low-throughput, high-retention workload.
 
 Configure it via `mockserver.ringBufferSize`, the `MOCKSERVER_RING_BUFFER_SIZE` environment variable, or
