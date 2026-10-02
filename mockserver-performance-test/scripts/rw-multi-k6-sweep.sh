@@ -25,6 +25,9 @@ for lib in perf-cpu-topology.sh perf-sweep-window.sh perf-derive-saturation.sh p
   . "$LIB_DIR/$lib"
 done
 for f in "$FIGURES_JQ" "$CROSS_JQ"; do [ -r "$f" ] || { echo ":x: $f not found" >&2; exit 1; }; done
+[ -r "$LIB_DIR/perf-sut-recvq.sh" ] || { echo ":x: $LIB_DIR/perf-sut-recvq.sh not found" >&2; exit 1; }
+# shellcheck source=/dev/null
+. "$LIB_DIR/perf-sut-recvq.sh"
 
 OUT_FILE="${1:-/dev/stdout}"
 
@@ -63,8 +66,12 @@ VU_DIAGNOSTICS="${PERF_RW_VU_DIAGNOSTICS:-true}"
 # Report-only: Go's GC trace in each k6 log (GODEBUG=gctrace=1), summarised per rung as .k6_gc.
 K6_GCTRACE="${PERF_RW_K6_GCTRACE:-true}"
 case "$K6_GCTRACE" in true|false) ;; *) echo ":x: PERF_RW_K6_GCTRACE must be true or false" >&2; exit 2 ;; esac
+# Report-only: the SUT's socket receive queues over the main ladder (lib/perf-sut-recvq.sh).
+SUT_RECVQ="${PERF_RW_SUT_RECVQ:-true}"
+case "$SUT_RECVQ" in true|false) ;; *) echo ":x: PERF_RW_SUT_RECVQ must be true or false" >&2; exit 2 ;; esac
 # Go GC knobs passed to every measured k6 process as GOGC / GOMEMLIMIT. Unset GOMEMLIMIT is derived
-# from the Docker host's memory once N is known (lib/perf-k6-runtime.sh). Go's own defaults are
+# from the k6 processes' NUMA node memory, else the Docker host's, once N is known
+# (lib/perf-k6-runtime.sh). Go's own defaults are
 # PERF_RW_K6_GOGC=100 and PERF_RW_K6_GOMEMLIMIT=off.
 K6_GOGC="${PERF_RW_K6_GOGC:-400}"
 K6_GOMEMLIMIT="${PERF_RW_K6_GOMEMLIMIT:-}"
@@ -371,10 +378,9 @@ record_pid() { echo "$1 $(proc_start "$1")" >> "$WORK/pids.txt"; }
 
 if [ -z "$K6_GOMEMLIMIT" ]; then
   _mem="$(k6_docker_mem_bytes)" || _mem=""
-  K6_GOMEMLIMIT="$(k6_gomemlimit_default "$_mem" "$N")" \
-    || die "cannot derive the k6 GOMEMLIMIT: Docker reported MemTotal '${_mem}' for N=$N; set PERF_RW_K6_GOMEMLIMIT (e.g. 8GiB, or off)"
-  K6_GOMEMLIMIT_BASIS="$(jq -nc --argjson m "$_mem" --argjson n "$N" --argjson pct "$K6_GOMEMLIMIT_HOST_PCT" \
-    '{docker_mem_total_bytes:$m, procs:$n, host_pct:$pct}')"
+  _gml="$(k6_gomemlimit_resolve "$_mem" "${K6_SETS[@]}")" \
+    || die "cannot derive the k6 GOMEMLIMIT: Docker reported MemTotal '${_mem}' for N=$N and no k6 NUMA node memory is readable; set PERF_RW_K6_GOMEMLIMIT (e.g. 8GiB, or off)"
+  K6_GOMEMLIMIT="$(jq -r .limit <<<"$_gml")"; K6_GOMEMLIMIT_BASIS="$(jq -c .basis <<<"$_gml")"
   if [ "${K6_GOMEMLIMIT%MiB}" -lt 1024 ]; then
     echo "WARNING: derived k6 GOMEMLIMIT $K6_GOMEMLIMIT is under 1 GiB; if a k6 live heap reaches it, Go collects continuously and k6 CPU per request rises" >&2
   fi
@@ -947,7 +953,19 @@ if [ "$XCHECK_RW_FAILURES" -gt 0 ]; then
   die "cross-check phase: $XCHECK_RW_FAILURES remote-write send failure(s), aborting before the main phase: $(grep -m1 -hiE 'failed to send|level=error.*remote write' "$WORK"/xcheck-p*.log)"
 fi
 
+if [ "$SUT_RECVQ" = true ]; then
+  _rq_max=$(( START_LEAD_S + $(tr ',' '\n' <<<"$RATES" | grep -c .) * (STEP_S + GAP_S) + QUIET_S + 120 ))
+  sut_recvq_sampler_start "$WORK" "$(docker inspect -f '{{.State.Pid}}' "${SUT_CONTAINER:-}" 2>/dev/null || true)" "$_rq_max" 1 16777216 "$PROM_CPUS"
+  [ -z "$SUT_RECVQ_PID" ] || record_pid "$SUT_RECVQ_PID"
+  echo "--- SUT receive-queue sampler: $(jq -c '{running, source, reason, pinned_cpus}' "$WORK/main-sut-recvq-status.json" 2>/dev/null || echo "no status")" >&2
+fi
 run_phase main "$N" "$RATES" "$WINDOW_MODE" true "$(IFS=';'; echo "${K6_SETS[*]}")"
+if [ "$SUT_RECVQ" = true ]; then
+  sut_recvq_sampler_stop
+  { sut_recvq_rungs "$WORK/main-sut-recvq.csv" "$(jq -r .start_at_s "$WORK/main-meta.json")" "$STEP_S" "$GAP_S" "$SETTLE_S" \
+      "$(jq -r '.agg_rates | join(",")' "$WORK/main-meta.json")" > "$WORK/main-sut-recvq-rungs.json"; } 2>/dev/null \
+    || echo "WARNING: rw-multi-k6: no per-rung receive-queue summary (report-only)" >&2
+fi
 soft merge_main merge_phase main "$WINDOW_MODE" main-merged
 # Without the merge there is nothing to judge: keep an empty ladder so every gate still runs
 # (rw_rungs_measured and rw_assembly_steps_ok then fail with the reason).

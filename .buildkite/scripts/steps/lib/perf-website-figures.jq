@@ -26,7 +26,11 @@
 # offered rung where achieved stayed within (1 - keep) of offered, errors were
 # zero, AND p50 stayed within lat_mult x the flat-region p50 — rather than
 # trusting the run's own saturation_rps, so a reader can see exactly which rung
-# it is and that latency was still flat there.
+# it is and that latency was still flat there. The climb stops at the first
+# rig-valid rung that is not healthy, or excluded rung that returned errors without
+# a client limit: a healthy rung above it never counts. Other excluded rungs (client-
+# limited, idle-pool drops) neither count nor stop it. Full rule and its interaction
+# with the lower bound: docs/code/performance-measurement.md, "The healthy ceiling rule".
 #
 # Args (all via --argjson / --arg):
 #   $now       ISO-8601 timestamp to stamp as published_utc
@@ -70,13 +74,20 @@ def commafy: (. // 0 | floor | tostring) | gsub("(?<=\\d)(?=(\\d{3})+$)"; ",");
      else (($flat[$n/2 - 1] + $flat[$n/2]) / 2) end) as $flat_p50
 | (if $flat_p50 == null then null else ($flat_p50 * $lat_mult) end) as $lat_thresh
 | ($ARGS.named.p99_max_ms // null | if . == null then null else tonumber end) as $p99_max
-# healthy rungs: kept up, no errors, latency still flat (and, when bounded, a missing p99 is not).
-| [ $s[]
-    | select(.offered_rps > 0
+# healthy rung: kept up, no errors, latency still flat (and, when bounded, a missing p99 is not).
+| def healthy: .offered_rps > 0
              and (.error_rate // 0) == 0
              and .achieved_rps >= ($keep * .offered_rps)
              and ($lat_thresh != null) and (.p50_ms != null) and (.p50_ms <= $lat_thresh)
-             and ($p99_max == null or ((.p99_ms != null) and (.p99_ms <= $p99_max)))) ] as $healthy
+             and ($p99_max == null or ((.p99_ms != null) and (.p99_ms <= $p99_max)));
+# The ceiling is the highest healthy rung BELOW the first unhealthy one: a healthy rung above a
+# failure is past the knee, not a ceiling. A rig-valid rung stops the climb when unhealthy; an excluded
+# one only when it had errors and the client was not limited (errors are the server's signal).
+  ([ ($s[] | select(healthy | not)),
+     ((.saturation.ladder // [])[]
+      | select(.rig_valid != true and .client_limited != true and ((.error_rate // 0) > 0))) ]
+   | sort_by(.offered_rps) | first) as $first_bad
+| [ $s[] | select(healthy and ($first_bad == null or .offered_rps < $first_bad.offered_rps)) ] as $healthy
 | ($healthy | max_by(.offered_rps)) as $hc
 # No rig-valid rung above the ceiling (or none at all) means no overload was measured, so
 # no peak_* is published. It is a lower bound when, in addition, the next rung up was
@@ -377,7 +388,7 @@ def commafy: (. // 0 | floor | tostring) | gsub("(?<=\\d)(?=(\\d{3})+$)"; ",");
   }
 # Only a bounded call (the multi-k6 arm) carries the p99 fields, so the published shape is unchanged.
 | if $p99_max == null then . else
-    .source.healthy_ceiling_rule = "achieved>=\($keep)x,p50<=\($lat_mult)x_flat,p99<=\($p99_max)ms"
+    .source.healthy_ceiling_rule = "achieved>=\($keep)x,p50<=\($lat_mult)x_flat,p99<=\($p99_max)ms,below_first_failure"
     | .headline |= (if . == null then null
                     else . + {healthy_ceiling_p99_ms: ($hc.p99_ms | round3), p99_max_ms: $p99_max} end)
   end

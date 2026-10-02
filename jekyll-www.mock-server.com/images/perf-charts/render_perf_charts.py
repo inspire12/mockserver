@@ -98,11 +98,12 @@ def _grid(ax):
     ax.set_axisbelow(True)
 
 
-def _healthy_ceiling(pts, keep=0.95, lat_mult=3.0):
+def _healthy_ceiling(pts, keep=0.95, lat_mult=3.0, stops=()):
     """Highest offered rung that kept up (achieved within (1-keep) of offered),
-    had zero errors, AND kept p50 within lat_mult x the flat-region p50 — the same
-    definition perf-website-figures.jq publishes (performance-programme Finding 1).
-    Returns the rung dict, or None if no rung qualifies."""
+    had zero errors, AND kept p50 within lat_mult x the flat-region p50, below the
+    first rung that did not or the lowest rate in stops (excluded rungs that
+    returned errors) — the same definition perf-website-figures.jq publishes
+    (performance-programme Finding 1). Returns the rung dict, or None if no rung qualifies."""
     s = sorted(pts, key=lambda p: p["offered_rps"])
     flat = sorted(p["p50_ms"] for p in s[:4] if p.get("p50_ms") is not None)
     if not flat:
@@ -110,12 +111,27 @@ def _healthy_ceiling(pts, keep=0.95, lat_mult=3.0):
     n = len(flat)
     flat_p50 = flat[n // 2] if n % 2 else (flat[n // 2 - 1] + flat[n // 2]) / 2
     thresh = flat_p50 * lat_mult
-    healthy = [p for p in s
-               if p.get("error_rate", 0) == 0
-               and p["offered_rps"] > 0
-               and p["achieved_rps"] >= keep * p["offered_rps"]
-               and p.get("p50_ms") is not None and p["p50_ms"] <= thresh]
-    return max(healthy, key=lambda p: p["offered_rps"]) if healthy else None
+
+    def ok(p):
+        return ((p.get("error_rate") or 0) == 0
+                and p["offered_rps"] > 0
+                and p["achieved_rps"] >= keep * p["offered_rps"]
+                and p.get("p50_ms") is not None and p["p50_ms"] <= thresh)
+    bad = [p["offered_rps"] for p in s if not ok(p)] + list(stops)
+    limit = min(bad) if bad else None
+    healthy = [p for p in s if ok(p) and (limit is None or p["offered_rps"] < limit)]
+    if not healthy:
+        return None
+    top = max(p["offered_rps"] for p in healthy)
+    return [p for p in healthy if p["offered_rps"] == top][-1]  # jq's max_by keeps the last tie
+
+
+def _error_stops(result):
+    """Offered rates of excluded rungs that returned errors without a client limit."""
+    ladder = ((result or {}).get("saturation") or {}).get("ladder") or []
+    return [r["offered_rps"] for r in ladder
+            if r.get("rig_valid") is not True and r.get("client_limited") is not True
+            and (r.get("error_rate") or 0) > 0 and r.get("offered_rps") is not None]
 
 
 def _missing(pts, keys):
@@ -128,7 +144,7 @@ def _missing(pts, keys):
 
 
 # --- chart 1: throughput vs latency "knee" ------------------------------------
-def chart_knee(sweep, out_dir):
+def chart_knee(sweep, out_dir, result=None):
     pts = sorted(sweep["points"], key=lambda p: p["offered_rps"])
     gap = _missing(pts, ("offered_rps", "achieved_rps", "p50_ms", "p95_ms", "p99_ms"))
     if gap:
@@ -167,7 +183,7 @@ def chart_knee(sweep, out_dir):
              label="ideal (keeps up)", zorder=2)
     axR.plot(offered, achieved, "-o", color=BLUE, lw=2.4, ms=5,
              label="achieved", zorder=4)
-    hc = _healthy_ceiling(pts)
+    hc = _healthy_ceiling(pts, stops=_error_stops(result))
     peak = max(achieved)
     # A lower bound: no rate above the ceiling was measured validly (the rig or a non-CPU
     # limit stopped the ladder). With no plotted rung above the ceiling there is no overload.
@@ -502,7 +518,7 @@ def main():
     hw_matrix = load(args.data, "perf-hw-matrix.json")
 
     if sweep:
-        chart_knee(sweep, args.out)
+        chart_knee(sweep, args.out, result)
         chart_percentiles(sweep, args.out)
     else:
         print("  (no perf-sweep.json — skipping knee + percentile charts)")

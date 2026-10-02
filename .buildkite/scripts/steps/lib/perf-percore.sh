@@ -20,7 +20,8 @@ set -euo pipefail
 #                           measure the injector, not the serving path.
 #   * healthy_ceiling_rps — the highest rung where achieved stayed >= keep*offered
 #                           with ZERO errors AND p50 within lat_mult x the flat-
-#                           region p50. This is NOT re-implemented here: each C's
+#                           region p50, below the first rung where that fails.
+#                           This is NOT re-implemented here: each C's
 #                           sweep is fed as a synthetic run to the ONE authoritative
 #                           implementation, lib/perf-website-figures.jq (Finding 1;
 #                           the same definition render_perf_charts.py carries), and
@@ -1422,7 +1423,7 @@ jq -nc \
     sweep:{rates:$rates, step:$step, gap:$gap, latency_settle_s:$settle},
     # false for PERF_K6_NUMA_NODE=same (the same-socket interference A/B); per point in .points[].placement.
     baseline_eligible:($k6node != "same"),
-    healthy_ceiling_definition:"lib/perf-website-figures.jq headline (Finding 1: highest rung achieved>=0.95*offered, zero errors, p50<=3x flat-region p50) — reused, not re-implemented",
+    healthy_ceiling_definition:"lib/perf-website-figures.jq headline (Finding 1: highest rung achieved>=0.95*offered, zero errors, p50<=3x flat-region p50, below the first rung that fails) — reused, not re-implemented",
     skipped:$skipped
   }
   + if $mode == "hw_matrix" then {

@@ -90,6 +90,12 @@ bash "$REPO_ROOT/.buildkite/scripts/test/perf-default-budget-test.sh"
 echo "--- allocation-profile annotation checks (item 28: ceiling views, size cap, degrade notes)"
 bash "$REPO_ROOT/.buildkite/scripts/test/perf-allocprofile-annotation-test.sh"
 
+echo "--- healthy ceiling rule checks (the climb stops at the first unhealthy measured rung; every copy of the rule agrees)"
+bash "$REPO_ROOT/.buildkite/scripts/test/perf-healthy-ceiling-test.sh"
+
+echo "--- SUT receive-queue sampler checks (item 44: lib/perf-sut-recvq.sh on a fake /proc, its wiring)"
+bash "$REPO_ROOT/.buildkite/scripts/test/perf-sut-recvq-test.sh"
+
 echo "--- byte-compiling the SSE fidelity reader (item 12)"
 # The reader is pure-stdlib python3 run on the perf agent by perf-test-run.sh; a
 # syntax error would only surface mid-run, so compile it here. Skip (do not fail)

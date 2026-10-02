@@ -219,22 +219,29 @@ fi
 # .headline.healthy_ceiling_rps back. Falls back to an inline copy of the SAME
 # Finding-1 rule ONLY if the filter file is absent (kept byte-identical in intent
 # so a fallback run is not silently a different definition).
-healthy_ceiling_of() { # points-json-file -> prints "rps p50 p95" (space sep) or "null null null"
-  local pts_file="$1" now_iso headline
+healthy_ceiling_of() { # points-json-file [ladder-json-file] -> prints "rps p50 p95" (space sep) or "null null null"
+  # The optional ladder ({offered_rps, rig_valid, client_limited, error_rate} per rung) lets an excluded
+  # rung that returned errors stop the climb, as it does in the filter.
+  local pts_file="$1" lad_file="${2:-}" now_iso headline lad="null"
   now_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  [ -z "$lad_file" ] || lad="$(jq -c . "$lad_file")"
   if [ -f "$FIGURES_JQ" ]; then
     local syn
-    syn="$(jq -nc --slurpfile p "$pts_file" --arg ts "$now_iso" \
-      '{schema_version:2, timestamp_utc:$ts, config:{}, agent:{}, sweep:{points:$p[0]}}')"
+    syn="$(jq -nc --slurpfile p "$pts_file" --argjson l "$lad" --arg ts "$now_iso" \
+      '{schema_version:2, timestamp_utc:$ts, config:{}, agent:{}, sweep:{points:$p[0]}}
+       + (if $l == null then {} else {saturation:{ladder:$l}} end)')"
     headline="$(jq --arg now "$now_iso" --argjson lat_mult 3 --argjson keep "$KEEP" --arg fix_date "2026-09-16" \
       -f "$FIGURES_JQ" <<<"$syn" 2>/dev/null | jq -c '.headline // {}')"
   else
-    headline="$(jq -c --argjson keep "$KEEP" '
+    headline="$(jq -c --argjson keep "$KEEP" --argjson l "$lad" '
       (sort_by(.offered_rps)) as $s
       | ([ $s[0:4][] | .p50_ms ] | map(select(. != null)) | sort) as $flat
       | (($flat|length) as $n | if $n==0 then null elif ($n%2)==1 then $flat[($n/2|floor)] else (($flat[$n/2-1]+$flat[$n/2])/2) end) as $fp50
       | (if $fp50==null then null else $fp50*3 end) as $lt
-      | [ $s[] | select(.offered_rps>0 and .achieved_rps>=($keep*.offered_rps) and (.error_rate//0)==0 and ($lt==null or (.p50_ms//0)<=$lt)) ] as $h
+      | def ok: .offered_rps>0 and .achieved_rps>=($keep*.offered_rps) and (.error_rate//0)==0 and $lt!=null and .p50_ms!=null and .p50_ms<=$lt;
+        ([ ($s[] | select(ok | not)), (($l // [])[] | select(.rig_valid != true and .client_limited != true and ((.error_rate // 0) > 0))) ]
+         | sort_by(.offered_rps) | first) as $bad
+      | [ $s[] | select(ok and ($bad == null or .offered_rps < $bad.offered_rps)) ] as $h
       | ($h | last) as $c
       | {healthy_ceiling_rps:($c.offered_rps // null), healthy_ceiling_p50_ms:($c.p50_ms // null), healthy_ceiling_p95_ms:($c.p95_ms // null)}
     ' "$pts_file")"
@@ -621,7 +628,9 @@ for N in "${PROCS_ARR[@]}"; do
               p50_ms:.p50_ms_worst, p95_ms:.p95_ms_worst, p99_ms:.p99_ms_worst,
               error_rate:.error_rate_max, sample_count:.agg_sample_count,
               dropped_iterations:.agg_dropped_iterations} ]' <<<"$AGG" > "$AGG_PTS"
-  read -r AGG_HC AGG_HC_P50 AGG_HC_P95 <<<"$(healthy_ceiling_of "$AGG_PTS" 2>/dev/null || echo 'null null null')"
+  jq -c '[ .ladder[] | {offered_rps:.agg_offered_rps, rig_valid:.client_sound, client_limited:.any_client_at_pin,
+                        error_rate:.error_rate_max} ]' <<<"$AGG" > "$WORK/agg-ladder-N${N}.json"
+  read -r AGG_HC AGG_HC_P50 AGG_HC_P95 <<<"$(healthy_ceiling_of "$AGG_PTS" "$WORK/agg-ladder-N${N}.json" 2>/dev/null || echo 'null null null')"
 
   # --- rig-valid aggregate peak (max client-sound achieved) + attribution ------
   AGG="$(jq -c \
@@ -744,7 +753,7 @@ jq -nc \
     procs_measured:($points|map(.procs)),
     agg_rates:$agg_rates,
     sweep:{step:$step, gap:$gap, latency_settle_s:$settle},
-    healthy_ceiling_definition:"lib/perf-website-figures.jq headline (Finding 1: highest client-sound rung achieved>=keep*offered, zero errors, p50<=3x flat-region p50) applied to the AGGREGATE offered/achieved series — reused, not re-implemented",
+    healthy_ceiling_definition:"lib/perf-website-figures.jq headline (Finding 1: highest client-sound rung achieved>=keep*offered, zero errors, p50<=3x flat-region p50, below the first one that fails) applied to the AGGREGATE offered/achieved series — reused, not re-implemented",
     aggregation_note:"agg_offered/agg_achieved are SUMS across the N disjoint processes (no double-counting); latency is per-process, and the aggregate reports the WORST (max) percentile across processes, not a merged one",
     scaling:$scaling,
     points:($points|sort_by(.procs)),

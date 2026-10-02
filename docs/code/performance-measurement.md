@@ -174,9 +174,49 @@ check (the run is invalid and compare fails the build), and the per-core and mul
 record that core or process count as a failure skip (`lib/perf-sweep-window.sh`).
 
 The healthy operating ceiling is the highest rung where `achieved_rps` is within 5% of
-`offered_rps` **and** latency is within a stated multiple of the flat-ladder baseline. The peak
+`offered_rps` **and** latency is within a stated multiple of the flat-ladder baseline, below the
+first rung where they are not (next section). The peak
 `achieved_rps` (top of the overload curve) is a different, higher number; do not publish one
-without the other. The multi-k6 arm alone also bounds p99 (next section).
+without the other. The multi-k6 arm alone also bounds p99 (below).
+
+#### The healthy ceiling rule
+
+**Outcome.** The healthy ceiling is the highest healthy rung **below the first measured rung that
+is not healthy**, or the first excluded rung that returned errors without a client limit. A healthy rung above a failed one never counts: past the knee a tail can fail the
+bound at one rung and pass it at the next, so the higher rung is not a rate the server sustains.
+`lib/perf-website-figures.jq` is the one implementation, and every ceiling comes from it: the
+published headline, the per-core, hardware-matrix and multi-process ceilings, and the multi-k6
+arm's p99-bounded ceiling (so also item 44's streak). The chart renderer
+(`render_perf_charts.py`) and `multi-process-sweep.sh`'s fallback copy apply the same rule.
+
+| Rung | Effect on the climb |
+|------|---------------------|
+| Rig-valid and healthy | Counts; the climb continues |
+| Rig-valid, not healthy: under 0.95x offered, any error, p50 over 3x the flat-region p50, or (bounded arm) p99 over the bound or missing | Stops it; the ceiling is the healthy rung below. None below means no ceiling (`headline` null) |
+| Excluded by `derive_saturation` with any error and `client_limited` not true: errors over `SWEEP_ERR_EPS`, or any error on a rung excluded for drops with an idle VU pool | Stops it. `derive_saturation` excludes such a rung because fast errors inflate `achieved_rps`, not because the rig failed: `client_limited` false means the client had headroom, and it labels the errors the server's |
+| Excluded as client-limited, or for drops with an idle VU pool and no errors | Neither counts nor stops it: it measured the rig, not the server |
+| Any rung of an input with no `saturation.ladder` (per-core single-k6 points) | Treated as measured, so an unhealthy one stops the climb. The multi-process aggregate passes its client-sound rungs with a ladder of all rungs (`client_sound` as rig validity, a client at its pin as client-limited), so an aggregate rung with errors stops it too |
+
+The lower bound is unchanged: `no_measured_overload` and `lower_bound` read only the rungs above
+the ceiling. A rig-valid rung that stopped the climb is above the ceiling, so such a run is a
+measured overload and never a lower bound. An excluded error rung that stopped it is not a lower
+bound either (it is not client-limited), but as it is not rig-valid no overload peak is published
+for it. A lower bound still needs every rung above the ceiling to be rig-invalid, the next one
+client-limited. `throughput_ladder[].degraded` marks every rung
+above the ceiling, including a healthy one past the stop. `saturation_rps` (the highest clean rung,
+which only places the allocation-profile window) and `rig_valid_peak_achieved_rps` (the top of the
+overload curve) are not ceilings and keep their max-over-rungs definitions.
+
+The rule closed a defect: build 605 (`perf-xl`, the `PERF_RW_K6_GOGC=off` A/B) reported a 152k
+p99-bounded ceiling although its 136k rung failed the bound (p99 35.6 ms); the rule gives 128k.
+Re-deriving every ceiling in the S3 run history (122 `perf` runs, 184 ceilings), the committed
+website figures (build 464's headline, build 544's hardware matrix) and build 540's matrix gives no
+change, so no published or baselined figure came from a skipped failure and compare needs no
+baseline reset. 13 rungs in three per-core runs were excluded for errors without a client limit;
+each sits above an already-failed rung, so none moves a ceiling. The only other change found was an
+allocation-profile run that is never published
+(502: 50k to 44k; its 48k rung delivered 0.939x offered).
+Tests: `.buildkite/scripts/test/perf-healthy-ceiling-test.sh`.
 
 #### The multi-k6 arm's p99 bound
 
@@ -422,7 +462,7 @@ cannot be valid:
 
 | Check | When | What it catches |
 |---|---|---|
-| Underivable `GOMEMLIMIT` | Before any container starts, when `PERF_RW_K6_GOMEMLIMIT` is unset | `docker info` reports no usable `MemTotal`, so the default k6 memory limit cannot be derived. The run stops rather than run k6 without a limit, and names `PERF_RW_K6_GOMEMLIMIT` as the way to set one (see "k6 heap and GC") |
+| Underivable `GOMEMLIMIT` | Before any container starts, when `PERF_RW_K6_GOMEMLIMIT` is unset | Neither the k6 processes' NUMA node memory nor `docker info`'s `MemTotal` is readable, so the default k6 memory limit cannot be derived. The run stops rather than run k6 without a limit, and names `PERF_RW_K6_GOMEMLIMIT` as the way to set one (see "k6 heap and GC") |
 | DNS label guard | Before any container starts | A host in `RW_URL` or the target URL with a DNS label over 63 characters. k6's Go resolver refuses such a name, so every push fails with `no such host`. The check reads the assembled URLs, not the alias constants |
 | Remote-write pre-flight | Once Prometheus is ready, before the SUT, warm-up or any rung | One k6 inside the run's network pushes through the same `experimental-prometheus-rw` output and URL the ladder uses. Any push failure in its log, or its `k6_iterations_total{proc="preflight"}` not reaching Prometheus within 10 s, stops the run in seconds (`preflight.log` is kept) |
 | Cross-check push failures | After the cross-check phase, before the main phase | A push path that broke after the pre-flight. Stopping here saves the main phase and its merge, several minutes on the rig |
@@ -585,8 +625,9 @@ the single-process ladder shows too (build 527: pool hit at 4k–24k with p95 ac
 occupancy rule reads them as stalls, so they are not a sizing fault.
 
 **k6 heap and GC.** The arm runs every measured k6 process with a `gracefulStop` equal to the gap
-(at least 1 s), `GOGC=400`, and a `GOMEMLIMIT` of half the Docker host's memory divided by N. On the
-c5.12xlarge (N=4) that is 5 s, 400 and about 12 GiB, the values the rig A/B below measured. Each stays
+(at least 1 s), `GOGC=400`, and a `GOMEMLIMIT` of half the memory k6 can use divided by N: the NUMA
+node it is bound to, else the Docker host. On the c5.12xlarge (one node, N=4) that is 5 s, 400 and
+about 12 GiB, the values the rig A/B below measured. Each stays
 overridable, and `PERF_RW_K6_GRACEFUL_STOP=30s PERF_RW_K6_GOGC=100 PERF_RW_K6_GOMEMLIMIT=off` restores
 k6's and Go's own defaults. The single-process published sweep is unchanged: `sweep.js` keeps k6's
 30 s `gracefulStop` unless `K6_SWEEP_GRACEFUL_STOP` is passed, and only this harness passes it or the
@@ -642,9 +683,17 @@ unconfirmed; the k6-side ones are what the default rests on.
   `PERF_RW_K6_GOGC` defaults to 400 (`100` is Go's default). Raising `GOGC` only pays once the live
   heap is small: on the 6,016-VU heap, `GOGC=400` left GC CPU per request unchanged and pushed the
   heap goal to 6.2 GB, which is why it ships together with the shorter `gracefulStop`.
-- **`GOMEMLIMIT` default: half the Docker host's memory over N.** Unset, `PERF_RW_K6_GOMEMLIMIT` is
-  `docker info`'s `MemTotal` × 50% ÷ N, in whole MiB (`lib/perf-k6-runtime.sh`): 12,288 MiB for a
-  full 96 GiB at N=4, ~1.3 GiB per process in an 8 GiB Docker Desktop VM at N=3. 12,288 MiB is the
+- **`GOMEMLIMIT` default: half the k6 node's memory over the processes on it.** Unset,
+  `PERF_RW_K6_GOMEMLIMIT` is derived by `k6_gomemlimit_resolve` (`lib/perf-k6-runtime.sh`). Each k6
+  container runs with `--cpuset-mems` for the node its cpuset is on, so it can only allocate that
+  node's memory. Where every k6 cpuset is on one node with a readable sysfs `node<N>/meminfo`, the limit
+  is that node's `MemTotal` × 50% ÷ the processes on it, the smallest over the nodes used, and never
+  above the host-wide figure below. On `perf-xl` (c6i.32xlarge, ~124 GiB per node, all four k6 on
+  node 1) that is about 15.5 GiB per process. The host-wide formula gave 31,725 MiB, so the four
+  processes together could fill the whole node: in build 605 (`GOGC=off`) their heaps reached about
+  113 GiB of it. With no NUMA information (Docker Desktop, a kernel without NUMA, an unreadable
+  meminfo, or a cpuset across nodes) it falls back to `docker info`'s `MemTotal` × 50% ÷ N, in whole MiB:
+  12,288 MiB for a full 96 GiB at N=4, ~1.3 GiB per process in an 8 GiB Docker Desktop VM at N=3. 12,288 MiB is the
   formula's figure; the rig's `MemTotal` is slightly below 96 GiB, so its limit is a little lower, and
   `.gomemlimit_basis` records the real `MemTotal`. `GOGC=400` sets each
   heap goal at 5× the live heap, so without a limit four processes on a 3 GB live heap could aim at
@@ -657,7 +706,10 @@ unconfirmed; the k6-side ones are what the default rests on.
   removes the limit, and an explicit value is used as given without asking Docker.
 - **What is recorded.** `.config.k6_runtime` holds the applied `gogc`, `gomemlimit` and
   `graceful_stop`, where each came from (`.source`: `default`, `derived` or `env`), and for a derived
-  limit `.gomemlimit_basis` (Docker's `MemTotal`, N and the 50%). Each hardware-matrix point copies it
+  limit `.gomemlimit_basis`: `memory_basis` (`numa_node` or `docker_host`), `bound_by` and per node
+  `numa_nodes[]` (`node`, `mem_total_bytes`, `procs`, `per_proc_mib`), or `numa_fallback_reason`; and
+  Docker's `MemTotal`, N and the 50% either way. Compare's baseline key reads only the source
+  (`derived`), so the change of basis does not reset a baseline. Each hardware-matrix point copies it
   to `.measurement.k6_runtime`. `perf-test-run.sh` and `lib/perf-percore.sh` pass none of the three, so
   both the trial arm and every hardware-matrix point run on the defaults, and a value set in the build
   environment reaches the harness unchanged. `.buildkite/scripts/test/perf-k6-runtime-test.sh` checks
@@ -684,6 +736,36 @@ Through the harness itself (N=2, per-process rungs 4k–12k, every run `valid`),
 162 µs/request on 2,561 VUs per process (`.k6_gc` up to 26% of one CPU per rung). A 5 s
 `gracefulStop` measured 140 µs on 962 VUs, adding `GOGC=400` measured 143 µs (GC at most 8%), and
 `GOGC=off` with `GOMEMLIMIT=2GiB` measured 131 µs.
+
+**SUT receive queues.** Over the main ladder the harness samples, about once a second, the Recv-Q
+of every TCP socket in the SUT container's network namespace (`lib/perf-sut-recvq.sh`, on by
+default, `PERF_RW_SUT_RECVQ=false` turns it off). Bytes in an established socket's Recv-Q have
+reached the SUT's kernel but not yet been read by its event loop. A non-zero Recv-Q therefore shows
+requests waiting for the event loop to read them. An empty one does not separate a kernel or bridge
+delay before the socket from delay after the read or on the client. Read it as a Little's-law estimate: the
+mean count of sockets holding unread bytes divided by the arrival rate is roughly the mean wait to
+be read (`est_wait_to_read_ms` per rung, using the offered rate). At one sample a second it is a
+sampled mean: a queue that fills and drains between samples is missed, so it bounds a sustained
+delay, not a single stall.
+It reads `ss -tanH` in the namespace through `nsenter` where that works (root), else the
+container's `/proc/<pid>/net/tcp` and `tcp6` from the host, which need no privilege. It is
+report-only and fails soft: with no SUT container (an external target), or neither source readable
+(Docker Desktop, whose containers run in a VM), it starts nothing and the status says why. It runs
+on Prometheus's cpus where `taskset` exists, and stops at the end of the ladder, after a bound on
+samples, or at 16 MiB. Parsing a 13,000-socket table took about 50 ms locally, so at one sample a
+second it uses about 5% of one of those cpus.
+
+| File (work bundle) | Holds |
+|---|---|
+| `main-sut-recvq.csv` | One row per sample: `ts`, `source` (`ss` or `proc`), `estab` (established sockets), `recvq_nonzero`, `recvq_sum_bytes`, `recvq_max_bytes`, `listen_recvq` (connections waiting in the accept queue), `read_ms` (how long the read took; empty without a sub-second clock) |
+| `main-sut-recvq-rungs.json` | Per rung, over its steady window: `samples`, `recvq_nonzero_mean`, `est_wait_to_read_ms`, `recvq_sum_bytes_mean` and `_max`, `recvq_max_bytes_max`, `nonzero_sample_frac`, `listen_recvq_max` |
+| `main-sut-recvq-status.json` | The source, or why none was readable; the interval, bounds, pinning and how the sampler stopped |
+
+MockServer exposes no event-loop lag or task-queue latency metric (`mock_server_scheduler_queued_tasks`
+counts the action scheduler's queue, not Netty's event loops), so the harness cannot read one. The
+receive queue is the outside view of the same delay; a direct one needs a product change, such as a
+gauge of each event loop's pending tasks or the delay of a task scheduled on every loop at a fixed
+interval. Tests: `.buildkite/scripts/test/perf-sut-recvq-test.sh`.
 
 **Running it.** `PERF_SERVING_RW_MULTIK6=true` on a perf build runs it against the main SUT right
 after the published sweep and stores the result under `.serving_rw_multik6`

@@ -46,7 +46,7 @@ def num: if type == "number" then . else null end;
     healthy_ceiling_p50_ms: ($hc50.healthy_ceiling_p50_ms // null),
     healthy_ceiling_p95_ms: ($hc50.healthy_ceiling_p95_ms // null),
     healthy_ceiling_p99_ms: ($hcrung.p99_ms // null),
-    healthy_ceiling_rule: "achieved>=0.95x offered, zero errors, p50<=3x flat-region p50",
+    healthy_ceiling_rule: "achieved>=0.95x offered, zero errors, p50<=3x flat-region p50, below the first failed rung (rig-valid, or excluded for errors with client headroom)",
     # Recorded, not published: the same rule plus p99 <= $p99_max_ms (programme item 44 decides any switch).
     healthy_ceiling_p99_bounded: {rps: ($hc99.healthy_ceiling_rps // null), p99_max_ms: $p99_max_ms,
                                   p99_ms: ($hc99.healthy_ceiling_p99_ms // null)},

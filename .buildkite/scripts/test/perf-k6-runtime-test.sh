@@ -52,7 +52,7 @@ STUB
 chmod +x "$T/bin/docker"
 resolve() { # env assignments... -> the harness's k6_runtime JSON in $R, its exit code in $RC
   RC=0
-  env PATH="$T/bin:$PATH" STUB_DOCKER_LOG="$T/docker.log" PERF_RW_TEST_RESOLVE_ONLY=true \
+  env PATH="$T/bin:$PATH" STUB_DOCKER_LOG="$T/docker.log" PERF_RW_TEST_RESOLVE_ONLY=true PERF_SYSFS_ROOT="$T/nosys" \
     PERF_RW_K6_CPUSETS="1;2;3;4" PERF_RW_PROCS=4 PERF_RW_REPO_ROOT="$REPO_ROOT" "$@" \
     bash "$HARNESS" >"$T/out.json" 2>"$T/stderr.log" || RC=$?
   R="$(cat "$T/out.json")"
@@ -87,14 +87,14 @@ check "Docker memory unreadable: non-zero exit" "1" "$RC"
 check "Docker memory unreadable: names the setting to use" "yes" \
   "$(grep -q 'set PERF_RW_K6_GOMEMLIMIT' "$T/stderr.log" && echo yes || echo no)"
 env PATH="$T/bin:$PATH" STUB_DOCKER_LOG="$T/docker.log" PERF_RW_K6_CPUSETS="1;2;3;4" PERF_RW_PROCS=4 \
-  PERF_RW_REPO_ROOT="$REPO_ROOT" bash "$HARNESS" "$T/fallback.json" 2>/dev/null || true
+  PERF_SYSFS_ROOT="$T/nosys" PERF_RW_REPO_ROOT="$REPO_ROOT" bash "$HARNESS" "$T/fallback.json" 2>/dev/null || true
 check "Docker memory unreadable: the written result is invalid and names it" "false true" \
   "$(jq -r '"\(.valid) \(.validity.checks[0].detail | test("GOMEMLIMIT"))"' "$T/fallback.json" 2>/dev/null || echo unreadable)"
 check "Docker memory unreadable: the result still records the resolved knobs" "400 null 5s" \
   "$(jq -r '"\(.config.k6_runtime.gogc) \(.config.k6_runtime.gomemlimit) \(.config.k6_runtime.graceful_stop)"' "$T/fallback.json" 2>/dev/null || echo unreadable)"
 rm -f "$T/resolve-out.json"; RC=0
 env PATH="$T/bin:$PATH" STUB_DOCKER_LOG="$T/docker.log" STUB_MEM="$C5_MEM" PERF_RW_TEST_RESOLVE_ONLY=true \
-  PERF_RW_K6_CPUSETS="1;2;3;4" PERF_RW_PROCS=4 PERF_RW_REPO_ROOT="$REPO_ROOT" \
+  PERF_RW_K6_CPUSETS="1;2;3;4" PERF_RW_PROCS=4 PERF_SYSFS_ROOT="$T/nosys" PERF_RW_REPO_ROOT="$REPO_ROOT" \
   bash "$HARNESS" "$T/resolve-out.json" >/dev/null 2>&1 || RC=$?
 check "the resolve-only hook with an output file (a real run) is rejected with exit 2" "2 absent" \
   "$RC $([ -e "$T/resolve-out.json" ] && echo written || echo absent)"
@@ -152,6 +152,55 @@ PERCORE_RUN="$(awk 'index($0, "run_point_multik6() {") == 1 {on = 1} on {print} 
   "$REPO_ROOT/.buildkite/scripts/steps/lib/perf-percore.sh")"
 check "every hardware-matrix point pins the VU ceiling at 2,048 (comparable across hosts)" "yes" \
   "$(grep -qE '(^|[[:space:]])PERF_RW_K6_VU_CEILING=2048([[:space:]]|$)' <<<"$PERCORE_RUN" && echo yes || echo no)"
+
+echo "--- 7. GOMEMLIMIT on a NUMA host: the memory of the node the k6 processes are bound to"
+# shellcheck source=../steps/lib/perf-cpu-topology.sh
+. "$REPO_ROOT/.buildkite/scripts/steps/lib/perf-cpu-topology.sh"
+NODE_KB=130023424 # 124 GiB, one socket of a c6i.32xlarge
+XL_MEM=266135932928 # Docker's MemTotal on a c6i.32xlarge
+mk_node() { # root node cpulist [meminfo_kb]
+  mkdir -p "$1/devices/system/node/node$2"; echo "$3" > "$1/devices/system/node/node$2/cpulist"
+  [ -z "${4:-}" ] || printf 'Node %s MemTotal:       %s kB\nNode %s MemFree:        1 kB\n' "$2" "$4" "$2" > "$1/devices/system/node/node$2/meminfo"
+}
+XL="$T/xl"; mk_node "$XL" 0 "0-31,64-95" "$NODE_KB"; mk_node "$XL" 1 "32-63,96-127" "$NODE_KB"
+gml() { PERF_SYSFS_ROOT="$1" k6_gomemlimit_resolve "${@:2}"; }
+R="$(gml "$XL" "$XL_MEM" "32-39,96-103" "40-47,104-111" "48-55,112-119" "56-63,120-127")"
+check "4 k6 on node 1: half the node over 4, not half the host over 4 (31725MiB)" "15872MiB numa_node numa_node" \
+  "$(jq -r '"\(.limit) \(.basis.memory_basis) \(.basis.bound_by)"' <<<"$R")"
+check "the basis names the node, its memory and its process count" "1 $(( NODE_KB * 1024 )) 4 15872" \
+  "$(jq -r '.basis.numa_nodes[0] | "\(.node) \(.mem_total_bytes) \(.procs) \(.per_proc_mib)"' <<<"$R")"
+check "the k6 total stays within half the node" "yes" "$([ $(( 15872 * 4 * 1048576 )) -le $(( NODE_KB * 1024 / 2 )) ] && echo yes || echo no)"
+R="$(gml "$XL" "$XL_MEM" "32-39" "40-47" "48-55" "0-7")"
+check "3 on node 1 and 1 on node 0: the busier node sets the limit" "21162MiB 0:1,1:3" \
+  "$(jq -r '"\(.limit) \([.basis.numa_nodes[] | "\(.node):\(.procs)"] | join(","))"' <<<"$R")"
+R="$(gml "$XL" $(( 8 * GIB )) "32-39" "40-47")"
+check "never above the host-wide share (a smaller Docker VM binds)" "2048MiB docker_host" \
+  "$(jq -r '"\(.limit) \(.basis.bound_by)"' <<<"$R")"
+R="$(gml "$XL" "$XL_MEM" "60-67" "40-47")"
+check "a cpuset across two nodes falls back to the host" "63451MiB docker_host true" \
+  "$(jq -r '"\(.limit) \(.basis.memory_basis) \(.basis.numa_fallback_reason | test("spans NUMA nodes"))"' <<<"$R")"
+NOMEM="$T/nomem"; mk_node "$NOMEM" 0 "0-15"
+R="$(gml "$NOMEM" "$C5_MEM" "1-2" "3-4" "5-6" "7-8")"
+check "no node meminfo: the host-wide share, saying why" "12288MiB docker_host true" \
+  "$(jq -r '"\(.limit) \(.basis.memory_basis) \(.basis.numa_fallback_reason | test("meminfo"))"' <<<"$R")"
+R="$(gml "$T/nosys" "$C5_MEM" "1" "2" "3" "4")"
+check "no NUMA at all (Docker Desktop, macOS): the host-wide share" "12288MiB docker_host" \
+  "$(jq -r '"\(.limit) \(.basis.memory_basis)"' <<<"$R")"
+R="$(gml "$XL" "" "32-39" "40-47")"
+check "Docker memory unreadable but the node readable: the node basis" "31744MiB numa_node null" \
+  "$(jq -r '"\(.limit) \(.basis.memory_basis) \(.basis.docker_mem_total_bytes)"' <<<"$R")"
+check "neither readable: fails" "fail" "$(gml "$T/nosys" "" "1" "2" || echo fail)"
+check "a malformed node meminfo is unreadable" "fail" \
+  "$(mkdir -p "$T/bad/devices/system/node/node0"; echo 'Node 0 MemTotal: lots kB' > "$T/bad/devices/system/node/node0/meminfo"; \
+     PERF_SYSFS_ROOT="$T/bad" k6_numa_node_mem_bytes 0 || echo fail)"
+resolve STUB_MEM="$XL_MEM" PERF_SYSFS_ROOT="$XL" PERF_TEST_HOST_CORES=128 PERF_RW_SERVER_CPUS=0-5 PERF_RW_PROM_CPUS=7 \
+  PERF_RW_K6_CPUSETS="32-39,96-103;40-47,104-111;48-55,112-119;56-63,120-127"
+check "harness on the two-node host: exit 0" "0" "$RC"
+check "harness: the derived limit and its node basis are recorded" "15872MiB derived numa_node 1" \
+  "$(jq -r '"\(.gomemlimit) \(.source.gomemlimit) \(.gomemlimit_basis.memory_basis) \(.gomemlimit_basis.numa_nodes[0].node)"' <<<"$R")"
+resolve STUB_MEM="$C5_MEM"
+check "harness without NUMA: the host basis, as before" "12288MiB docker_host" \
+  "$(jq -r '"\(.gomemlimit) \(.gomemlimit_basis.memory_basis)"' <<<"$R")"
 
 if [ "$FAILS" -gt 0 ]; then echo ":x: $FAILS k6 runtime check(s) failed" >&2; exit 1; fi
 echo "--- all k6 runtime fixture checks passed"
