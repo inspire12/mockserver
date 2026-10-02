@@ -234,6 +234,26 @@ public class ConnectRelayHttp2InterleavedUploadIntegrationTest {
         }
     }
 
+    @Test(timeout = 30_000)
+    public void shouldKeepTheTunnelWhenTheRelayResetsAStreamWhoseExpectHeadersItHasRelayed() throws Exception {
+        try (RelayClient client = RelayClient.connect(true)) {
+            RelayStream kept = client.get("/held");
+            // relayed as its headers at once; its body then breaks the content-length it declared, which is a stream
+            // error in the relay, not a reset from the client
+            RelayStream broken = client.open("/held", HttpMethod.POST, false, "expect", "100-continue", "content-length", "1");
+            TimeUnit.MILLISECONDS.sleep(200);
+            broken.send("longer than declared", true);
+
+            StreamOutcome brokenOutcome = broken.outcome.get(5, TimeUnit.SECONDS);
+            assertThat(brokenOutcome.toString(), brokenOutcome.resetCode, is(Http2Error.PROTOCOL_ERROR.code()));
+            assertAnswered(kept, "/held");
+            // past the delay of the answer MockServer was preparing for the broken stream
+            TimeUnit.MILLISECONDS.sleep(1_200);
+            assertAnswered(client.open("/get", HttpMethod.GET, true), "/get");
+            assertThat("the tunnel is still open", client.connection.isActive(), is(true));
+        }
+    }
+
     private static void assertInterleavedUploadsAnswered(RelayClient client) throws Exception {
         // the first stream opened sends its upload slowly; it finishes after every later stream
         RelayStream large = client.open("/large");

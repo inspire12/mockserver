@@ -397,6 +397,7 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
             final Http2Connection connection = new DefaultHttp2Connection(true);
             final HttpToHttp2ConnectionHandlerBuilder http2ConnectionHandlerBuilder = new HttpToHttp2ConnectionHandlerBuilder()
                 .frameListener(pipelineToMockServer.get(LoopbackHttp2StreamErrorHandler.class).proxyClientFrameListener(
+                    connection,
                     new InboundHttp2ToHttpAdapterBuilder(connection)
                         .maxContentLength(configuration.maxRequestBodySize())
                         .propagateSettings(true)

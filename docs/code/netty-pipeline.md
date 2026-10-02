@@ -857,13 +857,14 @@ the loopback in the order they finish, not the order their streams opened. HTTP/
 reusing the client's ids (`x-http2-stream-id`) made a request that finished after a later stream open a loopback
 stream below the last one: a connection error that closed the whole tunnel (plan item #68).
 
-`LoopbackHttp2StreamIdRemapper` sits after the loopback's `HttpToHttp2ConnectionHandler` and
-`LoopbackHttp2StreamErrorHandler` (see [Relay failure signalling](#relay-failure-signalling)):
+`LoopbackHttp2StreamIdRemapper` sits after the loopback's `HttpToHttp2ConnectionHandler`, next to
+`LoopbackHttp2StreamErrorHandler` (see [Relay failure signalling](#relay-failure-signalling)). The two may be
+in either order: the remapper is the only one that reads a message.
 
 | Direction | What it does |
 |---|---|
 | Request written to the loopback | Gives it the next loopback stream id (the last one created plus 2, or 1), records the pair, and rewrites `x-http2-stream-id`. A second message on the same client stream reuses the pair only while the loopback stream's local side is still open, which the relay's own requests never leave it: each is written whole. Otherwise it is dropped and released, with a WARN. A request sent with `Expect` reaches the relay as its headers and then its body (plan item #71). If the body arrives while MockServer is still answering the headers, a second HEADERS frame on that half-closed stream would close the whole loopback; if it arrives after that loopback stream has closed, MockServer would answer the request twice. To tell the second case from a new stream, the client's stream carries the mark that it was paired, so the mark goes when that stream does. A priority dependency (`x-http2-stream-dependency-id`) is translated, or dropped if it names no open stream or the stream itself |
-| Response read from the loopback | Rewrites `x-http2-stream-id` back to the client's id, and marks the client's stream answered when the response is a whole final (not `1xx`) one. A response with no pair, which only a server push could produce (MockServer does not push), is dropped and released |
+| Response read from the loopback | Rewrites `x-http2-stream-id` back to the client's id, and marks the client's stream answered when the response is a whole final (not `1xx`) one. A response with no pair, which only a server push could produce (MockServer does not push), is dropped and released. So is a response, `1xx` included, whose client stream has ended: writing it would fail, and a failed write closes the client's connection |
 | Loopback stream removed | Forgets the pair, so a long-lived tunnel holds one entry per open stream. A request whose stream was never opened (the write failed first) is forgotten at once, and its client stream marked as not relayed |
 
 Nothing else crosses the legs with a stream id. Each leg's `Http2ConnectionHandler` does its own flow control
@@ -975,7 +976,7 @@ back to HTTP/1.1.
 
 When the loopback cannot relay a response, the proxy client is told at once rather than left to its own
 timeout. On the HTTP/1.1 loopback a handler between its codec and `DownstreamProxyRelayHandler` does this; on the
-HTTP/2 loopback one sits between its `HttpToHttp2ConnectionHandler` and `LoopbackHttp2StreamIdRemapper`:
+HTTP/2 loopback one sits after its `HttpToHttp2ConnectionHandler`, and listens to the streams of both connections:
 
 | Loopback | Failure | What the proxy client gets |
 |---|---|---|
@@ -993,12 +994,32 @@ closes every loopback stream above its last stream id, including one opened befo
 of those is refused at once rather than left until the loopback connection closes (RFC 9113 section 6.8). The
 handler takes a peer reset from the frame listener rather than from `InboundHttp2ToHttpAdapter`, which reports one
 as an exception that `DownstreamProxyRelayHandler` would turn into closing both connections (and which throws for
-an error code Netty does not know). A response for a stream the client has already reset is dropped, since
-writing it would fail and close the client's connection. The other direction is handled the same way: a reset
-from the client (the client-facing adapter would also have closed the whole tunnel) unpairs the client's stream,
-so it is not answered with a reset, then resets the loopback stream with the client's code. When the loopback
-connection itself closes, its streams are left to
+an error code Netty does not know). When the loopback connection itself closes, its streams are left to
 [Relay loopback connection loss](#relay-loopback-connection-loss-http2).
+
+The other direction is handled the same way: a client stream that ends without a whole response is unpaired, so
+its loopback stream's close is not answered with a reset, and the loopback stream is then reset so MockServer
+stops working on the request:
+
+| The client's stream ends because | The loopback stream is reset with |
+|---|---|
+| the client sent `RST_STREAM` (taken from the frame listener: the client-facing adapter would have closed the whole tunnel) | the client's error code |
+| the relay reset it for a stream error in the client's request, such as a body longer than its `content-length` or than `maxRequestBodySize`, after a request sent with `Expect` had been relayed as its headers | `CANCEL` |
+
+The second row comes from the client connection's `onStreamClosed`, since a reset the relay sends never reaches
+its own frame listener. That event fires for every close, so it does nothing in four cases:
+
+| Client stream closes | Why the loopback stream is left alone |
+|---|---|
+| after a whole final response was relayed | the exchange is complete; the loopback stream is closing by itself |
+| because the loopback stream closed and the relay reset the client's (the rows of the table above) | RFC 9113 forbids answering a reset with a reset |
+| because the client connection closed | `UpstreamProxyRelayHandler` closes the loopback, which ends every stream on it |
+| because the loopback connection closed | `LoopbackHttp2ConnectionCloseHandler` answers the client's streams; nothing can be written to the loopback |
+
+Before, a client stream the relay reset itself stayed paired, and its loopback stream stayed open, until
+MockServer answered or the tunnel closed (plan item #85). A response that still arrives for a client stream
+that has ended is dropped by `LoopbackHttp2StreamIdRemapper` (see
+[HTTP/2 loopback stream ids](#http2-loopback-stream-ids)).
 
 ### Invariant: a handler overriding `channelReadComplete` MUST propagate it
 

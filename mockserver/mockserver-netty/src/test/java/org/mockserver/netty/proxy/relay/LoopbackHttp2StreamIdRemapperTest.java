@@ -20,6 +20,7 @@ import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.codec.http2.DefaultHttp2Connection;
 import io.netty.handler.codec.http2.Http2Connection;
 import io.netty.handler.codec.http2.Http2Error;
+import io.netty.handler.codec.http2.Http2Exception;
 import io.netty.handler.codec.http2.Http2FrameAdapter;
 import io.netty.handler.codec.http2.HttpToHttp2ConnectionHandler;
 import io.netty.handler.codec.http2.HttpToHttp2ConnectionHandlerBuilder;
@@ -116,7 +117,8 @@ public class LoopbackHttp2StreamIdRemapperTest {
     }
 
     @Test
-    public void shouldOpenIncreasingLoopbackStreamsForRequestsWrittenOutOfClientStreamOrder() {
+    public void shouldOpenIncreasingLoopbackStreamsForRequestsWrittenOutOfClientStreamOrder() throws Exception {
+        openClientStreams(1, 3, 5, 7);
         for (int clientStreamId : new int[]{3, 1, 7, 5}) {
             loopback.writeAndFlush(request(clientStreamId, "/stream-" + clientStreamId));
             pump();
@@ -132,11 +134,12 @@ public class LoopbackHttp2StreamIdRemapperTest {
     }
 
     @Test
-    public void shouldForgetEachPairWhenItsStreamCloses() {
+    public void shouldForgetEachPairWhenItsStreamCloses() throws Exception {
         // 10,000 streams in pairs written in reverse order, the second of each pair finishing first
         for (int pair = 0; pair < 5_000; pair++) {
             int first = 4 * pair + 1;
             int second = first + 2;
+            openClientStreams(first, second);
             loopback.writeAndFlush(request(second, "/stream-" + second));
             loopback.writeAndFlush(request(first, "/stream-" + first));
             assertThat(remapper.mappedStreams(), lessThanOrEqualTo(2));
@@ -144,6 +147,9 @@ public class LoopbackHttp2StreamIdRemapperTest {
             assertThat(responsesByClientStream.remove(first), is("answer for /stream-" + first));
             assertThat(responsesByClientStream.remove(second), is("answer for /stream-" + second));
             assertThat(remapper.mappedStreams(), is(0));
+            // answered, so the client's streams end too: its connection allows only so many at once
+            proxyClientConnection.stream(first).close();
+            proxyClientConnection.stream(second).close();
         }
 
         assertThat(loopback.isActive(), is(true));
@@ -152,8 +158,9 @@ public class LoopbackHttp2StreamIdRemapperTest {
     }
 
     @Test
-    public void shouldMapBothDirectionsWhileTheStreamIsOpen() {
+    public void shouldMapBothDirectionsWhileTheStreamIsOpen() throws Exception {
         serverAnswers = false;
+        openClientStreams(5);
         loopback.writeAndFlush(request(5, "/held"));
         pump();
 
@@ -206,8 +213,9 @@ public class LoopbackHttp2StreamIdRemapperTest {
     }
 
     @Test
-    public void shouldDropASecondRequestWhileTheFirstStillAwaitsItsResponse() {
+    public void shouldDropASecondRequestWhileTheFirstStillAwaitsItsResponse() throws Exception {
         serverAnswers = false;
+        openClientStreams(5);
         // as the client-facing adapter hands on a request sent with Expect whose body follows at once: an empty request,
         // then the whole request again, both on client stream 5
         FullHttpRequest headers = request(5, "/expect", "");
@@ -231,7 +239,7 @@ public class LoopbackHttp2StreamIdRemapperTest {
     @Test
     public void shouldDropASecondRequestOnAStreamWhoseLoopbackStreamHasClosed() throws Exception {
         // the client's stream stays open while it uploads the body
-        proxyClientConnection.remote().createStream(5, false);
+        openClientStreams(5, 7);
         loopback.writeAndFlush(request(5, "/headers"));
         pump();
         assertThat(responsesByClientStream.get(5), is("answer for /headers"));
@@ -320,6 +328,29 @@ public class LoopbackHttp2StreamIdRemapperTest {
     }
 
     @Test
+    public void shouldDropAndReleaseAResponseForAClientStreamThatHasEnded() throws Exception {
+        serverAnswers = false;
+        openClientStreams(5, 7);
+        loopback.writeAndFlush(request(5, "/ended"));
+        loopback.writeAndFlush(request(7, "/open"));
+        pump();
+        proxyClientConnection.stream(5).close();
+
+        // a write to the ended stream would fail, which closes the whole tunnel
+        FullHttpResponse informational = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.CONTINUE, Unpooled.copiedBuffer("1xx", StandardCharsets.UTF_8));
+        informational.headers().setInt(STREAM_ID.text(), 1);
+        FullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK, Unpooled.copiedBuffer("late", StandardCharsets.UTF_8));
+        response.headers().setInt(STREAM_ID.text(), 1);
+        loopback.writeInbound(informational, response);
+        answer(server.pipeline().lastContext(), 3, "/open");
+        pump();
+
+        assertThat(informational.refCnt(), is(0));
+        assertThat(response.refCnt(), is(0));
+        assertThat(responsesByClientStream, is(Map.of(7, "answer for /open")));
+    }
+
+    @Test
     public void shouldDropAResponseThatAnswersNoRelayedRequest() {
         EmbeddedChannel channel = new EmbeddedChannel(new LoopbackHttp2StreamIdRemapper(new MockServerLogger(), new DefaultHttp2Connection(false), null));
         FullHttpResponse pushed = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK, Unpooled.copiedBuffer("pushed", StandardCharsets.UTF_8));
@@ -350,6 +381,12 @@ public class LoopbackHttp2StreamIdRemapperTest {
         request.headers().set("host", "localhost");
         request.headers().set(SCHEME.text(), "https");
         return request;
+    }
+
+    private void openClientStreams(int... clientStreamIds) throws Http2Exception {
+        for (int clientStreamId : clientStreamIds) {
+            proxyClientConnection.remote().createStream(clientStreamId, false);
+        }
     }
 
     private static void answer(ChannelHandlerContext ctx, int streamId, String uri) {

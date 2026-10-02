@@ -4,15 +4,10 @@ import io.netty.buffer.ByteBuf;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
-import io.netty.handler.codec.http.HttpResponse;
-import io.netty.handler.codec.http.HttpStatusClass;
 import io.netty.handler.codec.http2.*;
-import io.netty.util.ReferenceCountUtil;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.slf4j.event.Level;
-
-import static io.netty.handler.codec.http2.HttpConversionUtil.ExtensionHeaderNames.STREAM_ID;
 
 /**
  * Answers the proxy client's HTTP/2 stream when the CONNECT/SOCKS relay's HTTP/2 loopback stream for it ends without
@@ -26,11 +21,12 @@ import static io.netty.handler.codec.http2.HttpConversionUtil.ExtensionHeaderNam
  *   <li>otherwise, a failure in the relay itself: {@code INTERNAL_ERROR}.</li>
  * </ul>
  * A stream whose whole final response has been relayed is answered ({@link LoopbackHttp2StreamIdRemapper#answered}),
- * so its close is not reset. A stream the client resets is unpaired, then reset on the loopback with the client's code
- * ({@link #proxyClientFrameListener}). A loopback connection that closes outright is left to
- * {@link LoopbackHttp2ConnectionCloseHandler}, which answers every client stream still open.
- * Sits between the loopback's {@link Http2ConnectionHandler} and the {@link LoopbackHttp2StreamIdRemapper}, so a response
- * still carries its loopback stream id here; one per loopback. It calls the other channel's
+ * so its close is not reset. A client stream that ends without one is unpaired, then reset on the loopback so MockServer
+ * stops working on it ({@link #proxyClientFrameListener}): with the client's code when the client reset it, with
+ * {@code CANCEL} when the relay did (a stream error in the client's request). A loopback connection that closes outright
+ * is left to {@link LoopbackHttp2ConnectionCloseHandler}, which answers every client stream still open.
+ * Sits after the loopback's {@link Http2ConnectionHandler}, on either side of the {@link LoopbackHttp2StreamIdRemapper}:
+ * it reads no message, only the two connections' stream events; one per loopback. It calls the other channel's
  * {@link Http2ConnectionHandler} directly, which is safe only because the loopback is bootstrapped on the proxy
  * client's event loop ({@code RelayConnectHandler.channelRead0}).
  */
@@ -107,23 +103,26 @@ public class LoopbackHttp2StreamErrorHandler extends ChannelInboundHandlerAdapte
     }
 
     /**
-     * Wraps the proxy client's frame listener so a stream the client resets is reset on the loopback too, and the
-     * client's other streams carry on.
+     * Wraps the proxy client's frame listener, and listens to its connection, so a client stream that ends without a
+     * whole response is reset on the loopback too, and the client's other streams carry on. A reset the client sends is
+     * relayed with its code; a stream the relay resets itself never reaches the frame listener, so its close is what
+     * resets the loopback stream.
      */
-    public Http2FrameListener proxyClientFrameListener(Http2FrameListener delegate) {
+    public Http2FrameListener proxyClientFrameListener(Http2Connection proxyClientConnection, Http2FrameListener delegate) {
+        proxyClientConnection.addListener(new Http2ConnectionAdapter() {
+            @Override
+            public void onStreamClosed(Http2Stream stream) {
+                // a closed client connection closes the loopback, and an answered stream has ended as it should
+                if (proxyClientChannel.isActive() && !streamIds.answered(stream.id())) {
+                    resetLoopbackStream(stream.id(), Http2Error.CANCEL.code());
+                }
+            }
+        });
         return new Http2FrameListenerDecorator(delegate) {
             @Override
             public void onRstStreamRead(ChannelHandlerContext ctx, int streamId, long errorCode) {
                 // not passed on, for the same reason as the loopback's: the adapter would close the whole tunnel
-                ChannelHandlerContext loopbackCtx = loopbackChannel != null ? loopbackChannel.pipeline().context(Http2ConnectionHandler.class) : null;
-                Integer loopbackStreamId = streamIds.loopbackStreamId(streamId);
-                Http2Stream loopbackStream = loopbackStreamId != null ? loopbackConnection.stream(loopbackStreamId) : null;
-                if (loopbackCtx != null && loopbackStream != null) {
-                    // unpaired first, so the client is not sent a reset in answer to its own
-                    streamIds.unpair(streamId);
-                    ((Http2ConnectionHandler) loopbackCtx.handler()).resetStream(loopbackCtx, loopbackStreamId, errorCode, loopbackCtx.newPromise());
-                    loopbackCtx.flush();
-                }
+                resetLoopbackStream(streamId, errorCode);
             }
         };
     }
@@ -133,24 +132,23 @@ public class LoopbackHttp2StreamErrorHandler extends ChannelInboundHandlerAdapte
         loopbackChannel = ctx.channel();
     }
 
-    @Override
-    public void channelRead(ChannelHandlerContext ctx, Object msg) {
-        if (msg instanceof HttpResponse && ((HttpResponse) msg).status().codeClass() != HttpStatusClass.INFORMATIONAL) {
-            Integer streamId = ((HttpResponse) msg).headers().getInt(STREAM_ID.text());
-            Integer clientStreamId = streamId != null ? streamIds.clientStreamId(streamId) : null;
-            if (clientStreamId != null && proxyClientStreamGone(clientStreamId)) {
-                // the client has already reset its stream, and a write to it would fail and close the client's connection
-                ReferenceCountUtil.release(msg);
-                return;
-            }
-        }
-        ctx.fireChannelRead(msg);
-    }
-
     private void recordLocalFailure(Http2Exception.StreamException streamException) {
         Http2Stream stream = loopbackConnection.stream(streamException.streamId());
         if (stream != null) {
             stream.setProperty(localFailureKey, streamException);
+        }
+    }
+
+    private void resetLoopbackStream(int clientStreamId, long errorCode) {
+        ChannelHandlerContext loopbackCtx = loopbackChannel != null && loopbackChannel.isActive() ? loopbackChannel.pipeline().context(Http2ConnectionHandler.class) : null;
+        Integer loopbackStreamId = streamIds.loopbackStreamId(clientStreamId);
+        Http2Stream loopbackStream = loopbackStreamId != null ? loopbackConnection.stream(loopbackStreamId) : null;
+        // a loopback stream that is closing is what ended the client's stream, and is not answered with a reset
+        if (loopbackCtx != null && loopbackStream != null && loopbackStream.state() != Http2Stream.State.CLOSED) {
+            // unpaired first, so this reset's close of the loopback stream is not relayed to the client as a reset
+            streamIds.unpair(clientStreamId);
+            ((Http2ConnectionHandler) loopbackCtx.handler()).resetStream(loopbackCtx, loopbackStreamId, errorCode, loopbackCtx.newPromise());
+            loopbackCtx.flush();
         }
     }
 
@@ -192,10 +190,5 @@ public class LoopbackHttp2StreamErrorHandler extends ChannelInboundHandlerAdapte
         }
         ((Http2ConnectionHandler) clientCtx.handler()).resetStream(clientCtx, streamId, errorCode, clientCtx.newPromise());
         clientCtx.flush();
-    }
-
-    private boolean proxyClientStreamGone(int streamId) {
-        Http2ConnectionHandler clientHandler = proxyClientChannel.pipeline().get(Http2ConnectionHandler.class);
-        return clientHandler != null && clientHandler.connection().stream(streamId) == null;
     }
 }

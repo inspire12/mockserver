@@ -547,6 +547,13 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   did not process is refused at once with `REFUSED_STREAM`, rather than when MockServer's side of the tunnel
   closes. Over HTTP/1.1 such a response now gets a `502` rather than a closed connection, unless a streamed
   response has already started, in which case the connection is still closed before the response ends.
+- **MockServer now stops working on an HTTP/2 request that a `CONNECT` or SOCKS tunnel rejects part-way
+  through.** A request sent with `Expect: 100-continue` is passed on to MockServer before its body arrives. If
+  the tunnel then rejected the request, because its body was longer than its `content-length` header or than
+  `maxRequestBodySize`, the client was told at once but MockServer was not: it carried on preparing a response
+  nobody could receive, and the tunnel kept the request open until that response arrived or the tunnel closed.
+  MockServer's copy of the request is now cancelled at the same moment. A request the client cancels itself was
+  already handled this way.
 - **HTTPS forward proxying over HTTP/2 no longer runs out of local ports under sustained load.**
   When a client negotiated HTTP/2 inside a `CONNECT` tunnel (k6, Go clients and browsers do by
   default), MockServer opened and closed a new upstream connection for every request, because only

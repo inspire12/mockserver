@@ -12,11 +12,15 @@ import io.netty.handler.codec.http2.*;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
 import org.mockito.ArgumentCaptor;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.List;
 
 import static io.netty.handler.codec.http2.HttpConversionUtil.ExtensionHeaderNames.STREAM_ID;
@@ -35,11 +39,21 @@ import static org.mockito.Mockito.when;
 
 /**
  * Which reset {@link LoopbackHttp2StreamErrorHandler} writes to the proxy client's stream when a loopback stream ends
- * without a response, read back as frames from the client's {@link Http2ConnectionHandler}.
+ * without a response, read back as frames from the client's {@link Http2ConnectionHandler}. Run with the handler on
+ * either side of {@link LoopbackHttp2StreamIdRemapper}, since neither may depend on the other's position.
  */
+@RunWith(Parameterized.class)
 public class LoopbackHttp2StreamErrorHandlerTest {
 
     private static final int STREAM_ID_UNDER_TEST = 3;
+
+    @Parameterized.Parameters(name = "error handler first: {0}")
+    public static Collection<Object[]> handlerOrders() {
+        return Arrays.asList(new Object[]{true}, new Object[]{false});
+    }
+
+    @Parameterized.Parameter
+    public boolean errorHandlerFirst;
 
     private EmbeddedChannel proxyClientChannel;
     private Http2Connection proxyClientConnection;
@@ -65,7 +79,7 @@ public class LoopbackHttp2StreamErrorHandlerTest {
         when(mockServerLogger.isEnabledForInstance(any())).thenReturn(true);
         streamIds = new LoopbackHttp2StreamIdRemapper(mockServerLogger, loopbackConnection, proxyClientChannel);
         handler = new LoopbackHttp2StreamErrorHandler(mockServerLogger, loopbackConnection, streamIds, proxyClientChannel);
-        loopbackChannel = new EmbeddedChannel(handler, streamIds);
+        loopbackChannel = errorHandlerFirst ? new EmbeddedChannel(handler, streamIds) : new EmbeddedChannel(streamIds, handler);
     }
 
     @After
@@ -162,7 +176,7 @@ public class LoopbackHttp2StreamErrorHandlerTest {
     }
 
     @Test
-    public void shouldDropAndReleaseAResponseForAStreamTheClientHasReset() throws Exception {
+    public void shouldDropAndReleaseAResponseForAClientStreamThatHasEnded() throws Exception {
         Http2Stream loopbackStream = sentStream();
         proxyClientConnection.stream(STREAM_ID_UNDER_TEST).close();
         FullHttpResponse response = response(loopbackStream.id(), HttpResponseStatus.OK);
@@ -183,14 +197,14 @@ public class LoopbackHttp2StreamErrorHandlerTest {
         EmbeddedChannel connectedLoopbackChannel = new EmbeddedChannel(new HttpToHttp2ConnectionHandlerBuilder()
             .connection(connectedLoopbackConnection)
             .frameListener(new Http2FrameAdapter())
-            .build(), connectedHandler, connectedStreamIds);
+            .build(), errorHandlerFirst ? connectedHandler : connectedStreamIds, errorHandlerFirst ? connectedStreamIds : connectedHandler);
         try {
             // the client preface and SETTINGS
             connectedLoopbackChannel.releaseOutbound();
             int loopbackStreamId = connectedStreamIds.pair(STREAM_ID_UNDER_TEST);
             connectedLoopbackConnection.local().createStream(loopbackStreamId, false).headersSent(false);
 
-            connectedHandler.proxyClientFrameListener(new Http2FrameAdapter()).onRstStreamRead(null, STREAM_ID_UNDER_TEST, Http2Error.CANCEL.code());
+            connectedHandler.proxyClientFrameListener(proxyClientConnection, new Http2FrameAdapter()).onRstStreamRead(null, STREAM_ID_UNDER_TEST, Http2Error.CANCEL.code());
 
             assertThat(resetsWrittenTo(connectedLoopbackChannel, loopbackStreamId), contains(Http2Error.CANCEL.code()));
             assertThat("the loopback stream closed while the client's still existed", connectedLoopbackConnection.stream(loopbackStreamId), nullValue());
