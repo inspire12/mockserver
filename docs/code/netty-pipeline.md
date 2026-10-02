@@ -847,6 +847,28 @@ Internal Channel"]
     DPR -->|writes responses to| CLIENT[Client Channel]
 ```
 
+### HTTP/2 loopback stream ids
+
+On an HTTP/2 relay the loopback gives each request a stream id of its own and maps it back to the client's. The
+client-facing `InboundHttp2ToHttpAdapter` hands a request on only when its upload is complete, so requests reach
+the loopback in the order they finish, not the order their streams opened. HTTP/2 stream ids must increase, so
+reusing the client's ids (`x-http2-stream-id`) made a request that finished after a later stream open a loopback
+stream below the last one: a connection error that closed the whole tunnel (plan item #68).
+
+`LoopbackHttp2StreamIdRemapper` sits after the loopback's `HttpToHttp2ConnectionHandler`:
+
+| Direction | What it does |
+|---|---|
+| Request written to the loopback | Gives it the next loopback stream id (the last one created plus 2, or 1), records the pair, and rewrites `x-http2-stream-id`. A second message on the same client stream reuses the pair only while the loopback stream's local side is still open, which the relay's own requests never leave it: each is written whole. Otherwise it is dropped and released, with a WARN. A request sent with `Expect` reaches the relay as its headers and then its body (plan item #71). If the body arrives while MockServer is still answering the headers, a second HEADERS frame on that half-closed stream would close the whole loopback; if it arrives after that loopback stream has closed, MockServer would answer the request twice. To tell the second case from a new stream, the client's stream carries the mark that it was paired, so the mark goes when that stream does. A priority dependency (`x-http2-stream-dependency-id`) is translated, or dropped if it names no open stream or the stream itself |
+| Response read from the loopback | Rewrites `x-http2-stream-id` back to the client's id. A response with no pair, which only a server push could produce (MockServer does not push), is dropped and released |
+| Loopback stream removed | Forgets the pair, so a long-lived tunnel holds one entry per open stream. A request whose stream was never opened (the write failed first) is forgotten at once |
+
+Nothing else crosses the legs with a stream id. Each leg's `Http2ConnectionHandler` does its own flow control
+(`WINDOW_UPDATE`), and PRIORITY frames, SETTINGS and GOAWAY are not relayed: a GOAWAY's last-stream-id is
+always in its own leg's ids. When the loopback connection closes, the client's connection is closed rather than
+sent a translated GOAWAY. Server push is not relayed either. The loopback never opens a stream of its own:
+the remapper's ids are the only ones it uses.
+
 ### Relay Protocol Selection (HTTP/1.1 vs HTTP/2)
 
 `RelayConnectHandler.configurePipelines()` builds both relay pipelines to match the protocol

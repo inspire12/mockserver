@@ -454,6 +454,13 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
 
 - **The log message for a request forwarded by a forward action now shows the request in its "in json"
   part.** It showed the response a second time.
+- **HTTP/2 uploads through a `CONNECT` or SOCKS tunnel no longer close the tunnel when they finish out of
+  order.** If a client opened a stream, then a later one, and the later stream's request finished first (for
+  example a large upload still being sent while small requests completed), the tunnel relayed the earlier
+  request on a stream number lower than one it had already used, which HTTP/2 does not allow. The whole
+  tunnel then closed, failing that request and every other one in flight on it. The tunnel now numbers its
+  own streams in the order requests finish, and every response still returns on the stream that asked for
+  it.
 - **HTTPS forward proxying over HTTP/2 no longer runs out of local ports under sustained load.**
   When a client negotiated HTTP/2 inside a `CONNECT` tunnel (k6, Go clients and browsers do by
   default), MockServer opened and closed a new upstream connection for every request, because only

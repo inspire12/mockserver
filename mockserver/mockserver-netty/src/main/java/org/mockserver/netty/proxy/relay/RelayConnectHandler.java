@@ -441,6 +441,7 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
             http2ConnectionHandlerBuilder.frameLogger(new Http2FrameLogger(LogLevel.TRACE, RelayConnectHandler.class.getName()));
         }
         pipelineToMockServer.addLast(http2ConnectionHandlerBuilder.build());
+        pipelineToMockServer.addLast(new LoopbackHttp2StreamIdRemapper(mockServerLogger, connection, proxyClientCtx.channel()));
         pipelineToMockServer.addLast(new DownstreamProxyRelayHandler(mockServerLogger, proxyClientCtx.channel()));
     }
 
