@@ -30,8 +30,10 @@ import io.netty.handler.codec.http2.DefaultHttp2GoAwayFrame;
 import io.netty.handler.codec.http2.DefaultHttp2Headers;
 import io.netty.handler.codec.http2.DefaultHttp2HeadersFrame;
 import io.netty.handler.codec.http2.DefaultHttp2PingFrame;
+import io.netty.handler.codec.http2.DefaultHttp2ResetFrame;
 import io.netty.handler.codec.http2.Http2DataFrame;
 import io.netty.handler.codec.http2.Http2Error;
+import io.netty.handler.codec.http2.Http2FrameCodec;
 import io.netty.handler.codec.http2.Http2FrameCodecBuilder;
 import io.netty.handler.codec.http2.Http2GoAwayFrame;
 import io.netty.handler.codec.http2.Http2HeadersFrame;
@@ -209,6 +211,25 @@ public class ConnectRelayLoopbackCloseIntegrationTest {
     }
 
     @Test(timeout = 30_000)
+    public void shouldRefuseAtOnceAStreamALoopbackGoAwaySaysWasNotProcessed() throws Exception {
+        try (Tunnel tunnel = Tunnel.open(null); RelayClient client = RelayClient.connect(tunnel.proxyPort())) {
+            RelayStream processed = client.get("/hold");
+            tunnel.upstream.awaitHeld("/hold");
+            RelayStream unprocessed = client.get("/hold-unprocessed");
+            // the relay has opened the second loopback stream before the GOAWAY arrives
+            tunnel.upstream.awaitHeld("/hold-unprocessed");
+
+            long goAwayNanos = System.nanoTime();
+            tunnel.upstream.goAwayProcessedUpTo("/hold");
+
+            // not left until the loopback connection closes
+            assertReset(unprocessed, Http2Error.REFUSED_STREAM, goAwayNanos);
+            tunnel.upstream.respond("/hold");
+            assertHealthy(processed);
+        }
+    }
+
+    @Test(timeout = 30_000)
     public void shouldRefuseOnlyARequestPastTheLoopbackConcurrentStreamLimit() throws Exception {
         try (Tunnel tunnel = Tunnel.open(1L); RelayClient client = RelayClient.connect(tunnel.proxyPort())) {
             RelayStream inFlight = client.get("/hold");
@@ -237,6 +258,25 @@ public class ConnectRelayLoopbackCloseIntegrationTest {
             RelayStream failed = client.startUpload(Upstream.EARLY_CORRUPT_RESPONSE);
             client.finishUpload(failed, HEALTHY.getBytes(StandardCharsets.UTF_8));
             assertReset(failed, Http2Error.INTERNAL_ERROR, sentNanos);
+
+            tunnel.upstream.respond("/hold");
+            assertHealthy(inFlight);
+            assertHealthy(client.get("/healthy"));
+        }
+    }
+
+    @Test(timeout = 30_000)
+    public void shouldKeepTheTunnelWhenTheClientResetsAStreamWhoseUploadIsQueuedOnTheLoopback() throws Exception {
+        try (Tunnel tunnel = Tunnel.open(null); RelayClient client = RelayClient.connect(tunnel.proxyPort())) {
+            RelayStream inFlight = client.get("/hold");
+            tunnel.upstream.awaitHeld("/hold");
+            RelayStream stalled = client.startUpload(Upstream.STALLED_UPLOAD);
+            client.finishUpload(stalled, HEALTHY.getBytes(StandardCharsets.UTF_8));
+            // the relay has opened the loopback stream, and the upload's DATA past its window is queued
+            tunnel.upstream.awaitHeld(Upstream.STALLED_UPLOAD);
+
+            stalled.channel.writeAndFlush(new DefaultHttp2ResetFrame(Http2Error.CANCEL)).sync();
+            client.ping();
 
             tunnel.upstream.respond("/hold");
             assertHealthy(inFlight);
@@ -385,12 +425,14 @@ public class ConnectRelayLoopbackCloseIntegrationTest {
      * An HTTP/2 server that answers the relay's {@code PROXIED_} handshake as MockServer does, then speaks TLS with ALPN
      * {@code h2}. A request to {@code /healthy} is answered at once; any other is held until {@link #respond}, except
      * {@link #EARLY_CORRUPT_RESPONSE}, which is answered with an undecodable body as soon as its HEADERS arrive, without
-     * reading any of its DATA, and {@link #BIG_THEN_CLOSE}, which is answered with {@link #BIG}, after which the whole
-     * connection closes.
+     * reading any of its DATA, {@link #STALLED_UPLOAD}, which is held as soon as its HEADERS arrive, without reading any
+     * of its DATA, and {@link #BIG_THEN_CLOSE}, which is answered with {@link #BIG}, after which the whole connection
+     * closes.
      */
     private static final class Upstream implements AutoCloseable {
         static final String EARLY_CORRUPT_RESPONSE = "/early-corrupt-response";
         static final String BIG_THEN_CLOSE = "/big-then-close";
+        static final String STALLED_UPLOAD = "/stalled-upload";
 
         private final ConcurrentMap<String, CompletableFuture<Channel>> held = new ConcurrentHashMap<>();
         private final BlockingQueue<Channel> connections = new LinkedBlockingQueue<>();
@@ -464,6 +506,21 @@ public class ConnectRelayLoopbackCloseIntegrationTest {
         }
 
         /**
+         * Sends a GOAWAY whose last-stream-id is the held stream for {@code path}, so the streams the upstream has opened
+         * above it count as not processed. Written below the codec, which would cover every stream it has opened.
+         */
+        void goAwayProcessedUpTo(String path) throws Exception {
+            int lastStreamId = ((Http2StreamChannel) heldStream(path).get(10, TimeUnit.SECONDS)).stream().id();
+            Channel connection = connection();
+            connection.eventLoop().submit(() -> {
+                ByteBuf frame = connection.alloc().buffer(17)
+                    .writeMedium(8).writeByte(0x7).writeByte(0).writeInt(0)
+                    .writeInt(lastStreamId).writeInt((int) Http2Error.NO_ERROR.code());
+                connection.pipeline().context(Http2FrameCodec.class).writeAndFlush(frame);
+            }).sync();
+        }
+
+        /**
          * Closes the TCP connection with a reset and no GOAWAY, bypassing the codec's own graceful close.
          */
         void resetConnection() throws Exception {
@@ -509,6 +566,11 @@ public class ConnectRelayLoopbackCloseIntegrationTest {
                             ctx.channel().config().setAutoRead(false);
                             ctx.write(new DefaultHttp2HeadersFrame(new DefaultHttp2Headers().status("200").set(HttpHeaderNames.CONTENT_ENCODING, "gzip")));
                             ctx.writeAndFlush(new DefaultHttp2DataFrame(Unpooled.wrappedBuffer(CORRUPT_GZIP), true));
+                            return;
+                        }
+                        if (STALLED_UPLOAD.equals(path)) {
+                            ctx.channel().config().setAutoRead(false);
+                            heldStream(path).complete(ctx.channel());
                             return;
                         }
                         endOfRequest = ((Http2HeadersFrame) msg).isEndStream();

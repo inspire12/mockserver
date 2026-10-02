@@ -179,6 +179,17 @@ public class LoopbackHttp2StreamIdRemapper extends ChannelDuplexHandler {
     }
 
     /**
+     * Forgets a proxy client stream's pair before its loopback stream closes, so nothing treats that close as one the
+     * client must be told of: the client has reset its own stream.
+     */
+    void unpair(int clientStreamId) {
+        Integer loopbackId = loopbackIdByClientId.get(clientStreamId);
+        if (loopbackId != null) {
+            forget(loopbackId);
+        }
+    }
+
+    /**
      * Whether a request on this proxy client stream has been handed to the loopback, so MockServer may have received it.
      * A request with {@code Expect} is handed on as its headers while the client is still sending the body.
      */

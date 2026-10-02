@@ -85,7 +85,7 @@ public class ZstdResponseAllocationBoundIntegrationTest {
     private static final byte[] DECLARES_TWO_GIB_THEN_AN_EVENT = concat(DECLARES_TWO_GIB, com.github.luben.zstd.Zstd.compress(EVENT, 3));
     private static final byte[] PLAIN = plain();
     private static final byte[] PLAIN_ZSTD = com.github.luben.zstd.Zstd.compress(PLAIN, 3);
-    private static final Duration TIMEOUT = Duration.ofSeconds(30);
+    private static final Duration TIMEOUT = Duration.ofSeconds(10);
     private static final Map<String, String> UPSTREAM_PROTOCOL = new ConcurrentHashMap<>();
 
     private static EventLoopGroup upstreamGroup;

@@ -857,7 +857,8 @@ the loopback in the order they finish, not the order their streams opened. HTTP/
 reusing the client's ids (`x-http2-stream-id`) made a request that finished after a later stream open a loopback
 stream below the last one: a connection error that closed the whole tunnel (plan item #68).
 
-`LoopbackHttp2StreamIdRemapper` sits after the loopback's `HttpToHttp2ConnectionHandler`:
+`LoopbackHttp2StreamIdRemapper` sits after the loopback's `HttpToHttp2ConnectionHandler` and
+`LoopbackHttp2StreamErrorHandler` (see [Relay failure signalling](#relay-failure-signalling)):
 
 | Direction | What it does |
 |---|---|
@@ -887,7 +888,7 @@ graceful-shutdown timeout for streams that could no longer be answered.
 | — a stream whose request was relayed but whose final response was not | `INTERNAL_ERROR`: MockServer may have acted on it |
 | — a stream whose whole final response was relayed but is still queued behind the client's flow-control window | nothing yet: the response is written out in full, then, if the client is still uploading, `NO_ERROR` |
 | — a stream whose whole final response has been written while the client is still uploading | `NO_ERROR`: the response is complete, so the client need only stop sending (RFC 9113 section 8.1) |
-| MockServer sends a `GOAWAY` | a `GOAWAY` (`NO_ERROR`, last stream id = the client's last stream), so new requests go to a new connection |
+| MockServer sends a `GOAWAY` | a `GOAWAY` (`NO_ERROR`, last stream id = the client's last stream), so new requests go to a new connection; a stream already open on the loopback above the `GOAWAY`'s last stream id is reset `REFUSED_STREAM` at once by `LoopbackHttp2StreamErrorHandler` (see [Relay failure signalling](#relay-failure-signalling)) |
 | One request cannot be written to the loopback because of that stream (a stream error) | that stream reset: `REFUSED_STREAM` when Netty refused to open the loopback stream (above a received `GOAWAY`'s last stream id, or past MockServer's concurrent-stream limit), otherwise `INTERNAL_ERROR`; the loopback and the other streams carry on |
 
 A request is usually relayed only once the client has sent all of it, but one sent with `Expect` is relayed as its
@@ -969,6 +970,35 @@ When the `http2Enabled` configuration property is `false`, `NettySslContextFacto
 `h2` via ALPN and `PortUnificationHandler` ignores the h2c cleartext preface; the relay detector is
 gated on the same flag, so it too ignores the preface. Every connection — direct or relayed — then falls
 back to HTTP/1.1.
+
+### Relay failure signalling
+
+When the loopback cannot relay a response, the proxy client is told at once rather than left to its own
+timeout. On the HTTP/1.1 loopback a handler between its codec and `DownstreamProxyRelayHandler` does this; on the
+HTTP/2 loopback one sits between its `HttpToHttp2ConnectionHandler` and `LoopbackHttp2StreamIdRemapper`:
+
+| Loopback | Failure | What the proxy client gets |
+|---|---|---|
+| HTTP/2 (`LoopbackHttp2StreamErrorHandler`) | MockServer resets the loopback stream | its stream reset with the same error code |
+| HTTP/2 | the request never reached MockServer (its HEADERS were not sent, or a `GOAWAY` says it was not processed) | its stream reset with `REFUSED_STREAM`, which tells it a retry is safe |
+| HTTP/2 | the response fails to decode, or passes `maxRequestBodySize` (`InboundHttp2ToHttpAdapter` resets it with `ENHANCE_YOUR_CALM`) | its stream reset with `INTERNAL_ERROR` |
+| HTTP/1.1 (`LoopbackHttp1ResponseErrorHandler`) | a decoder fault (corrupt body, over `maxRequestBodySize`) before the response head was relayed | `502` with `Connection: close` |
+| HTTP/1.1 | a decoder fault after the head (a streamed response) | the connection closed without the terminating chunk |
+
+The HTTP/2 handler answers the client from the loopback connection's `onStreamClosed`, and resets the client
+stream `LoopbackHttp2StreamIdRemapper` pairs with the loopback stream, so the other streams on both connections
+carry on. A stream counts as answered, and is not reset, once the remapper has marked the client's stream with a
+whole final response; that is the same mark `LoopbackHttp2ConnectionCloseHandler` reads. A `GOAWAY` from MockServer
+closes every loopback stream above its last stream id, including one opened before the `GOAWAY` arrived, and each
+of those is refused at once rather than left until the loopback connection closes (RFC 9113 section 6.8). The
+handler takes a peer reset from the frame listener rather than from `InboundHttp2ToHttpAdapter`, which reports one
+as an exception that `DownstreamProxyRelayHandler` would turn into closing both connections (and which throws for
+an error code Netty does not know). A response for a stream the client has already reset is dropped, since
+writing it would fail and close the client's connection. The other direction is handled the same way: a reset
+from the client (the client-facing adapter would also have closed the whole tunnel) unpairs the client's stream,
+so it is not answered with a reset, then resets the loopback stream with the client's code. When the loopback
+connection itself closes, its streams are left to
+[Relay loopback connection loss](#relay-loopback-connection-loss-http2).
 
 ### Invariant: a handler overriding `channelReadComplete` MUST propagate it
 

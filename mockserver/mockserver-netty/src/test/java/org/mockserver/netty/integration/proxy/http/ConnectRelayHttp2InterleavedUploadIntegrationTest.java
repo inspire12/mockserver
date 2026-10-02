@@ -23,6 +23,8 @@ import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.codec.http2.DefaultHttp2DataFrame;
 import io.netty.handler.codec.http2.DefaultHttp2Headers;
 import io.netty.handler.codec.http2.DefaultHttp2HeadersFrame;
+import io.netty.handler.codec.http2.DefaultHttp2ResetFrame;
+import io.netty.handler.codec.http2.Http2Error;
 import io.netty.handler.codec.http2.Http2DataFrame;
 import io.netty.handler.codec.http2.Http2FrameCodecBuilder;
 import io.netty.handler.codec.http2.Http2HeadersFrame;
@@ -43,6 +45,7 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 import org.mockserver.client.MockServerClient;
 import org.mockserver.configuration.ConfigurationProperties;
+import org.mockserver.model.HttpError;
 import org.mockserver.netty.MockServer;
 import org.mockserver.socket.tls.PEMToFile;
 import org.mockserver.test.Http2FlowControlBodies;
@@ -61,6 +64,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.lessThan;
 import static org.mockserver.configuration.Configuration.configuration;
+import static org.mockserver.model.HttpError.error;
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
 import static org.mockserver.model.StringBody.exact;
@@ -99,6 +103,8 @@ public class ConnectRelayHttp2InterleavedUploadIntegrationTest {
         for (int i = 0; i <= SMALL_STREAMS; i++) {
             mockServerClient.when(request().withMethod("POST").withPath("/small-" + i).withBody(exact(upload("/small-" + i)))).respond(response().withBody(answer("/small-" + i)));
         }
+        mockServerClient.when(request().withPath("/held")).respond(response().withBody(answer("/held")).withDelay(TimeUnit.MILLISECONDS, 1_000));
+        mockServerClient.when(request().withPath("/reset-cancel")).error(error().withStreamError(HttpError.StreamErrorCode.CANCEL));
 
         clientSslContext = SslContextBuilder.forClient()
             .trustManager(mockServerCaCertificate())
@@ -180,6 +186,51 @@ public class ConnectRelayHttp2InterleavedUploadIntegrationTest {
             RelayStream after = client.open("/get", HttpMethod.GET, true);
             assertAnswered(after, "/get");
             assertThat("the tunnel is still open", client.connection.isActive(), is(true));
+        }
+    }
+
+    @Test(timeout = 30_000)
+    public void shouldRelayMockServersResetOnARemappedStreamToItsOwnClientStream() throws Exception {
+        try (RelayClient client = RelayClient.connect(true)) {
+            // the client's Http2FrameCodec (DefaultHttp2Connection's DefaultEndpoint) keeps stream 1 for an upgrade, so
+            // client streams start at 3: this one is 3 and holds no loopback stream
+            RelayStream large = client.open("/large");
+            large.send(LARGE_UPLOAD.substring(0, LARGE_UPLOAD.length() / 2), false);
+            // client 5 -> loopback 1, client 7 -> loopback 3, client 9 -> loopback 5: the reset stream's loopback id
+            // is held's client id, so a reset relayed by raw id would hit held
+            RelayStream held = client.get("/held");
+            RelayStream otherHeld = client.get("/held");
+            RelayStream reset = client.get("/reset-cancel");
+
+            StreamOutcome resetOutcome = reset.outcome.get(5, TimeUnit.SECONDS);
+            assertThat(resetOutcome.toString(), resetOutcome.resetCode, is(Http2Error.CANCEL.code()));
+            assertAnswered(held, "/held");
+            assertAnswered(otherHeld, "/held");
+            large.send(LARGE_UPLOAD.substring(LARGE_UPLOAD.length() / 2), true);
+            assertAnswered(large, "/large");
+        }
+    }
+
+    @Test(timeout = 30_000)
+    public void shouldResetTheRemappedLoopbackStreamOfAStreamTheClientResets() throws Exception {
+        try (RelayClient client = RelayClient.connect(true)) {
+            // the client's Http2FrameCodec (DefaultHttp2Connection's DefaultEndpoint) keeps stream 1 for an upgrade, so
+            // client streams start at 3: this one is 3 and holds no loopback stream
+            RelayStream large = client.open("/large");
+            large.send(LARGE_UPLOAD.substring(0, LARGE_UPLOAD.length() / 2), false);
+            // client 5 -> loopback 1, client 7 -> loopback 3, client 9 -> loopback 5: sameIdAsCancelled's loopback id
+            // is cancelled's client id, so a reset relayed by raw id would hit sameIdAsCancelled
+            RelayStream cancelled = client.get("/held");
+            RelayStream kept = client.get("/held");
+            RelayStream sameIdAsCancelled = client.get("/held");
+            TimeUnit.MILLISECONDS.sleep(200);
+
+            cancelled.channel.writeAndFlush(new DefaultHttp2ResetFrame(Http2Error.CANCEL)).sync();
+
+            assertAnswered(kept, "/held");
+            assertAnswered(sameIdAsCancelled, "/held");
+            large.send(LARGE_UPLOAD.substring(LARGE_UPLOAD.length() / 2), true);
+            assertAnswered(large, "/large");
         }
     }
 
@@ -321,6 +372,12 @@ public class ConnectRelayHttp2InterleavedUploadIntegrationTest {
                 assertThat("the tunnel carries HTTP/2", sslHandler.applicationProtocol(), is(ApplicationProtocolNames.HTTP_2));
             }
             return new RelayClient(channel, tls ? HttpScheme.HTTPS : HttpScheme.HTTP);
+        }
+
+        RelayStream get(String path) throws Exception {
+            RelayStream stream = open(path);
+            stream.send("", true);
+            return stream;
         }
 
         RelayStream open(String path) throws Exception {

@@ -396,13 +396,13 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
         if (http2EnabledDownstream) {
             final Http2Connection connection = new DefaultHttp2Connection(true);
             final HttpToHttp2ConnectionHandlerBuilder http2ConnectionHandlerBuilder = new HttpToHttp2ConnectionHandlerBuilder()
-                .frameListener(
+                .frameListener(pipelineToMockServer.get(LoopbackHttp2StreamErrorHandler.class).proxyClientFrameListener(
                     new InboundHttp2ToHttpAdapterBuilder(connection)
                         .maxContentLength(configuration.maxRequestBodySize())
                         .propagateSettings(true)
                         .validateHttpHeaders(false)
                         .build()
-                );
+                ));
             if (mockServerLogger.isEnabledForInstance(TRACE)) {
                 http2ConnectionHandlerBuilder.frameLogger(new Http2FrameLogger(LogLevel.TRACE, RelayConnectHandler.class.getName()));
             }
@@ -419,14 +419,17 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
         pipelineToMockServer.addLast(new HttpClientCodec(configuration.maxInitialLineLength(), configuration.maxHeaderSize(), configuration.maxChunkSize()));
         pipelineToMockServer.addLast(new BoundedZstdHttpContentDecompressor());
         pipelineToMockServer.addLast(new StreamingAwareHttpObjectAggregator(configuration.maxRequestBodySize(), configuration, mockServerLogger, true));
+        pipelineToMockServer.addLast(new LoopbackHttp1ResponseErrorHandler(proxyClientCtx.channel()));
         // a streamed response skips the aggregator, so its bytes not yet written are bounded by the same limit
         pipelineToMockServer.addLast(new DownstreamProxyRelayHandler(mockServerLogger, proxyClientCtx.channel(), configuration.maxRequestBodySize()));
     }
 
     private void configureHttp2LoopbackPipeline(ChannelPipeline pipelineToMockServer, ChannelHandlerContext proxyClientCtx) {
         final Http2Connection connection = new DefaultHttp2Connection(false);
+        final LoopbackHttp2StreamIdRemapper streamIdRemapper = new LoopbackHttp2StreamIdRemapper(mockServerLogger, connection, proxyClientCtx.channel());
+        final LoopbackHttp2StreamErrorHandler streamErrorHandler = new LoopbackHttp2StreamErrorHandler(mockServerLogger, connection, streamIdRemapper, proxyClientCtx.channel());
         final HttpToHttp2ConnectionHandlerBuilder http2ConnectionHandlerBuilder = new HttpToHttp2ConnectionHandlerBuilder()
-            .frameListener(
+            .frameListener(streamErrorHandler.frameListener(
                 new BoundedZstdDecompressorFrameListener(
                     connection,
                     new InboundHttp2ToHttpAdapterBuilder(connection)
@@ -435,14 +438,14 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
                         .validateHttpHeaders(false)
                         .build()
                 )
-            )
+            ))
             .connection(connection)
             .flushPreface(true);
         if (mockServerLogger.isEnabledForInstance(TRACE)) {
             http2ConnectionHandlerBuilder.frameLogger(new Http2FrameLogger(LogLevel.TRACE, RelayConnectHandler.class.getName()));
         }
         pipelineToMockServer.addLast(http2ConnectionHandlerBuilder.build());
-        final LoopbackHttp2StreamIdRemapper streamIdRemapper = new LoopbackHttp2StreamIdRemapper(mockServerLogger, connection, proxyClientCtx.channel());
+        pipelineToMockServer.addLast(streamErrorHandler);
         pipelineToMockServer.addLast(streamIdRemapper);
         pipelineToMockServer.addLast(new LoopbackHttp2ConnectionCloseHandler(mockServerLogger, connection, proxyClientCtx.channel(), streamIdRemapper));
         pipelineToMockServer.addLast(new DownstreamProxyRelayHandler(mockServerLogger, proxyClientCtx.channel()));

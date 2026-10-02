@@ -529,6 +529,15 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   A request that could not be passed on, because MockServer had sent a `GOAWAY` or was already handling as many
   requests on the connection as it allows, used to close the whole tunnel; now only that request is refused.
   The client is also sent a `GOAWAY` when MockServer sends one, so it opens a new connection for new requests.
+- **A response MockServer cannot pass back through a `CONNECT` or SOCKS tunnel now fails at once instead of
+  leaving the client waiting.** Over HTTP/2, a response that failed to decode (for example a corrupt `gzip` or
+  `zstd` body) or was larger than `maxRequestBodySize` got no answer at all, so the client waited for its own
+  timeout; it is now reset with `INTERNAL_ERROR`. A stream reset by an expectation's `streamError`, or by the
+  client, used to close the whole tunnel with every other request on it; now only that stream is reset (with
+  the expectation's own error code) and the other requests carry on. A request MockServer's `GOAWAY` says it
+  did not process is refused at once with `REFUSED_STREAM`, rather than when MockServer's side of the tunnel
+  closes. Over HTTP/1.1 such a response now gets a `502` rather than a closed connection, unless a streamed
+  response has already started, in which case the connection is still closed before the response ends.
 - **HTTPS forward proxying over HTTP/2 no longer runs out of local ports under sustained load.**
   When a client negotiated HTTP/2 inside a `CONNECT` tunnel (k6, Go clients and browsers do by
   default), MockServer opened and closed a new upstream connection for every request, because only

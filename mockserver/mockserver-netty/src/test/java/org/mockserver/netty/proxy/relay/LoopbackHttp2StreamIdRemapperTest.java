@@ -169,6 +169,22 @@ public class LoopbackHttp2StreamIdRemapperTest {
     }
 
     @Test
+    public void shouldForgetAPairItIsToldToUnpairWhileItsStreamIsStillOpen() {
+        serverAnswers = false;
+        loopback.writeAndFlush(request(5, "/held"));
+        loopback.writeAndFlush(request(7, "/other"));
+        pump();
+
+        remapper.unpair(5);
+        remapper.unpair(9);
+
+        assertThat(remapper.loopbackStreamId(5), nullValue());
+        assertThat(remapper.clientStreamId(1), nullValue());
+        assertThat(remapper.loopbackStreamId(7), is(3));
+        assertThat(remapper.mappedStreams(), is(1));
+    }
+
+    @Test
     public void shouldReuseThePairForAMessageThatLeavesItsStreamOpen() {
         // the relay itself writes each request whole, which closes the loopback stream's local side; only a message
         // that leaves it open, such as these headers-only heads, can be followed by another on the same stream

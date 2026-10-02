@@ -1158,6 +1158,13 @@ from MockServer's side of the loopback was rejected because it needs a new inter
 reach a client. (Streaming of tunnelled responses is an HTTP/1.1-tunnel feature: the HTTP/2 loopback
 aggregates every response, compressed request or not.)
 
+When the relay cannot pass a response on (it fails to decode, is larger than `maxRequestBodySize`, or
+MockServer resets the stream), the tunnelled client is answered at once: over HTTP/2 its stream is reset
+(with MockServer's own error code, `REFUSED_STREAM` when the request never reached MockServer, otherwise
+`INTERNAL_ERROR`) and its other streams carry on; over HTTP/1.1 it gets a `502`, or, once a streamed
+response's head has gone, a closed connection. See
+[netty-pipeline.md](netty-pipeline.md#relay-failure-signalling).
+
 **Why a coding list is not encoded.** `MockServerHttpContentDecompressor`, like Netty's decompressor,
 compares the trimmed first value whole, so it never decodes a list in one value; a body under one is
 still in it, whether it came off the wire or was supplied by an override. Encoding it again was the old

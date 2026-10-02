@@ -30,16 +30,7 @@ public final class MockServerCaTrustTestSupport {
      * verification can stay ON.
      */
     public static SSLContext caTrustingSslContext() throws Exception {
-        String caPem;
-        try (InputStream in = MockServerCaTrustTestSupport.class.getClassLoader()
-            .getResourceAsStream(ConfigurationProperties.DEFAULT_CERTIFICATE_AUTHORITY_X509_CERTIFICATE)) {
-            if (in == null) {
-                throw new IllegalStateException("could not load MockServer CA certificate from classpath: "
-                    + ConfigurationProperties.DEFAULT_CERTIFICATE_AUTHORITY_X509_CERTIFICATE);
-            }
-            caPem = new String(in.readAllBytes(), StandardCharsets.UTF_8);
-        }
-        X509Certificate caCertificate = PEMToFile.x509FromPEM(caPem);
+        X509Certificate caCertificate = caCertificate();
 
         KeyStore trustStore = KeyStore.getInstance(KeyStore.getDefaultType());
         trustStore.load(null, null);
@@ -52,5 +43,22 @@ public final class MockServerCaTrustTestSupport {
         SSLContext sslContext = SSLContext.getInstance("TLS");
         sslContext.init(null, trustManagerFactory.getTrustManagers(), new SecureRandom());
         return sslContext;
+    }
+
+    /**
+     * MockServer's bundled Certificate Authority, for a client that is not built from an {@link SSLContext}, such as
+     * a Netty {@code SslContextBuilder}. The same conditions as {@link #caTrustingSslContext()} apply.
+     */
+    public static X509Certificate caCertificate() throws Exception {
+        String caPem;
+        try (InputStream in = MockServerCaTrustTestSupport.class.getClassLoader()
+            .getResourceAsStream(ConfigurationProperties.DEFAULT_CERTIFICATE_AUTHORITY_X509_CERTIFICATE)) {
+            if (in == null) {
+                throw new IllegalStateException("could not load MockServer CA certificate from classpath: "
+                    + ConfigurationProperties.DEFAULT_CERTIFICATE_AUTHORITY_X509_CERTIFICATE);
+            }
+            caPem = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        }
+        return PEMToFile.x509FromPEM(caPem);
     }
 }
