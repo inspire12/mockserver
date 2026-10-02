@@ -74,6 +74,14 @@
         <mockserver.testOutput>verbose</mockserver.testOutput>
         <mockserver.testLogLevel>ERROR</mockserver.testLogLevel>
         <mockserver.testArgLine/>
+        <!-- Empty default so the surefire/failsafe @{argLine} token always resolves. jacoco's
+             prepare-agent prepends its agent to it; without this default, invoking surefire:test or
+             failsafe:integration-test directly (no prepare-agent) passes a literal @{argLine} to the
+             fork, which crashes - and failsafe:integration-test alone reports that as BUILD SUCCESS. -->
+        <argLine/>
+        <!-- Modules where integration tests are always expected set this to true, so a verify that ran
+             zero ITs fails rather than passing. Override with -Dmockserver.failIfNoIntegrationTests=false. -->
+        <mockserver.failIfNoIntegrationTests>false</mockserver.failIfNoIntegrationTests>
         <disableXmlReport>false</disableXmlReport>
         <redirectTestOutputToFile>false</redirectTestOutputToFile>
         <deploy.plugin.repository.url>https://central.sonatype.com/repository/maven-releases/</deploy.plugin.repository.url>
@@ -1682,6 +1690,7 @@
                         <mockserver.maxLogEntries>1000</mockserver.maxLogEntries>
                     </systemPropertyVariables>
                     <argLine>@{argLine} -Duser.language=en -Duser.country=GB -Dmockserver.testOutput=${mockserver.testOutput} ${mockserver.testArgLine}</argLine>
+                    <failIfNoTests>${mockserver.failIfNoIntegrationTests}</failIfNoTests>
                     <disableXmlReport>${disableXmlReport}</disableXmlReport>
                     <redirectTestOutputToFile>${redirectTestOutputToFile}</redirectTestOutputToFile>
                     <properties>

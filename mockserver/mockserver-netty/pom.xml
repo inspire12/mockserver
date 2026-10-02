@@ -31,6 +31,7 @@
              (e.g. while pre-existing leaks are being triaged). Detection/logging/recording
              stay on regardless. -->
         <mockserver.failOnNettyLeak>true</mockserver.failOnNettyLeak>
+        <mockserver.failIfNoIntegrationTests>true</mockserver.failIfNoIntegrationTests>
     </properties>
 
     <dependencies>

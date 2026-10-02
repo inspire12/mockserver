@@ -16,6 +16,7 @@
 
     <properties>
         <module.name>org.mockserver.core</module.name>
+        <mockserver.failIfNoIntegrationTests>true</mockserver.failIfNoIntegrationTests>
     </properties>
 
     <dependencies>
