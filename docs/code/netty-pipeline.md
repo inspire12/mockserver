@@ -469,8 +469,8 @@ from the code that waits for writability, and each protocol has its own:
 | HTTP/1.1 response | `PacedLargeWriteHandler` (a `ChunkedWriteHandler`) sends an encoded buffer over 64 KB in 32 KB slices while the connection is writable | About one slice plus the 32 KB high-water mark |
 | HTTP/2 response | Netty's `DefaultHttp2RemoteFlowController` writes at most `max(bytesBeforeUnwritable(), 32 KB)` of DATA per pass, and nothing while the connection is unwritable | About 64 KB by Netty's design (not measured here); the rest of the body waits in the flow controller as slices of the original buffer |
 | WebSocket proxy passthrough | `FrameRelayHandler` turns the peer's `autoRead` off while the channel it writes to is unwritable | What one read of the peer brought in |
-| Streaming forward (`StreamingResponseRelayHandler`) | Reads the next upstream chunk only after the previous downstream write completes | One chunk |
-| CONNECT / SOCKS tunnel | The relay aggregates each response from the loopback server before writing it to the client | The whole response |
+| Streaming forward (`StreamingResponseRelayHandler`) | Reads the upstream again only once the decoded bytes not yet written have drained to min(64 KiB, `maxResponseBodySize` / 4); past `maxResponseBodySize` the stream is aborted | The watermark plus one upstream read, decoded |
+| CONNECT / SOCKS tunnel | The relay aggregates each response from the loopback server before writing it to the client; a streamed one is relayed piece by piece, its loopback reads stopped above min(256 KiB, `maxRequestBodySize` / 2) unwritten until the backlog halves, and the stream aborted above `maxRequestBodySize` | The whole response; a streamed one, about 256 KiB plus one read |
 
 **Why the body, and why direct memory.** An HTTP/1.1 response body is a heap buffer (usually the
 expectation's own bytes). The NIO and epoll transports copy a heap buffer into a direct buffer when it is
@@ -521,11 +521,12 @@ The request-intent (`EXPECT_STREAMING_RESPONSE`) signal is threaded onto **all t
 | Event | Action |
 |-------|--------|
 | `HttpResponse` (head) | Builds a head-only `org.mockserver.model.HttpResponse` with a `StreamingBody` sink. Completes `RESPONSE_FUTURE` immediately. |
-| `HttpContent` | Forwards the chunk to the downstream (client) channel. Appends to `StreamingBody` capture buffer (bounded to `maxStreamingCaptureBytes`). |
+| `HttpContent` | Forwards the chunk to the downstream (client) channel. Appends to `StreamingBody` capture buffer (bounded to `maxStreamingCaptureBytes`). If the chunk takes the bytes not yet written to the client past the aggregator's `maxContentLength` (`maxResponseBodySize`), `StreamingBody` refuses it and fails the stream, and the handler logs a `WARN` and closes the upstream; the rest of that read is released as it is decoded. |
 | `LastHttpContent` | Closes the sink. Signals `HttpActionHandler` to write the `FORWARDED_REQUEST` log entry using the captured bytes. |
-| `channelInactive` (mid-stream) | Calls `onError` on the sink. Emits a `FORWARDED_REQUEST` log entry flagged as truncated/aborted. |
+| `channelInactive` (mid-stream) | Calls `onError` on the sink with `StreamAbortedException`, so the client's response ends incomplete. Emits a `FORWARDED_REQUEST` log entry flagged as truncated/aborted. A body the upstream delimits by closing its connection reaches here already complete (the codec emits its `LastHttpContent` first). |
+| Failed decoder result (invalid framing) | `StreamedResponseDecoderResultGuard`, installed before the decompressor in streaming mode, fails the stream with `StreamAbortedException` and drops the rest of the message, since a decompressor would turn the failed last content into a clean end. |
 
-An `IdleStateHandler(0, 0, streamIdleTimeoutSeconds)` is added to the streaming channel so stalled upstream connections are detected without the fixed global socket timeout cutting live streams.
+An `IdleStateHandler(0, 0, streamIdleTimeoutSeconds)` is added to the streaming channel so stalled streams are detected without the fixed global socket timeout cutting live streams. Its `StreamIdleTimeoutHandler` ignores the idle event while upstream reads are withheld because more than the watermark waits for the client (`StreamingBody.isAwaitingClient()`), and otherwise fires `StreamingBody.IdleTimeoutException` and closes the channel, so the client's response ends incomplete.
 
 ### StreamingBody
 
@@ -533,6 +534,7 @@ An `IdleStateHandler(0, 0, streamIdleTimeoutSeconds)` is added to the streaming 
 
 - A `subscribe(onChunk, onComplete, onError)` API consumed by the server-side `NettyResponseWriter` to write chunks to the downstream client.
 - A bounded byte capture buffer (`capturedBytes()`) with a `truncated` flag.
+- An optional bound on chunk bytes added but not yet written: a writer reports each chunk written (or discarded) with `chunkWritten(bytes)`, which requests the next upstream read once the backlog is at or below min(64 KiB, bound / 4); a chunk that passes the bound fails the stream with `UnwrittenBytesLimitExceededException`, and the writer then closes or resets the client stream instead of writing the terminating chunk.
 
 The server-side `NettyResponseWriter` checks `response.getStreamingBody() != null` and, when true, writes a `DefaultHttpResponse` head followed by `DefaultHttpContent` frames per chunk and `LastHttpContent.EMPTY_LAST_CONTENT` at stream end — mirroring the existing `HttpSseResponseActionHandler` pattern.
 

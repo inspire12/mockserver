@@ -87,10 +87,34 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   `CONNECT` tunnel. Anyone who could make MockServer forward to a server they control could do this.
   MockServer now decompresses `zstd` in pieces of at most 64 KB; `maxRequestBodySize` limits a request's
   total (`413`) and `maxResponseBodySize` a forwarded response's (`502`), as for every other coding.
-  **Not yet fixed:** a streamed upstream response has no total limit. Streaming is on by default and an
-  upstream chooses it by answering `Content-Type: text/event-stream`, and one network read of a `zstd`
-  body (about 64 KB) can decompress to about 2 GB, so such an upstream can still exhaust MockServer's
-  memory whatever its heap size.
+  A streamed upstream response is bounded too (next entry).
+- **A streamed, compressed upstream response can no longer exhaust MockServer's memory.** Streaming is on
+  by default, and an upstream chooses it by answering `Content-Type: text/event-stream`. A response that is
+  streamed is never collected whole, so no body-size limit applied to it, and MockServer decompressed and
+  queued for the client everything one network read held at once: one read of a `zstd` body (about 64 KB)
+  decompresses to about 2 GB, so any server MockServer forwarded or proxied to could exhaust its memory
+  whatever its heap size (a 256 MB `zstd` stream, 8 KB on the wire, exhausted a 256 MB heap). MockServer
+  now limits how much of a streamed response may wait to be written to the client to `maxResponseBodySize`
+  (50 MB by default), the most the same response could hold if it were not streamed; past that it stops
+  the stream, closes the upstream connection and ends the client's response incomplete (the connection
+  closes, or on HTTP/2 and HTTP/3 the stream is reset) rather than as if it had finished. With a 256 MB
+  heap, a stream of 2 GB of `zstd` or `gzip` no longer runs MockServer out of memory. The limit applies
+  to each stream, as an aggregated response's applies to each response. A stream
+  through a `CONNECT` tunnel is limited the same way, by `maxRequestBodySize` (10 MB by default), the
+  limit that tunnel already applied to a response it collected whole. A legitimate stream is unaffected:
+  MockServer reads more of the upstream only once the client has taken nearly all of what is waiting, so
+  a slow client holds back the upstream rather than filling memory, and only a response that decompresses
+  to nearly the limit or more from a single network read is stopped. Time spent waiting for a slow
+  client in this way does not count towards `streamIdleTimeoutSeconds`, which now measures only an
+  upstream that sends nothing while MockServer is reading it; a client that pauses keeps its stream, with
+  at most the limit waiting for it, until it reads on or disconnects, as a client of a response that is
+  not streamed keeps that response; no timeout yet reclaims a client that stops reading. A stream that
+  times out, or whose upstream closes, fails or sends invalid chunk framing part-way through, now ends
+  incomplete, where before it ended with a normal final chunk and looked complete; a stream whose
+  upstream simply ends by closing its connection still completes normally. When the client goes away,
+  MockServer now also closes the upstream, where before it kept reading an endless stream forever.
+  Through a `CONNECT` tunnel this backpressure is new for a streamed response, which before was queued in
+  memory as fast as it arrived.
 
 ### Added
 

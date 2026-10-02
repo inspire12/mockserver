@@ -41,7 +41,7 @@ import static org.slf4j.event.Level.WARN;
  * <h3>Frame ordering</h3>
  * <p>Frames within a stream are dispatched one at a time: the caller parks the frame
  * and chains its continuation on the returned future. The existing backpressure
- * mechanisms (streaming body requestMore(), autoRead=false, withhold ctx.read()) ensure
+ * mechanisms (streaming body chunkWritten(bytes), autoRead=false, withhold ctx.read()) ensure
  * that the next frame is not delivered until the current one resolves — preserving the
  * same ordering guarantees as the REST-park path.
  *

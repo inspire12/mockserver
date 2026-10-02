@@ -419,7 +419,8 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
         pipelineToMockServer.addLast(new HttpClientCodec(configuration.maxInitialLineLength(), configuration.maxHeaderSize(), configuration.maxChunkSize()));
         pipelineToMockServer.addLast(new BoundedZstdHttpContentDecompressor());
         pipelineToMockServer.addLast(new StreamingAwareHttpObjectAggregator(configuration.maxRequestBodySize(), configuration, mockServerLogger, true));
-        pipelineToMockServer.addLast(new DownstreamProxyRelayHandler(mockServerLogger, proxyClientCtx.channel()));
+        // a streamed response skips the aggregator, so its bytes not yet written are bounded by the same limit
+        pipelineToMockServer.addLast(new DownstreamProxyRelayHandler(mockServerLogger, proxyClientCtx.channel(), configuration.maxRequestBodySize()));
     }
 
     private void configureHttp2LoopbackPipeline(ChannelPipeline pipelineToMockServer, ChannelHandlerContext proxyClientCtx) {

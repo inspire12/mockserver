@@ -229,23 +229,24 @@ public class NettyResponseWriter extends ResponseWriter {
         }
 
         // Subscribe to the streaming body to forward chunks as they arrive.
-        // After each chunk write completes, call streamingBody.requestMore() to trigger
-        // the next upstream read — this implements backpressure so a slow client does not
-        // cause unbounded buffering on the server channel.
+        // After each chunk write completes, call streamingBody.chunkWritten(bytes), which
+        // requests the next upstream read once the backlog has drained — this implements
+        // backpressure so a slow client does not cause unbounded buffering on the server channel.
         streamingBody.subscribe(
             // onChunk
             chunk -> {
+                final int chunkSize = chunk.readableBytes();
                 if (!ctx.channel().isActive()) {
-                    // Channel is no longer active; still request more so the upstream can
-                    // detect the closed channel on the next read and clean up.
-                    streamingBody.requestMore();
+                    // The client has gone, so nothing will take the rest of the stream
+                    streamingBody.closeUpstream();
+                    streamingBody.chunkWritten(chunkSize);
                     return;
                 }
 
                 if (!streamBreakpointsActive) {
                     // Default-off fast path: write the frame immediately (no interception)
                     DefaultHttpContent content = new DefaultHttpContent(Unpooled.copiedBuffer(chunk));
-                    ctx.writeAndFlush(content).addListener(future -> streamingBody.requestMore());
+                    ctx.writeAndFlush(content).addListener(future -> streamingBody.chunkWritten(chunkSize));
                     return;
                 }
 
@@ -270,7 +271,7 @@ public class NettyResponseWriter extends ResponseWriter {
                 if (wsFuture == null) {
                     // Cap reached or client not connected — write immediately
                     DefaultHttpContent content = new DefaultHttpContent(Unpooled.copiedBuffer(chunk));
-                    ctx.writeAndFlush(content).addListener(future -> streamingBody.requestMore());
+                    ctx.writeAndFlush(content).addListener(future -> streamingBody.chunkWritten(chunkSize));
                     return;
                 }
                 decisionFuture = wsFuture;
@@ -278,7 +279,7 @@ public class NettyResponseWriter extends ResponseWriter {
                 // Frame is parked (either in registry or dispatched via WS). The original
                 // chunk ByteBuf is NOT retained — we copied the bytes above. The chunk will
                 // be released by StreamingBody after onChunk returns.
-                // We do NOT call streamingBody.requestMore() — this stops the upstream from
+                // We do NOT call streamingBody.chunkWritten(chunkSize) — this stops the upstream from
                 // sending more chunks (backpressure). We will call it after the frame is resolved.
 
                 // When the decision future completes (from control-plane API, WS reply, or timeout),
@@ -287,25 +288,26 @@ public class NettyResponseWriter extends ResponseWriter {
                     // Marshal onto the channel's event loop
                     ctx.channel().eventLoop().execute(() -> {
                         if (!ctx.channel().isActive()) {
-                            streamingBody.requestMore();
+                            streamingBody.closeUpstream();
+                            streamingBody.chunkWritten(chunkSize);
                             return;
                         }
                         switch (decision.getAction()) {
                             case CONTINUE: {
                                 DefaultHttpContent content = new DefaultHttpContent(
                                     Unpooled.wrappedBuffer(chunkBytes));
-                                ctx.writeAndFlush(content).addListener(future -> streamingBody.requestMore());
+                                ctx.writeAndFlush(content).addListener(future -> streamingBody.chunkWritten(chunkSize));
                                 break;
                             }
                             case MODIFY: {
                                 DefaultHttpContent content = new DefaultHttpContent(
                                     Unpooled.wrappedBuffer(decision.getReplacementBody()));
-                                ctx.writeAndFlush(content).addListener(future -> streamingBody.requestMore());
+                                ctx.writeAndFlush(content).addListener(future -> streamingBody.chunkWritten(chunkSize));
                                 break;
                             }
                             case DROP: {
                                 // Discard the frame — do not write anything to the client
-                                streamingBody.requestMore();
+                                streamingBody.chunkWritten(chunkSize);
                                 break;
                             }
                             case INJECT: {
@@ -316,9 +318,9 @@ public class NettyResponseWriter extends ResponseWriter {
                                     if (ctx.channel().isActive()) {
                                         DefaultHttpContent injectedContent = new DefaultHttpContent(
                                             Unpooled.wrappedBuffer(decision.getInjectedBody()));
-                                        ctx.writeAndFlush(injectedContent).addListener(f2 -> streamingBody.requestMore());
+                                        ctx.writeAndFlush(injectedContent).addListener(f2 -> streamingBody.chunkWritten(chunkSize));
                                     } else {
-                                        streamingBody.requestMore();
+                                        streamingBody.chunkWritten(chunkSize);
                                     }
                                 });
                                 break;
@@ -326,11 +328,14 @@ public class NettyResponseWriter extends ResponseWriter {
                             case CLOSE: {
                                 // End the stream: send LastHttpContent and close. This breakpoint
                                 // action terminates the stream without going through onComplete (it
-                                // never calls requestMore), so this LastHttpContent write is the
-                                // terminal write — release the in-flight token once it flushes.
+                                // never calls chunkWritten), so this LastHttpContent write is the
+                                // terminal write — release the in-flight token once it flushes. The
+                                // upstream is closed once it has: nothing will take the rest of the
+                                // stream, and closing it first would abort the body before this flush.
                                 ChannelFuture closeFrameFuture = ctx.writeAndFlush(LastHttpContent.EMPTY_LAST_CONTENT);
                                 closeFrameFuture.addListener(future -> {
                                     ctx.close();
+                                    streamingBody.closeUpstream();
                                     // Do NOT request more — stream is ended
                                 });
                                 completeInFlightOnFlush(closeFrameFuture);
@@ -346,7 +351,7 @@ public class NettyResponseWriter extends ResponseWriter {
                                         .setMessageFormat("unrecognised stream frame breakpoint action: " + decision.getAction())
                                     );
                                 }
-                                streamingBody.requestMore();
+                                streamingBody.chunkWritten(chunkSize);
                                 break;
                             }
                         }
@@ -389,7 +394,11 @@ public class NettyResponseWriter extends ResponseWriter {
                     // Evict any remaining held frames for this stream (prevents leaks)
                     StreamFrameBreakpointRegistry.getInstance().evictStream(streamId);
                 }
-                if (ctx.channel().isActive()) {
+                if (error instanceof StreamingBody.StreamAbortedException) {
+                    // no terminating chunk, so the client sees an incomplete response (HTTP/2: a reset stream);
+                    // closing fails and releases the writes still queued
+                    completeInFlightOnFlush(ctx.close());
+                } else if (ctx.channel().isActive()) {
                     // Error terminates the stream: the LastHttpContent + close is the terminal write.
                     ChannelFuture errorFuture = ctx.writeAndFlush(LastHttpContent.EMPTY_LAST_CONTENT);
                     errorFuture.addListener(future -> ctx.close());

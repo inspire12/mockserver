@@ -341,15 +341,15 @@ the pooled chunks left from loading the 11 MiB expectation, not per-connection b
 #### Decompressed bodies
 
 **A compressed request, or an aggregated upstream response, cannot make MockServer allocate more than its
-body-size limit for it, plus one decoder buffer. A streamed upstream response has no total bound, and one
-read of it can decode to about 2 GiB (see Not covered).**
+body-size limit for it, plus one decoder buffer. A streamed upstream response cannot make MockServer hold
+more than the same limit of decoded bytes not yet written to the client: past it the stream is aborted.**
 
 | Body | Decompressor | Total bounded by |
 |---|---|---|
 | Request, every inbound protocol (HTTP/1.1, HTTP/2, HTTP/3) and the relay's streaming scan | `MockServerHttpContentDecompressor` | `maxRequestBodySize` (`413`) |
 | Forwarded response, HTTP/1.1 and HTTP/2 (`HttpClientInitializer`, `Http2ForwardStreamChildInitializer`) | `BoundedZstdHttpContentDecompressor` | `maxResponseBodySize` (`502`) |
 | MockServer's own response on the CONNECT relay's loopback, HTTP/1.1 / HTTP/2 (`RelayConnectHandler`) | `BoundedZstdHttpContentDecompressor` / `BoundedZstdDecompressorFrameListener` | `maxRequestBodySize` |
-| Streamed response (`text/event-stream`, or a client that asked to stream) | the forward client's, as above | nothing (see below) |
+| Streamed response (`text/event-stream`, or a client that asked to stream) | the forward client's or the relay's, as above | bytes not yet written to the client: `maxResponseBodySize` (forward) or `maxRequestBodySize` (relay), then the stream is aborted |
 
 Each decoder passes its output on in pieces as it produces it, and the aggregator after it refuses the
 body once the decompressed size passes the limit: a 256 MiB zstd bomb (8 KiB on the wire) gets `413` over
@@ -367,21 +367,57 @@ have received. On requests a raw Snappy block is also accepted, and its declared
 `maxRequestBodySize` before it is allocated. `zstd` is decoded only where zstd-jni is on the classpath, as
 it is in the shaded jar and the images (through `kafka-clients`).
 
+**Streamed responses.** A streamed response is not aggregated, and a decoder decompresses everything one
+upstream read delivered before read pacing (auto-read off, a read per completed write) can act: one read
+of `zstd` (about 32,000:1, so 2 GiB of zeros is about 64 KiB, one ordinary read) decodes to about 2 GiB,
+and of `gzip` (about 1,000:1) to about 64 MiB. Before the bound each decoded piece was copied and queued
+for the client at once, so a 256 MiB zstd stream (8 KiB on the wire) exhausted a 256 MiB heap. Now every
+decoded piece counts from the moment it is relayed until the client write that carries it completes
+(`StreamingBody.addChunk` to `chunkWritten`, including pieces pending before the writer subscribes; in the
+CONNECT relay's HTTP/1.1 loopback, `DownstreamProxyRelayHandler` counts the same way, and pauses the
+loopback's reads (below); before, that loopback read as fast as MockServer wrote, so a slow proxy client of
+a long stream queued all of it). The bound is the
+limit the same response would have had aggregated: `maxResponseBodySize` (50 MiB by default) for a
+forwarded stream over HTTP/1.1 or HTTP/2, `maxRequestBodySize` (10 MiB) in the relay loopback, which only
+decodes MockServer's own responses. When a piece would pass it, MockServer logs a `WARN`, closes the
+upstream connection or stream, drops what is queued and ends the client's response without its last chunk
+(HTTP/1.1: the connection closes; HTTP/2 and HTTP/3: the stream is reset), so the client sees an
+incomplete response rather than a complete short one. The rest of the read that passed the bound is still
+decoded, and released piece by piece: the same CPU an aggregated response spends past its limit.
+
+Read demand follows the backlog, so a legitimate stream is not affected: `chunkWritten` requests the next
+upstream read only once the unwritten bytes have drained to min(64 KiB, limit / 4), and the relay loopback
+stops reading above min(256 KiB, limit / 2) unwritten and resumes at half that (it no longer reads after
+every completed write while paused). A slow client therefore holds back the upstream, however many chunks
+one read holds, and the backlog passes the limit only when what arrives in one read (one upstream read
+forward; the read in progress when the relay paused) decodes to more than the limit less that watermark.
+Such a stream, a decompression bomb or an extremely compressible one, is aborted; raise the limit for it.
+While MockServer withholds reads the upstream connection is quiet by MockServer's choice, so the stream
+idle timeout (`streamIdleTimeoutSeconds`) ignores an idle event while `StreamingBody.isAwaitingClient()`
+(more than the watermark waits for the client) and applies only while MockServer is reading. A client that
+stops reading therefore keeps its stream, holding at most the limit, until it reads on or disconnects, as
+a client of an aggregated response keeps up to its limit; write completions were rejected as the progress
+signal because TCP frees a slow reader's send buffer in bursts that can be further apart than the timeout.
+Only a subscribed body can be awaiting its client: a streamed response that is replaced or dropped before
+it is written (a chaos error, rate limit or quota, a forward fallback) has nothing to take
+its bytes, so its upstream is reclaimed by the idle timeout as before, and a breakpoint `CLOSE` closes the
+upstream at once (`StreamingBody.closeUpstream()`). The bound abort, the idle timeout and an upstream that
+closes, fails or sends invalid framing mid-stream all end the client's response without its terminating
+chunk; a body that the upstream delimits by closing its connection still ends normally. When the client
+has gone, the writer closes the upstream instead of reading the rest of the stream into nothing. No timeout
+reclaims a client that stops reading, for streamed or aggregated responses alike (performance-programme
+#72).
+
+A per-read decode limit was rejected. Netty's `ZstdDecoder` decodes a whole cumulation in one `decode`
+call with no way to pause it (its removal is deferred until the call returns), and feeding the decoder
+smaller slices does not bound its output, because one zstd block of a few bytes decodes to 128 KiB (a
+1 KiB slice can decode to about 32 MiB). A demand-driven decode stage would mean holding compressed input
+across reads on every streamed response; the queue bound is one counter per stream on the path that
+already exists.
+
 **Not covered.** A zstd decoder's window is native memory allocated by zstd-jni, outside the heap and the
-direct-memory cap; Netty accepts windows up to 128 MiB (`Window_Log` 27). A **streamed** response is not
-aggregated, so no limit applies to its total, and a decoder decompresses everything one upstream read
-delivered before backpressure can act: each 64 KiB piece is copied and queued for the client at once
-(`StreamingResponseRelayHandler` → `StreamingBody` → `NettyResponseWriter`). With gzip (at most about
-1,000:1) that is bounded per read and a 1 GiB gzip stream (1 MiB on the wire) relayed at a heap peak of
-88 MiB at `-Xmx256m`; zstd reaches about 32,000:1, so a 256 MiB zstd stream (8 KiB on the wire) arrives
-in one read and exhausted a 256 MiB heap. The ceiling per read is about 2 GiB (2 GiB of zeros is about
-64 KiB of zstd, one ordinary read), so no heap size makes this safe. Streaming is on by default
-(`streamingResponsesEnabled`) and the upstream chooses it with `Content-Type: text/event-stream`. Read
-pacing already exists (auto-read off, `StreamingBody.requestMore()`); the amplification is inside one
-read, so the bound belongs at or right after the decoder (performance-programme #63). The CONNECT relay's HTTP/1.1 loopback streams a
-`text/event-stream` response the same way, though it decodes only MockServer's own responses (a forwarded
-response reaches it already decoded). The declared-size allocation is bounded on these paths too; the
-total is not.
+direct-memory cap; Netty accepts windows up to 128 MiB (`Window_Log` 27). The streamed bound is per stream,
+as an aggregated response's limit is per response, so concurrent streams each hold up to it.
 
 ### Connection Memory
 

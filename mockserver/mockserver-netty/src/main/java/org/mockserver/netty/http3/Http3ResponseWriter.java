@@ -4,6 +4,7 @@ import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.http3.DefaultHttp3DataFrame;
 import io.netty.handler.codec.http3.DefaultHttp3HeadersFrame;
+import io.netty.handler.codec.http3.Http3ErrorCode;
 import io.netty.handler.codec.quic.QuicStreamChannel;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.log.model.LogEntry;
@@ -33,8 +34,9 @@ import java.util.List;
  * {@link StreamingBody} (SSE, chunked proxy forwarding, LLM streaming),
  * the headers are sent immediately and each chunk is forwarded as an HTTP/3
  * DATA frame. The QUIC stream output is shut down when the stream completes.
- * Backpressure is implemented via {@link StreamingBody#requestMore()}: each
- * chunk write completion triggers the next upstream read.
+ * Backpressure is implemented via {@link StreamingBody#chunkWritten(int)}: each
+ * chunk write completion reports its bytes, which requests the next upstream read
+ * once the unwritten backlog has drained.
  */
 public class Http3ResponseWriter extends ResponseWriter implements StreamErrorWriter {
 
@@ -250,23 +252,24 @@ public class Http3ResponseWriter extends ResponseWriter implements StreamErrorWr
         ctx.writeAndFlush(headersFrame);
 
         // Subscribe to the streaming body to forward chunks as HTTP/3 DATA frames.
-        // After each chunk write completes, call streamingBody.requestMore() to trigger
-        // the next upstream read -- this implements backpressure so a slow client does
-        // not cause unbounded buffering.
+        // After each chunk write completes, call streamingBody.chunkWritten(bytes), which
+        // requests the next upstream read once the backlog has drained -- this implements
+        // backpressure so a slow client does not cause unbounded buffering.
         streamingBody.subscribe(
             // onChunk
             chunk -> {
+                final int chunkSize = chunk.readableBytes();
                 if (ctx.channel().isActive()) {
                     DefaultHttp3DataFrame dataFrame = new DefaultHttp3DataFrame(
                         Unpooled.copiedBuffer(chunk)
                     );
                     ctx.writeAndFlush(dataFrame).addListener(future ->
-                        streamingBody.requestMore()
+                        streamingBody.chunkWritten(chunkSize)
                     );
                 } else {
-                    // Channel is no longer active; still request more so the upstream can
-                    // detect the closed channel on the next read and clean up.
-                    streamingBody.requestMore();
+                    // The client has gone, so nothing will take the rest of the stream
+                    streamingBody.closeUpstream();
+                    streamingBody.chunkWritten(chunkSize);
                 }
             },
             // onComplete -- flush an empty DATA frame to ensure all prior chunk
@@ -299,7 +302,13 @@ public class Http3ResponseWriter extends ResponseWriter implements StreamErrorWr
                             .setThrowable(error)
                     );
                 }
-                if (ctx.channel().isActive()) {
+                if (error instanceof StreamingBody.StreamAbortedException) {
+                    // reset rather than end the stream, so the client sees an incomplete response
+                    if (ctx.channel() instanceof QuicStreamChannel) {
+                        ((QuicStreamChannel) ctx.channel()).shutdownOutput(Http3ErrorCode.H3_INTERNAL_ERROR.code());
+                    }
+                    ctx.channel().close();
+                } else if (ctx.channel().isActive()) {
                     ctx.writeAndFlush(new DefaultHttp3DataFrame(Unpooled.EMPTY_BUFFER))
                         .addListener(future -> shutdownQuicStreamOutput());
                 }

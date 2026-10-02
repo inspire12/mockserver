@@ -1,5 +1,6 @@
 package org.mockserver.httpclient;
 
+import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.handler.codec.http.*;
@@ -32,18 +33,25 @@ import static org.mockserver.model.NottableString.strings;
  * On each {@link HttpContent} chunk, the bytes are fed to the {@link StreamingBody}
  * (bounded capture + forward). On {@link LastHttpContent}, the body is completed and the
  * channel is closed. On {@code channelInactive} or exception mid-stream the body is
- * errored so the log entry can still be written with whatever was captured.
+ * errored so the log entry can still be written with whatever was captured. When more than
+ * {@code maxUnwrittenBytes} are waiting to be written to the client the body fails and the upstream is closed.
  */
 public class StreamingResponseRelayHandler extends ChannelInboundHandlerAdapter {
 
     private final Configuration configuration;
     private final MockServerLogger mockServerLogger;
+    private final long maxUnwrittenBytes;
     private StreamingBody streamingBody;
     private boolean headReceived;
 
-    public StreamingResponseRelayHandler(Configuration configuration, MockServerLogger mockServerLogger) {
+    /**
+     * @param maxUnwrittenBytes the most response bytes relayed but not yet written to the client before the stream is
+     *                          aborted, normally the aggregator's {@code maxContentLength}; zero or less for no bound
+     */
+    public StreamingResponseRelayHandler(Configuration configuration, MockServerLogger mockServerLogger, long maxUnwrittenBytes) {
         this.configuration = configuration;
         this.mockServerLogger = mockServerLogger;
+        this.maxUnwrittenBytes = maxUnwrittenBytes;
     }
 
     @Override
@@ -79,8 +87,10 @@ public class StreamingResponseRelayHandler extends ChannelInboundHandlerAdapter 
                 // Map cookies from Set-Cookie headers
                 setCookies(mockResponse);
 
-                // Attach a streaming body with per-chunk timestamp capture for replay timing
-                streamingBody = new StreamingBody(configuration.maxStreamingCaptureBytes(), true);
+                // Attach a streaming body with per-chunk timestamp capture for replay timing. Its bytes not yet written
+                // to the client are bounded as an aggregated response's total is, because one upstream read can
+                // decompress to far more than any heap (about 2 GiB of zstd per read).
+                streamingBody = new StreamingBody(configuration.maxStreamingCaptureBytes(), true, maxUnwrittenBytes);
                 mockResponse.withStreamingBody(streamingBody);
 
                 // Give the body a reference to the upstream event loop so that subscribe()
@@ -89,7 +99,8 @@ public class StreamingResponseRelayHandler extends ChannelInboundHandlerAdapter 
 
                 // Disable AUTO_READ on the upstream channel so that we only read the next
                 // chunk when the downstream write has completed (backpressure). The downstream
-                // writer calls streamingBody.requestMore() which triggers ctx.read() here.
+                // writer calls streamingBody.chunkWritten(bytes), which triggers ctx.read() here
+                // once the unwritten backlog has drained.
                 ctx.channel().config().setAutoRead(false);
                 final ChannelHandlerContext upstreamCtx = ctx;
                 streamingBody.setRequestMoreCallback(() -> {
@@ -97,6 +108,7 @@ public class StreamingResponseRelayHandler extends ChannelInboundHandlerAdapter 
                         upstreamCtx.read();
                     }
                 });
+                streamingBody.setUpstreamCloser(upstreamCtx::close);
                 // NOTE: We do NOT call ctx.read() here. The first upstream read is triggered
                 // by subscribe() after it has drained any pending chunks. This avoids a race
                 // where a chunk arrives before the subscriber is connected.
@@ -135,7 +147,7 @@ public class StreamingResponseRelayHandler extends ChannelInboundHandlerAdapter 
                 if (streamingBody != null) {
                     LastHttpContent lastContent = (LastHttpContent) msg;
                     if (lastContent.content().readableBytes() > 0) {
-                        streamingBody.addChunk(lastContent.content());
+                        addChunk(ctx, lastContent.content());
                     }
                     streamingBody.complete();
                 }
@@ -148,7 +160,7 @@ public class StreamingResponseRelayHandler extends ChannelInboundHandlerAdapter 
                 if (streamingBody != null) {
                     HttpContent content = (HttpContent) msg;
                     if (content.content().readableBytes() > 0) {
-                        streamingBody.addChunk(content.content());
+                        addChunk(ctx, content.content());
                     }
                 }
             } finally {
@@ -160,10 +172,34 @@ public class StreamingResponseRelayHandler extends ChannelInboundHandlerAdapter 
         }
     }
 
+    /**
+     * @return whether upstream reads are withheld until the client takes what waits for it (see
+     * {@link StreamingBody#isAwaitingClient()})
+     */
+    public boolean isAwaitingClient() {
+        return streamingBody != null && streamingBody.isAwaitingClient();
+    }
+
+    // A refused chunk means the stream has ended; the rest of the current read is still decoded and released here.
+    private void addChunk(ChannelHandlerContext ctx, ByteBuf content) {
+        if (!streamingBody.addChunk(content) && ctx.channel().isOpen()) {
+            if (streamingBody.getError() instanceof StreamingBody.UnwrittenBytesLimitExceededException
+                && mockServerLogger != null && mockServerLogger.isEnabledForInstance(Level.WARN)) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.WARN)
+                        .setMessageFormat("aborting streamed response from {} because more than {} bytes of it were waiting to be written to the client")
+                        .setArguments(ctx.channel().remoteAddress(), maxUnwrittenBytes)
+                );
+            }
+            ctx.close();
+        }
+    }
+
     @Override
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
         if (streamingBody != null && !streamingBody.isCompleted()) {
-            streamingBody.error(new RuntimeException("channel closed mid-stream"));
+            streamingBody.error(new StreamingBody.StreamAbortedException("upstream closed mid-stream"));
         }
         super.channelInactive(ctx);
     }
@@ -171,7 +207,8 @@ public class StreamingResponseRelayHandler extends ChannelInboundHandlerAdapter 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
         if (streamingBody != null && !streamingBody.isCompleted()) {
-            streamingBody.error(cause);
+            // the body cannot be finished, so the client's response must end incomplete
+            streamingBody.error(cause instanceof StreamingBody.StreamAbortedException ? cause : new StreamingBody.StreamAbortedException("upstream failed mid-stream", cause));
         }
         // Also complete the response future exceptionally if it hasn't been completed
         CompletableFuture<Message> responseFuture = ctx.channel().attr(RESPONSE_FUTURE).get();

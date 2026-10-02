@@ -103,9 +103,10 @@ completed when the client replies or the timeout fires. No thread is blocked.
   gRPC server-streaming over HTTP/2 and HTTP/3, WebSocket, and GraphQL subscriptions).
 - Decision actions: CONTINUE (write original frame), MODIFY (write replacement
   body), DROP (discard frame), INJECT (write original + extra frame), CLOSE
-  (send stream-end signal and close the stream).
+  (send stream-end signal and close the stream; for a forwarded stream the upstream connection is closed
+  too, since nothing will take the rest of it).
 - **Backpressure:** for SSE/chunked streams, when a frame is parked,
-  `streamingBody.requestMore()` is NOT called — this stops the upstream from
+  `streamingBody.chunkWritten(bytes)` is NOT called — this stops the upstream from
   sending more chunks. For gRPC server-streaming and WebSocket eager/scripted
   mock-generated streams (via `scheduleMessages`), the next message in the
   sequence is not scheduled until the current frame's decision is resolved
@@ -447,7 +448,7 @@ The client's reply carrying the resolution decision.
 | `MODIFY` | Write the `body` bytes instead of the original |
 | `DROP` | Discard the frame (do not write / do not process inbound) |
 | `INJECT` | Write the original frame AND an additional frame with `body` bytes |
-| `CLOSE` | End the stream (drop frame, send stream-end signal, evict remaining) |
+| `CLOSE` | End the stream (drop frame, send stream-end signal, evict remaining; a forwarded stream's upstream is closed) |
 
 #### Safety rails
 
@@ -460,7 +461,7 @@ The client's reply carrying the resolution decision.
   stream-frame dispatches are auto-completed to CONTINUE via
   `StreamFrameCallbackDispatcher.autoCompleteForClient(clientId)`.
 - **Frame ordering:** ordering is preserved by the existing backpressure
-  mechanisms (streaming body `requestMore()`, `autoRead=false`, withhold
+  mechanisms (streaming body `chunkWritten(bytes)`, `autoRead=false`, withhold
   `ctx.read()`). The next frame is not delivered until the current one resolves.
 - **Event-loop safety:** the WS dispatch future's `thenAccept` callback is
   marshalled onto the channel's event loop via `ctx.channel().eventLoop().execute()`.

@@ -7,6 +7,8 @@ import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.http3.DefaultHttp3DataFrame;
 import io.netty.handler.codec.http3.DefaultHttp3HeadersFrame;
+import io.netty.handler.codec.http3.Http3ErrorCode;
+import io.netty.handler.codec.quic.QuicStreamChannel;
 import io.netty.util.concurrent.GenericFutureListener;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
@@ -186,6 +188,90 @@ public class Http3ResponseWriterTest {
             allWrites.get(0), instanceOf(DefaultHttp3HeadersFrame.class));
         assertThat("second write should be empty DATA frame (error sentinel)",
             allWrites.get(1), instanceOf(DefaultHttp3DataFrame.class));
+    }
+
+    @Test
+    public void shouldFreeTheUnwrittenBoundAsEachDataFrameIsWritten() {
+        // given -- every DATA frame write completes at once
+        List<ByteBuf> writtenBufs = new ArrayList<>();
+        Http3ResponseWriter writer = new Http3ResponseWriter(CONFIGURATION, LOGGER, mockCtxWithListenerFiringChannel(writtenBufs));
+        StreamingBody streamingBody = new StreamingBody(0, false, 4096);
+        writer.sendResponse(request().withPath("/stream"), response().withStreamingBody(streamingBody));
+
+        // when -- a stream 25 times the bound
+        for (int i = 0; i < 100; i++) {
+            ByteBuf chunk = Unpooled.buffer(1024).writeZero(1024);
+            assertThat("chunk " + i + " is taken", streamingBody.addChunk(chunk), is(true));
+            chunk.release();
+        }
+
+        // then
+        assertThat(streamingBody.getError(), is(nullValue()));
+        assertThat(writtenBufs.size(), is(100));
+        writtenBufs.forEach(ByteBuf::release);
+    }
+
+    @Test
+    public void shouldFreeTheUnwrittenBoundForChunksAfterTheClientHasGone() {
+        // given -- a stream whose client has gone, so no DATA frame is written
+        List<ByteBuf> writtenBufs = new ArrayList<>();
+        ChannelHandlerContext ctx = mockCtxWithListenerFiringChannel(writtenBufs);
+        Http3ResponseWriter writer = new Http3ResponseWriter(CONFIGURATION, LOGGER, ctx);
+        StreamingBody streamingBody = new StreamingBody(0, false, 4096);
+        boolean[] upstreamClosed = {false};
+        streamingBody.setUpstreamCloser(() -> upstreamClosed[0] = true);
+        writer.sendResponse(request().withPath("/stream"), response().withStreamingBody(streamingBody));
+        when(ctx.channel().isActive()).thenReturn(false);
+
+        // when -- ten times the bound arrives
+        for (int i = 0; i < 40; i++) {
+            ByteBuf chunk = Unpooled.buffer(1024).writeZero(1024);
+            assertThat("chunk " + i + " is taken", streamingBody.addChunk(chunk), is(true));
+            chunk.release();
+        }
+
+        // then -- each discarded chunk was reported, so the bound never fails the stream
+        assertThat(streamingBody.getError(), is(nullValue()));
+        assertThat(writtenBufs.size(), is(0));
+        assertThat("nothing will take the rest of the stream, so the upstream is closed", upstreamClosed[0], is(true));
+    }
+
+    @Test
+    public void shouldResetTheStreamWhenUnwrittenBytesPassTheBound() {
+        // given -- a QUIC stream whose DATA frame writes never complete
+        ChannelHandlerContext ctx = mock(ChannelHandlerContext.class);
+        QuicStreamChannel channel = mock(QuicStreamChannel.class);
+        when(channel.isActive()).thenReturn(true);
+        when(ctx.channel()).thenReturn(channel);
+        List<Object> written = new ArrayList<>();
+        when(ctx.writeAndFlush(any())).thenAnswer(invocation -> {
+            written.add(invocation.getArgument(0));
+            ChannelFuture future = mock(ChannelFuture.class);
+            when(future.addListener(any())).thenReturn(future);
+            return future;
+        });
+        Http3ResponseWriter writer = new Http3ResponseWriter(CONFIGURATION, LOGGER, ctx);
+        StreamingBody streamingBody = new StreamingBody(0, false, 4096);
+        writer.sendResponse(request().withPath("/stream"), response().withStreamingBody(streamingBody));
+
+        // when
+        for (int i = 0; i < 5; i++) {
+            ByteBuf chunk = Unpooled.buffer(1024).writeZero(1024);
+            streamingBody.addChunk(chunk);
+            chunk.release();
+        }
+
+        // then -- reset, not ended: no empty DATA frame after the four within the bound
+        assertThat(streamingBody.getError(), instanceOf(StreamingBody.UnwrittenBytesLimitExceededException.class));
+        verify(channel).shutdownOutput(Http3ErrorCode.H3_INTERNAL_ERROR.code());
+        verify(channel).close();
+        assertThat("headers and the four DATA frames within the bound", written.size(), is(5));
+        for (Object frame : written) {
+            if (frame instanceof DefaultHttp3DataFrame) {
+                assertThat(((DefaultHttp3DataFrame) frame).content().readableBytes(), is(1024));
+                ((DefaultHttp3DataFrame) frame).release();
+            }
+        }
     }
 
     /**

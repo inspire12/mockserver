@@ -378,8 +378,8 @@ public class StreamingAwareHttpObjectAggregator extends CoalescingHttpObjectAggr
             return;
         }
 
-        // Install the streaming relay handler
-        StreamingResponseRelayHandler relayHandler = new StreamingResponseRelayHandler(configuration, mockServerLogger);
+        // Install the streaming relay handler; the response's bytes not yet written are bounded as its aggregated total would be
+        StreamingResponseRelayHandler relayHandler = new StreamingResponseRelayHandler(configuration, mockServerLogger, maxContentLength());
 
         // Remove HttpClientHandler to prevent double completion of RESPONSE_FUTURE
         if (pipeline.get(HttpClientHandler.class) != null) {
@@ -408,10 +408,14 @@ public class StreamingAwareHttpObjectAggregator extends CoalescingHttpObjectAggr
         if (idleTimeout > 0) {
             // Bound the stream by the stream-appropriate idle timeout (default 60s).
             pipeline.addBefore(ctx.name(), "streamIdleStateHandler", new IdleStateHandler(0, 0, idleTimeout, TimeUnit.SECONDS));
-            pipeline.addAfter("streamIdleStateHandler", "streamIdleTimeoutHandler", new StreamIdleTimeoutHandler(mockServerLogger));
+            pipeline.addAfter("streamIdleStateHandler", "streamIdleTimeoutHandler", new StreamIdleTimeoutHandler(mockServerLogger, idleTimeout, relayHandler::isAwaitingClient));
         }
         // idleTimeout == 0 explicitly disables the stream idle bound: the stream runs unbounded
         // (the socket timeout has been removed above so a healthy long-paused stream is not cut).
+
+        // An invalid message must fail the stream before a decompressor can turn its failed last content into a clean end
+        ChannelHandlerContext decompressorCtx = pipeline.context(HttpContentDecoder.class);
+        pipeline.addBefore(decompressorCtx != null ? decompressorCtx.name() : ctx.name(), "streamedResponseDecoderResultGuard", new StreamedResponseDecoderResultGuard());
 
         // Replace this aggregator with the streaming relay handler
         pipeline.replace(this, "streamingResponseRelayHandler", relayHandler);

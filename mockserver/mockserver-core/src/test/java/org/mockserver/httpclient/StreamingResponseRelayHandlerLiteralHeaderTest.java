@@ -31,7 +31,7 @@ public class StreamingResponseRelayHandlerLiteralHeaderTest {
 
     private static HttpResponse relayHead(DefaultHttpResponse nettyResponse) throws Exception {
         EmbeddedChannel channel = new EmbeddedChannel(
-            new StreamingResponseRelayHandler(Configuration.configuration(), new MockServerLogger()));
+            new StreamingResponseRelayHandler(Configuration.configuration(), new MockServerLogger(), 0));
         CompletableFuture<Message> future = new CompletableFuture<>();
         channel.attr(RESPONSE_FUTURE).set(future);
 

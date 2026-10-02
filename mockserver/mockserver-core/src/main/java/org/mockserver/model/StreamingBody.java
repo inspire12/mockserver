@@ -7,6 +7,7 @@ import io.netty.channel.EventLoop;
 import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
 /**
@@ -27,6 +28,12 @@ import java.util.function.Consumer;
  * is serialised on the upstream channel's event loop to avoid races between chunk arrival
  * and subscription. Any chunks that arrive before {@code subscribe()} are buffered as
  * {@code byte[]} arrays in a pending list and drained in order when the subscriber connects.
+ * <p>
+ * Every chunk counts towards {@code maxUnwrittenBytes} from {@link #addChunk} until its subscriber reports it
+ * written with {@link #chunkWritten}, including chunks still pending before {@code subscribe()}. Read pacing
+ * cannot bound this, because a decoder expands one upstream read synchronously (one read of {@code zstd} can
+ * decode to about 2 GiB), so a chunk that takes the total past the bound fails the stream with
+ * {@link UnwrittenBytesLimitExceededException} instead.
  */
 public class StreamingBody {
 
@@ -42,6 +49,7 @@ public class StreamingBody {
     private volatile Consumer<Throwable> onError;
     private List<Runnable> completionListeners;
     private volatile Runnable requestMoreCallback;
+    private volatile Runnable upstreamCloser;
 
     /** The upstream channel's event loop, used to serialise subscribe/addChunk/complete/error. */
     private volatile EventLoop eventLoop;
@@ -59,6 +67,15 @@ public class StreamingBody {
     /** Whether to record per-chunk monotonic timestamps on {@link #addChunk}. */
     private final boolean captureChunkTimestamps;
 
+    /** The most chunk bytes added but not yet reported written; zero or less for no bound. */
+    private final long maxUnwrittenBytes;
+    /** With a bound, {@link #chunkWritten} requests the next upstream read only at or below this many unwritten bytes. */
+    private final long requestMoreAtOrBelowBytes;
+    private final AtomicLong unwrittenBytes = new AtomicLong();
+
+    /** The most unwritten bytes at which {@link #chunkWritten} requests another read, when the bound allows it. */
+    static final long REQUEST_MORE_AT_OR_BELOW_BYTES = 64 * 1024;
+
     public StreamingBody(int maxCaptureBytes) {
         this(maxCaptureBytes, false);
     }
@@ -69,6 +86,19 @@ public class StreamingBody {
      *                              for later per-chunk replay timing
      */
     public StreamingBody(int maxCaptureBytes, boolean captureChunkTimestamps) {
+        this(maxCaptureBytes, captureChunkTimestamps, 0);
+    }
+
+    /**
+     * @param maxCaptureBytes        maximum bytes to capture for the event log
+     * @param captureChunkTimestamps when true, records a {@code System.nanoTime()} per chunk
+     *                               for later per-chunk replay timing
+     * @param maxUnwrittenBytes      the most chunk bytes added but not yet reported written by
+     *                               {@link #chunkWritten}, past which the stream fails; zero or less for no bound
+     */
+    public StreamingBody(int maxCaptureBytes, boolean captureChunkTimestamps, long maxUnwrittenBytes) {
+        this.maxUnwrittenBytes = maxUnwrittenBytes;
+        this.requestMoreAtOrBelowBytes = Math.min(REQUEST_MORE_AT_OR_BELOW_BYTES, maxUnwrittenBytes / 4);
         this.maxCaptureBytes = Math.max(0, maxCaptureBytes);
         this.captureBuffer = new ByteArrayOutputStream(Math.min(this.maxCaptureBytes, 8192));
         this.pendingChunks = new ArrayList<>();
@@ -95,7 +125,8 @@ public class StreamingBody {
      * Any chunks that arrived before subscription are drained in order and then the first
      * upstream read is triggered via {@link #requestMore()}.
      *
-     * @param onChunk    called for each {@link ByteBuf} chunk; the consumer must NOT release the buffer
+     * @param onChunk    called for each {@link ByteBuf} chunk; the consumer must NOT release the buffer, and must
+     *                   call {@link #chunkWritten} with its size once it is written or discarded
      * @param onComplete called when the last chunk has been received
      * @param onError    called if the stream is interrupted (channel close, timeout, etc.)
      */
@@ -154,10 +185,19 @@ public class StreamingBody {
      * {@link #subscribe} runs.
      *
      * @param chunk the chunk content (caller retains ownership of the buffer)
+     * @return false when the chunk was not taken: the stream has ended, or this chunk took it past
+     * {@code maxUnwrittenBytes} and failed it, so the caller should stop reading the upstream
      */
-    public void addChunk(ByteBuf chunk) {
+    public boolean addChunk(ByteBuf chunk) {
         if (completed) {
-            return;
+            return false;
+        }
+        int readable = chunk.readableBytes();
+        if (maxUnwrittenBytes > 0 && unwrittenBytes.addAndGet(readable) > maxUnwrittenBytes) {
+            // nothing pending is delivered once the stream has failed this way
+            pendingChunks = null;
+            error(new UnwrittenBytesLimitExceededException(maxUnwrittenBytes));
+            return false;
         }
         // record monotonic timestamp for per-chunk replay timing (stop once truncated —
         // a truncated recording falls back to a static/fixed response so per-chunk timing
@@ -167,7 +207,6 @@ public class StreamingBody {
             chunkTimestampsNanos.add(System.nanoTime());
         }
         // capture into bounded buffer
-        int readable = chunk.readableBytes();
         if (!truncated && readable > 0) {
             int remaining = maxCaptureBytes - captureBuffer.size();
             if (remaining > 0) {
@@ -194,6 +233,23 @@ public class StreamingBody {
             byte[] copy = new byte[readable];
             chunk.getBytes(chunk.readerIndex(), copy);
             pendingChunks.add(copy);
+        }
+        return true;
+    }
+
+    /**
+     * Report that a chunk passed to the subscriber has been written to the client, or discarded, so its bytes no
+     * longer count towards {@code maxUnwrittenBytes}. With a bound, the next upstream read is requested only once the
+     * unwritten bytes have drained to a low watermark (min(64 KiB, bound / 4)), so how many chunks one read held
+     * cannot grow the backlog; the write that drains it there always requests one. Without a bound every call
+     * requests one. Safe to call from any thread.
+     *
+     * @param bytes the chunk's readable bytes when it was passed to the subscriber
+     */
+    public void chunkWritten(int bytes) {
+        long unwritten = unwrittenBytes.addAndGet(-bytes);
+        if (maxUnwrittenBytes <= 0 || unwritten <= requestMoreAtOrBelowBytes) {
+            requestMore();
         }
     }
 
@@ -279,8 +335,8 @@ public class StreamingBody {
 
     /**
      * Set a callback that is invoked to request the next chunk from the upstream channel.
-     * Used for backpressure: the downstream writer calls {@link #requestMore()} after
-     * each chunk write completes, which triggers an upstream {@code ctx.read()}.
+     * Used for backpressure: {@link #chunkWritten} invokes it, through {@link #requestMore()},
+     * once the unwritten backlog has drained, which triggers an upstream {@code ctx.read()}.
      *
      * @param callback the callback to request the next upstream chunk
      */
@@ -289,8 +345,8 @@ public class StreamingBody {
     }
 
     /**
-     * Request the next chunk from the upstream channel. Called by the downstream writer
-     * after a chunk write completes to implement backpressure.
+     * Request the next chunk from the upstream channel, whatever the backlog. Writers report
+     * written chunks with {@link #chunkWritten} instead, which calls this when the backlog allows.
      */
     public void requestMore() {
         if (requestMoreCallback != null) {
@@ -349,5 +405,68 @@ public class StreamingBody {
             delays.add(Math.max(0, deltaNanos / 1_000_000L)); // nanos to millis, floor at 0
         }
         return delays;
+    }
+
+    /**
+     * @return true while more bytes wait for the client than the watermark at which {@link #chunkWritten} requests
+     * another read, so the upstream is not being read until the client takes them; always false without a bound
+     */
+    public boolean isAwaitingClient() {
+        // with no subscriber nothing will ever write the waiting bytes, so nothing is awaited
+        return onChunk != null && maxUnwrittenBytes > 0 && unwrittenBytes.get() > requestMoreAtOrBelowBytes;
+    }
+
+    /**
+     * Set how to close the upstream connection (or stream) this body is read from.
+     */
+    public void setUpstreamCloser(Runnable upstreamCloser) {
+        this.upstreamCloser = upstreamCloser;
+    }
+
+    /**
+     * Close the upstream this body is read from, for a subscriber that has ended the client's response itself and
+     * will take no more of the stream. Safe to call from any thread.
+     */
+    public void closeUpstream() {
+        Runnable closer = upstreamCloser;
+        if (closer != null) {
+            closer.run();
+        }
+    }
+
+    /**
+     * The stream was cut short by MockServer, so a writer must end the client's response as incomplete (close the
+     * connection or reset the stream) rather than with a normal terminating chunk, which would make it look whole.
+     */
+    public static class StreamAbortedException extends RuntimeException {
+
+        public StreamAbortedException(String message) {
+            super(message);
+        }
+
+        public StreamAbortedException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
+    /**
+     * The stream failed because more chunk bytes were added than {@code maxUnwrittenBytes} while not yet written.
+     */
+    public static final class UnwrittenBytesLimitExceededException extends StreamAbortedException {
+
+        public UnwrittenBytesLimitExceededException(long maxUnwrittenBytes) {
+            super("streamed response passed " + maxUnwrittenBytes + " bytes not yet written to the client");
+        }
+    }
+
+    /**
+     * The upstream sent nothing for the stream idle timeout while MockServer was reading it, or while nothing had
+     * subscribed to the stream (a response replaced or dropped before it was written).
+     */
+    public static final class IdleTimeoutException extends StreamAbortedException {
+
+        public IdleTimeoutException(long idleTimeoutSeconds) {
+            super("streamed response received nothing from the upstream for " + idleTimeoutSeconds + " seconds");
+        }
     }
 }

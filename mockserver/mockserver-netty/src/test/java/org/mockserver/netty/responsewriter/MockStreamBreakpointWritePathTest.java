@@ -7,6 +7,7 @@ import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.DefaultHttpContent;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpResponse;
+import io.netty.handler.codec.http.LastHttpContent;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import io.netty.util.ReferenceCountUtil;
 import org.junit.After;
@@ -27,8 +28,10 @@ import org.mockserver.serialization.model.PausedStreamFrameDTO;
 import org.mockserver.serialization.model.StreamFrameDecisionDTO;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.EnumSet;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.endsWith;
@@ -147,6 +150,79 @@ public class MockStreamBreakpointWritePathTest {
         });
     }
 
+    @Test
+    public void shouldFreeTheUnwrittenBoundForEveryDecision() throws Exception {
+        // ten 1 KiB frames through a 4 KiB bound: each decision must report its frame written, or the fifth fails the stream
+        for (String action : new String[]{"CONTINUE", "MODIFY", "INJECT", "DROP"}) {
+            resetBreakpointSingletons();
+            withStreamBreakpointFixture(4 * 1024, (data, ws, streamingBody) -> {
+                for (int i = 0; i < 10; i++) {
+                    feedFrame(data, streamingBody, kibibyte(i));
+                    PausedStreamFrameDTO paused = readPausedFrame(ws);
+                    deliverDecision(data, decision(paused, action, "MODIFY".equals(action) || "INJECT".equals(action) ? "replacement".getBytes(StandardCharsets.UTF_8) : null));
+                    drainOutbound(data);
+                }
+                assertThat(action + " frames are reported written", streamingBody.getError(), is(nullValue()));
+                assertThat(streamingBody.isCompleted(), is(false));
+            });
+        }
+    }
+
+    @Test
+    public void shouldCloseTheUpstreamAndEndTheResponseOnceOnACloseDecision() throws Exception {
+        withStreamBreakpointFixture(4 * 1024, (data, ws, streamingBody) -> {
+            AtomicBoolean upstreamClosed = new AtomicBoolean();
+            // as the real upstream does, closing it aborts the body at once
+            streamingBody.setUpstreamCloser(() -> {
+                upstreamClosed.set(true);
+                streamingBody.error(new StreamingBody.StreamAbortedException("upstream closed mid-stream"));
+            });
+            feedFrame(data, streamingBody, kibibyte(0));
+            deliverDecision(data, decision(readPausedFrame(ws), "CLOSE", null));
+
+            assertThat("nothing will take the rest of the stream, so the upstream is closed", upstreamClosed.get(), is(true));
+            assertThat("the CLOSE decision's own terminating chunk still reaches the client", data.readOutbound(), is(instanceOf(LastHttpContent.class)));
+            // the upstream closing ends the body; the response is already ended, so nothing more is written
+            data.eventLoop().execute(() -> streamingBody.error(new StreamingBody.StreamAbortedException("upstream closed mid-stream")));
+            data.runPendingTasks();
+            assertThat(data.readOutbound(), is(nullValue()));
+        });
+    }
+
+    @Test
+    public void shouldCloseTheUpstreamWhenTheClientHasGoneBeforeAParkedFrameIsDecided() throws Exception {
+        withStreamBreakpointFixture(4 * 1024, (data, ws, streamingBody) -> {
+            AtomicBoolean upstreamClosed = new AtomicBoolean();
+            streamingBody.setUpstreamCloser(() -> upstreamClosed.set(true));
+            feedFrame(data, streamingBody, kibibyte(0));
+            PausedStreamFrameDTO paused = readPausedFrame(ws);
+            data.close();
+            deliverDecision(data, decision(paused, "CONTINUE", null));
+
+            assertThat("nothing will take the rest of the stream, so the upstream is closed", upstreamClosed.get(), is(true));
+        });
+    }
+
+    @Test
+    public void shouldFreeTheUnwrittenBoundForFramesAfterTheClientHasGone() throws Exception {
+        withStreamBreakpointFixture(4 * 1024, (data, ws, streamingBody) -> {
+            AtomicBoolean upstreamClosed = new AtomicBoolean();
+            streamingBody.setUpstreamCloser(() -> upstreamClosed.set(true));
+            data.close();
+            for (int i = 0; i < 10; i++) {
+                feedFrame(data, streamingBody, kibibyte(i));
+            }
+            assertThat("frames for a closed client are reported written", streamingBody.getError(), is(nullValue()));
+            assertThat("nothing will take the rest of the stream, so the upstream is closed", upstreamClosed.get(), is(true));
+        });
+    }
+
+    private static String kibibyte(int i) {
+        char[] body = new char[1024];
+        Arrays.fill(body, (char) ('a' + i % 26));
+        return new String(body);
+    }
+
     // --- fixture wiring -----------------------------------------------------
 
     @FunctionalInterface
@@ -161,6 +237,10 @@ public class MockStreamBreakpointWritePathTest {
      * that matches the request. The response head is written and drained before the scenario runs.
      */
     private void withStreamBreakpointFixture(StreamBreakpointScenario scenario) throws Exception {
+        withStreamBreakpointFixture(0, scenario);
+    }
+
+    private void withStreamBreakpointFixture(long maxUnwrittenBytes, StreamBreakpointScenario scenario) throws Exception {
         Configuration configuration = configuration()
             .breakpointTimeoutMillis(30_000L)
             .breakpointMaxHeld(50);
@@ -185,7 +265,7 @@ public class MockStreamBreakpointWritePathTest {
                 mockServerLogger
             );
 
-            StreamingBody streamingBody = new StreamingBody(1024);
+            StreamingBody streamingBody = new StreamingBody(1024, false, maxUnwrittenBytes);
             streamingBody.setEventLoop(dataChannel.eventLoop());
 
             org.mockserver.model.HttpResponse response = response()

@@ -154,11 +154,11 @@ sequenceDiagram
     W->>C: Http3HeadersFrame (immediate)
     SB->>W: onChunk(chunk1)
     W->>C: Http3DataFrame(chunk1)
-    W->>SB: requestMore()
+    W->>SB: chunkWritten(bytes)
     U->>SB: addChunk(chunk2)
     SB->>W: onChunk(chunk2)
     W->>C: Http3DataFrame(chunk2)
-    W->>SB: requestMore()
+    W->>SB: chunkWritten(bytes)
     U->>SB: complete()
     SB->>W: onComplete()
     W->>C: QUIC stream FIN (shutdownOutput)
@@ -396,7 +396,8 @@ declarations are needed -- they resolve automatically.
 - Metrics: HTTP/3 requests counted in `REQUESTS_RECEIVED_COUNT`
 - **Streaming/SSE responses**: `StreamingBody` (SSE, chunked proxy forwarding,
   LLM streaming) responses are fully supported over HTTP/3. Each chunk is sent
-  as an HTTP/3 DATA frame with backpressure via `StreamingBody.requestMore()`.
+  as an HTTP/3 DATA frame with backpressure via `StreamingBody.chunkWritten(bytes)`, which requests the next
+  upstream read once the unwritten backlog has drained.
   The QUIC stream output is shut down on stream completion or error.
 - Unit-tested frame conversion (no native QUIC needed for bridge tests)
 - Unit-tested streaming response writer (no native QUIC needed)

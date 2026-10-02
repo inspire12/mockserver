@@ -3142,8 +3142,9 @@ public class ConfigurationProperties {
     }
 
     /**
-     * The maximum time in seconds a streaming response connection may be idle (no chunk received) before it is
-     * considered dead and closed. This replaces the fixed socket timeout for streaming responses, which would
+     * The maximum time in seconds a streaming response connection may be idle (no chunk received while MockServer is
+     * reading the upstream; not while it waits for a slow client) before it is considered dead and closed, ending the
+     * client's response incomplete. This replaces the fixed socket timeout for streaming responses, which would
      * otherwise terminate long-lived streams.
      * <p>
      * Default is 60 seconds
@@ -3263,6 +3264,9 @@ public class ConfigurationProperties {
     /**
      * Maximum aggregated body size (in bytes) accepted on responses received from upstream
      * servers when MockServer is acting as a proxy or forwarder.
+     * <p>
+     * A streamed response is not aggregated; this instead bounds its decoded bytes not yet written
+     * to the client, past which the stream is aborted and the client's response ends incomplete.
      * <p>
      * The default is 52,428,800 bytes (50 MiB).
      *
