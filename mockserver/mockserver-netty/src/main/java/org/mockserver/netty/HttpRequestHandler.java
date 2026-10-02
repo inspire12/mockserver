@@ -6,6 +6,7 @@ import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.util.AttributeKey;
 import org.apache.commons.text.StringEscapeUtils;
 import org.mockserver.configuration.Configuration;
+import org.mockserver.configuration.ServerTlsSettings;
 import org.mockserver.dashboard.DashboardHandler;
 import org.mockserver.lifecycle.LifeCycle;
 import org.mockserver.log.model.LogEntry;
@@ -547,7 +548,7 @@ public class HttpRequestHandler extends SimpleChannelInboundHandler<HttpRequest>
                         return;
                     }
 
-                    if (configuration.tlsMutualAuthenticationRequired() && !isSslEnabledUpstream(ctx.channel())) {
+                    if (Boolean.TRUE.equals(ServerTlsSettings.of(configuration).tlsMutualAuthenticationRequired()) && !isSslEnabledUpstream(ctx.channel())) {
                         HttpResponse upgradeResponse = response()
                             .withStatusCode(426)
                             .withReasonPhrase("Upgrade Required")

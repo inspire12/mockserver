@@ -42,7 +42,8 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   arrived at that moment passed without credentials. A TLS connection opened while a `PUT` changed
   `tlsMutualAuthenticationRequired` or its certificate chain could keep the old TLS setup in use until
   the next TLS change. Control-plane authentication and authorization settings, and the server TLS
-  settings, now switch from all old to all new values with nothing in between. The window was under a
+  settings, now switch from all old to all new values with nothing in between, and so does the
+  `426 Upgrade Required` answer to a plain-text request when mTLS is required. The window was under a
   millisecond, so hitting it needed a request timed against an operator's `PUT`. A `PUT` that is
   rejected, for example because a certificate path does not exist or `globalResponseDelayMillis` is
   negative, now answers `400` having changed nothing; before, the fields ahead of the invalid one stayed

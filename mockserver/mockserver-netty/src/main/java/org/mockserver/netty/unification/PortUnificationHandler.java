@@ -20,6 +20,8 @@ import org.mockserver.codec.MockServerHttpServerCodec;
 import org.mockserver.codec.PreserveHeadersNettyRemoves;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.configuration.ConfigurationProperties;
+import org.mockserver.configuration.ControlPlaneAuthenticationSettings;
+import org.mockserver.configuration.ServerTlsSettings;
 import org.mockserver.dashboard.DashboardWebSocketHandler;
 import org.mockserver.lifecycle.LifeCycle;
 import org.mockserver.log.model.LogEntry;
@@ -487,7 +489,9 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
             addLastIfNotPresent(pipeline, httpContentLengthRemover);
             addLastIfNotPresent(pipeline, new EarlyMatchingHandler(configuration, httpState, actionHandler, isSslEnabledUpstream(ctx.channel())));
             addLastIfNotPresent(pipeline, HttpObjectAggregators.httpObjectAggregator(configuration.maxRequestBodySize()));
-            if (configuration.tlsMutualAuthenticationRequired() && configuration.controlPlaneTLSMutualAuthenticationRequired() && !isSslEnabledUpstream(ctx.channel())) {
+            if (Boolean.TRUE.equals(ServerTlsSettings.of(configuration).tlsMutualAuthenticationRequired())
+                && Boolean.TRUE.equals(ControlPlaneAuthenticationSettings.of(configuration).controlPlaneTLSMutualAuthenticationRequired())
+                && !isSslEnabledUpstream(ctx.channel())) {
                 HttpResponse httpResponse = response()
                     .withStatusCode(426)
                     .withHeader("Upgrade", "TLS/1.2, HTTP/1.1")

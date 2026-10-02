@@ -108,6 +108,10 @@ import static org.hamcrest.Matchers.is;
  * the call sites AND the set of modules to cover automatically. If it fails on a new call site, the
  * correct first response is to make the site consult the {@link Configuration} instance — NOT to add an
  * allowlist entry. Allowlist only genuinely instance-unreachable bootstrap code, and say why.
+ *
+ * <p>The same scan also enforces the snapshot rule: control-plane authentication and server TLS values are
+ * read through {@link ControlPlaneAuthenticationSettings} and {@link ServerTlsSettings}, never field by field
+ * (see {@link #shouldReadSnapshottedSettingsOnlyThroughTheirSnapshots()}).
  */
 public class ConfigurationCallSiteGuardTest {
 
@@ -366,6 +370,338 @@ public class ConfigurationCallSiteGuardTest {
                 + "ALLOWED_STATIC_ONLY_CALL_SITES, with a reason, if no Configuration instance can exist "
                 + "at that point:\n  " + String.join("\n  ", violations) + "\n",
             violations, is(empty()));
+    }
+
+    /**
+     * Snapshot rule: a value held by {@link ControlPlaneAuthenticationSettings} or {@link ServerTlsSettings}
+     * must be read from the snapshot, never through its {@link Configuration} getter or the static store.
+     * A {@code PUT} writes the fields one at a time and republishes the snapshots once at the end, so a
+     * field-by-field read can see a mix of old and new values (mTLS switched off before JWT is switched on
+     * reads as "no authentication required"). The guarded getters are derived from the snapshot classes,
+     * so a newly snapshotted field is covered without editing this test.
+     */
+    @Test
+    public void shouldReadSnapshottedSettingsOnlyThroughTheirSnapshots() throws Exception {
+        Set<String> guardedGetters = snapshottedGetters(SNAPSHOT_CLASSES);
+        List<Path> moduleClassRoots = moduleClassRoots();
+        Set<String> scannedModules = moduleClassRoots.stream()
+            .map(p -> p.getParent().getParent().getFileName().toString())
+            .collect(Collectors.toCollection(TreeSet::new));
+        assertThat("mockserver-core must be scanned", scannedModules, hasItem("mockserver-core"));
+        assertThat("mockserver-netty must be scanned", scannedModules, hasItem("mockserver-netty"));
+
+        Map<String, Set<String>> reads = new TreeMap<>();
+        for (Path root : moduleClassRoots) {
+            try (Stream<Path> files = Files.walk(root)) {
+                for (Path classFile : files.filter(f -> f.toString().endsWith(".class")).collect(Collectors.toList())) {
+                    reads.putAll(directSnapshottedReads(Files.readAllBytes(classFile), guardedGetters));
+                }
+            }
+        }
+        assertThat("guard must find direct reads of snapshotted getters (the definition classes alone have dozens) — "
+            + "a scan that indexes nothing would pass vacuously", reads.size(), greaterThan(10));
+
+        List<String> violations = new ArrayList<>();
+        for (Map.Entry<String, Set<String>> entry : reads.entrySet()) {
+            String method = entry.getKey();
+            String className = method.substring(0, method.indexOf('#'));
+            String topLevelClassName = className.contains("$") ? className.substring(0, className.indexOf('$')) : className;
+            if (SNAPSHOT_DEFINITION_CLASSES.containsKey(topLevelClassName)) {
+                continue;
+            }
+            AllowedRead allowed = ALLOWED_DIRECT_SNAPSHOTTED_READS.get(method.substring(0, method.indexOf('(')));
+            if (allowed == null) {
+                allowed = ALLOWED_DIRECT_SNAPSHOTTED_READS.get(className);
+            }
+            Set<String> disallowed = new TreeSet<>(entry.getValue());
+            if (allowed != null) {
+                disallowed.removeAll(allowed.getters);
+            }
+            if (!disallowed.isEmpty()) {
+                violations.add(method + " reads " + disallowed);
+            }
+        }
+
+        assertThat("these methods read a control-plane authentication or server TLS value through a Configuration "
+                + "getter or the static store instead of its snapshot, so a multi-field PUT /mockserver/configuration "
+                + "can be seen half-applied. Read ControlPlaneAuthenticationSettings.of(configuration) or "
+                + "ServerTlsSettings.of(configuration) once and decide from it; only add to "
+                + "ALLOWED_DIRECT_SNAPSHOTTED_READS, with a reason, a site whose decision cannot weaken "
+                + "authentication or TLS:\n  " + String.join("\n  ", violations) + "\n",
+            violations, is(empty()));
+    }
+
+    @Test
+    public void shouldGuardEveryValueTheSnapshotsExpose() {
+        Set<String> guardedGetters = snapshottedGetters(SNAPSHOT_CLASSES);
+        for (Class<?> snapshotClass : SNAPSHOT_CLASSES) {
+            for (Method method : publicNoArgGetters(snapshotClass)) {
+                if (!SNAPSHOT_DERIVED_ACCESSORS.containsKey(method.getName())) {
+                    assertThat(snapshotClass.getSimpleName() + "." + method.getName() + "() has no Configuration getter "
+                            + "of the same name, so direct reads of the value cannot be guarded. Name it after the "
+                            + "Configuration getter, or list it in SNAPSHOT_DERIVED_ACCESSORS if it is derived",
+                        guardedGetters, hasItem(method.getName()));
+                }
+            }
+        }
+        for (String name : java.util.Arrays.asList("controlPlaneTLSMutualAuthenticationRequired", "controlPlaneJWTAuthenticationRequired",
+            "controlPlaneOidcAuthenticationRequired", "controlPlaneAuthorizationEnabled", "controlPlaneScopeMapping",
+            "tlsMutualAuthenticationRequired", "tlsMutualAuthenticationCertificateChain", "tlsProtocols", "x509CertificatePath")) {
+            assertThat(guardedGetters, hasItem(name));
+        }
+
+        for (Map.Entry<String, AllowedRead> allowed : ALLOWED_DIRECT_SNAPSHOTTED_READS.entrySet()) {
+            assertThat(allowed.getKey() + " needs a reason", allowed.getValue().reason.trim().isEmpty(), is(false));
+            for (String getter : allowed.getValue().getters) {
+                assertThat(allowed.getKey() + " permits " + getter + ", which is not a snapshotted getter",
+                    guardedGetters, hasItem(getter));
+            }
+        }
+
+        Set<String> extended = snapshottedGetters(java.util.Arrays.asList(ServerTlsSettings.class, ExtendedSnapshotFixture.class));
+        assertThat("a getter added to a snapshot class must join the guarded set without editing this test",
+            extended, hasItem("maxExpectations"));
+        assertThat(extended.contains("notAConfigurationGetter"), is(false));
+    }
+
+    @Test
+    public void shouldDetectEveryFormOfDirectSnapshottedRead() throws IOException {
+        String fixture = DirectReadFixture.class.getName();
+        byte[] bytes;
+        try (java.io.InputStream in = DirectReadFixture.class.getResourceAsStream("/" + fixture.replace('.', '/') + ".class")) {
+            bytes = in.readAllBytes();
+        }
+        Map<String, Set<String>> reads = directSnapshottedReads(bytes, snapshottedGetters(SNAPSHOT_CLASSES));
+        Map<String, Set<String>> byMethod = new TreeMap<>();
+        reads.forEach((method, names) -> byMethod.put(method.substring(fixture.length() + 1, method.indexOf('(')), names));
+        assertThat(byMethod.get("viaGetter"), is(new TreeSet<>(java.util.Collections.singleton("tlsMutualAuthenticationRequired"))));
+        assertThat(byMethod.get("viaMethodReference"), is(new TreeSet<>(java.util.Collections.singleton("controlPlaneJWTAuthenticationRequired"))));
+        assertThat(byMethod.get("viaStaticStore"), is(new TreeSet<>(java.util.Collections.singleton("controlPlaneOidcIssuer"))));
+        assertThat("a read through the snapshot is the sanctioned form", byMethod.containsKey("viaSnapshot"), is(false));
+        assertThat("an unguarded getter is not a snapshotted read", byMethod.containsKey("viaUnguardedGetter"), is(false));
+    }
+
+    private static final List<Class<?>> SNAPSHOT_CLASSES =
+        java.util.Arrays.asList(ControlPlaneAuthenticationSettings.class, ServerTlsSettings.class);
+
+    /** Snapshot accessors computed from other snapshotted values rather than holding one of their own. */
+    private static final Map<String, String> SNAPSHOT_DERIVED_ACCESSORS = new TreeMap<>();
+
+    static {
+        SNAPSHOT_DERIVED_ACCESSORS.put("authenticationRequired", "OR of the three control-plane *Required values");
+        SNAPSHOT_DERIVED_ACCESSORS.put("signature", "cache key built from the snapshotted authentication values");
+    }
+
+    /**
+     * Classes, keyed by top-level name, that define, publish, copy or serialise the snapshotted values, so a
+     * direct read inside them is the mechanism itself rather than a decision made from a half-applied update.
+     */
+    private static final Map<String, String> SNAPSHOT_DEFINITION_CLASSES = new TreeMap<>();
+
+    static {
+        SNAPSHOT_DEFINITION_CLASSES.put("org.mockserver.configuration.Configuration",
+            "defines the getters and builds both snapshots from its fields");
+        SNAPSHOT_DEFINITION_CLASSES.put("org.mockserver.configuration.ConfigurationProperties",
+            "the static store the getters and snapshots fall back to");
+        SNAPSHOT_DEFINITION_CLASSES.put("org.mockserver.configuration.ControlPlaneAuthenticationSettings",
+            "the control-plane authentication snapshot");
+        SNAPSHOT_DEFINITION_CLASSES.put("org.mockserver.configuration.ServerTlsSettings", "the server TLS snapshot");
+        SNAPSHOT_DEFINITION_CLASSES.put("org.mockserver.configuration.ClientConfiguration",
+            "client-side configuration: copies values from the static store for the client, enforces nothing on the server");
+        SNAPSHOT_DEFINITION_CLASSES.put("org.mockserver.serialization.model.ConfigurationDTO",
+            "serialises and applies the configuration; applyTo runs inside an AtomicConfigurationUpdate");
+    }
+
+    private static final String[] CERTIFICATE_PATHS = {"certificateAuthorityCertificate", "certificateAuthorityPrivateKey",
+        "directoryToSaveDynamicSSLCertificate", "dynamicallyCreateCertificateAuthorityCertificate", "privateKeyPath",
+        "x509CertificatePath", "preventCertificateDynamicUpdate"};
+
+    /**
+     * Sites allowed to read named snapshotted values through a {@link Configuration} getter or the static store,
+     * keyed by {@code Class#method} (all overloads) or by {@code Class} (every method of that class, not its
+     * nested classes). A site belongs here only when a mixed read cannot weaken authentication or TLS: a warning
+     * or log message, the outbound client context, protocol routing, or certificate material the server context
+     * build re-reads from the snapshot. Each entry permits only the getters it lists.
+     */
+    private static final Map<String, AllowedRead> ALLOWED_DIRECT_SNAPSHOTTED_READS = new TreeMap<>();
+
+    static {
+        allow("org.mockserver.mock.HttpState#warnIfLoweringTlsPosture",
+            "compares the current values with an incoming PUT to log a warning; decides nothing",
+            "tlsMutualAuthenticationRequired", "tlsMutualAuthenticationCertificateChain", "privateKeyPath",
+            "x509CertificatePath", "certificateAuthorityCertificate", "certificateAuthorityPrivateKey");
+        allow("org.mockserver.socket.tls.bouncycastle.BCKeyAndCertificateFactory",
+            "the certificate factory resolves, generates and writes back the CA and leaf paths; the server context "
+                + "build reads them after the build and discards them if an update completed meanwhile",
+            CERTIFICATE_PATHS);
+        allow("org.mockserver.socket.tls.KeyAndCertificateFactory#writeCertificateAuthorityToDisk",
+            "interface default overridden by BCKeyAndCertificateFactory, the only in-tree implementation",
+            "directoryToSaveDynamicSSLCertificate");
+        allow("org.mockserver.socket.tls.CertificateConfigurationValidator#validate",
+            "checks the certificate files before a build; a mixed read can only fail a build, which is retried",
+            "certificateAuthorityCertificate", "certificateAuthorityPrivateKey", "privateKeyPath", "x509CertificatePath");
+        allow("org.mockserver.socket.tls.NettySslContextFactory#createServerSslContext",
+            "exception message after a failed build", "privateKeyPath", "x509CertificatePath", "certificateAuthorityCertificate");
+        allow("org.mockserver.socket.tls.NettySslContextFactory#fixedServerCertificateRecheckDue",
+            "throttled on-disk rotation check of a fixed leaf; it can only trigger or skip a rebuild, which reads the snapshot",
+            "privateKeyPath", "x509CertificatePath");
+        allow("org.mockserver.socket.tls.NettySslContextFactory#fixedServerCertificateChangedOnDisk",
+            "throttled on-disk rotation check of a fixed leaf; it can only trigger or skip a rebuild, which reads the snapshot",
+            "privateKeyPath", "x509CertificatePath");
+        allow("org.mockserver.socket.tls.NettySslContextFactory#recordFixedServerCertificateState",
+            "records the fixed leaf's file state for the rotation check above", "privateKeyPath", "x509CertificatePath");
+        allow("org.mockserver.socket.tls.NettySslContextFactory#usingBundledDefaultCertificateAuthority",
+            "startup warning that the bundled CA is in use", "dynamicallyCreateCertificateAuthorityCertificate",
+            "privateKeyPath", "x509CertificatePath", "certificateAuthorityCertificate", "certificateAuthorityPrivateKey");
+        allow("org.mockserver.socket.tls.NettySslContextFactory#warnIfInsecureTlsProfileConfigured",
+            "startup warning about TLSv1 / TLSv1.1", "tlsProtocols", "tlsAllowInsecureProtocols");
+        allow("org.mockserver.socket.tls.NettySslContextFactory$ClientTlsInputs#<init>",
+            "the outbound client context's inputs, read once; the client context is built only from them and cached "
+                + "under their signature, and the server context is built from ServerTlsSettings",
+            "tlsMutualAuthenticationCertificateChain", "tlsProtocols", "tlsAllowInsecureProtocols", "http2Enabled",
+            "certificateAuthorityCertificate", "certificateAuthorityPrivateKey",
+            "dynamicallyCreateCertificateAuthorityCertificate", "directoryToSaveDynamicSSLCertificate");
+        allow("org.mockserver.netty.unification.PortUnificationHandler#decode",
+            "chooses the HTTP/2 or HTTP/1.1 pipeline; a mismatch with the context's ALPN fails the connection, "
+                + "it skips no authentication", "http2Enabled");
+        allow("org.mockserver.netty.unification.PortUnificationHandler#exceptionCaught",
+            "log message", "x509CertificatePath", "certificateAuthorityCertificate");
+        allow("org.mockserver.netty.proxy.relay.RelayConnectHandler$RelayTlsDetectionHandler#decode",
+            "chooses h2c or HTTP/1.1 for a relayed cleartext connection, matching PortUnificationHandler#decode",
+            "http2Enabled");
+        allow("org.mockserver.socket.tls.ProxySetupInfo#isUsingDefaultCa",
+            "describes the CA for --proxy-setup output", "certificateAuthorityCertificate",
+            "dynamicallyCreateCertificateAuthorityCertificate");
+        allow("org.mockserver.state.StateBackendFactory#isClusteredWithDynamicCertificateAuthority",
+            "startup warning for a clustered server with a per-node dynamic CA",
+            "dynamicallyCreateCertificateAuthorityCertificate");
+        allow("org.mockserver.echo.tls.UniqueCertificateChainSSLContextBuilder$UniqueCertificateChainX509KeyManager#<init>",
+            "test-support echo server: saves the values it overrides on its own Configuration to build a unique "
+                + "client chain, and restores them", "dynamicallyCreateCertificateAuthorityCertificate",
+            "directoryToSaveDynamicSSLCertificate", "privateKeyPath", "x509CertificatePath");
+    }
+
+    private static void allow(String site, String reason, String... getters) {
+        ALLOWED_DIRECT_SNAPSHOTTED_READS.put(site, new AllowedRead(reason, getters));
+    }
+
+    private static final class AllowedRead {
+        final String reason;
+        final Set<String> getters;
+
+        AllowedRead(String reason, String... getters) {
+            this.reason = reason;
+            this.getters = new TreeSet<>(java.util.Arrays.asList(getters));
+        }
+    }
+
+    /**
+     * The guarded getter names: every public no-arg accessor of the snapshot classes that {@link Configuration}
+     * also exposes as a public no-arg getter.
+     */
+    static Set<String> snapshottedGetters(List<Class<?>> snapshotClasses) {
+        Set<String> configurationGetters = publicNoArgGetters(Configuration.class).stream()
+            .map(Method::getName)
+            .collect(Collectors.toSet());
+        Set<String> guarded = new TreeSet<>();
+        for (Class<?> snapshotClass : snapshotClasses) {
+            for (Method method : publicNoArgGetters(snapshotClass)) {
+                if (configurationGetters.contains(method.getName())) {
+                    guarded.add(method.getName());
+                }
+            }
+        }
+        return guarded;
+    }
+
+    private static List<Method> publicNoArgGetters(Class<?> type) {
+        List<Method> getters = new ArrayList<>();
+        for (Method method : type.getDeclaredMethods()) {
+            int modifiers = method.getModifiers();
+            if (!method.isSynthetic() && java.lang.reflect.Modifier.isPublic(modifiers) && !java.lang.reflect.Modifier.isStatic(modifiers)
+                && method.getParameterCount() == 0 && !void.class.equals(method.getReturnType())) {
+                getters.add(method);
+            }
+        }
+        return getters;
+    }
+
+    /**
+     * Descriptor-qualified {@code fqcn#name(desc)ret} of each method in {@code classBytes} that reads a guarded
+     * getter through {@link Configuration} (a call or a method reference) or through the static store, mapped
+     * to the names it reads.
+     */
+    static Map<String, Set<String>> directSnapshottedReads(byte[] classBytes, Set<String> guardedGetters) {
+        Map<String, Set<String>> reads = new TreeMap<>();
+        ClassReader reader = new ClassReader(classBytes);
+        String className = reader.getClassName().replace('/', '.');
+        reader.accept(new ClassVisitor(Opcodes.ASM9) {
+            @Override
+            public MethodVisitor visitMethod(int access, String name, String descriptor, String signature, String[] exceptions) {
+                String key = className + "#" + name + descriptor;
+                return new MethodVisitor(Opcodes.ASM9) {
+                    @Override
+                    public void visitMethodInsn(int opcode, String owner, String calledName, String calledDescriptor, boolean isInterface) {
+                        record(owner, calledName, calledDescriptor);
+                    }
+
+                    @Override
+                    public void visitInvokeDynamicInsn(String indyName, String indyDescriptor, org.objectweb.asm.Handle bootstrap, Object... bootstrapArguments) {
+                        for (Object argument : bootstrapArguments) {
+                            if (argument instanceof org.objectweb.asm.Handle) {
+                                org.objectweb.asm.Handle handle = (org.objectweb.asm.Handle) argument;
+                                record(handle.getOwner(), handle.getName(), handle.getDesc());
+                            }
+                        }
+                    }
+
+                    private void record(String owner, String calledName, String calledDescriptor) {
+                        if ((CONFIGURATION.equals(owner) || CONFIGURATION_PROPERTIES.equals(owner))
+                            && guardedGetters.contains(calledName)
+                            && Type.getArgumentTypes(calledDescriptor).length == 0) {
+                            reads.computeIfAbsent(key, k -> new TreeSet<>()).add(calledName);
+                        }
+                    }
+                };
+            }
+        }, ClassReader.SKIP_FRAMES | ClassReader.SKIP_DEBUG);
+        return reads;
+    }
+
+    /** Stands in for a snapshot class that gained a field, to show the guarded set follows the snapshots. */
+    @SuppressWarnings("unused")
+    public static final class ExtendedSnapshotFixture {
+        public Integer maxExpectations() {
+            return null;
+        }
+
+        public String notAConfigurationGetter() {
+            return null;
+        }
+    }
+
+    /** One method per form of read the detector must (or must not) report. */
+    @SuppressWarnings("unused")
+    static final class DirectReadFixture {
+        boolean viaGetter(Configuration configuration) {
+            return Boolean.TRUE.equals(configuration.tlsMutualAuthenticationRequired());
+        }
+
+        java.util.function.Supplier<Boolean> viaMethodReference(Configuration configuration) {
+            return configuration::controlPlaneJWTAuthenticationRequired;
+        }
+
+        String viaStaticStore() {
+            return ConfigurationProperties.controlPlaneOidcIssuer();
+        }
+
+        boolean viaSnapshot(Configuration configuration) {
+            return Boolean.TRUE.equals(ServerTlsSettings.of(configuration).tlsMutualAuthenticationRequired());
+        }
+
+        Integer viaUnguardedGetter(Configuration configuration) {
+            return configuration.maxExpectations();
+        }
     }
 
     /** Repository paths that build or publish released artifacts; a trailing {@code *} matches a name prefix. */
