@@ -6436,8 +6436,11 @@ public class ConfigurationProperties {
         setProperty(MOCKSERVER_FORWARD_PROXY_CLIENT_CERTIFICATES_BY_HOST, clientCertificatesByHost != null ? clientCertificatesByHost : "");
     }
 
+    /**
+     * Throws when a non-blank path is neither a readable classpath resource nor an existing file.
+     */
     @SuppressWarnings("ConstantConditions")
-    static void fileExists(String file) {
+    public static void fileExists(String file) {
         try {
             if (isNotBlank(file) && FileReader.openStreamToFileFromClassPathOrPath(file) == null) {
                 throw new RuntimeException(file + " does not exist or is not accessible");

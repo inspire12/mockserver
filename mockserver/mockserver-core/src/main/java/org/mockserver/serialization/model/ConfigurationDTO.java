@@ -3,6 +3,7 @@ package org.mockserver.serialization.model;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import org.mockserver.configuration.AtomicConfigurationUpdate;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.configuration.ConfigurationProperties;
 import org.mockserver.socket.tls.ForwardProxyTLSX509CertificatesTrustManager;
@@ -760,6 +761,34 @@ public class ConfigurationDTO implements DTO<Configuration> {
         if (forwardSocksProxy != null) {
             parseInetSocketAddress(forwardSocksProxy);
         }
+        if (globalResponseDelayMillis != null && globalResponseDelayMillis < 0) {
+            throw new IllegalArgumentException("globalResponseDelayMillis must be >= 0, got: " + globalResponseDelayMillis);
+        }
+        // every check a setter applyTo calls would make, made BEFORE anything is written, so a rejected
+        // PUT is refused whole rather than abandoned half-applied over the live configuration
+        requireExistingFile("controlPlaneTLSMutualAuthenticationCAChain", controlPlaneTLSMutualAuthenticationCAChain);
+        requireExistingFile("controlPlaneX509CertificatePath", controlPlaneX509CertificatePath);
+        requireExistingFile("tlsMutualAuthenticationCertificateChain", tlsMutualAuthenticationCertificateChain);
+        requireExistingFile("forwardProxyTLSCustomTrustX509Certificates", forwardProxyTLSCustomTrustX509Certificates);
+        requireExistingFile("forwardProxyCertificateChain", forwardProxyCertificateChain);
+        // these two go through restoreRedactedValue, which never writes a value carrying the mask
+        if (!ConfigurationProperties.containsRedactionMask(controlPlanePrivateKeyPath)) {
+            requireExistingFile("controlPlanePrivateKeyPath", controlPlanePrivateKeyPath);
+        }
+        if (!ConfigurationProperties.containsRedactionMask(forwardProxyPrivateKey)) {
+            requireExistingFile("forwardProxyPrivateKey", forwardProxyPrivateKey);
+        }
+    }
+
+    private static void requireExistingFile(String propertyName, String path) {
+        if (path == null) {
+            return;
+        }
+        try {
+            ConfigurationProperties.fileExists(path);
+        } catch (RuntimeException notFound) {
+            throw new IllegalArgumentException("Invalid " + propertyName + ": " + notFound.getMessage());
+        }
     }
 
     @Override
@@ -1230,7 +1259,15 @@ public class ConfigurationDTO implements DTO<Configuration> {
         return value == null || value.isEmpty() ? null : ConfigurationProperties.REDACTED_VALUE;
     }
 
+    /**
+     * Applies every set field to {@code target} as one {@link AtomicConfigurationUpdate}, so the
+     * control-plane authentication and server TLS settings change for readers all at once.
+     */
     public void applyTo(Configuration target) {
+        AtomicConfigurationUpdate.apply(target, () -> applyFieldsTo(target));
+    }
+
+    private void applyFieldsTo(Configuration target) {
         validateFields();
         if (logLevel != null) {
             target.logLevel(Level.valueOf(logLevel));

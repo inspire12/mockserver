@@ -18,6 +18,7 @@ import io.netty.handler.codec.quic.QuicStreamChannel;
 import io.netty.handler.ssl.ClientAuth;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import org.mockserver.configuration.Configuration;
+import org.mockserver.configuration.ServerTlsSettings;
 import org.mockserver.lifecycle.LifeCycle;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.metrics.Metrics;
@@ -327,13 +328,12 @@ public class Http3Server {
         //   or an insecure trust-all factory when no explicit chain is provided
         //   (same as the TCP path's InsecureTrustManagerFactory fallback)
         if (configuration != null && keyAndCertFactory != null) {
-            quicSslBuilder.clientAuth(
-                configuration.tlsMutualAuthenticationRequired()
-                    ? ClientAuth.REQUIRE : ClientAuth.OPTIONAL
-            );
-            if (isNotBlank(configuration.tlsMutualAuthenticationCertificateChain())
-                || configuration.tlsMutualAuthenticationRequired()) {
-                quicSslBuilder.trustManager(buildTrustCertificateChain(keyAndCertFactory));
+            // one snapshot, so the client-auth mode and trust chain come from the same configuration update
+            ServerTlsSettings tlsSettings = ServerTlsSettings.of(configuration);
+            boolean mutualAuthenticationRequired = Boolean.TRUE.equals(tlsSettings.tlsMutualAuthenticationRequired());
+            quicSslBuilder.clientAuth(mutualAuthenticationRequired ? ClientAuth.REQUIRE : ClientAuth.OPTIONAL);
+            if (isNotBlank(tlsSettings.tlsMutualAuthenticationCertificateChain()) || mutualAuthenticationRequired) {
+                quicSslBuilder.trustManager(buildTrustCertificateChain(keyAndCertFactory, tlsSettings.tlsMutualAuthenticationCertificateChain()));
             } else {
                 quicSslBuilder.trustManager(InsecureTrustManagerFactory.INSTANCE);
             }
@@ -348,8 +348,7 @@ public class Http3Server {
      * When a custom mTLS trust chain is configured, it is loaded from PEM and
      * combined with the CA certificate; otherwise, only the CA certificate is used.
      */
-    private X509Certificate[] buildTrustCertificateChain(KeyAndCertificateFactory keyAndCertFactory) {
-        String mtlsCertChainPath = configuration.tlsMutualAuthenticationCertificateChain();
+    private X509Certificate[] buildTrustCertificateChain(KeyAndCertificateFactory keyAndCertFactory, String mtlsCertChainPath) {
         if (isNotBlank(mtlsCertChainPath)) {
             List<X509Certificate> x509Certificates = x509ChainFromPEMFile(mtlsCertChainPath);
             x509Certificates.add(keyAndCertFactory.certificateAuthorityX509Certificate());

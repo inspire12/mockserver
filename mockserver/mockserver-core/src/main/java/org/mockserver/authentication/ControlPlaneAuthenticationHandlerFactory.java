@@ -4,6 +4,7 @@ import org.mockserver.authentication.jwt.JWTAuthenticationHandler;
 import org.mockserver.authentication.mtls.MTLSAuthenticationHandler;
 import org.mockserver.authentication.oidc.OidcAuthenticationHandler;
 import org.mockserver.configuration.Configuration;
+import org.mockserver.configuration.ControlPlaneAuthenticationSettings;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.socket.tls.NettySslContextFactory;
@@ -11,10 +12,6 @@ import org.slf4j.event.Level;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.TreeMap;
-import java.util.TreeSet;
 
 /**
  * Builds the control-plane {@link AuthenticationHandler} chain from a {@link Configuration}.
@@ -41,43 +38,17 @@ public class ControlPlaneAuthenticationHandlerFactory {
      * @return {@code true} if any control-plane authentication mechanism is enabled
      */
     public static boolean authenticationRequired(Configuration configuration) {
-        return Boolean.TRUE.equals(configuration.controlPlaneTLSMutualAuthenticationRequired())
-            || Boolean.TRUE.equals(configuration.controlPlaneJWTAuthenticationRequired())
-            || Boolean.TRUE.equals(configuration.controlPlaneOidcAuthenticationRequired());
+        return ControlPlaneAuthenticationSettings.of(configuration).authenticationRequired();
     }
 
     /**
      * A stable string capturing every configuration value that feeds handler construction. When this
      * changes the cached handler must be discarded and rebuilt, which is how a runtime reconfiguration
      * (system property, {@code Configuration} setter, DTO, or {@code PUT /mockserver/configuration})
-     * reaches the enforcement point. Sorted collections keep the value order-independent so a
-     * semantically identical configuration does not force a pointless rebuild.
+     * reaches the enforcement point. See {@link ControlPlaneAuthenticationSettings#signature()}.
      */
     public static String signature(Configuration configuration) {
-        StringBuilder signature = new StringBuilder();
-        signature
-            .append(configuration.controlPlaneTLSMutualAuthenticationRequired()).append('|')
-            .append(configuration.controlPlaneTLSMutualAuthenticationCAChain()).append('|')
-            .append(configuration.controlPlaneJWTAuthenticationRequired()).append('|')
-            .append(configuration.controlPlaneJWTAuthenticationJWKSource()).append('|')
-            .append(configuration.controlPlaneJWTAuthenticationExpectedAudience()).append('|')
-            .append(sorted(configuration.controlPlaneJWTAuthenticationMatchingClaims())).append('|')
-            .append(sorted(configuration.controlPlaneJWTAuthenticationRequiredClaims())).append('|')
-            .append(configuration.controlPlaneOidcAuthenticationRequired()).append('|')
-            .append(configuration.controlPlaneOidcJwksUri()).append('|')
-            .append(configuration.controlPlaneOidcIssuer()).append('|')
-            .append(configuration.controlPlaneOidcAudience()).append('|')
-            .append(configuration.controlPlaneOidcScopeClaim()).append('|')
-            .append(sorted(configuration.controlPlaneOidcRequiredScopes()));
-        return signature.toString();
-    }
-
-    private static String sorted(Map<String, String> map) {
-        return map == null ? "null" : new TreeMap<>(map).toString();
-    }
-
-    private static String sorted(Set<String> set) {
-        return set == null ? "null" : new TreeSet<>(set).toString();
+        return ControlPlaneAuthenticationSettings.of(configuration).signature();
     }
 
     /**
@@ -88,32 +59,42 @@ public class ControlPlaneAuthenticationHandlerFactory {
      * construction failed
      */
     public static AuthenticationHandler build(Configuration configuration, MockServerLogger mockServerLogger) {
-        if (!authenticationRequired(configuration)) {
+        return build(ControlPlaneAuthenticationSettings.of(configuration), configuration, mockServerLogger);
+    }
+
+    /**
+     * Build the control-plane authentication handler from one settings snapshot, so every mechanism it
+     * enables and every value it is configured with come from the same configuration update.
+     *
+     * @param configuration supplies the certificate authority the mTLS trust chain is completed with
+     */
+    public static AuthenticationHandler build(ControlPlaneAuthenticationSettings settings, Configuration configuration, MockServerLogger mockServerLogger) {
+        if (!settings.authenticationRequired()) {
             return null;
         }
         try {
             List<AuthenticationHandler> handlers = new ArrayList<>();
-            if (Boolean.TRUE.equals(configuration.controlPlaneTLSMutualAuthenticationRequired())) {
+            if (Boolean.TRUE.equals(settings.controlPlaneTLSMutualAuthenticationRequired())) {
                 handlers.add(new MTLSAuthenticationHandler(
                     mockServerLogger,
                     new NettySslContextFactory(configuration, mockServerLogger, true)
-                        .trustCertificateChain(configuration.controlPlaneTLSMutualAuthenticationCAChain())
+                        .trustCertificateChain(settings.controlPlaneTLSMutualAuthenticationCAChain())
                 ));
             }
-            if (Boolean.TRUE.equals(configuration.controlPlaneJWTAuthenticationRequired())) {
-                handlers.add(new JWTAuthenticationHandler(mockServerLogger, configuration.controlPlaneJWTAuthenticationJWKSource())
-                    .withExpectedAudience(configuration.controlPlaneJWTAuthenticationExpectedAudience())
-                    .withMatchingClaims(configuration.controlPlaneJWTAuthenticationMatchingClaims())
-                    .withRequiredClaims(configuration.controlPlaneJWTAuthenticationRequiredClaims()));
+            if (Boolean.TRUE.equals(settings.controlPlaneJWTAuthenticationRequired())) {
+                handlers.add(new JWTAuthenticationHandler(mockServerLogger, settings.controlPlaneJWTAuthenticationJWKSource())
+                    .withExpectedAudience(settings.controlPlaneJWTAuthenticationExpectedAudience())
+                    .withMatchingClaims(settings.controlPlaneJWTAuthenticationMatchingClaims())
+                    .withRequiredClaims(settings.controlPlaneJWTAuthenticationRequiredClaims()));
             }
-            if (Boolean.TRUE.equals(configuration.controlPlaneOidcAuthenticationRequired())) {
+            if (Boolean.TRUE.equals(settings.controlPlaneOidcAuthenticationRequired())) {
                 handlers.add(new OidcAuthenticationHandler(
                     mockServerLogger,
-                    configuration.controlPlaneOidcJwksUri(),
-                    configuration.controlPlaneOidcIssuer(),
-                    configuration.controlPlaneOidcAudience(),
-                    configuration.controlPlaneOidcScopeClaim(),
-                    configuration.controlPlaneOidcRequiredScopes()
+                    settings.controlPlaneOidcJwksUri(),
+                    settings.controlPlaneOidcIssuer(),
+                    settings.controlPlaneOidcAudience(),
+                    settings.controlPlaneOidcScopeClaim(),
+                    settings.controlPlaneOidcRequiredScopes()
                 ));
             }
             if (handlers.size() == 1) {

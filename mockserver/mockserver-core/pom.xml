@@ -733,6 +733,8 @@
                         <!-- Toggles tlsMutualAuthenticationRequired in the STATIC ConfigurationProperties store. -->
                         <exclude>**/MutualAuthenticationRuntimeReconfigurationTest.java</exclude>
                         <exclude>**/NettySslContextFactoryGlobalStateTest.java</exclude>
+                        <!-- Pauses the server context build through the static sslServerContextBuilderCustomizer. -->
+                        <exclude>**/ServerSslContextConcurrentUpdateGlobalStateTest.java</exclude>
                         <exclude>**/OtelMetricsExporterTest.java</exclude>
                         <exclude>**/TimeServiceTest.java</exclude>
                         <exclude>**/TimeToLiveTest.java</exclude>
@@ -986,6 +988,7 @@
                                 <include>**/WasmRuntimeConfigurationRouteTest.java</include>
                                 <include>**/MutualAuthenticationRuntimeReconfigurationTest.java</include>
                                 <include>**/NettySslContextFactoryGlobalStateTest.java</include>
+                                <include>**/ServerSslContextConcurrentUpdateGlobalStateTest.java</include>
                                 <include>**/OtelMetricsExporterTest.java</include>
                                 <include>**/TimeServiceTest.java</include>
                                 <include>**/TimeToLiveTest.java</include>

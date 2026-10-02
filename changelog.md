@@ -35,6 +35,18 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   given at startup (system property, environment variable, properties file) were not affected, nor
   were servers started through `ClientAndServer`, the JUnit rule and extension, or the Spring
   integrations.
+- **A `PUT /mockserver/configuration` that changes authentication or TLS settings now takes effect
+  all at once.** The server applied the fields of a `PUT` one at a time, and requests arriving
+  meanwhile could see a mix of old and new values. A `PUT` switching control-plane authentication
+  from mTLS to JWT or OIDC briefly required no authentication at all, so a control-plane request that
+  arrived at that moment passed without credentials. A TLS connection opened while a `PUT` changed
+  `tlsMutualAuthenticationRequired` or its certificate chain could keep the old TLS setup in use until
+  the next TLS change. Control-plane authentication and authorization settings, and the server TLS
+  settings, now switch from all old to all new values with nothing in between. The window was under a
+  millisecond, so hitting it needed a request timed against an operator's `PUT`. A `PUT` that is
+  rejected, for example because a certificate path does not exist or `globalResponseDelayMillis` is
+  negative, now answers `400` having changed nothing; before, the fields ahead of the invalid one stayed
+  applied, so a rejected switch from mTLS to JWT could leave the control plane open.
 - **`redactSecretsInLog` now masks credentials everywhere the event log is shown or retrieved.**
   With it enabled, each log entry for a proxied or forwarded request still carried the credentials its
   masked request had hidden: the log message printed to the console, returned by retrieve and shown in

@@ -8,6 +8,7 @@ import org.mockserver.closurecallback.websocketregistry.LocalCallbackRegistry;
 import org.mockserver.closurecallback.websocketregistry.WebSocketClientRegistry;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.configuration.ConfigurationProperties;
+import org.mockserver.configuration.ControlPlaneAuthenticationSettings;
 import org.mockserver.cors.CORSHeaders;
 import org.mockserver.file.FileStore;
 import org.mockserver.grpc.GrpcProtoDescriptorStore;
@@ -546,16 +547,21 @@ public class HttpState {
      * any configuration route takes effect at the enforcement point instead of being accepted and ignored.
      */
     public AuthenticationHandler getControlPlaneAuthenticationHandler() {
+        return controlPlaneAuthenticationHandler(ControlPlaneAuthenticationSettings.of(configuration));
+    }
+
+    // Every decision below comes from the one settings snapshot, so a PUT applied concurrently is seen
+    // whole or not at all: a switch from mTLS to JWT can never be observed as "nothing required".
+    private AuthenticationHandler controlPlaneAuthenticationHandler(ControlPlaneAuthenticationSettings settings) {
         AuthenticationHandler explicitHandler = controlPlaneAuthenticationHandler;
         if (explicitHandler != null) {
             return explicitHandler;
         }
-        if (!ControlPlaneAuthenticationHandlerFactory.authenticationRequired(configuration)) {
-            // fast path for the default (unauthenticated) control plane: three boolean reads, no signature
-            // built and no handler retained
+        if (!settings.authenticationRequired()) {
+            // fast path for the default (unauthenticated) control plane: no signature built, no handler retained
             return null;
         }
-        String signature = ControlPlaneAuthenticationHandlerFactory.signature(configuration);
+        String signature = settings.signature();
         DerivedControlPlaneAuthenticationHandler derived = derivedControlPlaneAuthenticationHandler;
         if (derived != null && derived.signature.equals(signature)) {
             return derived.handler;
@@ -565,7 +571,7 @@ public class HttpState {
             if (derived == null || !derived.signature.equals(signature)) {
                 derived = new DerivedControlPlaneAuthenticationHandler(
                     signature,
-                    ControlPlaneAuthenticationHandlerFactory.build(configuration, mockServerLogger)
+                    ControlPlaneAuthenticationHandlerFactory.build(settings, configuration, mockServerLogger)
                 );
                 derivedControlPlaneAuthenticationHandler = derived;
             }
@@ -6350,13 +6356,14 @@ public class HttpState {
             // Resolve through the getter, NOT the raw field: the handler may be derived from the live
             // configuration, so reading the field directly would miss a control-plane authentication
             // mechanism enabled after startup and fall through to the null => "authenticated" branch.
-            AuthenticationHandler resolvedControlPlaneAuthenticationHandler = getControlPlaneAuthenticationHandler();
+            ControlPlaneAuthenticationSettings settings = ControlPlaneAuthenticationSettings.of(configuration);
+            AuthenticationHandler resolvedControlPlaneAuthenticationHandler = controlPlaneAuthenticationHandler(settings);
             org.mockserver.authentication.AuthenticationResult authenticationResult =
                 resolvedControlPlaneAuthenticationHandler == null
                     ? org.mockserver.authentication.AuthenticationResult.authenticated(null, "none", java.util.Map.of(), java.util.Set.of())
                     : resolvedControlPlaneAuthenticationHandler.authenticate(request);
             if (authenticationResult.isAuthenticated()) {
-                if (configuration.controlPlaneAuthorizationEnabled() && !controlPlaneAuthorized(request, authenticationResult)) {
+                if (Boolean.TRUE.equals(settings.controlPlaneAuthorizationEnabled()) && !controlPlaneAuthorized(request, authenticationResult, settings.controlPlaneScopeMapping())) {
                     recordAudit(request, authenticationResult, "FORBIDDEN");
                     return ControlPlaneAuthDecision.FORBIDDEN;
                 }
@@ -6406,10 +6413,11 @@ public class HttpState {
      * @return true to allow the operation; false to deny it with a 403-equivalent
      */
     public boolean controlPlaneToolAuthorized(java.util.Set<String> verifiedScopes, boolean isRead, String operation) {
-        if (!configuration.controlPlaneAuthorizationEnabled()) {
+        ControlPlaneAuthenticationSettings settings = ControlPlaneAuthenticationSettings.of(configuration);
+        if (!Boolean.TRUE.equals(settings.controlPlaneAuthorizationEnabled())) {
             return true;
         }
-        org.mockserver.authentication.authorization.ControlPlaneAuthorizer authorizer = controlPlaneAuthorizer();
+        org.mockserver.authentication.authorization.ControlPlaneAuthorizer authorizer = controlPlaneAuthorizer(settings.controlPlaneScopeMapping());
         java.util.Set<String> scopes = verifiedScopes != null ? verifiedScopes : java.util.Set.of();
         boolean authorized = authorizer.isAuthorized(scopes, isRead);
         if (!authorized && mockServerLogger != null && mockServerLogger.isEnabledForInstance(Level.INFO)) {
@@ -6441,8 +6449,8 @@ public class HttpState {
      * verified principal whose scopes are mapped — i.e. control-plane OIDC authentication
      * should be enabled. The denial detail is logged at INFO server-side only.
      */
-    private boolean controlPlaneAuthorized(HttpRequest request, org.mockserver.authentication.AuthenticationResult authenticationResult) {
-        org.mockserver.authentication.authorization.ControlPlaneAuthorizer authorizer = controlPlaneAuthorizer();
+    private boolean controlPlaneAuthorized(HttpRequest request, org.mockserver.authentication.AuthenticationResult authenticationResult, java.util.Map<String, org.mockserver.authentication.authorization.ControlPlaneRole> scopeMapping) {
+        org.mockserver.authentication.authorization.ControlPlaneAuthorizer authorizer = controlPlaneAuthorizer(scopeMapping);
         String method = request.getMethod() != null ? request.getMethod().getValue() : "";
         String operation = auditOperation(request.getPath() != null ? request.getPath().getValue() : "");
         boolean isRead = isControlPlaneRead(method, operation);
@@ -6469,8 +6477,7 @@ public class HttpState {
      * every control-plane request. Cheap reference-equality fast path for the common case
      * where {@code controlPlaneScopeMapping()} returns the same instance each call.
      */
-    private org.mockserver.authentication.authorization.ControlPlaneAuthorizer controlPlaneAuthorizer() {
-        java.util.Map<String, org.mockserver.authentication.authorization.ControlPlaneRole> mapping = configuration.controlPlaneScopeMapping();
+    private org.mockserver.authentication.authorization.ControlPlaneAuthorizer controlPlaneAuthorizer(java.util.Map<String, org.mockserver.authentication.authorization.ControlPlaneRole> mapping) {
         // Read the holder ONCE: its (authorizer, mapping) pair is always self-consistent.
         AuthorizerHolder holder = cachedAuthorizerHolder;
         if (holder != null && (holder.mapping == mapping || (holder.mapping != null && holder.mapping.equals(mapping)))) {

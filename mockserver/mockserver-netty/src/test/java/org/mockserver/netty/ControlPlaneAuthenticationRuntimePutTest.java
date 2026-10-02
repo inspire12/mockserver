@@ -4,13 +4,19 @@ import io.netty.channel.embedded.EmbeddedChannel;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockserver.authentication.jwt.JWKGenerator;
+import org.mockserver.authentication.jwt.JWTGenerator;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.configuration.ConfigurationProperties;
+import org.mockserver.keys.AsymmetricKeyGenerator;
+import org.mockserver.keys.AsymmetricKeyPair;
+import org.mockserver.keys.AsymmetricKeyPairAlgorithm;
 import org.mockserver.lifecycle.LifeCycle;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.mock.HttpState;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.scheduler.Scheduler;
+import org.mockserver.test.TempFileWriter;
 
 import java.io.DataInputStream;
 import java.io.IOException;
@@ -138,6 +144,31 @@ public class ControlPlaneAuthenticationRuntimePutTest {
 
         assertThat("an unauthenticated PUT must not be able to unlock the control plane",
             httpState.evaluateControlPlaneAuthentication(request()).isAllowed(), is(false));
+    }
+
+    @Test
+    public void aRejectedAuthenticatedPutMustLeaveControlPlaneAuthenticationEnforced() {
+        AsymmetricKeyPair keyPair = AsymmetricKeyGenerator.createAsymmetricKeyPair(AsymmetricKeyPairAlgorithm.RSA2048_SHA256);
+        configuration
+            .controlPlaneJWTAuthenticationJWKSource(TempFileWriter.write(new JWKGenerator().generateJWK(keyPair)))
+            .controlPlaneJWTAuthenticationRequired(true);
+        String token = new JWTGenerator(keyPair).generateJWT();
+
+        // each body turns JWT off before the field applyTo would reject, so a half-applied PUT reopens the control plane
+        for (String rejectedPut : new String[]{
+            "{\"controlPlaneJWTAuthenticationRequired\": false, \"globalResponseDelayMillis\": -1}",
+            "{\"controlPlaneJWTAuthenticationRequired\": false, \"tlsMutualAuthenticationCertificateChain\": \"/no/such/chain.pem\"}"
+        }) {
+            HttpResponse response = exchange(request("/mockserver/configuration")
+                .withMethod("PUT")
+                .withHeader("Authorization", "Bearer " + token)
+                .withBody(rejectedPut));
+
+            assertThat(rejectedPut, response.getStatusCode(), is(400));
+            assertThat("a rejected PUT must change nothing: " + rejectedPut,
+                httpState.evaluateControlPlaneAuthentication(request("/mockserver/retrieve")).isAllowed(), is(false));
+            assertThat(rejectedPut, configuration.controlPlaneJWTAuthenticationRequired(), is(true));
+        }
     }
 
     // ------------------------------------------------------------------------------------------------

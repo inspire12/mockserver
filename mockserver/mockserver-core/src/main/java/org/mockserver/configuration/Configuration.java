@@ -20,6 +20,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 import java.util.function.Consumer;
 
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
@@ -33,6 +34,10 @@ import static org.mockserver.configuration.ConfigurationProperties.fileExists;
 public class Configuration {
 
     private static final org.slf4j.Logger LOGGER = org.slf4j.LoggerFactory.getLogger(Configuration.class);
+    private static final AtomicReferenceFieldUpdater<Configuration, ControlPlaneAuthenticationSettings> CONTROL_PLANE_AUTHENTICATION_SETTINGS =
+        AtomicReferenceFieldUpdater.newUpdater(Configuration.class, ControlPlaneAuthenticationSettings.class, "controlPlaneAuthenticationSettings");
+    private static final AtomicReferenceFieldUpdater<Configuration, ServerTlsSettings> SERVER_TLS_SETTINGS =
+        AtomicReferenceFieldUpdater.newUpdater(Configuration.class, ServerTlsSettings.class, "serverTlsSettings");
 
     public static Configuration configuration() {
         return new Configuration();
@@ -368,6 +373,13 @@ public class Configuration {
     private volatile String controlPlaneOidcScopeClaim;
     private volatile Boolean controlPlaneAuthorizationEnabled;
     private volatile Map<String, org.mockserver.authentication.authorization.ControlPlaneRole> controlPlaneScopeMapping;
+    // The control-plane authentication and server TLS inputs, each also published as one immutable snapshot
+    // that a multi-field update replaces only once it is complete, so a reader never sees it half-applied.
+    private volatile ControlPlaneAuthenticationSettings controlPlaneAuthenticationSettings = ControlPlaneAuthenticationSettings.UNSET;
+    private volatile ServerTlsSettings serverTlsSettings = ServerTlsSettings.UNSET;
+    // nesting depth of applyAtomically, and how many outermost calls have completed; both only under synchronized (this)
+    private volatile int deferredSnapshotPublications;
+    private volatile long completedAtomicUpdates;
 
     // TLS
     private volatile Boolean proactivelyInitialiseTLS;
@@ -3167,6 +3179,7 @@ public class Configuration {
     public Configuration http2Enabled(Boolean http2Enabled) {
         this.http2Enabled = http2Enabled;
         serverTLSContextInputChanged();
+        publishServerTlsSettings();
         return this;
     }
 
@@ -4999,6 +5012,7 @@ public class Configuration {
      */
     public Configuration controlPlaneTLSMutualAuthenticationRequired(Boolean controlPlaneTLSMutualAuthenticationRequired) {
         this.controlPlaneTLSMutualAuthenticationRequired = controlPlaneTLSMutualAuthenticationRequired;
+        publishControlPlaneAuthenticationSettings();
         return this;
     }
 
@@ -5021,6 +5035,7 @@ public class Configuration {
     public Configuration controlPlaneTLSMutualAuthenticationCAChain(String controlPlaneTLSMutualAuthenticationCAChain) {
         fileExists(controlPlaneTLSMutualAuthenticationCAChain);
         this.controlPlaneTLSMutualAuthenticationCAChain = controlPlaneTLSMutualAuthenticationCAChain;
+        publishControlPlaneAuthenticationSettings();
         return this;
     }
 
@@ -5088,6 +5103,7 @@ public class Configuration {
      */
     public Configuration controlPlaneJWTAuthenticationRequired(Boolean controlPlaneJWTAuthenticationRequired) {
         this.controlPlaneJWTAuthenticationRequired = controlPlaneJWTAuthenticationRequired;
+        publishControlPlaneAuthenticationSettings();
         return this;
     }
 
@@ -5113,6 +5129,7 @@ public class Configuration {
      */
     public Configuration controlPlaneJWTAuthenticationJWKSource(String controlPlaneJWTAuthenticationJWKSource) {
         this.controlPlaneJWTAuthenticationJWKSource = controlPlaneJWTAuthenticationJWKSource;
+        publishControlPlaneAuthenticationSettings();
         return this;
     }
 
@@ -5132,6 +5149,7 @@ public class Configuration {
      */
     public Configuration controlPlaneJWTAuthenticationExpectedAudience(String controlPlaneJWTAuthenticationExpectedAudience) {
         this.controlPlaneJWTAuthenticationExpectedAudience = controlPlaneJWTAuthenticationExpectedAudience;
+        publishControlPlaneAuthenticationSettings();
         return this;
     }
 
@@ -5154,6 +5172,7 @@ public class Configuration {
      */
     public Configuration controlPlaneJWTAuthenticationMatchingClaims(Map<String, String> controlPlaneJWTAuthenticationMatchingClaims) {
         this.controlPlaneJWTAuthenticationMatchingClaims = controlPlaneJWTAuthenticationMatchingClaims;
+        publishControlPlaneAuthenticationSettings();
         return this;
     }
 
@@ -5176,6 +5195,7 @@ public class Configuration {
      */
     public Configuration controlPlaneJWTAuthenticationRequiredClaims(Set<String> controlPlaneJWTAuthenticationRequiredClaims) {
         this.controlPlaneJWTAuthenticationRequiredClaims = controlPlaneJWTAuthenticationRequiredClaims;
+        publishControlPlaneAuthenticationSettings();
         return this;
     }
 
@@ -5195,6 +5215,7 @@ public class Configuration {
      */
     public Configuration controlPlaneOidcAuthenticationRequired(Boolean controlPlaneOidcAuthenticationRequired) {
         this.controlPlaneOidcAuthenticationRequired = controlPlaneOidcAuthenticationRequired;
+        publishControlPlaneAuthenticationSettings();
         return this;
     }
 
@@ -5214,6 +5235,7 @@ public class Configuration {
      */
     public Configuration controlPlaneOidcIssuer(String controlPlaneOidcIssuer) {
         this.controlPlaneOidcIssuer = controlPlaneOidcIssuer;
+        publishControlPlaneAuthenticationSettings();
         return this;
     }
 
@@ -5233,6 +5255,7 @@ public class Configuration {
      */
     public Configuration controlPlaneOidcJwksUri(String controlPlaneOidcJwksUri) {
         this.controlPlaneOidcJwksUri = controlPlaneOidcJwksUri;
+        publishControlPlaneAuthenticationSettings();
         return this;
     }
 
@@ -5252,6 +5275,7 @@ public class Configuration {
      */
     public Configuration controlPlaneOidcAudience(String controlPlaneOidcAudience) {
         this.controlPlaneOidcAudience = controlPlaneOidcAudience;
+        publishControlPlaneAuthenticationSettings();
         return this;
     }
 
@@ -5274,6 +5298,7 @@ public class Configuration {
      */
     public Configuration controlPlaneOidcRequiredScopes(Set<String> controlPlaneOidcRequiredScopes) {
         this.controlPlaneOidcRequiredScopes = controlPlaneOidcRequiredScopes;
+        publishControlPlaneAuthenticationSettings();
         return this;
     }
 
@@ -5293,6 +5318,7 @@ public class Configuration {
      */
     public Configuration controlPlaneOidcScopeClaim(String controlPlaneOidcScopeClaim) {
         this.controlPlaneOidcScopeClaim = controlPlaneOidcScopeClaim;
+        publishControlPlaneAuthenticationSettings();
         return this;
     }
 
@@ -5312,6 +5338,7 @@ public class Configuration {
      */
     public Configuration controlPlaneAuthorizationEnabled(Boolean controlPlaneAuthorizationEnabled) {
         this.controlPlaneAuthorizationEnabled = controlPlaneAuthorizationEnabled;
+        publishControlPlaneAuthenticationSettings();
         return this;
     }
 
@@ -5334,6 +5361,7 @@ public class Configuration {
      */
     public Configuration controlPlaneScopeMapping(Map<String, org.mockserver.authentication.authorization.ControlPlaneRole> controlPlaneScopeMapping) {
         this.controlPlaneScopeMapping = controlPlaneScopeMapping;
+        publishControlPlaneAuthenticationSettings();
         return this;
     }
 
@@ -5392,6 +5420,210 @@ public class Configuration {
         return serverTLSContextInputChanges.get() + ConfigurationProperties.modificationCount();
     }
 
+    /**
+     * Runs {@code update} under this instance's lock, deferring replacement of the security snapshots
+     * until the outermost update finishes (normally or not), so readers see all of its changes or none.
+     */
+    void applyAtomically(Runnable update) {
+        synchronized (this) {
+            ControlPlaneAuthenticationSettings.Values controlPlaneBefore = controlPlaneAuthenticationValues();
+            ServerTlsSettings.Values serverTlsBefore = serverTlsValues();
+            deferredSnapshotPublications++;
+            try {
+                update.run();
+            } catch (RuntimeException | Error rejected) {
+                // a rejected update must not leave these groups half-applied, e.g. mTLS off and JWT not yet on
+                restoreControlPlaneAuthenticationValues(controlPlaneBefore);
+                restoreServerTlsValues(serverTlsBefore);
+                throw rejected;
+            } finally {
+                if (--deferredSnapshotPublications == 0) {
+                    completedAtomicUpdates++;
+                    long generation = ConfigurationProperties.modificationCount();
+                    controlPlaneAuthenticationSettings = resolveControlPlaneAuthenticationSettings(controlPlaneAuthenticationValues(), generation);
+                    serverTlsSettings = resolveServerTlsSettings(serverTlsValues(), generation, completedAtomicUpdates);
+                    serverTlsSettingsPublished();
+                    // after the snapshot, so a reader that sees the new generation also sees the new snapshot
+                    serverTLSContextInputChanged();
+                }
+            }
+        }
+    }
+
+    /**
+     * Test seam between publishing the server TLS snapshot and advancing the TLS generation.
+     */
+    void serverTlsSettingsPublished() {
+    }
+
+    private void restoreControlPlaneAuthenticationValues(ControlPlaneAuthenticationSettings.Values values) {
+        controlPlaneTLSMutualAuthenticationRequired = values.tlsMutualAuthenticationRequired;
+        controlPlaneTLSMutualAuthenticationCAChain = values.tlsMutualAuthenticationCAChain;
+        controlPlaneJWTAuthenticationRequired = values.jwtAuthenticationRequired;
+        controlPlaneJWTAuthenticationJWKSource = values.jwtAuthenticationJWKSource;
+        controlPlaneJWTAuthenticationExpectedAudience = values.jwtAuthenticationExpectedAudience;
+        controlPlaneJWTAuthenticationMatchingClaims = values.jwtAuthenticationMatchingClaims;
+        controlPlaneJWTAuthenticationRequiredClaims = values.jwtAuthenticationRequiredClaims;
+        controlPlaneOidcAuthenticationRequired = values.oidcAuthenticationRequired;
+        controlPlaneOidcIssuer = values.oidcIssuer;
+        controlPlaneOidcJwksUri = values.oidcJwksUri;
+        controlPlaneOidcAudience = values.oidcAudience;
+        controlPlaneOidcRequiredScopes = values.oidcRequiredScopes;
+        controlPlaneOidcScopeClaim = values.oidcScopeClaim;
+        controlPlaneAuthorizationEnabled = values.authorizationEnabled;
+        controlPlaneScopeMapping = values.scopeMapping;
+    }
+
+    private void restoreServerTlsValues(ServerTlsSettings.Values values) {
+        tlsMutualAuthenticationRequired = values.tlsMutualAuthenticationRequired;
+        tlsMutualAuthenticationCertificateChain = values.tlsMutualAuthenticationCertificateChain;
+        tlsProtocols = values.tlsProtocols;
+        tlsAllowInsecureProtocols = values.tlsAllowInsecureProtocols;
+        http2Enabled = values.http2Enabled;
+        certificateAuthorityCertificate = values.certificateAuthorityCertificate;
+        certificateAuthorityPrivateKey = values.certificateAuthorityPrivateKey;
+        dynamicallyCreateCertificateAuthorityCertificate = values.dynamicallyCreateCertificateAuthorityCertificate;
+        proxySetup = values.proxySetup;
+        directoryToSaveDynamicSSLCertificate = values.directoryToSaveDynamicSSLCertificate;
+        privateKeyPath = values.privateKeyPath;
+        x509CertificatePath = values.x509CertificatePath;
+        preventCertificateDynamicUpdate = values.preventCertificateDynamicUpdate;
+    }
+
+    private void publishControlPlaneAuthenticationSettings() {
+        synchronized (this) {
+            if (deferredSnapshotPublications == 0) {
+                controlPlaneAuthenticationSettings = resolveControlPlaneAuthenticationSettings(controlPlaneAuthenticationValues(), ConfigurationProperties.modificationCount());
+            }
+        }
+    }
+
+    private void publishServerTlsSettings() {
+        synchronized (this) {
+            if (deferredSnapshotPublications == 0) {
+                serverTlsSettings = resolveServerTlsSettings(serverTlsValues(), ConfigurationProperties.modificationCount(), completedAtomicUpdates);
+                serverTLSContextInputChanged();
+            }
+        }
+    }
+
+    ControlPlaneAuthenticationSettings controlPlaneAuthenticationSettings() {
+        ControlPlaneAuthenticationSettings settings = controlPlaneAuthenticationSettings;
+        // read the generation BEFORE resolving, so a concurrent property write causes a re-resolve, never a stale value
+        long generation = ConfigurationProperties.modificationCount();
+        if (settings.generation == generation) {
+            return settings;
+        }
+        // re-resolve from the snapshot's own raw values, never the fields, which an update may be half-way through
+        ControlPlaneAuthenticationSettings resolved = resolveControlPlaneAuthenticationSettings(settings.raw, generation);
+        CONTROL_PLANE_AUTHENTICATION_SETTINGS.compareAndSet(this, settings, resolved);
+        return resolved;
+    }
+
+    ServerTlsSettings serverTlsSettings() {
+        ServerTlsSettings settings = serverTlsSettings;
+        long generation = ConfigurationProperties.modificationCount();
+        if (settings.generation == generation) {
+            return settings;
+        }
+        ServerTlsSettings resolved = resolveServerTlsSettings(settings.raw, generation, settings.atomicUpdates);
+        SERVER_TLS_SETTINGS.compareAndSet(this, settings, resolved);
+        return resolved;
+    }
+
+    private ControlPlaneAuthenticationSettings.Values controlPlaneAuthenticationValues() {
+        return new ControlPlaneAuthenticationSettings.Values(
+            controlPlaneTLSMutualAuthenticationRequired,
+            controlPlaneTLSMutualAuthenticationCAChain,
+            controlPlaneJWTAuthenticationRequired,
+            controlPlaneJWTAuthenticationJWKSource,
+            controlPlaneJWTAuthenticationExpectedAudience,
+            controlPlaneJWTAuthenticationMatchingClaims,
+            controlPlaneJWTAuthenticationRequiredClaims,
+            controlPlaneOidcAuthenticationRequired,
+            controlPlaneOidcIssuer,
+            controlPlaneOidcJwksUri,
+            controlPlaneOidcAudience,
+            controlPlaneOidcRequiredScopes,
+            controlPlaneOidcScopeClaim,
+            controlPlaneAuthorizationEnabled,
+            controlPlaneScopeMapping
+        );
+    }
+
+    // mirrors the getters' fallback to ConfigurationProperties for each unset value
+    private static ControlPlaneAuthenticationSettings resolveControlPlaneAuthenticationSettings(ControlPlaneAuthenticationSettings.Values raw, long generation) {
+        Map<String, String> matchingClaims = raw.jwtAuthenticationMatchingClaims;
+        RuntimeException matchingClaimsFailure = null;
+        if (matchingClaims == null) {
+            try {
+                matchingClaims = ConfigurationProperties.controlPlaneJWTAuthenticationMatchingClaims();
+            } catch (RuntimeException exception) {
+                matchingClaimsFailure = exception;
+            }
+        }
+        ControlPlaneAuthenticationSettings.Values resolved = new ControlPlaneAuthenticationSettings.Values(
+            raw.tlsMutualAuthenticationRequired != null ? raw.tlsMutualAuthenticationRequired : ConfigurationProperties.controlPlaneTLSMutualAuthenticationRequired(),
+            raw.tlsMutualAuthenticationCAChain != null ? raw.tlsMutualAuthenticationCAChain : ConfigurationProperties.controlPlaneTLSMutualAuthenticationCAChain(),
+            raw.jwtAuthenticationRequired != null ? raw.jwtAuthenticationRequired : ConfigurationProperties.controlPlaneJWTAuthenticationRequired(),
+            raw.jwtAuthenticationJWKSource != null ? raw.jwtAuthenticationJWKSource : ConfigurationProperties.controlPlaneJWTAuthenticationJWKSource(),
+            raw.jwtAuthenticationExpectedAudience != null ? raw.jwtAuthenticationExpectedAudience : ConfigurationProperties.controlPlaneJWTAuthenticationExpectedAudience(),
+            matchingClaims,
+            raw.jwtAuthenticationRequiredClaims != null ? raw.jwtAuthenticationRequiredClaims : ConfigurationProperties.controlPlaneJWTAuthenticationRequiredClaims(),
+            raw.oidcAuthenticationRequired != null ? raw.oidcAuthenticationRequired : ConfigurationProperties.controlPlaneOidcAuthenticationRequired(),
+            raw.oidcIssuer != null ? raw.oidcIssuer : ConfigurationProperties.controlPlaneOidcIssuer(),
+            raw.oidcJwksUri != null ? raw.oidcJwksUri : ConfigurationProperties.controlPlaneOidcJwksUri(),
+            raw.oidcAudience != null ? raw.oidcAudience : ConfigurationProperties.controlPlaneOidcAudience(),
+            raw.oidcRequiredScopes != null ? raw.oidcRequiredScopes : ConfigurationProperties.controlPlaneOidcRequiredScopes(),
+            raw.oidcScopeClaim != null ? raw.oidcScopeClaim : ConfigurationProperties.controlPlaneOidcScopeClaim(),
+            raw.authorizationEnabled != null ? raw.authorizationEnabled : ConfigurationProperties.controlPlaneAuthorizationEnabled(),
+            raw.scopeMapping != null ? raw.scopeMapping : ConfigurationProperties.controlPlaneScopeMapping()
+        );
+        return new ControlPlaneAuthenticationSettings(raw, resolved, matchingClaimsFailure, generation);
+    }
+
+    private ServerTlsSettings.Values serverTlsValues() {
+        return new ServerTlsSettings.Values(
+            tlsMutualAuthenticationRequired,
+            tlsMutualAuthenticationCertificateChain,
+            tlsProtocols,
+            tlsAllowInsecureProtocols,
+            http2Enabled,
+            certificateAuthorityCertificate,
+            certificateAuthorityPrivateKey,
+            dynamicallyCreateCertificateAuthorityCertificate,
+            proxySetup,
+            directoryToSaveDynamicSSLCertificate,
+            privateKeyPath,
+            x509CertificatePath,
+            preventCertificateDynamicUpdate
+        );
+    }
+
+    // mirrors the getters' fallback to ConfigurationProperties for each unset value
+    private static ServerTlsSettings resolveServerTlsSettings(ServerTlsSettings.Values raw, long generation, long atomicUpdates) {
+        Boolean proxySetup = raw.proxySetup != null ? raw.proxySetup : ConfigurationProperties.proxySetup();
+        Boolean dynamicallyCreateCertificateAuthorityCertificate = Boolean.TRUE.equals(proxySetup)
+            ? Boolean.TRUE
+            : raw.dynamicallyCreateCertificateAuthorityCertificate != null ? raw.dynamicallyCreateCertificateAuthorityCertificate : ConfigurationProperties.dynamicallyCreateCertificateAuthorityCertificate();
+        ServerTlsSettings.Values resolved = new ServerTlsSettings.Values(
+            raw.tlsMutualAuthenticationRequired != null ? raw.tlsMutualAuthenticationRequired : ConfigurationProperties.tlsMutualAuthenticationRequired(),
+            raw.tlsMutualAuthenticationCertificateChain != null ? raw.tlsMutualAuthenticationCertificateChain : ConfigurationProperties.tlsMutualAuthenticationCertificateChain(),
+            raw.tlsProtocols != null ? raw.tlsProtocols : ConfigurationProperties.tlsProtocols(),
+            raw.tlsAllowInsecureProtocols != null ? raw.tlsAllowInsecureProtocols : ConfigurationProperties.tlsAllowInsecureProtocols(),
+            raw.http2Enabled != null ? raw.http2Enabled : ConfigurationProperties.http2Enabled(),
+            raw.certificateAuthorityCertificate != null ? raw.certificateAuthorityCertificate : ConfigurationProperties.certificateAuthorityCertificate(),
+            raw.certificateAuthorityPrivateKey != null ? raw.certificateAuthorityPrivateKey : ConfigurationProperties.certificateAuthorityPrivateKey(),
+            dynamicallyCreateCertificateAuthorityCertificate,
+            proxySetup,
+            raw.directoryToSaveDynamicSSLCertificate != null ? raw.directoryToSaveDynamicSSLCertificate : ConfigurationProperties.directoryToSaveDynamicSSLCertificate(),
+            raw.privateKeyPath != null ? raw.privateKeyPath : ConfigurationProperties.privateKeyPath(),
+            raw.x509CertificatePath != null ? raw.x509CertificatePath : ConfigurationProperties.x509CertificatePath(),
+            raw.preventCertificateDynamicUpdate != null ? raw.preventCertificateDynamicUpdate : ConfigurationProperties.preventCertificateDynamicUpdate()
+        );
+        return new ServerTlsSettings(raw, resolved, generation, atomicUpdates);
+    }
+
     public String tlsProtocols() {
         if (tlsProtocols == null) {
             return ConfigurationProperties.tlsProtocols();
@@ -5408,6 +5640,7 @@ public class Configuration {
     public Configuration tlsProtocols(String tlsProtocols) {
         this.tlsProtocols = tlsProtocols;
         serverTLSContextInputChanged();
+        publishServerTlsSettings();
         return this;
     }
 
@@ -5429,6 +5662,7 @@ public class Configuration {
     public Configuration tlsAllowInsecureProtocols(Boolean tlsAllowInsecureProtocols) {
         this.tlsAllowInsecureProtocols = tlsAllowInsecureProtocols;
         serverTLSContextInputChanged();
+        publishServerTlsSettings();
         return this;
     }
 
@@ -5462,6 +5696,7 @@ public class Configuration {
         this.proxySetup = proxySetup;
         // proxySetup forces dynamicallyCreateCertificateAuthorityCertificate(), a server TLS context input
         serverTLSContextInputChanged();
+        publishServerTlsSettings();
         return this;
     }
 
@@ -5501,6 +5736,7 @@ public class Configuration {
         if (changed) {
             rebuildServerTLSContext(true);
             rebuildTLSContext(true);
+            publishServerTlsSettings();
         }
         return this;
     }
@@ -5523,6 +5759,7 @@ public class Configuration {
         if (changed) {
             rebuildServerTLSContext(true);
             rebuildTLSContext(true);
+            publishServerTlsSettings();
         }
         return this;
     }
@@ -5542,6 +5779,7 @@ public class Configuration {
     public Configuration preventCertificateDynamicUpdate(Boolean preventCertificateDynamicUpdate) {
         this.preventCertificateDynamicUpdate = preventCertificateDynamicUpdate;
         serverTLSContextInputChanged();
+        publishServerTlsSettings();
         return this;
     }
 
@@ -5718,6 +5956,7 @@ public class Configuration {
         if (changed) {
             rebuildServerTLSContext(true);
             rebuildTLSContext(true);
+            publishServerTlsSettings();
         }
         return this;
     }
@@ -5746,6 +5985,7 @@ public class Configuration {
         if (changed) {
             rebuildServerTLSContext(true);
             rebuildTLSContext(true);
+            publishServerTlsSettings();
         }
         return this;
     }
@@ -5780,6 +6020,7 @@ public class Configuration {
         if (changed) {
             rebuildServerTLSContext(true);
             rebuildTLSContext(true);
+            publishServerTlsSettings();
         }
         return this;
     }
@@ -5812,6 +6053,7 @@ public class Configuration {
         if (changed) {
             rebuildServerTLSContext(true);
             rebuildTLSContext(true);
+            publishServerTlsSettings();
         }
         return this;
     }
@@ -5835,6 +6077,7 @@ public class Configuration {
         // accepted and silently ignored, and certificateless clients keep connecting. Mirrors
         // addSslSubjectAlternativeName*/clearSslSubjectAlternativeName*, which already do this.
         rebuildServerTLSContext(true);
+        publishServerTlsSettings();
         return this;
     }
 
@@ -5857,6 +6100,7 @@ public class Configuration {
         this.tlsMutualAuthenticationCertificateChain = tlsMutualAuthenticationCertificateChain;
         // same reasoning as tlsMutualAuthenticationRequired: this feeds the server context's trust manager
         rebuildServerTLSContext(true);
+        publishServerTlsSettings();
         return this;
     }
 

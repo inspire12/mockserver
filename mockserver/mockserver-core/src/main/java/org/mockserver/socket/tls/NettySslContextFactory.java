@@ -5,6 +5,7 @@ import io.netty.handler.ssl.*;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.configuration.ConfigurationProperties;
+import org.mockserver.configuration.ServerTlsSettings;
 import org.mockserver.file.FileReader;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
@@ -132,11 +133,15 @@ public class NettySslContextFactory {
      * the original list is returned so SSL context creation does not fail.
      */
     private String[] effectiveTlsProtocols() {
-        String[] requested = java.util.Arrays.stream(configuration.tlsProtocols().split(","))
+        return effectiveTlsProtocols(configuration.tlsProtocols(), configuration.tlsAllowInsecureProtocols());
+    }
+
+    private static String[] effectiveTlsProtocols(String tlsProtocols, Boolean tlsAllowInsecureProtocols) {
+        String[] requested = java.util.Arrays.stream(tlsProtocols.split(","))
             .map(String::trim)
             .filter(p -> !p.isEmpty())
             .toArray(String[]::new);
-        if (Boolean.TRUE.equals(configuration.tlsAllowInsecureProtocols())) {
+        if (Boolean.TRUE.equals(tlsAllowInsecureProtocols)) {
             return requested;
         }
         String[] filtered = java.util.Arrays.stream(requested)
@@ -489,28 +494,38 @@ public class NettySslContextFactory {
      * <p>It is only recomputed when {@link Configuration#serverTLSContextGeneration()} moves, so every
      * setter of an input read here must advance that generation.
      *
-     * @param subjectAlternativeNames {@link #subjectAlternativeNameSignature()}, read before the build so
-     *                                a SAN added while a build is in flight forces another build
+     * <p>Every input comes from {@code settings}, the one snapshot the context was built from, except the
+     * certificate paths the certificate factory derives while building (the dynamic CA paths, and the
+     * leaf paths when none were configured), which come from {@code afterBuild}. So a configuration
+     * change that lands mid-build is never recorded as an input the context was built from.
+     *
+     * @param subjectAlternativeNames {@link #subjectAlternativeNameSignature(ServerTlsSettings)}, read
+     *                                before the build so a SAN added while a build is in flight forces
+     *                                another build
      */
-    private String serverContextSignature(String subjectAlternativeNames) {
+    private static String serverContextSignature(ServerTlsSettings settings, ServerTlsSettings afterBuild, String subjectAlternativeNames) {
+        boolean dynamicCA = Boolean.TRUE.equals(settings.dynamicallyCreateCertificateAuthorityCertificate());
+        ServerTlsSettings caPaths = dynamicCA ? afterBuild : settings;
+        boolean generatedLeaf = isBlank(settings.privateKeyPath()) || isBlank(settings.x509CertificatePath());
+        ServerTlsSettings leafPaths = generatedLeaf ? afterBuild : settings;
         return new StringBuilder()
-            .append("mtls=").append(configuration.tlsMutualAuthenticationRequired())
-            .append("|mtlsChain=").append(configuration.tlsMutualAuthenticationCertificateChain())
-            .append("|protocols=").append(configuration.tlsProtocols())
-            .append("|insecureProtocols=").append(configuration.tlsAllowInsecureProtocols())
-            .append("|http2=").append(configuration.http2Enabled())
-            .append("|caCert=").append(configuration.certificateAuthorityCertificate())
-            .append("|caKey=").append(configuration.certificateAuthorityPrivateKey())
-            .append("|dynamicCA=").append(configuration.dynamicallyCreateCertificateAuthorityCertificate())
-            .append("|dir=").append(configuration.directoryToSaveDynamicSSLCertificate())
-            .append("|keyPath=").append(configuration.privateKeyPath())
-            .append("|certPath=").append(configuration.x509CertificatePath())
+            .append("mtls=").append(settings.tlsMutualAuthenticationRequired())
+            .append("|mtlsChain=").append(settings.tlsMutualAuthenticationCertificateChain())
+            .append("|protocols=").append(settings.tlsProtocols())
+            .append("|insecureProtocols=").append(settings.tlsAllowInsecureProtocols())
+            .append("|http2=").append(settings.http2Enabled())
+            .append("|caCert=").append(caPaths.certificateAuthorityCertificate())
+            .append("|caKey=").append(caPaths.certificateAuthorityPrivateKey())
+            .append("|dynamicCA=").append(settings.dynamicallyCreateCertificateAuthorityCertificate())
+            .append("|dir=").append(settings.directoryToSaveDynamicSSLCertificate())
+            .append("|keyPath=").append(leafPaths.privateKeyPath())
+            .append("|certPath=").append(leafPaths.x509CertificatePath())
             .append(subjectAlternativeNames)
             .toString();
     }
 
-    private String subjectAlternativeNameSignature() {
-        if (Boolean.TRUE.equals(configuration.preventCertificateDynamicUpdate())) {
+    private String subjectAlternativeNameSignature(ServerTlsSettings settings) {
+        if (Boolean.TRUE.equals(settings.preventCertificateDynamicUpdate())) {
             return "";
         }
         return "|sanDomains=" + new TreeSet<>(nullSafeSet(configuration.sslSubjectAlternativeNameDomains()))
@@ -560,7 +575,8 @@ public class NettySslContextFactory {
         if (generation == state.generation) {
             return state.sslContext;
         }
-        if (serverContextSignature(subjectAlternativeNameSignature()).equals(state.signature)) {
+        ServerTlsSettings settings = ServerTlsSettings.of(configuration);
+        if (serverContextSignature(settings, settings, subjectAlternativeNameSignature(settings)).equals(state.signature)) {
             // the generation moved but no input changed value (e.g. an unrelated property was set)
             serverContextState.compareAndSet(state, new ServerContextState(state.sslContext, generation, state.signature));
             return state.sslContext;
@@ -619,31 +635,36 @@ public class NettySslContextFactory {
                 return cached;
             }
             try {
+                // the generation BEFORE the snapshot it guards: an update publishes the snapshot, then advances it
                 long generation = configuration.serverTLSContextGeneration();
-                String subjectAlternativeNames = subjectAlternativeNameSignature();
+                ServerTlsSettings settings = ServerTlsSettings.of(configuration);
+                String subjectAlternativeNames = subjectAlternativeNameSignature(settings);
                 new CertificateConfigurationValidator(configuration, mockServerLogger).validate();
                 keyAndCertificateFactory.buildAndSavePrivateKeyAndX509Certificate();
                 logUsedCertificateData();
+                boolean mutualAuthenticationRequired = Boolean.TRUE.equals(settings.tlsMutualAuthenticationRequired());
                 final SslContextBuilder sslContextBuilder = SslContextBuilder
                     .forServer(
                         keyAndCertificateFactory.privateKey(),
                         keyAndCertificateFactory.certificateChain()
                     )
-                    .protocols(effectiveTlsProtocols())
-                    .clientAuth(configuration.tlsMutualAuthenticationRequired() ? ClientAuth.REQUIRE : ClientAuth.OPTIONAL);
-                configureALPN(sslContextBuilder);
-                if (isNotBlank(configuration.tlsMutualAuthenticationCertificateChain()) || configuration.tlsMutualAuthenticationRequired()) {
-                    sslContextBuilder.trustManager(trustCertificateChain());
+                    .protocols(effectiveTlsProtocols(settings.tlsProtocols(), settings.tlsAllowInsecureProtocols()))
+                    .clientAuth(mutualAuthenticationRequired ? ClientAuth.REQUIRE : ClientAuth.OPTIONAL);
+                configureALPN(sslContextBuilder, Boolean.TRUE.equals(settings.http2Enabled()));
+                if (isNotBlank(settings.tlsMutualAuthenticationCertificateChain()) || mutualAuthenticationRequired) {
+                    sslContextBuilder.trustManager(trustCertificateChain(settings.tlsMutualAuthenticationCertificateChain()));
                 } else {
                     sslContextBuilder.trustManager(InsecureTrustManagerFactory.INSTANCE);
                 }
                 SslContext built = sslServerContextBuilderCustomizer
                     .apply(sslContextBuilder)
                     .build();
-                // record the inputs this context was built from — the non-SAN inputs read AFTER the build,
-                // so paths the factory derived during it are captured, and the SANs read BEFORE it — so a
-                // later change to any of them forces a rebuild without relying on a consumable flag
-                serverContextState.set(new ServerContextState(built, generation, serverContextSignature(subjectAlternativeNames)));
+                // record the inputs this context was built from, from the same snapshot (SANs read BEFORE
+                // the build), so a later change to any of them forces a rebuild without a consumable flag.
+                // Derived paths are taken from after the build unless an update landed mid-build.
+                ServerTlsSettings afterBuild = ServerTlsSettings.of(configuration);
+                serverContextState.set(new ServerContextState(built, generation,
+                    serverContextSignature(settings, afterBuild.updatedSince(settings) ? settings : afterBuild, subjectAlternativeNames)));
                 recordFixedServerCertificateState();
                 configuration.rebuildServerTLSContext(false);
             } catch (Error error) {
@@ -772,8 +793,12 @@ public class NettySslContextFactory {
     }
 
     private void configureALPN(SslContextBuilder sslContextBuilder) {
+        configureALPN(sslContextBuilder, configuration.http2Enabled());
+    }
+
+    private static void configureALPN(SslContextBuilder sslContextBuilder, boolean http2Enabled) {
         // when HTTP/2 is disabled only advertise http/1.1 via ALPN so h2 capable clients fall back to HTTP/1.1
-        String[] applicationProtocols = configuration.http2Enabled()
+        String[] applicationProtocols = http2Enabled
             ? new String[]{ApplicationProtocolNames.HTTP_2, ApplicationProtocolNames.HTTP_1_1}
             : new String[]{ApplicationProtocolNames.HTTP_1_1};
         Consumer<SslContextBuilder> configureALPN = contextBuilder -> contextBuilder
@@ -793,10 +818,6 @@ public class NettySslContextFactory {
         } else if (SslProvider.isAlpnSupported(SslProvider.OPENSSL)) {
             configureALPN.accept(sslContextBuilder.sslProvider(SslProvider.OPENSSL));
         }
-    }
-
-    private X509Certificate[] trustCertificateChain() {
-        return trustCertificateChain(configuration.tlsMutualAuthenticationCertificateChain());
     }
 
     public X509Certificate[] trustCertificateChain(String tlsMutualAuthenticationCertificateChain) {
