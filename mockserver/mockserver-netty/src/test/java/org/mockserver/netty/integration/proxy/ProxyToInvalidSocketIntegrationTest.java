@@ -11,7 +11,7 @@ import org.mockserver.integration.ClientAndServer;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.scheduler.Scheduler;
-import org.mockserver.socket.PortFactory;
+import org.mockserver.test.ClosedPort;
 import org.mockserver.verify.VerificationTimes;
 
 import java.net.InetSocketAddress;
@@ -71,7 +71,7 @@ public class ProxyToInvalidSocketIntegrationTest {
             httpClient.sendRequest(
                 request()
                     .withPath("/some_path")
-                    .withHeader(HOST.toString(), "localhost:" + PortFactory.findFreePort()),
+                    .withHeader(HOST.toString(), "localhost:" + ClosedPort.CLOSED_PORT),
                 new InetSocketAddress(clientAndServer.getPort())
             );
 
@@ -86,7 +86,7 @@ public class ProxyToInvalidSocketIntegrationTest {
             httpClient.sendRequest(
                 request()
                     .withPath("/some_path")
-                    .withHeader(HOST.toString(), "localhost:" + PortFactory.findFreePort()),
+                    .withHeader(HOST.toString(), "localhost:" + ClosedPort.CLOSED_PORT),
                 new InetSocketAddress(clientAndServer.getPort())
             );
 

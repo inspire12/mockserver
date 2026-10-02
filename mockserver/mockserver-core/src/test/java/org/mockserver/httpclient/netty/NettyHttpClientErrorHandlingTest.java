@@ -11,7 +11,6 @@ import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.model.MediaType;
 import org.mockserver.scheduler.Scheduler;
-import org.mockserver.socket.PortFactory;
 
 import java.net.InetSocketAddress;
 import java.util.concurrent.TimeUnit;
@@ -31,6 +30,7 @@ import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
 import static org.mockserver.model.StringBody.exact;
 import static org.mockserver.stop.Stop.stopQuietly;
+import static org.mockserver.test.ClosedPort.CLOSED_PORT;
 
 public class NettyHttpClientErrorHandlingTest {
 
@@ -49,19 +49,15 @@ public class NettyHttpClientErrorHandlingTest {
 
     @Test
     public void shouldThrowSocketCommunicationExceptionForConnectException() {
-        // given
-        int freePort = PortFactory.findFreePort();
-
         // when
         Exception exception = assertThrows(Exception.class, () -> new NettyHttpClient(configuration(), mockServerLogger, clientEventLoopGroup, null, false)
-            .sendRequest(request().withHeader(HOST.toString(), "127.0.0.1:" + freePort))
+            .sendRequest(request().withHeader(HOST.toString(), "127.0.0.1:" + CLOSED_PORT))
             .get(60, TimeUnit.SECONDS));
 
         // then
         assertThat(exception.getMessage(), anyOf(
-            containsString("Connection refused: /127.0.0.1:" + freePort),
-            containsString("Connection refused: no further information: /127.0.0.1:" + freePort),
-            containsString("Channel closed before valid response")
+            containsString("Connection refused: /127.0.0.1:" + CLOSED_PORT),
+            containsString("Connection refused: no further information: /127.0.0.1:" + CLOSED_PORT)
         ));
     }
 

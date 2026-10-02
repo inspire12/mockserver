@@ -20,6 +20,7 @@ import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.netty.MockServer;
 import org.mockserver.socket.tls.NettySslContextFactory;
+import org.mockserver.test.ClosedPort;
 
 import java.net.URI;
 import java.util.concurrent.BlockingQueue;
@@ -213,8 +214,7 @@ public class WebSocketProxyPassthroughIntegrationTest {
         mockServerClient.reset();
         // Host header points at a port with no listener — the upstream connect fails, so the client must get a 502
         // and must NOT hang waiting for a 101.
-        int deadPort = findFreePort();
-        try (WsTestClient client = new WsTestClient(mockServer.getLocalPort(), false, "127.0.0.1:" + deadPort, "/relay/refused")) {
+        try (WsTestClient client = new WsTestClient(mockServer.getLocalPort(), false, "127.0.0.1:" + ClosedPort.CLOSED_PORT, "/relay/refused")) {
             String signal = client.attemptConnect();
             assertThat(signal, is("HANDSHAKE_FAILED:502"));
         }
@@ -284,12 +284,6 @@ public class WebSocketProxyPassthroughIntegrationTest {
         assertThat(pair.getHttpResponse().getFirstHeader("x-mockserver-websocket-transcript-truncated"), is("false"));
         stopQuietly(noFramesClient);
         stopQuietly(noFramesServer);
-    }
-
-    private static int findFreePort() throws Exception {
-        try (java.net.ServerSocket socket = new java.net.ServerSocket(0)) {
-            return socket.getLocalPort();
-        }
     }
 
     private HttpRequest[] awaitRecorded(String path) throws InterruptedException {

@@ -6,7 +6,7 @@ import org.junit.Before;
 import org.junit.Test;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.httpclient.SocketCommunicationException;
-import org.mockserver.socket.PortFactory;
+import org.mockserver.test.ClosedPort;
 
 import java.io.IOException;
 import java.net.ServerSocket;
@@ -193,9 +193,8 @@ public class MockServerClientHasStoppedTest {
     @Test
     public void shouldReportStoppedWhenNothingIsListening() throws IOException {
         // given - a port with nothing listening on it, so connections are refused
-        int freePort = PortFactory.findFreePort();
         Configuration configuration = configuration().maxSocketTimeoutInMillis(SOCKET_TIMEOUT_MILLIS);
-        mockServerClient = new MockServerClient(configuration, "localhost", freePort);
+        mockServerClient = new MockServerClient(configuration, "localhost", ClosedPort.CLOSED_PORT);
 
         // then - a refused connection is unambiguous, so this really is stopped
         assertThat(
