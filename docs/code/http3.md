@@ -325,8 +325,8 @@ with `http3Port` set and asserts it exits non-zero printing every fix and no sta
 `-http3` jar and asserts HTTP/3 starts. For images, `.buildkite/scripts/steps/docker-http3-smoke.sh`
 makes a real HTTP/3 request to a `-http3` container with the JDK's own HTTP/3 client
 (`.buildkite/scripts/lib/Http3Probe.java`, JDK 26+) and checks the base image refuses `http3Port`
-with the message. The per-merge `snapshot-http3` publish stays non-blocking until plan item 41
-(performance-programme.md §6) makes it blocking after 5 green master runs.
+with the message. A smoke failure fails the per-merge `snapshot-http3` publish and its step, as it
+does the release's `-http3` publish.
 
 ### Test UDP sockets (macOS port shadowing)
 

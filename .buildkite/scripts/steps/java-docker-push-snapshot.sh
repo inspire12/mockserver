@@ -342,8 +342,8 @@ rm -f docker/clustered/mockserver-netty-jar-with-dependencies.jar docker/cluster
 # ---------------------------------------------------------------------------
 # :snapshot-http3 — the standard image plus this arch's QUIC native (docker/http3/Dockerfile),
 # built FROM the :snapshot digest pushed above so it can never drift from it. Smoke-tested with a
-# real HTTP/3 request before it is pushed. NON-BLOCKING until it has run green on CI (plan item 41): a
-# failure publishes nothing and warns, and never fails the images already pushed.
+# real HTTP/3 request before it is pushed. HARD-FAIL like the release's -http3 publish, and LAST, so a
+# failure publishes no snapshot-http3 and reds the step after every other image is already pushed.
 publish_snapshot_http3() {
   export HTTP3_SMOKE_ID="$$"
   local base_digest base_ref smoke_tag="mockserver/mockserver:smoke-http3-$HTTP3_SMOKE_ID"
@@ -381,13 +381,15 @@ publish_snapshot_http3() {
     --tag "${ECR_REPO}:mockserver-snapshot-http3" \
     docker/http3
 }
-echo "--- :docker: Building, smoke-testing and pushing mockserver/mockserver:snapshot-http3 (multi-arch, non-blocking)"
-# Bounded, so a hung pull or smoke run cannot eat the step's timeout for an optional image.
+echo "--- :docker: Building, smoke-testing and pushing mockserver/mockserver:snapshot-http3 (multi-arch)"
+# Bounded, so a hung pull or smoke run fails the step in 20m rather than eating its whole timeout.
 export ECR_REPO
 export -f publish_snapshot_http3
-if ! timeout 20m bash -c 'set -euo pipefail; publish_snapshot_http3'; then
-  echo "WARNING: snapshot-http3 was NOT published (non-blocking) — see the log above"
-  echo "The \`snapshot-http3\` image was **not** published by this build: its build or HTTP/3 smoke test failed (non-blocking). See the \`:docker: build and push :snapshot\` log." \
-    | buildkite-agent annotate --style warning --context snapshot-http3 || true
-fi
+http3_rc=0
+timeout 20m bash -c 'set -euo pipefail; publish_snapshot_http3' || http3_rc=$?
 rm -f docker/http3/ca-bundle.pem
+if (( http3_rc != 0 )); then
+  echo "ERROR: snapshot-http3 was NOT published: its build, HTTP/3 smoke test or push failed (exit ${http3_rc}, 124 = the 20m timeout) — see the log above" >&2
+  # Exit 1, not the child's status: a 255 would match the step's agent-shutdown auto-retry.
+  exit 1
+fi

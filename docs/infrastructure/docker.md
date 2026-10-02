@@ -72,7 +72,7 @@ Images are published to two registries:
 | AWS ECR Public | `public.ecr.aws/mockserver/mockserver` | Avoids Docker Hub rate limits for AWS-based CI/CD |
 | AWS ECR Public | `public.ecr.aws/mockserver/mockserver-webhook` | Webhook image on ECR |
 
-Both registries receive the same tags on every push. On each merge to `master`, the legacy Buildkite pipeline (`.buildkite/scripts/steps/java-docker-push-snapshot.sh`) pushes the `:snapshot`, `:mockserver-snapshot`, `-graaljs` and `-clustered` snapshot variants (plus `:snapshot` / `:mockserver-snapshot` for the webhook image), then `snapshot-http3` / `mockserver-snapshot-http3` (non-blocking). During releases, the release pipeline (`scripts/release/components/docker.sh`) pushes `:latest`, `:X.Y.Z`, `:mockserver-X.Y.Z`, `-graaljs`, `clustered-*`, `-aot` (experimental, error-isolated), and webhook release variants, then — last, after those are mirrored and signed — `-http3`. The `:latest` tag is pushed only by the release pipeline, not by the per-merge snapshot step. The `:latest` tag always points to the most recent official release, not the development branch.
+Both registries receive the same tags on every push. On each merge to `master`, the legacy Buildkite pipeline (`.buildkite/scripts/steps/java-docker-push-snapshot.sh`) pushes the `:snapshot`, `:mockserver-snapshot`, `-graaljs` and `-clustered` snapshot variants (plus `:snapshot` / `:mockserver-snapshot` for the webhook image), then, last, `snapshot-http3` / `mockserver-snapshot-http3` (a failure fails the step). During releases, the release pipeline (`scripts/release/components/docker.sh`) pushes `:latest`, `:X.Y.Z`, `:mockserver-X.Y.Z`, `-graaljs`, `clustered-*`, `-aot` (experimental, error-isolated), and webhook release variants, then — last, after those are mirrored and signed — `-http3`. The `:latest` tag is pushed only by the release pipeline, not by the per-merge snapshot step. The `:latest` tag always points to the most recent official release, not the development branch.
 
 Release images are cosign-signed by digest after push (see below). Snapshot images are not signed.
 
@@ -131,7 +131,7 @@ else Maven Central + sha256"]
 
   | Where | Smoke | On failure |
   |---|---|---|
-  | Snapshot step, per merge | agent-arch `--load` build over the pushed `:snapshot` digest, before pushing `snapshot-http3` | non-blocking (plan item 41 makes it blocking): warning annotation, nothing published; the block runs last under `timeout 20m` |
+  | Snapshot step, per merge | agent-arch `--load` build over the pushed `:snapshot` digest, before pushing `snapshot-http3` | hard-fail, but LAST under `timeout 20m`: every other snapshot image is already pushed, so only the `snapshot-http3` publish stops |
   | Release (`--execute`) | agent-arch `--load` build over the pushed release digest, before the multi-arch push | hard-fail, but LAST: every core image is already pushed, mirrored and signed, so only the `-http3` publish stops |
   | Release dry run | local build, HTTP/3 request only (the base's message may predate this version) | blocking, last |
   | Container-integration harness | `docker_variant_smoke_http3` over the default reference image | non-blocking |
