@@ -8,6 +8,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# shellcheck source=lib/perf-test-env.sh
+. "$REPO_ROOT/.buildkite/scripts/test/lib/perf-test-env.sh"
+perf_test_scrub_env
 LIB="$REPO_ROOT/.buildkite/scripts/steps/lib"
 FIGURES_JQ="$LIB/perf-website-figures.jq"
 POINT_JQ="$LIB/perf-hw-matrix-rw.jq"
@@ -149,7 +152,8 @@ chmod +x "$T/aws"
 mkdir -p "$T/bin" && printf '#!/bin/sh\nexit 0\n' > "$T/bin/buildkite-agent" && chmod +x "$T/bin/buildkite-agent"
 publish() { # run_json [env...]
   local run="$1"; shift
-  env PATH="$T/bin:$PATH" PERF_TEST_RUN="$run" PERF_PUBLISH_AWS_BIN="$T/aws" PERF_PUBLISH_REPO_ROOT="$R" "$@" \
+  env PATH="$T/bin:$PATH" PERF_TEST_RUN="$run" PERF_PUBLISH_AWS_BIN="$T/aws" PERF_PUBLISH_REPO_ROOT="$R" \
+    PERF_PUBLISH_PERSISTED_KEY="runs/master/2026-09-30T00:00:00Z__abc.json" "$@" \
     bash "$PUBLISH" > "$T/publish.log" 2>&1
 }
 COMMITTED="$R/jekyll-www.mock-server.com/_data/perf_figures.json"

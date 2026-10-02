@@ -6,6 +6,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# shellcheck source=lib/perf-test-env.sh
+. "$REPO_ROOT/.buildkite/scripts/test/lib/perf-test-env.sh"
+perf_test_scrub_env PERF_HC_FIGURES_JQ PERF_HC_MULTI_SH PERF_HC_CHARTS_PY
 FIGURES_JQ="${PERF_HC_FIGURES_JQ:-$REPO_ROOT/.buildkite/scripts/steps/lib/perf-website-figures.jq}"
 MULTI_SH="${PERF_HC_MULTI_SH:-$REPO_ROOT/mockserver-performance-test/scripts/multi-process-sweep.sh}"
 CHARTS_PY="${PERF_HC_CHARTS_PY:-$REPO_ROOT/jekyll-www.mock-server.com/images/perf-charts/render_perf_charts.py}"

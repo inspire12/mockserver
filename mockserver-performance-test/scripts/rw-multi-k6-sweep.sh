@@ -16,7 +16,7 @@ REPO_ROOT="${PERF_RW_REPO_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 LIB_DIR="$REPO_ROOT/.buildkite/scripts/steps/lib"
 FIGURES_JQ="$LIB_DIR/perf-website-figures.jq"
 CROSS_JQ="$LIB_DIR/perf-rw-cross-check.jq"
-for lib in perf-cpu-topology.sh perf-sweep-window.sh perf-derive-saturation.sh perf-k6-interrupted.sh perf-k6-runtime.sh; do
+for lib in perf-cpu-topology.sh perf-sweep-window.sh perf-derive-saturation.sh perf-k6-interrupted.sh perf-k6-runtime.sh perf-tail-instrument.sh; do
   if [ ! -r "$LIB_DIR/$lib" ]; then
     echo ":x: $LIB_DIR/$lib not found — refusing to run without the shared guard" >&2
     exit 1
@@ -81,6 +81,19 @@ fi
 if [ -n "$K6_GOMEMLIMIT" ] && ! [[ "$K6_GOMEMLIMIT" =~ ^(off|[0-9]+(B|KiB|MiB|GiB|TiB)?)$ ]]; then
   echo ":x: PERF_RW_K6_GOMEMLIMIT='$K6_GOMEMLIMIT' must be off or bytes with an optional B/KiB/MiB/GiB/TiB suffix (e.g. 8GiB)" >&2; exit 2
 fi
+if [ "$K6_GOGC" = off ] && [ "$K6_GOMEMLIMIT" = off ]; then
+  echo ":x: PERF_RW_K6_GOGC=off needs a GOMEMLIMIT (leave PERF_RW_K6_GOMEMLIMIT unset for the derived one): with both off Go never collects" >&2; exit 2
+fi
+# Report-only tail attribution files (item 44): each k6 process's per-second series and GC trace, and
+# host kernel counters sampled over the main ladder (lib/perf-tail-instrument.sh). Never a gate.
+TAIL_INSTRUMENT="${PERF_RW_TAIL_INSTRUMENT:-true}"
+case "$TAIL_INSTRUMENT" in true|false) ;; *) echo ":x: PERF_RW_TAIL_INSTRUMENT must be true or false" >&2; exit 2 ;; esac
+HKS_INTERVAL_S="${PERF_RW_HOST_SAMPLER_INTERVAL_S:-1}"
+if ! [[ "$HKS_INTERVAL_S" =~ ^[0-9]+(\.[0-9]+)?$ ]] || ! awk -v v="$HKS_INTERVAL_S" 'BEGIN{exit !(v+0 >= 0.1)}'; then
+  echo ":x: PERF_RW_HOST_SAMPLER_INTERVAL_S='$HKS_INTERVAL_S' must be a number of seconds of at least 0.1" >&2; exit 2
+fi
+HKS_MAX_BYTES="${PERF_RW_HOST_SAMPLER_MAX_BYTES:-33554432}"
+[[ "$HKS_MAX_BYTES" =~ ^[1-9][0-9]{3,9}$ ]] || { echo ":x: PERF_RW_HOST_SAMPLER_MAX_BYTES='$HKS_MAX_BYTES' must be a whole number of bytes from 1000" >&2; exit 2; }
 ACCOUNT_TOL="${PERF_RW_ACCOUNT_TOL:-0}"
 WARMUP_RATE="${PERF_RW_WARMUP_RATE:-2000}"
 WARMUP_DURATION="${PERF_RW_WARMUP_DURATION:-10s}"
@@ -272,6 +285,15 @@ k6_runtime_json() { # the result's .config.k6_runtime
      vu_ceiling_basis:(if $vbasis == "" then null else ($vbasis | fromjson) end),
      note:"applied to every measured k6 process (xcheck and main phases); Go and k6 defaults are GOGC 100, GOMEMLIMIT off and gracefulStop 30s; vu_ceiling caps each rung pool of ceil(rate x 0.08) VUs per process; null = not resolved before an abort"}'
 }
+# The result's .method.ab: the opt-in A/B knobs set (null = not set). Any of them makes the run a trial,
+# never one of item 44's counting runs (docs/code/performance-measurement.md, "Tail attribution files").
+ab_json() {
+  jq -nc --arg numa "$K6_NUMA_NODE" --arg gogc "${PERF_RW_K6_GOGC:-}" --arg gomem "${PERF_RW_K6_GOMEMLIMIT:-}" \
+    --arg cpp "${PERF_RW_K6_CORES_PER_PROC:-}" --arg vuc "${PERF_RW_K6_VU_CEILING:-}" '
+    def v: if . == "" then null else . end;
+    {k6_numa_node:(if $numa == "same" then $numa else null end), k6_gogc:($gogc | v), k6_gomemlimit:($gomem | v),
+     k6_cores_per_proc:($cpp | v), k6_vu_ceiling:($vuc | v)} | . + {trial:any(.[]; . != null)}'
+}
 case "$WINDOW_MODE" in wallclock|vu_tag) ;; *) echo ":x: PERF_RW_WINDOW_MODE must be wallclock or vu_tag" >&2; exit 1 ;; esac
 [[ "$PUSH_S" =~ ^[1-9][0-9]*$ ]] || { echo ":x: PERF_RW_PUSH_INTERVAL_S must be a whole number of seconds >= 1" >&2; exit 1; }
 if [ "$QUIET_S" -lt $(( PUSH_S * 2 )) ]; then
@@ -297,7 +319,7 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/perf-rw.XXXXXX")"
 chmod 0777 "$WORK"
 ALL_NAMES=""
 OWN_NETWORK=""
-SUT_MEMS=""; PROM_MEMS=""; XCHECK_MEMS=""; OBSERVED=""; NODE_CPULISTS_JSON=""
+SUT_MEMS=""; PROM_MEMS=""; XCHECK_MEMS=""; K6_MEMS_JSON=""; OBSERVED=""; NODE_CPULISTS_JSON=""
 RESULT_WRITTEN=0
 # The result's placement: the arm's computed record plus what Docker reports each container got
 # (observed[], observed_mems = the SUT's) beside what the arm asked for. null before it is resolved.
@@ -305,14 +327,15 @@ placement_result_json() {
   local obs="[]"
   if [ -s "${OBSERVED:-}" ]; then obs="$(jq -sc . "$OBSERVED" 2>/dev/null)" || obs="[]"; fi
   jq -nc --argjson p "${PLACEMENT_JSON:-null}" --argjson obs "${obs:-[]}" --argjson cpulists "${NODE_CPULISTS_JSON:-null}" \
-    --arg sm "${SUT_MEMS#--cpuset-mems=}" --arg pm "${PROM_MEMS#--cpuset-mems=}" --arg xm "${XCHECK_MEMS#--cpuset-mems=}" '
+    --arg sm "${SUT_MEMS#--cpuset-mems=}" --arg pm "${PROM_MEMS#--cpuset-mems=}" --arg xm "${XCHECK_MEMS#--cpuset-mems=}" \
+    --argjson km "${K6_MEMS_JSON:-null}" '
     if $p == null then null else
       ([ $obs[] | select(.role == "sut") ] | first) as $sut
       | $p + {observed_mems: ($sut.cpuset_mems // null),
               sut_mems_as_requested: (if $sut == null or $sut.cpuset_mems == null then null else $sut.cpuset_mems == $sm end),
-              requested_mems: {sut: $sm, prometheus: $pm, xcheck: $xm},
+              requested_mems: {sut: $sm, prometheus: $pm, xcheck: $xm, k6: $km},
               observed: $obs, node_cpulists: $cpulists,
-              note: "observed = docker inspect HostConfig.CpusetCpus/CpusetMems per container (\"\" = unrestricted, null = not inspectable); requested_mems = the --cpuset-mems this arm computes for its own containers"}
+              note: "observed = docker inspect HostConfig.CpusetCpus/CpusetMems per container (\"\" = unrestricted, null = not inspectable); requested_mems = the --cpuset-mems this arm computes for its own containers (k6: one per main process, in order)"}
     end'
 }
 # An abort still leaves an invalid result naming the failed step, plus whatever the main
@@ -342,6 +365,8 @@ write_fallback_result() { # rc failed_command
 }
 cleanup() { # rc failed_command
   local rc="$1"
+  # First, so its status and CSVs are final before the copy below; a no-op once run_phase stopped it.
+  { declare -F host_kernel_sampler_stop >/dev/null && host_kernel_sampler_stop; } 2>/dev/null || true
   if [ "$RESULT_WRITTEN" != 1 ] && [ "$OUT_FILE" != /dev/stdout ]; then write_fallback_result "$rc" "$2"; fi
   # JSON, CSV and text files, full k6 logs and the Prometheus log (taken before the
   # containers go). Guarded: a copy failure must not skip cleanup or change the exit code.
@@ -390,7 +415,11 @@ if [ "${PERF_RW_TEST_RESOLVE_ONLY:-}" = true ]; then # test hook: print .config.
   k6_runtime_json; RESULT_WRITTEN=1; exit 0
 fi
 
-echo "--- item 31 remote-write multi-k6 sweep: N=$N rates=$RATES step=$SWEEP_STEP gap=$SWEEP_GAP settle=${SETTLE_S}s push=${PUSH_S}s quiet=${QUIET_S}s window=$WINDOW_MODE server=$SERVER_CPUS prometheus=$PROM_CPUS upstream=${UPSTREAM_CPUS:-none} k6=${K6_SETS[*]} target=${TARGET_URL:-<launch SUT>} degrade=${DEGRADE:-none} k6_gogc=$K6_GOGC k6_gomemlimit=$K6_GOMEMLIMIT k6_graceful_stop=$K6_GRACEFUL_STOP ladder=$LADDER_PROFILE/$RATES_SOURCE k6_vu_ceiling=${K6_VU_CEILING:-$RW_SWEEP_VU_CEILING} ($K6_VU_CEILING_SOURCE)" >&2
+echo "--- item 31 remote-write multi-k6 sweep: N=$N rates=$RATES step=$SWEEP_STEP gap=$SWEEP_GAP settle=${SETTLE_S}s push=${PUSH_S}s quiet=${QUIET_S}s window=$WINDOW_MODE server=$SERVER_CPUS prometheus=$PROM_CPUS upstream=${UPSTREAM_CPUS:-none} k6=${K6_SETS[*]} target=${TARGET_URL:-<launch SUT>} degrade=${DEGRADE:-none} k6_gogc=$K6_GOGC k6_gomemlimit=$K6_GOMEMLIMIT k6_graceful_stop=$K6_GRACEFUL_STOP ladder=$LADDER_PROFILE/$RATES_SOURCE k6_vu_ceiling=${K6_VU_CEILING:-$RW_SWEEP_VU_CEILING} ($K6_VU_CEILING_SOURCE) tail_instrument=$TAIL_INSTRUMENT" >&2
+AB_JSON="$(ab_json)"
+if [ "$(jq -r '.trial' <<<"$AB_JSON")" = true ]; then
+  echo "--- A/B trial, not a counting run for item 44 (.method.ab): $AB_JSON" >&2
+fi
 
 # --- placement proof: SUT, Prometheus, upstream and every k6 on disjoint physical cores ---
 PAIRS=(server "$SERVER_CPUS" prometheus "$PROM_CPUS")
@@ -409,17 +438,19 @@ PLACEMENT_JSON="$(numa_placement_json "$PLACEMENT_LAYOUT" "$K6_NUMA_NODE" "$SERV
 # Each container's memory on the node it runs on; empty (no flag) where the node map is unreadable.
 SUT_MEMS="$(numa_mems_flag "$SERVER_CPUS")"; PROM_MEMS="$(numa_mems_flag "$PROM_CPUS")"
 XCHECK_MEMS="$(numa_mems_flag "$XCHECK_CPUS")"
+# The flag each main k6 process gets in run_phase, "" where none.
+K6_MEMS_JSON="$(for _k in "${K6_SETS[@]}"; do _f="$(numa_mems_flag "$_k")"; printf '%s\n' "${_f#--cpuset-mems=}"; done | jq -Rsc 'split("\n") | .[:-1]')"
 NODE_CPULISTS_JSON="$(numa_node_cpulists_json)"
 numa_log_node_cpulists >&2
 # What this arm asks for; what each container received follows as "--- observed placement:" lines.
-echo "--- placement: $PLACEMENT_JSON requested mems: server=${SUT_MEMS:-none} prometheus=${PROM_MEMS:-none} xcheck=${XCHECK_MEMS:-none}" >&2
+echo "--- placement: $PLACEMENT_JSON requested mems: server=${SUT_MEMS:-none} prometheus=${PROM_MEMS:-none} xcheck=${XCHECK_MEMS:-none} k6=$K6_MEMS_JSON" >&2
 if [ "${PERF_RW_TEST_PLACEMENT_ONLY:-}" = true ]; then # test hook: print the resolved placement, start nothing
   jq -nc --arg s "$SERVER_CPUS" --arg p "$PROM_CPUS" --arg u "${DEF_UPSTREAM:-}" --arg k "$(IFS=';'; echo "${K6_SETS[*]}")" \
     --arg x "$XCHECK_CPUS" --arg sm "$SUT_MEMS" --arg pm "$PROM_MEMS" --arg xm "$XCHECK_MEMS" \
     --arg km "$(for _k in "${K6_SETS[@]}"; do numa_mems_flag "$_k"; echo; done)" --argjson placement "$PLACEMENT_JSON" \
     --arg rates "$RATES" --arg profile "$LADDER_PROFILE" --arg rsrc "$RATES_SOURCE" \
-    --argjson k6rt "$(k6_runtime_json)" --argjson cpulists "$NODE_CPULISTS_JSON" '
-    {server:$s, prometheus:$p, upstream_default:$u, k6:($k | split(";")), xcheck:$x,
+    --argjson k6rt "$(k6_runtime_json)" --argjson cpulists "$NODE_CPULISTS_JSON" --argjson ab "$AB_JSON" '
+    {ab:$ab, server:$s, prometheus:$p, upstream_default:$u, k6:($k | split(";")), xcheck:$x,
      mems:{server:$sm, prometheus:$pm, xcheck:$xm, k6:($km | split("\n") | map(select(. != "")))}, placement:$placement,
      ladder:{profile:$profile, source:$rsrc, rates:$rates}, k6_runtime:$k6rt, node_cpulists:$cpulists}'
   RESULT_WRITTEN=1; exit 0
@@ -593,6 +624,24 @@ soft_capture() { # var default name cmd...  (stdout of cmd -> var)
   printf -v "$var" '%s' "$def"
 }
 
+# Host kernel counters over the main ladder: per cpu for the SUT and each k6 process, TCP per network
+# namespace (the host's, the SUT's, each k6's), on Prometheus's cpus where taskset exists. Report-only.
+start_tail_sampler() { # k6_names cpusets(;) ladder_end_s
+  local -a sets_arr; IFS=';' read -ra sets_arr <<< "$2"
+  local roles="sut=$SERVER_CPUS" netns="host=self" i=0 k pid max
+  if [ -n "$SUT_CONTAINER" ]; then
+    pid="$(docker inspect -f '{{.State.Pid}}' "$SUT_CONTAINER" 2>/dev/null || true)"; netns="$netns sut=${pid:-}"
+  fi
+  for k in $1; do
+    pid="$(docker inspect -f '{{.State.Pid}}' "$k" 2>/dev/null || true)"
+    roles="$roles k6_$i=${sets_arr[$i]}"; netns="$netns k6_$i=${pid:-}"; i=$((i + 1))
+  done
+  max="$(awk -v s=$(( $3 - $(date +%s) + QUIET_S + 60 )) -v iv="$HKS_INTERVAL_S" 'BEGIN { n = int(s / iv) + 1; print (n < 1 ? 1 : n) }')"
+  host_kernel_sampler_start "$WORK" "$roles" "$netns" "$max" "$HKS_INTERVAL_S" "$HKS_MAX_BYTES" "$PROM_CPUS"
+  [ -z "$HOST_KERNEL_SAMPLER_PID" ] || record_pid "$HOST_KERNEL_SAMPLER_PID"
+  echo "--- host kernel sampler: $(jq -c '{running, reason, pinned_cpus, unavailable:[.sources | to_entries[] | select(.value.available | not) | "\(.key): \(.value.reason)"]}' "$WORK/host-kernel-status.json" 2>/dev/null || echo "no status")" >&2
+}
+
 # --- one synchronised ladder ---------------------------------------------------
 # run_phase <phase> <n> <agg_rates_csv> <window_mode> <lean> <cpusets;...>
 # Leaves $WORK/<phase>-p<i>.json (per-process summaries), $WORK/<phase>-meta.json
@@ -633,11 +682,15 @@ run_phase() {
       "$K6_IMAGE" run --tag "proc=${phase}-p${i}" -o experimental-prometheus-rw /k6/sweep.js >/dev/null
     log_container_cpuset "k6_${phase}_p${i}" "$kname" "$OBSERVED"
   done
+  if [ "$phase" = main ] && [ "$TAIL_INSTRUMENT" = true ]; then
+    start_tail_sampler "$names" "$sets" "$ladder_end_s" || echo "WARNING: rw-multi-k6: host kernel sampler not started (report-only)" >&2
+  fi
 
   local cpu_log="$WORK/${phase}-cpu.csv" want="$names $PROM_NAME ${SUT_CONTAINER:-}"
   : > "$cpu_log"
   # Stamped on return: docker stats reports the ~1 s before it returns (performance-measurement.md, sweep.js).
-  ( while true; do
+  # Ends with its parent too: a SIGKILLed harness runs no cleanup to kill it.
+  ( while kill -0 "$$" 2>/dev/null; do
       stats="$(docker stats --no-stream --format '{{.Name}} {{.CPUPerc}}' 2>/dev/null || true)"
       ts="$(date -u +%s)"
       awk -v t="$ts" -v want="$want" '
@@ -681,6 +734,7 @@ run_phase() {
   if [ "$DEGRADE" = pause_prometheus ] && [ "$phase" = main ]; then docker unpause "$PROM_NAME" >/dev/null 2>&1 || true; fi
   wait "$cgroup_pid" 2>/dev/null || true
   kill "$sampler" >/dev/null 2>&1 || true; wait "$sampler" 2>/dev/null || true
+  if [ "$phase" = main ]; then host_kernel_sampler_stop; fi
   i=0
   # Each container's start (epoch s), which places its gctrace lines (@seconds since start).
   local started="" st
@@ -693,8 +747,8 @@ run_phase() {
 
   jq -nc --arg phase "$phase" --argjson n "$n" --arg agg "$agg" --arg pp "$pp" --arg sets "$sets" \
     --arg wmode "$wmode" --arg lean "$lean" --argjson start_s "$start_s" --argjson end_s "$ladder_end_s" \
-    --arg names "$names" --arg exits "$exits" --arg started "$started" '
-    {phase:$phase, n:$n, window_mode:$wmode, lean_summary:($lean=="true"),
+    --arg names "$names" --arg exits "$exits" --arg started "$started" --argjson step "$STEP_S" --argjson gap "$GAP_S" '
+    {phase:$phase, n:$n, window_mode:$wmode, lean_summary:($lean=="true"), step_s:$step, gap_s:$gap,
      agg_rates:($agg|split(",")|map(tonumber)), per_process_rates:($pp|split(",")|map(tonumber)),
      cpusets:($sets|split(";")), start_at_s:$start_s, ladder_end_s:$end_s,
      containers:($names|split(" ")), exit_codes:($exits|split(" ")|map(select(.!=""))|map(tonumber)),
@@ -974,6 +1028,76 @@ soft merge_main merge_phase main "$WINDOW_MODE" main-merged
 { curl -sf --max-time 30 --data-urlencode 'query=count by (__name__, proc, rate) ({__name__=~"k6_http_req.*"})' \
     "$(prom_url)/api/v1/query" | jq -c '[.data.result[] | {name:.metric.__name__, proc:.metric.proc, rate:.metric.rate, series:(.value[1]|tonumber)}]' \
     > "$WORK/prom-series-inventory.json"; } 2>/dev/null || true
+
+# --- tail attribution files (report-only, item 44; never a gate) ------------------
+# main-k6-gc.csv (every gctrace cycle), main-k6-timeseries.csv (per process and second, from Prometheus
+# range queries over the ladder) and tail-instrument.json (what each holds, or why it is empty).
+k6_prom_ranges() { # from_s to_s out_file -> {reqs, over_5ms, iterations, dropped, vus: matrix | null, failed: [...]}
+  # Matrices travel through files, never arguments: one ladder's matrix passes Linux's 128 KiB per-argument limit.
+  local sel='proc=~"main-p[0-9]+"' h='k6_http_req_duration_seconds{proc=~"main-p[0-9]+"}' name expr r="$3.query"
+  echo '{"failed":[]}' > "$3"
+  for name in reqs over_5ms iterations dropped vus; do
+    case "$name" in
+      reqs) expr="sum by (proc) (k6_http_reqs_total{$sel})" ;;
+      # A histogram with no observations has a NaN fraction; the >= 0 filter drops it, as it adds nothing.
+      over_5ms) expr="sum by (proc) (histogram_count($h) * (1 - (histogram_fraction(0, 0.005, $h) >= 0)))" ;;
+      iterations) expr="sum by (proc) (k6_iterations_total{$sel})" ;;
+      dropped) expr="sum by (proc) (k6_dropped_iterations_total{$sel})" ;;
+      vus) expr="max by (proc) (k6_vus{$sel})" ;;
+    esac
+    curl -sf --max-time 30 --data-urlencode "query=$expr" --data-urlencode "start=$1" --data-urlencode "end=$2" \
+        --data-urlencode "step=1" "$(prom_url)/api/v1/query_range" 2>/dev/null | jq -c '.data.result | arrays' > "$r" 2>/dev/null \
+      || : > "$r"
+    jq -c --arg n "$name" --slurpfile r "$r" '.[$n] = ($r[0] // null) | if .[$n] == null then .failed += [$n] else . end' "$3" > "$3.tmp" \
+      && mv -f "$3.tmp" "$3"
+  done
+  rm -f "$r"
+}
+build_tail_files() {
+  local meta="$WORK/main-meta.json" i started from to span reason="" status
+  echo "$K6_GC_CSV_HEADER" > "$WORK/main-k6-gc.csv"
+  for ((i=0;i<N;i++)); do
+    started="$(jq -r ".container_started_epoch_s[$i] // \"null\"" "$meta")"
+    k6_gctrace_csv "main-p$i" "$started" "$WORK/main-p$i.log" >> "$WORK/main-k6-gc.csv"
+  done
+  from=$(( $(jq -r '.start_at_s' "$meta") - 5 )); to=$(( $(jq -r '.ladder_end_s' "$meta") + QUIET_S + 5 )); span=$(( to - from ))
+  if [ "$span" -le 10000 ]; then # Prometheus answers at most 11,000 points per series
+    k6_prom_ranges "$from" "$to" "$WORK/main-k6-ranges.json"
+  else
+    reason="the ladder spans ${span} s, over the 10,000 one-second points a range query returns"
+    echo '{"failed":["all"]}' > "$WORK/main-k6-ranges.json"
+  fi
+  k6_timeseries_csv "$WORK/main-k6-ranges.json" "$WORK/main-k6-gc.csv" "$(jq -r '.start_at_s' "$meta")" \
+    "$STEP_S" "$GAP_S" "$(jq -r '.agg_rates | join(",")' "$meta")" > "$WORK/main-k6-timeseries.csv"
+  status="$(jq -nc --slurpfile q "$WORK/main-k6-ranges.json" --arg reason "$reason" --argjson from "$from" --argjson to "$to" \
+    --arg gctrace "$K6_GCTRACE" --argjson cycles "$(( $(wc -l < "$WORK/main-k6-gc.csv") - 1 ))" \
+    --argjson rows "$(( $(wc -l < "$WORK/main-k6-timeseries.csv") - 1 ))" '
+    ($q[0] // {failed:["all"]}) as $r
+    | {k6_gctrace:{file:"main-k6-gc.csv", cycles:$cycles,
+                 reason:(if $gctrace != "true" then "PERF_RW_K6_GCTRACE=false" elif $cycles == 0 then "no gctrace line in any main-p*.log" else null end)},
+     k6_timeseries:{file:"main-k6-timeseries.csv", rows:$rows, from_s:$from, to_s:$to, step_s:1,
+                    failed_queries:$r.failed,
+                    empty_series:[ $r | to_entries[] | select(.key != "failed" and (.value | type == "array" and length == 0)) | .key ],
+                    reason:(if $reason != "" then $reason elif $rows == 0 then "no Prometheus series for main-p*" else null end),
+                    note:"row ts covers [ts, ts + 1): counters are the difference of cumulative values at ts and ts + 1 (an empty series, as dropped_iterations until one drops, reads 0), vus the value at ts + 1; empty = null"}}')"
+  jq -c --argjson s "$status" '$s + {host_kernel: .}' "$WORK/host-kernel-status.json" 2>/dev/null > "$WORK/tail-instrument.json" \
+    || jq -c '. + {host_kernel: null}' <<<"$status" > "$WORK/tail-instrument.json"
+  rm -f "$WORK/main-k6-ranges.json"
+}
+# The result always gets a JSON object: a step that failed inside build_tail_files leaves at worst a reason.
+write_tail_files() {
+  ( build_tail_files ) || true
+  jq -e 'type == "object"' "$WORK/tail-instrument.json" >/dev/null 2>&1 && return 0
+  echo "WARNING: rw-multi-k6: tail-instrument.json is empty or not JSON; the tail attribution files are incomplete (report-only, not a gate)" >&2
+  echo '{"error":"tail-instrument.json was empty or not JSON when the run ended; the tail attribution files are incomplete"}' > "$WORK/tail-instrument.json"
+}
+tail_instrument_json() { # one JSON object, or null: never empty, which would abort the result assembly
+  local v # a failed jq can still print (a missing file prints null), so its output is replaced, not appended to
+  v="$(jq -sc 'if length == 1 and (.[0] | type) == "object" then .[0] else null end' "$WORK/tail-instrument.json" 2>/dev/null)" || v=null
+  echo "$v"
+}
+if [ "$TAIL_INSTRUMENT" = true ]; then write_tail_files; fi
+
 # Degrade hook: PERF_RW_TEST_NULL_RUNG=<aggregate rate> blanks that rung's merged count, as
 # when a rung's histogram query returns nothing.
 if [ -n "${PERF_RW_TEST_NULL_RUNG:-}" ]; then
@@ -1240,7 +1364,8 @@ jq -n --argjson synth "$SYNTH" --argjson headline "$HEADLINE" --slurpfile m "$WO
   --argjson slow "$SLOW_FLUSHES" --argjson rwfail "${RW_FAILURES:-0}" --argjson k6gc "$K6_GC" --argjson k6int "$K6_INTERRUPTED" \
   --arg hook_cut "${PERF_RW_TEST_CUT_FAULT:-}" --arg hook_step "${PERF_RW_TEST_FAIL_STEP:-}" --arg hook_null "${PERF_RW_TEST_NULL_RUNG:-}" --arg hook_zero "${PERF_RW_TEST_ZERO_TAIL:-}" \
   --argjson promwarn "$(head -n 50 "$PROM_WARNINGS" | jq -R . | jq -sc .)" --argjson placement "$(placement_result_json)" \
-  --arg rates_source "$RATES_SOURCE" --arg ladder_profile "$LADDER_PROFILE" '
+  --arg rates_source "$RATES_SOURCE" --arg ladder_profile "$LADDER_PROFILE" --argjson ab "$AB_JSON" \
+  --argjson tailinst "$(tail_instrument_json)" '
   ($m[0].points) as $P
   | $synth + {
       rig_valid_peak_achieved_rps: $synth.saturation.rig_valid_peak_achieved_rps,
@@ -1262,6 +1387,7 @@ jq -n --argjson synth "$SYNTH" --argjson headline "$HEADLINE" --slurpfile m "$WO
         healthy_ceiling_p99_max_ms: ($p99max | tonumber? // $p99max),
         server_cpus: $scpus, prometheus_cpus: $pcpus, host_cores: $host_cores,
         ladder: {profile: $ladder_profile, source: $rates_source},
+        ab: $ab,
         k6_image: $k6img, prometheus_image: $promimg, mockserver_image: $msimg,
         cpu_window_t0_s: $t0,
         degrade: (if $degrade == "" then null else $degrade end),
@@ -1287,6 +1413,7 @@ jq -n --argjson synth "$SYNTH" --argjson headline "$HEADLINE" --slurpfile m "$WO
       remote_write: {send_failures: $rwfail, slow_flushes: $slow},
       k6_gc: {note: "report-only: Go GC CPU (% of one CPU) and cycles per process over each rung steady window, from GODEBUG=gctrace=1", per_process: $k6gc},
       prometheus: {query_warnings: $promwarn},
+      tail_instrumentation: $tailinst,
       cpu: {sut_pct_over_ladder:$sutcpu, prometheus_pct_over_ladder:$promcpu,
             k6_cpu_us_per_request_mean: ([ $pp[] | .cpu_us_per_request | select(. != null) ] | if length == 0 then null else (add / length * 10 | round) / 10 end)},
       cross_check: $cross

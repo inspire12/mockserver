@@ -6,6 +6,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# shellcheck source=lib/perf-test-env.sh
+. "$REPO_ROOT/.buildkite/scripts/test/lib/perf-test-env.sh"
+perf_test_scrub_env PERF_RQ_LIB PERF_RQ_HARNESS
 LIB="${PERF_RQ_LIB:-$REPO_ROOT/.buildkite/scripts/steps/lib/perf-sut-recvq.sh}"
 HARNESS="${PERF_RQ_HARNESS:-$REPO_ROOT/mockserver-performance-test/scripts/rw-multi-k6-sweep.sh}"
 # shellcheck source=../steps/lib/perf-sut-recvq.sh

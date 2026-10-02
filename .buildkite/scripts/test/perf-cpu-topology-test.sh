@@ -7,6 +7,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# shellcheck source=lib/perf-test-env.sh
+. "$REPO_ROOT/.buildkite/scripts/test/lib/perf-test-env.sh"
+perf_test_scrub_env PERF_TOPO_HARNESS PERF_TOPO_PERCORE PERF_TOPO_RUN
 # shellcheck source=../steps/lib/perf-cpu-topology.sh
 . "$REPO_ROOT/.buildkite/scripts/steps/lib/perf-cpu-topology.sh"
 HARNESS="${PERF_TOPO_HARNESS:-$REPO_ROOT/mockserver-performance-test/scripts/rw-multi-k6-sweep.sh}"
@@ -233,6 +236,15 @@ check "c6i same: k6 on node 0, marked non-baseline" "8-13,72-77;14-19,78-83;20-2
   "$(q '"\(.k6 | join(";"))|\(.placement.layout)|\(.placement.k6_node)|\(.placement.baseline_eligible)"')"
 place "$C6I" 128 PERF_K6_NUMA_NODE=same PERF_RW_K6_CORES_PER_PROC=6
 check "c6i other at the same-socket arm's 6 cores per process (A/B parity)" "0" "$RC"
+# The same-socket A/B (item 44) as the perf-xl arm step runs it: perf-test-run.sh passes its SUT and upstream.
+place "$C6I" 128 PERF_K6_NUMA_NODE=same PERF_RW_SERVER_CPUS=0-5 PERF_RW_UPSTREAM_CPUS=6
+check "c6i same, SUT and upstream passed in: k6 on node 0, disjoint, a non-baseline trial" \
+  "0|8-13,72-77;14-19,78-83;20-25,84-89;26-31,90-95|numa_same_node|false|same|true" \
+  "$RC|$(q '"\(.k6 | join(";"))|\(.placement.layout)|\(.placement.baseline_eligible)|\(.ab.k6_numa_node)|\(.ab.trial)"')"
+place "$C6I" 128 PERF_RW_SERVER_CPUS=0-5 PERF_RW_UPSTREAM_CPUS=6 PERF_RW_K6_CORES_PER_PROC=6
+check "c6i the A/B's control: other socket at 6 cores per process, also a trial" \
+  "0|32-37,96-101;38-43,102-107;44-49,108-113;50-55,114-119|numa_split|null|6|true" \
+  "$RC|$(q '"\(.k6 | join(";"))|\(.placement.layout)|\(.ab.k6_numa_node)|\(.ab.k6_cores_per_proc)|\(.ab.trial)"')"
 place "$C6I" 128 PERF_RW_K6_CPUSETS="8-11;12-15"
 check "c6i: explicit k6 on the SUT's node FAILS" "1" "$RC"
 check "  ... naming the NUMA guard" "yes" "$(grep -q 'NUMA placement guard' "$T/stderr.log" && echo yes || echo no)"
@@ -415,17 +427,25 @@ check "the result and the fallback both carry the observed placement" "1|1" \
   "$(grep -cF -- '--argjson placement "$(placement_result_json)"' "$RW")|$(grep -cF -- '--argjson placement "$(placement_result_json 2>/dev/null' "$RW")"
 PRJ="$(awk '/^placement_result_json\(\) \{/ {p=1} p {print} p && /^}/ {exit}' "$RW")"
 [ -n "$PRJ" ] || bad "placement_result_json not found in $RW"
-prj() { # observed_ndjson sut_mems -> the placement block
+prj() { # observed_ndjson sut_mems [k6_mems_json] -> the placement block
   printf '%s\n' "$1" > "$T/obs.ndjson"
   env -i PATH="$PATH" bash -c "set -euo pipefail; $PRJ
     PLACEMENT_JSON='{\"layout\":\"numa_split\"}' OBSERVED='$T/obs.ndjson' NODE_CPULISTS_JSON='{\"node0\":\"0-31\"}'
-    SUT_MEMS='$2' PROM_MEMS='--cpuset-mems=0' XCHECK_MEMS='--cpuset-mems=1'
+    SUT_MEMS='$2' PROM_MEMS='--cpuset-mems=0' XCHECK_MEMS='--cpuset-mems=1' K6_MEMS_JSON='${3:-}'
     placement_result_json"
 }
 OBS_SUT='{"role":"sut","container":"s","cpuset_cpus":"0-5","cpuset_mems":"0"}'
 OBS_K6='{"role":"k6_main_p0","container":"k","cpuset_cpus":"32-39,96-103","cpuset_mems":"1"}'
 check "observed_mems is the SUT's, as requested" "0|true|0|1|numa_split|2" \
   "$(prj "$OBS_SUT"$'\n'"$OBS_K6" --cpuset-mems=0 | jq -r '"\(.observed_mems)|\(.sut_mems_as_requested)|\(.requested_mems.sut)|\(.requested_mems.xcheck)|\(.layout)|\(.observed | length)"')"
+check "requested_mems.k6: one entry per main k6 process, in order; null before it is resolved" '["1","1","1",""]|null' \
+  "$(prj "$OBS_SUT" --cpuset-mems=0 '["1","1","1",""]' | jq -c '.requested_mems.k6')|$(prj "$OBS_SUT" --cpuset-mems=0 | jq -c '.requested_mems.k6')"
+# shellcheck disable=SC2016  # literal source lines
+KM_BUILD='K6_MEMS_JSON="$(for _k in "${K6_SETS[@]}"; do _f="$(numa_mems_flag "$_k")"'
+# shellcheck disable=SC2016
+KM_RUN='mems="$(numa_mems_flag "${set_arr[$i]}")"'
+KM_OK=no; grep -qF -- "$KM_BUILD" "$RW" && grep -qF -- "$KM_RUN" "$RW" && KM_OK=yes
+check "  ... built from numa_mems_flag over every main k6 cpuset, as run_phase passes it" "yes" "$KM_OK"
 check "a SUT on other memory than requested is shown, not hidden" "\"\"|false" \
   "$(prj '{"role":"sut","container":"s","cpuset_cpus":"0-5","cpuset_mems":""}' --cpuset-mems=0 | jq -r '"\(.observed_mems | tojson)|\(.sut_mems_as_requested)"')"
 check "an uninspectable SUT reads null, never as requested" "null|null" \

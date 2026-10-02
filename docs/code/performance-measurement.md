@@ -76,6 +76,15 @@ embedded DNS cannot resolve it. `require_dns_hostname` refuses such a hostname b
 starts, and `.buildkite/scripts/test/perf-upstream-alias-test.sh` fails lint if a `${RUN_ID}` container-name
 variable is used as a hostname.
 
+The lint step runs in the same build as the measurement, so it sees the build's environment. Every
+`.buildkite/scripts/test/perf-*-test.sh` therefore starts with `perf_test_scrub_env`
+(`.buildkite/scripts/test/lib/perf-test-env.sh`). It unsets the `PERF_*`, `K6_*`, `PUBLISH_*` and
+`MOCKSERVER_*` knobs and the other variables the perf scripts read, keeping only the test's own
+seams and `BUILDKITE`. Without it, an A/B build's `PERF_RW_K6_VU_CEILING=2048` or
+`PERF_RW_K6_GOGC=off` changed the defaults the fixtures assert, and builds 605 and 606 failed lint.
+`perf-test-env-test.sh` checks that every test does this, and runs the topology, tail, k6-runtime
+and perf-xl dispatch tests with `BUILDKITE=true` under each of those builds' environments.
+
 ### Which queue runs which arm
 
 Every arm runs on the `perf` queue (c5.12xlarge) by default. `PERF_XL=true` moves two opt-in arms
@@ -821,6 +830,83 @@ Set `PROM_ALIAS="$PROM_NAME"` with a 36-character `BUILDKITE_BUILD_ID` and a 5-d
 guard must stop the run at once. Also disable the `assert_dns_host "remote-write URL"` line, and
 the pre-flight must stop it within seconds on `no such host`. Point only the cross-check phase's
 `K6_PROMETHEUS_RW_SERVER_URL` at an unknown host, and the run must stop before `phase=main`.
+
+#### Tail attribution files (item 44)
+
+**Outcome.** On `perf-xl` the arm's p99 tail at 112–128k sits outside MockServer's timers, so it
+belongs to the client, the kernel path or an event loop that has not yet read the socket. Every run
+now writes report-only files into its work bundle that separate those suspects. Each file fails
+soft, with empty cells and a reason in `.tail_instrumentation`, and none of them gates validity: if
+`tail-instrument.json` itself is empty or unreadable, `.tail_instrumentation` is an `error` or `null`, never a failed run.
+The Prometheus series are read through files, so a long ladder's matrices never hit an argument-size limit.
+`mockserver-performance-test/scripts/rw-tail-attribution.py` reads a bundle and prints each tail
+spike: the process it hit, whether it overlaps that process's own Go GC mark phase, and the softirq,
+softnet and TCP counters of the SUT's cpus at that second.
+
+| File | One row per | Source |
+|---|---|---|
+| `main-k6-timeseries.csv` | process and second: rung, `reqs`, `over_5ms`, `iterations`, `dropped_iterations`, `vus` (in flight), `gc_cycles_started`, `gc_mark_ms` | Prometheus range queries (1 s step) over the ladder, run once it ends, on the same remote-write series the merge reads |
+| `main-k6-gc.csv` | Go GC cycle per process: start, the two stop-the-world phases and the concurrent mark (ms), its CPU split, heap sizes and goal | each process's `GODEBUG=gctrace=1` lines (`PERF_RW_K6_GCTRACE`, on by default), placed by its container's start time |
+| `host-kernel-cpu.csv` | sample and cpu of the SUT and of each k6 process (every other cpu summed as `other`): `usr`/`sys`/`soft`/`irq`/`idle` %, NET_RX and NET_TX softirqs, softnet processed, dropped and `time_squeeze` | the host's `/proc/stat`, `/proc/softirqs` and `/proc/net/softnet_stat` |
+| `host-kernel-tcp.csv` | sample and network namespace (`host`, `sut`, `k6_<i>`): `RetransSegs`, `ListenOverflows`, `ListenDrops`, `TCPBacklogDrop`, `TCPTimeouts` and other TCP drop counters | `/proc/<pid>/net/snmp` and `netstat` of each container's process. Each container has its own namespace, so the host's `/proc/net` never counts the SUT's or k6's sockets |
+| `host-kernel-status.json`, `tail-instrument.json` | — | what each file holds, every unreadable source with its reason, and how the sampler stopped; copied into the result as `.tail_instrumentation` |
+
+Every row covers `[ts, ts + 1)` in whole epoch seconds. A counter is the difference of k6's
+cumulative value at `ts` and `ts + 1`, so it follows when k6's 1 s pushes landed: a 0 followed by a
+doubled second is aliasing, not a stall. `over_5ms` is interpolated inside the native-histogram bucket
+that holds 5 ms. `vus` is k6's in-flight gauge read once a second, so a burst shorter than a second can
+fall between readings.
+
+**The host sampler** (`lib/perf-tail-instrument.sh`) starts once the main phase's k6 containers are
+up, before the shared start instant, and stops when they exit. It samples every
+`PERF_RW_HOST_SAMPLER_INTERVAL_S` (1), just after each second boundary when bash has
+`EPOCHREALTIME`, and is pinned to Prometheus's cpus where `taskset` exists. It is bounded by the
+ladder's length plus the quiet window plus 60 s of samples and by `PERF_RW_HOST_SAMPLER_MAX_BYTES` (32 MiB) of CSV, and
+records `truncated` when it hits either, and its own CPU at stop (`sampler_cpu_s`,
+`sampler_cpu_pct_of_one_cpu`). It is stopped on every exit path: by `run_phase`, by the
+exit trap before it copies the work files (guarded by `declare -F`, as `stop_info_els_sampler` is
+in `perf-test-run.sh`), and by the PID registry. If the harness itself is killed, the sampler exits
+within a second of losing its parent. Where no source is readable (Docker Desktop on a Mac) it starts
+nothing and records each source as unavailable with the reason; the series and GC files are still
+written. `PERF_RW_TAIL_INSTRUMENT=false` turns all of it off. At startup the harness rejects, with
+exit 2, a `PERF_RW_TAIL_INSTRUMENT` other than `true` or `false`, an interval under 0.1 s, a byte cap
+under 1,000, and `PERF_RW_K6_GOGC=off` with `PERF_RW_K6_GOMEMLIMIT=off` (Go would never collect).
+
+**The A/B knobs.** Both suspects with a knob have one already. Each arm is a trial: the result's
+`.method.ab` records the knobs set (`PERF_K6_NUMA_NODE=same`, `PERF_RW_K6_GOGC`,
+`PERF_RW_K6_GOMEMLIMIT`, `PERF_RW_K6_CORES_PER_PROC`, `PERF_RW_K6_VU_CEILING`),
+`.method.ab.trial` is `true`, and the log says it is not a counting run, so it never counts
+towards item 44's five. Hardware-matrix points set `PERF_RW_K6_VU_CEILING=2048`, so they read
+as trials too; they are never item 44 runs. An arm-only `perf-xl` step is never
+baseline-eligible in any case.
+
+| Suspect | Trial arm | Control arm |
+|---|---|---|
+| Cross-socket kernel path: the kernel and bridge path, cross-socket wakeups | `PERF_K6_NUMA_NODE=same`: k6 on the SUT's node, 4 × 6 cores on the c6i | `PERF_RW_K6_CORES_PER_PROC=6`: k6 on the other node at the same 24 cores |
+| k6 GC: Go GC mark phases in a k6 process near its CPU ceiling | `PERF_RW_K6_GOGC=off`: the derived `GOMEMLIMIT`, NUMA-sized to about 15.5 GiB per process on the c6i (see the `GOMEMLIMIT` default above), becomes the only GC trigger; the bundle's `main-k6-gc.csv` records how many cycles each process ran. That limit is half of build 605's 31,725 MiB, so a `GOGC=off` run now is a new arm: to repeat 605, also set `PERF_RW_K6_GOMEMLIMIT=31725MiB`. `PERF_RW_K6_GOGC=800` is the milder variant | the default, `GOGC` 400 |
+
+Run each arm as a manual perf build with `PERF_XL=true` and the knob in the build environment (an
+API-triggered build needs `[perf-run]` in its message). Builds can land on different VMs, so repeat
+each arm at least twice and alternate them. Then run the helper on each `perfxl-` work bundle. If
+the GC arm shows the per-process spikes at the same rate with no mark phase nearby, the k6 GC
+suspect loses weight. If the same-socket arm loses the all-process episodes and keeps the per-process ones, the
+cross-socket path carries them. The helper's summary sets the SUT's softirq share and softnet
+counters in spike seconds against the other seconds of the same rungs.
+
+```bash
+python3 mockserver-performance-test/scripts/rw-tail-attribution.py perfxl-rw-multik6-serving-rw-multik6-work.tgz --min-rate 96000
+```
+
+A spike is a second in which a process's in-flight VUs reach max(50, 5 × that rung's median) or
+its over-5 ms count reaches max(20, 5% of its requests); each rung's first second is skipped.
+`OWN-GC` means within 0.3 s of that process's own mark phase. The summary compares the share of
+spikes aligned with their own GC against the share of all samples that are (a binomial tail), and
+counts spikes that coincide with another process's. A bundle without `main-k6-timeseries.csv`
+falls back to k6's progress lines, which carry in-flight VUs only. On build 597's bundle at 64k and
+above that reproduces the manual analysis: 14 spikes, 6 inside their own GC against a 0.119 base
+rate, P = 0.0036. `.buildkite/scripts/test/perf-tail-instrument-test.sh` covers the CSV shapes, the
+fail-soft paths, the sampler's lifecycle (stopped, bounded, gone after a failure, SIGTERM or SIGKILL
+of the harness) and the helper on synthetic bundles.
 
 ### `forward.js` — forward connection-pool guard
 
@@ -1692,7 +1778,8 @@ hardware change, so the load generator was sharing the server's physical cores.
 ### Publishing a run's figures (manual step)
 
 The daily perf pipeline's tail step `perf-website-publish.sh` (`perf` queue, `soft_fail`,
-non-gating) regenerates `perf_figures.json` and the charts from the newest valid run in S3. The
+non-gating) regenerates `perf_figures.json` and the charts from the run its own build persisted,
+when that run is still the newest in S3 (below). The
 perf queue holds **only** the S3 perf-results grant — no git or gh credentials — so it cannot
 push or open a PR. When the committed figures have drifted (older than `PUBLISH_MAX_AGE_DAYS`,
 default 30, or a headline metric moved more than `PUBLISH_MOVE_PCT`, default 10%) it commits the
@@ -1702,6 +1789,15 @@ refresh to a fresh local branch and attaches that commit as a `git format-patch`
 emits nothing. A refresh whose healthy ceiling is a client-limited lower bound *below* the
 committed one is held instead: the step fails with a "HELD" annotation and emits no patch (see
 [Published figures from a client-limited run](#sweepjs--throughput-vs-latency-knee)).
+The step only runs its checks in a build whose own compare step persisted a run to
+`runs/<branch>/`. Compare records that key as the build meta-data `perf-baseline-persisted-key`.
+Any other build, such as a manual `[perf-run]` build that is not baseline-eligible, exits 0 with
+"unchanged — this build did not persist a baseline", rather than judging another build's newest
+S3 object and soft-failing on its hold. A scheduled build with no key, or a key that cannot be
+read, soft-fails instead, and compare posts a warning annotation if it cannot record the key. The
+step judges only its own run: if the newest object under `runs/<branch>/` is another build's, it
+exits 0 unchanged and leaves that run to its own build. `PERF_PUBLISH_PERSISTED_KEY` overrides the
+meta-data, and a run without `buildkite-agent` (local) is not gated.
 **Nothing applies the patch automatically** — publishing a customer-facing figure
 is a deliberate human step.
 

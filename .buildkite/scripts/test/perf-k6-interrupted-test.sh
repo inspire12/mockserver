@@ -6,6 +6,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# shellcheck source=lib/perf-test-env.sh
+. "$REPO_ROOT/.buildkite/scripts/test/lib/perf-test-env.sh"
+perf_test_scrub_env PERF_K6INT_HARNESS
 FIX="$REPO_ROOT/.buildkite/scripts/test/fixtures"
 # shellcheck source=../steps/lib/perf-k6-interrupted.sh
 . "$REPO_ROOT/.buildkite/scripts/steps/lib/perf-k6-interrupted.sh"

@@ -5,6 +5,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# shellcheck source=lib/perf-test-env.sh
+. "$REPO_ROOT/.buildkite/scripts/test/lib/perf-test-env.sh"
+perf_test_scrub_env
 GUARD="$REPO_ROOT/.buildkite/scripts/steps/perf-test-guard.sh"
 RUN="$REPO_ROOT/.buildkite/scripts/steps/perf-test-run.sh"
 TIMEOUTS="$REPO_ROOT/.buildkite/scripts/steps/check-pipeline-step-timeouts.sh"

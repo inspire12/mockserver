@@ -1,7 +1,8 @@
 steps:
   - label: ":chart_with_upwards_trend: perf test lint"
     command: ".buildkite/scripts/steps/perf-test-lint.sh"
-    timeout_in_minutes: 5
+    # Every perf fixture test, plus perf-test-env-test.sh re-running four of them under two A/B envs.
+    timeout_in_minutes: 10
     retry:
       automatic:
         - exit_status: -1   # agent lost (e.g. Spot reclamation)

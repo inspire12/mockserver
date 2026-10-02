@@ -11,6 +11,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# shellcheck source=lib/perf-test-env.sh
+. "$REPO_ROOT/.buildkite/scripts/test/lib/perf-test-env.sh"
+perf_test_scrub_env PERF_ALLOCPROFILE_SCRIPT PERF_ALLOCPROFILE_TEST_OUT PERF_ALLOCPROFILE_TEST_BUNDLE PERF_ALLOCPROFILE_TEST_BUNDLE_PERIODS PERF_ALLOCPROFILE_TEST_REAL PERF_JFR_JDK_IMAGE
 F="${PERF_ALLOCPROFILE_SCRIPT:-$REPO_ROOT/.buildkite/scripts/steps/perf-test-allocprofile.sh}"
 FAILS=0
 ok()   { echo "  ok   $1"; }

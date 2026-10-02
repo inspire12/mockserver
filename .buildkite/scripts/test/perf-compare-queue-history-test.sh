@@ -6,6 +6,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# shellcheck source=lib/perf-test-env.sh
+. "$REPO_ROOT/.buildkite/scripts/test/lib/perf-test-env.sh"
+perf_test_scrub_env PERF_COMPARE_SCRIPT
 COMPARE="${PERF_COMPARE_SCRIPT:-$REPO_ROOT/.buildkite/scripts/steps/perf-test-compare.sh}"
 FAILS=0
 ok()   { echo "  ok   $1"; }
@@ -42,6 +45,8 @@ if [ "$1 $2" = "artifact download" ]; then
   [ "$3" = perf-result.json ] && cp "$HEAD_RESULT" "$4/perf-result.json" && exit 0
   exit 1
 fi
+if [ "$1 $2" = "meta-data set" ]; then [ "$META_SET_FAIL" = true ] && exit 1; echo "$3=$4" >> "$META_LOG"; exit 0; fi
+[ "$1" = annotate ] && { echo "$*" >> "$META_LOG.annotate"; cat > /dev/null; }
 exit 0
 STUB
 chmod +x "$WORK/bin/aws" "$WORK/bin/buildkite-agent"
@@ -59,7 +64,9 @@ seed() { # key queue instance_type timestamp
 }
 compare() { # name head_result_file -> log in $WORK/<name>.log, exit code in $WORK/<name>.rc
   local rc=0
-  env -i PATH="$WORK/bin:$PATH" HOME="${HOME:-/tmp}" TMPDIR="$WORK" FAKE_BUCKET="$B" HEAD_RESULT="$2" \
+  : > "$WORK/$1.meta"; : > "$WORK/$1.meta.annotate"
+  env -i PATH="$WORK/bin:$PATH" HOME="${HOME:-/tmp}" TMPDIR="$WORK" FAKE_BUCKET="$B" HEAD_RESULT="$2" META_LOG="$WORK/$1.meta" \
+    META_SET_FAIL="${META_SET_FAIL:-}" \
     PERF_BUDGETS_COMMIT=fixture bash "$COMPARE" >"$WORK/$1.log" 2>&1 || rc=$?
   echo "$rc" > "$WORK/$1.rc"
 }
@@ -88,6 +95,17 @@ check "persisted under runs/master/" "yes" "$([ -f "$B/runs/master/2026-10-01T04
 check "its window is the six perf runs (the stray perf-xl object dropped)" "6" "$(baseline_count perf)"
 check "the stray is named as dropped" "1" "$(grep -c 'dropping 2026-09-29T04-00-00Z__stray00000.json' "$WORK/perf.log" || true)"
 check "the perf window reached the compare" "yes" "$(grep -q 'Perf baseline warming up' "$WORK/perf.log" && echo no || echo yes)"
+check "it tells the publish step the key it persisted" "perf-baseline-persisted-key=runs/master/2026-10-01T04-00-00Z__0123456789.json" "$(cat "$WORK/perf.meta")"
+check "a perf-xl run's key is its own history's" "perf-baseline-persisted-key=runs-perf-xl/master/2026-09-30T04-00-00Z__0123456789.json" "$(cat "$WORK/xl.meta")"
+jq '.baseline_eligible = false | .timestamp_utc = "2026-10-01T04:30:00Z"' "$WORK/head-perf.json" > "$WORK/head-inelig.json"
+compare inelig "$WORK/head-inelig.json"
+check "an ineligible run: exit 0, nothing persisted, no key for the publish step" "0|0|" \
+  "$(cat "$WORK/inelig.rc")|$(find "$B" -name '2026-10-01T04-30-00Z__*' | wc -l | tr -d ' ')|$(cat "$WORK/inelig.meta")"
+check "a persisted run sets no warning about the key" "0" "$(grep -c 'perf-persisted-key' "$WORK/perf.meta.annotate" || true)"
+jq '.timestamp_utc = "2026-10-01T04:40:00Z"' "$WORK/head-perf.json" > "$WORK/head-metafail.json"
+META_SET_FAIL=true compare metafail "$WORK/head-metafail.json"
+check "the key cannot be recorded: still exit 0 and persisted, with a warning annotation" "0|1|1" \
+  "$(cat "$WORK/metafail.rc")|$(find "$B" -name '2026-10-01T04-40-00Z__*' | wc -l | tr -d ' ')|$(grep -c 'annotate --style warning --context perf-persisted-key' "$WORK/metafail.meta.annotate" || true)"
 
 echo "--- 3. a result with no queue is a perf run; an unusable queue name fails closed"
 jq 'del(.agent.queue) | .timestamp_utc = "2026-10-01T05:00:00Z"' "$WORK/head-perf.json" > "$WORK/head-noqueue.json"

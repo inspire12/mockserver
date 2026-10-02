@@ -385,6 +385,13 @@ Writing this run to \`s3://${BUCKET}/${KEY}\` failed, so it was **not stored in 
     exit 1
   fi
 fi
+# This build's publish step refreshes the website only from a build that persisted a run (the key says which).
+if [ "$HAVE_AWS" = true ] && command -v buildkite-agent >/dev/null 2>&1; then
+  if ! buildkite-agent meta-data set perf-baseline-persisted-key "$KEY"; then
+    printf '%s\n' ":warning: **Perf run persisted, but the publish step was not told** — \`buildkite-agent meta-data set perf-baseline-persisted-key\` failed, so this build's website publish step will not refresh the figures from \`${KEY}\` (in a scheduled build it soft-fails)." \
+      | buildkite-agent annotate --style warning --context perf-persisted-key || true
+  fi
+fi
 
 # --- 2b. laptop profile PRESENCE assertion (item 8) ---------------------------
 # Two axes, exactly as 15b separated them: laptop VALUES stay notify-only, but

@@ -9,6 +9,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# shellcheck source=lib/perf-test-env.sh
+. "$REPO_ROOT/.buildkite/scripts/test/lib/perf-test-env.sh"
+perf_test_scrub_env PERF_COMPARE_SCRIPT PERF_COVERAGE_LIB PERF_RUN_SCRIPT
 F="${PERF_RUN_SCRIPT:-$REPO_ROOT/.buildkite/scripts/steps/perf-test-run.sh}"
 COV="${PERF_COVERAGE_LIB:-$REPO_ROOT/.buildkite/scripts/steps/lib/perf-path-coverage.sh}"
 CMP="${PERF_COMPARE_SCRIPT:-$REPO_ROOT/.buildkite/scripts/steps/perf-test-compare.sh}"

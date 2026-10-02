@@ -66,6 +66,12 @@ bash "$REPO_ROOT/.buildkite/scripts/test/perf-k6-interrupted-test.sh"
 echo "--- rw-multi-k6 default k6 runtime fixture checks (item 31: lib/perf-k6-runtime.sh)"
 bash "$REPO_ROOT/.buildkite/scripts/test/perf-k6-runtime-test.sh"
 
+echo "--- perf fixture tests are hermetic (a build's PERF_*/K6_* knobs never reach their defaults)"
+bash "$REPO_ROOT/.buildkite/scripts/test/perf-test-env-test.sh"
+
+echo "--- rw-multi-k6 tail attribution fixture checks (item 44: lib/perf-tail-instrument.sh, rw-tail-attribution.py)"
+bash "$REPO_ROOT/.buildkite/scripts/test/perf-tail-instrument-test.sh"
+
 echo "--- NUMA placement fixture checks (items 31/44: lib/perf-cpu-topology.sh on fake sysfs, both arms' layouts)"
 bash "$REPO_ROOT/.buildkite/scripts/test/perf-cpu-topology-test.sh"
 
@@ -80,6 +86,9 @@ bash "$REPO_ROOT/.buildkite/scripts/test/perf-info-budget-test.sh"
 
 echo "--- perf-xl dispatch checks (guard YAML with and without PERF_XL, PERF_RUN_ARM switch)"
 bash "$REPO_ROOT/.buildkite/scripts/test/perf-xl-dispatch-test.sh"
+
+echo "--- website publish persist-gate checks (publish only from a build whose compare persisted a run)"
+bash "$REPO_ROOT/.buildkite/scripts/test/perf-publish-persist-gate-test.sh"
 
 echo "--- compare queue-history checks (a perf-xl run never enters or displaces the perf baseline window)"
 bash "$REPO_ROOT/.buildkite/scripts/test/perf-compare-queue-history-test.sh"
@@ -103,6 +112,8 @@ echo "--- byte-compiling the SSE fidelity reader (item 12)"
 if command -v python3 >/dev/null 2>&1; then
   python3 -m py_compile "$PERF_DIR/k6/tools/sse-fidelity-reader.py"
   echo "python3 -m py_compile k6/tools/sse-fidelity-reader.py OK"
+  python3 -m py_compile "$PERF_DIR/scripts/rw-tail-attribution.py"
+  echo "python3 -m py_compile scripts/rw-tail-attribution.py OK"
 else
   echo "python3 absent — skipping reader byte-compile (run step guards on it)"
 fi

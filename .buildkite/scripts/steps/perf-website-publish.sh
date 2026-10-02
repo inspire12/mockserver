@@ -175,6 +175,37 @@ _The committed figures were left unchanged (the page still shows the last good n
 
 echo "--- :chart_with_upwards_trend: perf website publish — source s3://${BUCKET}/runs/${BRANCH}/ (age>${MAX_AGE_DAYS}d or move>${MOVE_PCT}% emits a patch artifact)"
 
+# --- 0. only a build that persisted a baseline publishes ----------------------
+# A manual [perf-run] build that compare did not persist (non-default, or ineligible) would
+# otherwise re-judge another build's S3 object and soft-fail on its HOLD. compare records the key
+# it persisted as meta-data; PERF_PUBLISH_PERSISTED_KEY (even empty) overrides it, and without
+# buildkite-agent (a local run) the gate is off. A scheduled build is expected to persist, so
+# there a missing key, like an unreadable one, soft-fails instead of passing quietly.
+if [ -n "${PERF_PUBLISH_PERSISTED_KEY+set}" ]; then
+  PERSISTED_KEY="$PERF_PUBLISH_PERSISTED_KEY"; PERSISTED_FROM="PERF_PUBLISH_PERSISTED_KEY"
+elif command -v buildkite-agent >/dev/null 2>&1; then
+  PERSISTED_FROM="meta-data perf-baseline-persisted-key"
+  PERSISTED_KEY="$(buildkite-agent meta-data get perf-baseline-persisted-key --default "" 2>"$WORK/meta.err")" \
+    || fail "PERSISTED KEY UNREADABLE" "\`buildkite-agent meta-data get perf-baseline-persisted-key\` failed, so this step cannot tell whether this build's compare persisted a run.
+
+\`\`\`
+$(head -c 600 "$WORK/meta.err" 2>/dev/null)
+\`\`\`"
+else
+  PERSISTED_KEY="local"; PERSISTED_FROM="no buildkite-agent: a local run, not gated"
+fi
+case "$PERSISTED_KEY" in
+  local|runs/"${BRANCH}"/*.json) echo "--- this build persisted: ${PERSISTED_KEY} (${PERSISTED_FROM})" ;;
+  *)
+    if [ "${BUILDKITE_SOURCE:-}" = schedule ]; then
+      fail "SCHEDULED BUILD PERSISTED NO RUN" "This scheduled build's compare step persisted no run to \`runs/${BRANCH}/\` (${PERSISTED_FROM}: \`${PERSISTED_KEY:-none}\`). A daily run is expected to persist one; see the compare step's annotation for why it did not."
+    fi
+    annotate "info" ":information_source: **Website perf publish: unchanged — this build did not persist a baseline**
+
+This build's compare step persisted no run to \`runs/${BRANCH}/\` (${PERSISTED_FROM}: \`${PERSISTED_KEY:-none}\`), so there is nothing of its own to publish; another build's run is judged by that build's publish step. The committed figures were left unchanged."
+    exit 0 ;;
+esac
+
 [ -f "$JQ_FILTER" ] || fail "TRANSFORM MISSING" "The figures transform \`${JQ_FILTER}\` is missing from the checkout."
 
 # --- 1. find the newest run object in S3 (fail-closed) ------------------------
@@ -200,6 +231,13 @@ if [ -z "$NEWEST_KEY" ]; then
     "\`s3://${BUCKET}/runs/${BRANCH}/\` contains no run JSON objects. There is nothing to publish from. (If the producer has genuinely never run, that is a producer problem, surfaced by perf-baseline-freshness.sh.)"
 fi
 echo "--- newest run object: ${NEWEST_KEY}"
+# Judge only this build's own run: with several perf agents, a newer object is another build's.
+if [ "$PERSISTED_KEY" != local ] && [ "$NEWEST_KEY" != "$PERSISTED_KEY" ]; then
+  annotate "info" ":information_source: **Website perf publish: unchanged — a newer run than this build's is in S3**
+
+This build persisted \`${PERSISTED_KEY}\`, but the newest run under \`runs/${BRANCH}/\` is \`${NEWEST_KEY}\`, another build's. That build's publish step judges it; publishing this older run could undo it. The committed figures were left unchanged."
+  exit 0
+fi
 
 set +e
 "$AWS_BIN" s3 cp "s3://${BUCKET}/${NEWEST_KEY}" "$WORK/run.json" --only-show-errors --region "$REGION" 2>"$WORK/cp.err"

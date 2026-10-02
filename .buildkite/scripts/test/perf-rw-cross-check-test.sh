@@ -7,6 +7,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# shellcheck source=lib/perf-test-env.sh
+. "$REPO_ROOT/.buildkite/scripts/test/lib/perf-test-env.sh"
+perf_test_scrub_env
 CROSS_JQ="$REPO_ROOT/.buildkite/scripts/steps/lib/perf-rw-cross-check.jq"
 FAILS=0
 ok()   { echo "  ok   $1"; }
