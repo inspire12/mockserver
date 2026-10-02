@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.mockserver.authentication.ControlPlaneAuthentication;
 import org.mockserver.lifecycle.LifeCycle;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.metrics.Metrics;
@@ -165,35 +166,37 @@ public class McpRequestProcessor {
 
     /**
      * Process an MCP POST request. The request is authenticated by the transport handler
-     * BEFORE this is called; the principal's verified scopes are passed in so per-tool
+     * BEFORE this is called; its authentication is passed in so per-tool
      * control-plane authorization can be enforced for {@code tools/call} (a mutating tool
      * requires the MUTATE role, a reading tool the READ role). Equivalent to
-     * {@link #handlePost(String, String, java.util.Set)} with {@code null} scopes, used by
-     * callers that do not (yet) carry an authenticated result.
+     * {@link #handlePost(String, String, ControlPlaneAuthentication)} with no scopes and the
+     * current settings, used by callers that do not carry an authenticated result.
      *
      * @param requestBody the raw JSON body
      * @param mcpSessionId the Mcp-Session-Id header value (may be null)
      * @return the result to write back
      */
     public McpResult handlePost(String requestBody, String mcpSessionId) {
-        return handlePost(requestBody, mcpSessionId, null);
+        return handlePost(requestBody, mcpSessionId, ControlPlaneAuthentication.of(httpState.controlPlaneAuthenticationSettings(), null));
     }
 
     /**
      * Process an MCP POST request, enforcing per-tool control-plane authorization for
-     * {@code tools/call} using the authenticated principal's verified {@code scopes}.
+     * {@code tools/call} using the authenticated principal's verified scopes.
      * <p>
      * Authorization is delegated to {@link HttpState#controlPlaneToolAuthorized} — the SAME
      * authorizer/role model as the HTTP control plane — and is gated by
      * {@code controlPlaneAuthorizationEnabled}: when that is off (the default), authorization
-     * always passes and behaviour is unchanged.
+     * always passes and behaviour is unchanged. It uses the settings snapshot the caller was
+     * authenticated under, never a fresh one.
      *
      * @param requestBody the raw JSON body
      * @param mcpSessionId the Mcp-Session-Id header value (may be null)
-     * @param scopes the authenticated principal's verified scopes (null when authorization is not enforced)
+     * @param authentication the caller's authentication and the settings snapshot it was made under
      * @return the result to write back
      */
-    public McpResult handlePost(String requestBody, String mcpSessionId, java.util.Set<String> scopes) {
+    public McpResult handlePost(String requestBody, String mcpSessionId, ControlPlaneAuthentication authentication) {
+        java.util.Objects.requireNonNull(authentication, "authentication");
         if (requestBody == null || requestBody.isEmpty()) {
             return jsonResponse(400,
                 JsonRpcMessage.JsonRpcResponse.error(null, JsonRpcMessage.PARSE_ERROR, "Empty request body"), null);
@@ -203,9 +206,9 @@ public class McpRequestProcessor {
             JsonNode jsonNode = objectMapper.readTree(requestBody);
 
             if (jsonNode.isArray()) {
-                return handleBatchRequest(jsonNode, mcpSessionId, scopes);
+                return handleBatchRequest(jsonNode, mcpSessionId, authentication);
             } else if (jsonNode.isObject()) {
-                return handleSingleRequest(jsonNode, mcpSessionId, scopes);
+                return handleSingleRequest(jsonNode, mcpSessionId, authentication);
             } else {
                 return jsonResponse(400,
                     JsonRpcMessage.JsonRpcResponse.error(null, JsonRpcMessage.PARSE_ERROR, "Invalid JSON-RPC message"), null);
@@ -304,7 +307,7 @@ public class McpRequestProcessor {
         return "ping".equals(method);
     }
 
-    private McpResult handleBatchRequest(JsonNode batchNode, String mcpSessionId, java.util.Set<String> scopes) {
+    private McpResult handleBatchRequest(JsonNode batchNode, String mcpSessionId, ControlPlaneAuthentication authentication) {
         if (batchNode.size() == 0) {
             return jsonResponse(400,
                 JsonRpcMessage.JsonRpcResponse.error(null, JsonRpcMessage.INVALID_REQUEST, "Invalid Request: batch must not be empty"), null);
@@ -361,7 +364,7 @@ public class McpRequestProcessor {
                             "MCP session has not completed initialization. Send the 'notifications/initialized' notification first.")));
                     continue;
                 }
-                JsonRpcMessage.JsonRpcResponse response = processRequest(rpcRequest, mcpSessionId, scopes);
+                JsonRpcMessage.JsonRpcResponse response = processRequest(rpcRequest, mcpSessionId, authentication);
                 responses.add(objectMapper.valueToTree(response));
             }
         }
@@ -372,7 +375,7 @@ public class McpRequestProcessor {
         return rawJsonResponse(200, responses, null);
     }
 
-    private McpResult handleSingleRequest(JsonNode jsonNode, String mcpSessionId, java.util.Set<String> scopes) {
+    private McpResult handleSingleRequest(JsonNode jsonNode, String mcpSessionId, ControlPlaneAuthentication authentication) {
         JsonRpcMessage.JsonRpcRequest rpcRequest = parseJsonRpcRequest(jsonNode);
         if (rpcRequest == null) {
             return jsonResponse(400,
@@ -416,7 +419,7 @@ public class McpRequestProcessor {
                     "MCP session has not completed initialization. Send the 'notifications/initialized' notification first."), null);
         }
 
-        JsonRpcMessage.JsonRpcResponse response = processRequest(rpcRequest, mcpSessionId, scopes);
+        JsonRpcMessage.JsonRpcResponse response = processRequest(rpcRequest, mcpSessionId, authentication);
         return jsonResponse(200, response, null);
     }
 
@@ -454,7 +457,7 @@ public class McpRequestProcessor {
         }
     }
 
-    private JsonRpcMessage.JsonRpcResponse processRequest(JsonRpcMessage.JsonRpcRequest rpcRequest, String mcpSessionId, java.util.Set<String> scopes) {
+    private JsonRpcMessage.JsonRpcResponse processRequest(JsonRpcMessage.JsonRpcRequest rpcRequest, String mcpSessionId, ControlPlaneAuthentication authentication) {
         String method = rpcRequest.getMethod();
         if (method == null) {
             return JsonRpcMessage.JsonRpcResponse.error(rpcRequest.getId(), JsonRpcMessage.INVALID_REQUEST, "Missing method");
@@ -473,7 +476,7 @@ public class McpRequestProcessor {
                 case "tools/list":
                     return handleToolsList(rpcRequest);
                 case "tools/call":
-                    return handleToolsCall(rpcRequest, mcpSessionId, scopes);
+                    return handleToolsCall(rpcRequest, mcpSessionId, authentication);
                 case "resources/list":
                     return handleResourcesList(rpcRequest);
                 case "resources/read":
@@ -577,7 +580,7 @@ public class McpRequestProcessor {
         return JsonRpcMessage.JsonRpcResponse.success(rpcRequest.getId(), result);
     }
 
-    private JsonRpcMessage.JsonRpcResponse handleToolsCall(JsonRpcMessage.JsonRpcRequest rpcRequest, String mcpSessionId, java.util.Set<String> scopes) {
+    private JsonRpcMessage.JsonRpcResponse handleToolsCall(JsonRpcMessage.JsonRpcRequest rpcRequest, String mcpSessionId, ControlPlaneAuthentication authentication) {
         JsonNode params = rpcRequest.getParams();
         if (params == null) {
             return JsonRpcMessage.JsonRpcResponse.error(rpcRequest.getId(), JsonRpcMessage.INVALID_PARAMS, "Missing params");
@@ -599,7 +602,7 @@ public class McpRequestProcessor {
         // (the default), so default behaviour is unchanged. The per-tool read/mutate split is
         // required because all tool calls arrive as a single tools/call POST.
         boolean isRead = !McpToolRegistry.isMutatingTool(toolName);
-        if (!httpState.controlPlaneToolAuthorized(scopes, isRead, toolName)) {
+        if (!httpState.controlPlaneToolAuthorized(authentication.settings(), authentication.scopes(), isRead, toolName)) {
             return JsonRpcMessage.JsonRpcResponse.error(rpcRequest.getId(), JsonRpcMessage.INVALID_REQUEST,
                 "Forbidden for control plane");
         }

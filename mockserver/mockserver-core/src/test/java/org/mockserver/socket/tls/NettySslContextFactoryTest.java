@@ -286,6 +286,86 @@ public class NettySslContextFactoryTest {
         assertThat(factory.usingBundledDefaultCertificateAuthority(), is(false));
     }
 
+    // ---- client context built from one read of its inputs ----
+
+    @Test
+    public void shouldBuildAndCacheClientContextFromTheTrustManagerTypeItIsKeyedBy() {
+        TrustTypeChangingConfiguration configuration = new TrustTypeChangingConfiguration();
+        configuration.forwardProxyTLSX509CertificatesTrustManagerType(ForwardProxyTLSX509CertificatesTrustManager.JVM);
+        NettySslContextFactory factory = new NettySslContextFactory(configuration, new MockServerLogger(), false);
+
+        // a PUT switching to ANY lands right after the factory first reads the trust manager type
+        configuration.changeAfterNextRead(ForwardProxyTLSX509CertificatesTrustManager.ANY);
+        SslContext builtDuringPut = factory.createClientSslContext(true, false, "example.com");
+        assertThat("built from the JVM value it read first, a validating (wrapped) context", builtDuringPut, is(instanceOf(io.netty.handler.ssl.DelegatingSslContext.class)));
+
+        configuration.forwardProxyTLSX509CertificatesTrustManagerType(ForwardProxyTLSX509CertificatesTrustManager.JVM);
+        SslContext afterReturningToJvm = factory.createClientSslContext(true, false, "example.com");
+        assertThat("a JVM configuration is never served the trust-all context", afterReturningToJvm, is(instanceOf(io.netty.handler.ssl.DelegatingSslContext.class)));
+    }
+
+    @Test
+    public void shouldNotCacheClientContextWhoseInputsChangedWhileItWasBuilt() {
+        Configuration configuration = configuration()
+            .forwardProxyTLSX509CertificatesTrustManagerType(ForwardProxyTLSX509CertificatesTrustManager.JVM)
+            .forwardProxyTLSHostnameVerificationEnabled(true);
+        java.util.concurrent.atomic.AtomicInteger builds = new java.util.concurrent.atomic.AtomicInteger();
+        NettySslContextFactory factory = new NettySslContextFactory(configuration, new MockServerLogger(), false)
+            .withClientSslContextBuilderFunction(builder -> {
+                if (builds.incrementAndGet() == 1) {
+                    // stands in for a CA change the key factory would read during the build
+                    configuration.forwardProxyTLSHostnameVerificationEnabled(false);
+                }
+                return NettySslContextFactory.clientSslContextBuilderFunction.apply(builder);
+            });
+
+        factory.createClientSslContext(true, false, "example.com");
+        configuration.forwardProxyTLSHostnameVerificationEnabled(true);
+        factory.createClientSslContext(true, false, "example.com");
+
+        assertThat("the context built while its inputs changed is not served again", builds.get(), is(2));
+        factory.createClientSslContext(true, false, "example.com");
+        assertThat("a context built from unchanged inputs is cached", builds.get(), is(2));
+    }
+
+    @Test
+    public void shouldRebuildClientContextWhenHttp2IsDisabledAtRuntime() {
+        Configuration configuration = configuration().http2Enabled(true);
+        NettySslContextFactory factory = new NettySslContextFactory(configuration, new MockServerLogger(), false);
+        SslContext http2Context = factory.createClientSslContext(true, true, "example.com");
+        assertThat(http2Context.applicationProtocolNegotiator().protocols(), hasItem(ApplicationProtocolNames.HTTP_2));
+
+        configuration.http2Enabled(false);
+        SslContext http1Context = factory.createClientSslContext(true, true, "example.com");
+
+        assertThat("the context advertising h2 is not served once HTTP/2 is disabled", http1Context, is(not(sameInstance(http2Context))));
+        assertThat(http1Context.applicationProtocolNegotiator().protocols(), not(hasItem(ApplicationProtocolNames.HTTP_2)));
+        assertThat(http1Context.applicationProtocolNegotiator().protocols(), hasItem(ApplicationProtocolNames.HTTP_1_1));
+    }
+
+    /**
+     * Applies a trust manager type change straight after the next read of it, the position of a PUT that
+     * lands just after the client context factory has read its inputs.
+     */
+    private static class TrustTypeChangingConfiguration extends Configuration {
+        private volatile ForwardProxyTLSX509CertificatesTrustManager changeTo;
+
+        void changeAfterNextRead(ForwardProxyTLSX509CertificatesTrustManager changeTo) {
+            this.changeTo = changeTo;
+        }
+
+        @Override
+        public ForwardProxyTLSX509CertificatesTrustManager forwardProxyTLSX509CertificatesTrustManagerType() {
+            ForwardProxyTLSX509CertificatesTrustManager current = super.forwardProxyTLSX509CertificatesTrustManagerType();
+            ForwardProxyTLSX509CertificatesTrustManager pending = changeTo;
+            if (pending != null) {
+                changeTo = null;
+                forwardProxyTLSX509CertificatesTrustManagerType(pending);
+            }
+            return current;
+        }
+    }
+
     private static String endpointIdentificationAlgorithm(SslContext sslContext) {
         SslHandler handler = sslContext.newHandler(UnpooledByteBufAllocator.DEFAULT, "example.com", 443);
         return handler.engine().getSSLParameters().getEndpointIdentificationAlgorithm();

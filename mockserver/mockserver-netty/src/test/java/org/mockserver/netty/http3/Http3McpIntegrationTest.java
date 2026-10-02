@@ -410,6 +410,46 @@ public class Http3McpIntegrationTest {
             is(nullValue()));
     }
 
+    @Test
+    public void shouldAuthorizeToolCallFromTheSettingsItWasAuthenticatedUnderOverHttp3() throws Exception {
+        // the same window as McpToolAuthorizationSnapshotTest over TCP: a PUT disabling authorization lands
+        // after the tool call is authenticated and before it is authorized
+        startMockServer(configuration()
+            .controlPlaneAuthorizationEnabled(true)
+            .controlPlaneScopeMapping(java.util.Map.of("readers", org.mockserver.authentication.authorization.ControlPlaneRole.READ)));
+
+        HttpState httpState = getHttpState(mockServer);
+        Configuration serverConfiguration = httpState.getConfiguration();
+        java.util.concurrent.atomic.AtomicBoolean putDuringNextAuthentication = new java.util.concurrent.atomic.AtomicBoolean();
+        httpState.setControlPlaneAuthenticationHandler(new AuthenticationHandler() {
+            @Override
+            public boolean controlPlaneRequestAuthenticated(org.mockserver.model.HttpRequest request) {
+                return true;
+            }
+
+            @Override
+            public org.mockserver.authentication.AuthenticationResult authenticate(org.mockserver.model.HttpRequest request) {
+                if (putDuringNextAuthentication.getAndSet(false)) {
+                    new org.mockserver.serialization.model.ConfigurationDTO().setControlPlaneAuthorizationEnabled(false).applyTo(serverConfiguration);
+                }
+                return org.mockserver.authentication.AuthenticationResult.authenticated(
+                    "principal", "verified-oidc", java.util.Map.of(), java.util.Set.of("readers"));
+            }
+        });
+
+        String sessionId = initializeSession();
+        putDuringNextAuthentication.set(true);
+        String callBody = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"create_expectation\",\"arguments\":{\"method\":\"GET\",\"path\":\"/h3-during-put\",\"statusCode\":201}}}";
+        Http3ResponseCapture result = sendMcpRequest("POST", callBody, sessionId);
+
+        assertThat("the PUT ran between authentication and authorization", serverConfiguration.controlPlaneAuthorizationEnabled(), is(false));
+        assertThat("status should be 200 (JSON-RPC error transport)", result.status, is("200"));
+        assertThat("the tool is authorized from the settings it was authenticated under, which forbid it",
+            objectMapper.readTree(result.body).path("error").path("message").asText(), containsString("Forbidden for control plane"));
+        assertThat(httpState.firstMatchingExpectation(org.mockserver.model.HttpRequest.request().withMethod("GET").withPath("/h3-during-put")),
+            is(nullValue()));
+    }
+
     // ---- CORS headers over HTTP/3 ----
 
     @Test

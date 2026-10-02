@@ -9,6 +9,7 @@ import org.mockserver.authentication.AuthenticationHandler;
 import org.mockserver.authentication.AuthenticationResult;
 import org.mockserver.authentication.authorization.ControlPlaneRole;
 import org.mockserver.configuration.Configuration;
+import org.mockserver.configuration.ControlPlaneAuthenticationSettings;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.scheduler.Scheduler;
@@ -188,6 +189,21 @@ public class ControlPlaneAuthenticationAtomicUpdateTest {
             put.join(TimeUnit.SECONDS.toMillis(10));
         }
         assertThat("the new settings only grant READ", httpState.evaluateControlPlaneAuthentication(mutation).outcome(), is(HttpState.ControlPlaneAuthOutcome.FORBIDDEN));
+    }
+
+    @Test
+    public void shouldAuthorizeAToolCallFromTheSnapshotItWasAuthenticatedUnder() {
+        Configuration configuration = new Configuration();
+        configuration.controlPlaneAuthorizationEnabled(true).controlPlaneScopeMapping(Collections.singletonMap("team", ControlPlaneRole.READ));
+        HttpState httpState = httpState(configuration);
+        ControlPlaneAuthenticationSettings authenticatedUnder = httpState.controlPlaneAuthenticationSettings();
+
+        new ConfigurationDTO().setControlPlaneAuthorizationEnabled(false).applyTo(configuration);
+
+        assertThat("authorized from the snapshot the caller was authenticated under, which only grants READ",
+            httpState.controlPlaneToolAuthorized(authenticatedUnder, Collections.singleton("team"), false, "create_expectation"), is(false));
+        assertThat("a caller authenticated after the PUT is authorized from the new settings",
+            httpState.controlPlaneToolAuthorized(httpState.controlPlaneAuthenticationSettings(), Collections.singleton("team"), false, "create_expectation"), is(true));
     }
 
     @Test

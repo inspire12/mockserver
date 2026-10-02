@@ -11,6 +11,8 @@ import org.mockserver.cors.CORSHeaders;
 import org.mockserver.authentication.AuthenticationException;
 import org.mockserver.authentication.AuthenticationHandler;
 import org.mockserver.authentication.AuthenticationResult;
+import org.mockserver.authentication.ControlPlaneAuthentication;
+import org.mockserver.configuration.ControlPlaneAuthenticationSettings;
 import org.mockserver.lifecycle.LifeCycle;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
@@ -188,16 +190,17 @@ public class McpStreamableHttpHandler extends ChannelInboundHandlerAdapter {
     }
 
     /**
-     * Authenticate a control-plane MCP request. Returns the {@link AuthenticationResult}
-     * (carrying the verified principal's scopes, used for per-tool authorization on the POST
-     * path) when authentication succeeds, or {@code null} after having written the 401
-     * rejection when it fails. When no authentication handler is configured, returns an
-     * authenticated-but-anonymous result (no scopes) so the caller proceeds unchanged.
+     * Authenticate a control-plane MCP request. Returns a {@link ControlPlaneAuthentication} (the
+     * result, whose verified scopes drive per-tool authorization on the POST path, and the settings
+     * snapshot it was authenticated under) when authentication succeeds, or {@code null} after having
+     * written the 401 rejection when it fails. When no authentication handler is configured, the result
+     * is authenticated-but-anonymous (no scopes) so the caller proceeds unchanged.
      */
-    private AuthenticationResult authenticate(ChannelHandlerContext ctx, FullHttpRequest request, Integer streamId) {
-        AuthenticationHandler authHandler = httpState.getControlPlaneAuthenticationHandler();
+    private ControlPlaneAuthentication authenticate(ChannelHandlerContext ctx, FullHttpRequest request, Integer streamId) {
+        ControlPlaneAuthenticationSettings settings = httpState.controlPlaneAuthenticationSettings();
+        AuthenticationHandler authHandler = httpState.getControlPlaneAuthenticationHandler(settings);
         if (authHandler == null) {
-            return AuthenticationResult.authenticated(null, "none", java.util.Map.of(), java.util.Set.of());
+            return ControlPlaneAuthentication.of(settings, AuthenticationResult.authenticated(null, "none", java.util.Map.of(), java.util.Set.of()));
         }
         try {
             HttpRequest mockRequest = HttpRequest.request()
@@ -221,7 +224,7 @@ public class McpStreamableHttpHandler extends ChannelInboundHandlerAdapter {
                 writeUnauthorized(ctx, streamId);
                 return null;
             }
-            return result;
+            return ControlPlaneAuthentication.of(settings, result);
         } catch (AuthenticationException e) {
             if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
                 mockServerLogger.logEvent(
@@ -238,11 +241,10 @@ public class McpStreamableHttpHandler extends ChannelInboundHandlerAdapter {
     }
 
     private void handlePost(ChannelHandlerContext ctx, FullHttpRequest request, Integer streamId) {
-        AuthenticationResult authenticationResult = authenticate(ctx, request, streamId);
-        if (authenticationResult == null) {
+        final ControlPlaneAuthentication authentication = authenticate(ctx, request, streamId);
+        if (authentication == null) {
             return;
         }
-        final java.util.Set<String> scopes = authenticationResult.getScopes();
         // Retain the request before handing off to the MCP executor since Netty will release
         // the buffer after channelRead returns. The finally block ensures it is always released.
         request.retain();
@@ -251,7 +253,7 @@ public class McpStreamableHttpHandler extends ChannelInboundHandlerAdapter {
                 try {
                     String body = request.content().toString(StandardCharsets.UTF_8);
                     String mcpSessionId = request.headers().get("Mcp-Session-Id");
-                    McpRequestProcessor.McpResult result = processor.handlePost(body, mcpSessionId, scopes);
+                    McpRequestProcessor.McpResult result = processor.handlePost(body, mcpSessionId, authentication);
                     writeMcpResult(ctx, result, streamId);
                 } catch (Throwable throwable) {
                     // Backstop: anything escaping here would otherwise be swallowed by the executor

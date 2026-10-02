@@ -132,10 +132,6 @@ public class NettySslContextFactory {
      * {@code tlsAllowInsecureProtocols=false}. If filtering leaves the list empty,
      * the original list is returned so SSL context creation does not fail.
      */
-    private String[] effectiveTlsProtocols() {
-        return effectiveTlsProtocols(configuration.tlsProtocols(), configuration.tlsAllowInsecureProtocols());
-    }
-
     private static String[] effectiveTlsProtocols(String tlsProtocols, Boolean tlsAllowInsecureProtocols) {
         String[] requested = java.util.Arrays.stream(tlsProtocols.split(","))
             .map(String::trim)
@@ -252,15 +248,15 @@ public class NettySslContextFactory {
      * @param host the upstream target host (may be null/blank — then only the global pair is ever used)
      */
     public SslContext createClientSslContext(boolean forwardProxyClient, boolean enableHttp2, String host) {
+        // The context is built only from this one read of the inputs and cached under its signature, so a
+        // PUT landing mid-build cannot leave a context built from new values under the old values' key.
+        ClientTlsInputs inputs = ClientTlsInputs.read(configuration);
+        String[] perHost = resolveForwardProxyClientCertificate(inputs.forwardProxyClientCertificatesByHost, host);
         // Only hosts with an explicit per-host cert/key mapping are keyed by host; all other hosts share
         // the empty host-key so a forward proxy seeing many upstream hosts cannot grow the cache without bound.
-        String hostKeyPart = perHostForwardProxyCertAndKey(host) != null ? host.toLowerCase(Locale.ROOT) : "";
-        // Fold the mutable client-TLS inputs into the cache KEY so that rotating any of them at runtime
-        // self-invalidates the cache (defect C8). Previously the client SslContext was cached for the
-        // JVM lifetime and rotating forwardProxyPrivateKey / forwardProxyCertificateChain / trust manager
-        // type / tlsMutualAuthenticationCertificateChain / tlsProtocols was silently ignored.
+        String hostKeyPart = perHost != null ? host.toLowerCase(Locale.ROOT) : "";
         String key = "forwardProxyClient=" + forwardProxyClient + ",enableHttp2=" + enableHttp2 + ",host=" + hostKeyPart
-            + ",sig=" + clientContextSignature();
+            + ",sig=" + inputs.signature();
         SslContext clientSslContext = clientSslContexts.get(key);
         if (clientSslContext != null && !configuration.rebuildTLSContext()) {
             return clientSslContext;
@@ -277,16 +273,16 @@ public class NettySslContextFactory {
                 SslContextBuilder sslContextBuilder =
                     SslContextBuilder
                         .forClient()
-                        .protocols(effectiveTlsProtocols())
+                        .protocols(effectiveTlsProtocols(inputs.tlsProtocols, inputs.tlsAllowInsecureProtocols))
                         .keyManager(
-                            forwardProxyPrivateKey(host),
-                            forwardProxyCertificateChain(host)
+                            forwardProxyPrivateKey(perHost != null ? perHost[1] : inputs.forwardProxyPrivateKey),
+                            forwardProxyCertificateChain(perHost != null ? perHost[0] : inputs.forwardProxyCertificateChain)
                         );
                 if (enableHttp2) {
-                    configureALPN(sslContextBuilder);
+                    configureALPN(sslContextBuilder, Boolean.TRUE.equals(inputs.http2Enabled));
                 }
                 if (forwardProxyClient) {
-                    switch (configuration.forwardProxyTLSX509CertificatesTrustManagerType()) {
+                    switch (inputs.trustManagerType()) {
                         case ANY:
                             sslContextBuilder.trustManager(InsecureTrustManagerFactory.INSTANCE);
                             break;
@@ -297,13 +293,13 @@ public class NettySslContextFactory {
                             sslContextBuilder.trustManager(jvmCAX509TrustCertificates(mockServerX509Certificates));
                             break;
                         case CUSTOM:
-                            sslContextBuilder.trustManager(customCAX509TrustCertificates());
+                            sslContextBuilder.trustManager(customCAX509TrustCertificates(inputs.customTrustX509Certificates));
                             break;
                     }
                 } else {
                     List<X509Certificate> mockServerX509Certificates = new ArrayList<>();
-                    if (isNotBlank(configuration.tlsMutualAuthenticationCertificateChain())) {
-                        mockServerX509Certificates.addAll(x509ChainFromPEMFile(configuration.tlsMutualAuthenticationCertificateChain()));
+                    if (isNotBlank(inputs.tlsMutualAuthenticationCertificateChain)) {
+                        mockServerX509Certificates.addAll(x509ChainFromPEMFile(inputs.tlsMutualAuthenticationCertificateChain));
                         mockServerX509Certificates.add(keyAndCertificateFactory.certificateAuthorityX509Certificate());
                     } else {
                         mockServerX509Certificates.add(keyAndCertificateFactory.certificateAuthorityX509Certificate());
@@ -311,7 +307,7 @@ public class NettySslContextFactory {
                     sslContextBuilder.trustManager(jvmCAX509TrustCertificates(mockServerX509Certificates));
                 }
                 clientSslContext = instanceClientSslContextBuilderFunction.apply(sslClientContextBuilderCustomizer.apply(sslContextBuilder));
-                if (forwardProxyClient && forwardProxyUsesValidatingTrustManager()) {
+                if (forwardProxyClient && usesValidatingTrustManager(inputs.trustManagerType())) {
                     // Host name verification (RFC 2818 / HTTPS endpoint identification) for the JVM / CUSTOM
                     // validating trust managers. Netty already enables it for client contexts created via
                     // newHandler(host, port), but NOT for the no-host newHandler overloads (e.g. the
@@ -321,10 +317,13 @@ public class NettySslContextFactory {
                     // when enabled (covering the no-host paths too), or explicitly cleared when the operator
                     // disables it (validate the chain but not the host name). ANY is never wrapped — its
                     // insecure trust manager makes endpoint identification a no-op — so it is left as-is.
-                    String algorithm = Boolean.TRUE.equals(configuration.forwardProxyTLSHostnameVerificationEnabled()) ? "HTTPS" : null;
+                    String algorithm = Boolean.TRUE.equals(inputs.forwardProxyTLSHostnameVerificationEnabled) ? "HTTPS" : null;
                     clientSslContext = withEndpointIdentification(clientSslContext, algorithm);
                 }
-                clientSslContexts.put(key, clientSslContext);
+                // the key factory reads the CA settings itself, so a change during the build is only seen here
+                if (inputs.signature().equals(ClientTlsInputs.read(configuration).signature())) {
+                    clientSslContexts.put(key, clientSslContext);
+                }
                 configuration.rebuildTLSContext(false);
             } catch (Throwable throwable) {
                 throw new RuntimeException("Exception creating SSL context for client", throwable);
@@ -333,9 +332,7 @@ public class NettySslContextFactory {
         return clientSslContext;
     }
 
-    private PrivateKey forwardProxyPrivateKey(String host) {
-        String[] perHost = perHostForwardProxyCertAndKey(host);
-        String forwardProxyPrivateKey = perHost != null ? perHost[1] : configuration.forwardProxyPrivateKey();
+    private PrivateKey forwardProxyPrivateKey(String forwardProxyPrivateKey) {
         if (isNotBlank(forwardProxyPrivateKey)) {
             // Cache the parsed key by the PEM *contents* (not the file path) so an unchanged PEM is
             // parsed only once while a rotated key file (same path, new contents) is re-parsed.
@@ -346,9 +343,7 @@ public class NettySslContextFactory {
         }
     }
 
-    private X509Certificate[] forwardProxyCertificateChain(String host) {
-        String[] perHost = perHostForwardProxyCertAndKey(host);
-        String forwardProxyCertificateChain = perHost != null ? perHost[0] : configuration.forwardProxyCertificateChain();
+    private X509Certificate[] forwardProxyCertificateChain(String forwardProxyCertificateChain) {
         if (isNotBlank(forwardProxyCertificateChain)) {
             // Cache the parsed chain by the PEM *contents* (not the file path) so an unchanged PEM
             // chain is parsed only once while a rotated file is re-parsed. A clone is returned so
@@ -364,21 +359,14 @@ public class NettySslContextFactory {
 
     /**
      * Resolve the per-host outbound mTLS certificate chain and private key for {@code host} from the
-     * {@code forwardProxyClientCertificatesByHost} property.
+     * {@code forwardProxyClientCertificatesByHost} property value {@code mapping}.
      * <p>
      * The property is a comma-separated list of {@code host=certificateChainPath;privateKeyPath} entries;
      * host matching is case-insensitive. Returns {@code [certificateChainPath, privateKeyPath]} for the
      * first matching host, or {@code null} when {@code host} is blank, no mapping is configured, or no
      * entry matches — in which case the caller falls back to the global forward-proxy cert/key pair.
      * Malformed entries (no {@code =}, or no {@code ;} separating the two paths) are skipped.
-     */
-    private String[] perHostForwardProxyCertAndKey(String host) {
-        return resolveForwardProxyClientCertificate(configuration.forwardProxyClientCertificatesByHost(), host);
-    }
-
-    /**
-     * Pure resolver for {@link #perHostForwardProxyCertAndKey(String)} — package-private for unit testing.
-     * See that method's Javadoc for the format and semantics.
+     * Package-private for unit testing.
      */
     static String[] resolveForwardProxyClientCertificate(String mapping, String host) {
         if (host == null || host.isEmpty()) {
@@ -421,11 +409,11 @@ public class NettySslContextFactory {
             .toArray(new X509Certificate[0]);
     }
 
-    private X509Certificate[] customCAX509TrustCertificates() {
+    private X509Certificate[] customCAX509TrustCertificates(String forwardProxyTLSCustomTrustX509Certificates) {
         ArrayList<X509Certificate> x509Certificates = new ArrayList<>();
         x509Certificates.add(keyAndCertificateFactory.x509Certificate());
         x509Certificates.add(keyAndCertificateFactory.certificateAuthorityX509Certificate());
-        x509Certificates.addAll(x509ChainFromPEMFile(configuration.forwardProxyTLSCustomTrustX509Certificates()));
+        x509Certificates.addAll(x509ChainFromPEMFile(forwardProxyTLSCustomTrustX509Certificates));
         return x509Certificates.toArray(new X509Certificate[0]);
     }
 
@@ -434,13 +422,7 @@ public class NettySslContextFactory {
      * CUSTOM, not the trust-all ANY). Only these modes get host-name verification forced on/off; ANY is
      * left untouched because its insecure trust manager makes endpoint identification a no-op anyway.
      */
-    private boolean forwardProxyUsesValidatingTrustManager() {
-        ForwardProxyTLSX509CertificatesTrustManager type;
-        try {
-            type = configuration.forwardProxyTLSX509CertificatesTrustManagerType();
-        } catch (RuntimeException ignore) {
-            return false;
-        }
+    private static boolean usesValidatingTrustManager(ForwardProxyTLSX509CertificatesTrustManager type) {
         return type == ForwardProxyTLSX509CertificatesTrustManager.JVM
             || type == ForwardProxyTLSX509CertificatesTrustManager.CUSTOM;
     }
@@ -585,33 +567,86 @@ public class NettySslContextFactory {
     }
 
     /**
-     * The mutable client-TLS inputs baked into a cached client {@link SslContext}; folded into the cache
-     * key so runtime rotation self-invalidates (defect C8).
+     * The mutable client-TLS inputs of a client {@link SslContext}, each read from the configuration once.
+     * A context is built only from these values and cached under their {@link #signature()}, so rotating any
+     * of them at runtime self-invalidates the cache (defects C8 and C9: the CA identity is included so a CA
+     * rotation invalidates the client trust anchor too).
      */
-    private String clientContextSignature() {
-        return "fwdKey=" + configuration.forwardProxyPrivateKey()
-            + "|fwdChain=" + configuration.forwardProxyCertificateChain()
-            + "|fwdByHost=" + configuration.forwardProxyClientCertificatesByHost()
-            + "|trustType=" + forwardProxyTrustManagerTypeSafe()
-            // fold the host-name-verification toggle into the key so flipping it at runtime self-invalidates
-            // the cached client context (defect C8), instead of a rotated value being silently ignored
-            + "|hostnameVerification=" + configuration.forwardProxyTLSHostnameVerificationEnabled()
-            + "|customTrust=" + configuration.forwardProxyTLSCustomTrustX509Certificates()
-            + "|mtlsChain=" + configuration.tlsMutualAuthenticationCertificateChain()
-            + "|protocols=" + configuration.tlsProtocols()
-            + "|insecureProtocols=" + configuration.tlsAllowInsecureProtocols()
-            // CA identity so a runtime CA rotation invalidates the client trust anchor too (defect C9)
-            + "|caCert=" + configuration.certificateAuthorityCertificate()
-            + "|caKey=" + configuration.certificateAuthorityPrivateKey()
-            + "|dynamicCA=" + configuration.dynamicallyCreateCertificateAuthorityCertificate()
-            + "|dir=" + configuration.directoryToSaveDynamicSSLCertificate();
-    }
+    private static final class ClientTlsInputs {
+        private final String forwardProxyPrivateKey;
+        private final String forwardProxyCertificateChain;
+        private final String forwardProxyClientCertificatesByHost;
+        private final ForwardProxyTLSX509CertificatesTrustManager trustManagerType;
+        // the getter can throw on an unparsable property; the build rethrows it, as reading it there did
+        private final RuntimeException trustManagerTypeFailure;
+        private final Boolean forwardProxyTLSHostnameVerificationEnabled;
+        private final String customTrustX509Certificates;
+        private final String tlsMutualAuthenticationCertificateChain;
+        private final String tlsProtocols;
+        private final Boolean tlsAllowInsecureProtocols;
+        private final Boolean http2Enabled;
+        private final String certificateAuthorityCertificate;
+        private final String certificateAuthorityPrivateKey;
+        private final Boolean dynamicallyCreateCertificateAuthorityCertificate;
+        private final String directoryToSaveDynamicSSLCertificate;
+        private String signature;
 
-    private String forwardProxyTrustManagerTypeSafe() {
-        try {
-            return String.valueOf(configuration.forwardProxyTLSX509CertificatesTrustManagerType());
-        } catch (RuntimeException ignore) {
-            return "";
+        private ClientTlsInputs(Configuration configuration) {
+            forwardProxyPrivateKey = configuration.forwardProxyPrivateKey();
+            forwardProxyCertificateChain = configuration.forwardProxyCertificateChain();
+            forwardProxyClientCertificatesByHost = configuration.forwardProxyClientCertificatesByHost();
+            ForwardProxyTLSX509CertificatesTrustManager type = null;
+            RuntimeException typeFailure = null;
+            try {
+                type = configuration.forwardProxyTLSX509CertificatesTrustManagerType();
+            } catch (RuntimeException failure) {
+                typeFailure = failure;
+            }
+            trustManagerType = type;
+            trustManagerTypeFailure = typeFailure;
+            forwardProxyTLSHostnameVerificationEnabled = configuration.forwardProxyTLSHostnameVerificationEnabled();
+            customTrustX509Certificates = configuration.forwardProxyTLSCustomTrustX509Certificates();
+            tlsMutualAuthenticationCertificateChain = configuration.tlsMutualAuthenticationCertificateChain();
+            tlsProtocols = configuration.tlsProtocols();
+            tlsAllowInsecureProtocols = configuration.tlsAllowInsecureProtocols();
+            http2Enabled = configuration.http2Enabled();
+            certificateAuthorityCertificate = configuration.certificateAuthorityCertificate();
+            certificateAuthorityPrivateKey = configuration.certificateAuthorityPrivateKey();
+            dynamicallyCreateCertificateAuthorityCertificate = configuration.dynamicallyCreateCertificateAuthorityCertificate();
+            directoryToSaveDynamicSSLCertificate = configuration.directoryToSaveDynamicSSLCertificate();
+        }
+
+        static ClientTlsInputs read(Configuration configuration) {
+            return new ClientTlsInputs(configuration);
+        }
+
+        ForwardProxyTLSX509CertificatesTrustManager trustManagerType() {
+            if (trustManagerTypeFailure != null) {
+                throw trustManagerTypeFailure;
+            }
+            return trustManagerType;
+        }
+
+        String signature() {
+            String memoised = signature;
+            if (memoised == null) {
+                memoised = "fwdKey=" + forwardProxyPrivateKey
+                    + "|fwdChain=" + forwardProxyCertificateChain
+                    + "|fwdByHost=" + forwardProxyClientCertificatesByHost
+                    + "|trustType=" + (trustManagerTypeFailure != null ? "" : String.valueOf(trustManagerType))
+                    + "|hostnameVerification=" + forwardProxyTLSHostnameVerificationEnabled
+                    + "|customTrust=" + customTrustX509Certificates
+                    + "|mtlsChain=" + tlsMutualAuthenticationCertificateChain
+                    + "|protocols=" + tlsProtocols
+                    + "|insecureProtocols=" + tlsAllowInsecureProtocols
+                    + "|http2=" + http2Enabled
+                    + "|caCert=" + certificateAuthorityCertificate
+                    + "|caKey=" + certificateAuthorityPrivateKey
+                    + "|dynamicCA=" + dynamicallyCreateCertificateAuthorityCertificate
+                    + "|dir=" + directoryToSaveDynamicSSLCertificate;
+                signature = memoised;
+            }
+            return memoised;
         }
     }
 
@@ -790,10 +825,6 @@ public class NettySslContextFactory {
                     )
             );
         }
-    }
-
-    private void configureALPN(SslContextBuilder sslContextBuilder) {
-        configureALPN(sslContextBuilder, configuration.http2Enabled());
     }
 
     private static void configureALPN(SslContextBuilder sslContextBuilder, boolean http2Enabled) {

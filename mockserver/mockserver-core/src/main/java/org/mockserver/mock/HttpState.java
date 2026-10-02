@@ -547,12 +547,24 @@ public class HttpState {
      * any configuration route takes effect at the enforcement point instead of being accepted and ignored.
      */
     public AuthenticationHandler getControlPlaneAuthenticationHandler() {
-        return controlPlaneAuthenticationHandler(ControlPlaneAuthenticationSettings.of(configuration));
+        return getControlPlaneAuthenticationHandler(controlPlaneAuthenticationSettings());
     }
 
-    // Every decision below comes from the one settings snapshot, so a PUT applied concurrently is seen
-    // whole or not at all: a switch from mTLS to JWT can never be observed as "nothing required".
-    private AuthenticationHandler controlPlaneAuthenticationHandler(ControlPlaneAuthenticationSettings settings) {
+    /**
+     * @return one consistent snapshot of the control-plane authentication and authorization settings; a
+     * caller that authenticates and then authorizes separately takes it once and uses it for both
+     */
+    public ControlPlaneAuthenticationSettings controlPlaneAuthenticationSettings() {
+        return ControlPlaneAuthenticationSettings.of(configuration);
+    }
+
+    /**
+     * The control-plane authentication handler for the given settings snapshot, or {@code null} when it
+     * requires no authentication (an explicitly installed handler always wins). Every decision comes from
+     * the one snapshot, so a {@code PUT} applied concurrently is seen whole or not at all: a switch from
+     * mTLS to JWT can never be observed as "nothing required".
+     */
+    public AuthenticationHandler getControlPlaneAuthenticationHandler(ControlPlaneAuthenticationSettings settings) {
         AuthenticationHandler explicitHandler = controlPlaneAuthenticationHandler;
         if (explicitHandler != null) {
             return explicitHandler;
@@ -6356,8 +6368,8 @@ public class HttpState {
             // Resolve through the getter, NOT the raw field: the handler may be derived from the live
             // configuration, so reading the field directly would miss a control-plane authentication
             // mechanism enabled after startup and fall through to the null => "authenticated" branch.
-            ControlPlaneAuthenticationSettings settings = ControlPlaneAuthenticationSettings.of(configuration);
-            AuthenticationHandler resolvedControlPlaneAuthenticationHandler = controlPlaneAuthenticationHandler(settings);
+            ControlPlaneAuthenticationSettings settings = controlPlaneAuthenticationSettings();
+            AuthenticationHandler resolvedControlPlaneAuthenticationHandler = getControlPlaneAuthenticationHandler(settings);
             org.mockserver.authentication.AuthenticationResult authenticationResult =
                 resolvedControlPlaneAuthenticationHandler == null
                     ? org.mockserver.authentication.AuthenticationResult.authenticated(null, "none", java.util.Map.of(), java.util.Set.of())
@@ -6406,14 +6418,19 @@ public class HttpState {
      * fail-closed exactly like {@link #controlPlaneAuthorized}: a principal with no mapped role
      * is denied every mutation (and every read unless it has a READ-or-higher role).
      *
+     * <p>
+     * {@code settings} must be the snapshot the caller was authenticated under (see
+     * {@link org.mockserver.authentication.ControlPlaneAuthentication}), so a {@code PUT} applied between
+     * authentication and this call cannot pair the old authentication with new authorization settings.
+     *
+     * @param settings       the settings snapshot the caller was authenticated under
      * @param verifiedScopes the authenticated principal's verified scopes (may be null/empty)
      * @param isRead         true if the operation only reads control-plane state, false if it mutates
      * @param operation      a short label for the operation (e.g. the MCP tool name) used only in the
      *                       server-side denial log; may be null
      * @return true to allow the operation; false to deny it with a 403-equivalent
      */
-    public boolean controlPlaneToolAuthorized(java.util.Set<String> verifiedScopes, boolean isRead, String operation) {
-        ControlPlaneAuthenticationSettings settings = ControlPlaneAuthenticationSettings.of(configuration);
+    public boolean controlPlaneToolAuthorized(ControlPlaneAuthenticationSettings settings, java.util.Set<String> verifiedScopes, boolean isRead, String operation) {
         if (!Boolean.TRUE.equals(settings.controlPlaneAuthorizationEnabled())) {
             return true;
         }

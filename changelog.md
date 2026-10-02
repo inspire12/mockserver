@@ -46,7 +46,15 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   millisecond, so hitting it needed a request timed against an operator's `PUT`. A `PUT` that is
   rejected, for example because a certificate path does not exist or `globalResponseDelayMillis` is
   negative, now answers `400` having changed nothing; before, the fields ahead of the invalid one stayed
-  applied, so a rejected switch from mTLS to JWT could leave the control plane open.
+  applied, so a rejected switch from mTLS to JWT could leave the control plane open. An MCP tool call
+  (over HTTP/1.1, HTTP/2 or HTTP/3) is now also authorized with the same settings it was authenticated
+  with: before, a `PUT` landing between the two steps could pair them, so after switching from OIDC with
+  role-based authorization to mTLS without it, a caller holding only the read role could run a tool that
+  changes state. Outbound TLS connections (forwarding and proxying) now cache their TLS setup only under
+  the exact settings it was built from: a `PUT` that changed, for example,
+  `forwardProxyTLSX509CertificatesTrustManagerType` from `JVM` to `ANY` while that setup was being built
+  could store a trust-all setup under the `JVM` settings, to be used again if the configuration returned
+  to them. Turning `http2Enabled` off at runtime now also stops outbound TLS connections offering HTTP/2.
 - **`redactSecretsInLog` now masks credentials everywhere the event log is shown or retrieved.**
   With it enabled, each log entry for a proxied or forwarded request still carried the credentials its
   masked request had hidden: the log message printed to the console, returned by retrieve and shown in

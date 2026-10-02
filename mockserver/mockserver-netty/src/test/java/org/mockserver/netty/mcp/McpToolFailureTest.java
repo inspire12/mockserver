@@ -169,7 +169,7 @@ public class McpToolFailureTest {
         McpSessionManager sessionManager = new McpSessionManager(httpState.getMockServerLogger());
         McpRequestProcessor exploding = new McpRequestProcessor(httpState, server, sessionManager) {
             @Override
-            public McpResult handlePost(String requestBody, String mcpSessionId, java.util.Set<String> scopes) {
+            public McpResult handlePost(String requestBody, String mcpSessionId, org.mockserver.authentication.ControlPlaneAuthentication authentication) {
                 throw new IllegalStateException("processor exploded");
             }
         };
