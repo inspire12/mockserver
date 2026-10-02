@@ -315,6 +315,17 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   removed to stay within `maxLogEntries` or `maxEventLogSizeInBytes`, which is when raising those keeps more
   history. Once dismissed, it comes back for new drops but not for further evictions. Its "Learn more" link
   now opens the MockServer website instead of a page the server does not have.
+- **A verification that fails because the event log is incomplete now says what was lost and how to fix
+  it.** `never()`, `atMost`, `exactly`, `once()` and `between` fail rather than pass when log entries
+  were lost, because a request that was not found may have been made and not kept. The message used to
+  give both reasons a log event can be dropped whichever one happened, and one list of settings to
+  change. It now lists only what happened since the log was last reset, each with its count and fix:
+  events dropped because the logging thread fell behind (lower the log level; a larger `ringBufferSize`
+  only absorbs short bursts), events dropped because the bodies waiting to be logged went over their
+  memory limit (lower the log level or raise `maxEventLogSizeInBytes`), and recorded entries evicted
+  (raise `maxLogEntries`, or `maxEventLogSizeInBytes` when that was the limit reached). The matching
+  entry in the dashboard log says whether events were dropped, evicted or both. Tests that check this
+  message's wording may need updating; when the verification fails has not changed.
 
 ### Fixed
 

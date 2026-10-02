@@ -201,14 +201,14 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
     private final AtomicLong ringFullDroppedLogEvents = new AtomicLong(0);
     private final AtomicLong inFlightBytesDroppedLogEvents = new AtomicLong(0);
     private final AtomicBoolean droppedLogEventWarned = new AtomicBoolean(false);
-    // Dropped log events since startup or the last reset()/clear-all — the resettable TAINT that feeds
-    // the fail-closed verify path (upperBoundUnprovableAfterEviction), distinct from the monotonic
-    // per-reason drop counters above (which must never be reset, as they mirror a Prometheus counter). A
-    // drop means an incoming entry was NEVER recorded — the same loss of evidence as a deque eviction,
-    // and just as fatal to proving absence — so an upper-bound verify (never/atMost/exactly/once/
-    // between) must fail closed rather than pass on it. Reset alongside the deque's eviction counter on
-    // reset() and clear(null) so a suite that clears between tests is not permanently poisoned.
-    private final AtomicLong droppedLogEventsSinceLogReset = new AtomicLong(0);
+    // Dropped log events, by cause, since startup or the last reset()/clear-all — the resettable TAINT
+    // that feeds the fail-closed verify path (upperBoundUnprovableAfterEviction), distinct from the
+    // monotonic per-reason drop counters above (which must never be reset, as they mirror a Prometheus
+    // counter). A drop means an incoming entry was NEVER recorded — the same loss of evidence as a deque
+    // eviction — so an upper-bound verify must fail closed rather than pass on it. Kept per cause so the
+    // failure names what happened since the reset, not what has ever happened on this server.
+    private final AtomicLong ringFullDroppedSinceLogReset = new AtomicLong(0);
+    private final AtomicLong inFlightBytesDroppedSinceLogReset = new AtomicLong(0);
     // Bytes of request/response body held by log entries that have been PUBLISHED to the ring but not
     // yet processed by the single consumer (the in-flight backlog). The deque byte budget
     // (maxEventLogSizeInBytes) bounds only what has already been RETAINED after processing; it cannot
@@ -398,10 +398,19 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
         return reason == DropReason.RING_FULL ? ringFullDroppedLogEvents : inFlightBytesDroppedLogEvents;
     }
 
+    private AtomicLong droppedSinceLogResetCounter(DropReason reason) {
+        return reason == DropReason.RING_FULL ? ringFullDroppedSinceLogReset : inFlightBytesDroppedSinceLogReset;
+    }
+
     private void recordDrop(DropReason reason) {
         droppedLogEventCounter(reason).incrementAndGet();
-        droppedLogEventsSinceLogReset.incrementAndGet();
+        droppedSinceLogResetCounter(reason).incrementAndGet();
         Metrics.incrementDroppedLogEvents(reason.metricLabel());
+    }
+
+    private void clearDropTaint() {
+        ringFullDroppedSinceLogReset.set(0);
+        inFlightBytesDroppedSinceLogReset.set(0);
     }
 
     /**
@@ -948,7 +957,7 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
                 eventLog.clear();
                 evictedLogEntryWarned.set(false);
                 evictedCountReportedToMetrics.set(0);
-                droppedLogEventsSinceLogReset.set(0);
+                clearDropTaint();
                 inFlightBytesDropWarned.set(false);
                 droppedLogEventWarned.set(false);
                 future.complete("done");
@@ -1026,7 +1035,7 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
                     eventLog.resetEvictedCount();
                     evictedLogEntryWarned.set(false);
                     evictedCountReportedToMetrics.set(0);
-                    droppedLogEventsSinceLogReset.set(0);
+                    clearDropTaint();
                     inFlightBytesDropWarned.set(false);
                     droppedLogEventWarned.set(false);
                 }
@@ -1464,7 +1473,7 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
                     // evicted, "found 0 times" may mean "the evidence was discarded", so passing
                     // here would be a silent false green — the single worst failure mode for a
                     // verification tool. Refuse to certify what we can no longer see.
-                    String evictionFailure = upperBoundUnprovableAfterEviction(verification);
+                    UnprovableUpperBound evictionFailure = upperBoundUnprovableAfterEviction(verification, "Request");
                     if (evictionFailure != null) {
                         if (logResult && mockServerLogger.isEnabledForInstance(Level.INFO)) {
                             mockServerLogger.logEvent(
@@ -1473,11 +1482,11 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
                                     .setLogLevel(Level.INFO)
                                     .setCorrelationId(logCorrelationId)
                                     .setHttpRequest(verification.getHttpRequest())
-                                    .setMessageFormat("request:{}could not be verified " + verification.getTimes() + " because the event log has evicted entries")
+                                    .setMessageFormat("request:{}could not be verified " + verification.getTimes() + " because the event log has " + (evictionFailure.dropped ? evictionFailure.evicted ? "dropped log events and evicted entries" : "dropped log events" : "evicted entries"))
                                     .setArguments(verification.getHttpRequest())
                             );
                         }
-                        resultConsumer.accept(evictionFailure);
+                        resultConsumer.accept(evictionFailure.message);
                         return;
                     }
                     if (logResult && mockServerLogger.isEnabledForInstance(Level.INFO)) {
@@ -1528,11 +1537,7 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
      * </ul>
      * A FAIL is never converted to a pass here, so this can only ever make verification stricter.
      */
-    private String upperBoundUnprovableAfterEviction(Verification verification) {
-        return upperBoundUnprovableAfterEviction(verification, "Request");
-    }
-
-    private String upperBoundUnprovableAfterEviction(Verification verification, String subject) {
+    private UnprovableUpperBound upperBoundUnprovableAfterEviction(Verification verification, String subject) {
         if (!configuration.failVerificationOnEvictedLog()) {
             return null;
         }
@@ -1541,46 +1546,68 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
             // no upper bound asserted — eviction cannot invalidate this pass
             return null;
         }
+        // Ways the log stops being a complete record, each fatal to proving absence and each with its own
+        // remedy: a recorded entry EVICTED from the retained deque (by the count or the byte bound), or
+        // an incoming entry DROPPED before being recorded because the ring had no free slot or the
+        // in-flight byte cap was reached. Drops are weight/type-agnostic, so the entry lost can be the
+        // RECEIVED_REQUEST a verify reads. All four counts are since the last reset()/clear-all, and say
+        // what the log lost, not that THIS verification's entries were among it.
         long evicted = eventLog.getEvictedCount();
-        // Two distinct ways the log stops being a complete record, BOTH fatal to proving absence:
-        //  - EVICTION: a recorded entry was discarded from the retained deque (count or byte bound).
-        //  - DROP: an incoming entry was never recorded at all, because the in-flight ring backlog hit
-        //    the byte budget or the ring was full. The drop path is weight/type-agnostic, so the entry
-        //    most likely dropped under large-body load is exactly a RECEIVED_REQUEST — the entry a
-        //    request verify reads — which is why a drop MUST taint this path too and not only eviction.
-        long dropped = droppedLogEventsSinceLogReset.get();
-        if (evicted <= 0 && dropped <= 0) {
+        // read separately from the total, so clamp: an eviction between the two reads must not go negative
+        long byteEvicted = Math.min(evicted, eventLog.getByteEvictedCount());
+        long countEvicted = evicted - byteEvicted;
+        long ringFull = ringFullDroppedSinceLogReset.get();
+        long inFlightBytes = inFlightBytesDroppedSinceLogReset.get();
+        if (evicted <= 0 && ringFull <= 0 && inFlightBytes <= 0) {
             return null;
         }
-        // Name the bound that actually evicted so the remedy points at the right property. The byte
-        // budget and the count cap are both active by default (whichever binds first evicts), and a
-        // message that always blamed maxLogEntries would send an operator to raise a limit that was
-        // not the one hit. Lifetime scope, deliberately (see the eviction-counter note): this says the
-        // byte budget has evicted at some point on this log, not that THIS verification's entries were
-        // byte- rather than count-evicted; it is a remedy hint and both levers are documented.
-        boolean byteBoundHit = eventLog.getByteEvictedCount() > 0;
         StringBuilder message = new StringBuilder(subject)
             .append(" could not be verified ").append(verification.getTimes())
             .append(" because the event log is not a complete record: ");
-        if (dropped > 0) {
+        StringBuilder remedy = new StringBuilder("To fix: ");
+        if (ringFull > 0) {
             message
-                .append(dropped).append(dropped == 1 ? " log event was" : " log events were")
-                .append(" DROPPED before being recorded (incoming request/response bodies arrived faster than the log could process them and exceeded the in-flight byte budget of ")
-                .append(maxInFlightBytes).append(" bytes, the larger of maxEventLogSizeInBytes and a heap-derived cap, or the ring buffer was full). ");
+                .append(ringFull).append(ringFull == 1 ? " log event was" : " log events were")
+                .append(" DROPPED before being recorded because the ring buffer was full (log events arrived faster than the single logging thread could record them). ");
+            remedy.append("for the ring-full drops, lower the log level (e.g. to WARN) if they persist under steady load — a larger ringBufferSize only absorbs short bursts; ");
         }
-        if (evicted > 0) {
-            String boundDetail = byteBoundHit
-                ? "its maximum size in bytes (maxEventLogSizeInBytes=" + configuration.maxEventLogSizeInBytes() + ")"
-                : "its maximum number of entries (maxLogEntries=" + configuration.maxLogEntries() + ")";
+        if (inFlightBytes > 0) {
             message
-                .append(evicted).append(evicted == 1 ? " recorded entry was" : " recorded entries were")
-                .append(" EVICTED after the log reached ").append(boundDetail).append(". ");
+                .append(inFlightBytes).append(inFlightBytes == 1 ? " log event was" : " log events were")
+                .append(" DROPPED before being recorded because the request/response bodies waiting to be logged exceeded the in-flight byte budget of ")
+                .append(maxInFlightBytes).append(" bytes (the larger of maxEventLogSizeInBytes and a heap-derived cap). ");
+            remedy.append("for the in-flight byte drops, lower the log level or, if you have heap to spare, raise maxEventLogSizeInBytes above that budget (maxLoggedBodyBytes does not help: it truncates bodies only after they leave this backlog); ");
         }
-        return message
+        if (countEvicted > 0) {
+            message
+                .append(countEvicted).append(countEvicted == 1 ? " recorded entry was" : " recorded entries were")
+                .append(" EVICTED after the log reached its maximum number of entries (maxLogEntries=").append(configuration.maxLogEntries()).append("). ");
+            remedy.append("for the evictions at maxLogEntries, raise it, or lower the log level so fewer entries are recorded per request; ");
+        }
+        if (byteEvicted > 0) {
+            message
+                .append(byteEvicted).append(byteEvicted == 1 ? " recorded entry was" : " recorded entries were")
+                .append(" EVICTED after the log reached its maximum size in bytes (maxEventLogSizeInBytes=").append(configuration.maxEventLogSizeInBytes()).append("). ");
+            remedy.append("for the evictions at maxEventLogSizeInBytes, raise it, or set maxLoggedBodyBytes to truncate large bodies so each recorded entry is smaller; ");
+        }
+        return new UnprovableUpperBound(ringFull > 0 || inFlightBytes > 0, evicted > 0, message
             .append("Absence cannot be proven — the matching requests may have been discarded rather than never made. ")
-            .append("Increase maxEventLogSizeInBytes / maxLogEntries, reduce maxLoggedBodyBytes, lower the log level, reset the event log between tests, or set")
-            .append(" failVerificationOnEvictedLog=false to restore the previous (unsound) behaviour.")
-            .toString();
+            .append(remedy)
+            .append("or reset the event log between tests, or set failVerificationOnEvictedLog=false to restore the previous (unsound) behaviour.")
+            .toString());
+    }
+
+    /** Why an upper-bound PASS cannot stand: what the log lost (for the log entry), and the full failure message. */
+    private static final class UnprovableUpperBound {
+        private final boolean dropped;
+        private final boolean evicted;
+        private final String message;
+
+        private UnprovableUpperBound(boolean dropped, boolean evicted, String message) {
+            this.dropped = dropped;
+            this.evicted = evicted;
+            this.message = message;
+        }
     }
 
     private void verifyResponse(Verification verification, String logCorrelationId, boolean logResult, Consumer<String> resultConsumer) {
@@ -1648,7 +1675,7 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
                     // Same soundness rule as the request side: an upper-bound PASS is not provable
                     // once the log has evicted, because the responses we did not find may simply
                     // have been discarded. See upperBoundUnprovableAfterEviction.
-                    String evictionFailure = upperBoundUnprovableAfterEviction(verification, "Response");
+                    UnprovableUpperBound evictionFailure = upperBoundUnprovableAfterEviction(verification, "Response");
                     if (evictionFailure != null) {
                         if (logResult && mockServerLogger.isEnabledForInstance(Level.INFO)) {
                             mockServerLogger.logEvent(
@@ -1657,11 +1684,11 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
                                     .setLogLevel(Level.INFO)
                                     .setCorrelationId(logCorrelationId)
                                     .setHttpRequest(verification.getHttpRequest())
-                                    .setMessageFormat("response:{}could not be verified " + verification.getTimes() + " because the event log has evicted entries")
+                                    .setMessageFormat("response:{}could not be verified " + verification.getTimes() + " because the event log has " + (evictionFailure.dropped ? evictionFailure.evicted ? "dropped log events and evicted entries" : "dropped log events" : "evicted entries"))
                                     .setArguments(verification.getHttpResponse())
                             );
                         }
-                        resultConsumer.accept(evictionFailure);
+                        resultConsumer.accept(evictionFailure.message);
                         return;
                     }
                     if (logResult && mockServerLogger.isEnabledForInstance(Level.INFO)) {

@@ -4462,7 +4462,7 @@ public class Configuration {
     }
 
     /**
-     * If true (the default) a verification that asserts an upper bound (never(), atMost(n), exactly(n), between(a,b)) fails rather than passes if the event log has evicted entries, because absence cannot be proven once evidence has been discarded. Set to false to restore the previous behaviour where such verifications could pass on an incomplete log.
+     * If true (the default) a verification that asserts an upper bound (never(), atMost(n), exactly(n), between(a,b)) fails rather than passes if the event log has evicted entries or dropped log events before recording them, because absence cannot be proven once evidence has been discarded; the failure names which happened since the last reset and its remedy. Set to false to restore the previous behaviour where such verifications could pass on an incomplete log.
      *
      * @param failVerificationOnEvictedLog enabled failing upper-bound verifications when the event log has evicted entries
      */
