@@ -1003,10 +1003,12 @@ def latfam: if IN("serving_percore.*.healthy_ceiling_rps", "serving_percore.*.rp
 # It keys on the k6 runtime of its points too (rw-multi-k6-sweep.sh .config.k6_runtime): GOGC,
 # gracefulStop and where GOMEMLIMIT came from, never the derived MiB, which follows host memory.
 # No runtime is k6 and Go defaults, so a run that sets them back explicitly matches older runs.
+# The VU ceiling joins the key only when it is not the sweep.js default of 2,048 (absent reads as 2,048).
 def latk6rt($f): (first(.[$f].points[]?.measurement.k6_runtime | select(. != null)) // null) as $rt
-  | ($rt.gomemlimit // "off") as $mem
+  | ($rt.gomemlimit // "off") as $mem | ($rt.vu_ceiling // 2048) as $vuc
   | "gogc=\($rt.gogc // "100"),graceful_stop=\($rt.graceful_stop // "30s"),gomemlimit="
-    + (if $mem == "off" then "off" else ($rt.source.gomemlimit // "env") end);
+    + (if $mem == "off" then "off" else ($rt.source.gomemlimit // "env") end)
+    + (if $vuc == 2048 then "" else ",vu_ceiling=\($vuc)" end);
 def latfp($f): (.[$f].sweep.latency_settle_s // null) as $s
   | if $f == "serving_hw_matrix" and $s != null then "\($s)|\(.[$f].client // "single")|\(latk6rt($f))" else $s end;
 def latpresent($f): (((.[$f] // {}).points // []) | length) > 0;

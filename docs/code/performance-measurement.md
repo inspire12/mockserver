@@ -453,6 +453,7 @@ Unknown `PERF_RW_TEST_FAIL_STEP`, `PERF_RW_TEST_NULL_RUNG` or `PERF_RW_TEST_CUT_
 `false`, a `PERF_RW_K6_GOGC` other than a whole number or `off` (Go would silently use 100), a
 `PERF_RW_K6_GOMEMLIMIT` outside Go's syntax (`off`, or bytes with an optional `B`/`KiB`/`MiB`/`GiB`/`TiB`
 suffix), a `PERF_RW_K6_GRACEFUL_STOP` that is not whole `ms` or `s` of at least 1 s, a
+`PERF_RW_K6_VU_CEILING` that is not a whole number above 0, a
 `PERF_RW_TEST_RESOLVE_ONLY` other than empty or `true`, and a `PERF_RW_P99_MAX_MS` that
 is not a positive decimal are rejected at startup with exit 2. A default `GOMEMLIMIT` that cannot be
 derived (Docker reports no memory size) stops the run before any container starts, with an invalid
@@ -523,8 +524,8 @@ inventory (`prom-series-inventory.json`).
   further adds no CPU. Build 535 tried eight processes on two cores each, on the same 16 cores, and
   was worse than build 533's four: k6 CPU per request rose from ~289 to ~316 µs, the client limit
   fell from 64k to 56k, and p99 at 44k rose from 4.8 to 16.4 ms. So the default is four again. Above
-  25,600 rps per process (the 112k and 128k rungs) each pool caps at 2,048 VUs, which only matters
-  on rungs the client already limits. At ~290 µs of k6 CPU per request, the 16 cores'
+  25,600 rps per process (the 112k and 128k rungs) each pool caps at 2,048 VUs, which on this host
+  only matters on rungs the client already limits (see "Ladder" for the two-socket host). At ~290 µs of k6 CPU per request, the 16 cores'
   hyperthread-adjusted ceiling (125% of a core each, 2,000% in all) carries about 69k req/s, so the
   client still limits the ladder above ~70k. Measuring 100k or more needs cheaper requests on the
   client (~200 µs or less), a larger single-socket host, or the load generator on its own host.
@@ -561,7 +562,24 @@ below ~1,200 rps per process, where the 96-VU floor applies (Little's law holds 
 With four processes the 128k top is 32,000 rps per process, whose pool caps at 2,048 VUs. k6
 initialises the largest sum of pools whose reservations overlap, about 6,000 VUs per process
 (1,920 + 2,048 + 2,048) on k6's 30 s `gracefulStop`; the arm's default `gracefulStop` (the gap) cuts
-that to the largest pool (see "k6 heap and GC" below). A local run needs a short `PERF_RW_RATES`: the default ladder OOM-kills k6 containers in an
+that to the largest pool (see "k6 heap and GC" below). On a host with two or more sockets, each at least one NUMA node (the c6i.32xlarge `perf-xl` queue),
+the default ladder adds 104k, 120k, 136k, 144k, 152k and 160k (25 rungs, 8k apart from 96k to 160k):
+there k6 has a socket to itself and was at 62% of its CPU ceiling at 128k (build 595), so the 16k
+steps above 96k left the p99-bounded ceiling unresolved between 112k and 128k, and the 128k top rung
+was also the peak. On that host the arm also raises sweep.js's per-process VU ceiling to the top
+rung's own pool, `ceil(top per-process rate × 0.08)`: 3,200 VUs at 160k with N=4. In 595 the 2,048
+cap bound at 128k (`vus_active_max` 2,048, 825 dropped iterations) with k6 well under its CPU
+ceiling. On one socket the cap is unchanged, because k6 runs out of CPU first: in build 553 the c5
+was client-limited from 80k, 20k per process, where the pool is 1,600. The extra VUs fit the
+memory limit: a VU's JavaScript runtime is ~0.3 MB, so 3,201 VUs add ~0.35 GB of init heap to the
+0.61 GB at 2,049 (595's live heap ended at 1.1 GB, its heap at 5.2 GB, against a `GOMEMLIMIT` of
+31,725 MiB per process). `PERF_RW_RATES` replaces the ladder on any host, and the ceiling then
+follows its top rung; `PERF_RW_K6_VU_CEILING` sets the ceiling explicitly (`2048` restores
+sweep.js's). The hardware matrix (`lib/perf-percore.sh`) pins it at 2,048 on every host, so a
+matrix point measures the same client on the c5 and on `perf-xl` (its 6-core point on `perf-xl`
+would otherwise derive 3,072), and compare keys the matrix on the ceiling only when it is not 2,048. `.method.ladder` records the profile (`default` or `multi_socket`) and whether the
+rates came from the environment, and `.config.k6_runtime.vu_ceiling` the ceiling, its source
+(`env`, `derived` or `sweep.js default`) and, when derived, its basis. A local run needs a short `PERF_RW_RATES`: the default ladder OOM-kills k6 containers in an
 8 GiB Docker Desktop VM. `Insufficient VUs` warnings on sub-knee rungs are the transient-stall signature
 the single-process ladder shows too (build 527: pool hit at 4k–24k with p95 active VUs 3–7). The
 occupancy rule reads them as stalls, so they are not a sizing fault.
@@ -1679,8 +1697,13 @@ c6i.32xlarge's enumeration, but for the two-socket c5.24xlarge it documents node
 gives node 0 `0-31,64-95` and node 1 `32-63,96-127`, siblings at N and N+64, so the layout
 above is SUT `0-5`, upstream `6`, Prometheus `7,71` and k6 `32-39,96-103` through
 `56-63,120-127`. The fixture tests also cover a different two-node numbering (adjacent
-siblings), so a host that enumerates otherwise still gets a correct layout. Each run logs its
-resolved layout as a `--- placement:` line; check it on the first `perf-xl` run.
+siblings), so a host that enumerates otherwise still gets a correct layout. Each run logs the raw
+`node*/cpulist` files once (`--- NUMA node cpulists (raw …): node0=… node1=…`) and its resolved
+layout as a `--- placement:` line, whose `requested mems` are what the arm computes. After each
+container starts, `--- observed placement: <role> <container> cpuset_cpus=… cpuset_mems=…` logs
+what Docker applied (`docker inspect` of `HostConfig.CpusetCpus` and `CpusetMems`): every
+container `start_mockserver` starts in `perf-test-run.sh`, and the SUT (whoever started it),
+Prometheus and every measured k6 process in the multi-k6 arm.
 
 **Knobs.**
 
@@ -1716,6 +1739,11 @@ point has `.points[].placement`, and the matrix has `baseline_eligible` and
 {"numa_nodes": 2, "sut_node": 0, "k6_node": 1, "k6_nodes": [1],
  "layout": "numa_split", "k6_numa_node": "other", "baseline_eligible": true}
 ```
+
+The multi-k6 `placement` also carries what was observed: `observed_mems` (the SUT's
+`CpusetMems` as Docker reports it; `""` is unrestricted, `null` means it could not be inspected),
+`sut_mems_as_requested`, `requested_mems`, `observed[]` (one `{role, container, cpuset_cpus,
+cpuset_mems}` per container) and `node_cpulists` (the raw files, `{}` when unreadable).
 
 `layout` is `single_node`, `numa_split`, `numa_same_node`, `explicit` (the k6 cpusets were set) or
 `topology_unknown`;
@@ -1764,7 +1792,10 @@ sub-NUMA-clustering hosts and a NUMA-less kernel. It drives the two arm scripts 
 `PERF_RW_TEST_PLACEMENT_ONLY` and `PERF_PERCORE_TEST_PLACEMENT_ONLY`, which resolve and guard the
 placement and then exit before starting a container, and it re-assembles a perf-xl matrix from its
 `matrix-inputs.json`. It also checks that every pinned `docker run` in both scripts passes the
-`--cpuset-mems` of its own cpuset. For `perf-test-run.sh` it runs the script's real blocks (the
+`--cpuset-mems` of its own cpuset, that every detached container the multi-k6 arm starts is
+followed by its observed-placement record, and that the arm's ladder and VU ceiling are the c5
+defaults byte for byte on one socket and the extended ones on the c6i tree, with `PERF_RW_RATES`
+and `PERF_RW_K6_VU_CEILING` applied as given. For `perf-test-run.sh` it runs the script's real blocks (the
 `PERF_K6_NUMA_NODE` check, the lib source and prime, the core-pinning block, `start_mockserver`,
 and both eligibility blocks) against the same trees, as the script's other tests do. A run of the
 whole script would pass its EXIT trap and stale-container sweep, and a test-only switch inside it

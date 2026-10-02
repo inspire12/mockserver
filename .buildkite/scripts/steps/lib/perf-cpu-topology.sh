@@ -486,3 +486,41 @@ numa_placement_json() { # layout mode sut_spec k6_spec...
        k6_nodes:$k, layout:$layout, k6_numa_node:$mode,
        baseline_eligible:($mode != "same")}'
 }
+
+# --- observed placement: what the kernel and Docker actually gave each run -------------------------
+# The raw node*/cpulist files, as one line and as a JSON object ({"node0":"0-31,64-95",...}; {} when
+# none is readable). The layout is derived from these, so the log keeps the input beside the output.
+numa_node_cpulists_json() {
+  local f n out="{}"
+  for f in "$(perf_sysfs_node_root)"/node[0-9]*/cpulist; do
+    [ -r "$f" ] || continue
+    n="${f%/cpulist}"; n="${n##*/}"
+    out="$(jq -c --arg n "$n" --arg v "$(tr -d '[:space:]' < "$f")" '. + {($n): $v}' <<<"$out")"
+  done
+  echo "$out"
+}
+numa_log_node_cpulists() {
+  echo "--- NUMA node cpulists (raw $(perf_sysfs_node_root)/node*/cpulist): $(numa_node_cpulists_json \
+    | jq -r 'if length == 0 then "unreadable" else to_entries | map("\(.key)=\(.value)") | join(" ") end')"
+}
+
+# The cpuset Docker applied to a container, as {role, container, cpuset_cpus, cpuset_mems}: "" is
+# unrestricted (Docker's own empty value), null means the container could not be inspected.
+container_cpuset_json() { # role container
+  local got cpus="" mems="" ok=false
+  if got="$(docker inspect -f '{{.HostConfig.CpusetCpus}} {{.HostConfig.CpusetMems}}' "$2" 2>/dev/null)" \
+     && [[ "$got" == *" "* ]] && [[ "$got" != *$'\n'* ]]; then
+    cpus="${got%% *}"; mems="${got#* }"; ok=true
+  fi
+  jq -nc --arg role "$1" --arg c "$2" --arg cpus "$cpus" --arg mems "$mems" --argjson ok "$ok" \
+    '{role:$role, container:$c, cpuset_cpus:(if $ok then $cpus else null end), cpuset_mems:(if $ok then $mems else null end)}'
+}
+# Logs that line to stderr and appends the JSON to <ndjson_file> when given. Never fails the caller.
+log_container_cpuset() { # role container [ndjson_file]
+  local j
+  j="$(container_cpuset_json "$1" "$2" 2>/dev/null)" || return 0
+  echo "--- observed placement: $1 $2 $(jq -r 'def v: if . == null then "<inspect failed>" elif . == "" then "<unrestricted>" else . end;
+    "cpuset_cpus=\(.cpuset_cpus | v) cpuset_mems=\(.cpuset_mems | v)"' <<<"$j" 2>/dev/null)" >&2
+  if [ -n "${3:-}" ]; then printf '%s\n' "$j" >> "$3" 2>/dev/null || true; fi
+  return 0
+}

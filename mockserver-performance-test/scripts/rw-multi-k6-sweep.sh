@@ -38,7 +38,16 @@ HOST_CORES="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 0)"
 # Own ladder, not the published one: split over N processes the client knee moves up, so it
 # keeps the published rungs to 48k (comparable rung for rung) and continues past the SUT's
 # projected CPU ceiling (docs/code/performance-measurement.md, "Ladder").
-RATES="${PERF_RW_RATES:-500,1000,2000,4000,8000,16000,24000,32000,36000,40000,44000,48000,56000,64000,72000,80000,96000,112000,128000}"
+DEFAULT_RATES="500,1000,2000,4000,8000,16000,24000,32000,36000,40000,44000,48000,56000,64000,72000,80000,96000,112000,128000"
+# Two or more sockets and NUMA nodes (perf-xl): k6 gets a socket to itself and is not the
+# limit at 128k, so the ladder steps 8k from 96k to 160k to resolve the ceiling there.
+MULTI_SOCKET_RATES="500,1000,2000,4000,8000,16000,24000,32000,36000,40000,44000,48000,56000,64000,72000,80000,96000,104000,112000,120000,128000,136000,144000,152000,160000"
+numa_map_prime
+LADDER_PROFILE=default
+if [ "$(numa_package_count)" -ge 2 ] && [ "$(numa_node_count)" -ge 2 ]; then LADDER_PROFILE=multi_socket; fi
+if [ -n "${PERF_RW_RATES:-}" ]; then RATES="$PERF_RW_RATES"; RATES_SOURCE="env"
+elif [ "$LADDER_PROFILE" = multi_socket ]; then RATES="$MULTI_SOCKET_RATES"; RATES_SOURCE=default
+else RATES="$DEFAULT_RATES"; RATES_SOURCE=default; fi
 SWEEP_STEP="${PERF_RW_STEP:-15s}"
 SWEEP_GAP="${PERF_RW_GAP:-5s}"
 SETTLE_S="${PERF_RW_SETTLE_S:-3}"
@@ -158,7 +167,6 @@ SUT_CONTAINER="${PERF_RW_SUT_CONTAINER:-}"
 K6_NUMA_NODE="${PERF_K6_NUMA_NODE:-other}"
 case "$K6_NUMA_NODE" in other|same) ;; *) echo ":x: PERF_K6_NUMA_NODE='$K6_NUMA_NODE' must be other or same" >&2; exit 2 ;; esac
 HOST_CORES="${PERF_TEST_HOST_CORES:-$HOST_CORES}"
-numa_map_prime
 NUMA_LAYOUT=""; _lrc=0
 NUMA_LAYOUT="$(numa_split_layout 6 "${PERF_RW_PROCS:-4}" "$K6_NUMA_NODE" "${PERF_RW_K6_CORES_PER_PROC:-}")" || _lrc=$?
 if [ "$_lrc" -eq 0 ]; then
@@ -197,6 +205,29 @@ fi
 K6_SETS=("${K6_SETS[@]:0:$N}")
 XCHECK_CPUS="${PERF_RW_XCHECK_CPUS:-$(IFS=','; echo "${K6_SETS[*]}")}"
 
+# sweep.js gives each rung a pool of ceil(rate x 0.08) VUs per process, capped at its 2,048 default.
+# Where the client has a socket of its own the cap would bind before k6's CPU does, so the arm lifts
+# it to the top rung's own pool there; elsewhere k6 runs out of CPU first and sweep.js keeps 2,048.
+RW_VUS_PER_KRPS=80 # sweep.js's K6_SWEEP_VUS_PER_KRPS default (lib/config.js)
+RW_SWEEP_VU_CEILING=2048 # sweep.js's K6_SWEEP_VU_CEILING default
+K6_VU_CEILING="${PERF_RW_K6_VU_CEILING:-}"; K6_VU_CEILING_SOURCE="env"; K6_VU_CEILING_BASIS=""
+if [ -n "$K6_VU_CEILING" ] && ! [[ "$K6_VU_CEILING" =~ ^[1-9][0-9]{0,5}$ ]]; then
+  echo ":x: PERF_RW_K6_VU_CEILING='$K6_VU_CEILING' must be a whole number of VUs above 0" >&2; exit 2
+fi
+if [ -z "$K6_VU_CEILING" ]; then
+  K6_VU_CEILING_SOURCE="sweep.js default"
+  _top_pp=0
+  IFS=',' read -ra _rates <<< "$RATES"
+  for _a in "${_rates[@]}"; do
+    if [[ "$_a" =~ ^[0-9]+$ ]] && [ $(( 10#$_a / N )) -gt "$_top_pp" ]; then _top_pp=$(( 10#$_a / N )); fi
+  done
+  _sized=$(( (_top_pp * RW_VUS_PER_KRPS + 999) / 1000 ))
+  if [ "$LADDER_PROFILE" = multi_socket ] && [ "$_sized" -gt "$RW_SWEEP_VU_CEILING" ]; then
+    K6_VU_CEILING="$_sized"; K6_VU_CEILING_SOURCE=derived
+    K6_VU_CEILING_BASIS="{\"top_per_process_rps\":$_top_pp,\"vus_per_krps\":$RW_VUS_PER_KRPS}"
+  fi
+fi
+
 # --- validation --------------------------------------------------------------
 to_secs() {
   awk -v s="$1" 'BEGIN{ t=0; n="";
@@ -220,14 +251,19 @@ K6_GOMEMLIMIT_BASIS=""
 k6_runtime_json() { # the result's .config.k6_runtime
   jq -nc --arg gogc "$K6_GOGC" --arg gomem "$K6_GOMEMLIMIT" --arg gstop "$K6_GRACEFUL_STOP" \
     --arg basis "$K6_GOMEMLIMIT_BASIS" --arg s_gogc "${PERF_RW_K6_GOGC:+env}" \
-    --arg s_gomem "${PERF_RW_K6_GOMEMLIMIT:+env}" --arg s_gstop "${PERF_RW_K6_GRACEFUL_STOP:+env}" '
+    --arg s_gomem "${PERF_RW_K6_GOMEMLIMIT:+env}" --arg s_gstop "${PERF_RW_K6_GRACEFUL_STOP:+env}" \
+    --arg vuc "${K6_VU_CEILING:-}" --arg s_vuc "${K6_VU_CEILING_SOURCE:-}" --arg vbasis "${K6_VU_CEILING_BASIS:-}" \
+    --argjson swvuc "$RW_SWEEP_VU_CEILING" '
     def v: if . == "" then null else . end;
     {gogc:($gogc | v), gomemlimit:($gomem | v), graceful_stop:($gstop | v),
+     vu_ceiling:(if $vuc == "" then $swvuc else ($vuc | tonumber) end),
      source:{gogc:($s_gogc | if . == "" then "default" else . end),
              gomemlimit:($s_gomem | if . == "" then "derived" else . end),
-             graceful_stop:($s_gstop | if . == "" then "default (the gap)" else . end)},
+             graceful_stop:($s_gstop | if . == "" then "default (the gap)" else . end),
+             vu_ceiling:($s_vuc | v)},
      gomemlimit_basis:(if $basis == "" then null else ($basis | fromjson) end),
-     note:"applied to every measured k6 process (xcheck and main phases); Go and k6 defaults are GOGC 100, GOMEMLIMIT off and gracefulStop 30s; null = not resolved before an abort"}'
+     vu_ceiling_basis:(if $vbasis == "" then null else ($vbasis | fromjson) end),
+     note:"applied to every measured k6 process (xcheck and main phases); Go and k6 defaults are GOGC 100, GOMEMLIMIT off and gracefulStop 30s; vu_ceiling caps each rung pool of ceil(rate x 0.08) VUs per process; null = not resolved before an abort"}'
 }
 case "$WINDOW_MODE" in wallclock|vu_tag) ;; *) echo ":x: PERF_RW_WINDOW_MODE must be wallclock or vu_tag" >&2; exit 1 ;; esac
 [[ "$PUSH_S" =~ ^[1-9][0-9]*$ ]] || { echo ":x: PERF_RW_PUSH_INTERVAL_S must be a whole number of seconds >= 1" >&2; exit 1; }
@@ -254,7 +290,24 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/perf-rw.XXXXXX")"
 chmod 0777 "$WORK"
 ALL_NAMES=""
 OWN_NETWORK=""
+SUT_MEMS=""; PROM_MEMS=""; XCHECK_MEMS=""; OBSERVED=""; NODE_CPULISTS_JSON=""
 RESULT_WRITTEN=0
+# The result's placement: the arm's computed record plus what Docker reports each container got
+# (observed[], observed_mems = the SUT's) beside what the arm asked for. null before it is resolved.
+placement_result_json() {
+  local obs="[]"
+  if [ -s "${OBSERVED:-}" ]; then obs="$(jq -sc . "$OBSERVED" 2>/dev/null)" || obs="[]"; fi
+  jq -nc --argjson p "${PLACEMENT_JSON:-null}" --argjson obs "${obs:-[]}" --argjson cpulists "${NODE_CPULISTS_JSON:-null}" \
+    --arg sm "${SUT_MEMS#--cpuset-mems=}" --arg pm "${PROM_MEMS#--cpuset-mems=}" --arg xm "${XCHECK_MEMS#--cpuset-mems=}" '
+    if $p == null then null else
+      ([ $obs[] | select(.role == "sut") ] | first) as $sut
+      | $p + {observed_mems: ($sut.cpuset_mems // null),
+              sut_mems_as_requested: (if $sut == null or $sut.cpuset_mems == null then null else $sut.cpuset_mems == $sm end),
+              requested_mems: {sut: $sm, prometheus: $pm, xcheck: $xm},
+              observed: $obs, node_cpulists: $cpulists,
+              note: "observed = docker inspect HostConfig.CpusetCpus/CpusetMems per container (\"\" = unrestricted, null = not inspectable); requested_mems = the --cpuset-mems this arm computes for its own containers"}
+    end'
+}
 # An abort still leaves an invalid result naming the failed step, plus whatever the main
 # phase merged, so a rig run is never reduced to `{}`.
 write_fallback_result() { # rc failed_command
@@ -266,7 +319,7 @@ write_fallback_result() { # rc failed_command
   [ -s "$merged" ] || merged=/dev/null
   fallback_json() { # merged_file
     jq -n --arg err "$err" --argjson n "${N:-0}" --slurpfile merged "$1" --argjson k6rt "$(k6_runtime_json 2>/dev/null || echo null)" \
-      --argjson placement "${PLACEMENT_JSON:-null}" \
+      --argjson placement "$(placement_result_json 2>/dev/null || echo "${PLACEMENT_JSON:-null}")" \
       --arg hook_cut "${PERF_RW_TEST_CUT_FAULT:-}" --arg hook_step "${PERF_RW_TEST_FAIL_STEP:-}" --arg hook_null "${PERF_RW_TEST_NULL_RUNG:-}" --arg hook_zero "${PERF_RW_TEST_ZERO_TAIL:-}" '
       {attempted:true, valid:false, headline:null, config:{k6_runtime:$k6rt}, placement:$placement,
        invalid_reasons:["rw_harness_completed: the harness aborted before assembling its result (\($err))"],
@@ -331,7 +384,7 @@ if [ "${PERF_RW_TEST_RESOLVE_ONLY:-}" = true ]; then # test hook: print .config.
   k6_runtime_json; RESULT_WRITTEN=1; exit 0
 fi
 
-echo "--- item 31 remote-write multi-k6 sweep: N=$N rates=$RATES step=$SWEEP_STEP gap=$SWEEP_GAP settle=${SETTLE_S}s push=${PUSH_S}s quiet=${QUIET_S}s window=$WINDOW_MODE server=$SERVER_CPUS prometheus=$PROM_CPUS upstream=${UPSTREAM_CPUS:-none} k6=${K6_SETS[*]} target=${TARGET_URL:-<launch SUT>} degrade=${DEGRADE:-none} k6_gogc=$K6_GOGC k6_gomemlimit=$K6_GOMEMLIMIT k6_graceful_stop=$K6_GRACEFUL_STOP" >&2
+echo "--- item 31 remote-write multi-k6 sweep: N=$N rates=$RATES step=$SWEEP_STEP gap=$SWEEP_GAP settle=${SETTLE_S}s push=${PUSH_S}s quiet=${QUIET_S}s window=$WINDOW_MODE server=$SERVER_CPUS prometheus=$PROM_CPUS upstream=${UPSTREAM_CPUS:-none} k6=${K6_SETS[*]} target=${TARGET_URL:-<launch SUT>} degrade=${DEGRADE:-none} k6_gogc=$K6_GOGC k6_gomemlimit=$K6_GOMEMLIMIT k6_graceful_stop=$K6_GRACEFUL_STOP ladder=$LADDER_PROFILE/$RATES_SOURCE k6_vu_ceiling=${K6_VU_CEILING:-$RW_SWEEP_VU_CEILING} ($K6_VU_CEILING_SOURCE)" >&2
 
 # --- placement proof: SUT, Prometheus, upstream and every k6 on disjoint physical cores ---
 PAIRS=(server "$SERVER_CPUS" prometheus "$PROM_CPUS")
@@ -350,15 +403,23 @@ PLACEMENT_JSON="$(numa_placement_json "$PLACEMENT_LAYOUT" "$K6_NUMA_NODE" "$SERV
 # Each container's memory on the node it runs on; empty (no flag) where the node map is unreadable.
 SUT_MEMS="$(numa_mems_flag "$SERVER_CPUS")"; PROM_MEMS="$(numa_mems_flag "$PROM_CPUS")"
 XCHECK_MEMS="$(numa_mems_flag "$XCHECK_CPUS")"
-echo "--- placement: $PLACEMENT_JSON mems: server=${SUT_MEMS:-none} prometheus=${PROM_MEMS:-none} xcheck=${XCHECK_MEMS:-none}" >&2
+NODE_CPULISTS_JSON="$(numa_node_cpulists_json)"
+numa_log_node_cpulists >&2
+# What this arm asks for; what each container received follows as "--- observed placement:" lines.
+echo "--- placement: $PLACEMENT_JSON requested mems: server=${SUT_MEMS:-none} prometheus=${PROM_MEMS:-none} xcheck=${XCHECK_MEMS:-none}" >&2
 if [ "${PERF_RW_TEST_PLACEMENT_ONLY:-}" = true ]; then # test hook: print the resolved placement, start nothing
   jq -nc --arg s "$SERVER_CPUS" --arg p "$PROM_CPUS" --arg u "${DEF_UPSTREAM:-}" --arg k "$(IFS=';'; echo "${K6_SETS[*]}")" \
     --arg x "$XCHECK_CPUS" --arg sm "$SUT_MEMS" --arg pm "$PROM_MEMS" --arg xm "$XCHECK_MEMS" \
-    --arg km "$(for _k in "${K6_SETS[@]}"; do numa_mems_flag "$_k"; echo; done)" --argjson placement "$PLACEMENT_JSON" '
+    --arg km "$(for _k in "${K6_SETS[@]}"; do numa_mems_flag "$_k"; echo; done)" --argjson placement "$PLACEMENT_JSON" \
+    --arg rates "$RATES" --arg profile "$LADDER_PROFILE" --arg rsrc "$RATES_SOURCE" \
+    --argjson k6rt "$(k6_runtime_json)" --argjson cpulists "$NODE_CPULISTS_JSON" '
     {server:$s, prometheus:$p, upstream_default:$u, k6:($k | split(";")), xcheck:$x,
-     mems:{server:$sm, prometheus:$pm, xcheck:$xm, k6:($km | split("\n") | map(select(. != "")))}, placement:$placement}'
+     mems:{server:$sm, prometheus:$pm, xcheck:$xm, k6:($km | split("\n") | map(select(. != "")))}, placement:$placement,
+     ladder:{profile:$profile, source:$rsrc, rates:$rates}, k6_runtime:$k6rt, node_cpulists:$cpulists}'
   RESULT_WRITTEN=1; exit 0
 fi
+OBSERVED="$WORK/observed-placement.ndjson"
+: > "$OBSERVED"
 
 # --- container-side URLs: every host a k6 container resolves --------------------
 # Go's resolver (k6) refuses a DNS label over 63 characters, so a long alias turns every push
@@ -406,6 +467,7 @@ docker run -d --name "$PROM_NAME" --network "$NETWORK" --network-alias "$PROM_AL
   "$PROM_IMAGE" --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/prometheus \
   --web.enable-remote-write-receiver --enable-feature=native-histograms \
   --query.lookback-delta=2h >/dev/null
+log_container_cpuset prometheus "$PROM_NAME" "$OBSERVED"
 # Resolved per call: a Prometheus restart moves the published host port.
 # PERF_RW_PUBLISHED_HOST: where published ports are reachable when this script itself runs in
 # a container (e.g. host.docker.internal); default is the address docker reports.
@@ -466,6 +528,8 @@ if [ -n "$LAUNCH_SUT" ]; then
 else
   CURL_URL="${PERF_RW_TARGET_CURL_URL:-$TARGET_URL}"
 fi
+# The SUT may have been started by the caller, so its cpuset is what Docker reports, not SUT_MEMS.
+[ -n "$SUT_CONTAINER" ] && log_container_cpuset sut "$SUT_CONTAINER" "$OBSERVED"
 wait_ready "$CURL_URL" || die "SUT not ready at $CURL_URL"
 
 # --- Prometheus query helpers ------------------------------------------------
@@ -552,6 +616,7 @@ run_phase() {
       -e "K6_SWEEP_SETTLE=${SETTLE_S}s" -e "K6_SWEEP_RESULT_PATH=/out/${phase}-p${i}.json" \
       -e "K6_SWEEP_WINDOW_MODE=$wmode" -e "K6_SWEEP_LEAN_SUMMARY=$lean" \
       -e "K6_SWEEP_VU_DIAGNOSTICS=$VU_DIAGNOSTICS" -e "K6_SWEEP_GRACEFUL_STOP=$K6_GRACEFUL_STOP" \
+      ${K6_VU_CEILING:+-e "K6_SWEEP_VU_CEILING=$K6_VU_CEILING"} \
       -e "GODEBUG=$([ "$K6_GCTRACE" = true ] && echo gctrace=1)" ${K6_GO_ENV[@]+"${K6_GO_ENV[@]}"} \
       -e "K6_SWEEP_START_AT_MS=$(( start_s * 1000 ))" -e "K6_SWEEP_QUIET=${QUIET_S}s" \
       -e "K6_SWEEP_MANAGE_SUT=$([ "$i" -eq 0 ] && echo true || echo false)" \
@@ -560,6 +625,7 @@ run_phase() {
       -e "K6_PROMETHEUS_RW_PUSH_INTERVAL=${PUSH_S}s" \
       -e "K6_PROMETHEUS_RW_STALE_MARKERS=false" \
       "$K6_IMAGE" run --tag "proc=${phase}-p${i}" -o experimental-prometheus-rw /k6/sweep.js >/dev/null
+    log_container_cpuset "k6_${phase}_p${i}" "$kname" "$OBSERVED"
   done
 
   local cpu_log="$WORK/${phase}-cpu.csv" want="$names $PROM_NAME ${SUT_CONTAINER:-}"
@@ -1155,7 +1221,8 @@ jq -n --argjson synth "$SYNTH" --argjson headline "$HEADLINE" --slurpfile m "$WO
   --argjson cpusamples "$CPU_SAMPLES" --argjson t0 "$T0_S" --arg p99max "$P99_MAX_MS" \
   --argjson slow "$SLOW_FLUSHES" --argjson rwfail "${RW_FAILURES:-0}" --argjson k6gc "$K6_GC" --argjson k6int "$K6_INTERRUPTED" \
   --arg hook_cut "${PERF_RW_TEST_CUT_FAULT:-}" --arg hook_step "${PERF_RW_TEST_FAIL_STEP:-}" --arg hook_null "${PERF_RW_TEST_NULL_RUNG:-}" --arg hook_zero "${PERF_RW_TEST_ZERO_TAIL:-}" \
-  --argjson promwarn "$(head -n 50 "$PROM_WARNINGS" | jq -R . | jq -sc .)" --argjson placement "$PLACEMENT_JSON" '
+  --argjson promwarn "$(head -n 50 "$PROM_WARNINGS" | jq -R . | jq -sc .)" --argjson placement "$(placement_result_json)" \
+  --arg rates_source "$RATES_SOURCE" --arg ladder_profile "$LADDER_PROFILE" '
   ($m[0].points) as $P
   | $synth + {
       rig_valid_peak_achieved_rps: $synth.saturation.rig_valid_peak_achieved_rps,
@@ -1176,6 +1243,7 @@ jq -n --argjson synth "$SYNTH" --argjson headline "$HEADLINE" --slurpfile m "$WO
         native_histograms: true, histogram_bucket_factor: 1.1, accounting_tolerance: $acct_tol,
         healthy_ceiling_p99_max_ms: ($p99max | tonumber? // $p99max),
         server_cpus: $scpus, prometheus_cpus: $pcpus, host_cores: $host_cores,
+        ladder: {profile: $ladder_profile, source: $rates_source},
         k6_image: $k6img, prometheus_image: $promimg, mockserver_image: $msimg,
         cpu_window_t0_s: $t0,
         degrade: (if $degrade == "" then null else $degrade end),

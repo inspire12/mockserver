@@ -259,6 +259,51 @@ place "$SNC" 16 PERF_RW_SERVER_CPUS=0-1 PERF_RW_PROM_CPUS=3 PERF_RW_K6_CPUSETS="
 check "SNC: explicit k6 on the other socket" "0|2" "$RC|$(q '.placement.k6_node')"
 place "$C5" 48 PERF_RW_K6_CPUSETS="5-8;9-12"
 check "the physical-core guard still runs (k6 on the SUT's core 5)" "1" "$RC"
+
+echo "--- 4b. the ladder and the k6 VU-pool ceiling per host (c5 byte-identical; multi-socket extended)"
+# The c5 default ladder, byte for byte, as it was before the multi-socket ladder existed.
+C5_RATES="500,1000,2000,4000,8000,16000,24000,32000,36000,40000,44000,48000,56000,64000,72000,80000,96000,112000,128000"
+XL_RATES="500,1000,2000,4000,8000,16000,24000,32000,36000,40000,44000,48000,56000,64000,72000,80000,96000,104000,112000,120000,128000,136000,144000,152000,160000"
+ladder() { q '"\(.ladder.profile)|\(.ladder.source)|\(.ladder.rates)"'; }
+vuc() { q '"\(.k6_runtime.vu_ceiling)|\(.k6_runtime.source.vu_ceiling)|\(.k6_runtime.vu_ceiling_basis.top_per_process_rps // "-")"'; }
+place "$C5" 48
+check "c5: the default ladder is unchanged" "default|default|$C5_RATES" "$(ladder)"
+check "c5: sweep.js keeps its 2,048 VU ceiling (k6 CPU binds first)" "2048|sweep.js default|-" "$(vuc)"
+place "$T/none" 48
+check "unreadable topology: the c5 ladder" "default|default|$C5_RATES" "$(ladder)"
+place "$NUMAOFF" 128
+check "numa=off c6i (2 sockets, 1 node): the c5 ladder" "default|default|$C5_RATES" "$(ladder)"
+place "$SNC1" 8 PERF_K6_NUMA_NODE=same PERF_RW_SERVER_CPUS=0 PERF_RW_PROM_CPUS=1 PERF_RW_K6_CPUSETS="2;3" PERF_RW_PROCS=2
+check "one socket split into two nodes: the c5 ladder" "0|default|default|$C5_RATES" "$RC|$(ladder)"
+place "$C6I" 128
+check "c6i: 8k rungs from 96k to 160k" "multi_socket|default|$XL_RATES" "$(ladder)"
+check "c6i: the VU ceiling is the 160k rung's own pool (40,000 rps per process x 0.08)" "3200|derived|40000" "$(vuc)"
+place "$C6I" 128 PERF_K6_NUMA_NODE=same
+check "c6i same-socket A/B: the same ladder and ceiling as the other arm" "multi_socket|default|$XL_RATES|3200|derived|40000" "$(ladder)|$(vuc)"
+place "$C6I" 128 PERF_RW_PROCS=2
+check "c6i N=2: the ceiling follows the per-process top rung (80,000 x 0.08)" "6400|derived|80000" "$(vuc)"
+place "$C6I" 128 PERF_RW_RATES=1000,64000,128000
+check "c6i PERF_RW_RATES: applied as given, the ceiling from its top rung" "multi_socket|env|1000,64000,128000|2560|derived|32000" "$(ladder)|$(vuc)"
+place "$C6I" 128 PERF_RW_RATES=1000,8000,72000
+check "c6i PERF_RW_RATES whose pools fit under 2,048: sweep.js's ceiling" "env|1000,8000,72000|2048|sweep.js default" \
+  "$(q '"\(.ladder.source)|\(.ladder.rates)"')|$(q '"\(.k6_runtime.vu_ceiling)|\(.k6_runtime.source.vu_ceiling)"')"
+place "$C5" 48 PERF_RW_RATES=500,2000
+check "c5 PERF_RW_RATES: applied as given" "default|env|500,2000" "$(ladder)"
+place "$C5" 48 PERF_RW_K6_VU_CEILING=4096
+check "c5 PERF_RW_K6_VU_CEILING: applied as given" "4096|env|-" "$(vuc)"
+place "$C6I" 128 PERF_RW_K6_VU_CEILING=2048
+check "c6i PERF_RW_K6_VU_CEILING=2048 restores sweep.js's cap" "2048|env|-" "$(vuc)"
+for bad in 0 abc 12.5 -3; do
+  place "$C5" 48 PERF_RW_K6_VU_CEILING="$bad"
+  check "PERF_RW_K6_VU_CEILING='$bad' is rejected with exit 2" "2" "$RC"
+done
+place "$C6I" 128
+check "c6i: the raw node cpulists are recorded" '{"node0":"0-31,64-95","node1":"32-63,96-127"}' "$(q '.node_cpulists | tostring')"
+check "  ... and logged" "yes" "$(grep -q -- '^--- NUMA node cpulists (raw .*): node0=0-31,64-95 node1=32-63,96-127$' "$T/stderr.log" && echo yes || echo no)"
+check "  ... and the placement line says its mems are requested, not observed" "yes" \
+  "$(grep -q -- '^--- placement: .* requested mems: server=--cpuset-mems=0 ' "$T/stderr.log" && echo yes || echo no)"
+place "$T/none" 48
+check "unreadable: no node cpulists" "{}" "$(q '.node_cpulists | tostring')"
 check "nothing was started (stub docker never called)" "0" "$(wc -l < "$T/docker.log" | tr -d ' ')"
 
 echo "--- 5. perf-percore.sh hardware matrix and per-core placement (PERF_PERCORE_TEST_PLACEMENT_ONLY)"
@@ -354,6 +399,55 @@ for f in "$RW" "$PERCORE"; do
   check "$(basename "$f"): no --cpuset-cpus without a mems flag" "" "$stray"
 done
 
+echo "--- 6b. rw-multi-k6-sweep.sh records what Docker applied to every container it starts detached"
+# <container var>|<the log call that must follow its docker run -d>: a new detached container fails here.
+OBS_TABLE='$PROM_NAME|log_container_cpuset prometheus "$PROM_NAME" "$OBSERVED"
+$SUT_NAME|[ -n "$SUT_CONTAINER" ] && log_container_cpuset sut "$SUT_CONTAINER" "$OBSERVED"
+$kname|log_container_cpuset "k6_${phase}_p${i}" "$kname" "$OBSERVED"'
+check "every detached docker run is in the table" "$(wc -l <<<"$OBS_TABLE" | tr -d ' ')" "$(grep -cE 'docker run -d ' "$RW")"
+while IFS='|' read -r var call; do
+  # The log call must come after that container's docker run and before the next docker run.
+  got="$(OBS_VAR="$var" OBS_CALL="$call" awk 'index($0, "docker run -d --name \"" ENVIRON["OBS_VAR"] "\"") {p = 1; next}
+    p && index($0, "docker run ") {exit} p && index($0, ENVIRON["OBS_CALL"]) {print "yes"; exit}' "$RW")"
+  check "$var: its observed cpuset is logged and recorded" "yes" "${got:-no}"
+done <<<"$OBS_TABLE"
+check "the result and the fallback both carry the observed placement" "1|1" \
+  "$(grep -cF -- '--argjson placement "$(placement_result_json)"' "$RW")|$(grep -cF -- '--argjson placement "$(placement_result_json 2>/dev/null' "$RW")"
+PRJ="$(awk '/^placement_result_json\(\) \{/ {p=1} p {print} p && /^}/ {exit}' "$RW")"
+[ -n "$PRJ" ] || bad "placement_result_json not found in $RW"
+prj() { # observed_ndjson sut_mems -> the placement block
+  printf '%s\n' "$1" > "$T/obs.ndjson"
+  env -i PATH="$PATH" bash -c "set -euo pipefail; $PRJ
+    PLACEMENT_JSON='{\"layout\":\"numa_split\"}' OBSERVED='$T/obs.ndjson' NODE_CPULISTS_JSON='{\"node0\":\"0-31\"}'
+    SUT_MEMS='$2' PROM_MEMS='--cpuset-mems=0' XCHECK_MEMS='--cpuset-mems=1'
+    placement_result_json"
+}
+OBS_SUT='{"role":"sut","container":"s","cpuset_cpus":"0-5","cpuset_mems":"0"}'
+OBS_K6='{"role":"k6_main_p0","container":"k","cpuset_cpus":"32-39,96-103","cpuset_mems":"1"}'
+check "observed_mems is the SUT's, as requested" "0|true|0|1|numa_split|2" \
+  "$(prj "$OBS_SUT"$'\n'"$OBS_K6" --cpuset-mems=0 | jq -r '"\(.observed_mems)|\(.sut_mems_as_requested)|\(.requested_mems.sut)|\(.requested_mems.xcheck)|\(.layout)|\(.observed | length)"')"
+check "a SUT on other memory than requested is shown, not hidden" "\"\"|false" \
+  "$(prj '{"role":"sut","container":"s","cpuset_cpus":"0-5","cpuset_mems":""}' --cpuset-mems=0 | jq -r '"\(.observed_mems | tojson)|\(.sut_mems_as_requested)"')"
+check "an uninspectable SUT reads null, never as requested" "null|null" \
+  "$(prj '{"role":"sut","container":"s","cpuset_cpus":null,"cpuset_mems":null}' --cpuset-mems=0 | jq -r '"\(.observed_mems)|\(.sut_mems_as_requested)"')"
+check "no SUT observed (external target): null" "null|null|1" \
+  "$(prj "$OBS_K6" "" | jq -r '"\(.observed_mems)|\(.sut_mems_as_requested)|\(.observed | length)"')"
+
+echo "--- 6c. the multi-k6 arm passes its VU ceiling to every measured k6, mirroring sweep.js's defaults"
+check "run_phase passes K6_SWEEP_VU_CEILING when the arm sets one" "1" \
+  "$(grep -cF -- '${K6_VU_CEILING:+-e "K6_SWEEP_VU_CEILING=$K6_VU_CEILING"}' "$RW")"
+CONFIG_JS="$REPO_ROOT/mockserver-performance-test/k6/lib/config.js"
+cfg_default() { sed -nE "s/.*num\('$1', ([0-9]+)\).*/\1/p" "$CONFIG_JS"; }
+check "RW_VUS_PER_KRPS is sweep.js's default (config.js|harness)" "80|80" \
+  "$(cfg_default K6_SWEEP_VUS_PER_KRPS)|$(sed -nE 's/^RW_VUS_PER_KRPS=([0-9]+).*/\1/p' "$RW")"
+check "RW_SWEEP_VU_CEILING is sweep.js's default (config.js|harness)" "2048|2048" \
+  "$(cfg_default K6_SWEEP_VU_CEILING)|$(sed -nE 's/^RW_SWEEP_VU_CEILING=([0-9]+).*/\1/p' "$RW")"
+
+LINT="$REPO_ROOT/.buildkite/scripts/steps/perf-test-lint.sh"
+check "perf-test-lint.sh inspects sweep.js at the multi-socket ladder per process (N=4) and its ceiling" \
+  "$(sed -nE 's/^MULTI_SOCKET_RATES="([0-9,]+)"$/\1/p' "$RW" | tr ',' '\n' | awk '{printf "%s%d", (NR > 1 ? "," : ""), $1 / 4}')|3200" \
+  "$(grep -oE 'K6_SWEEP_RATES=[0-9,]+ -e K6_SWEEP_VU_CEILING=[0-9]+' "$LINT" | sed -E 's/K6_SWEEP_RATES=([0-9,]+) -e K6_SWEEP_VU_CEILING=([0-9]+)/\1|\2/')"
+
 echo "--- 7. perf-test-run.sh: main SUT, upstream and k6 placement, memory and eligibility (real blocks)"
 # Lifted from the script rather than run whole: everything after its trap and stale-container sweep
 # would need docker, and a test-only switch in the script could leak into a real run.
@@ -385,13 +479,16 @@ check "c5: today's cpusets, map primed after the lib is sourced" "0|0-5|6|7-23|p
 check "  ... SUT and k6 each verified on node 0" "yes|yes" "$(logged 'server cpuset 0-5 is on NUMA node 0')|$(logged 'k6_0 cpuset 7-23 is on NUMA node 0')"
 check "c5 in CI: one socket, one node passes" "0|0-5|6|7-23|primed" "$(pin "$C5" 48 BUILDKITE=true)"
 check "unreadable (Docker Desktop), 48 cpus: today's cpusets" "0|0-5|6|7-23|primed" "$(pin "$T/none" 48)"
+check "  ... the node cpulists are logged as unreadable" "yes" "$(logged '^--- NUMA node cpulists (raw .*): unreadable$')"
 check "  ... the NUMA check warns, once" "1" "$(grep -c 'WARNING: the NUMA node map is unreadable' "$T/pin.log" || true)"
 check "unreadable, 12 cpus: unpinned, as today" "0||||primed" "$(pin "$T/none" 12)"
-check "c5 with 8 cpus online: unpinned, no NUMA check" "0||||primed|no" "$(pin "$C5" 8)|$(logged 'NUMA')"
+check "c5 with 8 cpus online: unpinned, no NUMA check" "0||||primed|no" "$(pin "$C5" 8)|$(logged 'NUMA node [0-9]\|NUMA node map\|NUMA placement')"
 check "numa=off c6i off-CI: today's cpusets, warned" "0|0-5|6|7-23|primed|yes" "$(pin "$NUMAOFF" 128)|$(logged 'sockets but 1 NUMA node')"
 check "numa=off c6i in CI: FAILS on the socket/node mismatch" "1|yes" "$(pin "$NUMAOFF" 128 BUILDKITE=true | cut -d'|' -f1)|$(logged '2 sockets but 1 NUMA node')"
 # Two nodes: k6 moves to the other socket, the rest stays.
 check "c6i: k6 on node 1, 17 cores one thread each" "0|0-5|6|32-48|primed" "$(pin "$C6I" 128)"
+check "  ... the raw node cpulists are logged once" "1" \
+  "$(grep -c -- '^--- NUMA node cpulists (raw .*/devices/system/node/node\*/cpulist): node0=0-31,64-95 node1=32-63,96-127$' "$T/pin.log" || true)"
 check "  ... verified on different nodes" "yes" "$(logged 'server on NUMA node 0, k6 on node 1')"
 check "c6i in CI" "0|0-5|6|32-48|primed" "$(pin "$C6I" 128 BUILDKITE=true)"
 check "c6i same: k6 back on node 0, the c5 string" "0|0-5|6|7-23|primed|yes" "$(pin "$C6I" 128 PERF_K6_NUMA_NODE=same)|$(logged "k6 on the SUT's NUMA node 0")"
@@ -411,21 +508,36 @@ check "  ... even unpinned, before any placement" "1|yes" "$(pin "$C5" 8 PERF_K6
 # start_mockserver: the SUT, the upstream and every other container it starts get their cpuset's node.
 printf '%s\n' 'set -euo pipefail' "$LIBSRC" "$CPUARG" "$STARTFN" \
   'require_dns_hostname() { :; }; diag_jvm_opts() { :; }; compose_java_tool_options() { :; }' \
-  'docker() { printf "%s\n" "$@" > "$ARGS_FILE"; }' \
+  'docker() { case "$1" in
+      run) printf "%s\n" "$@" > "$ARGS_FILE"; [ "${FAKE_RUN:-ok}" = ok ] ;;
+      inspect) [ "${FAKE_INSPECT:-ok}" = ok ] || return 1
+               printf "%s %s\n" "$(sed -n "s/^--cpuset-cpus=//p" "$ARGS_FILE")" "$(sed -n "s/^--cpuset-mems=//p" "$ARGS_FILE")" ;;
+    esac; }' \
   'NETWORK=n MOCKSERVER_IMAGE=img PERF_MAX_EVENT_LOG_BYTES=1 HARNESS_FIXED_EVENT_LOG_BYTES=1 SUT_IMAGE_JAVA_TOOL_OPTIONS= PERF_NETWORK_MODE=bridge START_EXTRA_ENV=()' \
-  'start_mockserver name "$CPUS" alias' > "$T/start.sh"
-started() { # sysfs cpus -> the container's --cpuset-* arguments, '|'-joined
+  'start_mockserver name "$CPUS" alias || exit "$?" # an || caller, as perf-path-coverage.sh is: set -e is off inside' > "$T/start.sh"
+started() { # sysfs cpus [env...] -> the container's --cpuset-* arguments, '|'-joined; stderr in $T/start.err
+  local root="$1" cpus="$2"; shift 2
   : > "$T/start.args"
-  env -i PATH="$PATH" PERF_SYSFS_ROOT="$1" CPUS="$2" ARGS_FILE="$T/start.args" SCRIPT_DIR="$(dirname "$RUN")" \
-    bash "$T/start.sh" >/dev/null 2>&1 || echo "rc=$?"
+  env -i PATH="$PATH" PERF_SYSFS_ROOT="$root" CPUS="$cpus" ARGS_FILE="$T/start.args" SCRIPT_DIR="$(dirname "$RUN")" "$@" \
+    bash "$T/start.sh" >/dev/null 2>"$T/start.err" || echo "rc=$?"
   grep -E '^--cpuset-' "$T/start.args" | paste -sd'|' - || true
 }
+observed() { grep -- '^--- observed placement:' "$T/start.err" | paste -sd'|' - || true; }
 check "c6i SUT 0-5: memory on node 0" "--cpuset-cpus=0-5|--cpuset-mems=0" "$(started "$C6I" 0-5)"
 check "c6i upstream 6: memory on node 0" "--cpuset-cpus=6|--cpuset-mems=0" "$(started "$C6I" 6)"
 check "c6i container on node 1: memory on node 1" "--cpuset-cpus=32-35|--cpuset-mems=1" "$(started "$C6I" 32-35)"
 check "c5 SUT: memory on node 0" "--cpuset-cpus=0-5|--cpuset-mems=0" "$(started "$C5" 0-5)"
 check "unreadable map (Docker Desktop): --cpuset-cpus only, as today" "--cpuset-cpus=0-5" "$(started "$T/none" 0-5)"
 check "unpinned container: neither flag, as today" "" "$(started "$C6I" "")"
+echo "--- 7b. start_mockserver logs the cpuset Docker applied (docker inspect), and still fails on a failed run"
+started "$C6I" 0-5 >/dev/null
+check "c6i SUT: the observed cpus and mems are logged" "--- observed placement: alias name cpuset_cpus=0-5 cpuset_mems=0" "$(observed)"
+started "$C6I" "" >/dev/null
+check "unpinned: logged as unrestricted" "--- observed placement: alias name cpuset_cpus=<unrestricted> cpuset_mems=<unrestricted>" "$(observed)"
+check "an inspect failure is logged, not fatal" "--cpuset-cpus=0-5|--cpuset-mems=0" "$(started "$C6I" 0-5 FAKE_INSPECT=fail)"
+check "  ... as <inspect failed>" "--- observed placement: alias name cpuset_cpus=<inspect failed> cpuset_mems=<inspect failed>" "$(observed)"
+check "a failed docker run still fails start_mockserver, with nothing logged as observed" "rc=1|" \
+  "$(started "$C6I" 0-5 FAKE_RUN=fail | grep -o '^rc=[0-9]*' | head -1)|$(observed)"
 check "the main SUT and upstream are started with their cpusets" "1|1" \
   "$(grep -cE '^start_mockserver "\$UPSTREAM" "\$UPSTREAM_CPUS" ' "$RUN" || true)|$(grep -cE '^start_mockserver "\$SERVER" "\$SERVER_CPUS" ' "$RUN" || true)"
 

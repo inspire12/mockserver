@@ -880,6 +880,7 @@ assert_cpusets_physically_disjoint() {
 }
 
 # --- core pinning --------------------------------------------------------------
+numa_log_node_cpulists
 CORES="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 0)"
 SERVER_CPUS=""; UPSTREAM_CPUS=""; K6_CPUS=""
 if [ "$CORES" -ge 16 ]; then
@@ -1006,7 +1007,8 @@ start_mockserver() {
     -e MOCKSERVER_METRICS_ENABLED=true \
     ${event_log_bytes:+-e MOCKSERVER_MAX_EVENT_LOG_SIZE_IN_BYTES="$event_log_bytes"} \
     ${PERF_SO_BACKLOG:+-e MOCKSERVER_SO_BACKLOG="$PERF_SO_BACKLOG"} \
-    "$MOCKSERVER_IMAGE" -serverPort "$port" >/dev/null
+    "$MOCKSERVER_IMAGE" -serverPort "$port" >/dev/null || return
+  log_container_cpuset "$alias" "$name"
 }
 
 # A container's .State verdict and last 50 log lines, to stderr.

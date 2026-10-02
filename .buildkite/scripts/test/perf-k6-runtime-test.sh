@@ -144,6 +144,14 @@ check "a single-k6 matrix carries k6 defaults" "3|single|gogc=100,graceful_stop=
   "$(fp serving_hw_matrix '{"sweep":{"latency_settle_s":3},"points":[{"measurement":{"client":"single"}}]}')"
 check "a block without a settle stays null" "null" "$(fp serving_hw_matrix '{"client":"multik6","points":[]}')"
 check "other families keep the settle alone" "3" "$(fp serving_percore '{"sweep":{"latency_settle_s":3}}')"
+check "a pinned 2,048 VU ceiling keeps the existing key" "$NEWDEF" \
+  "$(fp serving_hw_matrix "$(hw "$(jq -c '.vu_ceiling = 2048 | .source.vu_ceiling = "env"' <<<"$DERIVED")")")"
+check "any other VU ceiling is its own signature" "$NEWDEF,vu_ceiling=3072" \
+  "$(fp serving_hw_matrix "$(hw "$(jq -c '.vu_ceiling = 3072 | .source.vu_ceiling = "derived"' <<<"$DERIVED")")")"
+PERCORE_RUN="$(awk 'index($0, "run_point_multik6() {") == 1 {on = 1} on {print} on && /^}/ {exit}' \
+  "$REPO_ROOT/.buildkite/scripts/steps/lib/perf-percore.sh")"
+check "every hardware-matrix point pins the VU ceiling at 2,048 (comparable across hosts)" "yes" \
+  "$(grep -qE '(^|[[:space:]])PERF_RW_K6_VU_CEILING=2048([[:space:]]|$)' <<<"$PERCORE_RUN" && echo yes || echo no)"
 
 if [ "$FAILS" -gt 0 ]; then echo ":x: $FAILS k6 runtime check(s) failed" >&2; exit 1; fi
 echo "--- all k6 runtime fixture checks passed"
