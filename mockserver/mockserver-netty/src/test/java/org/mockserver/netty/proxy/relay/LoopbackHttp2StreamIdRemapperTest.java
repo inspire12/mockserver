@@ -258,8 +258,10 @@ public class LoopbackHttp2StreamIdRemapperTest {
     }
 
     @Test
-    public void shouldForgetARequestWhoseStreamWasNeverOpened() {
+    public void shouldForgetARequestWhoseStreamWasNeverOpened() throws Exception {
         serverAnswers = false;
+        proxyClientConnection.remote().createStream(1, false);
+        proxyClientConnection.remote().createStream(3, false);
         loopback.writeAndFlush(request(1, "/before-goaway"));
         pump();
         HttpToHttp2ConnectionHandler serverHandler = server.pipeline().get(HttpToHttp2ConnectionHandler.class);
@@ -275,6 +277,30 @@ public class LoopbackHttp2StreamIdRemapperTest {
         assertThat(urisAtServer(), is(List.of("/before-goaway")));
         assertThat(remapper.loopbackStreamId(3), nullValue());
         assertThat(remapper.mappedStreams(), is(1));
+        assertThat(remapper.relayed(1), is(true));
+        // so a loopback close refuses it, which tells the client a retry is safe
+        assertThat(remapper.relayed(3), is(false));
+    }
+
+    @Test
+    public void shouldMarkAClientStreamAnsweredOnlyByAWholeFinalResponse() throws Exception {
+        serverAnswers = false;
+        proxyClientConnection.remote().createStream(5, false);
+        loopback.writeAndFlush(request(5, "/answered"));
+        pump();
+        assertThat(remapper.relayed(5), is(true));
+        assertThat(remapper.answered(5), is(false));
+
+        // a 1xx is handed on as soon as it arrives, ahead of the response
+        FullHttpResponse informational = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.CONTINUE);
+        informational.headers().setInt(STREAM_ID.text(), 1);
+        loopback.writeInbound(informational);
+        assertThat(remapper.answered(5), is(false));
+
+        answer(server.pipeline().lastContext(), 1, "/answered");
+        pump();
+        assertThat(responsesByClientStream.get(5), is("answer for /answered"));
+        assertThat(remapper.answered(5), is(true));
     }
 
     @Test

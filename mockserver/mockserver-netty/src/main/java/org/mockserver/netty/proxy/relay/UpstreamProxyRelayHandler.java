@@ -6,6 +6,11 @@ import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.handler.codec.http.FullHttpRequest;
+import io.netty.handler.codec.http2.Http2CodecUtil;
+import io.netty.handler.codec.http2.Http2ConnectionHandler;
+import io.netty.handler.codec.http2.Http2Error;
+import io.netty.handler.codec.http2.Http2Exception;
+import io.netty.handler.codec.http2.Http2Stream;
 import io.netty.handler.ssl.SslHandler;
 import org.mockserver.codec.StreamingAwareHttpObjectAggregator;
 import org.mockserver.log.model.LogEntry;
@@ -15,6 +20,7 @@ import org.slf4j.event.Level;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.ClosedSelectorException;
 
+import static io.netty.handler.codec.http2.HttpConversionUtil.ExtensionHeaderNames.STREAM_ID;
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
 import static org.mockserver.exception.ExceptionHandling.closeOnFlush;
 import static org.mockserver.exception.ExceptionHandling.DIRECT_MEMORY_LIMIT_REACHED;
@@ -87,9 +93,14 @@ public class UpstreamProxyRelayHandler extends SimpleChannelInboundHandler<FullH
         // raw path, query string dropped: this line is logged as plain text, where a query-string credential could
         // not be masked. Never decode here: a malformed escape would throw before the request is relayed or released.
         downstreamChannel.attr(StreamingAwareHttpObjectAggregator.REQUEST_LINE).set(request.method() + " " + org.apache.commons.lang3.StringUtils.substringBefore(request.uri(), "?"));
+        // read before the write, which may change it on the loopback
+        final Integer clientStreamId = request.headers().getInt(STREAM_ID.text());
         downstreamChannel.writeAndFlush(request).addListener((ChannelFutureListener) future -> {
             if (future.isSuccess()) {
                 ctx.channel().read();
+            } else if (clientStreamId != null && future.channel().isActive() && resetFailedStream(ctx, clientStreamId, future.cause())) {
+                // only this stream failed, so the loopback carries on with the others
+                ctx.read();
             } else {
                 if (isNotSocketClosedException(future.cause())) {
                     org.mockserver.model.HttpRequest loggedRequest = loggedRequest(request);
@@ -105,6 +116,43 @@ public class UpstreamProxyRelayHandler extends SimpleChannelInboundHandler<FullH
                 future.channel().close();
             }
         });
+    }
+
+    /**
+     * Resets the proxy client's HTTP/2 stream when its request could not be written to the loopback because of that
+     * stream alone, returning false when the failure is not one stream's (or the tunnel is HTTP/1.1). Netty refuses to
+     * open a loopback stream above a received GOAWAY's last stream id, or past MockServer's concurrent-stream limit,
+     * with {@code REFUSED_STREAM}: MockServer never saw the request, so the client may retry it (RFC 9113 section 8.7).
+     * The reset waits for the event loop's next task: a write can fail while the client's own RST_STREAM for the stream
+     * is being read, and the stream is gone only after that, so it is not then answered with a reset of its own.
+     */
+    private boolean resetFailedStream(ChannelHandlerContext ctx, int clientStreamId, Throwable cause) {
+        Http2Exception failure = Http2CodecUtil.getEmbeddedHttp2Exception(cause);
+        ChannelHandlerContext clientCtx = ctx.pipeline().context(Http2ConnectionHandler.class);
+        if (!(failure instanceof Http2Exception.StreamException) || clientCtx == null) {
+            return false;
+        }
+        long errorCode = (failure.error() == Http2Error.REFUSED_STREAM ? Http2Error.REFUSED_STREAM : Http2Error.INTERNAL_ERROR).code();
+        clientCtx.executor().execute(() -> {
+            Http2ConnectionHandler clientHandler = (Http2ConnectionHandler) clientCtx.handler();
+            Http2Stream clientStream = clientHandler.connection().stream(clientStreamId);
+            // a closed client connection has already closed every stream
+            if (clientStream == null || clientStream.isResetSent()) {
+                return;
+            }
+            if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.WARN)
+                        .setMessageFormat("request on stream {} from {} could not be relayed, resetting the client's stream with error code {}")
+                        .setArguments(clientStreamId, clientCtx.channel().remoteAddress(), errorCode)
+                        .setThrowable(cause)
+                );
+            }
+            clientHandler.resetStream(clientCtx, clientStreamId, errorCode, clientCtx.newPromise());
+            clientCtx.flush();
+        });
+        return true;
     }
 
     private boolean isNotSocketClosedException(Throwable cause) {

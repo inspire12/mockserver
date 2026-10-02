@@ -4,8 +4,10 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPromise;
+import io.netty.handler.codec.http.FullHttpResponse;
 import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpMessage;
+import io.netty.handler.codec.http.HttpStatusClass;
 import io.netty.handler.codec.http2.Http2Connection;
 import io.netty.handler.codec.http2.Http2ConnectionAdapter;
 import io.netty.handler.codec.http2.Http2ConnectionHandler;
@@ -28,9 +30,10 @@ import static io.netty.handler.codec.http2.HttpConversionUtil.ExtensionHeaderNam
  * id, which is a connection error that closes the whole tunnel.
  * <p>
  * Each pair is forgotten when its loopback stream is removed, so a long-lived tunnel holds one entry per open stream.
- * A loopback response with no pair (only a server push could have one) is dropped. Flow control, PRIORITY frames and
- * GOAWAY are not relayed between the legs, so they carry no ids to translate; a priority dependency on a request is
- * translated, or dropped when it names no open stream. Sits after the loopback's {@code Http2ConnectionHandler}; one per
+ * A loopback response with no pair (only a server push could have one) is dropped. Flow control and PRIORITY frames are
+ * not relayed between the legs, and a GOAWAY is not translated: {@link LoopbackHttp2ConnectionCloseHandler} sends the
+ * client one of its own, from the client connection's ids. A priority dependency on a request is translated, or dropped
+ * when it names no open stream. Sits after the loopback's {@code Http2ConnectionHandler}; one per
  * loopback. It reads and marks the proxy client connection's streams directly, which is safe only because the loopback is
  * bootstrapped on the proxy client's event loop ({@code RelayConnectHandler.channelRead0}), so both channels, both
  * connections and this handler are confined to that one thread.
@@ -44,6 +47,7 @@ public class LoopbackHttp2StreamIdRemapper extends ChannelDuplexHandler {
     private final Channel proxyClientChannel;
     private Http2Connection proxyClientConnection;
     private Http2Connection.PropertyKey pairedKey;
+    private Http2Connection.PropertyKey answeredKey;
 
     public LoopbackHttp2StreamIdRemapper(MockServerLogger mockServerLogger, Http2Connection loopbackConnection, Channel proxyClientChannel) {
         this.mockServerLogger = mockServerLogger;
@@ -94,8 +98,12 @@ public class LoopbackHttp2StreamIdRemapper extends ChannelDuplexHandler {
         // the loopback's Http2ConnectionHandler opens the stream as it handles this write, in this call
         ctx.write(msg, promise);
         if (loopbackConnection.stream(loopbackId) == null && !loopbackConnection.streamMayHaveExisted(loopbackId)) {
-            // never opened (the write failed first), so no removal will ever forget it
+            // never opened (the write failed first), so no removal will ever forget it, and MockServer never saw it
             forget(loopbackId);
+            Http2Stream clientStream = paired == null ? proxyClientStream(clientId) : null;
+            if (clientStream != null) {
+                clientStream.setProperty(pairedKey, Boolean.FALSE);
+            }
         }
     }
 
@@ -119,6 +127,11 @@ public class LoopbackHttp2StreamIdRemapper extends ChannelDuplexHandler {
             HttpHeaders headers = ((HttpMessage) msg).headers();
             headers.setInt(STREAM_ID.text(), clientId);
             translateDependency(headers, clientIdByLoopbackId, clientId);
+            // a 1xx is handed on as soon as it arrives; only a final response is the whole answer
+            Http2Stream clientStream = msg instanceof FullHttpResponse && ((FullHttpResponse) msg).status().codeClass() != HttpStatusClass.INFORMATIONAL ? proxyClientStream(clientId) : null;
+            if (clientStream != null) {
+                clientStream.setProperty(answeredKey, Boolean.TRUE);
+            }
         }
         ctx.fireChannelRead(msg);
     }
@@ -144,7 +157,8 @@ public class LoopbackHttp2StreamIdRemapper extends ChannelDuplexHandler {
      * stream must be opened (or the pair forgotten) before another client stream is paired. {@code null} for a client
      * stream that was paired before and whose loopback stream has closed: a second request on a stream MockServer has
      * already answered (a request with {@code Expect} reaches the relay as its headers, then later its body). The mark
-     * lives on the client's own stream, so it goes with it.
+     * lives on the client's own stream, so it goes with it; a loopback stream that never opens leaves the client stream
+     * marked as paired but not relayed.
      */
     Integer pair(int clientStreamId) {
         Integer paired = loopbackIdByClientId.get(clientStreamId);
@@ -164,6 +178,24 @@ public class LoopbackHttp2StreamIdRemapper extends ChannelDuplexHandler {
         return loopbackId;
     }
 
+    /**
+     * Whether a request on this proxy client stream has been handed to the loopback, so MockServer may have received it.
+     * A request with {@code Expect} is handed on as its headers while the client is still sending the body.
+     */
+    boolean relayed(int clientStreamId) {
+        Http2Stream clientStream = proxyClientStream(clientStreamId);
+        return clientStream != null && Boolean.TRUE.equals(clientStream.getProperty(pairedKey));
+    }
+
+    /**
+     * Whether a whole final response for this proxy client stream has been handed on towards the client, so all that is
+     * left of the stream is the client's side of it and the response's bytes still queued for the client.
+     */
+    boolean answered(int clientStreamId) {
+        Http2Stream clientStream = proxyClientStream(clientStreamId);
+        return clientStream != null && clientStream.getProperty(answeredKey) != null;
+    }
+
     private Http2Stream proxyClientStream(int clientStreamId) {
         if (proxyClientConnection == null) {
             Http2ConnectionHandler clientHandler = proxyClientChannel != null ? proxyClientChannel.pipeline().get(Http2ConnectionHandler.class) : null;
@@ -172,6 +204,7 @@ public class LoopbackHttp2StreamIdRemapper extends ChannelDuplexHandler {
             }
             proxyClientConnection = clientHandler.connection();
             pairedKey = proxyClientConnection.newKey();
+            answeredKey = proxyClientConnection.newKey();
         }
         return proxyClientConnection.stream(clientStreamId);
     }

@@ -497,6 +497,18 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   tunnel then closed, failing that request and every other one in flight on it. The tunnel now numbers its
   own streams in the order requests finish, and every response still returns on the stream that asked for
   it.
+- **Requests in an HTTP/2 `CONNECT` or SOCKS tunnel no longer wait 30 seconds when MockServer's side of the
+  tunnel closes.** If the connection MockServer uses internally to serve a tunnel closed, for example because
+  the MockServer it relays to stopped or the connection failed, requests still waiting for their response got
+  nothing for about 30 seconds, until the tunnel closed. Each is now reset at once: with `REFUSED_STREAM`, which
+  tells the client a retry is safe, if none of the request had been passed on to MockServer, and otherwise with
+  `INTERNAL_ERROR`. (A request sent with `Expect: 100-continue` is passed on before its body arrives, so it gets
+  `INTERNAL_ERROR` even while it is still uploading.) A response MockServer had already sent in full is still
+  delivered whole, as before; if the client is still uploading that request's body, it is then told to stop,
+  with `NO_ERROR`.
+  A request that could not be passed on, because MockServer had sent a `GOAWAY` or was already handling as many
+  requests on the connection as it allows, used to close the whole tunnel; now only that request is refused.
+  The client is also sent a `GOAWAY` when MockServer sends one, so it opens a new connection for new requests.
 - **HTTPS forward proxying over HTTP/2 no longer runs out of local ports under sustained load.**
   When a client negotiated HTTP/2 inside a `CONNECT` tunnel (k6, Go clients and browsers do by
   default), MockServer opened and closed a new upstream connection for every request, because only
