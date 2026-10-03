@@ -101,6 +101,20 @@ public class PlainTextUpgradeRequiredSnapshotTest {
         assertThat(plainTextExchange(configuration), not(containsString(UPGRADE_REQUIRED)));
     }
 
+    @Test
+    public void shouldKeepAnsweringDataPlaneUpgradeRequiredUntilDisablingIsApplied() {
+        Configuration configuration = configuration().tlsMutualAuthenticationRequired(true);
+        AtomicReference<String> duringUpdate = new AtomicReference<>();
+
+        AtomicConfigurationUpdate.apply(configuration, () -> {
+            configuration.tlsMutualAuthenticationRequired(false);
+            duringUpdate.set(plainTextExchange(configuration));
+        });
+
+        assertThat(duringUpdate.get(), containsString(UPGRADE_REQUIRED));
+        assertThat(plainTextExchange(configuration), not(containsString(UPGRADE_REQUIRED)));
+    }
+
     /** One plain-text HTTP/1.1 data-plane request on a fresh connection; returns everything written back. */
     private static String plainTextExchange(Configuration configuration) {
         HttpState httpState = new HttpState(configuration, new MockServerLogger(), mock(Scheduler.class));

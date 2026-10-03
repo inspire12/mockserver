@@ -9,7 +9,6 @@ import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.net.URL;
@@ -112,6 +111,13 @@ import static org.hamcrest.Matchers.is;
  * <p>The same scan also enforces the snapshot rule: control-plane authentication and server TLS values are
  * read through {@link ControlPlaneAuthenticationSettings} and {@link ServerTlsSettings}, never field by field
  * (see {@link #shouldReadSnapshottedSettingsOnlyThroughTheirSnapshots()}).
+ *
+ * <p>Both rules match a read by the class the call is compiled against, which is the receiver's static type.
+ * {@link ConfigurationOwners} therefore counts every scanned subclass of the two configuration classes as an
+ * owner, and the scan fails on a subclass not in {@link #ALLOWED_CONFIGURATION_SUBCLASSES}, on a subclass that
+ * redeclares one of their methods, on either class gaining a supertype other than {@code Object}, and on either
+ * class or any subclass implementing an interface (a read through a supertype would name it as the owner). Each allow-list also fails on an entry whose site no longer
+ * makes the read it permits.
  */
 public class ConfigurationCallSiteGuardTest {
 
@@ -242,6 +248,14 @@ public class ConfigurationCallSiteGuardTest {
     }
 
     /**
+     * Main classes permitted to extend {@link Configuration} or {@link ConfigurationProperties}, by dotted name,
+     * each with a mandatory reason. Empty: none exists. Reads through a listed subclass are still checked like
+     * reads through the class it extends, and a listed subclass may not redeclare any of that class's methods or
+     * implement an interface (a read through the interface would name it as the owner).
+     */
+    private static final Map<String, String> ALLOWED_CONFIGURATION_SUBCLASSES = new TreeMap<>();
+
+    /**
      * Instance-unreachable defects that exist TODAY and are not yet fixed. This is a ratchet, NOT an
      * excuse list: each entry is a real bug where a value settable over
      * {@code PUT /mockserver/configuration} is silently ignored.
@@ -269,18 +283,67 @@ public class ConfigurationCallSiteGuardTest {
      */
     private static final Map<String, String> KNOWN_INSTANCE_UNREACHABLE_DEFECTS = new TreeMap<>();
 
-    @Test
-    public void shouldNotReadStaticConfigurationStoreWithoutInstanceFallback() throws Exception {
-        List<Path> moduleClassRoots = moduleClassRoots();
-        Set<String> restReachableProperties = restReachableProperties();
+    /** The main bytecode of every scanned module, read once, with the call owners derived from it. */
+    private static final class BuiltTree {
+        final List<byte[]> classes = new ArrayList<>();
+        ConfigurationOwners owners;
+    }
 
+    /**
+     * Reads every scanned module's classes. Both scanning tests go through here, so neither can pass having
+     * scanned part of the tree, with a supertype above either configuration class, or with an unlisted or
+     * method-redeclaring subclass of either in main code.
+     */
+    private static BuiltTree scanBuiltTree() throws IOException {
+        List<Path> moduleClassRoots = moduleClassRoots();
+        assertEveryExpectedModuleWasScanned(moduleClassRoots);
+        BuiltTree tree = new BuiltTree();
+        for (Path root : moduleClassRoots) {
+            try (Stream<Path> files = Files.walk(root)) {
+                for (Path classFile : files.filter(f -> f.toString().endsWith(".class")).collect(Collectors.toList())) {
+                    tree.classes.add(Files.readAllBytes(classFile));
+                }
+            }
+        }
+        tree.owners = ConfigurationOwners.of(tree.classes);
+        List<String> ownerSupertypeViolations = tree.owners.ownerSupertypeViolations();
+        assertThat("Configuration and ConfigurationProperties must extend only Object, and neither they nor any subclass "
+                + "of them may implement an interface: a read through a receiver typed as a supertype names that "
+                + "supertype as its owner, so neither scanning test would see it. Extend ConfigurationOwners to treat "
+                + "the supertypes as owners before relaxing this: " + ownerSupertypeViolations,
+            ownerSupertypeViolations, is(empty()));
+        Set<String> unlistedSubclasses = tree.owners.subclasses();
+        unlistedSubclasses.removeAll(ALLOWED_CONFIGURATION_SUBCLASSES.keySet());
+        assertThat("these main classes extend Configuration or ConfigurationProperties. A subclass can override a "
+                + "getter or the snapshot publication, so enforcement code handed one no longer reads what a PUT "
+                + "/mockserver/configuration wrote. Compose a Configuration instead; only add to "
+                + "ALLOWED_CONFIGURATION_SUBCLASSES, with a reason, a subclass that redeclares no method and "
+                + "implements no interface: "
+                + unlistedSubclasses,
+            unlistedSubclasses, is(empty()));
+        assertThat("these ALLOWED_CONFIGURATION_SUBCLASSES entries redeclare a method of the class they extend (a "
+                + "getter, setter, applyAtomically or a snapshot accessor), so code handed one no longer reads what a "
+                + "PUT /mockserver/configuration wrote. Compose a Configuration instead: " + tree.owners.redeclared,
+            tree.owners.redeclared.keySet(), is(empty()));
+        Set<String> staleSubclasses = new TreeSet<>(ALLOWED_CONFIGURATION_SUBCLASSES.keySet());
+        staleSubclasses.removeAll(tree.owners.subclasses());
+        assertThat("these ALLOWED_CONFIGURATION_SUBCLASSES entries name no scanned subclass — delete them: "
+            + staleSubclasses, staleSubclasses, is(empty()));
+        return tree;
+    }
+
+    private static void assertEveryExpectedModuleWasScanned(List<Path> moduleClassRoots) throws IOException {
         // sanity: the guard must be scanning real, representative bytecode so it cannot pass vacuously
         assertThat("guard must scan compiled module output — run this over a fully-built reactor",
             moduleClassRoots.size(), greaterThan(1));
-        assertThat("guard must cover a large property set", restReachableProperties.size(), greaterThan(100));
-        Set<String> scannedModules = moduleClassRoots.stream()
-            .map(p -> p.getParent().getParent().getFileName().toString())
-            .collect(Collectors.toCollection(TreeSet::new));
+        Set<String> scannedModules = new TreeSet<>();
+        for (Path root : moduleClassRoots) {
+            try (Stream<Path> files = Files.walk(root)) {
+                if (files.anyMatch(f -> f.toString().endsWith(".class"))) {
+                    scannedModules.add(root.getParent().getParent().getFileName().toString());
+                }
+            }
+        }
 
         // COVERAGE SELF-VERIFICATION (see the "Where this guard runs, and why" javadoc).
         //
@@ -301,7 +364,8 @@ public class ConfigurationCallSiteGuardTest {
                 + "let the coverage check pass vacuously", expectedModules.size(), greaterThan(10));
         Set<String> missingModules = new TreeSet<>(expectedModules);
         missingModules.removeAll(scannedModules);
-        assertThat("these reactor modules declare main sources but no <module>/target/classes was found for them, "
+        assertThat("these reactor modules declare main sources but no .class file was found under their "
+                + "<module>/target/classes, "
                 + "so the guard could not scan them and its coverage is INCOMPLETE. This is the defect the guard "
                 + "guards against in itself: a scan whose scope is set by what happens to be built, not by intent. "
                 + "It almost always means the guard ran before these modules were compiled — e.g. in "
@@ -316,14 +380,17 @@ public class ConfigurationCallSiteGuardTest {
         // above ever regresses to an over-permissive empty/near-empty expected set.
         assertThat("mockserver-core must be scanned", scannedModules, hasItem("mockserver-core"));
         assertThat("mockserver-netty must be scanned", scannedModules, hasItem("mockserver-netty"));
+    }
 
+    @Test
+    public void shouldNotReadStaticConfigurationStoreWithoutInstanceFallback() throws Exception {
+        Set<String> restReachableProperties = restReachableProperties();
+        assertThat("guard must cover a large property set", restReachableProperties.size(), greaterThan(100));
+
+        BuiltTree tree = scanBuiltTree();
         CallSiteIndex index = new CallSiteIndex();
-        for (Path root : moduleClassRoots) {
-            try (Stream<Path> files = Files.walk(root)) {
-                for (Path classFile : files.filter(f -> f.toString().endsWith(".class")).collect(Collectors.toList())) {
-                    index.scan(classFile);
-                }
-            }
+        for (byte[] classBytes : tree.classes) {
+            index.scan(classBytes, tree.owners);
         }
 
         assertThat("guard must find configuration call sites — a scan that indexes nothing would pass vacuously",
@@ -331,12 +398,10 @@ public class ConfigurationCallSiteGuardTest {
 
         List<String> violations = new ArrayList<>();
         Set<String> observedKnownDefects = new TreeSet<>();
+        Set<String> observedAllowedSites = new TreeSet<>();
         for (Map.Entry<String, Set<String>> entry : index.staticReads.entrySet()) {
             String descriptorQualifiedMethod = entry.getKey();
             String allowlistKey = descriptorQualifiedMethod.substring(0, descriptorQualifiedMethod.indexOf('('));
-            if (ALLOWED_STATIC_ONLY_CALL_SITES.containsKey(allowlistKey)) {
-                continue;
-            }
             Set<String> instanceReadsInSameMethod =
                 index.instanceReads.getOrDefault(descriptorQualifiedMethod, java.util.Collections.emptySet());
             List<String> unreachable = entry.getValue().stream()
@@ -345,6 +410,10 @@ public class ConfigurationCallSiteGuardTest {
                 .sorted()
                 .collect(Collectors.toList());
             if (unreachable.isEmpty()) {
+                continue;
+            }
+            if (ALLOWED_STATIC_ONLY_CALL_SITES.containsKey(allowlistKey)) {
+                observedAllowedSites.add(allowlistKey);
                 continue;
             }
             if (KNOWN_INSTANCE_UNREACHABLE_DEFECTS.containsKey(allowlistKey)) {
@@ -362,6 +431,13 @@ public class ConfigurationCallSiteGuardTest {
                 + "static store without an instance fallback — they appear to have been FIXED. Delete their "
                 + "entries so the guard starts enforcing them: " + staleKnownDefects,
             staleKnownDefects, is(empty()));
+
+        Set<String> staleAllowedSites = new TreeSet<>(ALLOWED_STATIC_ONLY_CALL_SITES.keySet());
+        staleAllowedSites.removeAll(observedAllowedSites);
+        assertThat("these ALLOWED_STATIC_ONLY_CALL_SITES entries name a method that no longer exists or no longer "
+                + "reads the static store without an instance fallback, so each is a standing licence for whatever "
+                + "next takes that name. Delete them, or re-key them to the new site: " + staleAllowedSites,
+            staleAllowedSites, is(empty()));
 
         assertThat("Configuration values read from the static ConfigurationProperties store with no "
                 + "instance fallback — these are UNREACHABLE from PUT /mockserver/configuration even though "
@@ -383,52 +459,35 @@ public class ConfigurationCallSiteGuardTest {
     @Test
     public void shouldReadSnapshottedSettingsOnlyThroughTheirSnapshots() throws Exception {
         Set<String> guardedGetters = snapshottedGetters(SNAPSHOT_CLASSES);
-        List<Path> moduleClassRoots = moduleClassRoots();
-        Set<String> scannedModules = moduleClassRoots.stream()
-            .map(p -> p.getParent().getParent().getFileName().toString())
-            .collect(Collectors.toCollection(TreeSet::new));
-        assertThat("mockserver-core must be scanned", scannedModules, hasItem("mockserver-core"));
-        assertThat("mockserver-netty must be scanned", scannedModules, hasItem("mockserver-netty"));
+        BuiltTree tree = scanBuiltTree();
 
         Map<String, Set<String>> reads = new TreeMap<>();
-        for (Path root : moduleClassRoots) {
-            try (Stream<Path> files = Files.walk(root)) {
-                for (Path classFile : files.filter(f -> f.toString().endsWith(".class")).collect(Collectors.toList())) {
-                    reads.putAll(directSnapshottedReads(Files.readAllBytes(classFile), guardedGetters));
-                }
-            }
+        for (byte[] classBytes : tree.classes) {
+            reads.putAll(directSnapshottedReads(classBytes, guardedGetters, tree.owners));
         }
         assertThat("guard must find direct reads of snapshotted getters (the definition classes alone have dozens) — "
             + "a scan that indexes nothing would pass vacuously", reads.size(), greaterThan(10));
 
-        List<String> violations = new ArrayList<>();
-        for (Map.Entry<String, Set<String>> entry : reads.entrySet()) {
-            String method = entry.getKey();
-            String className = method.substring(0, method.indexOf('#'));
-            String topLevelClassName = className.contains("$") ? className.substring(0, className.indexOf('$')) : className;
-            if (SNAPSHOT_DEFINITION_CLASSES.containsKey(topLevelClassName)) {
-                continue;
-            }
-            AllowedRead allowed = ALLOWED_DIRECT_SNAPSHOTTED_READS.get(method.substring(0, method.indexOf('(')));
-            if (allowed == null) {
-                allowed = ALLOWED_DIRECT_SNAPSHOTTED_READS.get(className);
-            }
-            Set<String> disallowed = new TreeSet<>(entry.getValue());
-            if (allowed != null) {
-                disallowed.removeAll(allowed.getters);
-            }
-            if (!disallowed.isEmpty()) {
-                violations.add(method + " reads " + disallowed);
-            }
-        }
+        SnapshotVerdict verdict = judgeSnapshottedReads(reads, ALLOWED_DIRECT_SNAPSHOTTED_READS, SNAPSHOT_DEFINITION_CLASSES.keySet());
 
         assertThat("these methods read a control-plane authentication or server TLS value through a Configuration "
                 + "getter or the static store instead of its snapshot, so a multi-field PUT /mockserver/configuration "
                 + "can be seen half-applied. Read ControlPlaneAuthenticationSettings.of(configuration) or "
                 + "ServerTlsSettings.of(configuration) once and decide from it; only add to "
                 + "ALLOWED_DIRECT_SNAPSHOTTED_READS, with a reason, a site whose decision cannot weaken "
-                + "authentication or TLS:\n  " + String.join("\n  ", violations) + "\n",
-            violations, is(empty()));
+                + "authentication or TLS:\n  " + String.join("\n  ", verdict.violations) + "\n",
+            verdict.violations, is(empty()));
+        assertThat("these ALLOWED_DIRECT_SNAPSHOTTED_READS or SNAPSHOT_DEFINITION_CLASSES entries permit a read that "
+                + "no longer happens: the site is gone or renamed, or it stopped reading the getter. A stale entry "
+                + "is a standing licence for whatever next takes that name, so delete it, trim its getters, or re-key "
+                + "it to the new site:\n  "
+                + String.join("\n  ", verdict.stale) + "\n",
+            verdict.stale, is(empty()));
+        assertThat("these ALLOWED_DIRECT_SNAPSHOTTED_READS entries are keyed by Class#method but cover more than one "
+                + "overload that reads a snapshotted getter, so one overload's reason licenses the other. Key each by "
+                + "its descriptor, as directSnapshottedReads reports it:\n  "
+                + String.join("\n  ", verdict.ambiguous) + "\n",
+            verdict.ambiguous, is(empty()));
     }
 
     @Test
@@ -466,19 +525,131 @@ public class ConfigurationCallSiteGuardTest {
 
     @Test
     public void shouldDetectEveryFormOfDirectSnapshottedRead() throws IOException {
-        String fixture = DirectReadFixture.class.getName();
-        byte[] bytes;
-        try (java.io.InputStream in = DirectReadFixture.class.getResourceAsStream("/" + fixture.replace('.', '/') + ".class")) {
-            bytes = in.readAllBytes();
-        }
-        Map<String, Set<String>> reads = directSnapshottedReads(bytes, snapshottedGetters(SNAPSHOT_CLASSES));
-        Map<String, Set<String>> byMethod = new TreeMap<>();
-        reads.forEach((method, names) -> byMethod.put(method.substring(fixture.length() + 1, method.indexOf('(')), names));
+        Map<String, Set<String>> byMethod = readsByMethodName(DirectReadFixture.class,
+            ConfigurationOwners.of(java.util.Collections.emptyList()));
         assertThat(byMethod.get("viaGetter"), is(new TreeSet<>(java.util.Collections.singleton("tlsMutualAuthenticationRequired"))));
         assertThat(byMethod.get("viaMethodReference"), is(new TreeSet<>(java.util.Collections.singleton("controlPlaneJWTAuthenticationRequired"))));
         assertThat(byMethod.get("viaStaticStore"), is(new TreeSet<>(java.util.Collections.singleton("controlPlaneOidcIssuer"))));
         assertThat("a read through the snapshot is the sanctioned form", byMethod.containsKey("viaSnapshot"), is(false));
         assertThat("an unguarded getter is not a snapshotted read", byMethod.containsKey("viaUnguardedGetter"), is(false));
+    }
+
+    /**
+     * javac names the receiver's static type as the owner of a call, so a read through a subclass of
+     * {@link Configuration} or {@link ConfigurationProperties} does not mention either class.
+     */
+    @Test
+    public void shouldDetectReadsThroughSubclassesOfTheConfigurationClasses() throws IOException {
+        ConfigurationOwners owners = ConfigurationOwners.of(java.util.Arrays.asList(classBytes(SubclassedConfigurationFixture.class),
+            classBytes(TwiceSubclassedConfigurationFixture.class), classBytes(SubclassedStoreFixture.class),
+            classBytes(SubclassReadFixture.class)));
+        assertThat(owners.subclasses(), is(new TreeSet<>(java.util.Arrays.asList(SubclassedConfigurationFixture.class.getName(),
+            TwiceSubclassedConfigurationFixture.class.getName(), SubclassedStoreFixture.class.getName()))));
+
+        Map<String, Set<String>> byMethod = readsByMethodName(SubclassReadFixture.class, owners);
+        assertThat(byMethod.get("viaSubclassGetter"), is(new TreeSet<>(java.util.Collections.singleton("tlsMutualAuthenticationRequired"))));
+        assertThat(byMethod.get("viaSubclassMethodReference"), is(new TreeSet<>(java.util.Collections.singleton("controlPlaneJWTAuthenticationRequired"))));
+        assertThat(byMethod.get("viaSubclassStaticStore"), is(new TreeSet<>(java.util.Collections.singleton("controlPlaneOidcIssuer"))));
+        Map<String, Set<String>> byExactOwner = readsByMethodName(SubclassReadFixture.class, ConfigurationOwners.of(java.util.Collections.emptyList()));
+        assertThat("the fixture must compile to calls owned by the subclasses, or it proves nothing",
+            byExactOwner.containsKey("viaSubclassGetter") || byExactOwner.containsKey("viaSubclassStaticStore"), is(false));
+
+        CallSiteIndex index = new CallSiteIndex();
+        index.scan(classBytes(SubclassReadFixture.class), owners);
+        String fixture = SubclassReadFixture.class.getName();
+        assertThat(index.staticReads.get(fixture + "#viaSubclassStaticStore()Ljava/lang/String;"),
+            is(new TreeSet<>(java.util.Collections.singleton("controlPlaneOidcIssuer"))));
+        assertThat(index.instanceReads.get(fixture + "#viaSubclassGetter(L" + Type.getInternalName(TwiceSubclassedConfigurationFixture.class) + ";)Z"),
+            is(new TreeSet<>(java.util.Collections.singleton("tlsMutualAuthenticationRequired"))));
+    }
+
+    /**
+     * A read through an interface or superclass of a configuration class names that supertype as its owner, which
+     * no owner set matches, so the scan requires both classes and their subclasses to have none beyond {@code Object}
+     * and the subclass chain; a subclass may not redeclare their methods.
+     */
+    @Test
+    public void shouldRejectSupertypesOfTheConfigurationClassesAndRedeclaringSubclasses() throws IOException {
+        ConfigurationOwners real = ConfigurationOwners.of(java.util.Arrays.asList(classBytes(Configuration.class),
+            classBytes(ConfigurationProperties.class)));
+        assertThat(real.ownerSupertypeViolations(), is(empty()));
+
+        String implementing = Type.getInternalName(InterfaceImplementingConfigurationFixture.class);
+        String view = Type.getInternalName(TlsViewFixture.class);
+        ConfigurationOwners withInterface = ConfigurationOwners.of(java.util.Arrays.asList(
+            classBytes(InterfaceImplementingConfigurationFixture.class), classBytes(ConfigurationProperties.class)), implementing, CONFIGURATION_PROPERTIES);
+        assertThat(withInterface.ownerSupertypeViolations(),
+            is(java.util.Collections.singletonList(implementing + " has supertypes [java/lang/Object, " + view + "]")));
+        assertThat("a read through the interface is invisible to the owner set, which is why the interface is forbidden",
+            readsByMethodName(SupertypeReadFixture.class, withInterface).containsKey("viaInterface"), is(false));
+        assertThat("the fixture must compile to a call owned by the interface, or it proves nothing",
+            readsByMethodName(SupertypeReadFixture.class, ConfigurationOwners.of(java.util.Collections.emptyList(), view, CONFIGURATION_PROPERTIES))
+                .get("viaInterface"), is(new TreeSet<>(java.util.Collections.singleton("tlsMutualAuthenticationRequired"))));
+
+        String subclassed = Type.getInternalName(SubclassedConfigurationFixture.class);
+        ConfigurationOwners withSuperclass = ConfigurationOwners.of(java.util.Collections.singletonList(
+            classBytes(SubclassedConfigurationFixture.class)), subclassed, CONFIGURATION_PROPERTIES);
+        assertThat(withSuperclass.ownerSupertypeViolations(), is(java.util.Arrays.asList(
+            subclassed + " has supertypes [" + CONFIGURATION + "]", CONFIGURATION_PROPERTIES + " was not scanned")));
+
+        String implementingSubclass = Type.getInternalName(InterfaceImplementingSubclassFixture.class);
+        ConfigurationOwners withSubclassInterface = ConfigurationOwners.of(java.util.Arrays.asList(classBytes(Configuration.class),
+            classBytes(ConfigurationProperties.class), classBytes(InterfaceImplementingSubclassFixture.class)));
+        assertThat("a subclass inherits the getter rather than redeclaring it, so only its interface list reveals it",
+            withSubclassInterface.redeclared.keySet(), is(empty()));
+        assertThat(withSubclassInterface.ownerSupertypeViolations(),
+            is(java.util.Collections.singletonList(implementingSubclass + " implements [" + view + "]")));
+
+        ConfigurationOwners redeclaring = ConfigurationOwners.of(java.util.Arrays.asList(classBytes(Configuration.class),
+            classBytes(ConfigurationProperties.class), classBytes(OverridingConfigurationFixture.class),
+            classBytes(HidingStoreFixture.class), classBytes(SubclassedConfigurationFixture.class)));
+        Map<String, Set<String>> expected = new TreeMap<>();
+        expected.put(OverridingConfigurationFixture.class.getName(), java.util.Collections.singleton("tlsMutualAuthenticationRequired()Ljava/lang/Boolean;"));
+        expected.put(HidingStoreFixture.class.getName(), java.util.Collections.singleton("controlPlaneOidcIssuer()Ljava/lang/String;"));
+        assertThat(redeclaring.redeclared, is(expected));
+    }
+
+    @Test
+    public void shouldReportStaleAndAmbiguousAllowListEntries() {
+        Map<String, Set<String>> reads = new TreeMap<>();
+        reads.put("a.Site#read()V", new TreeSet<>(java.util.Arrays.asList("x", "y")));
+        reads.put("a.Overloaded#read()V", new TreeSet<>(java.util.Collections.singleton("x")));
+        reads.put("a.Overloaded#read(I)V", new TreeSet<>(java.util.Collections.singleton("x")));
+        reads.put("a.Keyed#<init>()V", new TreeSet<>(java.util.Collections.singleton("x")));
+        reads.put("a.Keyed#<init>(I)V", new TreeSet<>(java.util.Collections.singleton("x")));
+        reads.put("a.Whole#one()V", new TreeSet<>(java.util.Collections.singleton("x")));
+        reads.put("a.Whole#two()V", new TreeSet<>(java.util.Collections.singleton("y")));
+        reads.put("a.Definition$Nested#any()V", new TreeSet<>(java.util.Collections.singleton("x")));
+
+        Map<String, AllowedRead> allowList = new TreeMap<>();
+        allowList.put("a.Site#read", new AllowedRead("reason", "x"));
+        allowList.put("a.Overloaded#read", new AllowedRead("reason", "x"));
+        allowList.put("a.Keyed#<init>()V", new AllowedRead("reason", "x"));
+        allowList.put("a.Whole", new AllowedRead("reason", "x", "y"));
+        SnapshotVerdict clean = judgeSnapshottedReads(reads, allowList, java.util.Collections.singleton("a.Definition"));
+        assertThat(clean.violations, is(java.util.Arrays.asList("a.Keyed#<init>(I)V reads [x]", "a.Site#read()V reads [y]")));
+        assertThat(clean.stale, is(empty()));
+        assertThat(clean.ambiguous, is(java.util.Collections.singletonList("a.Overloaded#read covers [a.Overloaded#read()V, a.Overloaded#read(I)V]")));
+
+        allowList.put("a.Site#read", new AllowedRead("reason", "x", "y", "z"));
+        allowList.put("a.Renamed#read", new AllowedRead("reason", "x"));
+        allowList.put("a.Whole", new AllowedRead("reason", "x", "y", "z"));
+        SnapshotVerdict stale = judgeSnapshottedReads(reads, allowList, new TreeSet<>(java.util.Arrays.asList("a.Definition", "a.GoneDefinition")));
+        assertThat(stale.stale, is(java.util.Arrays.asList("a.Renamed#read no longer reads [x]", "a.Site#read no longer reads [z]",
+            "a.Whole no longer reads [z]", "a.GoneDefinition (definition class) reads no snapshotted getter")));
+    }
+
+    private static byte[] classBytes(Class<?> type) throws IOException {
+        try (java.io.InputStream in = type.getResourceAsStream("/" + type.getName().replace('.', '/') + ".class")) {
+            return in.readAllBytes();
+        }
+    }
+
+    private static Map<String, Set<String>> readsByMethodName(Class<?> fixture, ConfigurationOwners owners) throws IOException {
+        Map<String, Set<String>> byMethod = new TreeMap<>();
+        directSnapshottedReads(classBytes(fixture), snapshottedGetters(SNAPSHOT_CLASSES), owners)
+            .forEach((method, names) -> byMethod.put(method.substring(fixture.getName().length() + 1, method.indexOf('(')), names));
+        return byMethod;
     }
 
     private static final List<Class<?>> SNAPSHOT_CLASSES =
@@ -495,17 +666,13 @@ public class ConfigurationCallSiteGuardTest {
     /**
      * Classes, keyed by top-level name, that define, publish, copy or serialise the snapshotted values, so a
      * direct read inside them is the mechanism itself rather than a decision made from a half-applied update.
+     * An entry that makes no direct read is stale, so a class that needs no exemption is not listed.
      */
     private static final Map<String, String> SNAPSHOT_DEFINITION_CLASSES = new TreeMap<>();
 
     static {
         SNAPSHOT_DEFINITION_CLASSES.put("org.mockserver.configuration.Configuration",
             "defines the getters and builds both snapshots from its fields");
-        SNAPSHOT_DEFINITION_CLASSES.put("org.mockserver.configuration.ConfigurationProperties",
-            "the static store the getters and snapshots fall back to");
-        SNAPSHOT_DEFINITION_CLASSES.put("org.mockserver.configuration.ControlPlaneAuthenticationSettings",
-            "the control-plane authentication snapshot");
-        SNAPSHOT_DEFINITION_CLASSES.put("org.mockserver.configuration.ServerTlsSettings", "the server TLS snapshot");
         SNAPSHOT_DEFINITION_CLASSES.put("org.mockserver.configuration.ClientConfiguration",
             "client-side configuration: copies values from the static store for the client, enforces nothing on the server");
         SNAPSHOT_DEFINITION_CLASSES.put("org.mockserver.serialization.model.ConfigurationDTO",
@@ -518,10 +685,12 @@ public class ConfigurationCallSiteGuardTest {
 
     /**
      * Sites allowed to read named snapshotted values through a {@link Configuration} getter or the static store,
-     * keyed by {@code Class#method} (all overloads) or by {@code Class} (every method of that class, not its
-     * nested classes). A site belongs here only when a mixed read cannot weaken authentication or TLS: a warning
+     * keyed by {@code Class#method}, by {@code Class#method(descriptor)return} (required when more than one
+     * overload reads a snapshotted getter), or by {@code Class} (every method of that class, not its nested
+     * classes). A site belongs here only when a mixed read cannot weaken authentication or TLS: a warning
      * or log message, the outbound client context, protocol routing, or certificate material the server context
-     * build re-reads from the snapshot. Each entry permits only the getters it lists.
+     * build re-reads from the snapshot. Each entry permits only the getters it lists, and must still read every
+     * one of them.
      */
     private static final Map<String, AllowedRead> ALLOWED_DIRECT_SNAPSHOTTED_READS = new TreeMap<>();
 
@@ -595,6 +764,162 @@ public class ConfigurationCallSiteGuardTest {
         }
     }
 
+    static final class SnapshotVerdict {
+        final List<String> violations = new ArrayList<>();
+        final List<String> stale = new ArrayList<>();
+        final List<String> ambiguous = new ArrayList<>();
+    }
+
+    /**
+     * Checks the direct reads against the allow-list in both directions: a read no entry permits is a violation,
+     * and an entry (or definition class) whose permitted reads no longer all happen is stale.
+     */
+    static SnapshotVerdict judgeSnapshottedReads(Map<String, Set<String>> reads, Map<String, AllowedRead> allowList, Set<String> definitionClasses) {
+        SnapshotVerdict verdict = new SnapshotVerdict();
+        Map<String, Set<String>> permittedReadsSeen = new HashMap<>();
+        Map<String, Set<String>> sitesByKey = new HashMap<>();
+        Set<String> definitionClassesSeen = new HashSet<>();
+        for (Map.Entry<String, Set<String>> entry : reads.entrySet()) {
+            String method = entry.getKey();
+            String className = method.substring(0, method.indexOf('#'));
+            String topLevelClassName = className.contains("$") ? className.substring(0, className.indexOf('$')) : className;
+            if (definitionClasses.contains(topLevelClassName)) {
+                definitionClassesSeen.add(topLevelClassName);
+                continue;
+            }
+            Set<String> disallowed = new TreeSet<>(entry.getValue());
+            for (String key : java.util.Arrays.asList(method, method.substring(0, method.indexOf('(')), className)) {
+                AllowedRead allowed = allowList.get(key);
+                if (allowed != null) {
+                    Set<String> permittedReads = new TreeSet<>(entry.getValue());
+                    permittedReads.retainAll(allowed.getters);
+                    permittedReadsSeen.computeIfAbsent(key, k -> new TreeSet<>()).addAll(permittedReads);
+                    sitesByKey.computeIfAbsent(key, k -> new TreeSet<>()).add(method);
+                    disallowed.removeAll(allowed.getters);
+                    break;
+                }
+            }
+            if (!disallowed.isEmpty()) {
+                verdict.violations.add(method + " reads " + disallowed);
+            }
+        }
+        for (Map.Entry<String, AllowedRead> allowed : allowList.entrySet()) {
+            String key = allowed.getKey();
+            Set<String> unread = new TreeSet<>(allowed.getValue().getters);
+            unread.removeAll(permittedReadsSeen.getOrDefault(key, java.util.Collections.emptySet()));
+            if (!unread.isEmpty()) {
+                verdict.stale.add(key + " no longer reads " + unread);
+            }
+            Set<String> sites = sitesByKey.getOrDefault(key, java.util.Collections.emptySet());
+            if (key.contains("#") && !key.contains("(") && sites.size() > 1) {
+                verdict.ambiguous.add(key + " covers " + sites);
+            }
+        }
+        for (String definitionClass : new TreeSet<>(definitionClasses)) {
+            if (!definitionClassesSeen.contains(definitionClass)) {
+                verdict.stale.add(definitionClass + " (definition class) reads no snapshotted getter");
+            }
+        }
+        return verdict;
+    }
+
+    /**
+     * The classes a configuration read can name as its owner: {@link Configuration} and
+     * {@link ConfigurationProperties}, plus every scanned class whose superclass chain reaches one of them.
+     */
+    static final class ConfigurationOwners {
+        final String instanceRoot;
+        final String staticRoot;
+        final Set<String> instance = new TreeSet<>();
+        final Set<String> staticStore = new TreeSet<>();
+        /** Each scanned class's superclass and interfaces, by internal name. */
+        private final Map<String, List<String>> supertypes = new HashMap<>();
+        /** Dotted subclass name to the methods ({@code name+descriptor}) it redeclares from its root. */
+        final Map<String, Set<String>> redeclared = new TreeMap<>();
+
+        private ConfigurationOwners(String instanceRoot, String staticRoot) {
+            this.instanceRoot = instanceRoot;
+            this.staticRoot = staticRoot;
+        }
+
+        static ConfigurationOwners of(java.util.Collection<byte[]> classes) {
+            return of(classes, CONFIGURATION, CONFIGURATION_PROPERTIES);
+        }
+
+        static ConfigurationOwners of(java.util.Collection<byte[]> classes, String instanceRoot, String staticRoot) {
+            Map<String, String> superNames = new HashMap<>();
+            Map<String, Set<String>> declaredMethods = new HashMap<>();
+            ConfigurationOwners owners = new ConfigurationOwners(instanceRoot, staticRoot);
+            for (byte[] classBytes : classes) {
+                ClassReader reader = new ClassReader(classBytes);
+                superNames.put(reader.getClassName(), reader.getSuperName());
+                List<String> supertypes = new ArrayList<>();
+                supertypes.add(reader.getSuperName());
+                supertypes.addAll(java.util.Arrays.asList(reader.getInterfaces()));
+                owners.supertypes.put(reader.getClassName(), supertypes);
+                Set<String> methods = new TreeSet<>();
+                reader.accept(new ClassVisitor(Opcodes.ASM9) {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String descriptor, String signature, String[] exceptions) {
+                        if ((access & Opcodes.ACC_PRIVATE) == 0 && !name.startsWith("<")) {
+                            methods.add(name + descriptor);
+                        }
+                        return null;
+                    }
+                }, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+                declaredMethods.put(reader.getClassName(), methods);
+            }
+            owners.instance.add(instanceRoot);
+            owners.staticStore.add(staticRoot);
+            for (String name : superNames.keySet()) {
+                Set<String> visited = new HashSet<>();
+                for (String ancestor = superNames.get(name); ancestor != null && visited.add(ancestor); ancestor = superNames.get(ancestor)) {
+                    if (instanceRoot.equals(ancestor) || staticRoot.equals(ancestor)) {
+                        (instanceRoot.equals(ancestor) ? owners.instance : owners.staticStore).add(name);
+                        Set<String> overlap = new TreeSet<>(declaredMethods.get(name));
+                        overlap.retainAll(declaredMethods.getOrDefault(ancestor, java.util.Collections.emptySet()));
+                        if (!overlap.isEmpty()) {
+                            owners.redeclared.put(name.replace('/', '.'), overlap);
+                        }
+                    }
+                }
+            }
+            return owners;
+        }
+
+        /**
+         * Ways a read could be compiled against a supertype of an owner, which no owner set would match: a root that
+         * extends anything but {@code Object} or was not scanned at all, or any owner that implements an interface.
+         */
+        List<String> ownerSupertypeViolations() {
+            List<String> violations = new ArrayList<>();
+            for (String root : java.util.Arrays.asList(instanceRoot, staticRoot)) {
+                List<String> rootSupertypes = supertypes.get(root);
+                if (rootSupertypes == null) {
+                    violations.add(root + " was not scanned");
+                } else if (!rootSupertypes.equals(java.util.Collections.singletonList("java/lang/Object"))) {
+                    violations.add(root + " has supertypes " + rootSupertypes);
+                }
+            }
+            for (String subclass : new TreeSet<>(Stream.concat(instance.stream(), staticStore.stream()).collect(Collectors.toSet()))) {
+                List<String> subclassSupertypes = supertypes.get(subclass);
+                if (!subclass.equals(instanceRoot) && !subclass.equals(staticRoot) && subclassSupertypes.size() > 1) {
+                    violations.add(subclass + " implements " + subclassSupertypes.subList(1, subclassSupertypes.size()));
+                }
+            }
+            return violations;
+        }
+
+        /** Dotted names of the owners other than the two roots themselves. */
+        Set<String> subclasses() {
+            Set<String> subclasses = new TreeSet<>();
+            Stream.concat(instance.stream(), staticStore.stream())
+                .filter(name -> !instanceRoot.equals(name) && !staticRoot.equals(name))
+                .forEach(name -> subclasses.add(name.replace('/', '.')));
+            return subclasses;
+        }
+    }
+
     /**
      * The guarded getter names: every public no-arg accessor of the snapshot classes that {@link Configuration}
      * also exposes as a public no-arg getter.
@@ -628,10 +953,10 @@ public class ConfigurationCallSiteGuardTest {
 
     /**
      * Descriptor-qualified {@code fqcn#name(desc)ret} of each method in {@code classBytes} that reads a guarded
-     * getter through {@link Configuration} (a call or a method reference) or through the static store, mapped
-     * to the names it reads.
+     * getter through a {@link Configuration} (a call or a method reference) or through the static store, mapped
+     * to the names it reads. {@code owners} names the classes such a read can be compiled against.
      */
-    static Map<String, Set<String>> directSnapshottedReads(byte[] classBytes, Set<String> guardedGetters) {
+    static Map<String, Set<String>> directSnapshottedReads(byte[] classBytes, Set<String> guardedGetters, ConfigurationOwners owners) {
         Map<String, Set<String>> reads = new TreeMap<>();
         ClassReader reader = new ClassReader(classBytes);
         String className = reader.getClassName().replace('/', '.');
@@ -656,7 +981,7 @@ public class ConfigurationCallSiteGuardTest {
                     }
 
                     private void record(String owner, String calledName, String calledDescriptor) {
-                        if ((CONFIGURATION.equals(owner) || CONFIGURATION_PROPERTIES.equals(owner))
+                        if ((owners.instance.contains(owner) || owners.staticStore.contains(owner))
                             && guardedGetters.contains(calledName)
                             && Type.getArgumentTypes(calledDescriptor).length == 0) {
                             reads.computeIfAbsent(key, k -> new TreeSet<>()).add(calledName);
@@ -701,6 +1026,65 @@ public class ConfigurationCallSiteGuardTest {
 
         Integer viaUnguardedGetter(Configuration configuration) {
             return configuration.maxExpectations();
+        }
+    }
+
+    static class SubclassedConfigurationFixture extends Configuration {
+    }
+
+    static final class TwiceSubclassedConfigurationFixture extends SubclassedConfigurationFixture {
+    }
+
+    static final class SubclassedStoreFixture extends ConfigurationProperties {
+    }
+
+    /** The reads of {@link DirectReadFixture}, each made through a subclass. */
+    @SuppressWarnings("unused")
+    static final class SubclassReadFixture {
+        boolean viaSubclassGetter(TwiceSubclassedConfigurationFixture configuration) {
+            return Boolean.TRUE.equals(configuration.tlsMutualAuthenticationRequired());
+        }
+
+        java.util.function.Supplier<Boolean> viaSubclassMethodReference(SubclassedConfigurationFixture configuration) {
+            return configuration::controlPlaneJWTAuthenticationRequired;
+        }
+
+        String viaSubclassStaticStore() {
+            return SubclassedStoreFixture.controlPlaneOidcIssuer();
+        }
+    }
+
+    interface TlsViewFixture {
+        Boolean tlsMutualAuthenticationRequired();
+    }
+
+    static final class InterfaceImplementingConfigurationFixture implements TlsViewFixture {
+        @Override
+        public Boolean tlsMutualAuthenticationRequired() {
+            return null;
+        }
+    }
+
+    static final class InterfaceImplementingSubclassFixture extends Configuration implements TlsViewFixture {
+    }
+
+    @SuppressWarnings("unused")
+    static final class SupertypeReadFixture {
+        boolean viaInterface(InterfaceImplementingConfigurationFixture configuration) {
+            return Boolean.TRUE.equals(((TlsViewFixture) configuration).tlsMutualAuthenticationRequired());
+        }
+    }
+
+    static final class OverridingConfigurationFixture extends Configuration {
+        @Override
+        public Boolean tlsMutualAuthenticationRequired() {
+            return Boolean.FALSE;
+        }
+    }
+
+    static final class HidingStoreFixture extends ConfigurationProperties {
+        public static String controlPlaneOidcIssuer() {
+            return null;
         }
     }
 
@@ -845,36 +1229,31 @@ public class ConfigurationCallSiteGuardTest {
         /** descriptor-qualified {@code fqcn#name(desc)ret} -> property names read from a Configuration instance */
         final Map<String, Set<String>> instanceReads = new HashMap<>();
 
-        void scan(Path classFile) {
-            try {
-                ClassReader reader = new ClassReader(Files.readAllBytes(classFile));
-                String internalName = reader.getClassName();
-                String className = internalName.replace('/', '.');
-                if (FALLBACK_DEFINITION_CLASSES.contains(className)) {
-                    return;
-                }
-                reader.accept(new ClassVisitor(Opcodes.ASM9) {
-                    @Override
-                    public MethodVisitor visitMethod(int access, String name, String descriptor, String signature, String[] exceptions) {
-                        String key = className + "#" + name + descriptor;
-                        return new MethodVisitor(Opcodes.ASM9) {
-                            @Override
-                            public void visitMethodInsn(int opcode, String owner, String calledName, String calledDescriptor, boolean isInterface) {
-                                if (!isNoArgReader(calledDescriptor)) {
-                                    return;
-                                }
-                                if (opcode == Opcodes.INVOKESTATIC && CONFIGURATION_PROPERTIES.equals(owner)) {
-                                    staticReads.computeIfAbsent(key, k -> new TreeSet<>()).add(calledName);
-                                } else if (opcode == Opcodes.INVOKEVIRTUAL && CONFIGURATION.equals(owner)) {
-                                    instanceReads.computeIfAbsent(key, k -> new TreeSet<>()).add(calledName);
-                                }
-                            }
-                        };
-                    }
-                }, ClassReader.SKIP_FRAMES | ClassReader.SKIP_DEBUG);
-            } catch (IOException e) {
-                throw new UncheckedIOException("failed reading " + classFile, e);
+        void scan(byte[] classBytes, ConfigurationOwners owners) {
+            ClassReader reader = new ClassReader(classBytes);
+            String className = reader.getClassName().replace('/', '.');
+            if (FALLBACK_DEFINITION_CLASSES.contains(className)) {
+                return;
             }
+            reader.accept(new ClassVisitor(Opcodes.ASM9) {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor, String signature, String[] exceptions) {
+                    String key = className + "#" + name + descriptor;
+                    return new MethodVisitor(Opcodes.ASM9) {
+                        @Override
+                        public void visitMethodInsn(int opcode, String owner, String calledName, String calledDescriptor, boolean isInterface) {
+                            if (!isNoArgReader(calledDescriptor)) {
+                                return;
+                            }
+                            if (opcode == Opcodes.INVOKESTATIC && owners.staticStore.contains(owner)) {
+                                staticReads.computeIfAbsent(key, k -> new TreeSet<>()).add(calledName);
+                            } else if (opcode == Opcodes.INVOKEVIRTUAL && owners.instance.contains(owner)) {
+                                instanceReads.computeIfAbsent(key, k -> new TreeSet<>()).add(calledName);
+                            }
+                        }
+                    };
+                }
+            }, ClassReader.SKIP_FRAMES | ClassReader.SKIP_DEBUG);
         }
 
         private static boolean isNoArgReader(String descriptor) {

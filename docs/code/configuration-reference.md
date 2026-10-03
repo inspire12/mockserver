@@ -209,7 +209,7 @@ That silence is keyed on `WHOLE_VALUE_MASKED_CREDENTIAL_PROPERTIES` — the thre
 
 `ConfigurationDTOCredentialMaskingTest` section 4 enumerates this surface **reflectively** — every credential-shaped `String` property, with no exclusions — rather than from a list, so a credential-shaped property added later is covered the day it is added. It also asserts, through `effectiveConfiguration()` rather than by re-applying its own filter, that the diagnostic surfaces really do render each one as the mask, so the round trip it guards is one that can actually occur; a property whose system-property key diverged from its DTO property name would fail there rather than silently drop out of the guard. Both non-vacuity floors in that class are **ratchets** — raise them when a property is added, never lower them.
 
-**Reachability ≠ enforcement.** Wiring a property onto `Configuration` makes it *settable*; the enforcement sites for these 27 still read the static store, so they are recorded in `ConfigurationCallSiteGuardTest.KNOWN_INSTANCE_UNREACHABLE_DEFECTS` until each site is changed to consult the instance. That map is a ratchet: fixing a site makes its entry stale and fails the build until the line is deleted.
+**Reachability ≠ enforcement.** Wiring a property onto `Configuration` makes it *settable*, not *enforced*: an enforcement site that still reads the static store ignores a `PUT`. When these 27 were wired, their enforcement sites were recorded in `ConfigurationCallSiteGuardTest.KNOWN_INSTANCE_UNREACHABLE_DEFECTS`, a ratchet that fails the build when an entry goes stale. All of them now consult the instance and the map is empty; a new static-only enforcement site fails the guard directly.
 
 ### `redactSecretsInRecordedExpectations`
 
