@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Tail-attribution instrumentation for scripts/rw-multi-k6-sweep.sh (performance programme item 44):
-# each k6 process's Go GC trace and per-second series, and a host kernel-counter sampler. Report-only:
+# each k6 process's Go GC trace and per-second series, the quiet seconds the GC-masked figure reads, and
+# a host kernel-counter sampler. Report-only:
 # nothing here gates a run, and every function fails soft. Defines functions only; bash 3.2 compatible.
 # Docs: docs/code/performance-measurement.md, "Tail attribution files".
 # Tests: .buildkite/scripts/test/perf-tail-instrument-test.sh
 
 # shellcheck disable=SC2034  # read by scripts/rw-multi-k6-sweep.sh
 K6_GC_CSV_HEADER="proc,gc,start_epoch_s,stw_sweep_ms,mark_ms,stw_mark_ms,assist_cpu_ms,bg_cpu_ms,idle_cpu_ms,heap_start_mb,heap_end_mb,heap_live_mb,goal_mb"
-K6_TS_CSV_HEADER="ts,proc,rung_offered_rps,t_in_rung_s,reqs,over_5ms,iterations,dropped_iterations,vus,gc_cycles_started,gc_mark_ms"
+K6_TS_CSV_HEADER="ts,proc,rung_offered_rps,t_in_rung_s,reqs,over_5ms,iterations,dropped_iterations,vus,gc_cycles_started,gc_mark_ms,over_bound"
 HKS_TCP_COUNTERS="RetransSegs InErrs OutRsts InSegs OutSegs ListenOverflows ListenDrops TCPBacklogDrop TCPTimeouts TCPSynRetrans TCPFastRetrans TCPLossProbes TCPRcvQDrop TCPZeroWindowDrop TCPReqQFullDrop"
 HKS_CPU_CSV_HEADER="ts,interval_s,cpu,role,usr_pct,sys_pct,soft_pct,irq_pct,idle_pct,net_rx,net_tx,softnet_processed,softnet_dropped,softnet_squeezed"
 HKS_TCP_CSV_HEADER="ts,interval_s,netns,$(tr ' ' ',' <<<"$HKS_TCP_COUNTERS")"
@@ -24,7 +25,7 @@ k6_gctrace_csv() {
 }
 
 # k6_timeseries_csv <ranges.json> <gc.csv> <start_at_s> <step_s> <gap_s> <rates_csv>: the per-second CSV
-# (K6_TS_CSV_HEADER). ranges.json maps reqs/over_5ms/iterations/dropped (cumulative) and vus (a gauge) to
+# (K6_TS_CSV_HEADER). ranges.json maps reqs/over_5ms/over_bound/iterations/dropped (cumulative) and vus (a gauge) to
 # a Prometheus matrix (or null). Row ts covers [ts, ts + 1): counters are cum(ts + 1) - cum(ts), vus is
 # the value at ts + 1. A counter before its first sample is 0 (k6 sends dropped_iterations only once one
 # drops); a failed query, a hole after the first sample and a fall of more than 0.5 (a reset) are null;
@@ -62,11 +63,65 @@ k6_timeseries_csv() {
           a = (m0[p, g] > t ? m0[p, g] : t); b = (m1[p, g] < t + 1 ? m1[p, g] : t + 1)
           if (b > a) mark += (b - a) * 1000
         }
-        o5 = d("over_5ms", p, t); vu = (("vus", p, t + 1) in v) ? v["vus", p, t + 1] : ""
-        printf "%d,%s,%s,%s,%s,%s,%s,%s,%s,%d,%.1f\n", t, p, rate, tin, d("reqs", p, t), (o5 == "" ? "" : sprintf("%.1f", o5)),
-          d("iterations", p, t), d("dropped", p, t), vu, cyc, mark
+        o5 = d("over_5ms", p, t); ob = d("over_bound", p, t); vu = (("vus", p, t + 1) in v) ? v["vus", p, t + 1] : ""
+        printf "%d,%s,%s,%s,%s,%s,%s,%s,%s,%d,%.1f,%s\n", t, p, rate, tin, d("reqs", p, t), (o5 == "" ? "" : sprintf("%.1f", o5)),
+          d("iterations", p, t), d("dropped", p, t), vu, cyc, mark, (ob == "" ? "" : sprintf("%.1f", ob))
       }
     }' | sort -t, -k2,2 -k1,1n
+}
+
+# --- GC-masked figure (report-only) -----------------------------------------------------------------
+# k6_gc_masked_rungs <timeseries.csv> <gc.csv> <n_procs> <settle_s> <push_s>: one JSON object,
+# {gc_procs, rungs:[{rung_offered_rps, seconds:{measured, quiet, gc, incomplete}, quiet_windows:[[a, b)],
+# rows:{requests, over_5ms, over_bound}}]}. A row ts holds the pushes that landed in (ts, ts + 1], so
+# requests completed in (ts - push, ts + 1]: it is measured from settle + push into its rung, and a GC
+# second when any process's cycle (sweep to mark termination) overlaps that span. A second without a
+# complete row from all n processes is never quiet. over_bound is null when a quiet row lacks the column.
+k6_gc_masked_rungs() {
+  [ -r "$1" ] && [ -r "$2" ] || { echo '{"gc_procs":0,"rungs":[]}'; return 0; }
+  awk -F, -v n="$3" -v settle="$4" -v push="$5" '
+    FNR == 1 { file++; for (i = 1; i <= NF; i++) col[file, $i] = i; next }
+    file == 1 { if ($(col[1, "start_epoch_s"]) == "") next
+                if (!($1 in gp)) { gp[$1] = 1; gprocs++ }
+                ng++; gs[ng] = $(col[1, "start_epoch_s"]) + 0
+                ge[ng] = gs[ng] + ($(col[1, "stw_sweep_ms"]) + $(col[1, "mark_ms"]) + $(col[1, "stw_mark_ms"])) / 1000; next }
+    { rate = $(col[2, "rung_offered_rps"]); tin = $(col[2, "t_in_rung_s"])
+      if (rate == "" || tin == "" || tin + 0 < settle + push) next
+      t = $(col[2, "ts"]) + 0; k = rate SUBSEP t
+      if (!(rate in lo)) { order[++nr] = rate; lo[rate] = t; hi[rate] = t }
+      if (t < lo[rate]) lo[rate] = t; if (t > hi[rate]) hi[rate] = t
+      np[k]++; rq = $(col[2, "reqs"]); o5 = $(col[2, "over_5ms"])
+      if (rq == "" || o5 == "") bad[k] = 1
+      r[k] += rq; f[k] += o5
+      if (!((2, "over_bound") in col) || $(col[2, "over_bound"]) == "") nob[k] = 1; else b[k] += $(col[2, "over_bound"]) }
+    END {
+      printf "{\"gc_procs\":%d,\"rungs\":[", gprocs
+      for (x = 1; x <= nr; x++) {
+        rate = order[x]; m = 0; q = 0; g = 0; inc = 0; sr = 0; sf = 0; sb = 0; nb = 0; w = ""; open = 0
+        for (t = lo[rate]; t <= hi[rate]; t++) {
+          k = rate SUBSEP t; state = "quiet"
+          if (!(k in np)) state = "absent"
+          else if (np[k] != n || (k in bad)) state = "incomplete"
+          else for (i = 1; i <= ng; i++) if (gs[i] < t + 1 && ge[i] > t - push) { state = "gc"; break }
+          if (state != "absent") m++
+          if (state == "gc") g++; else if (state == "incomplete") inc++
+          if (state == "quiet") { q++; sr += r[k]; sf += f[k]; sb += b[k]; if (k in nob) nb = 1
+                                  if (!open) { w = w (w == "" ? "" : ",") "[" t; open = 1 } }
+          else if (open) { w = w "," t "]"; open = 0 }
+        }
+        if (open) w = w "," (hi[rate] + 1) "]"
+        printf "%s{\"rung_offered_rps\":%s,\"seconds\":{\"measured\":%d,\"quiet\":%d,\"gc\":%d,\"incomplete\":%d},\"quiet_windows\":[%s],\"rows\":{\"requests\":%d,\"over_5ms\":%.1f,\"over_bound\":%s}}",
+          (x > 1 ? "," : ""), rate, m, q, g, inc, w, sr, sf, ((nb || q == 0) ? "null" : sprintf("%.1f", sb))
+      }
+      print "]}"
+    }' "$2" "$1"
+}
+
+# k6_gc_masked_expr <histogram selector> <quiet_windows JSON>: the PromQL histogram of the requests pushed
+# inside the windows, as the sum over windows [a, b) of (cumulative at b) - (cumulative at a). A series
+# with no sample yet at a counts as 0 there, which is its cumulative value.
+k6_gc_masked_expr() {
+  jq -r --arg h "$1" '[ .[] | "(sum(\($h) @ \(.[1])) - sum(\($h) @ \(.[0])))" ] | join(" + ")' <<<"$2"
 }
 
 # --- host kernel-counter sampler -------------------------------------------------------------------

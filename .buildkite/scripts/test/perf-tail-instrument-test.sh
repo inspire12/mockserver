@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Fixture tests for the multi-k6 arm's tail attribution files (performance programme item 44):
 # lib/perf-tail-instrument.sh (gctrace CSV, per-second series, host kernel sampler shape, fail-soft and
-# lifecycle), the harness wiring (stub docker, nothing started) and scripts/rw-tail-attribution.py on
-# synthetic bundles. No Docker. Run: .buildkite/scripts/test/perf-tail-instrument-test.sh
+# lifecycle), the harness wiring (stub docker, nothing started), scripts/rw-tail-attribution.py on
+# synthetic bundles, and the GC-masked figure on rows trimmed from a real bundle. No Docker. Run: .buildkite/scripts/test/perf-tail-instrument-test.sh
 # PERF_TAIL_LIB / PERF_TAIL_HARNESS / PERF_TAIL_HELPER=<path> test another copy (a degrade check); a
 # harness copy still sources its libs from this tree, so put a degraded lib in place via PERF_TAIL_LIB.
 set -euo pipefail
@@ -59,6 +59,7 @@ cat > "$T/ranges.json" <<'JSON'
  "reqs":[{"metric":{"proc":"main-p0"},"values":[[1000,"0"],[1001,"10"],[1002,"30"],[1003,"60"],[1004,"60"],[1005,"60"],[1006,"60"],[1007,"100"],[1008,"140"]]},
          {"metric":{"proc":"main-p1"},"values":[[1000,"0"],[1001,"20"],[1002,"5"],[1003,"15"]]}],
  "over_5ms":[{"metric":{"proc":"main-p0"},"values":[[1001,"0"],[1002,"0.5"],[1003,"5.5"],[1004,"NaN"],[1005,"5.5"],[1006,"5.4999999"]]}],
+ "over_bound":[{"metric":{"proc":"main-p0"},"values":[[1001,"0"],[1002,"0.25"],[1003,"2.25"]]}],
  "iterations":[{"metric":{"proc":"main-p0"},"values":[[1000,"0"],[1001,"10"],[1003,"60"]]}],
  "dropped":null,
  "vus":[{"metric":{"proc":"main-p0"},"values":[[1002,"3"],[1003,"7"]]}]}
@@ -67,8 +68,13 @@ printf '%s\n%s\n%s\n' "$K6_GC_CSV_HEADER" "main-p0,1,1002.2,0,500,0,0,0,0,1,1,1,
 TS="$(k6_timeseries_csv "$T/ranges.json" "$T/gc.csv" 1000 4 2 "100,200")"
 check "header" "$K6_TS_CSV_HEADER" "$(head -1 <<<"$TS")"
 row() { awk -F, -v t="$1" -v p="$2" '$1 == t && $2 == p' <<<"$TS"; }
-check "ts 1002 = [1002, 1003): reqs 60-30, over-5 ms 5.5-0.5, vus at 1003, one GC start, 500 ms of mark" \
-  "1002,main-p0,100,2,30,5.0,,,7,1,500.0" "$(row 1002 main-p0)"
+check "ts 1002 = [1002, 1003): reqs 60-30, over-5 ms 5.5-0.5, vus at 1003, one GC start, 500 ms of mark, over the bound 2.25-0.25" \
+  "1002,main-p0,100,2,30,5.0,,,7,1,500.0,2.0" "$(row 1002 main-p0)"
+check "over_bound is the last column, after the columns older bundles have" "over_bound|11" \
+  "$(tr ',' '\n' <<<"$K6_TS_CSV_HEADER" | tail -1)|$(tr ',' '\n' <<<"$K6_TS_CSV_HEADER" | grep -n '^gc_mark_ms$' | cut -d: -f1)"
+jq 'del(.over_bound)' "$T/ranges.json" > "$T/ranges-old.json"
+check "a ranges file without the over_bound query leaves that column null" "" \
+  "$(k6_timeseries_csv "$T/ranges-old.json" "$T/gc.csv" 1000 4 2 "100,200" | sed 1d | cut -d, -f12 | sort -u)"
 check "a mark across a second boundary is split between the two seconds" "200.0|300.0" \
   "$(row 1003 main-p0 | cut -d, -f11)|$(row 1004 main-p0 | cut -d, -f11)"
 check "the gap between rungs has no rung label" ",|0" "$(row 1004 main-p0 | cut -d, -f3,4)|$(row 1004 main-p0 | cut -d, -f5)"
@@ -79,9 +85,9 @@ check "a fall under 0.5 is rounding in the interpolated over-5 ms count: 0" "0.0
 check "a hole after a series' first sample is null, on both sides of it" "|" "$(row 1001 main-p0 | cut -d, -f7)|$(row 1002 main-p0 | cut -d, -f7)"
 check "a succeeded query with no series for a process reads 0 (dropped_iterations before a drop)" "0" "$(row 1001 main-p1 | cut -d, -f7)"
 check "a failed query leaves its column null on every row" "" "$(cut -d, -f8 <<<"$TS" | sed 1d | sort -u)"
-check "every row has the header's column count" "11" "$(sed 1d <<<"$TS" | awk -F, '{print NF}' | sort -u)"
+check "every row has the header's column count" "12" "$(sed 1d <<<"$TS" | awk -F, '{print NF}' | sort -u)"
 check "rows sorted by process, then time" "$(sed 1d <<<"$TS" | sort -t, -k2,2 -k1,1n)" "$(sed 1d <<<"$TS")"
-echo '{"failed":["reqs","over_5ms","iterations","dropped","vus"],"reqs":null,"over_5ms":null,"iterations":null,"dropped":null,"vus":null}' > "$T/none.json"
+echo '{"failed":["reqs","over_5ms","over_bound","iterations","dropped","vus"],"reqs":null,"over_5ms":null,"over_bound":null,"iterations":null,"dropped":null,"vus":null}' > "$T/none.json"
 check "every query failed: the header alone" "$K6_TS_CSV_HEADER" "$(k6_timeseries_csv "$T/none.json" "$T/gc.csv" 1000 4 2 100)"
 
 echo "--- 3. host counters: one interval's rows from two /proc states"
@@ -267,7 +273,7 @@ prom_url() { echo http://stub; }
 tail_case() { # procs points: a fresh WORK holding the files build_tail_files reads
   WORK="$T/tf-$1-$2"; rm -rf "$WORK"; mkdir -p "$WORK"
   # shellcheck disable=SC2034  # read by the harness functions eval'd above
-  N="$1" QUIET_S=5 STEP_S=60 GAP_S=0 K6_GCTRACE=true STUB_BODY="$WORK/body.json"
+  N="$1" QUIET_S=5 STEP_S=60 GAP_S=0 K6_GCTRACE=true P99_MAX_MS=10 STUB_BODY="$WORK/body.json"
   jq -nc --argjson p "$2" '{start_at_s:1700000005, ladder_end_s:(1700000000 + $p - 20), container_started_epoch_s:[], agg_rates:[1000,2000]}' \
     > "$WORK/main-meta.json"
   for ((i = 0; i < $1; i++)); do : > "$WORK/main-p$i.log"; done
@@ -282,6 +288,8 @@ write_tail_files 2>"$T/tf-err"
 check "a 1.2 MB matrix: every series is read, no query failed, no warning" "39992|[]|0" \
   "$(jq -r '"\(.k6_timeseries.rows)|\(.k6_timeseries.failed_queries | tojson)"' "$WORK/tail-instrument.json" 2>/dev/null)|$(grep -c WARNING "$T/tf-err" || true)"
 check "  ... and the result assembles with it" "true|39992" "$(assembled | jq -r '"\(.valid)|\(.tail_instrumentation.k6_timeseries.rows)"')"
+check "  ... the status names the bound over_bound counts against; the series is queried, so no row lacks it" "10|12|0" \
+  "$(jq -r '.k6_timeseries.over_bound_ms' "$WORK/tail-instrument.json")|$(awk -F, '{print NF}' "$WORK/main-k6-timeseries.csv" | sort -u)|$(awk -F, 'NR > 1 && $12 == ""' "$WORK/main-k6-timeseries.csv" | wc -l | tr -d ' ')"
 tail_case 2 50
 STUB_VUS_FAIL=1 write_tail_files 2>/dev/null
 check "a failed query is null and named; the others are read" '["vus"]|98' \
@@ -357,6 +365,193 @@ else
   check "older bundle: progress-line fallback finds the VU spike inside its own GC" "yes|yes" \
     "$(has 'series from progress lines' "$OUT3")|$(has 'main-p0 @\+5\.0s \[vus\] vus 90 .*OWN-GC' "$OUT3")"
 fi
+
+echo "--- 8. GC-masked figure: quiet seconds and their windows"
+# Rows of a perf-xl run's 96k-144k rungs, trimmed from its work bundle (4 processes, settle 3 s, push 1 s).
+# Named .csv.txt because *.csv is gitignored.
+FX="$REPO_ROOT/.buildkite/scripts/test/fixtures/rw-gc-masked-611"
+MR="$(k6_gc_masked_rungs "$FX/main-k6-timeseries.csv.txt" "$FX/main-k6-gc.csv.txt" 4 3 1)"
+mr() { jq -c --argjson r "$1" ".rungs[] | select(.rung_offered_rps == \$r) | $2" <<<"$MR"; }
+check "every process has GC cycles; seven rungs" "4|7" "$(jq -r '"\(.gc_procs)|\(.rungs | length)"' <<<"$MR")"
+check "104k: 11 measured seconds from settle + one push, 2 of them around a GC cycle" \
+  '{"measured":11,"quiet":9,"gc":2,"incomplete":0}' "$(mr 104000 .seconds)"
+check "104k: the quiet seconds as windows [a, b), split at the GC seconds" \
+  "[[1790946899,1790946904],[1790946906,1790946910]]" "$(mr 104000 .quiet_windows)"
+check "104k: requests and over-5 ms summed over the quiet rows of every process" "934734|218.7" "$(mr 104000 '"\(.rows.requests)|\(.rows.over_5ms)"' | tr -d '"')"
+check "136k and 144k: three quiet seconds each" "3|3" "$(mr 136000 .seconds.quiet)|$(mr 144000 .seconds.quiet)"
+check "144k: the quiet seconds still hold a tail (17,666 of 433,847 over 5 ms)" "433847|17665.6" "$(mr 144000 '"\(.rows.requests)|\(.rows.over_5ms)"' | tr -d '"')"
+check "a bundle from before the over_bound column: null, never 0" "null" "$(mr 104000 .rows.over_bound)"
+# Synthetic: one rung of 10 s from 1000 (settle 3, push 1: rows 1004-1009), two processes.
+mk_ts() { # skip "proc:ts ..." blank "proc:ts ..." [blank-over-5ms "proc:ts ..."] -> rows of 100 requests, 1 over 5 ms, 0.5 over the bound
+  echo "$K6_TS_CSV_HEADER"
+  for p in 0 1; do for t in $(seq 1000 1011); do
+    case " $1 " in *" $p:$t "*) continue ;; esac
+    rate=500; tin=$((t - 1000)); [ "$t" -ge 1010 ] && { rate=""; tin=""; }
+    rq=100; case " $2 " in *" $p:$t "*) rq="" ;; esac
+    o5=1.0; case " ${3:-} " in *" $p:$t "*) o5="" ;; esac
+    echo "$t,main-p$p,$rate,$tin,$rq,$o5,100,0,5,0,0.0,0.5"
+  done; done
+}
+gc_rows() { echo "$K6_GC_CSV_HEADER"; printf '%s\n' "$@"; }
+mk_ts "" "" > "$T/m-ts.csv"
+gc_rows "main-p0,1,900.0,0.1,5,0.1,0,0,0,1,1,1,2" "main-p1,1,1006.4,0.1,200,0.1,0,0,0,1,1,1,2" > "$T/m-gc.csv"
+M1="$(k6_gc_masked_rungs "$T/m-ts.csv" "$T/m-gc.csv" 2 3 1)"
+check "the settle and the first push interval after it are never measured" "6" "$(jq '.rungs[0].seconds.measured' <<<"$M1")"
+check "one process's cycle in second 1006 masks that second and the next for every process" \
+  '{"measured":6,"quiet":4,"gc":2,"incomplete":0}|[[1004,1006],[1008,1010]]' "$(jq -c '.rungs[0].seconds' <<<"$M1")|$(jq -c '.rungs[0].quiet_windows' <<<"$M1")"
+check "quiet rows of both processes are summed, over_bound included" "800|8.0|4.0" "$(jq -r '.rungs[0].rows | "\(.requests)|\(.over_5ms)|\(.over_bound)"' <<<"$M1")"
+gc_rows "main-p0,1,900.0,0.1,5,0.1,0,0,0,1,1,1,2" "main-p1,1,1005.6,0.1,399.7,0.1,0,0,0,1,1,1,2" > "$T/m-gc.csv"
+check "a cycle that ends 0.1 ms before a second starts masks that second and the next, not the one after" "[[1004,1005],[1007,1010]]" \
+  "$(k6_gc_masked_rungs "$T/m-ts.csv" "$T/m-gc.csv" 2 3 1 | jq -c '.rungs[0].quiet_windows')"
+gc_rows "main-p0,1,900.0,0.1,5,0.1,0,0,0,1,1,1,2" "main-p1,1,1005.2,300,400,300.1,0,0,0,1,1,1,2" > "$T/m-gc.csv"
+check "a cycle runs from its start to the end of mark termination (both stop-the-world phases count)" "[[1004,1005],[1008,1010]]" \
+  "$(k6_gc_masked_rungs "$T/m-ts.csv" "$T/m-gc.csv" 2 3 1 | jq -c '.rungs[0].quiet_windows')"
+check "a push interval of 2 s masks the two seconds after a cycle's last, and measures from settle + 2" "[[1009,1010]]" \
+  "$(k6_gc_masked_rungs "$T/m-ts.csv" "$T/m-gc.csv" 2 3 2 | jq -c '.rungs[0].quiet_windows')"
+gc_rows "main-p0,1,900.0,0.1,5,0.1,0,0,0,1,1,1,2" "main-p1,1,901.0,0.1,5,0.1,0,0,0,1,1,1,2" > "$T/m-gc.csv"
+mk_ts "1:1005" "0:1007" > "$T/m-ts.csv"
+M2="$(k6_gc_masked_rungs "$T/m-ts.csv" "$T/m-gc.csv" 2 3 1)"
+check "a second missing one process's row, or with a null count, is incomplete and never quiet" \
+  '{"measured":6,"quiet":4,"gc":0,"incomplete":2}|[[1004,1005],[1006,1007],[1008,1010]]' "$(jq -c '.rungs[0].seconds' <<<"$M2")|$(jq -c '.rungs[0].quiet_windows' <<<"$M2")"
+mk_ts "" "" "0:1008" > "$T/m-ts.csv"
+check "a second with a null over-5 ms count is incomplete too" '{"measured":6,"quiet":5,"gc":0,"incomplete":1}|[[1004,1008],[1009,1010]]' \
+  "$(k6_gc_masked_rungs "$T/m-ts.csv" "$T/m-gc.csv" 2 3 1 | jq -r '.rungs[0] | "\(.seconds | tojson)|\(.quiet_windows | tojson)"')"
+gc_rows "main-p0,1,900.0,0.1,5,0.1,0,0,0,1,1,1,2" > "$T/m-gc.csv"
+check "gc_procs counts the processes with a cycle (the harness needs all of them)" "1" "$(k6_gc_masked_rungs "$T/m-ts.csv" "$T/m-gc.csv" 2 3 1 | jq .gc_procs)"
+check "a missing file: no rungs, no process, exit 0" '{"gc_procs":0,"rungs":[]}|0' "$(k6_gc_masked_rungs "$T/m-ts.csv" "$T/nope.csv" 2 3 1)|$?"
+check "the PromQL over two windows: cumulative at each end less cumulative at each start, summed" \
+  '(sum(H{a="b"} @ 20) - sum(H{a="b"} @ 10)) + (sum(H{a="b"} @ 45) - sum(H{a="b"} @ 40))' "$(k6_gc_masked_expr 'H{a="b"}' '[[10,20],[40,45]]')"
+
+echo "--- 8b. GC-masked figure in the harness (stub Prometheus; the p99 answers are synthetic, the seconds are the run's)"
+for f in headline_for gc_masked_query gc_masked_unavailable build_gc_masked gc_masked_result; do
+  src="$(awk "/^$f\\(\\) \\{/,/^}/" "$HARNESS")"
+  if [ -n "$src" ]; then eval "$src"; else bad "the harness defines $f()"; fi
+done
+BODY="$(declare -f build_gc_masked gc_masked_query)"
+check "its queries never go through promq, promv or a soft step (those feed validity gates)" "no" "$(has '(^|[^_a-z])(promq|promv|soft|soft_capture|note_step_failure) ' "$BODY")"
+prom_url() { echo http://stub; }
+# One masked p99 (ms) per per-process rate; counts and shares are constants.
+curl() {
+  local q="" a r
+  for a in "$@"; do case "$a" in query=*) q="${a#query=}" ;; esac; done
+  echo "$q" >> "$T/gm-queries.txt"
+  [ -z "${STUB_GM_FAIL:-}" ] || return 22
+  r="$(sed -E 's/.*rate="([0-9]+)".*/\1/' <<<"$q")"
+  case "$q" in
+    histogram_count*) a=1000 ;;
+    "histogram_quantile(0.99,"*) case "$r" in 125|250|500|1000|2000|4000|6000|8000|9000|1[0-8]000|20000) a=0.0004 ;;
+                                   24000) a=0.0005 ;; 26000) a="${STUB_GM_P99_104K:-0.0006}" ;; 28000) a=0.0029 ;; 30000) a=0.0031 ;;
+                                   32000) a=0.0027 ;; 34000) a="${STUB_GM_P99_136K:-0.0048}" ;; 36000) a=0.0142 ;; *) a=NaN ;; esac ;;
+    "histogram_quantile(0.999,"*) a=0.02 ;;
+    *) a=0.001 ;;
+  esac
+  [[ "$q" == *"* 1000" ]] && [[ "$a" =~ ^[0-9.]+$ ]] && a="$(awk -v v="$a" 'BEGIN { print v * 1000 }')"
+  printf '{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1,"%s"]}]}}\n' "$a"
+}
+# shellcheck disable=SC2034  # read by the harness functions eval'd above
+gm_env() { # the globals build_gc_masked reads, over the fixture
+  WORK="$T/gm"; rm -rf "$WORK"; mkdir -p "$WORK"; cp "$FX/main-k6-gc.csv.txt" "$WORK/main-k6-gc.csv"
+  # The fixture holds the 96k-144k rows; the 16 rungs below get GC-free synthetic rows at their ladder times.
+  { cat "$FX/main-k6-timeseries.csv.txt"
+    jq -r '. as $m | range(16) as $k | range(15) as $t | range(4) as $p
+      | "\($m.start_at_s + $k * ($m.step_s + $m.gap_s) + $t),main-p\($p),\($m.agg_rates[$k]),\($t),100,0.0,100,0,5,0,0.0"' "$FX/main-meta.json"
+  } > "$WORK/main-k6-timeseries.csv"
+  TAIL_INSTRUMENT=true K6_GCTRACE=true N=4 SETTLE_S=3 PUSH_S=1 P99_MAX_MS=10 GC_MASK_MIN_QUIET_S=3 KEEP=0.95 NOW_ISO=x
+  MAIN_META="$FX/main-meta.json" FIGURES_JQ="$REPO_ROOT/.buildkite/scripts/steps/lib/perf-website-figures.jq"
+  SYNTH="$(cat "$FX/synth.json")"; HEADLINE="$(headline_for "$SYNTH")"
+  PROM_FAILURES="$T/gm-prom-failures.txt"; : > "$PROM_FAILURES"; : > "$T/gm-queries.txt"
+}
+gm() { jq -r "$1" <<<"$GM"; }
+gm_env
+check "  (fixture: the run's own ceiling is 104k, its 112k p99 over the 10 ms bound)" "104000|17.631" \
+  "$(jq -r .healthy_ceiling_rps <<<"$HEADLINE")|$(jq -r '.sweep.points[] | select(.offered_rps == 112000) | .p99_ms' <<<"$SYNTH")"
+GM="$(build_gc_masked)"
+check "available, report-only, with the bound, the minimum and where the measured seconds start" "true|true|10|3|4" \
+  "$(gm '"\(.available)|\(.report_only)|\(.p99_max_ms)|\(.min_quiet_s)|\(.measured_from_s)"')"
+check "the result states its method and its error" "yes|yes" \
+  "$(gm '.method | test("union of quiet seconds") and test("histogram_quantile")' | sed 's/true/yes/')|$(gm '.error | test("bucket") and test("push") and test("sample of the rung")' | sed 's/true/yes/')"
+check "one entry per rung of the ladder, in order" "25|500|160000" "$(gm '"\(.rungs | length)|\(.rungs[0].offered_rps)|\(.rungs[-1].offered_rps)"')"
+check "136k: seconds, requests, shares and both quantiles over the quiet seconds, beside the unmasked p99" \
+  '{"measured":11,"quiet":3,"gc":8,"incomplete":0}|1000|0.001|0.001|4.8|20|41.868|null' \
+  "$(gm '.rungs[] | select(.offered_rps == 136000) | "\(.seconds | tojson)|\(.requests)|\(.over_5ms_frac)|\(.over_bound_frac)|\(.p99_ms)|\(.p999_ms)|\(.unmasked_p99_ms)|\(.reason)"')"
+check "136k: the same seconds from the CSV rows (over the bound unknown in this bundle)" "404706|0.00921|null" \
+  "$(gm '.rungs[] | select(.offered_rps == 136000) | .rows | "\(.requests)|\(.over_5ms_frac)|\(.over_bound_frac)"')"
+H136='k6_http_req_duration_seconds{proc=~"main-p[0-9]+",rate="34000"}'
+check "136k: the p99 query reads this rung's histograms over its one quiet window" \
+  "histogram_quantile(0.99, (sum($H136 @ 1790946986) - sum($H136 @ 1790946983))) * 1000" "$(grep -F 'histogram_quantile(0.99,' "$T/gm-queries.txt" | grep -F 'rate="34000"')"
+check "the over-the-bound share is asked at the bound in seconds" "yes" "$(has 'histogram_fraction\(0, 0\.010000, ' "$(cat "$T/gm-queries.txt")")"
+check "the ceiling by the same rule on the masked p99: 136k, the first rung over the bound being 144k" "136000|4.8|10|104000" \
+  "$(gm '.healthy_ceiling | "\(.rps)|\(.p99_ms)|\(.p99_max_ms)|\(.unmasked_rps)"')"
+check "a rung with no row in the series has no figure, a reason, and is listed as failing the bound" "null|no row of this rung in main-k6-timeseries.csv|yes" \
+  "$(gm '.rungs[] | select(.offered_rps == 152000) | "\(.p99_ms)|\(.reason)"')|$(gm '.healthy_ceiling.no_masked_figure_at | index(152000) != null' | sed 's/true/yes/')"
+check "  ... every such rung is listed (the two above the fixture)" "[152000,160000]" "$(gm '.healthy_ceiling.no_masked_figure_at | tojson')"
+gm_env; STUB_GM_P99_104K=NaN; GM="$(build_gc_masked)"; unset STUB_GM_P99_104K
+check "a rung without a masked figure fails the bound even where its unmasked p99 (9.493 ms at 104k) is inside it" "96000|[104000,152000,160000]" \
+  "$(gm '.healthy_ceiling.rps')|$(gm '.healthy_ceiling.no_masked_figure_at | tojson')"
+gm_env
+# shellcheck disable=SC2034
+GC_MASK_MIN_QUIET_S=4; GM="$(build_gc_masked)"
+check "under the minimum of quiet seconds: no figure, the reason says how many, and no query is sent" \
+  "null|null|3 quiet second(s) of 11, under the minimum of 4|0" \
+  "$(gm '.rungs[] | select(.offered_rps == 136000) | "\(.p99_ms)|\(.requests)|\(.reason)"')|$(grep -c 'rate="34000"' "$T/gm-queries.txt" || true)"
+check "  ... its CSV row sums stay, labelled as rows" "404706" "$(gm '.rungs[] | select(.offered_rps == 136000) | .rows.requests')"
+check "  ... and the ceiling stops under it, the rung counting as over the bound" "128000|2.7|yes" \
+  "$(gm '.healthy_ceiling | "\(.rps)|\(.p99_ms)"')|$(gm '.healthy_ceiling.no_masked_figure_at | index(136000) != null' | sed 's/true/yes/')"
+gm_env; STUB_GM_P99_136K=0.0101; GM="$(build_gc_masked)"; unset STUB_GM_P99_136K
+check "a masked p99 over the bound fails its rung: the ceiling is the rung below" "128000|10.1" \
+  "$(gm '.healthy_ceiling.rps')|$(gm '.rungs[] | select(.offered_rps == 136000) | .p99_ms')"
+gm_env; STUB_GM_P99_136K=NaN; GM="$(build_gc_masked)"; unset STUB_GM_P99_136K
+check "a NaN quantile is no figure, with a reason" "null|Prometheus returned no histogram for the quiet seconds" \
+  "$(gm '.rungs[] | select(.offered_rps == 136000) | "\(.p99_ms)|\(.reason)"')"
+gm_env; STUB_GM_P99_136K=+Inf; GM="$(build_gc_masked)"; unset STUB_GM_P99_136K
+check "an answer that is not a finite number costs that rung its figure, not the whole result" "true|null|128000|2.9" \
+  "$(gm '"\(.available)|\(.rungs[] | select(.offered_rps == 136000) | .p99_ms)|\(.healthy_ceiling.rps)"')|$(gm '.rungs[] | select(.offered_rps == 112000) | .p99_ms')"
+gm_env; STUB_GM_FAIL=1; GM="$(build_gc_masked)"; unset STUB_GM_FAIL
+check "Prometheus down: every rung null with a reason, no masked ceiling, the unmasked one beside it, and no gate hears of it" \
+  "true|0|25|null|104000|0" \
+  "$(gm '"\(.available)|\([.rungs[] | select(.p99_ms != null)] | length)|\(.healthy_ceiling.no_masked_figure_at | length)|\(.healthy_ceiling.rps)|\(.healthy_ceiling.unmasked_rps)"')|$(grep -c . "$PROM_FAILURES" || true)"
+gm_env
+# shellcheck disable=SC2034
+K6_GCTRACE=false; GM="$(build_gc_masked)"
+check "no gctrace: unavailable with the reason, no rung, no ceiling" "false|yes|0|null" \
+  "$(gm '"\(.available)"')|$(has 'PERF_RW_K6_GCTRACE=false' "$(gm .reason)")|$(gm '.rungs | length')|$(gm '.healthy_ceiling')"
+gm_env
+# shellcheck disable=SC2034
+TAIL_INSTRUMENT=false; GM="$(build_gc_masked)"
+check "no tail instrumentation: unavailable with the reason" "false|yes" "$(gm .available)|$(has 'PERF_RW_TAIL_INSTRUMENT=false' "$(gm .reason)")"
+gm_env; grep -v '^main-p2,' "$FX/main-k6-gc.csv.txt" > "$WORK/main-k6-gc.csv"; GM="$(build_gc_masked)"
+check "one process without GC cycles (no gctrace or start time): unavailable, never read as quiet" "false|yes|0" \
+  "$(gm .available)|$(has 'GC cycles for 3 of 4 k6 processes' "$(gm .reason)")|$(grep -c . "$T/gm-queries.txt" || true)"
+gm_env; echo "$K6_TS_CSV_HEADER" > "$WORK/main-k6-timeseries.csv"; GM="$(build_gc_masked)"
+check "no per-second series: unavailable with the reason" "false|yes" "$(gm .available)|$(has 'no row inside a rung' "$(gm .reason)")"
+gm_env; rm "$WORK/main-k6-gc.csv"; GM="$(build_gc_masked)"
+check "no GC file at all: unavailable, exit 0" "false|0" "$(gm .available)|$?"
+gm_env; GC_MASKED="$(build_gc_masked)"
+check "a valid run carries the ceiling" "136000|null" "$(gc_masked_result true | jq -r '"\(.healthy_ceiling.rps)|\(.healthy_ceiling_if_valid)"')"
+check "an invalid run states no ceiling; the computed one stays for diagnosis" "null|136000" \
+  "$(gc_masked_result false | jq -r '"\(.healthy_ceiling)|\(.healthy_ceiling_if_valid.rps)"')"
+# shellcheck disable=SC2034
+GC_MASKED="$(gc_masked_unavailable why)"
+check "an unavailable figure passes through unchanged on an invalid run" '{"available":false,"reason":"why","report_only":true,"rungs":[],"healthy_ceiling":null}' "$(gc_masked_result false)"
+unset -f curl prom_url headline_for gc_masked_query gc_masked_unavailable build_gc_masked gc_masked_result
+check "the result carries it as .gc_masked, shaped by the run's validity" "yes|yes" \
+  "$(has '^      gc_masked: \$gcmasked,$' "$H")|$(awk '/^GC_MASKED_OUT="\$\(gc_masked_result "\$\(jq -r .\.valid. <<<"\$VALIDITY"\)" 2>\/dev\/null\)" \|\| GC_MASKED_OUT=""$/ { a = 1 } /--argjson gcmasked "\$GC_MASKED_OUT"/ && a { print "yes"; exit }' "$HARNESS")"
+check "a shaped figure that is not one JSON object reaches the result as null, never an aborted assembly" "yes" \
+  "$(has '^jq -e .type == "object". >/dev/null 2>&1 <<<"\$GC_MASKED_OUT" \|\| GC_MASKED_OUT=null$' "$H")"
+check "a figure that cannot be assembled becomes an unavailable one, never an abort" "yes" \
+  "$(awk '/^GC_MASKED="\$\( \( build_gc_masked \) 2>\/dev\/null \)" \|\| GC_MASKED=""$/ { a = NR } /GC_MASKED="\$\(gc_masked_unavailable / && a && NR <= a + 4 { print "yes"; exit }' "$HARNESS")"
+VBLOCK="$(awk '/^VALIDITY="\$\(jq -nc/,/^     reasons:/' "$HARNESS")"
+check "report-only: the validity checks never read it" "yes|no" "$(has 'rw_assembly_steps_ok' "$VBLOCK")|$(has '[gG][cC]_?[mM][aA][sS][kK]' "$VBLOCK")"
+check "report-only: the headline is still computed from the unmasked run" "yes" "$(has '^headline_of\(\) \{ headline_for "\$SYNTH"; \}$' "$H")"
+STEPS="$REPO_ROOT/.buildkite/scripts/steps"
+check "report-only: no compare, publish or run step reads .gc_masked" "" \
+  "$(grep -l 'gc_masked' "$STEPS"/*.sh "$STEPS"/lib/*.jq "$STEPS"/lib/perf-percore.sh 2>/dev/null | tr '\n' ' ')"
+for bad_env in PERF_RW_GC_MASK_MIN_QUIET_S=0 PERF_RW_GC_MASK_MIN_QUIET_S=2.5 PERF_RW_GC_MASK_MIN_QUIET_S=some; do
+  run_h PERF_RW_TEST_RESOLVE_ONLY=true PERF_RW_K6_GOMEMLIMIT=off "$bad_env"
+  check "rejected at startup: $bad_env" "2" "$RC"
+done
+run_h PERF_RW_TEST_RESOLVE_ONLY=true PERF_RW_K6_GOMEMLIMIT=off PERF_RW_GC_MASK_MIN_QUIET_S=5
+check "accepted: PERF_RW_GC_MASK_MIN_QUIET_S=5" "0" "$RC"
 
 echo
 if [ "$FAILS" -gt 0 ]; then echo ":x: $FAILS check(s) failed" >&2; exit 1; fi

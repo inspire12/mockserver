@@ -146,6 +146,9 @@ P99_MAX_MS="${PERF_RW_P99_MAX_MS:-10}"
 if ! [[ "$P99_MAX_MS" =~ ^[0-9]+(\.[0-9]+)?$ ]] || ! awk -v v="$P99_MAX_MS" 'BEGIN{exit !(v+0 > 0)}'; then
   echo ":x: PERF_RW_P99_MAX_MS='$P99_MAX_MS' must be a number of milliseconds above 0" >&2; exit 2
 fi
+# Report-only GC-masked figure (.gc_masked): a rung with fewer quiet seconds than this states no figure.
+GC_MASK_MIN_QUIET_S="${PERF_RW_GC_MASK_MIN_QUIET_S:-3}"
+[[ "$GC_MASK_MIN_QUIET_S" =~ ^[1-9][0-9]{0,3}$ ]] || { echo ":x: PERF_RW_GC_MASK_MIN_QUIET_S='$GC_MASK_MIN_QUIET_S' must be a whole number of seconds from 1" >&2; exit 2; }
 
 # Rig-validity tunables — the same names and defaults perf-test-run.sh passes to
 # derive_saturation, so both methods judge a rung by one rule.
@@ -1032,15 +1035,17 @@ soft merge_main merge_phase main "$WINDOW_MODE" main-merged
 # --- tail attribution files (report-only, item 44; never a gate) ------------------
 # main-k6-gc.csv (every gctrace cycle), main-k6-timeseries.csv (per process and second, from Prometheus
 # range queries over the ladder) and tail-instrument.json (what each holds, or why it is empty).
-k6_prom_ranges() { # from_s to_s out_file -> {reqs, over_5ms, iterations, dropped, vus: matrix | null, failed: [...]}
+k6_prom_ranges() { # from_s to_s out_file -> {reqs, over_5ms, over_bound, iterations, dropped, vus: matrix | null, failed: [...]}
   # Matrices travel through files, never arguments: one ladder's matrix passes Linux's 128 KiB per-argument limit.
-  local sel='proc=~"main-p[0-9]+"' h='k6_http_req_duration_seconds{proc=~"main-p[0-9]+"}' name expr r="$3.query"
+  local sel='proc=~"main-p[0-9]+"' h='k6_http_req_duration_seconds{proc=~"main-p[0-9]+"}' name expr r="$3.query" bound_s
+  bound_s="$(awk -v ms="$P99_MAX_MS" 'BEGIN { printf "%.6f", ms / 1000 }')"
   echo '{"failed":[]}' > "$3"
-  for name in reqs over_5ms iterations dropped vus; do
+  for name in reqs over_5ms over_bound iterations dropped vus; do
     case "$name" in
       reqs) expr="sum by (proc) (k6_http_reqs_total{$sel})" ;;
       # A histogram with no observations has a NaN fraction; the >= 0 filter drops it, as it adds nothing.
       over_5ms) expr="sum by (proc) (histogram_count($h) * (1 - (histogram_fraction(0, 0.005, $h) >= 0)))" ;;
+      over_bound) expr="sum by (proc) (histogram_count($h) * (1 - (histogram_fraction(0, $bound_s, $h) >= 0)))" ;;
       iterations) expr="sum by (proc) (k6_iterations_total{$sel})" ;;
       dropped) expr="sum by (proc) (k6_dropped_iterations_total{$sel})" ;;
       vus) expr="max by (proc) (k6_vus{$sel})" ;;
@@ -1070,16 +1075,16 @@ build_tail_files() {
   k6_timeseries_csv "$WORK/main-k6-ranges.json" "$WORK/main-k6-gc.csv" "$(jq -r '.start_at_s' "$meta")" \
     "$STEP_S" "$GAP_S" "$(jq -r '.agg_rates | join(",")' "$meta")" > "$WORK/main-k6-timeseries.csv"
   status="$(jq -nc --slurpfile q "$WORK/main-k6-ranges.json" --arg reason "$reason" --argjson from "$from" --argjson to "$to" \
-    --arg gctrace "$K6_GCTRACE" --argjson cycles "$(( $(wc -l < "$WORK/main-k6-gc.csv") - 1 ))" \
+    --arg gctrace "$K6_GCTRACE" --argjson cycles "$(( $(wc -l < "$WORK/main-k6-gc.csv") - 1 ))" --arg bound "$P99_MAX_MS" \
     --argjson rows "$(( $(wc -l < "$WORK/main-k6-timeseries.csv") - 1 ))" '
     ($q[0] // {failed:["all"]}) as $r
     | {k6_gctrace:{file:"main-k6-gc.csv", cycles:$cycles,
                  reason:(if $gctrace != "true" then "PERF_RW_K6_GCTRACE=false" elif $cycles == 0 then "no gctrace line in any main-p*.log" else null end)},
-     k6_timeseries:{file:"main-k6-timeseries.csv", rows:$rows, from_s:$from, to_s:$to, step_s:1,
+     k6_timeseries:{file:"main-k6-timeseries.csv", rows:$rows, from_s:$from, to_s:$to, step_s:1, over_bound_ms:($bound | tonumber),
                     failed_queries:$r.failed,
                     empty_series:[ $r | to_entries[] | select(.key != "failed" and (.value | type == "array" and length == 0)) | .key ],
                     reason:(if $reason != "" then $reason elif $rows == 0 then "no Prometheus series for main-p*" else null end),
-                    note:"row ts covers [ts, ts + 1): counters are the difference of cumulative values at ts and ts + 1 (an empty series, as dropped_iterations until one drops, reads 0), vus the value at ts + 1; empty = null"}}')"
+                    note:"row ts covers [ts, ts + 1): counters are the difference of cumulative values at ts and ts + 1 (an empty series, as dropped_iterations until one drops, reads 0), vus the value at ts + 1; over_bound counts requests over over_bound_ms, the healthy ceiling p99 bound; empty = null"}}')"
   jq -c --argjson s "$status" '$s + {host_kernel: .}' "$WORK/host-kernel-status.json" 2>/dev/null > "$WORK/tail-instrument.json" \
     || jq -c '. + {host_kernel: null}' <<<"$status" > "$WORK/tail-instrument.json"
   rm -f "$WORK/main-k6-ranges.json"
@@ -1191,9 +1196,106 @@ SYNTH="$(jq -nc --slurpfile s "$WORK/sweep.json" --argjson sat "$SATURATION_JSON
   {schema_version:2, timestamp_utc:$ts, config:{k6_runtime:$k6rt}, agent:{server_cpus:$scpus}, sweep:$s[0], saturation:$sat}')"
 # This arm alone adds the p99 bound (P99_MAX_MS, validated at startup); every other caller of
 # the filter stays p50-only (docs/code/performance-measurement.md, "The multi-k6 arm's p99 bound").
-headline_of() { jq -c --arg now "$NOW_ISO" --argjson lat_mult 3 --argjson keep "$KEEP" --arg fix_date "2026-09-16" \
-  --argjson p99_max_ms "$P99_MAX_MS" -f "$FIGURES_JQ" <<<"$SYNTH" | jq -c '.headline'; }
+headline_for() { # a SYNTH-shaped run
+  jq -c --arg now "$NOW_ISO" --argjson lat_mult 3 --argjson keep "$KEEP" --arg fix_date "2026-09-16" \
+    --argjson p99_max_ms "$P99_MAX_MS" -f "$FIGURES_JQ" <<<"$1" | jq -c '.headline'
+}
+headline_of() { headline_for "$SYNTH"; }
 soft_capture HEADLINE null headline headline_of
+
+# --- GC-masked figure (report-only, item 44; never a gate) ------------------------
+# .gc_masked: per rung, the requests pushed in seconds where no k6 process was in or just after a GC
+# cycle (lib/perf-tail-instrument.sh), with p99 from the native histograms over those seconds, and the
+# ceiling the rule above gives on that p99. Its queries bypass promq, so a failure here is a null
+# with a reason and never reaches rw_prometheus_queries_ok. Docs: performance-measurement.md, "The GC-masked figure".
+gc_masked_query() { # expr -> a finite number, or null
+  local v
+  v="$(curl -sf --max-time 30 --data-urlencode "query=$1" "$(prom_url)/api/v1/query" 2>/dev/null \
+    | jq -r '.data.result | if length == 1 then .[0].value[1] else "null" end' 2>/dev/null)" || v=null
+  [[ "$v" =~ ^-?[0-9]+(\.[0-9]+)?(e[-+]?[0-9]+)?$ ]] || v=null
+  echo "$v"
+}
+gc_masked_unavailable() { # reason
+  jq -nc --arg r "$1" '{available:false, reason:$r, report_only:true, rungs:[], healthy_ceiling:null}'
+}
+build_gc_masked() {
+  local base rungs="[]" k count rate nominal entry windows quiet expr vals q synth head bound_s
+  [ "$TAIL_INSTRUMENT" = true ] || { gc_masked_unavailable "PERF_RW_TAIL_INSTRUMENT=false: no per-second series"; return 0; }
+  [ "$K6_GCTRACE" = true ] || { gc_masked_unavailable "PERF_RW_K6_GCTRACE=false: no GC cycle times, so no second can be called quiet"; return 0; }
+  base="$(k6_gc_masked_rungs "$WORK/main-k6-timeseries.csv" "$WORK/main-k6-gc.csv" "$N" "$SETTLE_S" "$PUSH_S")"
+  if [ "$(jq -r '.gc_procs' <<<"$base")" != "$N" ]; then
+    gc_masked_unavailable "main-k6-gc.csv has GC cycles for $(jq -r '.gc_procs' <<<"$base") of $N k6 processes (a missing gctrace or container start time), so no second can be called quiet"; return 0
+  fi
+  if [ "$(jq -r '.rungs | length' <<<"$base")" = 0 ]; then
+    gc_masked_unavailable "main-k6-timeseries.csv has no row inside a rung's measured window (the Prometheus series are missing)"; return 0
+  fi
+  bound_s="$(awk -v ms="$P99_MAX_MS" 'BEGIN { printf "%.6f", ms / 1000 }')"
+  count="$(jq -r '.agg_rates | length' "$MAIN_META")"
+  for ((k=0;k<count;k++)); do
+    nominal="$(jq -r ".agg_rates[$k]" "$MAIN_META")"; rate="$(jq -r ".per_process_rates[$k]" "$MAIN_META")"
+    entry="$(jq -c --argjson r "$nominal" '[.rungs[] | select(.rung_offered_rps == $r)] | first // null' <<<"$base")"
+    vals='{"requests":null,"over_5ms_frac":null,"over_bound_frac":null,"p99_ms":null,"p999_ms":null}'
+    quiet="$(jq -r '.seconds.quiet // 0' <<<"$entry")"
+    if [ "$entry" != null ] && [ "$quiet" -ge "$GC_MASK_MIN_QUIET_S" ]; then
+      windows="$(jq -c '.quiet_windows' <<<"$entry")"
+      expr="$(k6_gc_masked_expr "k6_http_req_duration_seconds{proc=~\"main-p[0-9]+\",rate=\"$rate\"}" "$windows")"
+      for q in "requests|histogram_count($expr)" "over_5ms_frac|1 - histogram_fraction(0, 0.005, $expr)" \
+               "over_bound_frac|1 - histogram_fraction(0, $bound_s, $expr)" \
+               "p99_ms|histogram_quantile(0.99, $expr) * 1000" "p999_ms|histogram_quantile(0.999, $expr) * 1000"; do
+        vals="$(jq -c --arg key "${q%%|*}" --argjson v "$(gc_masked_query "${q#*|}")" '.[$key] = $v' <<<"$vals")"
+      done
+    fi
+    rungs="$(jq -c --argjson e "$entry" --argjson v "$vals" --argjson min "$GC_MASK_MIN_QUIET_S" --argjson nominal "$nominal" \
+      --argjson p "$(jq -c ".sweep.points[$k] // null" <<<"$SYNTH")" '
+      def r5: if . == null then null else ([., 0] | max) * 100000 | round / 100000 end;
+      def r3: if . == null then null else (. * 1000 | round) / 1000 end;
+      def frac($a; $b): if $a == null or $b == null or $b <= 0 then null else ($a / $b) | r5 end;
+      ($e != null and $e.seconds.quiet >= $min) as $enough
+      | ($enough and $v.p99_ms != null and $v.requests != null and $v.requests > 0) as $ok
+      | . + [{offered_rps: ($p.offered_rps // $nominal),
+              seconds: ($e.seconds // {measured:0, quiet:0, gc:0, incomplete:0}),
+              quiet_windows: ($e.quiet_windows // []),
+              requests: (if $ok then $v.requests else null end),
+              over_5ms_frac: (if $ok then $v.over_5ms_frac | r5 else null end),
+              over_bound_frac: (if $ok then $v.over_bound_frac | r5 else null end),
+              p99_ms: (if $ok then $v.p99_ms | r3 else null end),
+              p999_ms: (if $ok then $v.p999_ms | r3 else null end),
+              rows: (if $e == null or $e.seconds.quiet == 0 then null
+                     else {requests: $e.rows.requests, over_5ms_frac: frac($e.rows.over_5ms; $e.rows.requests),
+                           over_bound_frac: frac($e.rows.over_bound; $e.rows.requests)} end),
+              unmasked_p99_ms: ($p.p99_ms // null),
+              reason: (if $ok then null
+                       elif $e == null then "no row of this rung in main-k6-timeseries.csv"
+                       elif $enough | not then "\($e.seconds.quiet) quiet second(s) of \($e.seconds.measured), under the minimum of \($min)"
+                       else "Prometheus returned no histogram for the quiet seconds" end)}]' <<<"$rungs")"
+  done
+  # A rung without a masked figure gets a null p99, which the bounded rule fails.
+  synth="$(jq -c --argjson g "$rungs" '.sweep.points |= [ to_entries[] | .value + {p99_ms: $g[.key].p99_ms} ]' <<<"$SYNTH")"
+  head="$(headline_for "$synth")"
+  jq -nc --argjson g "$rungs" --argjson h "$head" --argjson unmasked "$HEADLINE" --argjson min "$GC_MASK_MIN_QUIET_S" \
+    --argjson settle "$SETTLE_S" --argjson push "$PUSH_S" --arg bound "$P99_MAX_MS" '
+    ($bound | tonumber) as $b
+    | {available: true, reason: null, report_only: true,
+       p99_max_ms: $b, min_quiet_s: $min, measured_from_s: ($settle + $push),
+       method: "per rung, the native histograms of every k6 process over the union of quiet seconds: sum over windows [a, b) of (cumulative at b) - (cumulative at a), then histogram_quantile. A second is quiet when no k6 process has a GC cycle (gctrace: sweep termination to mark termination) overlapping the \($push + 1) s its row can hold requests from; seconds run from settle + one push interval into the rung",
+       error: "a quantile is interpolated in a native-histogram bucket 10% wide (about 5%); a request is counted in the push that carried it, up to \($push) s after it completed, which is why the second after a cycle is masked too; the quiet seconds are a sample of the rung, not all of it; p50, achieved rate and errors in the ceiling rule stay those of the whole rung",
+       rungs: $g,
+       healthy_ceiling: {
+         rps: ($h.healthy_ceiling_rps // null), p99_ms: ($h.healthy_ceiling_p99_ms // null), p99_max_ms: $b,
+         unmasked_rps: ($unmasked.healthy_ceiling_rps // null),
+         no_masked_figure_at: [ $g[] | select(.p99_ms == null) | .offered_rps ],
+         note: "the first-failure rule of .headline with each rung p99 replaced by its masked p99; a rung without a masked figure (listed in no_masked_figure_at) fails the bound, so a missing figure can only lower this ceiling"}}'
+}
+# As the headline: an invalid run states no ceiling; the computed one stays for diagnosis.
+gc_masked_result() { # valid
+  jq -c --arg valid "$1" 'if $valid == "true" or .healthy_ceiling == null then .
+    else . + {healthy_ceiling: null, healthy_ceiling_if_valid: .healthy_ceiling} end' <<<"$GC_MASKED"
+}
+GC_MASKED="$( ( build_gc_masked ) 2>/dev/null )" || GC_MASKED=""
+if ! jq -e 'type == "object"' >/dev/null 2>&1 <<<"$GC_MASKED"; then
+  echo "WARNING: rw-multi-k6: the GC-masked figure could not be assembled (report-only, not a gate)" >&2
+  GC_MASKED="$(gc_masked_unavailable "the GC-masked figure could not be assembled")"
+fi
 
 # --- per-process, CPU and Prometheus cost ---------------------------------------
 cpu_stats() { # csv name from_s to_s -> {mean,max,samples} over [from_s, to_s), as derive_saturation
@@ -1353,6 +1455,8 @@ VALIDITY="$(jq -nc --slurpfile m "$WORK/main-merged.json" --argjson pp "$PER_PRO
      reasons:[ $checks[] | select(.ok|not) | "\(.name): \(.detail)" ]}')"
 
 # --- output -------------------------------------------------------------------------
+GC_MASKED_OUT="$(gc_masked_result "$(jq -r '.valid' <<<"$VALIDITY")" 2>/dev/null)" || GC_MASKED_OUT=""
+jq -e 'type == "object"' >/dev/null 2>&1 <<<"$GC_MASKED_OUT" || GC_MASKED_OUT=null
 jq -n --argjson synth "$SYNTH" --argjson headline "$HEADLINE" --slurpfile m "$WORK/main-merged.json" \
   --argjson validity "$VALIDITY" --argjson cross "$CROSS" --argjson pp "$PER_PROCESS" \
   --argjson sutcpu "$SUT_CPU" --argjson promcpu "$PROM_CPU" --argjson n "$N" --argjson push "$PUSH_S" \
@@ -1365,7 +1469,7 @@ jq -n --argjson synth "$SYNTH" --argjson headline "$HEADLINE" --slurpfile m "$WO
   --arg hook_cut "${PERF_RW_TEST_CUT_FAULT:-}" --arg hook_step "${PERF_RW_TEST_FAIL_STEP:-}" --arg hook_null "${PERF_RW_TEST_NULL_RUNG:-}" --arg hook_zero "${PERF_RW_TEST_ZERO_TAIL:-}" \
   --argjson promwarn "$(head -n 50 "$PROM_WARNINGS" | jq -R . | jq -sc .)" --argjson placement "$(placement_result_json)" \
   --arg rates_source "$RATES_SOURCE" --arg ladder_profile "$LADDER_PROFILE" --argjson ab "$AB_JSON" \
-  --argjson tailinst "$(tail_instrument_json)" '
+  --argjson tailinst "$(tail_instrument_json)" --argjson gcmasked "$GC_MASKED_OUT" '
   ($m[0].points) as $P
   | $synth + {
       rig_valid_peak_achieved_rps: $synth.saturation.rig_valid_peak_achieved_rps,
@@ -1414,6 +1518,7 @@ jq -n --argjson synth "$SYNTH" --argjson headline "$HEADLINE" --slurpfile m "$WO
       k6_gc: {note: "report-only: Go GC CPU (% of one CPU) and cycles per process over each rung steady window, from GODEBUG=gctrace=1", per_process: $k6gc},
       prometheus: {query_warnings: $promwarn},
       tail_instrumentation: $tailinst,
+      gc_masked: $gcmasked,
       cpu: {sut_pct_over_ladder:$sutcpu, prometheus_pct_over_ladder:$promcpu,
             k6_cpu_us_per_request_mean: ([ $pp[] | .cpu_us_per_request | select(. != null) ] | if length == 0 then null else (add / length * 10 | round) / 10 end)},
       cross_check: $cross
@@ -1422,6 +1527,7 @@ cp "$WORK/result.json" "$OUT_FILE"
 RESULT_WRITTEN=1
 
 echo "--- rw-multi-k6: valid=$(jq -r '.valid' "$WORK/result.json") $(jq -r 'if .valid == true then "healthy_ceiling=\(.headline.healthy_ceiling_rps // "null")" else "healthy_ceiling_if_valid=\(.headline_if_valid.healthy_ceiling_rps // "null") (NOT a result: the run is invalid)" end' "$WORK/result.json") rig_valid_peak=$(jq -r '.rig_valid_peak_achieved_rps' "$WORK/result.json") skew_max_ms=$(jq -r '.method.observed_max_start_skew_ms' "$WORK/result.json") k6_us_per_req=$(jq -r '.cpu.k6_cpu_us_per_request_mean' "$WORK/result.json") cross_check_equivalent=$(jq -r '.cross_check.equivalent | if . == null then "n/a" else tostring end' "$WORK/result.json") cross_run_agrees=$(jq -r '.cross_check.cross_run.agrees | if . == null then "n/a" else tostring end' "$WORK/result.json")" >&2
+echo "--- rw-multi-k6 GC-masked (report-only, never the result): $(jq -r '.gc_masked | if .available then (.healthy_ceiling // .healthy_ceiling_if_valid) as $c | "ceiling\(if .healthy_ceiling == null then "_if_valid" else "" end)=\($c.rps // "null") at masked p99 \($c.p99_ms // "null") ms (bound \(.p99_max_ms) ms; unmasked ceiling \($c.unmasked_rps // "null")); no masked figure, so failing the bound, at \($c.no_masked_figure_at | length) rung(s)" else "unavailable: \(.reason)" end' "$WORK/result.json")" >&2
 if [ "$(jq -r '.valid' "$WORK/result.json")" != true ]; then
   echo ":x: remote-write multi-k6 run INVALID:" >&2
   jq -r '.invalid_reasons[] | "    - " + .' "$WORK/result.json" >&2

@@ -503,7 +503,8 @@ Unknown `PERF_RW_TEST_FAIL_STEP`, `PERF_RW_TEST_NULL_RUNG` or `PERF_RW_TEST_CUT_
 `PERF_RW_K6_GOMEMLIMIT` outside Go's syntax (`off`, or bytes with an optional `B`/`KiB`/`MiB`/`GiB`/`TiB`
 suffix), a `PERF_RW_K6_GRACEFUL_STOP` that is not whole `ms` or `s` of at least 1 s, a
 `PERF_RW_K6_VU_CEILING` that is not a whole number above 0, a
-`PERF_RW_TEST_RESOLVE_ONLY` other than empty or `true`, and a `PERF_RW_P99_MAX_MS` that
+`PERF_RW_TEST_RESOLVE_ONLY` other than empty or `true`, a `PERF_RW_GC_MASK_MIN_QUIET_S` that is not
+a whole number from 1, and a `PERF_RW_P99_MAX_MS` that
 is not a positive decimal are rejected at startup with exit 2. A default `GOMEMLIMIT` that cannot be
 derived (Docker reports no memory size) stops the run before any container starts, with an invalid
 result naming it. The first 50 Prometheus query warnings (for example an
@@ -845,7 +846,7 @@ softnet and TCP counters of the SUT's cpus at that second.
 
 | File | One row per | Source |
 |---|---|---|
-| `main-k6-timeseries.csv` | process and second: rung, `reqs`, `over_5ms`, `iterations`, `dropped_iterations`, `vus` (in flight), `gc_cycles_started`, `gc_mark_ms` | Prometheus range queries (1 s step) over the ladder, run once it ends, on the same remote-write series the merge reads |
+| `main-k6-timeseries.csv` | process and second: rung, `reqs`, `over_5ms`, `iterations`, `dropped_iterations`, `vus` (in flight), `gc_cycles_started`, `gc_mark_ms`, `over_bound` (requests over the healthy ceiling's p99 bound, the last column; absent from bundles written before it) | Prometheus range queries (1 s step) over the ladder, run once it ends, on the same remote-write series the merge reads |
 | `main-k6-gc.csv` | Go GC cycle per process: start, the two stop-the-world phases and the concurrent mark (ms), its CPU split, heap sizes and goal | each process's `GODEBUG=gctrace=1` lines (`PERF_RW_K6_GCTRACE`, on by default), placed by its container's start time |
 | `host-kernel-cpu.csv` | sample and cpu of the SUT and of each k6 process (every other cpu summed as `other`): `usr`/`sys`/`soft`/`irq`/`idle` %, NET_RX and NET_TX softirqs, softnet processed, dropped and `time_squeeze` | the host's `/proc/stat`, `/proc/softirqs` and `/proc/net/softnet_stat` |
 | `host-kernel-tcp.csv` | sample and network namespace (`host`, `sut`, `k6_<i>`): `RetransSegs`, `ListenOverflows`, `ListenDrops`, `TCPBacklogDrop`, `TCPTimeouts` and other TCP drop counters | `/proc/<pid>/net/snmp` and `netstat` of each container's process. Each container has its own namespace, so the host's `/proc/net` never counts the SUT's or k6's sockets |
@@ -853,8 +854,8 @@ softnet and TCP counters of the SUT's cpus at that second.
 
 Every row covers `[ts, ts + 1)` in whole epoch seconds. A counter is the difference of k6's
 cumulative value at `ts` and `ts + 1`, so it follows when k6's 1 s pushes landed: a 0 followed by a
-doubled second is aliasing, not a stall. `over_5ms` is interpolated inside the native-histogram bucket
-that holds 5 ms. `vus` is k6's in-flight gauge read once a second, so a burst shorter than a second can
+doubled second is aliasing, not a stall. `over_5ms` and `over_bound` are interpolated inside the
+native-histogram bucket that holds 5 ms or the bound (`.tail_instrumentation.k6_timeseries.over_bound_ms`). `vus` is k6's in-flight gauge read once a second, so a burst shorter than a second can
 fall between readings.
 
 **The host sampler** (`lib/perf-tail-instrument.sh`) starts once the main phase's k6 containers are
@@ -907,6 +908,95 @@ above that reproduces the manual analysis: 14 spikes, 6 inside their own GC agai
 rate, P = 0.0036. `.buildkite/scripts/test/perf-tail-instrument-test.sh` covers the CSV shapes, the
 fail-soft paths, the sampler's lifecycle (stopped, bounded, gone after a failure, SIGTERM or SIGKILL
 of the harness) and the helper on synthetic bundles.
+
+#### The GC-masked figure (item 44)
+
+**Outcome.** On `perf-xl` the tail at the first rung that fails the p99 bound is k6's own Go GC, so
+the arm's ceiling reports when the four k6 processes collected, not what MockServer served. Every
+run's result now carries `.gc_masked`: per rung, the request count, the share over 5 ms and the p99
+(and p99.9) of the requests pushed in seconds with no k6 process in or just after a GC cycle, the
+count of quiet and GC seconds, and the healthy ceiling the same first-failure rule gives on that
+p99. It is **report-only**. It changes no validity check, `.headline`, compare metric or published
+figure, and no step script reads it.
+
+```mermaid
+flowchart LR
+  gc["main-k6-gc.csv\nGC cycles per process"] --> q["quiet seconds per rung\n(k6_gc_masked_rungs)"]
+  ts["main-k6-timeseries.csv\nrows per process and second"] --> q
+  q --> w["quiet windows [a, b)"]
+  w --> pq["PromQL over the windows\ncumulative at b - cumulative at a, summed"]
+  pq --> fig["per rung: requests, over 5 ms,\np99, p99.9"]
+  fig --> rule["perf-website-figures.jq\nwith the masked p99"]
+  rule --> ceil[".gc_masked.healthy_ceiling"]
+```
+
+| Field | Meaning |
+|---|---|
+| `.gc_masked.available`, `.reason` | `false` with a reason when the figure cannot be stated at all: `PERF_RW_TAIL_INSTRUMENT=false`, `PERF_RW_K6_GCTRACE=false`, a k6 process with no GC cycle in `main-k6-gc.csv` (no gctrace line or no container start time), or no per-second series |
+| `.rungs[].seconds` | `measured`, `quiet`, `gc` and `incomplete` seconds of the rung |
+| `.rungs[].quiet_windows` | the quiet seconds as `[a, b)` epoch-second windows, the ones the query read |
+| `.rungs[].requests`, `.over_5ms_frac`, `.over_bound_frac`, `.p99_ms`, `.p999_ms` | from Prometheus, over the quiet windows; all null, with `.reason`, when the rung has fewer than `min_quiet_s` quiet seconds or the query returned nothing |
+| `.rungs[].rows` | the same seconds summed from the CSV rows (`requests`, `over_5ms_frac`, `over_bound_frac`): what a bundle can re-derive offline |
+| `.rungs[].unmasked_p99_ms` | the rung's own p99, for comparison |
+| `.healthy_ceiling` | `rps`, its `p99_ms`, `p99_max_ms` (the bound used), `unmasked_rps` (the run's own ceiling) and `no_masked_figure_at` (the rungs with no masked figure, which fail the bound). On an invalid run it is null and the computed one is `healthy_ceiling_if_valid`, as with `.headline` |
+| `.method`, `.error` | the two paragraphs below, in the result itself |
+
+**Which seconds.** A row of `main-k6-timeseries.csv` at second `ts` holds the pushes that landed in
+`(ts, ts + 1]`, so requests that completed in `(ts - push, ts + 1]`. A second is a **GC second** when
+any k6 process has a cycle overlapping that span, a cycle running from its gctrace start to the end
+of mark termination (sweep termination, concurrent mark, mark termination). With the 1 s push
+interval that is the second a cycle touches and the one after. The mask is across processes: one
+process collecting masks the second for all of them. A second without a complete row from every
+process is `incomplete` and never quiet. Seconds run from settle plus one push interval into the
+rung, so no row holds a settle-window request; with the default 15 s step, 3 s settle and 1 s push
+that is 11 seconds a rung. A rung with fewer than `PERF_RW_GC_MASK_MIN_QUIET_S` (3) quiet seconds
+states no figure, says how many it had, and fails the bound in the ceiling.
+
+**How the p99 is read.** The per-second rows hold counts, not a distribution, so the p99 comes from
+the native histograms in Prometheus while it is still up: for the rung's histogram selector `H`,
+the sum over quiet windows `[a, b)` of `sum(H @ b) - sum(H @ a)`, then `histogram_quantile`,
+`histogram_count` and `histogram_fraction` on that one histogram. These are the same cumulative
+values at the same instants the CSV rows difference, so `.requests` should match `.rows.requests`;
+a gap between them means the histogram and the request counter were pushed apart. The
+queries use their own `curl`, not the harness's `promq`, so a failed one is a null with a reason and
+never reaches `rw_prometheus_queries_ok`.
+
+**The ceiling.** `lib/perf-website-figures.jq` runs again on the same run with each rung's p99
+replaced by its masked p99. A rung with no masked figure gets a null p99, which the bounded rule
+fails, and is listed in `no_masked_figure_at`, so a missing figure can only lower the ceiling. It
+never falls back to the unmasked p99: that comes from other seconds, and can sit below the masked
+one. p50, achieved rate, errors and rig validity stay those of the whole rung.
+
+**What it is not.**
+
+- Not a GC-free measurement. MockServer still served the bursts that follow each k6 pause; only the
+  requests pushed around a cycle are left out. A run with no cycle inside a rung's window is the
+  direct reading.
+- Not the whole rung. The quiet seconds are a sample, as few as three of eleven, and where k6
+  collects more often there are fewer of them. `seconds` says how many.
+- Not independent of the GC regime. A quiet second just after a masked one can still carry a tail
+  that seconds further from a cycle do not, and a run that collects rarely leaves a residue in its
+  GC-free seconds, so the masked ceiling moves with how many seconds are masked.
+- Not exact at the edges. A request is counted in the push that carried it, up to one push interval
+  after it completed, and a push that lands late moves its requests to a later second. A quantile
+  is interpolated inside a native-histogram bucket 10% wide, so it resolves to about 5%, and the
+  share over 5 ms and the p99 can disagree inside one bucket.
+- Not a result. Item 44's count still reads `.headline` and condition (3). Whether the bound should
+  read the masked p99 is a rule change with its own review.
+
+**Offline.** A bundle re-derives the seconds and the row sums, not the p99:
+
+```bash
+. .buildkite/scripts/steps/lib/perf-tail-instrument.sh
+k6_gc_masked_rungs main-k6-timeseries.csv main-k6-gc.csv 4 3 1 | jq -c '.rungs[]'   # processes, settle s, push s
+```
+
+With the `over_bound` column, quiet rows with `over_bound / requests` at or under 1% have a p99
+within the bound. A bundle without it gives a lower bound only: a rung whose quiet seconds hold
+under 1% of requests over 5 ms has a masked p99 under 5 ms. On that reading builds 611 (default
+runtime) and 612 (`PERF_RW_K6_GOGC=off`) give 136k and 128k against unmasked ceilings of 104k and
+112k. `.buildkite/scripts/test/perf-tail-instrument-test.sh` covers the seconds on rows trimmed
+from 611's bundle, the query text, the ceiling, and every unavailable and too-few-seconds path.
 
 ### `forward.js` — forward connection-pool guard
 
