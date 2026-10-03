@@ -177,8 +177,9 @@ for a body of one-byte chunks: about 5.4 GB for a 10 MiB request and 26.8 GB for
 each byte is copied once, plus the whole body again each time half the limit is merged components, which happens
 only at limits below about 2 MiB (1.5× the body for one-byte chunks at 1 MiB). The merged components count as one
 towards the limit, as the single component Netty's consolidation leaves does, so each merge falls on the chunk where
-Netty would have copied the whole body and copies at most that: for any mix of chunk sizes the aggregator never
-copies more, or holds more body bytes, than Netty's (`MergeNewComponentsOnlyNettyDifferentialTest`). Counting each merged component
+Netty would have copied the whole body and copies at most that: for any mix of chunk sizes the merges never copy
+more than Netty's consolidations, and the copies that free mostly unused reads (below) add at most the body again
+to what is copied and one read to what is held (`MergeNewComponentsOnlyNettyDifferentialTest`). Counting each merged component
 instead let the merges drift earlier than Netty's, and a 10 MiB-limit body that turned from one-byte to
 1,000-byte chunks just before Netty's third consolidation was copied 10.3 MB where Netty copied 31 KB. A merge
 releases every chunk it covers, so what is held at once stays within twice the body, the old worst case, plus the
@@ -190,7 +191,11 @@ the reads alive a block copy only adds memory. Measured through the real HTTP/1.
 blocks held up to 2.9× the body at a 10 MiB limit (64 chunks of 1,023 bytes and a 1 KiB chunk, then four times 15
 one-byte chunks and a 1 KiB chunk, repeated), against 1.1× for Netty's aggregator and for merging alone. The
 worst case left is the component heap itself: about 1.2 MB per HTTP/1.1 connection at the 10 MiB
-`maxRequestBodySize` (10,240 components, plus up to 1,023 merged ones, × ~110 B).
+`maxRequestBodySize` (10,240 components, plus up to 1,023 merged ones, × ~110 B). The chunks a body holds from a
+read it uses under half of are merged when it moves on to the next read (see **Read buffers a body pins** below), so
+padding each read with a chunk extension no longer pins it. Where a merge at the limit leaves part of a read's tiny
+chunks unmerged, that part is copied again: a body of one-byte chunks in 64 KiB reads is copied about 1.06 times,
+not once (`Http1ChunkComponentLimitTest`).
 
 **HTTP/2 and HTTP/3 request streams** get a tenth of that limit, never below 1,024
 (`HttpObjectAggregators.streamComponentLimit`: 1,024 at the 10 MiB default, 6,553 at 64 MiB), because one
@@ -239,31 +244,79 @@ of connections, which only `maxInboundConnections` caps (off by default — see 
   production's settings, `Http2MultiplexHandler`, the real stream chain, a client honouring flow control, reads
   sized by Netty's adaptive read allocator, and every read, decoder buffer, block and merge counted, capacity growth
   included; `Http2StreamPeakHeldMeasurement` prints the table on demand):
-  - an upload in 16 KiB frames, copied by nothing, holds 1.5–1.75× its size under every aggregator;
+  - an upload in 16 KiB frames, copied by nothing, holds 1.5–1.75× its size under every aggregator; one whose every
+    fourth frame the flow-control window cuts a byte short holds 1.6–1.7× under Netty's aggregator and 1.4–1.5×
+    under the others, which copy 0.18–0.25× of it (the decoder joins a frame cut by a read into a buffer twice its
+    size, under half used when that frame is the short one, so it is copied: see **Read buffers a body pins**);
   - across 70 combinations of 19 uploads (one and four streams of 1-, 100- and 1,023-byte frames, mixes, a 16 KiB-
     frame stream sharing reads with tiny-frame streams, 256 KiB to 10 MiB per stream) with reads of 64 B to 64 KiB,
-    the blocks peak at 3.1× the body, merging alone (`mergeNewComponentsOnly`) at 5.3× and Netty's aggregator at 5.3×;
-  - the blocks free the reads tiny frames pin, but only those of unbroken runs of 16 or more frames under 1 KiB.
-    They hold less where frames are uniformly tiny or tiny-frame streams share reads (1.1× against 2.1–3.0× for
-    1,023-byte frames; 1.6× against 5.3× beside a 16 KiB-frame stream), and more where 1 KiB frames of the same
-    stream keep the reads alive (3.1× against 1.4× for 16 frames of 1,023 bytes, a 1 KiB frame, 15 one-byte frames
-    and a 1 KiB frame, repeated: the HTTP/1.1 mechanism above);
-  - merging alone never holds more than Netty's aggregator, but copies a 10 MiB body of one-byte frames 10.5×
-    (the whole-body restart every 512 merges, about every 512 KiB, at the stream limit), against 1.0× for the
-    blocks. So streams keep the blocks. The pooled allocator, its live buffers' capacities sampled at every
-    allocation, gives the same peaks at 64 KiB reads (66 of 69 rows identical, the other 3 within 0.2%); that counts
+    the blocks peak at 2.8× the body (runs of one-byte frames between 16 KiB frames), merging alone
+    (`mergeNewComponentsOnly`) at 2.0× and Netty's aggregator at 5.3×;
+  - the blocks and the copying of mostly unused reads (below) free the reads small frames pin: 1.0–1.1× against
+    2.5–3.0× for 1,023-byte frames, 1.1–1.3× against 1.6–5.3× beside a 16 KiB-frame stream, 1.1–1.6× against
+    1.8–1.9× for runs of 100-byte frames between 1 KiB frames. They hold more than Netty's aggregator where larger
+    frames of the same stream keep their buffers at least half used, and so kept, while the runs of one-byte frames
+    between them are copied into blocks: 2.8× against 1.5× for runs of 31 one-byte frames between 16 KiB frames (a
+    16 KiB frame cut by a read is joined into a 32 KiB buffer), 1.6–2.0× against 1.5–1.6× for runs of 15 one-byte
+    frames between 1 KiB frames at reads of 16 KiB or less. Copying is at most 1.8× the body (1,023-byte frames then
+    runs of one-byte frames, at reads of 1 KiB or less);
+  - merging alone holds slightly more than Netty's aggregator in four of the 70 combinations (at most 2.0× against
+    1.5×, runs of one-byte frames between 16 KiB frames at 64-byte reads), and copies a 10 MiB body of one-byte
+    frames 8.3–10.2× (the whole-body restart every 512 merges, about every 512 KiB, at the stream limit), against
+    1.0× for the blocks. So streams keep the blocks. The pooled allocator, its live buffers' capacities sampled at every
+    allocation, gave the same peaks at 64 KiB reads before that copy (66 of 69 rows identical, the other 3 within 0.2%); that counts
     each buffer's requested capacity, not the pool's size-class rounding.
 
   These figures are for cleartext h2c: over TLS a DATA frame is a slice of `SslHandler`'s output buffers instead of
-  the reads, which was not measured. `Http2StreamPeakHeldTest` pins both sides through the codec.
+  the reads, which the copy below checks the same way (it unwraps to whatever buffer a frame slices) but which was not
+  measured. `Http2StreamPeakHeldTest` pins both sides through the codec.
 
-  **No aggregator bounds what a stream holds by its body** (plan item 67, open). A client can send each frame of
-  one stream in a read filled by another, completed, request, and every such read stays allocated while the frame
-  is held. 1,100 frames of 1 KiB, each in its own read of about 32 KiB, held 29 MB for a 1.1 MB body under all
-  three. The blocks hold 1.6–3.2 MB when every frame is under 1 KiB, but a 1 KiB frame after every 15 tiny ones
-  breaks their runs: 15 one-byte frames and one of 1 KiB, one per read, held 28 MB under all three. A stream can
-  hold up to its component limit times the read size, about 100 × 1,025 × 64 KiB ≈ 6.3 GiB (6.7 GB) across a connection's
-  streams at the default. The forward client's streams the upstream opens (below) coalesce the same way.
+  The forward client's streams the upstream opens (below) coalesce the same way.
+
+**Read buffers a body pins** (plan item 67). A piece of a body is usually a slice of a socket read, of a decoder's
+cumulation, or of `SslHandler`'s output, and the whole buffer stays allocated while any slice of it is held. A client
+can put each small piece of a body in a read filled with other, completed, requests (HTTP/2), or pad each chunk-size
+line with a chunk extension (HTTP/1.1), up to 8,192 bytes since plan item 74 and unbounded until then. Before this
+fix, 1,100 HTTP/2 frames of 1 KiB, each in its own read of about 32 KiB, held 29 MB for a 1.1 MB body, 11,000 one-byte
+chunks with 60 KiB extensions held 671 MB (measured on the bare codec, before item 74's limit), and a connection's
+streams could hold about 100 × 1,025 × 64 KiB ≈ 6.3 GiB (6.7 GB), held while the streams stay open. Every
+`CoalescingHttpObjectAggregator` (HTTP/2 streams, the forward client's HTTP/1.1 and HTTP/2 streams, the HTTP/1.1
+server and both legs of the CONNECT relay) now counts, per buffer, the
+pieces and bytes it holds; when a body moves on to a new buffer, the pieces it holds from the previous one are copied
+into buffers of their own if they are under half that buffer, and so are the pieces left of a buffer once a block
+copy takes some of them leaves it under half used (a read held just over half by a 1 B, a 1,039 B and fifteen
+1,023-byte frames, whose run of 16 the next read completes, otherwise stayed pinned at 1,040 B used: 2.6× the body
+through the codec, against 1.75× under Netty's aggregator). On an HTTP/2 stream, pieces just before the one that
+arrived go into the stream's current block instead (a new block is no larger than the body so far, up to 16 KiB), so
+a later run copy does not copy them again and a short body is not given a whole block. Every buffer a body pins is
+then at least half used,
+except the one it is reading and one part-used block, so it holds at most about twice its body plus one read and
+16 KiB, and briefly a further copy while a merge at the component limit is made. The one it is reading can be the
+frame decoder's buffer that joins a frame cut by a read, grown in powers of two to hold it. A body whose pieces fill
+their reads is never copied. Each buffer is counted under what it unwraps to, as its slices are: the allocator returns
+a buffer Netty's leak detector samples (one in 128 at the default level, every one at `paranoid`) inside a wrapper
+that a composite's components unwrap past (`CoalescingHttpObjectAggregatorLeakAwareBufferTest`). Measured through the real codecs (`Http2StreamPeakHeldTest`, `Http1ChunkPinningTest`):
+
+| Shape | Netty's aggregator | Now |
+|---|---|---|
+| 1,100 HTTP/2 frames of 1 KiB, one per ~32 KiB read | 29 MB | 1.25 MB |
+| 15 one-byte frames and one of 1 KiB, one per read | 28 MB | 0.20 MB |
+| 20 streams × 100 frames of 4,097 B, one per read | 54 MB | 8.9 MB |
+| 20 streams × 60 one-byte frames, one per read, no other traffic | 84 KB (6.7× the wire) | 9.2 KB (0.74×) |
+| 11,000 one-byte HTTP/1.1 chunks, 60 KiB extensions (bare codec, before item 74's limit) | 671 MB | 0.24 MB |
+| an upload in 16 KiB frames | 1.5–1.75× | the same, never copied |
+| 16 KiB frames, every fourth a byte short (the window) | 1.6–1.7× | 1.4–1.5×, copying 0.18–0.25× |
+| a 1 B, a 1,039 B and 15 frames of 1,023 B, repeated | 1.75× | 1.02× |
+
+The cost is a copy of the pieces of mostly unused reads: concurrent uploads whose frames each take a small share of
+the reads (50 streams of 1,000- or 4,097-byte frames) are copied about once and hold 1.03–1.09× their bodies instead of
+1.5–1.7×, and streams of small frames copy up to about 1.8× their bodies in all. On an HTTP/1.1 upload whose chunks fill
+their reads aggregation allocates the same and takes 3–10% longer (`Http1ChunkedAggregationBenchmark`, unpooled
+heap, 3 forks, two rounds per side); where every HTTP/2 frame takes a small share of a separate buffer every frame is
+copied once, 2.1× (1 B frames) to 7.6× (16 KiB frames) the aggregation time of a body that copies nothing
+(`Http2StreamAggregationBenchmark`, which wraps each frame in a buffer of its own over one array). What the decoder
+itself buffers for a chunk-size line is bounded separately: see [Chunk-size lines and trailers](#chunk-size-lines-and-trailers).
+
 - **HTTP/3** — Netty hands a request body over in pieces of about one QUIC packet (about 1.1 KiB on
   loopback) whatever DATA frame size the client sent, so one component per piece would reach the limit at
   about 1.1 MiB, and `CompositeByteBuf`'s own consolidation copies the whole body each time it does (about

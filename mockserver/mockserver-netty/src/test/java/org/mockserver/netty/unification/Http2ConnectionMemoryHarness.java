@@ -579,7 +579,8 @@ final class Http2ConnectionMemoryHarness {
     /**
      * Counts every byte array or direct buffer it allocates, including those a buffer allocates to grow, and the
      * most allocated and not yet freed at once across every allocator sharing its {@link Usage}; composites and
-     * derived buffers own no memory of their own.
+     * derived buffers own no memory of their own. A buffer the leak detector samples is returned in its wrapper, as
+     * the pooled allocator returns it (every buffer at the paranoid level this module's tests run at).
      */
     static final class TrackingAllocator extends AbstractByteBufAllocator {
         final Usage usage;
@@ -608,7 +609,7 @@ final class Http2ConnectionMemoryHarness {
                 }
             };
             unreleased++;
-            return buffer;
+            return toLeakAwareBuffer(buffer);
         }
 
         @Override
@@ -630,7 +631,7 @@ final class Http2ConnectionMemoryHarness {
             // the wrapping constructor treats the buffer as already written
             buffer.clear();
             unreleased++;
-            return buffer;
+            return toLeakAwareBuffer(buffer);
         }
 
         /**

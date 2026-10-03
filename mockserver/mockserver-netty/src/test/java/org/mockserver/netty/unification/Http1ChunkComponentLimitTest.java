@@ -67,7 +67,8 @@ public class Http1ChunkComponentLimitTest {
     @Test(timeout = 120_000)
     public void shouldCopyABodyOfOneByteChunksAboutOnce() {
         // consolidating the whole body every 10,240 chunks would copy about chunks^2 / 20,480 bytes: 214 MB here;
-        // merging only the chunks since the last merge copies each byte once
+        // merging only the chunks since the last merge copies each byte once, and the chunks a read still holds after
+        // a merge, under half of it, are copied once more when the body moves on to the next read (about 6% here)
         int bodyBytes = 2 * MIB;
         TrackingAllocator allocator = new TrackingAllocator();
         Chain chain = new Chain(configuration(), allocator);
@@ -77,7 +78,7 @@ public class Http1ChunkComponentLimitTest {
             CompositeByteBuf content = chain.capture.content(0);
             assertThat(ByteBufUtil.getBytes(content), is(body));
             assertThat(content.numComponents(), lessThanOrEqualTo(10_240));
-            assertThat(allocator.allocatedBytes, allOf(lessThanOrEqualTo((long) bodyBytes), greaterThan((long) bodyBytes - 10_240)));
+            assertThat(allocator.allocatedBytes, allOf(lessThanOrEqualTo((long) bodyBytes + bodyBytes / 8), greaterThan((long) bodyBytes - 10_240)));
         } finally {
             chain.finish();
         }
@@ -142,7 +143,8 @@ public class Http1ChunkComponentLimitTest {
                 readAllocator.assertAllReleased();
                 String description = "maxRequestBodySize " + maxRequestBodySize + " pieces " + Arrays.toString(Arrays.copyOf(pattern, 8));
                 assertThat(description, usage.peakLiveBytes, lessThanOrEqualTo(2L * maxRequestBodySize + framing + largestRead));
-                assertThat(description, allocator.allocatedBytes, lessThanOrEqualTo((long) maxRequestBodySize));
+                // merged about once, plus the chunks of reads used under half, copied when the body moves on
+                assertThat(description, allocator.allocatedBytes, lessThanOrEqualTo((long) maxRequestBodySize + maxRequestBodySize / 8));
             }
         }
     }

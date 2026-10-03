@@ -148,6 +148,22 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   8 KB is what Tomcat allows. Anything within the limit, the request line, headers and body sizes
   are unaffected, and a lower `maxInitialLineLength` or `maxHeaderSize` still applies. HTTP/2 and
   HTTP/3 have no chunk-size lines.
+- **A client can no longer make the server hold far more memory than the request it is sending.** Each piece
+  of a request body is a slice of the network read it arrived in, and the server kept the whole read allocated
+  while it held any piece of it. Over HTTP/2, a client that put each small DATA frame of a request in a read
+  filled with other, already-completed requests made the server hold up to the per-stream piece limit times the
+  read size per stream, about 6.7 GB (6.3 GiB) across a connection's 100 streams at the default 10 MB
+  request-body limit; over HTTP/1.1, padding each chunk's size line with a chunk extension did the same for each
+  one-byte chunk (11,000 such chunks held 671 MB). The memory stayed held until the request finished, which the
+  idle-connection timeout does not force while a request is open, and connections are unbounded unless
+  `maxInboundConnections` is set. The server now copies the pieces it holds from a read when they use less than
+  half of it, once the request moves on to the next read, so every read a request keeps is at least half its
+  own: a request holds at most about twice its body plus one read. In the cases measured the memory held fell
+  by 6 to over 2,000 times (29 MB to 1.25 MB, 671 MB to 0.24 MB). The same applies to responses MockServer
+  receives as a proxy. Uploads whose pieces fill their reads, such as HTTP/2 uploads in 16 KB frames, are not
+  copied; one whose frames the flow-control window cuts a byte short is copied by about a fifth to a quarter of
+  its size, and holds less than before. Concurrent uploads that share reads, and uploads in very small frames,
+  are now copied about once to twice.
 
 ### Added
 
@@ -234,16 +250,19 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   many small DATA frames is now copied at most about twice (at most 1.8× its size in the mixes measured,
   against up to 160× before; 10 MiB in one-byte frames used to cost about 54 GB of copying and now costs
   10 MiB). Measured through the real HTTP/2 connection without TLS, where each frame keeps the network read it
-  arrived in allocated, an upload holds at most about 3.1× its size in the mixes measured with frames sent in
-  ordinary reads: less than before for uploads of tiny frames, including several on one connection (1.6×
-  against 5.3× beside an upload in 16 KiB frames), but more for an upload mixing runs of frames under 1 KiB with
-  1 KiB frames (3.1× against 1.4×). An ordinary upload in 16 KiB frames, including the shorter frames the
-  flow-control window cuts, is still not copied, and holds up to about 1.75× its size in network buffers, as
-  before. An HTTP/1.1 upload, a forwarded or tunnelled response,
+  arrived in allocated, an upload holds at most about 2.8× its size in the mixes measured with frames sent in
+  ordinary reads: less than before for uploads of small frames, including several on one connection (1.1–1.3×
+  against up to 5.3× beside an upload in 16 KiB frames) and runs of 100-byte frames between 1 KiB frames
+  (1.1–1.6× against 1.8–1.9×), but more for runs of one-byte frames between 16 KiB frames (2.8× against 1.5×)
+  and, in reads of 16 KiB or less, between 1 KiB frames (up to 2.0× against 1.6×).
+  An ordinary upload in 16 KiB frames is still not copied, and holds up to about 1.75× its size in network
+  buffers, as before; one whose every fourth frame the flow-control window cuts a byte short is now copied by
+  0.18–0.25× its size and holds 1.4–1.5× its size instead of 1.6–1.7×. An HTTP/1.1 upload, a forwarded or tunnelled response,
   or a response on the forward client's own HTTP/2 stream, sent as many tiny chunks, is now copied about once
   instead of in full each time it passes the limit on body pieces (a 10 MiB upload in one-byte chunks
-  used to cost about 5.4 GB of copying and a 50 MiB forwarded response about 27 GB), and never copies more,
-  or holds more body bytes, than before; a body of chunks averaging 1 KiB or more is unchanged. An HTTP/2 upstream that
+  used to cost about 5.4 GB of copying and a 50 MiB forwarded response about 27 GB), and copies at most the
+  body once more, and holds at most one network read more, than before; a body of chunks averaging 1 KiB or
+  more that fill the reads they arrive in is unchanged. An HTTP/2 upstream that
   MockServer forwards to may now open only one stream of its own at a time, and that stream gets the same
   per-stream limit. Embedded use
   (`ClientAndServer`, the JUnit and Spring integrations) is unchanged.

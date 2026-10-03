@@ -922,6 +922,8 @@
                         <!-- Drives the process-global BCKeyAndCertificateFactory.renewalClock static and
                              the KeyAndCertificateFactoryFactory custom-supplier static (certificate hardening) -->
                         <exclude>**/CertificateHardeningGlobalStateTest.java</exclude>
+                        <!-- Sets the JVM-wide ResourceLeakDetector level so every allocation is a leak-aware wrapper -->
+                        <exclude>**/CoalescingHttpObjectAggregatorLeakAwareBufferTest.java</exclude>
                         <!-- Registers into and resets the process-wide CassetteRegistry singleton -->
                         <exclude>**/HttpStateCassetteEndpointTest.java</exclude>
                         <!-- Force a fresh <clinit> of MockServerLogger / ConfigurationProperties in an
@@ -1111,6 +1113,7 @@
                                 <include>**/LlmDatasetExporterTest.java</include>
                                 <include>**/GrpcHealthRegistryTest.java</include>
                                 <include>**/CertificateHardeningGlobalStateTest.java</include>
+                                <include>**/CoalescingHttpObjectAggregatorLeakAwareBufferTest.java</include>
                                 <include>**/HttpStateCassetteEndpointTest.java</include>
                                 <!-- Fresh <clinit> in an isolated classloader performs a JVM-global
                                      LogManager reset (readConfiguration) that strips handlers from every

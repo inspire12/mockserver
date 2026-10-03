@@ -8,6 +8,11 @@ import io.netty.handler.codec.http.HttpContent;
 import io.netty.handler.codec.http.HttpMessage;
 import io.netty.handler.codec.http.HttpObjectAggregator;
 
+import java.util.ArrayList;
+import java.util.IdentityHashMap;
+import java.util.List;
+import java.util.Map;
+
 /**
  * An {@link HttpObjectAggregator} that, past its component limit, merges only the components added since its last
  * merge instead of consolidating the whole body (the rule the HTTP/3 accumulator uses), and can also copy long runs
@@ -25,9 +30,17 @@ import io.netty.handler.codec.http.HttpObjectAggregator;
  *     is full), so each such byte is copied into a block once, the component bookkeeping is paid once per 16
  *     pieces, and at most one block per body is part-used.</li>
  * </ul>
- * A piece is usually a slice of a socket read, which stays allocated while any slice of it is held, so a block copy
- * frees nothing while larger pieces from the same reads are kept: blocks can hold about the body again on top of the
- * reads, which is why the HTTP/1.1-limit aggregators, which rarely reach their limit, do without them.
+ * A piece is usually a slice of a socket read (or of a decoder's cumulation, or of {@code SslHandler}'s output), and
+ * the whole buffer stays allocated while any slice of it is held. So a block copy frees nothing while larger pieces
+ * from the same reads are kept: blocks can hold about the body again on top of the reads, which is why the
+ * HTTP/1.1-limit aggregators, which rarely reach their limit, do without them. And a client that puts each small
+ * piece in a read filled with other requests' bytes, or pads a chunk-size line with an extension, could make a body
+ * pin far more than its size. Both modes bound that: when a body moves on to a new buffer, the pieces it holds from
+ * the previous one are merged into a buffer of their own (with {@link #coalesceSmallContent()}, into the current
+ * block) if they are under half that buffer, and so are the pieces a block copy leaves of an earlier buffer once
+ * they are under half of it. Every buffer a body pins is then at least half used, except the one it is reading now
+ * and one part-used block. A body whose pieces fill their reads is never copied. A buffer is counted under what it
+ * unwraps to, as its slices are, because an allocator may return it inside a leak-detection wrapper.
  * <p>
  * The oversized-body check is Netty's and sees every byte, because Netty appends each piece and a run is only
  * moved, never held back. The aggregator never owns a reference to a block: a block is reachable only through
@@ -50,6 +63,11 @@ public class CoalescingHttpObjectAggregator extends HttpObjectAggregator {
     private int runOffset;
     private int runPieces;
     private int merged;
+    private Map<ByteBuf, Use> uses;
+    private List<ByteBuf> eroded;
+    private boolean tracking;
+    private ByteBuf lastRoot;
+    private Use lastUse;
 
     public CoalescingHttpObjectAggregator(int maxContentLength) {
         super(maxContentLength);
@@ -66,8 +84,8 @@ public class CoalescingHttpObjectAggregator extends HttpObjectAggregator {
 
     /**
      * Turns on only the merge rule: past the component limit, merge the components added since the last merge
-     * rather than the whole body, and copy nothing into blocks. Must be called before the aggregator is added to a
-     * pipeline.
+     * rather than the whole body, and copy no runs into blocks (pieces of a mostly unused buffer are still merged).
+     * Must be called before the aggregator is added to a pipeline.
      */
     public void mergeNewComponentsOnly() {
         coalescing = true;
@@ -107,18 +125,201 @@ public class CoalescingHttpObjectAggregator extends HttpObjectAggregator {
 
     @Override
     protected void aggregate(FullHttpMessage aggregated, HttpContent content) throws Exception {
+        int length = content.content().readableBytes();
+        ByteBuf root = composite != null && length > 0 ? root(content.content()) : null;
         super.aggregate(aggregated, content);
         CompositeByteBuf target = composite;
-        if (target == null) {
+        if (target == null || aggregated.content() != target || length == 0) {
             return;
         }
+        if (tracking && lastComponentHolds(target, length)) {
+            tracked(target, root, length);
+        } else {
+            tracking = false;
+        }
         if (!copyingRuns) {
-            if (target.numComponents() > maxCumulationBufferComponents() && aggregated.content() == target) {
+            if (target.numComponents() > maxCumulationBufferComponents()) {
                 limitComponents(target);
             }
-        } else if (aggregated.content() == target) {
-            appended(target, content.content().readableBytes());
+        } else {
+            appended(target, length);
         }
+        freeEroded(target);
+    }
+
+    /**
+     * Records the piece just appended; when it is the first from a new buffer, merges the pieces held from the
+     * previous buffer if they are under half of it, so that buffer is freed rather than pinned.
+     */
+    private void tracked(CompositeByteBuf target, ByteBuf root, int length) {
+        if (root == lastRoot) {
+            lastUse.pieces++;
+            lastUse.held += length;
+            return;
+        }
+        ByteBuf previous = lastRoot;
+        Use previousUse = lastUse;
+        lastRoot = root;
+        lastUse = use(root, false);
+        lastUse.pieces++;
+        lastUse.held += length;
+        if (previous != null && previousUse.pieces > 0 && underHalf(previous, previousUse)) {
+            mergePiecesOf(target, previous, previousUse.pieces);
+        }
+    }
+
+    /**
+     * Copies the components holding {@code root}'s pieces, which come just before the last component, into buffers of
+     * their own, one per run of adjacent components; block slices a run copy put among them are stepped over, so
+     * nothing but those pieces is copied, and byte offsets, so the block's last slice, are unchanged.
+     */
+    private void mergePiecesOf(CompositeByteBuf target, ByteBuf root, int pieces) {
+        int index = target.numComponents() - 2;
+        while (pieces > 0 && index >= merged) {
+            ByteBuf candidate = root(target.internalComponent(index));
+            if (candidate == root) {
+                int end = index;
+                while (index > merged && root(target.internalComponent(index - 1)) == root) {
+                    index--;
+                }
+                pieces -= end - index + 1;
+                copyComponents(target, index, end);
+            } else if (!isBlock(candidate)) {
+                return;
+            }
+            index--;
+        }
+    }
+
+    private void copyComponents(CompositeByteBuf target, int start, int end) {
+        if (copyingRuns && end == target.numComponents() - 2 && start >= 1) {
+            // onto the current block, so these pieces are copied once, not again by the run they may belong to; a new
+            // block is no larger than the body so far, so a short body is not given a whole 16 KiB block
+            endRun();
+            runOffset = target.toByteIndex(start);
+            copyIntoBlocks(target, start, end + 1, Math.min(BLOCK_BYTES, target.capacity()));
+            return;
+        }
+        copyIntoOwnBuffer(target, start, end);
+    }
+
+    private void copyIntoOwnBuffer(CompositeByteBuf target, int start, int end) {
+        int from = target.toByteIndex(start);
+        int bytes = target.toByteIndex(end + 1) - from;
+        // allocate before changing the body; consolidate() would leave a single component in place
+        ByteBuf copy = target.alloc().buffer(bytes, bytes);
+        try {
+            target.getBytes(from, copy, 0, bytes);
+            copy.writerIndex(bytes);
+        } catch (RuntimeException | Error e) {
+            copy.release();
+            throw e;
+        }
+        untrack(target, start, end);
+        target.removeComponents(start, end - start + 1);
+        target.addComponent(false, start, copy);
+        target.writerIndex(target.capacity());
+        track(root(copy), bytes);
+    }
+
+    /**
+     * Copies the pieces left of each buffer a block copy took some pieces of, where what is left is under half that
+     * buffer, into buffers of their own, so a buffer kept because it was at least half used does not stay pinned
+     * once it no longer is. The buffer the body is reading is left to the check when the body moves on.
+     */
+    private void freeEroded(CompositeByteBuf target) {
+        if (eroded == null || eroded.isEmpty()) {
+            return;
+        }
+        for (int i = 0; i < eroded.size(); i++) {
+            ByteBuf root = eroded.get(i);
+            Use use = uses.get(root);
+            int index = target.numComponents() - 1;
+            while (use != null && use.pieces > 0 && root != lastRoot && underHalf(root, use) && index >= merged) {
+                if (root(target.internalComponent(index)) == root) {
+                    int end = index;
+                    while (index > merged && root(target.internalComponent(index - 1)) == root) {
+                        index--;
+                    }
+                    copyIntoOwnBuffer(target, index, end);
+                    use = uses.get(root);
+                }
+                index--;
+            }
+        }
+        eroded.clear();
+    }
+
+    private static boolean underHalf(ByteBuf root, Use use) {
+        return 2L * use.held < root.capacity();
+    }
+
+    private boolean isBlock(ByteBuf root) {
+        Use use = uses.get(root);
+        return use != null && use.block;
+    }
+
+    private Use use(ByteBuf root, boolean block) {
+        if (uses == null) {
+            uses = new IdentityHashMap<>();
+        }
+        return uses.computeIfAbsent(root, key -> new Use(block));
+    }
+
+    private void track(ByteBuf root, int bytes) {
+        if (!tracking) {
+            return;
+        }
+        Use use = use(root, false);
+        use.pieces++;
+        use.held += bytes;
+    }
+
+    private void trackBlock(ByteBuf block, int bytes) {
+        if (!tracking) {
+            return;
+        }
+        Use use = use(root(block), true);
+        use.pieces++;
+        use.held += bytes;
+    }
+
+    /**
+     * Forgets the pieces of components {@code start} to {@code end}, which are about to be removed or merged.
+     */
+    private void untrack(CompositeByteBuf target, int start, int end) {
+        if (!tracking || uses == null) {
+            return;
+        }
+        for (int i = start; i <= end; i++) {
+            ByteBuf component = target.internalComponent(i);
+            ByteBuf root = root(component);
+            Use use = uses.get(root);
+            if (use != null) {
+                use.pieces--;
+                use.held -= component.readableBytes();
+                if (use.pieces == 0) {
+                    uses.remove(root);
+                    if (root == lastRoot) {
+                        lastRoot = null;
+                        lastUse = null;
+                    }
+                } else if (!use.block && root != lastRoot && underHalf(root, use)) {
+                    if (eroded == null) {
+                        eroded = new ArrayList<>();
+                    }
+                    eroded.add(root);
+                }
+            }
+        }
+    }
+
+    private static ByteBuf root(ByteBuf piece) {
+        ByteBuf root = piece;
+        for (ByteBuf next = root.unwrap(); next != null && next != root; next = root.unwrap()) {
+            root = next;
+        }
+        return root;
     }
 
     @Override
@@ -161,47 +362,63 @@ public class CoalescingHttpObjectAggregator extends HttpObjectAggregator {
      */
     private void copyRunIntoBlocks(CompositeByteBuf target) {
         int runStart = target.numComponents() - runPieces;
-        int runBytes = target.capacity() - runOffset;
         runPieces = 0;
+        copyIntoBlocks(target, runStart, target.numComponents(), BLOCK_BYTES);
+    }
+
+    /**
+     * Copies components {@code runStart} to {@code runEnd} (exclusive), starting at byte {@code runOffset}, as
+     * {@link #copyRunIntoBlocks} does for a run at the end of the body; a new block is at least {@code newBlockBytes}.
+     */
+    private void copyIntoBlocks(CompositeByteBuf target, int runStart, int runEnd, int newBlockBytes) {
         if (runStart < 1 || target.toByteIndex(runStart) != runOffset) {
             return;
         }
+        int runBytes = (runEnd == target.numComponents() ? target.capacity() : target.toByteIndex(runEnd)) - runOffset;
         boolean intoTail = block != null && blockFill < block.capacity();
         boolean adjacent = intoTail
             && target.toByteIndex(runStart - 1) == sliceOffset
             && sliceOffset + blockFill - sliceStart == runOffset;
         int intoBlock = intoTail ? Math.min(block.capacity() - blockFill, runBytes) : 0;
         // allocate before changing the body, so a failed allocation cannot lose the run
-        ByteBuf next = intoBlock < runBytes ? target.alloc().buffer(BLOCK_BYTES, BLOCK_BYTES) : null;
+        int nextBytes = Math.max(newBlockBytes, runBytes - intoBlock);
+        ByteBuf next = intoBlock < runBytes ? target.alloc().buffer(nextBytes, nextBytes) : null;
         try {
-            ByteBuf tailSlice = null;
             if (intoBlock > 0) {
                 target.getBytes(runOffset, block, blockFill, intoBlock);
-                tailSlice = adjacent
-                    ? block.retainedSlice(sliceStart, blockFill + intoBlock - sliceStart)
-                    : block.retainedSlice(blockFill, intoBlock);
             }
             if (next != null) {
                 target.getBytes(runOffset + intoBlock, next, 0, runBytes - intoBlock);
             }
+            // sliced only once nothing more can throw, so the retained slice is always added
+            ByteBuf tailSlice = null;
+            if (intoBlock > 0) {
+                tailSlice = adjacent
+                    ? block.retainedSlice(sliceStart, blockFill + intoBlock - sliceStart)
+                    : block.retainedSlice(blockFill, intoBlock);
+            }
             int firstReplaced = adjacent ? runStart - 1 : runStart;
-            target.removeComponents(firstReplaced, target.numComponents() - firstReplaced);
-            target.writerIndex(target.capacity());
+            untrack(target, firstReplaced, runEnd - 1);
+            target.removeComponents(firstReplaced, runEnd - firstReplaced);
+            int index = firstReplaced;
             if (tailSlice != null) {
                 if (!adjacent) {
                     sliceStart = blockFill;
-                    sliceOffset = target.capacity();
+                    sliceOffset = runOffset;
                 }
-                target.addComponent(true, tailSlice);
+                target.addComponent(false, index++, tailSlice);
+                trackBlock(block, tailSlice.readableBytes());
                 blockFill += intoBlock;
             }
             if (next != null) {
                 sliceStart = 0;
-                sliceOffset = target.capacity();
-                target.addComponent(true, next.retainedSlice(0, runBytes - intoBlock));
+                sliceOffset = runOffset + intoBlock;
+                target.addComponent(false, index, next.retainedSlice(0, runBytes - intoBlock));
+                trackBlock(next, runBytes - intoBlock);
                 block = next;
                 blockFill = runBytes - intoBlock;
             }
+            target.writerIndex(target.capacity());
         } finally {
             if (next != null) {
                 next.release();
@@ -241,7 +458,10 @@ public class CoalescingHttpObjectAggregator extends HttpObjectAggregator {
             // once half the limit is merged components, start again by merging the whole body into one
             merged = 0;
         }
+        int bytes = target.capacity() - target.toByteIndex(merged);
+        untrack(target, merged, components - 1);
         target.consolidate(merged, components - merged);
+        track(root(target.internalComponent(merged)), bytes);
         merged++;
     }
 
@@ -254,5 +474,27 @@ public class CoalescingHttpObjectAggregator extends HttpObjectAggregator {
         block = null;
         endRun();
         merged = 0;
+        if (uses != null) {
+            uses.clear();
+        }
+        if (eroded != null) {
+            eroded.clear();
+        }
+        tracking = target != null;
+        lastRoot = null;
+        lastUse = null;
+    }
+
+    /**
+     * How many components hold pieces of one buffer, and how many bytes; a block is this aggregator's own.
+     */
+    private static final class Use {
+        private final boolean block;
+        private int pieces;
+        private long held;
+
+        Use(boolean block) {
+            this.block = block;
+        }
     }
 }
