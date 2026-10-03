@@ -73,6 +73,7 @@ public class DirectProxyUnificationHandlerTest {
         } else {
             assertThat(String.valueOf(embeddedChannel.pipeline().names()), embeddedChannel.pipeline().names(), contains(
                 "SniHandler#0",
+                "write-stall",
                 "inbound-idle",
                 "PortUnificationHandler#0",
                 "DefaultChannelPipeline$TailContext#0"
@@ -115,6 +116,7 @@ public class DirectProxyUnificationHandlerTest {
                 "Socks5CommandRequestDecoder#0",
                 "Socks5ServerEncoder#0",
                 "Socks5ProxyHandler#0",
+                "write-stall",
                 "inbound-idle",
                 "PortUnificationHandler#0",
                 "DefaultChannelPipeline$TailContext#0"
@@ -124,6 +126,7 @@ public class DirectProxyUnificationHandlerTest {
                 "Socks5CommandRequestDecoder#0",
                 "Socks5ServerEncoder#0",
                 "Socks5ProxyHandler#0",
+                "write-stall",
                 "inbound-idle",
                 "PortUnificationHandler#0",
                 "DefaultChannelPipeline$TailContext#0"
@@ -166,6 +169,7 @@ public class DirectProxyUnificationHandlerTest {
             ));
         } else {
             assertThat(String.valueOf(embeddedChannel.pipeline().names()), embeddedChannel.pipeline().names(), contains(
+                "write-stall",
                 "inbound-idle",
                 "PacedLargeWriteHandler#0",
                 "HttpChunkLineLimiter$BeforeCodec#0",
@@ -222,6 +226,7 @@ public class DirectProxyUnificationHandlerTest {
             ));
         } else {
             assertThat(String.valueOf(embeddedChannel.pipeline().names()), embeddedChannel.pipeline().names(), contains(
+                "write-stall",
                 "inbound-idle",
                 "PacedLargeWriteHandler#0",
                 "HttpChunkLineLimiter$BeforeCodec#0",

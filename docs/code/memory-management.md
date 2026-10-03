@@ -456,18 +456,20 @@ Such a stream, a decompression bomb or an extremely compressible one, is aborted
 While MockServer withholds reads the upstream connection is quiet by MockServer's choice, so the stream
 idle timeout (`streamIdleTimeoutSeconds`) ignores an idle event while `StreamingBody.isAwaitingClient()`
 (more than the watermark waits for the client) and applies only while MockServer is reading. A client that
-stops reading therefore keeps its stream, holding at most the limit, until it reads on or disconnects, as
-a client of an aggregated response keeps up to its limit; write completions were rejected as the progress
-signal because TCP frees a slow reader's send buffer in bursts that can be further apart than the timeout.
+stops reading therefore keeps its stream, holding at most the limit, until it reads on, disconnects or
+trips `responseWriteStallTimeoutMillis`, as a client of an aggregated response keeps up to its limit; write
+completions were rejected as the idle timeout's progress signal because TCP frees a slow reader's send buffer
+in bursts that can be further apart than the timeout.
 Only a subscribed body can be awaiting its client: a streamed response that is replaced or dropped before
 it is written (a chaos error, rate limit or quota, a forward fallback) has nothing to take
 its bytes, so its upstream is reclaimed by the idle timeout as before, and a breakpoint `CLOSE` closes the
 upstream at once (`StreamingBody.closeUpstream()`). The bound abort, the idle timeout and an upstream that
 closes, fails or sends invalid framing mid-stream all end the client's response without its terminating
 chunk; a body that the upstream delimits by closing its connection still ends normally. When the client
-has gone, the writer closes the upstream instead of reading the rest of the stream into nothing. No timeout
-reclaims a client that stops reading, for streamed or aggregated responses alike (performance-programme
-#72).
+has gone, the writer closes the upstream instead of reading the rest of the stream into nothing.
+`responseWriteStallTimeoutMillis` (default 60 s) reclaims a client that stops reading, for streamed and
+aggregated responses alike: it ends the response incomplete, and the writer's close listener closes a streamed
+response's upstream — see [netty-pipeline.md](netty-pipeline.md#response-write-stall-timeout).
 
 A per-read decode limit was rejected. Netty's `ZstdDecoder` decodes a whole cumulation in one `decode`
 call with no way to pause it (its removal is deferred until the call returns), and feeding the decoder

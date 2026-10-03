@@ -422,6 +422,29 @@
     <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.maxInboundConnections=5000</code></pre>
 </div>
 
+<button id="button_configuration_response_write_stall_timeout_millis" class="accordion title"><strong>Response Write Stall Timeout</strong></button>
+<div class="panel title">
+    <p>How long, in milliseconds, a response may wait for a client that has stopped reading it before MockServer gives up on it. A client that stops reading (a hung test, a paused debugger, a consumer that stops taking a stream) would otherwise keep what is waiting for it for as long as its connection stays open: an aggregated response up to its full size, and for a streamed response up to <span class="inline_code">maxResponseBodySize</span> plus an open connection to the upstream it is forwarded from.</p>
+    <p>When bytes of a response have been waiting for the whole timeout and the client has taken none of them, the response ends incomplete and is logged as a warning:</p>
+    <ul>
+        <li>HTTP/1.1: the connection is closed (for a CONNECT or SOCKS tunnel, the tunnel is closed)</li>
+        <li>HTTP/2 and HTTP/3: only that stream is reset; other streams on the connection carry on</li>
+        <li>a streamed (forwarded) response: its upstream connection is closed too</li>
+    </ul>
+    <p>A client that keeps taking some of the response at least once per timeout period is not affected, and neither is a client waiting for a delayed or slow response, because nothing is waiting for it to read. The same applies to a WebSocket whose client stops reading the messages sent to it. The operating system sends data to a slow reader in bursts, sometimes seconds apart, so keep the timeout well above a few seconds; the 1 minute default leaves plenty of room. Set it to <span class="inline_code">0</span> to never cut off a stalled client, which was the behaviour before this setting existed. The value applies to connections accepted after it is changed.</p>
+    <p>Type: <span class="keyword">long</span> Default: <span class="this_value">60000</span> (1 minute)</p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.responseWriteStallTimeoutMillis(long millis)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.responseWriteStallTimeoutMillis=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_RESPONSE_WRITE_STALL_TIMEOUT_MILLIS=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.responseWriteStallTimeoutMillis=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.responseWriteStallTimeoutMillis=120000</code></pre>
+</div>
+
 <button id="button_configuration_nio_event_loop_thread_count" class="accordion title"><strong>Number of Event Loop Threads</strong></button>
 <div class="panel title">
     <p>Number of threads for main event loop</p>

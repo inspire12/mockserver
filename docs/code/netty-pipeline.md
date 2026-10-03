@@ -264,6 +264,40 @@ idle-closed counter"]
 
 **Not covered:** HTTP/3 (QUIC has its own `http3MaxIdleTimeout` and is not counted) and outbound forward/proxy connections (the forward pool has its own idle reaper). A child whose registration fails is still decremented: Netty's register path calls `closeForcibly()` and then completes the close future, which runs the limiter's listener.
 
+### Response Write-Stall Timeout
+
+**Outcome:** `responseWriteStallTimeoutMillis` (default `60000`, `0` disables, negative clamps to `0`) ends a response whose client has taken none of what is waiting for it for the timeout, so a client that stops reading cannot hold a queued response, or a streamed response's upstream connection, indefinitely. HTTP/1.1 (and any TCP connection: tunnels, WebSockets) is closed; an HTTP/2 or HTTP/3 stream is reset alone. The streaming writers' close listener then closes the upstream. A client that keeps taking some of the response at least once per timeout period is not affected, and a connection with nothing waiting to be written runs no timer.
+
+```mermaid
+flowchart LR
+    ACC["MockServerUnificationInitializer"] --> TCP["WriteStallTimeoutHandler\n(addFirst, per connection)"]
+    H2["switchToHttp2Multiplex"] --> S2["Http2StreamWriteStallHandler\n(codec → handler → multiplex)"]
+    Q["Http3Server stream init"] --> S3["Http3StreamWriteStallHandler\n(addFirst, per QUIC stream)"]
+    TCP -->|"no outbound progress"| CLOSE["socket closed directly\n(not through the pipeline)"]
+    S2 -->|"window unchanged, no WINDOW_UPDATE"| RST2["RST_STREAM CANCEL"]
+    S3 -->|"no write completed"| RST3["RESET_STREAM H3_INTERNAL_ERROR"]
+    CLOSE --> UP["writer closeFuture listener\nStreamingBody.closeUpstream()"]
+    RST2 --> UP
+    RST3 --> UP
+```
+
+| Component | Where | Progress signal |
+|-----------|-------|-----------------|
+| `WriteStallTimeoutHandler` | `addFirst("write-stall")` in `MockServerUnificationInitializer.handlerAdded`, when the timeout is `> 0`; kept for the connection's life (not removed by `markLongLived`) | The socket taking more of `ChannelOutboundBuffer`: a different head message, `currentProgress()` moved, or fewer pending bytes. On epoll `tcpInfo().lastDataSent` within the check interval also counts, because the kernel wakes a writer only once a share of the send buffer is free |
+| `Http2StreamWriteStallHandler` | Between `Http2FrameCodec` and `Http2MultiplexHandler` in `PortUnificationHandler.switchToHttp2Multiplex` — the only place that sees per-stream `WINDOW_UPDATE` frames, which the multiplex handler drops | For each active stream the remote flow controller holds data for: its send window changed, or a `WINDOW_UPDATE` arrived for it; for a stream whose own window is still open, also any other stream or the connection window moving, because the weighted-fair distributor gives a stream nothing while a stream it depends on has data. A client can starve one stream while reading the connection, so a socket-level check alone would miss it |
+| `Http3StreamWriteStallHandler` | `addFirst` in each QUIC request stream, from `Http3Server` | A write completing: QUIC completes a write once it has taken all of it, so `Http3ResponseWriter` splits DATA frames to at most 32 KiB to make a slow reader's progress visible |
+| Writer close listener | `NettyResponseWriter` (streamed HTTP/1.1 and HTTP/2) and `Http3ResponseWriter` | On the client channel's (or HTTP/2 / HTTP/3 stream channel's) `closeFuture`, an incomplete `StreamingBody` closes its upstream; removed on complete or error so a keep-alive connection does not collect one per response |
+
+**Timers.** Each handler arms a timer (interval `min(1 s, timeout / 2)`, at least 10 ms) only when there is something waiting: a flush that leaves bytes in the outbound buffer, an HTTP/2 connection with active streams, an HTTP/3 stream with writes pending. The check costs one outbound-buffer snapshot per connection, or one pass over active streams, per interval.
+
+**The connection is closed directly.** `WriteStallTimeoutHandler` closes the socket with `channel.unsafe().close(...)` rather than `channel.close()`. Asked to close through the pipeline, an `SslHandler` queues a `close_notify` (and an HTTP/2 codec a `GOAWAY`, then waits for its streams) behind the bytes the client is not taking, and leaves the connection open, refusing further writes, until that flushes or its own timeout passes. On a CONNECT tunnel, whose TLS the relay holds, a client that read on in that interval left `DownstreamProxyRelayHandler` writing the rest of the response into the closed engine, one logged error per chunk. Closing the socket fails everything queued and fires `channelInactive`, which is what closes the relay's loopback and, through the writer's close listener, the upstream.
+
+**Why the timeout must sit well above a few seconds.** A slow reader's progress reaches the writer in bursts. On macOS NIO a reader taking a few KB at a time can show no progress for 4–20 s, because the kernel holds megabytes between the two ends and wakes a writer only once a share of them is free (an extra write attempt each check showed nothing more, so there is none); on Linux epoll `lastDataSent` removes that gap. The 60 s default leaves room for both.
+
+**Relay loopback exemption.** MockServer's own CONNECT/SOCKS loopback leg is read by `DownstreamProxyRelayHandler` only as fast as the relay's proxy client takes what it is sent (reads pause above 256 KiB unwritten), so its silences are MockServer's own backpressure. `RelayConnectHandler` registers the loopback's local address in `RelayLoopbackAddresses` before it writes the `PROXIED_` preamble; `switchToProxyConnected` removes the connection handler when the accepted connection's remote address is one of them (a client merely sending the preamble is not exempted), and `switchToHttp2Multiplex` then skips the stream handler. The proxy client's own connection is watched, and tearing it down closes the loopback. A stalled HTTP/2 stream inside a tunnel whose client keeps reading the connection is therefore not cut (the relay's client-facing HTTP/2 connection has no per-stream watcher). On macOS NIO the exemption is reasoned, not demonstrated: there the loopback leg shows progress at about the same granularity as the proxy-client leg (a 40 KiB/s tunnel reader against a 9 s timeout left both legs at most ~6 s quiet, with the exemption removed), so no reader rate was found that trips the loopback without tripping the client leg first, and no test goes red without it on macOS. On Linux epoll it is expected to be load-bearing: the proxy-client leg shows progress through `tcpInfo` `lastDataSent`, while a loopback the relay has paused sends nothing until about 128 KiB of the backlog drains.
+
+**Not covered:** outbound forward/proxy connections (MockServer as the client), a client that keeps an HTTP/1.1 request upload stalled (nothing is being written to it), and progress inside a large HTTP/3 write other than `Http3ResponseWriter`'s: the gRPC writers (`Http3GrpcResponseWriter`, `Http3GrpcBidiStreamHandler`), MCP (`Http3MockServerHandler`) and CONNECT-UDP (`Http3ConnectUdpHandler`) write one whole DATA frame, so a slow but progressing reader of a large message is reset after the timeout (performance-programme #93).
+
 ### TCP Chaos Handler
 
 When TCP-layer chaos is active (at least one host registered in `TcpChaosRegistry`), a `TcpChaosHandler` is inserted at the front of the pipeline before HTTP codecs. This handler operates on raw `ByteBuf` data and can inject transport-layer faults that mirror Toxiproxy's named toxics:

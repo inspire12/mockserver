@@ -53,6 +53,7 @@ public class ConfigurationDTO implements DTO<Configuration> {
     private Integer soBacklog;
     private Long inboundConnectionIdleTimeoutMillis;
     private Integer maxInboundConnections;
+    private Long responseWriteStallTimeoutMillis;
     private Integer actionHandlerThreadCount;
     private Integer maxPendingDelayedResponses;
     private Integer maxQueuedTemplateActions;
@@ -400,6 +401,7 @@ public class ConfigurationDTO implements DTO<Configuration> {
             this.soBacklog = configuration.soBacklog();
             this.inboundConnectionIdleTimeoutMillis = configuration.inboundConnectionIdleTimeoutMillis();
             this.maxInboundConnections = configuration.maxInboundConnections();
+            this.responseWriteStallTimeoutMillis = configuration.responseWriteStallTimeoutMillis();
             this.actionHandlerThreadCount = configuration.actionHandlerThreadCount();
             this.maxPendingDelayedResponses = configuration.maxPendingDelayedResponses();
             this.maxQueuedTemplateActions = configuration.maxQueuedTemplateActions();
@@ -834,6 +836,7 @@ public class ConfigurationDTO implements DTO<Configuration> {
         configuration.soBacklog(soBacklog);
         configuration.inboundConnectionIdleTimeoutMillis(inboundConnectionIdleTimeoutMillis);
         configuration.maxInboundConnections(maxInboundConnections);
+        configuration.responseWriteStallTimeoutMillis(responseWriteStallTimeoutMillis);
         configuration.actionHandlerThreadCount(actionHandlerThreadCount);
         configuration.maxPendingDelayedResponses(maxPendingDelayedResponses);
         configuration.maxQueuedTemplateActions(maxQueuedTemplateActions);
@@ -1370,6 +1373,9 @@ public class ConfigurationDTO implements DTO<Configuration> {
         }
         if (maxInboundConnections != null) {
             target.maxInboundConnections(maxInboundConnections);
+        }
+        if (responseWriteStallTimeoutMillis != null) {
+            target.responseWriteStallTimeoutMillis(responseWriteStallTimeoutMillis);
         }
         if (nioEventLoopThreadCount != null) {
             target.nioEventLoopThreadCount(nioEventLoopThreadCount);
@@ -2573,6 +2579,15 @@ public class ConfigurationDTO implements DTO<Configuration> {
 
     public ConfigurationDTO setSoBacklog(Integer soBacklog) {
         this.soBacklog = soBacklog;
+        return this;
+    }
+
+    public Long getResponseWriteStallTimeoutMillis() {
+        return responseWriteStallTimeoutMillis;
+    }
+
+    public ConfigurationDTO setResponseWriteStallTimeoutMillis(Long responseWriteStallTimeoutMillis) {
+        this.responseWriteStallTimeoutMillis = responseWriteStallTimeoutMillis;
         return this;
     }
 

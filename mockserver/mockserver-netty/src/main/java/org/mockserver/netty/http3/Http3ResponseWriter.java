@@ -1,9 +1,13 @@
 package org.mockserver.netty.http3;
 
+import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
+import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.http3.DefaultHttp3DataFrame;
 import io.netty.handler.codec.http3.DefaultHttp3HeadersFrame;
+import io.netty.handler.codec.http3.Http3DataFrame;
 import io.netty.handler.codec.http3.Http3ErrorCode;
 import io.netty.handler.codec.quic.QuicStreamChannel;
 import org.mockserver.configuration.Configuration;
@@ -39,6 +43,12 @@ import java.util.List;
  * once the unwritten backlog has drained.
  */
 public class Http3ResponseWriter extends ResponseWriter implements StreamErrorWriter {
+
+    /**
+     * The largest DATA frame written: QUIC completes a write only once it has taken all of it, so a body split into
+     * frames lets {@link Http3StreamWriteStallHandler} see a slow reader's progress through it.
+     */
+    static final int MAX_DATA_FRAME_BYTES = 32 * 1024;
 
     private final ChannelHandlerContext ctx;
 
@@ -251,6 +261,14 @@ public class Http3ResponseWriter extends ResponseWriter implements StreamErrorWr
         DefaultHttp3HeadersFrame headersFrame = Http3RequestBridge.toHttp3HeadersFrame(response, true);
         ctx.writeAndFlush(headersFrame);
 
+        // a stream reset or closed mid-response (a write stall, the client going away) takes no more of the upstream
+        ChannelFutureListener closeUpstreamIfIncomplete = future -> {
+            if (!streamingBody.isCompleted()) {
+                streamingBody.closeUpstream();
+            }
+        };
+        ctx.channel().closeFuture().addListener(closeUpstreamIfIncomplete);
+
         // Subscribe to the streaming body to forward chunks as HTTP/3 DATA frames.
         // After each chunk write completes, call streamingBody.chunkWritten(bytes), which
         // requests the next upstream read once the backlog has drained -- this implements
@@ -260,12 +278,8 @@ public class Http3ResponseWriter extends ResponseWriter implements StreamErrorWr
             chunk -> {
                 final int chunkSize = chunk.readableBytes();
                 if (ctx.channel().isActive()) {
-                    DefaultHttp3DataFrame dataFrame = new DefaultHttp3DataFrame(
-                        Unpooled.copiedBuffer(chunk)
-                    );
-                    ctx.writeAndFlush(dataFrame).addListener(future ->
-                        streamingBody.chunkWritten(chunkSize)
-                    );
+                    writeDataFrames(new DefaultHttp3DataFrame(Unpooled.copiedBuffer(chunk)), true)
+                        .addListener(future -> streamingBody.chunkWritten(chunkSize));
                 } else {
                     // The client has gone, so nothing will take the rest of the stream
                     streamingBody.closeUpstream();
@@ -278,6 +292,7 @@ public class Http3ResponseWriter extends ResponseWriter implements StreamErrorWr
             // When the response carries trailers, emit a trailing HEADERS frame after
             // the final DATA frame and before shutting down the stream output.
             () -> {
+                ctx.channel().closeFuture().removeListener(closeUpstreamIfIncomplete);
                 if (ctx.channel().isActive()) {
                     DefaultHttp3HeadersFrame trailersFrame = Http3RequestBridge.toHttp3TrailersFrame(response);
                     if (trailersFrame != null) {
@@ -292,6 +307,7 @@ public class Http3ResponseWriter extends ResponseWriter implements StreamErrorWr
             },
             // onError
             error -> {
+                ctx.channel().closeFuture().removeListener(closeUpstreamIfIncomplete);
                 if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
                     mockServerLogger.logEvent(
                         new LogEntry()
@@ -329,11 +345,11 @@ public class Http3ResponseWriter extends ResponseWriter implements StreamErrorWr
         if (dataFrame != null) {
             if (trailersFrame != null) {
                 // headers + data + trailing HEADERS frame, then shutdown the stream output
-                ctx.write(dataFrame);
+                writeDataFrames(dataFrame, false);
                 ctx.writeAndFlush(trailersFrame)
                     .addListener(QuicStreamChannel.SHUTDOWN_OUTPUT);
             } else {
-                ctx.writeAndFlush(dataFrame)
+                writeDataFrames(dataFrame, true)
                     .addListener(QuicStreamChannel.SHUTDOWN_OUTPUT);
             }
         } else if (trailersFrame != null) {
@@ -343,6 +359,27 @@ public class Http3ResponseWriter extends ResponseWriter implements StreamErrorWr
         } else {
             ctx.flush();
             shutdownQuicStreamOutput();
+        }
+    }
+
+    /**
+     * Write a DATA frame, split into frames of at most {@link #MAX_DATA_FRAME_BYTES}, flushing after the last if asked.
+     *
+     * @return the future of the last frame's write, which completes after the others
+     */
+    private ChannelFuture writeDataFrames(Http3DataFrame dataFrame, boolean flush) {
+        ByteBuf content = dataFrame.content();
+        if (content.readableBytes() <= MAX_DATA_FRAME_BYTES) {
+            return flush ? ctx.writeAndFlush(dataFrame) : ctx.write(dataFrame);
+        }
+        try {
+            while (content.readableBytes() > MAX_DATA_FRAME_BYTES) {
+                ctx.write(new DefaultHttp3DataFrame(content.readRetainedSlice(MAX_DATA_FRAME_BYTES)));
+            }
+            DefaultHttp3DataFrame last = new DefaultHttp3DataFrame(content.readRetainedSlice(content.readableBytes()));
+            return flush ? ctx.writeAndFlush(last) : ctx.write(last);
+        } finally {
+            dataFrame.release();
         }
     }
 

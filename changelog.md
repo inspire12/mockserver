@@ -128,8 +128,9 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   to nearly the limit or more from a single network read is stopped. Time spent waiting for a slow
   client in this way does not count towards `streamIdleTimeoutSeconds`, which now measures only an
   upstream that sends nothing while MockServer is reading it; a client that pauses keeps its stream, with
-  at most the limit waiting for it, until it reads on or disconnects, as a client of a response that is
-  not streamed keeps that response; no timeout yet reclaims a client that stops reading. A stream that
+  at most the limit waiting for it, until it reads on, disconnects or takes nothing for
+  `responseWriteStallTimeoutMillis` (see *Changed*), as a client of a response that is not streamed
+  keeps that response. A stream that
   times out, or whose upstream closes, fails or sends invalid chunk framing part-way through, now ends
   incomplete, where before it ended with a normal final chunk and looked complete; a stream whose
   upstream simply ends by closing its connection still completes normally. When the client goes away,
@@ -267,6 +268,16 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   per-stream limit. Embedded use
   (`ClientAndServer`, the JUnit and Spring integrations) is unchanged.
 
+- **Behaviour change: a client that stops reading a response is now disconnected after 1 minute by default**
+  (`responseWriteStallTimeoutMillis`, default `60000`; set it to `0` to restore the previous behaviour). A
+  client that stopped reading kept what was waiting for it indefinitely: an aggregated response up to its full
+  size and, for a streamed response, up to `maxResponseBodySize` plus an open upstream connection. Now, when a
+  response has had bytes waiting for its client for the timeout and the client has taken none of them, the
+  response ends incomplete: an HTTP/1.1 connection (or the `CONNECT`/SOCKS tunnel it reads through) is closed,
+  an HTTP/2 or HTTP/3 stream is reset (other streams on the connection carry on), and a streamed response's
+  upstream connection is closed. A client that keeps taking some of the response at least once per timeout
+  period is not affected, nor is one waiting for a delayed or slow response, which has nothing waiting for it. Each stall is logged as a
+  `WARN`. The value applies to connections accepted after it is changed.
 - **Behaviour change: idle client connections are now closed after 5 minutes by default** (`inboundConnectionIdleTimeoutMillis`); set it to `0` to restore the previous behaviour. Only a connection that has sent and received nothing for the whole timeout with nothing in progress is closed: one waiting for a delayed or breakpoint-paused response, streaming a response (SSE, chunked, gRPC), carrying an open HTTP/2 stream, or used as a WebSocket, CONNECT/SOCKS tunnel or raw binary proxy is never closed by it. An `error()` action that sends nothing and keeps the connection open is not waiting for anything, so that connection counts as idle and is closed once the timeout passes. Mainstream HTTP clients reconnect transparently; in rare cases a request sent at the exact moment of closure may need a retry.
 - `mock_server_evicted_log_entries_total` now counts evicted log entries rather than eviction
   episodes. It used to go up by one when the event log started evicting (and once more after each

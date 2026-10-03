@@ -125,6 +125,7 @@ public class ConfigurationProperties {
     private static final String MOCKSERVER_SO_BACKLOG = "mockserver.soBacklog";
     private static final String MOCKSERVER_INBOUND_CONNECTION_IDLE_TIMEOUT_MILLIS = "mockserver.inboundConnectionIdleTimeoutMillis";
     private static final String MOCKSERVER_MAX_INBOUND_CONNECTIONS = "mockserver.maxInboundConnections";
+    private static final String MOCKSERVER_RESPONSE_WRITE_STALL_TIMEOUT_MILLIS = "mockserver.responseWriteStallTimeoutMillis";
     private static final String MOCKSERVER_ACTION_HANDLER_THREAD_COUNT = "mockserver.actionHandlerThreadCount";
     private static final String MOCKSERVER_MAX_PENDING_DELAYED_RESPONSES = "mockserver.maxPendingDelayedResponses";
     private static final String MOCKSERVER_MAX_QUEUED_TEMPLATE_ACTIONS = "mockserver.maxQueuedTemplateActions";
@@ -2515,6 +2516,27 @@ public class ConfigurationProperties {
      */
     public static void inboundConnectionIdleTimeoutMillis(long millis) {
         setProperty(MOCKSERVER_INBOUND_CONNECTION_IDLE_TIMEOUT_MILLIS, "" + millis);
+    }
+
+    public static long responseWriteStallTimeoutMillis() {
+        return Math.max(0L, readLongProperty(MOCKSERVER_RESPONSE_WRITE_STALL_TIMEOUT_MILLIS, "MOCKSERVER_RESPONSE_WRITE_STALL_TIMEOUT_MILLIS", 60_000L));
+    }
+
+    /**
+     * <p>How long, in milliseconds, a response being written to a client may go without the client taking any more
+     * of it before MockServer gives up on it. Default {@code 60000} (1 minute); {@code 0} disables the timeout, and a
+     * negative value is treated as {@code 0}.</p>
+     *
+     * <p>A client that stops reading otherwise keeps what is queued for it indefinitely: an aggregated response up to
+     * its size, and a streamed response up to {@code maxResponseBodySize} plus its upstream connection. When the
+     * timeout passes the response ends incomplete: an HTTP/1.1 connection is closed, and an HTTP/2 or HTTP/3 stream is
+     * reset; a streamed response's upstream connection is closed too. A client that keeps taking some of the response at
+     * least once per timeout period is not affected.</p>
+     *
+     * @param millis write stall timeout in milliseconds, 0 to disable
+     */
+    public static void responseWriteStallTimeoutMillis(long millis) {
+        setProperty(MOCKSERVER_RESPONSE_WRITE_STALL_TIMEOUT_MILLIS, "" + millis);
     }
 
     public static int maxInboundConnections() {

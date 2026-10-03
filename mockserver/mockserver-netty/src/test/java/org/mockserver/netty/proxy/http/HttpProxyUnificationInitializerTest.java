@@ -62,6 +62,7 @@ public class HttpProxyUnificationInitializerTest {
         // then - should add SSL handlers first
         assertThat(String.valueOf(embeddedChannel.pipeline().names()), embeddedChannel.pipeline().names(), contains(
             "SniHandler#0",
+            "write-stall",
             "inbound-idle",
             "PortUnificationHandler#0",
             "DefaultChannelPipeline$TailContext#0"
@@ -101,6 +102,7 @@ public class HttpProxyUnificationInitializerTest {
             "Socks5CommandRequestDecoder#0",
             "Socks5ServerEncoder#0",
             "Socks5ProxyHandler#0",
+            "write-stall",
             "inbound-idle",
             "PortUnificationHandler#0",
             "DefaultChannelPipeline$TailContext#0"
@@ -123,6 +125,7 @@ public class HttpProxyUnificationInitializerTest {
 
         // then - should add HTTP handlers last
         assertThat(String.valueOf(embeddedChannel.pipeline().names()), embeddedChannel.pipeline().names(), contains(
+            "write-stall",
             "inbound-idle",
             "PacedLargeWriteHandler#0",
             "HttpChunkLineLimiter$BeforeCodec#0",
@@ -154,6 +157,7 @@ public class HttpProxyUnificationInitializerTest {
 
         // then - the transport timer sits between the codec and everything that aggregates or answers
         assertThat(String.valueOf(embeddedChannel.pipeline().names()), embeddedChannel.pipeline().names(), contains(
+            "write-stall",
             "inbound-idle",
             "PacedLargeWriteHandler#0",
             "HttpChunkLineLimiter$BeforeCodec#0",

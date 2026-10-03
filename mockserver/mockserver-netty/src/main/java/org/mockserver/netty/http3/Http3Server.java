@@ -195,6 +195,11 @@ public class Http3Server {
                             new ChannelInitializer<QuicStreamChannel>() {
                                 @Override
                                 protected void initChannel(QuicStreamChannel streamCh) {
+                                    long writeStallTimeoutMillis = configuration != null ? configuration.responseWriteStallTimeoutMillis() : 0;
+                                    if (writeStallTimeoutMillis > 0) {
+                                        // first, so it sees each write the HTTP/3 frame codec makes
+                                        streamCh.pipeline().addFirst(new Http3StreamWriteStallHandler(writeStallTimeoutMillis, mockServerLogger));
+                                    }
                                     if (httpState != null && httpActionHandler != null && configuration != null) {
                                         if (connectUdpEnabled) {
                                             streamCh.pipeline().addLast(new Http3ConnectUdpHandler(configuration));

@@ -197,6 +197,15 @@ public class NettyResponseWriter extends ResponseWriter {
         // Send the response head
         ctx.writeAndFlush(nettyResponse);
 
+        // a connection or HTTP/2 stream closed mid-response (a write stall, the client going away) takes no more of the
+        // upstream; removed when the stream ends, so a keep-alive connection does not collect one per response
+        ChannelFutureListener closeUpstreamIfIncomplete = future -> {
+            if (!streamingBody.isCompleted()) {
+                streamingBody.closeUpstream();
+            }
+        };
+        ctx.channel().closeFuture().addListener(closeUpstreamIfIncomplete);
+
         // Determine if stream-frame breakpoints are active for this response
         final org.mockserver.mock.breakpoint.BreakpointMatcher streamBreakpointMatcher = org.mockserver.mock.breakpoint.BreakpointMatcherRegistry.getInstance().findMatch(request, org.mockserver.mock.breakpoint.BreakpointPhase.RESPONSE_STREAM);
         final boolean streamBreakpointsActive = streamBreakpointMatcher != null;
@@ -360,6 +369,7 @@ public class NettyResponseWriter extends ResponseWriter {
             },
             // onComplete
             () -> {
+                ctx.channel().closeFuture().removeListener(closeUpstreamIfIncomplete);
                 if (streamBreakpointsActive) {
                     // Evict any remaining held frames for this stream (prevents leaks)
                     StreamFrameBreakpointRegistry.getInstance().evictStream(streamId);
@@ -390,6 +400,7 @@ public class NettyResponseWriter extends ResponseWriter {
             },
             // onError
             error -> {
+                ctx.channel().closeFuture().removeListener(closeUpstreamIfIncomplete);
                 if (streamBreakpointsActive) {
                     // Evict any remaining held frames for this stream (prevents leaks)
                     StreamFrameBreakpointRegistry.getInstance().evictStream(streamId);

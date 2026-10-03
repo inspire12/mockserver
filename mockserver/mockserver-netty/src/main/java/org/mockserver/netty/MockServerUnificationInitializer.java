@@ -8,6 +8,7 @@ import org.mockserver.lifecycle.LifeCycle;
 import org.mockserver.mock.HttpState;
 import org.mockserver.mock.action.http.HttpActionHandler;
 import org.mockserver.netty.connection.InboundConnectionIdleHandler;
+import org.mockserver.netty.connection.WriteStallTimeoutHandler;
 import org.mockserver.netty.mcp.McpSessionManager;
 import org.mockserver.netty.mcp.McpStreamableHttpHandler;
 import org.mockserver.netty.proxy.ProxyProtocolOriginalDestinationHandler;
@@ -52,6 +53,10 @@ public class MockServerUnificationInitializer extends ChannelHandlerAdapter {
         long idleTimeoutMillis = configuration.inboundConnectionIdleTimeoutMillis();
         if (idleTimeoutMillis > 0) {
             ctx.pipeline().addFirst("inbound-idle", new InboundConnectionIdleHandler(idleTimeoutMillis, httpState.getMockServerLogger()));
+        }
+        long writeStallTimeoutMillis = configuration.responseWriteStallTimeoutMillis();
+        if (writeStallTimeoutMillis > 0) {
+            ctx.pipeline().addFirst("write-stall", new WriteStallTimeoutHandler(writeStallTimeoutMillis, httpState.getMockServerLogger()));
         }
         // When transparent proxy mode is enabled, add:
         // 1. PROXY protocol v1 handler (reads first inbound bytes for PROXY header)

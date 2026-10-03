@@ -36,9 +36,12 @@ import org.mockserver.model.Delay;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.netty.HttpRequestHandler;
+import org.mockserver.netty.connection.Http2StreamWriteStallHandler;
 import org.mockserver.netty.connection.HttpExchangeTracker;
 import org.mockserver.netty.connection.HttpTransportTimer;
 import org.mockserver.netty.connection.InboundConnectionActivity;
+import org.mockserver.netty.connection.WriteStallTimeoutHandler;
+import org.mockserver.netty.proxy.relay.RelayLoopbackAddresses;
 import org.mockserver.netty.mcp.McpStreamableHttpHandler;
 import org.mockserver.netty.grpc.GrpcToHttpRequestHandler;
 import org.mockserver.netty.grpc.GrpcToHttpResponseHandler;
@@ -455,6 +458,10 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
             frameCodecBuilder.frameLogger(new Http2FrameLogger(LogLevel.TRACE, PortUnificationHandler.class.getName()));
         }
         addLastIfNotPresent(pipeline, frameCodecBuilder.build());
+        long writeStallTimeoutMillis = configuration.responseWriteStallTimeoutMillis();
+        if (writeStallTimeoutMillis > 0 && !WriteStallTimeoutHandler.isExempt(ctx.channel())) {
+            addLastIfNotPresent(pipeline, new Http2StreamWriteStallHandler(writeStallTimeoutMillis, mockServerLogger));
+        }
         addLastIfNotPresent(pipeline, new Http2MultiplexHandler(
             new Http2MultiplexChildInitializer(
                 configuration, server, httpState, actionHandler,
@@ -548,6 +555,9 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
     private void switchToProxyConnected(ChannelHandlerContext ctx, ByteBuf msg) {
         // MockServer's own loopback leg of a CONNECT/SOCKS tunnel: idle-closing it would tear the tunnel down
         InboundConnectionActivity.markLongLived(ctx.channel());
+        if (RelayLoopbackAddresses.isRelayLoopback(ctx.channel())) {
+            WriteStallTimeoutHandler.exempt(ctx.channel());
+        }
         String message = readMessage(msg);
         if (message.startsWith(PROXIED_SECURE)) {
             String[] hostParts = HttpRequest.splitHostPort(StringUtils.substringAfter(message, PROXIED_SECURE));

@@ -155,6 +155,7 @@ public class Configuration {
     private volatile Integer soBacklog;
     private volatile Long inboundConnectionIdleTimeoutMillis;
     private volatile Integer maxInboundConnections;
+    private volatile Long responseWriteStallTimeoutMillis;
     private volatile Integer actionHandlerThreadCount;
     private volatile Integer maxPendingDelayedResponses;
     private volatile Integer maxQueuedTemplateActions;
@@ -2128,6 +2129,27 @@ public class Configuration {
      */
     public Configuration inboundConnectionIdleTimeoutMillis(Long inboundConnectionIdleTimeoutMillis) {
         this.inboundConnectionIdleTimeoutMillis = inboundConnectionIdleTimeoutMillis;
+        return this;
+    }
+
+    public Long responseWriteStallTimeoutMillis() {
+        if (responseWriteStallTimeoutMillis == null) {
+            return ConfigurationProperties.responseWriteStallTimeoutMillis();
+        }
+        return Math.max(0L, responseWriteStallTimeoutMillis);
+    }
+
+    /**
+     * <p>How long, in milliseconds, a response being written to a client may go without the client taking any more
+     * of it before MockServer gives up on it: the response ends incomplete (an HTTP/1.1 connection is closed, an
+     * HTTP/2 or HTTP/3 stream is reset) and a streamed response's upstream connection is closed. Default
+     * {@code 60000} (1 minute), {@code 0} disables it. Applies to TCP connections accepted, and HTTP/3 streams
+     * opened, after it is set.</p>
+     *
+     * @param responseWriteStallTimeoutMillis write stall timeout in milliseconds, 0 to disable
+     */
+    public Configuration responseWriteStallTimeoutMillis(Long responseWriteStallTimeoutMillis) {
+        this.responseWriteStallTimeoutMillis = responseWriteStallTimeoutMillis;
         return this;
     }
 
