@@ -1341,17 +1341,35 @@ event_log_counters() { # < metrics_text -> "dropped|evicted", each empty when ab
     "$(gauge_value mock_server_evicted_log_entries_total <<<"$m")"
 }
 # Appends "retained_bytes retained_entries" every 2 s until killed. The load phases reset the
-# log, so its occupancy can only be seen by sampling during them.
-event_log_sampler() { # host:port outfile
+# log, so its occupancy can only be seen by sampling during them. With a pressure csv, each scrape
+# also appends the drop counters (by reason; blank on a server that exports no reason label) and
+# the ring / in-flight gauges, which event_log_pressure_json lines up with the sweep rungs.
+EVENT_LOG_PRESSURE_COLS="ts,dropped_ring_full,dropped_in_flight_bytes,dropped_log_events,ring_occupancy,ring_capacity,in_flight_bytes,max_in_flight_bytes"
+event_log_sampler() { # host:port outfile [pressure_csv]
+  local csv="${3:-}" m row_csv
+  [ -z "$csv" ] || echo "$EVENT_LOG_PRESSURE_COLS" 2>/dev/null > "$csv" || csv=""
   while true; do
-    curl -sf --max-time 2 "http://$1/mockserver/metrics" 2>/dev/null | awk '
+    row_csv="$csv"; m="$(curl -sf --max-time 2 "http://$1/mockserver/metrics" 2>/dev/null)" || row_csv=""
+    # Only a complete scrape writes a pressure row: a body cut mid-number reads as a counter restart.
+    # Stamped with the next whole second, so a row never claims a time before its values were read.
+    awk -v ts="$(( $(date -u +%s) + 1 ))" -v csv="$row_csv" '
+      function n(v) { return v == "" ? "" : sprintf("%.0f", v) }
       $1 == "mock_server_event_log_retained_bytes" {b = $2} $1 == "mock_server_event_log_retained_entries" {e = $2}
-      END {if (b != "") printf "%.0f %.0f\n", b, e + 0}' >> "$2" || true
+      $1 == "mock_server_dropped_log_events_total" {du = $2; seen = 1}
+      index($1, "mock_server_dropped_log_events_total{") == 1 {
+        dl += $2; labelled = 1; seen = 1
+        if (index($1, "reason=\"ring_full\"")) rf = $2; else if (index($1, "reason=\"in_flight_bytes\"")) ib = $2 }
+      $1 == "mock_server_event_log_ring_occupancy" {occ = $2; seen = 1} $1 == "mock_server_event_log_ring_capacity" {cap = $2}
+      $1 == "mock_server_event_log_in_flight_bytes" {ifb = $2; seen = 1} $1 == "mock_server_event_log_max_in_flight_bytes" {maxinf = $2}
+      END {if (b != "") printf "%.0f %.0f\n", b, e + 0
+           # A scrape cut off between the two reason lines would read as a counter restart: leave its drops blank.
+           if (labelled && (rf == "" || ib == "")) { rf = ""; ib = ""; dl = "" }
+           if (csv != "" && seen) printf "%s,%s,%s,%s,%s,%s,%s,%s\n", ts, n(rf), n(ib), n(labelled ? dl : du), n(occ), n(cap), n(ifb), n(maxinf) >> csv}' <<<"$m" >> "$2" || true
     sleep 2
   done
 }
-start_info_els_sampler() { # host:port outfile
-  event_log_sampler "$1" "$2" & INFO_ELS_SAMPLER_PID=$!
+start_info_els_sampler() { # host:port outfile [pressure_csv]
+  event_log_sampler "$1" "$2" "${3:-}" & INFO_ELS_SAMPLER_PID=$!
 }
 stop_info_els_sampler() {
   [ -n "$INFO_ELS_SAMPLER_PID" ] || return 0
@@ -1361,6 +1379,54 @@ stop_info_els_sampler() {
 }
 event_log_peaks() { # samples_file -> "peak_bytes peak_entries", empty when there are no samples
   awk '{if ($1 > b) b = $1; if ($2 > e) e = $2; n++} END {if (n) printf "%.0f %.0f", b, e}' "$1" 2>/dev/null || true
+}
+# Report-only. Per sweep rung, the events dropped (by reason) and the peak ring occupancy and
+# in-flight bytes; null when no sample bounds them. Rungs are separated by a gap, so a rung's drops
+# run from the last sample at or before its start to the last sample at or before the next rung's
+# start (the last rung: to the last sample, as the sampler stops when the sweep returns). The gap,
+# where the rung's backlog drains, counts towards the rung before it, and the rungs sum to the drops
+# sampled over the ladder.
+# A counter that falls is read as restarted. Peaks are of 2 s samples inside the rung, so floors.
+event_log_pressure_json() { # sweep_json pressure_csv -> JSON; reads STEP_S through sweep_rung_windows
+  local rungs='[]'
+  [ -s "$2" ] || { echo null; return 0; }
+  [ ! -s "$1" ] || rungs="$(sweep_rung_windows "$1")"
+  jq -Rnc --argjson rungs "${rungs:-[]}" '
+    def num: if . == null or . == "" then null else (tonumber? // null) end;
+    def grown: map(select(. != null)) | if length < 2 then null
+      else [range(1; length) as $i | if .[$i] >= .[$i - 1] then .[$i] - .[$i - 1] else .[$i] end] | add end;
+    def peak: map(select(. != null)) | max;
+    def frac($p; $c): if $p == null or $c == null or $c <= 0 then null else ($p / $c * 10000 | round / 10000) end;
+    def first_rps(f): (map(select((f // 0) > 0)) | .[0].offered_rps) // null;
+    [inputs | split(",") | select(.[0] != "ts") | {ts: (.[0] | num), ring_full: (.[1] | num), in_flight: (.[2] | num),
+       dropped: (.[3] | num), occ: (.[4] | num), cap: (.[5] | num), inflt: (.[6] | num), maxinflt: (.[7] | num)}
+     | select(.ts != null)] as $rows
+    | if ($rows | length) == 0 then null else
+      ($rows | any(.ring_full != null or .in_flight != null)) as $split
+      | ($rows | length) as $n
+      | [range(0; $rungs | length) as $i | $rungs[$i] | (.start_epoch_ms / 1000) as $lo | (.end_epoch_ms / 1000) as $hi | .offered_rps as $rps
+         | [$rows[] | select(.ts > $lo and .ts <= $hi)] as $in
+         | (([range(0; $n) | select($rows[.].ts <= $lo)] | last) // ([range(0; $n) | select($rows[.].ts > $lo)] | first)) as $from
+         | (if $i + 1 < ($rungs | length) then ($rungs[$i + 1].start_epoch_ms / 1000) as $next | [range(0; $n) | select($rows[.].ts <= $next)] | last
+            else $n - 1 end) as $to
+         | (if $from == null or $to == null or $to < $from then [] else $rows[$from:$to + 1] end) as $span
+         | {offered_rps: $rps, samples: ($in | length),
+            dropped_log_events: ($span | map(.dropped) | grown),
+            dropped_by_reason: (if $split then {ring_full: ($span | map(.ring_full) | grown),
+                                                in_flight_bytes: ($span | map(.in_flight) | grown)} else null end),
+            peak_ring_occupancy: ($in | map(.occ) | peak), peak_in_flight_bytes: ($in | map(.inflt) | peak)}] as $per
+      | ($rows | map(.occ) | peak) as $pocc | ($rows | map(.cap) | peak) as $cap
+      | ($rows | map(.inflt) | peak) as $pinf | ($rows | map(.maxinflt) | peak) as $maxinf
+      | {sample_interval_s: 2, samples: ($rows | length), reason_split: $split,
+         dropped_log_events: ([{dropped: 0}] + $rows | map(.dropped) | grown),
+         dropped_by_reason: (if $split then {ring_full: ([{ring_full: 0}] + $rows | map(.ring_full) | grown),
+                                             in_flight_bytes: ([{in_flight: 0}] + $rows | map(.in_flight) | grown)} else null end),
+         peak_ring_occupancy: $pocc, ring_capacity: $cap, peak_ring_utilisation: frac($pocc; $cap),
+         peak_in_flight_bytes: $pinf, max_in_flight_bytes: $maxinf, peak_in_flight_utilisation: frac($pinf; $maxinf),
+         first_drop_rung_rps: ($per | first_rps(.dropped_log_events)),
+         first_drop_rung_rps_by_reason: (if $split then {ring_full: ($per | first_rps(.dropped_by_reason.ring_full)),
+                                                         in_flight_bytes: ($per | first_rps(.dropped_by_reason.in_flight_bytes))} else null end),
+         rungs: $per} end' "$2" 2>/dev/null || echo null
 }
 # event_log_budget for the INFO arm record; empty arguments become null. bound_reached is null when
 # evictions are unknown and no utilisation reaches the ratio. binding is null without utilisations,
@@ -2668,6 +2734,7 @@ if [ "$PERF_INFO_ARM" = "true" ]; then
     || echo "WARNING: INFO SUT failed to start — INFO arm will record measured:false" >&2
   INFO_ELS_MAX_BYTES=""; INFO_ELS_MAX_ENTRIES=""; INFO_HEAP_MAX_BYTES=""; INFO_ELS_DROPPED=""; INFO_ELS_EVICTED=""
   INFO_ELS_SAMPLES="$DIAG_DIR/info/event-log-samples.txt"; : > "$INFO_ELS_SAMPLES" 2>/dev/null || true
+  INFO_ELS_PRESSURE="$DIAG_DIR/info/event-log-pressure.csv"
   if wait_ready "$INFO_SERVER"; then
     INFO_MEASURED=true
     INFO_METRICS_HOSTPORT="$(docker port "$INFO_SERVER" 1080/tcp 2>/dev/null | head -1 || true)"
@@ -2677,7 +2744,7 @@ if [ "$PERF_INFO_ARM" = "true" ]; then
     INFO_ELS_MAX_ENTRIES="$(gauge_value mock_server_event_log_max_retained_entries <<<"$INFO_METRICS")"
     INFO_HEAP_MAX_BYTES="$(gauge_value 'jvm_memory_max_bytes{area="heap"}' <<<"$INFO_METRICS")"
     echo "--- INFO SUT event-log budget: maxEventLogSizeInBytes=${INFO_ELS_MAX_BYTES:-<unreadable>} maxLogEntries=${INFO_ELS_MAX_ENTRIES:-<unreadable>} heap_max=${INFO_HEAP_MAX_BYTES:-<unreadable>} (requested: ${PERF_INFO_MAX_EVENT_LOG_BYTES:-shipped default})"
-    [ -z "$INFO_METRICS_HOSTPORT" ] || start_info_els_sampler "$INFO_METRICS_HOSTPORT" "$INFO_ELS_SAMPLES"
+    [ -z "$INFO_METRICS_HOSTPORT" ] || start_info_els_sampler "$INFO_METRICS_HOSTPORT" "$INFO_ELS_SAMPLES" "$INFO_ELS_PRESSURE"
     # Per-behaviour percentiles at INFO (http + https_h2), same durations/arms as the
     # ERROR regression so the two are comparable. Guarded: a k6 failure degrades this
     # arm to measured:false rather than aborting the (ERROR-baseline) run.
@@ -2716,14 +2783,17 @@ if [ "$PERF_INFO_ARM" = "true" ]; then
     "$INFO_ELS_MAX_BYTES" "$INFO_ELS_MAX_ENTRIES" "$INFO_HEAP_MAX_BYTES" "$INFO_ELS_EXPECTED_DEFAULT" \
     "$INFO_ELS_PEAK_BYTES" "$INFO_ELS_PEAK_ENTRIES" "$INFO_ELS_DROPPED" "$INFO_ELS_EVICTED" "$PERF_EVENT_LOG_APPROACH_RATIO")"
   jq -e . >/dev/null 2>&1 <<<"$INFO_ELS_JSON" || INFO_ELS_JSON="$(jq -nc --arg m "$INFO_ELS_METHOD" '{method: $m}')"
+  INFO_ELS_PRESSURE_JSON="$(event_log_pressure_json "$OUT_DIR/info-sweep.json" "$INFO_ELS_PRESSURE")"
+  jq -se 'length == 1' >/dev/null 2>&1 <<<"$INFO_ELS_PRESSURE_JSON" || INFO_ELS_PRESSURE_JSON=null
 
   # Merge the http + https_h2 behaviours (guarded to {} on any missing/unparsable
   # file), derive the INFO saturation with the SHARED derive_saturation, then assemble the
   # self-describing block. No server CPU log is passed (the diag sampler watches the ERROR
   # SUT), so only the k6 CPU client-limited test applies here, unlike the ERROR arm.
   INFO_BEHAVIOURS="$(jq -sc '(.[0].behaviours // {}) + (.[1].behaviours // {})' \
-    "$OUT_DIR/info-regression-http.json" "$OUT_DIR/info-regression-https.json" 2>/dev/null || echo '{}')"
-  jq -e . >/dev/null 2>&1 <<<"$INFO_BEHAVIOURS" || INFO_BEHAVIOURS='{}'
+    "$OUT_DIR/info-regression-http.json" "$OUT_DIR/info-regression-https.json" 2>/dev/null || true)"
+  # Exactly one document: with a file missing jq still prints the merge of the rest and exits non-zero.
+  jq -se 'length == 1' >/dev/null 2>&1 <<<"$INFO_BEHAVIOURS" || INFO_BEHAVIOURS='{}'
   INFO_SWEEP_JSON="$(cat "$OUT_DIR/info-sweep.json" 2>/dev/null || echo '{}')"
   jq -e . >/dev/null 2>&1 <<<"$INFO_SWEEP_JSON" || INFO_SWEEP_JSON='{}'
   if [ -f "$OUT_DIR/info-sweep.json" ]; then
@@ -2739,6 +2809,7 @@ if [ "$PERF_INFO_ARM" = "true" ]; then
     --arg image "$MOCKSERVER_IMAGE" --arg image_digest "$IMAGE_DIGEST" \
     --arg server_cpus "${SERVER_CPUS:-none}" --arg k6_cpus "${K6_CPUS:-none}" \
     --argjson event_log_budget "$INFO_ELS_JSON" \
+    --argjson event_log_pressure "$INFO_ELS_PRESSURE_JSON" \
     --argjson behaviours "$INFO_BEHAVIOURS" \
     --argjson sweep "$INFO_SWEEP_JSON" \
     --argjson saturation "$INFO_SATURATION_JSON" '
@@ -2767,12 +2838,16 @@ if [ "$PERF_INFO_ARM" = "true" ]; then
       # server_headroom_test is "off", so it is not comparable with the ERROR-arm peak.
       sweep: { proto: ($sweep.proto // "http"), latency_window: ($sweep.latency_window // null), points: ($sweep.points // []) },
       saturation: $saturation,
+      # Report-only: per-rung drops by reason, the first rung that dropped, and the ring / in-flight peaks.
+      event_log_pressure: $event_log_pressure,
       rig_valid_peak_achieved_rps: ($saturation.rig_valid_peak_achieved_rps // null),
       saturation_rps: ($saturation.saturation_rps // null)
     }')"
   INFO_PEAK="$(jq -r '.rig_valid_peak_achieved_rps // "n/a"' <<<"$INFO_ARM_JSON")"
   INFO_SAT="$(jq -r '.saturation_rps // "n/a"' <<<"$INFO_ARM_JSON")"
   INFO_T_END="$(date -u +%s)"
+  echo "--- INFO event-log pressure: $(jq -r 'if . == null then "no samples" else
+      "first drops at the \(.first_drop_rung_rps // "no") rps rung; sampled drops \(.dropped_log_events // "n/a") (ring_full \(.dropped_by_reason.ring_full // "n/a"), in_flight_bytes \(.dropped_by_reason.in_flight_bytes // "n/a")); peak ring \(.peak_ring_occupancy // "n/a")/\(.ring_capacity // "n/a"), peak in-flight \(.peak_in_flight_bytes // "n/a")/\(.max_in_flight_bytes // "n/a") bytes" end' <<<"$INFO_ELS_PRESSURE_JSON" 2>/dev/null || echo unavailable)"
   echo "--- INFO-log-level arm done (log_level=${INFO_LOG_LEVEL_VAL} measured=${INFO_MEASURED} rig_valid_peak_achieved_rps=${INFO_PEAK} saturation_rps=${INFO_SAT}); added wall-clock $((INFO_T_END - INFO_T_START))s"
   # Free the INFO SUT's heap before the growth phase (cleanup() also reaps it).
   docker rm -f "$INFO_SERVER" >/dev/null 2>&1 || true

@@ -2103,6 +2103,9 @@ The INFO SUT now gets no budget, so the INFO arm measures the out-of-the-box fig
   `peak_retained_entries`, their utilisations, `evicted_log_entries`, `dropped_log_events`,
   `bound_reached` and `binding`.
 
+Where in the ladder the ring starts dropping, and why, is in `info_log_level_arm.event_log_pressure`
+(see [INFO-arm event-log pressure](#info-arm-event-log-pressure)).
+
 The compare step keys every `info_*` metric on `method`; a run without the block reads as
 `fixed-268435456`. So `info_*` stays `:new:` until `MIN_BASELINE` runs share the new method, and
 re-baselines from the first run after the change. While older runs remain in the window the
@@ -2163,6 +2166,56 @@ The heap divisors the harness expects mirror `ConfigurationProperties` and must 
 `els_default_divisor` for the retention budget (20 at `WARN`/`ERROR`/`OFF`, 12 at
 `INFO`/`DEBUG`/`TRACE`) and `els_inflight_divisor` for the in-flight floor (7 and 12). `.buildkite/scripts/test/perf-default-budget-test.sh` checks the call sites, both guards,
 the scoped PUT against a stubbed SUT, the window statistics and the key.
+
+### INFO-arm event-log pressure
+
+`info_log_level_arm.config.event_log_budget` says whether the retained log reached its bound; `dropped_log_events` there is
+one end-of-run total. `info_log_level_arm.event_log_pressure` says where in the ladder the ring
+started dropping and why. It is report-only: nothing gates on it and the compare step does not
+read it.
+
+The INFO arm's 2 s event-log sampler also writes one row per scrape to `info/event-log-pressure.csv` in the diagnostics
+bundle (`ts`, `dropped_ring_full`, `dropped_in_flight_bytes`, `dropped_log_events`,
+`ring_occupancy`, `ring_capacity`, `in_flight_bytes`, `max_in_flight_bytes`), over both INFO
+`regression.js` passes and the INFO sweep. The block is derived from it:
+
+| Field | Meaning |
+|---|---|
+| `rungs[]` | per sweep rung: `offered_rps`, `samples`, `dropped_log_events`, `dropped_by_reason` (`ring_full`, `in_flight_bytes`), `peak_ring_occupancy`, `peak_in_flight_bytes` |
+| `first_drop_rung_rps` | the lowest rung that dropped anything; `null` when no rung did |
+| `first_drop_rung_rps_by_reason` | the same, per reason |
+| `dropped_log_events`, `dropped_by_reason` | drops over the whole sampled INFO load, the regression passes included |
+| `peak_ring_occupancy`, `ring_capacity`, `peak_ring_utilisation` | the fullest the ring was seen, against its size |
+| `peak_in_flight_bytes`, `max_in_flight_bytes`, `peak_in_flight_utilisation` | the most in-flight bytes seen, against the cap |
+| `samples`, `sample_interval_s`, `reason_split` | how many rows the block rests on, and whether the server exported the reason label |
+
+How to read it:
+
+- Rungs are not contiguous: `sweep.js` leaves `K6_SWEEP_GAP` (5 s) between them. A rung's
+  `samples` and peaks come from its own window, `start_epoch_ms` to `start_epoch_ms + STEP_S`,
+  settle included. Its drops run from the last sample at or before its start to the last sample at
+  or before the next rung's start; the last rung runs to the last sample, as the sampler stops when
+  the sweep returns. So the gap, where the rung's backlog drains, counts towards the rung before
+  it, each drop lands in exactly one rung, and the rungs sum to the drops sampled over the ladder.
+- A row is stamped with the whole second after its scrape returns, so never earlier than the read
+  and up to a second later. Rows are 2 s apart plus the scrape time, so a drop in the last 3–4 s
+  before a rung starts can be counted in that rung instead of the one before. A scrape that does
+  not complete (a timeout, a cut-off body) writes no row.
+- A rung with `samples: 0` still gets drops when a sample falls between its start and the next
+  rung's start (a gap sample bounds it, often at 0). Only when no sample does are its drops `null`,
+  and then whatever it dropped shows in the next rung that was bounded, so `first_drop_rung_rps`
+  can read one rung late. Check `samples` on the rungs below it before quoting it.
+- The occupancy and in-flight figures are gauges read every 2 s, so a peak is a floor: the ring can
+  fill and drain between two samples. Drops are counters, so nothing is lost between samples; drops
+  after the last sample (the sampler stops when the sweep returns) appear only in the end-of-run
+  `config.event_log_budget.dropped_log_events`, which stays the authoritative total.
+- `null` means not observed, never zero: a rung with no sample in it, or a reason split on a server
+  that exports one unlabelled `mock_server_dropped_log_events_total` (before item 76). Such a
+  server still gives totals and `first_drop_rung_rps`, with `reason_split: false`. A scrape that
+  carries only one of the two reason lines is treated as cut off: its drop columns are left blank.
+- The block is `null` when the INFO SUT's metrics port could not be read at all.
+
+`.buildkite/scripts/test/perf-info-budget-test.sh` checks the sampler rows and the derivation.
 
 ### GC log cycle times are not stop-the-world pause times
 
