@@ -8,6 +8,7 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 import org.mockserver.client.MockServerClient;
 import org.mockserver.llm.codec.BedrockEventStreamEncoder;
+import org.mockserver.model.Usage;
 import org.mockserver.netty.MockServer;
 
 import java.io.ByteArrayOutputStream;
@@ -17,7 +18,9 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
@@ -29,6 +32,7 @@ import static org.mockserver.model.Completion.completion;
 import static org.mockserver.model.Provider.ANTHROPIC;
 import static org.mockserver.model.Provider.AZURE_OPENAI;
 import static org.mockserver.model.Provider.BEDROCK;
+import static org.mockserver.model.Provider.DEEPSEEK;
 import static org.mockserver.model.Provider.GEMINI;
 import static org.mockserver.model.Provider.OLLAMA;
 import static org.mockserver.model.Provider.OPENAI;
@@ -653,6 +657,85 @@ public class LlmAgentLoopE2eTest {
         assertThat(rawResponse, containsString("text/event-stream"));
         assertThat(rawResponse, containsString("chat.completion.chunk"));
         assertThat(rawResponse, containsString("[DONE]"));
+    }
+
+    @Test
+    public void shouldStreamOpenAiUsageChunkThroughNettyPipelineWhenRequestSetsIncludeUsage() throws Exception {
+        // AI SDKs (Vercel AI SDK, LangChain stream_usage, LiteLLM) send stream_options.include_usage
+        // and read token counts only from the final choices:[] chunk before [DONE].
+        for (org.mockserver.model.Provider provider : new org.mockserver.model.Provider[]{OPENAI, AZURE_OPENAI, DEEPSEEK}) {
+            mockServerClient.reset();
+            String path = "/v1/chat/completions/" + provider.name().toLowerCase();
+            llmMock(path)
+                .withProvider(provider)
+                .withModel("gpt-4o")
+                .respondingWith(completion()
+                    .withText("Hello from streaming usage")
+                    .withUsage(Usage.usage().withInputTokens(11).withOutputTokens(7).withCachedInputTokens(5))
+                    .withStreaming(true))
+                .applyTo(mockServerClient);
+
+            String body = "{\"model\":\"gpt-4o\",\"stream\":true,\"stream_options\":{\"include_usage\":true},"
+                + "\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]}";
+            List<String> dataLines = sseDataLines(sendPostRaw(path, body));
+
+            String ctx = provider + " ";
+            assertThat(ctx + "ends with [DONE]", dataLines.get(dataLines.size() - 1), is("[DONE]"));
+            JsonNode usageChunk = OBJECT_MAPPER.readTree(dataLines.get(dataLines.size() - 2));
+            assertThat(ctx + "usage chunk has empty choices", usageChunk.get("choices").size(), is(0));
+            assertThat(ctx + "prompt_tokens", usageChunk.path("usage").path("prompt_tokens").asInt(-1), is(11));
+            assertThat(ctx + "completion_tokens", usageChunk.path("usage").path("completion_tokens").asInt(-1), is(7));
+            assertThat(ctx + "total_tokens", usageChunk.path("usage").path("total_tokens").asInt(-1), is(18));
+            assertThat(ctx + "cached_tokens", usageChunk.path("usage").path("prompt_tokens_details").path("cached_tokens").asInt(-1), is(5));
+            for (String line : dataLines.subList(0, dataLines.size() - 2)) {
+                JsonNode chunk = OBJECT_MAPPER.readTree(line);
+                assertThat(ctx + "usage is null on content chunks", chunk.has("usage") && chunk.get("usage").isNull(), is(true));
+            }
+        }
+    }
+
+    @Test
+    public void shouldNotStreamOpenAiUsageChunkWhenRequestDoesNotSetIncludeUsage() throws Exception {
+        llmMock("/v1/chat/completions/no-usage")
+            .withProvider(OPENAI)
+            .withModel("gpt-4o")
+            .respondingWith(completion()
+                .withText("Hello without usage")
+                .withUsage(Usage.usage().withInputTokens(11).withOutputTokens(7))
+                .withStreaming(true))
+            .applyTo(mockServerClient);
+
+        String body = "{\"model\":\"gpt-4o\",\"stream\":true,"
+            + "\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]}";
+        List<String> dataLines = sseDataLines(sendPostRaw("/v1/chat/completions/no-usage", body));
+
+        assertThat(dataLines.get(dataLines.size() - 1), is("[DONE]"));
+        for (String line : dataLines.subList(0, dataLines.size() - 1)) {
+            JsonNode chunk = OBJECT_MAPPER.readTree(line);
+            assertThat(chunk.has("usage"), is(false));
+            assertThat(chunk.get("choices").size(), is(1));
+        }
+    }
+
+    /** The {@code data:} payloads of an HTTP/1.1 SSE response, de-chunking the body when it is chunked. */
+    private static List<String> sseDataLines(byte[] rawBytes) {
+        int headerEnd = indexOfSequence(rawBytes, "\r\n\r\n".getBytes(StandardCharsets.US_ASCII), 0);
+        assertThat("response must have a header/body boundary", headerEnd, greaterThanOrEqualTo(0));
+        String headerText = new String(rawBytes, 0, headerEnd, StandardCharsets.US_ASCII);
+        assertThat(headerText, containsString("200"));
+        assertThat(headerText, containsString("text/event-stream"));
+        byte[] body = new byte[rawBytes.length - (headerEnd + 4)];
+        System.arraycopy(rawBytes, headerEnd + 4, body, 0, body.length);
+        if (headerText.toLowerCase().contains("transfer-encoding: chunked")) {
+            body = deChunkHttpBody(body);
+        }
+        List<String> dataLines = new ArrayList<>();
+        for (String line : new String(body, StandardCharsets.UTF_8).split("\r?\n")) {
+            if (line.startsWith("data:")) {
+                dataLines.add(line.substring("data:".length()).trim());
+            }
+        }
+        return dataLines;
     }
 
     @Test

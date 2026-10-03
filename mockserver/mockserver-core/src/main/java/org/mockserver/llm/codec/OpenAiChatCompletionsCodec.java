@@ -84,27 +84,7 @@ public class OpenAiChatCompletionsCodec implements ProviderCodec {
         // finish_reason mapping
         choice.put("finish_reason", mapFinishReason(completion.getStopReason(), hasToolCalls, completion.getToolChoice()));
 
-        // usage
-        ObjectNode usage = root.putObject("usage");
-        Usage completionUsage = completion.getUsage();
-        int promptTokens = completionUsage != null && completionUsage.getInputTokens() != null ? completionUsage.getInputTokens() : 0;
-        int completionTokens = completionUsage != null && completionUsage.getOutputTokens() != null ? completionUsage.getOutputTokens() : 0;
-        usage.put("prompt_tokens", promptTokens);
-        usage.put("completion_tokens", completionTokens);
-        usage.put("total_tokens", promptTokens + completionTokens);
-        // Cached-input and reasoning token details are emitted only when set (non-null, non-zero),
-        // under OpenAI's native nested-details keys, so existing fixtures stay byte-identical when
-        // these optional fields are unset.
-        if (completionUsage != null) {
-            Integer cachedInputTokens = completionUsage.getCachedInputTokens();
-            if (cachedInputTokens != null && cachedInputTokens != 0) {
-                usage.putObject("prompt_tokens_details").put("cached_tokens", cachedInputTokens);
-            }
-            Integer reasoningTokens = completionUsage.getReasoningTokens();
-            if (reasoningTokens != null && reasoningTokens != 0) {
-                usage.putObject("completion_tokens_details").put("reasoning_tokens", reasoningTokens);
-            }
-        }
+        root.set("usage", usageNode(completion.getUsage()));
 
         try {
             String json = OBJECT_MAPPER.writeValueAsString(root);
@@ -119,6 +99,22 @@ public class OpenAiChatCompletionsCodec implements ProviderCodec {
 
     @Override
     public List<SseEvent> encodeStreaming(Completion completion, String model, StreamingPhysics physics) {
+        return encodeStreamingChunks(completion, model, physics, false);
+    }
+
+    /**
+     * Streams the usage chunk only when the request opts in with
+     * {@code stream_options.include_usage: true}, as the OpenAI and Azure OpenAI APIs do:
+     * every chunk then carries {@code "usage": null}, and one extra chunk with
+     * {@code "choices": []} and the token usage precedes {@code [DONE]}. Without the
+     * opt-in no chunk carries a {@code usage} key, even when the expectation sets usage.
+     */
+    @Override
+    public List<SseEvent> encodeStreaming(Completion completion, String model, StreamingPhysics physics, HttpRequest request) {
+        return encodeStreamingChunks(completion, model, physics, includeUsageRequested(request));
+    }
+
+    private List<SseEvent> encodeStreamingChunks(Completion completion, String model, StreamingPhysics physics, boolean includeUsage) {
         List<SseEvent> events = new ArrayList<>();
         String id = "chatcmpl-" + randomId(29);
         long created = System.currentTimeMillis() / 1000;
@@ -126,7 +122,7 @@ public class OpenAiChatCompletionsCodec implements ProviderCodec {
 
         // 1. First chunk: role-only
         events.add(sseEvent().withData(buildChunk(id, created, modelName,
-            "{\"role\":\"assistant\",\"content\":\"\"}", null)));
+            "{\"role\":\"assistant\",\"content\":\"\"}", null, includeUsage)));
 
         // 2. Text content chunks
         String text = completion.getText();
@@ -135,7 +131,7 @@ public class OpenAiChatCompletionsCodec implements ProviderCodec {
             for (String token : tokens) {
                 if (!token.isEmpty()) {
                     events.add(sseEvent().withData(buildChunk(id, created, modelName,
-                        "{\"content\":\"" + escapeJson(token) + "\"}", null)));
+                        "{\"content\":\"" + escapeJson(token) + "\"}", null, includeUsage)));
                 }
             }
         }
@@ -151,15 +147,20 @@ public class OpenAiChatCompletionsCodec implements ProviderCodec {
                 String delta = "{\"tool_calls\":[{\"index\":" + i + ",\"id\":\"" + toolCallId +
                     "\",\"type\":\"function\",\"function\":{\"name\":\"" + escapeJson(toolCall.getName()) +
                     "\",\"arguments\":\"" + escapeJson(args) + "\"}}]}";
-                events.add(sseEvent().withData(buildChunk(id, created, modelName, delta, null)));
+                events.add(sseEvent().withData(buildChunk(id, created, modelName, delta, null, includeUsage)));
             }
         }
 
         // 4. Final chunk with finish_reason
         String finishReason = mapFinishReason(completion.getStopReason(), hasToolCalls, completion.getToolChoice());
-        events.add(sseEvent().withData(buildChunk(id, created, modelName, "{}", finishReason)));
+        events.add(sseEvent().withData(buildChunk(id, created, modelName, "{}", finishReason, includeUsage)));
 
-        // 5. [DONE] sentinel
+        // 5. Usage chunk (only when the request set stream_options.include_usage)
+        if (includeUsage) {
+            events.add(sseEvent().withData(buildUsageChunk(id, created, modelName, completion.getUsage())));
+        }
+
+        // 6. [DONE] sentinel
         events.add(sseEvent().withData("[DONE]"));
 
         return StreamingPhysicsExpander.applyPhysics(events, physics);
@@ -342,20 +343,84 @@ public class OpenAiChatCompletionsCodec implements ProviderCodec {
         EmbeddingVectors.normalizeL2(vector);
     }
 
-    private String buildChunk(String id, long created, String model, String deltaJson, String finishReason) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("{\"id\":\"").append(id).append("\",");
-        sb.append("\"object\":\"chat.completion.chunk\",");
-        sb.append("\"created\":").append(created).append(",");
-        sb.append("\"model\":\"").append(escapeJson(model)).append("\",");
+    private String buildChunk(String id, long created, String model, String deltaJson, String finishReason, boolean includeUsage) {
+        StringBuilder sb = chunkPrefix(id, created, model);
         sb.append("\"choices\":[{\"index\":0,\"delta\":").append(deltaJson).append(",");
         if (finishReason != null) {
             sb.append("\"finish_reason\":\"").append(escapeJson(finishReason)).append("\"");
         } else {
             sb.append("\"finish_reason\":null");
         }
-        sb.append("}]}");
+        sb.append("}]");
+        if (includeUsage) {
+            sb.append(",\"usage\":null");
+        }
+        sb.append("}");
         return sb.toString();
+    }
+
+    private String buildUsageChunk(String id, long created, String model, Usage usage) {
+        try {
+            return chunkPrefix(id, created, model)
+                .append("\"choices\":[],\"usage\":")
+                .append(OBJECT_MAPPER.writeValueAsString(usageNode(usage)))
+                .append("}")
+                .toString();
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to encode OpenAI streaming usage chunk", e);
+        }
+    }
+
+    private StringBuilder chunkPrefix(String id, long created, String model) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\"id\":\"").append(id).append("\",");
+        sb.append("\"object\":\"chat.completion.chunk\",");
+        sb.append("\"created\":").append(created).append(",");
+        sb.append("\"model\":\"").append(escapeJson(model)).append("\",");
+        return sb;
+    }
+
+    /**
+     * Whether the request body sets {@code stream_options.include_usage} to JSON {@code true}.
+     * Fail-soft: an absent, unparseable or non-boolean value means no usage chunk.
+     */
+    private static boolean includeUsageRequested(HttpRequest request) {
+        try {
+            String body = request != null ? request.getBodyAsText() : null;
+            if (body == null || body.isEmpty()) {
+                return false;
+            }
+            JsonNode includeUsage = OBJECT_MAPPER.readTree(body).path("stream_options").path("include_usage");
+            return includeUsage.isBoolean() && includeUsage.booleanValue();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * The Chat Completions {@code usage} object, shared by the non-streaming body and the
+     * streaming usage chunk. Cached-input and reasoning token details are emitted only when
+     * set (non-null, non-zero), under OpenAI's native nested-details keys, so existing
+     * fixtures stay byte-identical when these optional fields are unset.
+     */
+    private static ObjectNode usageNode(Usage completionUsage) {
+        ObjectNode usage = OBJECT_MAPPER.createObjectNode();
+        int promptTokens = completionUsage != null && completionUsage.getInputTokens() != null ? completionUsage.getInputTokens() : 0;
+        int completionTokens = completionUsage != null && completionUsage.getOutputTokens() != null ? completionUsage.getOutputTokens() : 0;
+        usage.put("prompt_tokens", promptTokens);
+        usage.put("completion_tokens", completionTokens);
+        usage.put("total_tokens", promptTokens + completionTokens);
+        if (completionUsage != null) {
+            Integer cachedInputTokens = completionUsage.getCachedInputTokens();
+            if (cachedInputTokens != null && cachedInputTokens != 0) {
+                usage.putObject("prompt_tokens_details").put("cached_tokens", cachedInputTokens);
+            }
+            Integer reasoningTokens = completionUsage.getReasoningTokens();
+            if (reasoningTokens != null && reasoningTokens != 0) {
+                usage.putObject("completion_tokens_details").put("reasoning_tokens", reasoningTokens);
+            }
+        }
+        return usage;
     }
 
     private static String mapFinishReason(String stopReason, boolean hasToolCalls, String toolChoice) {

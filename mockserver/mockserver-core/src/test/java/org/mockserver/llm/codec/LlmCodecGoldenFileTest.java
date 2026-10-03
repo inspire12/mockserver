@@ -430,6 +430,59 @@ public class LlmCodecGoldenFileTest {
         }
     }
 
+    /**
+     * Streaming usage for the OpenAI Chat Completions family (OpenAI, Azure OpenAI and the
+     * OpenAI-compatible aliases), which only streams usage when the request sets
+     * {@code stream_options.include_usage: true}: pins the wire shape against a golden, the
+     * token counts on the final {@code choices: []} chunk, and each alias's non-streaming
+     * usage counts (aliases are skipped by the per-provider tests above).
+     */
+    @Test
+    public void shouldEncodeStreamingUsageChunkForOpenAiChatFamilyWhenIncludeUsageRequested() throws Exception {
+        ProviderCodecRegistry registry = ProviderCodecRegistry.getInstance();
+        HttpRequest includeUsage = HttpRequest.request()
+            .withBody("{\"stream\":true,\"stream_options\":{\"include_usage\":true},\"messages\":[]}");
+        ProviderCodec openAi = registry.lookup(Provider.OPENAI).orElseThrow(AssertionError::new);
+        String model = CANONICAL_MODELS.get(Provider.OPENAI);
+
+        List<String> failures = new ArrayList<>();
+        handleGolden(fixturesBasePath().resolve("openai").resolve("streaming-text-include-usage.jsonl"),
+            normalizeStreamingEvents(openAi.encodeStreaming(TEXT_COMPLETION, model, null, includeUsage)),
+            isUpdateMode(), Provider.OPENAI.name(), "streaming-text-include-usage", failures);
+        if (!failures.isEmpty()) {
+            fail(String.join("\n", failures));
+        }
+
+        List<Provider> family = new ArrayList<>(Arrays.asList(Provider.OPENAI, Provider.AZURE_OPENAI));
+        family.addAll(OPENAI_COMPATIBLE_ALIAS_PROVIDERS);
+        for (Provider provider : family) {
+            ProviderCodec codec = registry.lookup(provider).orElseThrow(AssertionError::new);
+            assertStreamedUsageChunk(provider, codec.encodeStreaming(TEXT_COMPLETION, model, null, includeUsage), 12, 8);
+            assertStreamedUsageChunk(provider, codec.encodeStreaming(TOOL_CALL_COMPLETION, model, null, includeUsage), 25, 15);
+            assertThat(provider + " streams the OpenAI include_usage shape",
+                normalizeStreamingEvents(codec.encodeStreaming(TEXT_COMPLETION, model, null, includeUsage)),
+                is(normalizeStreamingEvents(openAi.encodeStreaming(TEXT_COMPLETION, model, null, includeUsage))));
+            assertEncodedUsage(Provider.OPENAI, encodeToTree(codec, TEXT_COMPLETION, model), 12, 8);
+            assertEncodedUsage(Provider.OPENAI, encodeToTree(codec, TOOL_CALL_COMPLETION, model), 25, 15);
+        }
+    }
+
+    private void assertStreamedUsageChunk(Provider provider, List<SseEvent> events, int expectedInput, int expectedOutput)
+        throws JsonProcessingException {
+        String ctx = provider.name() + " streaming usage";
+        assertThat(ctx + " ends with [DONE]", events.get(events.size() - 1).getData(), is("[DONE]"));
+        JsonNode usageChunk = OBJECT_MAPPER.readTree(events.get(events.size() - 2).getData());
+        assertThat(ctx + " choices", usageChunk.path("choices").isArray() && usageChunk.path("choices").isEmpty(), is(true));
+        JsonNode u = usageChunk.path("usage");
+        assertThat(ctx + " prompt_tokens", u.path("prompt_tokens").asInt(-1), is(expectedInput));
+        assertThat(ctx + " completion_tokens", u.path("completion_tokens").asInt(-1), is(expectedOutput));
+        assertThat(ctx + " total_tokens", u.path("total_tokens").asInt(-1), is(expectedInput + expectedOutput));
+        for (SseEvent event : events.subList(0, events.size() - 2)) {
+            JsonNode chunk = OBJECT_MAPPER.readTree(event.getData());
+            assertThat(ctx + " null on every other chunk", chunk.has("usage") && chunk.get("usage").isNull(), is(true));
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Encode + normalize helpers
     // -----------------------------------------------------------------------
@@ -446,7 +499,10 @@ public class LlmCodecGoldenFileTest {
     private String encodeStreamingAndNormalize(ProviderCodec codec, Completion completion,
                                                String model, Provider provider) throws JsonProcessingException {
         // Pass null physics so no timing delays are added
-        List<SseEvent> events = codec.encodeStreaming(completion, model, null);
+        return normalizeStreamingEvents(codec.encodeStreaming(completion, model, null));
+    }
+
+    private String normalizeStreamingEvents(List<SseEvent> events) throws JsonProcessingException {
         StringBuilder sb = new StringBuilder();
         for (SseEvent event : events) {
             String data = event.getData();

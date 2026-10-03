@@ -16,7 +16,9 @@ drift in our codecs.
 >
 > 1. **`LlmCodecGoldenFileTest.shouldEncodeCanonicalTokenUsageCounts`** pins the
 >    **token-count values** against hand-authored `Usage` numbers (the goldens
->    normalise usage to `0`).
+>    normalise usage to `0`). Its sibling
+>    `shouldEncodeStreamingUsageChunkForOpenAiChatFamilyWhenIncludeUsageRequested`
+>    does the same for the OpenAI-family streaming usage chunk.
 > 2. **`LlmCodecStructuralContractTest`** pins the **wire body/streaming
 >    structure** against hand-authored, provider-schema-sourced expectations. It
 >    reads live codec output only — it never reads the golden files and is not
@@ -190,6 +192,17 @@ Streaming goldens use JSONL (one entry per line):
 The test passes `null` for `StreamingPhysics` so no timing delays are injected.
 This ensures the golden files capture only the wire-format content, not timing
 behavior.
+
+## Request-dependent streaming: OpenAI `include_usage`
+
+The OpenAI Chat Completions stream depends on the request. Only when the request
+sets `stream_options.include_usage: true` does every chunk carry `"usage": null`,
+with one extra `"choices": []` chunk holding the usage before `[DONE]`. The default
+goldens use no request, so the opt-in shape has its own golden,
+`openai/streaming-text-include-usage.jsonl`. It is written and asserted by
+`shouldEncodeStreamingUsageChunkForOpenAiChatFamilyWhenIncludeUsageRequested`, which
+also pins the usage-chunk token counts for OpenAI, Azure OpenAI and every
+OpenAI-compatible alias, and each alias's non-streaming counts.
 
 ## Live provider capture (optional)
 

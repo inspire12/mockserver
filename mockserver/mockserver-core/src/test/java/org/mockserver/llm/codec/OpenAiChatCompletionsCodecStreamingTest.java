@@ -176,4 +176,114 @@ public class OpenAiChatCompletionsCodecStreamingTest {
         JsonNode finalChunk = OBJECT_MAPPER.readTree(events.get(events.size() - 2).getData());
         assertThat(finalChunk.get("choices").get(0).get("finish_reason").asText(), is("length"));
     }
+
+    private static HttpRequest chatRequest(String streamOptions) {
+        String body = "{\"model\":\"gpt-4o\",\"stream\":true,"
+            + (streamOptions != null ? "\"stream_options\":" + streamOptions + "," : "")
+            + "\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}";
+        return HttpRequest.request().withMethod("POST").withPath("/v1/chat/completions").withBody(body);
+    }
+
+    @Test
+    public void shouldStreamUsageChunkBeforeDoneWhenRequestSetsIncludeUsage() throws Exception {
+        // given
+        Completion completion = completion()
+            .withText("Hello world")
+            .withUsage(Usage.usage().withInputTokens(12).withOutputTokens(8)
+                .withCachedInputTokens(4).withReasoningTokens(3));
+
+        // when
+        List<SseEvent> events = codec.encodeStreaming(completion, "gpt-4o", null, chatRequest("{\"include_usage\":true}"));
+
+        // then — [DONE] last, preceded by the usage chunk with an empty choices array
+        assertThat(events.get(events.size() - 1).getData(), is("[DONE]"));
+        JsonNode usageChunk = OBJECT_MAPPER.readTree(events.get(events.size() - 2).getData());
+        JsonNode firstChunk = OBJECT_MAPPER.readTree(events.get(0).getData());
+        assertThat(usageChunk.get("object").asText(), is("chat.completion.chunk"));
+        assertThat(usageChunk.get("id").asText(), is(firstChunk.get("id").asText()));
+        assertThat(usageChunk.get("created").asLong(), is(firstChunk.get("created").asLong()));
+        assertThat(usageChunk.get("model").asText(), is("gpt-4o"));
+        assertThat(usageChunk.get("choices").isArray(), is(true));
+        assertThat(usageChunk.get("choices").size(), is(0));
+        JsonNode usage = usageChunk.get("usage");
+        assertThat(usage.get("prompt_tokens").asInt(), is(12));
+        assertThat(usage.get("completion_tokens").asInt(), is(8));
+        assertThat(usage.get("total_tokens").asInt(), is(20));
+        assertThat(usage.get("prompt_tokens_details").get("cached_tokens").asInt(), is(4));
+        assertThat(usage.get("completion_tokens_details").get("reasoning_tokens").asInt(), is(3));
+
+        // every other chunk carries "usage": null, and the finish_reason chunk still precedes the usage chunk
+        for (SseEvent event : events.subList(0, events.size() - 2)) {
+            JsonNode chunk = OBJECT_MAPPER.readTree(event.getData());
+            assertThat(chunk.has("usage"), is(true));
+            assertThat(chunk.get("usage").isNull(), is(true));
+            assertThat(chunk.get("choices").size(), is(1));
+        }
+        JsonNode finishChunk = OBJECT_MAPPER.readTree(events.get(events.size() - 3).getData());
+        assertThat(finishChunk.get("choices").get(0).get("finish_reason").asText(), is("stop"));
+    }
+
+    @Test
+    public void shouldStreamZeroUsageWithoutDetailsWhenCompletionSetsNoUsage() throws Exception {
+        // when
+        List<SseEvent> events = codec.encodeStreaming(completion().withText("hi"), "gpt-4o", null,
+            chatRequest("{\"include_usage\":true}"));
+
+        // then
+        JsonNode usage = OBJECT_MAPPER.readTree(events.get(events.size() - 2).getData()).get("usage");
+        assertThat(usage.get("prompt_tokens").asInt(), is(0));
+        assertThat(usage.get("completion_tokens").asInt(), is(0));
+        assertThat(usage.get("total_tokens").asInt(), is(0));
+        assertThat(usage.has("prompt_tokens_details"), is(false));
+        assertThat(usage.has("completion_tokens_details"), is(false));
+    }
+
+    @Test
+    public void shouldStreamUsageChunkAfterToolCallChunksWhenRequestSetsIncludeUsage() throws Exception {
+        // given
+        Completion completion = completion()
+            .withToolCall(toolUse("get_weather").withArguments("{\"city\":\"London\"}"))
+            .withUsage(Usage.usage().withInputTokens(25).withOutputTokens(15));
+
+        // when
+        List<SseEvent> events = codec.encodeStreaming(completion, "gpt-4o", null, chatRequest("{\"include_usage\":true}"));
+
+        // then
+        JsonNode finishChunk = OBJECT_MAPPER.readTree(events.get(events.size() - 3).getData());
+        assertThat(finishChunk.get("choices").get(0).get("finish_reason").asText(), is("tool_calls"));
+        JsonNode usageChunk = OBJECT_MAPPER.readTree(events.get(events.size() - 2).getData());
+        assertThat(usageChunk.get("choices").size(), is(0));
+        assertThat(usageChunk.get("usage").get("total_tokens").asInt(), is(40));
+    }
+
+    @Test
+    public void shouldNotStreamUsageWhenRequestDoesNotOptIn() throws Exception {
+        // given — the expectation sets usage, but the real API streams none without include_usage
+        Completion completion = completion()
+            .withText("Hello world")
+            .withUsage(Usage.usage().withInputTokens(12).withOutputTokens(8));
+        HttpRequest[] requests = {
+            chatRequest(null),
+            chatRequest("{\"include_usage\":false}"),
+            chatRequest("{\"include_usage\":\"true\"}"),
+            chatRequest("{}"),
+            chatRequest("null"),
+            HttpRequest.request().withBody("not json"),
+            HttpRequest.request(),
+            null
+        };
+
+        for (HttpRequest request : requests) {
+            // when
+            List<SseEvent> events = codec.encodeStreaming(completion, "gpt-4o", null, request);
+
+            // then — byte-identical in shape to the request-less stream: no usage key anywhere
+            assertThat(events.get(events.size() - 1).getData(), is("[DONE]"));
+            for (SseEvent event : events.subList(0, events.size() - 1)) {
+                JsonNode chunk = OBJECT_MAPPER.readTree(event.getData());
+                assertThat("request " + request, chunk.has("usage"), is(false));
+                assertThat("request " + request, chunk.get("choices").size(), is(1));
+            }
+        }
+    }
 }

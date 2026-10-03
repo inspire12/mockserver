@@ -389,6 +389,17 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   structured-output error bodies still use the Anthropic format on Converse paths, and the dashboard does
   not yet show Converse traffic as LLM traffic.
 
+- **A streamed OpenAI Chat Completions mock now reports token usage when the request asks for it.**
+  With `"stream_options": {"include_usage": true}` in the request, the stream ends, before
+  `data: [DONE]`, with one extra chunk whose `choices` is `[]` and whose `usage` holds `prompt_tokens`,
+  `completion_tokens`, `total_tokens` and, when set, `prompt_tokens_details.cached_tokens` and
+  `completion_tokens_details.reasoning_tokens`. Every other chunk carries `"usage": null`. The stream
+  never carried usage, even though the documentation's streaming example set it, so the Vercel AI SDK
+  (which asks for usage by default), LangChain `stream_usage`, LiteLLM and Langfuse saw zero tokens. This
+  applies to `OPENAI`, `AZURE_OPENAI` and the OpenAI-compatible providers (`MISTRAL`, `XAI`, `DEEPSEEK`,
+  `GROQ`, `OPENROUTER`, `ORCAROUTER`). A request that does not ask gets no usage, as from the real
+  OpenAI and Azure APIs, and is unchanged; the compatible providers follow the same opt-in.
+
 - **Setting `maxResponseBodySize` or `maxRequestBodySize` to zero no longer removes the limit on a
   streamed response.** At `0` an ordinary response or request with a body was refused, but several
   limits on bodies that are not collected whole read `0` as "no limit": a streamed upstream response

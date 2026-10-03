@@ -41,6 +41,11 @@ public abstract class OpenAiCompatibleChatCodec implements ProviderCodec {
     }
 
     @Override
+    public List<SseEvent> encodeStreaming(Completion completion, String model, StreamingPhysics physics, HttpRequest request) {
+        return delegate.encodeStreaming(completion, model, physics, request);
+    }
+
+    @Override
     public ParsedConversation decode(HttpRequest request) {
         return delegate.decode(request);
     }

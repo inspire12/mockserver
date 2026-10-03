@@ -591,6 +591,40 @@ curl -v -X PUT "http://localhost:1080/mockserver/expectation" -d '{
     </tbody>
 </table>
 
+<p>
+    <strong>Token usage in an OpenAI stream.</strong> For <span class="inline_code">OPENAI</span>,
+    <span class="inline_code">AZURE_OPENAI</span> and the OpenAI-compatible providers, a stream carries the
+    <span class="inline_code">usage</span> above only when the request asks for it, as the real OpenAI and Azure
+    APIs do (the OpenAI-compatible providers follow the same rule in MockServer). Some AI SDKs ask by default
+    (the Vercel AI SDK does); in LangChain set <span class="inline_code">stream_usage</span>, and with the OpenAI
+    SDKs pass <span class="inline_code">stream_options</span>.
+    The request sets <span class="inline_code">stream_options</span>:
+</p>
+
+<pre class="prettyprint lang-json code"><code class="code">{
+  "model": "gpt-4o",
+  "stream": true,
+  "stream_options": { "include_usage": true },
+  "messages": [{ "role": "user", "content": "Hello" }]
+}</code></pre>
+
+<p>
+    Every chunk then carries <span class="inline_code">"usage": null</span>, and one extra chunk with an empty
+    <span class="inline_code">choices</span> array and the token counts comes just before
+    <span class="inline_code">[DONE]</span>:
+</p>
+
+<pre class="prettyprint lang-text code"><code class="code">data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":1759478400,"model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":null}
+
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":1759478400,"model":"gpt-4o","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":8,"total_tokens":18}}
+
+data: [DONE]</code></pre>
+
+<p>
+    Without <span class="inline_code">include_usage</span> no chunk has a <span class="inline_code">usage</span> field.
+    A non-streaming response always includes <span class="inline_code">usage</span>.
+</p>
+
 <a id="tool_calls" class="anchor" href="#tool_calls">&nbsp;</a>
 <h2>Tool Calls</h2>
 
