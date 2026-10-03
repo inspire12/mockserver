@@ -52,6 +52,7 @@ public class HttpSseResponseActionHandler {
                 defaultContentType = "application/x-ndjson";
                 break;
             case AWS_EVENT_STREAM:
+            case AWS_CONVERSE_EVENT_STREAM:
                 defaultContentType = BedrockEventStreamEncoder.CONTENT_TYPE;
                 break;
             default:
@@ -255,7 +256,8 @@ public class HttpSseResponseActionHandler {
     /**
      * Format a chunk as bytes for the given streaming format. SSE and NDJSON
      * produce UTF-8 text; AWS_EVENT_STREAM produces a binary event-stream
-     * message wrapping the chunk data.
+     * message wrapping the chunk data; AWS_CONVERSE_EVENT_STREAM produces one
+     * whose {@code :event-type} is the event name and whose payload is the raw data.
      */
     private byte[] formatChunkBytes(SseEvent event, StreamingFormat format) {
         if (format == StreamingFormat.AWS_EVENT_STREAM) {
@@ -264,6 +266,13 @@ public class HttpSseResponseActionHandler {
                 data = "";
             }
             return BedrockEventStreamEncoder.encodeChunk(data);
+        }
+        if (format == StreamingFormat.AWS_CONVERSE_EVENT_STREAM) {
+            String data = event.getData();
+            // a nameless event (e.g. the malformed-SSE chaos chunk) would carry an empty :event-type,
+            // which AWS SDKs drop silently; contentBlockDelta makes it reach the client's parser
+            String eventType = event.getEvent() != null && !event.getEvent().isEmpty() ? event.getEvent() : "contentBlockDelta";
+            return BedrockEventStreamEncoder.encodeEvent(eventType, data != null ? data : "");
         }
         return formatChunk(event, format).getBytes(StandardCharsets.UTF_8);
     }

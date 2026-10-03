@@ -3,7 +3,9 @@ package org.mockserver.llm.client;
 import org.junit.Test;
 import org.mockserver.llm.ParsedConversation;
 import org.mockserver.llm.ParsedMessage;
+import org.mockserver.model.Completion;
 import org.mockserver.model.HttpRequest;
+import org.mockserver.model.HttpResponse;
 import org.mockserver.model.Provider;
 
 import java.time.Instant;
@@ -231,5 +233,36 @@ public class BedrockLlmClientTest {
 
         String auth = request.getFirstHeader("Authorization");
         assertThat(auth, containsString("content-type"));
+    }
+
+    @Test
+    public void shouldParseConverseResponseUsageAndText() {
+        HttpResponse response = HttpResponse.response().withBody("{"
+            + "\"output\":{\"message\":{\"role\":\"assistant\",\"content\":[{\"text\":\"Hello \"},{\"text\":\"world\"}]}},"
+            + "\"stopReason\":\"end_turn\","
+            + "\"usage\":{\"inputTokens\":30,\"outputTokens\":12,\"totalTokens\":192,\"cacheReadInputTokens\":100,\"cacheWriteInputTokens\":50},"
+            + "\"metrics\":{\"latencyMs\":1275}}");
+
+        Completion completion = new BedrockLlmClient().parseCompletionResponse(response);
+
+        assertThat(completion.getText(), is("Hello world"));
+        assertThat(completion.getStopReason(), is("end_turn"));
+        assertThat(completion.getUsage().getInputTokens(), is(30));
+        assertThat(completion.getUsage().getOutputTokens(), is(12));
+        assertThat(completion.getUsage().getCachedInputTokens(), is(100));
+        assertThat(completion.getUsage().getCacheCreationTokens(), is(50));
+    }
+
+    @Test
+    public void shouldStillParseInvokeModelAnthropicResponse() {
+        HttpResponse response = HttpResponse.response().withBody("{"
+            + "\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Hi\"}],"
+            + "\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}");
+
+        Completion completion = new BedrockLlmClient().parseCompletionResponse(response);
+
+        assertThat(completion.getText(), is("Hi"));
+        assertThat(completion.getUsage().getInputTokens(), is(3));
+        assertThat(completion.getUsage().getOutputTokens(), is(1));
     }
 }

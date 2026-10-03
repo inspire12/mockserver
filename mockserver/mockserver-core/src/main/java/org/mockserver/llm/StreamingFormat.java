@@ -14,10 +14,16 @@ package org.mockserver.llm;
  *       message with prelude CRC32, typed headers, a base64-wrapped JSON payload,
  *       and a trailing message CRC32. Used by Bedrock
  *       {@code InvokeModelWithResponseStream}.</li>
+ *   <li>{@link #AWS_CONVERSE_EVENT_STREAM} — the same AWS event-stream binary
+ *       framing, as used by Bedrock {@code ConverseStream}: each frame's
+ *       {@code :event-type} header is the event name ({@code messageStart},
+ *       {@code contentBlockDelta}, ...) and the payload is the event's raw JSON,
+ *       with no base64 {@code bytes} wrapper.</li>
  * </ul>
  */
 public enum StreamingFormat {
     SSE,
     NDJSON,
-    AWS_EVENT_STREAM
+    AWS_EVENT_STREAM,
+    AWS_CONVERSE_EVENT_STREAM
 }

@@ -32,7 +32,8 @@ Audit of each codec:
 | `OpenAiChatCompletionsCodec` | `model`, `token`, `toolCall.getName()`, tool `args`, `finishReason` | `escapeJson()` via `buildChunk()` |
 | `OpenAiResponsesCodec` | `modelName`, `token`, `text`, `toolCall.getName()`, tool `args` | `escapeJson()` |
 | `GeminiCodec` | `token`, `modelName`, `toolCall.getName()`, tool `args` | `escapeJson()`; args also re-serialised via Jackson `writeValueAsString` |
-| `BedrockCodec` | Delegates to `AnthropicCodec` | Same as Anthropic |
+| `BedrockCodec` | Delegates to `AnthropicCodec` (InvokeModel) or `BedrockConverseCodec` (Converse) | Same as Anthropic; see next row |
+| `BedrockConverseCodec` | `token`, `toolCall.getName()`, tool `args`, reasoning text/signature, stop reason | Not hand-built: every event payload is a Jackson `ObjectNode` serialised with `writeValueAsString()` |
 | `AzureOpenAiCodec` | Delegates to `OpenAiChatCompletionsCodec` | Same as OpenAI |
 | `OllamaCodec` | `modelName`, `token` (text chunks) | `escapeJson()`; final chunk uses `OBJECT_MAPPER.writeValueAsString()` |
 
@@ -83,6 +84,8 @@ The embedding `deterministicFromInput()` deliberately uses `java.util.Random` se
 **Resolved** in G14. `BedrockCodec` now declares `StreamingFormat.AWS_EVENT_STREAM` and the `HttpSseResponseActionHandler` encodes each streaming chunk as a binary AWS event-stream message via `BedrockEventStreamEncoder`. Each message carries headers (`:event-type=chunk`, `:content-type=application/json`, `:message-type=event`), CRC32 integrity checks (prelude and message), and a payload of `{"bytes":"<base64(chunkJson)>"}` matching the `InvokeModelWithResponseStream` wire format. Raw (non-SDK) Bedrock streaming clients now work against MockServer.
 
 The limitation is documented in the `BedrockCodec` javadoc. Not a security concern.
+
+`ConverseStream` (selected by a `/converse-stream` path, GitHub discussion #2757) uses the same binary framing via `StreamingFormat.AWS_CONVERSE_EVENT_STREAM` and `BedrockEventStreamEncoder.encodeEvent`, but each frame's `:event-type` is the Converse event name and its payload is the raw event JSON (no base64 wrapper), as AWS sends it. The `:event-type` value is one of the codec's fixed event-name constants, never user input. A nameless event (the malformed-SSE chaos chunk, which has no name) is framed as `contentBlockDelta` so its corrupt payload reaches the client instead of being dropped by the SDK for an empty `:event-type`.
 
 ### Runtime LLM client — Bedrock SigV4 signing (RESOLVED)
 

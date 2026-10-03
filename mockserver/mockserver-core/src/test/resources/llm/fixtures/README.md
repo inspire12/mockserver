@@ -16,7 +16,8 @@ fixtures/
   openai/             OpenAI Chat Completions API codec output
   openai-responses/   OpenAI Responses API codec output
   gemini/             Google Gemini generateContent API codec output
-  bedrock/            AWS Bedrock (Anthropic-on-Bedrock) codec output
+  bedrock/            AWS Bedrock InvokeModel (Anthropic-on-Bedrock) codec output
+  bedrock-converse/   AWS Bedrock Converse / ConverseStream codec output
   azure-openai/       Azure OpenAI Chat Completions codec output
   ollama/             Ollama /api/chat codec output
 ```

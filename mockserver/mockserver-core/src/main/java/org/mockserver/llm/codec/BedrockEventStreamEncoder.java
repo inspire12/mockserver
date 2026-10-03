@@ -28,7 +28,9 @@ import java.util.zip.CRC32;
  * For Bedrock {@code InvokeModelWithResponseStream}, each "chunk" event carries
  * headers {@code :event-type=chunk}, {@code :content-type=application/json},
  * {@code :message-type=event}, and the payload is
- * {@code {"bytes":"<base64(chunkJson)>"}}.
+ * {@code {"bytes":"<base64(chunkJson)>"}}. For Bedrock {@code ConverseStream} each event
+ * carries {@code :event-type=<event name>} and the raw event JSON as its payload
+ * ({@link #encodeEvent(String, String)}).
  * <p>
  * This class uses only JDK APIs ({@link java.util.zip.CRC32},
  * {@link java.util.Base64}) and introduces no new Maven dependencies.
@@ -73,6 +75,24 @@ public final class BedrockEventStreamEncoder {
         headers.put(":message-type", "event");
 
         return encodeMessage(headers, payload);
+    }
+
+    /**
+     * Encode one Bedrock {@code ConverseStream} event as an AWS event-stream binary message.
+     * The {@code :event-type} header is the event name (e.g. {@code messageStart},
+     * {@code contentBlockDelta}) and the payload is the event's JSON as-is &mdash; unlike
+     * {@link #encodeChunk(String)} there is no {@code {"bytes":"<base64>"}} wrapper.
+     *
+     * @param eventType   the ConverseStream event name
+     * @param payloadJson the event's JSON payload
+     * @return the complete binary event-stream message
+     */
+    public static byte[] encodeEvent(String eventType, String payloadJson) {
+        Map<String, String> headers = new LinkedHashMap<>();
+        headers.put(":event-type", eventType);
+        headers.put(":content-type", "application/json");
+        headers.put(":message-type", "event");
+        return encodeMessage(headers, payloadJson.getBytes(StandardCharsets.UTF_8));
     }
 
     /**

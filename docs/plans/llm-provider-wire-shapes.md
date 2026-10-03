@@ -30,7 +30,6 @@ this gap.
 
 | # | Item | Batch |
 |---|---|---|
-| 1 | Bedrock Converse and ConverseStream shapes (#2757) | in review |
 | 2 | OpenAI Responses tool calls and stream completion | 1, in progress |
 | 3 | OpenAI Chat streaming usage chunk | 1, in progress |
 | 4 | Embeddings: per-provider input fields and one vector per input | 1, after item 1 lands |
@@ -51,7 +50,7 @@ this gap.
 
 | # | Problem | Fix |
 |---|---|---|
-| 1 | `BedrockCodec` delegated to `AnthropicCodec`, so `/model/{model}/converse` returned Anthropic's Messages body (no `usage.totalTokens`, no `output.message`), and Converse requests decoded to an empty conversation. | A Converse codec chosen per request by path (body shape on other paths), raw-JSON ConverseStream event-stream frames, Converse request decode, and Converse response parsing in `BedrockLlmClient`. `/invoke` is unchanged. |
+| 1 | **Closed.** Converse and ConverseStream shapes ship, with the request picking the shape. Evidence: `BedrockConverseCodecTest`, the `bedrock-converse` golden files, `LlmCodecStructuralContractTest.shouldEncodeBedrockConverseStructureOnConversePaths`, and the netty `LlmAgentLoopE2eTest` Converse tests, which include the discussion's exact expectation. `BedrockCodec` delegated to `AnthropicCodec`, so `/model/{model}/converse` returned Anthropic's Messages body (no `usage.totalTokens`, no `output.message`), and Converse requests decoded to an empty conversation. | A Converse codec chosen per request by path (body shape on other paths), raw-JSON ConverseStream event-stream frames, Converse request decode, and Converse response parsing in `BedrockLlmClient`. `/invoke` is unchanged. |
 | 2 | `OpenAiResponsesCodec` emits `function_call` items without `call_id` and no `function_call_arguments` events. `response.completed` carries no `output` or `sequence_number`. Decode keys the call by `id` and the result by `call_id`, so `containsToolResultFor` never matches. The OpenAI Agents SDK reads its final turn from `response.completed`, so its loop ends. | Emit the full Responses object and event set with a distinct `call_id`, and link tool results by `call_id`. |
 | 3 | `OpenAiChatCompletionsCodec` streaming never sends usage, even with `stream_options.include_usage`. This affects OPENAI, AZURE_OPENAI and the six OpenAI-compatible aliases. Token counts read zero in the Vercel AI SDK, LangChain `stream_usage`, LiteLLM and Langfuse. | With `include_usage`, send the final usage chunk (`choices: []`) before `[DONE]`. |
 | 4 | `HttpLlmResponseActionHandler.extractInputFromRequest` reads only a top-level `input`. Gemini `content.parts`, Titan `inputText`, Cohere `texts[]` and Ollama `prompt` therefore become `""`, so every document gets the same vector. Every codec emits one vector even for array input. Also: OpenAI `model` is hard-coded, Cohere-on-Bedrock lacks `id`/`response_type`/`texts` and ignores `embedding_types`, `startsWith("cohere")` misses region-prefixed IDs, Titan v2 lacks `embeddingsByType`, and Gemini `batchEmbedContents` is unsupported. | Read each provider's input field and return one vector per input in each provider's real shape. |

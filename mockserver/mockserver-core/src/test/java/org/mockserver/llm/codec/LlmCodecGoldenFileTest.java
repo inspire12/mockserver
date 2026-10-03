@@ -110,6 +110,9 @@ public class LlmCodecGoldenFileTest {
         PROVIDER_DIR_NAMES = Collections.unmodifiableMap(m);
     }
 
+    /** Fixture directory for Bedrock's Converse API shape (the {@code bedrock} directory holds InvokeModel). */
+    private static final String BEDROCK_CONVERSE_DIR = "bedrock-converse";
+
     /**
      * Fixed text completion input used for all providers.
      */
@@ -239,6 +242,28 @@ public class LlmCodecGoldenFileTest {
             }
         }
 
+        // Bedrock serves two wire APIs under one provider; the Converse shape (selected by a
+        // /converse or /converse-stream path) gets its own fixture directory.
+        {
+            BedrockConverseCodec converseCodec = new BedrockConverseCodec();
+            String model = CANONICAL_MODELS.get(Provider.BEDROCK);
+            Path converseDir = fixturesBase.resolve(BEDROCK_CONVERSE_DIR);
+            Files.createDirectories(converseDir);
+            String label = "BEDROCK_CONVERSE";
+            goldenFilesWritten += handleGolden(converseDir.resolve("text-completion.json"),
+                encodeAndNormalize(converseCodec, TEXT_COMPLETION, model), updateMode, label, "text-completion", failures);
+            covered.add(label + "/text-completion");
+            goldenFilesWritten += handleGolden(converseDir.resolve("tool-call.json"),
+                encodeAndNormalize(converseCodec, TOOL_CALL_COMPLETION, model), updateMode, label, "tool-call", failures);
+            covered.add(label + "/tool-call");
+            goldenFilesWritten += handleGolden(converseDir.resolve("streaming-text.jsonl"),
+                encodeStreamingAndNormalize(converseCodec, TEXT_COMPLETION, model, Provider.BEDROCK), updateMode, label, "streaming-text", failures);
+            covered.add(label + "/streaming-text");
+            goldenFilesWritten += handleGolden(converseDir.resolve("streaming-tool-call.jsonl"),
+                encodeStreamingAndNormalize(converseCodec, TOOL_CALL_COMPLETION, model, Provider.BEDROCK), updateMode, label, "streaming-tool-call", failures);
+            covered.add(label + "/streaming-tool-call");
+        }
+
         if (updateMode) {
             System.out.println("[LlmCodecGoldenFileTest] UPDATE MODE: wrote " + goldenFilesWritten + " golden files.");
             System.out.println("  Covered: " + String.join(", ", covered));
@@ -263,8 +288,8 @@ public class LlmCodecGoldenFileTest {
         // not pass quietly.
         assertThat("Providers/operations were unexpectedly skipped (no encode/encodeStreaming): " + skipped,
             skipped, is(empty()));
-        assertThat("Expected all 28 golden files (7 providers x text/tool-call/streaming-text/streaming-tool-call) to be verified",
-            covered.size(), greaterThanOrEqualTo(28));
+        assertThat("Expected all 32 golden files (7 providers + Bedrock Converse x text/tool-call/streaming-text/streaming-tool-call) to be verified",
+            covered.size(), greaterThanOrEqualTo(32));
 
         System.out.println("[LlmCodecGoldenFileTest] PASS: " + covered.size() + " golden files verified.");
         System.out.println("  Covered: " + String.join(", ", covered));
@@ -322,9 +347,23 @@ public class LlmCodecGoldenFileTest {
             asserted.add(provider.name());
         }
 
+        // Bedrock Converse: usage.{inputTokens,outputTokens,totalTokens} (camelCase, with a total)
+        BedrockConverseCodec converseCodec = new BedrockConverseCodec();
+        String bedrockModel = CANONICAL_MODELS.get(Provider.BEDROCK);
+        assertConverseUsage(encodeToTree(converseCodec, TEXT_COMPLETION, bedrockModel), 12, 8);
+        assertConverseUsage(encodeToTree(converseCodec, TOOL_CALL_COMPLETION, bedrockModel), 25, 15);
+        asserted.add("BEDROCK_CONVERSE");
+
         assertThat("Expected canonical token-usage assertions to cover all 7 chat/completion providers "
-                + "(OpenAI, OpenAI-Responses, Anthropic, Gemini, Bedrock, Azure-OpenAI, Ollama): " + asserted,
-            asserted.size(), greaterThanOrEqualTo(7));
+                + "(OpenAI, OpenAI-Responses, Anthropic, Gemini, Bedrock, Azure-OpenAI, Ollama) plus Bedrock Converse: " + asserted,
+            asserted.size(), greaterThanOrEqualTo(8));
+    }
+
+    private void assertConverseUsage(JsonNode root, int expectedInput, int expectedOutput) {
+        JsonNode u = root.path("usage");
+        assertThat("BEDROCK_CONVERSE usage inputTokens", u.path("inputTokens").asInt(-1), is(expectedInput));
+        assertThat("BEDROCK_CONVERSE usage outputTokens", u.path("outputTokens").asInt(-1), is(expectedOutput));
+        assertThat("BEDROCK_CONVERSE usage totalTokens", u.path("totalTokens").asInt(-1), is(expectedInput + expectedOutput));
     }
 
     private JsonNode encodeToTree(ProviderCodec codec, Completion completion, String model) {
@@ -365,7 +404,7 @@ public class LlmCodecGoldenFileTest {
             }
             case ANTHROPIC:
             case BEDROCK: {
-                // Anthropic Messages (and Bedrock's Anthropic shape): usage.{input_tokens,output_tokens}
+                // Anthropic Messages (and Bedrock InvokeModel's Anthropic shape): usage.{input_tokens,output_tokens}
                 JsonNode u = root.path("usage");
                 assertThat(ctx + " input_tokens", u.path("input_tokens").asInt(-1), is(expectedInput));
                 assertThat(ctx + " output_tokens", u.path("output_tokens").asInt(-1), is(expectedOutput));
@@ -553,7 +592,8 @@ public class LlmCodecGoldenFileTest {
     private boolean isIdField(String fieldName) {
         return "id".equals(fieldName)
             || "item_id".equals(fieldName)
-            || "tool_call_id".equals(fieldName);
+            || "tool_call_id".equals(fieldName)
+            || "toolUseId".equals(fieldName);
     }
 
     private boolean isUsageField(String fieldName) {
@@ -577,6 +617,7 @@ public class LlmCodecGoldenFileTest {
             || value.startsWith("resp_")
             || value.startsWith("call_")
             || value.startsWith("toolu_")
+            || value.startsWith("tooluse_")
             || value.startsWith("fc_");
     }
 

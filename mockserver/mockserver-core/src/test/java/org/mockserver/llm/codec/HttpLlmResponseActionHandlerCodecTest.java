@@ -239,6 +239,52 @@ public class HttpLlmResponseActionHandlerCodecTest {
     }
 
     @Test
+    public void shouldReturnConverseEventStreamFormatForBedrockConverseStreamPath() {
+        HttpLlmResponseActionHandler handler = new HttpLlmResponseActionHandler(new MockServerLogger());
+        assertThat(handler.streamingFormatFor(Provider.BEDROCK, request().withPath("/model/amazon.nova-pro-v1:0/converse-stream")),
+            is(StreamingFormat.AWS_CONVERSE_EVENT_STREAM));
+        assertThat(handler.streamingFormatFor(Provider.BEDROCK, request().withPath("/model/amazon.nova-pro-v1:0/invoke-with-response-stream")),
+            is(StreamingFormat.AWS_EVENT_STREAM));
+    }
+
+    @Test
+    public void shouldEncodeBedrockConverseShapeWhenRequestTargetsConverse() throws Exception {
+        // given — GitHub discussion #2757: BEDROCK at /model/{model}/converse must return the Converse envelope
+        HttpLlmResponseActionHandler handler = new HttpLlmResponseActionHandler(new MockServerLogger());
+        HttpLlmResponse llmResponse = llmResponse()
+            .withProvider(Provider.BEDROCK)
+            .withModel("amazon.titan-text-express-v1")
+            .withCompletion(completion()
+                .withText("mocked response")
+                .withUsage(Usage.usage().withInputTokens(5).withOutputTokens(5)));
+        HttpRequest request = request().withPath("/model/amazon.titan-text-express-v1/converse")
+            .withBody("{\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"hi\"}]}]}");
+
+        // when
+        HttpResponse response = handler.handle(llmResponse, request);
+
+        // then
+        assertThat(response.getStatusCode(), is(200));
+        JsonNode root = OBJECT_MAPPER.readTree(response.getBodyAsString());
+        assertThat(root.path("output").path("message").path("content").path(0).path("text").asText(), is("mocked response"));
+        assertThat(root.path("usage").path("totalTokens").asInt(-1), is(10));
+    }
+
+    @Test
+    public void shouldStreamBedrockConverseEventsWhenRequestTargetsConverseStream() {
+        HttpLlmResponseActionHandler handler = new HttpLlmResponseActionHandler(new MockServerLogger());
+        HttpLlmResponse llmResponse = llmResponse()
+            .withProvider(Provider.BEDROCK)
+            .withModel("amazon.nova-pro-v1:0")
+            .withCompletion(completion().withText("streamed").withStreaming(true));
+
+        List<SseEvent> events = handler.handleStreaming(llmResponse, request().withPath("/model/amazon.nova-pro-v1:0/converse-stream"));
+
+        assertThat(events.get(0).getEvent(), is("messageStart"));
+        assertThat(events.get(events.size() - 1).getEvent(), is("metadata"));
+    }
+
+    @Test
     public void shouldReturnSseFormatForNonOllamaAndNonBedrockProviders() {
         HttpLlmResponseActionHandler handler = new HttpLlmResponseActionHandler(new MockServerLogger());
         assertThat(handler.streamingFormatFor(Provider.ANTHROPIC), is(StreamingFormat.SSE));

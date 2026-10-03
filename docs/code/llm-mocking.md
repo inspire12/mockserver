@@ -30,6 +30,7 @@ flowchart LR
 - `encodeEmbedding(EmbeddingResponse, input)` / `encodeEmbedding(EmbeddingResponse, input, model)` -- embeddings (the model-aware overload lets Bedrock pick Titan vs Cohere; most codecs ignore the model and inherit the two-arg default)
 - `encodeRerank(RerankResponse, documents)` -- rerank results (Cohere/Voyage)
 - `decode(HttpRequest)` -- parse inbound request to `ParsedConversation` (for conversation matchers)
+- `encode(Completion, model, HttpRequest)` / `encodeStreaming(..., HttpRequest)` / `streamingFormat(HttpRequest)` -- request-aware overloads that `HttpLlmResponseActionHandler` calls; they default to the request-less methods, and only `BedrockCodec` overrides them (to choose InvokeModel or Converse, see [Bedrock: InvokeModel and Converse](#bedrock-invokemodel-and-converse))
 
 All embedding codecs share `EmbeddingVectors` (deterministic-from-input or random, then L2-normalised); only the JSON envelope differs per provider. When `deterministicFromInput` is set, the vector is built by **n-gram feature hashing** rather than a hash-seeded PRNG, so it is not only deterministic but also **semantically plausible**: the input is tokenised (Unicode-aware, lowercased) into word unigrams, word bigrams, and character 3-grams; each feature is hashed (seeded FNV-1a) into one of `dimensions` buckets with a **signed** contribution (a second hash picks +/- to reduce collision bias), weighted by a sublinear term frequency (`1 + ln(count)`, character n-grams down-weighted x0.5); the accumulated vector is L2-normalised. Texts that share vocabulary / n-grams land in overlapping buckets, so their **cosine similarity is higher** (paraphrases score ~0.3-0.6) while unrelated texts are **near-orthogonal** (~0.0-0.1) — letting offline RAG / vector-search code rank related documents above unrelated ones without a real embedding model. The transform is deterministic for the same `input`, `seed`, and `dimensions` (the seeded FNV-1a feature hash is JVM-stable, though the floating-point vector is not promised bit-exact across platforms — feature summation order and `Math.log` ULP differences can perturb the low bits; the cosine ordering is what is guaranteed); feature-less input (empty/punctuation-only) falls back to a seeded non-zero vector so the result is always unit-length. The non-deterministic path (default) is unchanged (uniform-random unit vector). Embedding shapes: OpenAI/Azure `{"object":"list","data":[{"embedding":[...]}]}` (default 1536 dims); Gemini `{"embedding":{"values":[...]}}` (768); Ollama `{"embeddings":[[...]]}` — the `/api/embed` shape (768); Bedrock Titan `{"embedding":[...],"inputTextTokenCount":N}` or Bedrock Cohere `{"embeddings":[[...]]}` when the model id starts with `cohere` (1024). `ANTHROPIC` and `OPENAI_RESPONSES` have no embeddings endpoint and throw (surfaced as a 400 by the handler). Rerank shares `RerankScoring` (per-document relevance scores — reproducible when `deterministicFromInput` is set, else random — descending, capped to `topN`) and emits the provider-correct envelope via a `RerankScoring.Envelope` selector: Cohere `{"results":[{"index":N,"relevance_score":F}, ...]}`, Voyage `{"object":"list","data":[...],"usage":{"total_tokens":N}}`.
 
@@ -41,7 +42,7 @@ Currently registered codecs:
 | OPENAI | `OpenAiChatCompletionsCodec` | Complete (chat + embeddings) |
 | OPENAI_RESPONSES | `OpenAiResponsesCodec` | Complete (no embeddings endpoint) |
 | GEMINI | `GeminiCodec` | Complete (chat + embeddings) |
-| BEDROCK | `BedrockCodec` | Complete (delegates chat to `AnthropicCodec`; streaming uses `application/vnd.amazon.eventstream` binary framing via `BedrockEventStreamEncoder`; automatic AWS SigV4 request signing implemented via `AwsSigV4Signer` on the client path; embeddings = Titan default / Cohere by model) |
+| BEDROCK | `BedrockCodec` | Complete. Two wire APIs selected per request: InvokeModel (delegates chat to `AnthropicCodec`) and Converse (delegates to `BedrockConverseCodec`); both stream with `application/vnd.amazon.eventstream` binary framing via `BedrockEventStreamEncoder`; automatic AWS SigV4 request signing implemented via `AwsSigV4Signer` on the client path; embeddings = Titan default / Cohere by model |
 | AZURE_OPENAI | `AzureOpenAiCodec` | Complete (delegates to `OpenAiChatCompletionsCodec`) |
 | OLLAMA | `OllamaCodec` | Complete (chat + embeddings; see security audit for NDJSON wire-format limitation) |
 | COHERE | `CohereCodec` | Rerank only (`/v1/rerank`) |
@@ -52,6 +53,37 @@ Currently registered codecs:
 | GROQ | `GroqCodec` | Complete (delegates to `OpenAiChatCompletionsCodec`) |
 | OPENROUTER | `OpenRouterCodec` | Complete (delegates to `OpenAiChatCompletionsCodec`) |
 | ORCAROUTER | `OrcaRouterCodec` | Complete (delegates to `OpenAiChatCompletionsCodec`) |
+
+### Bedrock: InvokeModel and Converse
+
+`Provider.BEDROCK` serves two AWS Bedrock Runtime APIs with different wire shapes. `BedrockCodec.isConverse(HttpRequest)` picks one per request, and the same choice drives `encode`, `encodeStreaming`, `streamingFormat` and `decode` (GitHub discussion #2757: the docs promised Converse while the codec only ever emitted InvokeModel's Anthropic body).
+
+```mermaid
+flowchart LR
+    REQ["inbound request"] --> P{"path ends with"}
+    P -->|"/converse, /converse-stream"| CV["BedrockConverseCodec"]
+    P -->|"/invoke, /invoke-with-response-stream"| AN["AnthropicCodec (InvokeModel)"]
+    P -->|"anything else"| B{"Converse-shaped body?"}
+    B -->|yes| CV
+    B -->|"no / no request"| AN
+```
+
+| API | Non-streaming body | Streaming (`StreamingFormat`) |
+|-----|--------------------|-------------------------------|
+| InvokeModel (Claude) | Anthropic Messages body (`content[]`, `stop_reason`, `usage.input_tokens`) | `AWS_EVENT_STREAM`: `:event-type=chunk` frames, payload `{"bytes":"<base64(anthropic event)>"}` |
+| Converse | `{"output":{"message":{"role","content":[{"text"},{"toolUse":{toolUseId,name,input}}]}},"stopReason","usage":{"inputTokens","outputTokens","totalTokens"[,"cacheReadInputTokens","cacheWriteInputTokens"]},"metrics":{"latencyMs":0}}` | `AWS_CONVERSE_EVENT_STREAM`: `:event-type=<event name>` frames, payload = the event JSON itself (`messageStart`, `contentBlockStart` for toolUse only, `contentBlockDelta`, `contentBlockStop`, `messageStop`, `metadata`) |
+
+- **Path wins, body is the fallback.** A Converse-shaped body is one with a Converse-only top-level field (`inferenceConfig`, `toolConfig`, `additionalModelRequestFields`, …) or a `system` / `messages[].content[]` block keyed by its union member (`{"text":…}`) with no `type`; `anthropic_version` rules it out. A request-less call (golden tests, the old 2-arg overloads) stays InvokeModel, so existing InvokeModel users see no change.
+- **Usage semantics.** AWS counts only non-cached input in `inputTokens`, so `totalTokens = inputTokens + outputTokens + cacheReadInputTokens + cacheWriteInputTokens`. `Usage.cachedInputTokens` / `cacheCreationTokens` map to the two cache fields, which are emitted only when non-zero (as in `AnthropicCodec`).
+- **Stop reasons.** The emitted `stopReason` is always one of the 9 Converse enum values, because AWS SDKs deserialise it as an enum. Native values pass through. `length`/`MAX_TOKENS` map to `max_tokens`, `tool_calls` to `tool_use`, and `content_filter`/`refusal`/`SAFETY` to `content_filtered`. Everything else, including `stop`, `pause_turn`, `STOP` and unknown values, maps to `end_turn`. Blank tool arguments encode as `"input":{}`.
+- **Malformed-SSE chaos.** The chaos chunk has no event name, so on ConverseStream it is framed as `contentBlockDelta` and its broken JSON reaches the client (an empty `:event-type` would be dropped silently by the SDK).
+- **Reasoning.** `reasoningText` becomes a leading `{"reasoningContent":{"reasoningText":{"text","signature"}}}` block, or in a stream `contentBlockDelta` events with `delta.reasoningContent.text` / `.signature`.
+- **Decode.** `system[].text`, `messages[].content[]` `text` / `image` (`format` → `image/<format>`) / `audio` / `toolUse` (id kept, so `whenContainsToolResultFor` correlates) / `toolResult` (role `TOOL`, `text` and `json` parts). `toolConfig` is not part of `ParsedConversation`, as Anthropic `tools` is not.
+- **Runtime client.** `BedrockLlmClient.parseCompletionResponse` also recognises a Converse body, so proxied `/converse` traffic gets token/cost observability. The client still *calls* real Bedrock through InvokeModel.
+- **Limitations.**
+  - The chaos `contentFilterBlockProbability` block for `BEDROCK` returns the Anthropic refusal body on Converse paths too (`LlmContentFilterBodies` is not request-aware).
+  - Chaos `errorStatus` errors and structured-output enforcement errors for `BEDROCK` use the Anthropic `{"type":"error",...}` envelope (`LlmErrorBodies.bodyFor`) on both APIs. Only the explicit-`errorKind` path emits the AWS `{"__type":...,"message":...}` shape.
+  - The dashboard's `isBedrockPath` (`mockserver-ui/src/lib/llmTraffic.ts`) recognises only `/model/anthropic.*…/invoke`. Converse traffic shows as plain HTTP traffic, not LLM traffic.
 
 ### OpenAI-compatible provider aliases
 
@@ -283,19 +315,21 @@ The `Usage` optional fields and the `Completion` reasoning fields are **encoded*
 
 | Provider(s) | `cachedInputTokens` key | `cacheCreationTokens` key | `reasoningTokens` key |
 |-------------|-------------------------|---------------------------|-----------------------|
-| ANTHROPIC / BEDROCK | `usage.cache_read_input_tokens` | `usage.cache_creation_input_tokens` | — (no native field) |
+| ANTHROPIC / BEDROCK (InvokeModel) | `usage.cache_read_input_tokens` | `usage.cache_creation_input_tokens` | — (no native field) |
+| BEDROCK (Converse) | `usage.cacheReadInputTokens` | `usage.cacheWriteInputTokens` | — (no native field) |
 | OPENAI / AZURE_OPENAI | `usage.prompt_tokens_details.cached_tokens` | — | `usage.completion_tokens_details.reasoning_tokens` |
 | OPENAI_RESPONSES | `usage.input_tokens_details.cached_tokens` | — | `usage.output_tokens_details.reasoning_tokens` |
 | GEMINI | `usageMetadata.cachedContentTokenCount` | — | `usageMetadata.thoughtsTokenCount` |
 | OLLAMA | — (no native field) | — | — (no native field) |
 
-The Anthropic `cache_read`/`cache_creation` keys are mirrored into the streaming `message_start` usage; the OpenAI Responses details into the `response.completed` usage; the Gemini counts into the final streaming chunk's `usageMetadata`. (Bedrock and Azure inherit the Anthropic/OpenAI behaviour by delegation.)
+The Anthropic `cache_read`/`cache_creation` keys are mirrored into the streaming `message_start` usage; the OpenAI Responses details into the `response.completed` usage; the Gemini counts into the final streaming chunk's `usageMetadata`. (Bedrock InvokeModel and Azure inherit the Anthropic/OpenAI behaviour by delegation; Bedrock Converse mirrors its usage into the final `metadata` stream event.)
 
 **Reasoning ("thinking") content** — `Completion.reasoningText` (plus optional `reasoningSignature` for Anthropic redaction) encodes a provider-correct reasoning block **before** the visible text block, on both paths, absent unless set:
 
 | Provider | Non-streaming shape | Streaming events |
 |----------|--------------------|------------------|
-| ANTHROPIC / BEDROCK | leading `{"type":"thinking","thinking":…,"signature":…}` content block | `content_block_start`(thinking) → `thinking_delta` → optional `signature_delta` → `content_block_stop`, at index 0 before the text block |
+| ANTHROPIC / BEDROCK (InvokeModel) | leading `{"type":"thinking","thinking":…,"signature":…}` content block | `content_block_start`(thinking) → `thinking_delta` → optional `signature_delta` → `content_block_stop`, at index 0 before the text block |
+| BEDROCK (Converse) | leading `{"reasoningContent":{"reasoningText":{"text":…,"signature":…}}}` block | `contentBlockDelta` with `delta.reasoningContent.text` → optional `.signature` → `contentBlockStop`, at index 0 before the text block |
 | OPENAI_RESPONSES | leading `{"type":"reasoning","summary":[{"type":"summary_text","text":…}]}` output item | `response.output_item.added`(reasoning) → `response.reasoning_summary_part.added` → `response.reasoning_summary_text.delta`/`.done` → `…part.done` → `output_item.done` |
 | GEMINI | leading `{"text":…,"thought":true}` part | a thought chunk (`parts:[{text,thought:true}]`) before the text chunks |
 | OLLAMA | `message.thinking` sibling string | a leading chunk with `message.thinking` set |
@@ -702,7 +736,8 @@ Key source files under `mockserver/mockserver-core/src/main/java/org/mockserver/
 | `llm/codec/OpenAiChatCompletionsCodec.java` | OpenAI Chat Completions encoder/decoder |
 | `llm/codec/OpenAiResponsesCodec.java` | OpenAI Responses API encoder/decoder |
 | `llm/codec/GeminiCodec.java` | Gemini encoder/decoder |
-| `llm/codec/BedrockCodec.java` | Bedrock wrapper (delegates to Anthropic codec; streaming uses AWS event-stream framing) |
+| `llm/codec/BedrockCodec.java` | Bedrock codec: picks InvokeModel (delegates to Anthropic codec) or Converse per request (`isConverse`) |
+| `llm/codec/BedrockConverseCodec.java` | Bedrock Converse / ConverseStream encoder and Converse request decoder (not registered on its own) |
 | `llm/codec/BedrockEventStreamEncoder.java` | AWS event-stream binary framing encoder/decoder (`application/vnd.amazon.eventstream`) |
 | `llm/codec/AzureOpenAiCodec.java` | Azure OpenAI wrapper (delegates to OpenAI codec) |
 | `llm/codec/OllamaCodec.java` | Ollama encoder/decoder |

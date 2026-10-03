@@ -235,4 +235,20 @@ public class BedrockEventStreamEncoderTest {
         assertThat(BedrockEventStreamEncoder.CONTENT_TYPE,
             is("application/vnd.amazon.eventstream"));
     }
+
+    @Test
+    public void shouldEncodeConverseStreamEventWithEventTypeHeaderAndRawPayload() {
+        String payload = "{\"contentBlockIndex\":0,\"delta\":{\"text\":\"Hi\"}}";
+
+        List<BedrockEventStreamEncoder.DecodedMessage> messages =
+            BedrockEventStreamEncoder.decode(BedrockEventStreamEncoder.encodeEvent("contentBlockDelta", payload));
+
+        assertThat(messages.size(), is(1));
+        Map<String, String> headers = messages.get(0).getHeaders();
+        assertThat(headers.get(":event-type"), is("contentBlockDelta"));
+        assertThat(headers.get(":content-type"), is("application/json"));
+        assertThat(headers.get(":message-type"), is("event"));
+        // ConverseStream carries the event JSON directly, not a {"bytes":"<base64>"} wrapper
+        assertThat(messages.get(0).getPayloadAsString(), is(payload));
+    }
 }

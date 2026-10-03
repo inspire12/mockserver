@@ -20,7 +20,7 @@ schema_faq:
   - question: "Does MockServer support streaming (SSE) LLM responses?"
     answer: "Yes. Set streaming to true on the completion object. MockServer splits the text into token-sized chunks and emits them as Server-Sent Events in the provider's native streaming format (SSE for OpenAI, Anthropic, and Gemini; NDJSON for Ollama). Use the streamingPhysics field to control time-to-first-token, tokens-per-second rate, and jitter for realistic timing."
   - question: "Which LLM providers can MockServer mock?"
-    answer: "MockServer supports OPENAI (Chat Completions), OPENAI_RESPONSES (Responses API), ANTHROPIC, GEMINI, BEDROCK (Converse API with binary event-stream framing), AZURE_OPENAI, OLLAMA, COHERE (rerank), and VOYAGE (rerank), plus the OpenAI-chat-compatible providers MISTRAL, XAI, DEEPSEEK, GROQ, OPENROUTER, and ORCAROUTER. Each provider value produces the wire format that the corresponding SDK expects, including correct headers and JSON structure."
+    answer: "MockServer supports OPENAI (Chat Completions), OPENAI_RESPONSES (Responses API), ANTHROPIC, GEMINI, BEDROCK (AWS Bedrock: the Converse API for /converse and /converse-stream requests, the InvokeModel Anthropic Claude body for /invoke requests, both streaming with binary event-stream framing), AZURE_OPENAI, OLLAMA, COHERE (rerank), and VOYAGE (rerank), plus the OpenAI-chat-compatible providers MISTRAL, XAI, DEEPSEEK, GROQ, OPENROUTER, and ORCAROUTER. Each provider value produces the wire format that the corresponding SDK expects, including correct headers and JSON structure."
   - question: "How do I mock tool/function calls from an LLM?"
     answer: "Add a toolCalls array to the completion object with each tool call's id, name, and arguments. Set stopReason to tool_use (Anthropic) or tool_calls (OpenAI). For OpenAI-compatible mocks you can also set toolChoice to required to force the mocked finish_reason to tool_calls, matching how the real API behaves when a caller forces a tool invocation."
   - question: "How do I test multi-turn LLM agent conversations with MockServer?"
@@ -384,8 +384,8 @@ curl -v -X PUT "http://localhost:1080/mockserver/expectation" -d '{
         </tr>
         <tr>
             <td><span class="inline_code">BEDROCK</span></td>
-            <td><span class="inline_code">/model/{model}/converse</span></td>
-            <td>AWS Bedrock Converse API; streaming uses <span class="inline_code">application/vnd.amazon.eventstream</span> binary framing</td>
+            <td><span class="inline_code">/model/{model}/converse</span><br/><span class="inline_code">/model/{model}/converse-stream</span><br/><span class="inline_code">/model/{model}/invoke</span><br/><span class="inline_code">/model/{model}/invoke-with-response-stream</span></td>
+            <td>AWS Bedrock. The request path picks the format: <span class="inline_code">converse</span> paths return the Converse API format, and <span class="inline_code">invoke</span> paths return the InvokeModel format for Anthropic Claude. See <a href="#bedrock">AWS Bedrock: Converse and InvokeModel</a>.</td>
         </tr>
         <tr>
             <td><span class="inline_code">AZURE_OPENAI</span></td>
@@ -451,6 +451,80 @@ curl -v -X PUT "http://localhost:1080/mockserver/expectation" -d '{
     what makes the captured traffic show up as LLM traffic with the right provider and pricing.
 </p>
 
+<a id="bedrock" class="anchor" href="#bedrock">&nbsp;</a>
+<h3>AWS Bedrock: Converse and InvokeModel</h3>
+
+<p>
+    AWS Bedrock has two APIs that return different JSON, and <span class="inline_code">BEDROCK</span> supports both.
+    MockServer picks the format from the path of the incoming request, so the same expectation works with
+    whichever API your code calls:
+</p>
+
+<table class="table table-bordered table-striped">
+    <thead>
+        <tr><th>Request path ends with</th><th>Response format</th></tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><span class="inline_code">/converse</span></td>
+            <td>Converse API: <span class="inline_code">{"output":{"message":{"role":"assistant","content":[{"text":"..."}]}},"stopReason":"end_turn","usage":{"inputTokens":5,"outputTokens":5,"totalTokens":10},"metrics":{"latencyMs":0}}</span>.
+                The same format for every model (Claude, Titan, Nova, Llama, &hellip;). Tool calls are
+                <span class="inline_code">{"toolUse":{"toolUseId":"...","name":"...","input":{...}}}</span> content blocks.</td>
+        </tr>
+        <tr>
+            <td><span class="inline_code">/converse-stream</span></td>
+            <td>ConverseStream: binary AWS event-stream (<span class="inline_code">application/vnd.amazon.eventstream</span>) carrying
+                <span class="inline_code">messageStart</span>, <span class="inline_code">contentBlockStart</span> (tool calls only),
+                <span class="inline_code">contentBlockDelta</span>, <span class="inline_code">contentBlockStop</span>,
+                <span class="inline_code">messageStop</span> and a final <span class="inline_code">metadata</span> event with
+                <span class="inline_code">usage</span> and <span class="inline_code">metrics</span>. Each event's JSON is sent as-is, the way AWS sends it.</td>
+        </tr>
+        <tr>
+            <td><span class="inline_code">/invoke</span></td>
+            <td>InvokeModel for Anthropic Claude: the Anthropic Messages body (<span class="inline_code">content[]</span>,
+                <span class="inline_code">stop_reason</span>, <span class="inline_code">usage.input_tokens</span> / <span class="inline_code">output_tokens</span>).</td>
+        </tr>
+        <tr>
+            <td><span class="inline_code">/invoke-with-response-stream</span></td>
+            <td>InvokeModelWithResponseStream: binary AWS event-stream where each <span class="inline_code">chunk</span> event wraps an
+                Anthropic streaming event as <span class="inline_code">{"bytes":"&lt;base64&gt;"}</span>.</td>
+        </tr>
+    </tbody>
+</table>
+
+<p>
+    If the path doesn't end with one of these (for example, a gateway path), MockServer looks at the request body instead.
+    A Converse-style body (content blocks such as <span class="inline_code">{"text":"..."}</span>, or an
+    <span class="inline_code">inferenceConfig</span> or <span class="inline_code">toolConfig</span> field) gets the Converse format.
+    Anything else gets the InvokeModel format, which is what <span class="inline_code">BEDROCK</span> returned before Converse
+    support was added. For streaming, set <span class="inline_code">"streaming": true</span> on the completion, just as for other providers.
+</p>
+
+<p>
+    In the Converse format, <span class="inline_code">totalTokens</span> is <span class="inline_code">inputTokens + outputTokens</span>,
+    plus <span class="inline_code">cachedInputTokens</span> and <span class="inline_code">cacheCreationTokens</span> if you set them.
+    Those two appear in the response as <span class="inline_code">cacheReadInputTokens</span> and <span class="inline_code">cacheWriteInputTokens</span>.
+    This follows AWS, where <span class="inline_code">inputTokens</span> counts only the input tokens that weren't read from or written to the cache.
+    <span class="inline_code">metrics.latencyMs</span> is always <span class="inline_code">0</span>; use
+    <a href="#streaming">streaming physics</a> or a response delay to simulate latency.
+    Conversation matchers read Converse requests too: the <span class="inline_code">system</span> text blocks, the
+    <span class="inline_code">messages[].content[]</span> text, image, <span class="inline_code">toolUse</span> and
+    <span class="inline_code">toolResult</span> blocks.
+    Any <span class="inline_code">stopReason</span> you set is converted to one of the values AWS accepts, so AWS SDKs can always read it.
+    For example, <span class="inline_code">refusal</span> becomes <span class="inline_code">content_filtered</span>, and unrecognised values become
+    <span class="inline_code">end_turn</span>.
+</p>
+
+<p>Current limitations:</p>
+<ul>
+    <li>The chaos <span class="inline_code">contentFilterBlockProbability</span> block for <span class="inline_code">BEDROCK</span> returns the
+        InvokeModel (Anthropic) refusal body, even on a Converse path.</li>
+    <li>Chaos <span class="inline_code">errorStatus</span> errors and structured-output enforcement errors for <span class="inline_code">BEDROCK</span>
+        use the Anthropic <span class="inline_code">{"type":"error",...}</span> error body on both APIs. Setting
+        <span class="inline_code">errorKind</span> instead returns the AWS-style <span class="inline_code">{"__type":...,"message":...}</span> error.</li>
+    <li>The dashboard doesn't recognise Converse traffic as LLM traffic yet. It shows Converse requests as ordinary HTTP requests.</li>
+</ul>
+
 <a id="streaming" class="anchor" href="#streaming">&nbsp;</a>
 <h2>Streaming Responses</h2>
 
@@ -458,7 +532,7 @@ curl -v -X PUT "http://localhost:1080/mockserver/expectation" -d '{
     Set <span class="inline_code">streaming</span> to <span class="inline_code">true</span> on the completion to return
     a stream instead of a single JSON response.
     MockServer splits the text into token-sized chunks and sends them as streaming
-    chunks in the provider's native streaming format (SSE for most providers; NDJSON for Ollama).
+    chunks in the provider's native streaming format (SSE for most providers; NDJSON for Ollama; binary AWS event-stream for Bedrock).
 </p>
 
 <p>

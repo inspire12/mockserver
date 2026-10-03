@@ -413,8 +413,86 @@ public class LlmCodecStructuralContractTest {
     }
 
     // -----------------------------------------------------------------------
+    // Bedrock Converse / ConverseStream (selected by request path)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Bedrock's second wire API. Hand-authored from the AWS Bedrock Runtime API reference
+     * (API_runtime_Converse / API_runtime_ConverseStream): the response is
+     * {@code output.message.content[]} with union-keyed blocks ({@code {"text":..}},
+     * {@code {"toolUse":{toolUseId,name,input}}}), a camelCase {@code stopReason}, and
+     * {@code usage.{inputTokens,outputTokens,totalTokens}}; the stream is the
+     * {@code messageStart … contentBlockDelta … contentBlockStop … messageStop … metadata}
+     * event sequence whose payloads are the event bodies themselves.
+     */
+    @Test
+    public void shouldEncodeBedrockConverseStructureOnConversePaths() {
+        ProviderCodec codec = ProviderCodecRegistry.getInstance().lookup(Provider.BEDROCK)
+            .orElseThrow(() -> new AssertionError("BEDROCK must be registered"));
+        String model = CANONICAL_MODELS.get(Provider.BEDROCK);
+        HttpRequest converse = HttpRequest.request().withPath("/model/" + model + "/converse");
+        HttpRequest converseStream = HttpRequest.request().withPath("/model/" + model + "/converse-stream");
+
+        // text body
+        JsonNode text = parse(codec.encode(TEXT_COMPLETION, model, converse).getBodyAsString());
+        JsonNode message = text.path("output").path("message");
+        assertThat("converse text role", message.path("role").asText(ABSENT), is("assistant"));
+        assertThat("converse text content[0].text", message.path("content").path(0).path("text").asText(ABSENT), is(TEXT));
+        assertThat("converse text content[0] has no type discriminator", message.path("content").path(0).has("type"), is(false));
+        assertThat("converse text stopReason", text.path("stopReason").asText(ABSENT), is("end_turn"));
+        assertThat("converse usage.inputTokens", text.path("usage").path("inputTokens").asInt(-1), is(12));
+        assertThat("converse usage.outputTokens", text.path("usage").path("outputTokens").asInt(-1), is(8));
+        assertThat("converse usage.totalTokens", text.path("usage").path("totalTokens").asInt(-1), is(20));
+        assertThat("converse metrics.latencyMs is a number", text.path("metrics").path("latencyMs").isNumber(), is(true));
+
+        // tool body — input is a structured JSON document, not a string
+        JsonNode tool = parse(codec.encode(TOOL_CALL_COMPLETION, model, converse).getBodyAsString());
+        JsonNode toolUse = tool.path("output").path("message").path("content").path(0).path("toolUse");
+        assertThat("converse toolUse.name", toolUse.path("name").asText(ABSENT), is("get_weather"));
+        assertThat("converse toolUse.toolUseId is a string", toolUse.path("toolUseId").isTextual(), is(true));
+        assertThat("converse toolUse.input is an object", toolUse.path("input").isObject(), is(true));
+        assertThat("converse toolUse.input.city", toolUse.path("input").path("city").asText(ABSENT), is("London"));
+        assertThat("converse tool stopReason", tool.path("stopReason").asText(ABSENT), is("tool_use"));
+
+        // text stream
+        List<StreamEvent> textEvents = streamEvents(codec, TEXT_COMPLETION, model, converseStream);
+        List<String> names = eventNames(textEvents);
+        assertThat("converse stream opens with messageStart", names.get(0), is("messageStart"));
+        assertThat("converse stream event names", new LinkedHashSet<>(names),
+            contains("messageStart", "contentBlockDelta", "contentBlockStop", "messageStop", "metadata"));
+        assertThat("converse stream ends with metadata", names.get(names.size() - 1), is("metadata"));
+        assertThat("converse messageStart.role", dataOf(textEvents, "messageStart").get(0).path("role").asText(ABSENT), is("assistant"));
+        assertThat("converse reassembled text",
+            concat(dataOf(textEvents, "contentBlockDelta"), n -> n.path("delta").path("text").asText("")), is(TEXT));
+        assertThat("converse messageStop.stopReason",
+            dataOf(textEvents, "messageStop").get(0).path("stopReason").asText(ABSENT), is("end_turn"));
+        JsonNode metadataUsage = dataOf(textEvents, "metadata").get(0).path("usage");
+        assertThat("converse metadata.usage.totalTokens", metadataUsage.path("totalTokens").asInt(-1), is(20));
+
+        // tool stream — toolUse opens with contentBlockStart; its input delta is a JSON *string*
+        List<StreamEvent> toolEvents = streamEvents(codec, TOOL_CALL_COMPLETION, model, converseStream);
+        assertThat("converse tool stream event names", eventNames(toolEvents),
+            contains("messageStart", "contentBlockStart", "contentBlockDelta", "contentBlockStop", "messageStop", "metadata"));
+        JsonNode start = dataOf(toolEvents, "contentBlockStart").get(0).path("start").path("toolUse");
+        assertThat("converse contentBlockStart.start.toolUse.name", start.path("name").asText(ABSENT), is("get_weather"));
+        JsonNode inputDelta = dataOf(toolEvents, "contentBlockDelta").get(0).path("delta").path("toolUse").path("input");
+        assertThat("converse toolUse delta input is a string", inputDelta.isTextual(), is(true));
+        assertThat("converse toolUse delta input", inputDelta.asText(ABSENT), is(TOOL_ARGS_JSON));
+        assertThat("converse tool messageStop.stopReason",
+            dataOf(toolEvents, "messageStop").get(0).path("stopReason").asText(ABSENT), is("tool_use"));
+    }
+
+    // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
+
+    private JsonNode parse(String body) {
+        try {
+            return MAPPER.readTree(body);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to parse encoded body for structural assertion", e);
+        }
+    }
 
     private JsonNode encodeTree(ProviderCodec codec, Completion completion, String model) {
         try {
@@ -425,7 +503,13 @@ public class LlmCodecStructuralContractTest {
     }
 
     private List<StreamEvent> streamEvents(ProviderCodec codec, Completion completion, String model) {
-        List<SseEvent> raw = codec.encodeStreaming(completion, model, null);
+        return streamEvents(codec, completion, model, null);
+    }
+
+    private List<StreamEvent> streamEvents(ProviderCodec codec, Completion completion, String model, HttpRequest request) {
+        List<SseEvent> raw = request == null
+            ? codec.encodeStreaming(completion, model, null)
+            : codec.encodeStreaming(completion, model, null, request);
         List<StreamEvent> out = new ArrayList<>();
         for (SseEvent event : raw) {
             String data = event.getData();

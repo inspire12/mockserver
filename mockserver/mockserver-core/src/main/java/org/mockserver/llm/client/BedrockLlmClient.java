@@ -1,12 +1,16 @@
 package org.mockserver.llm.client;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.mockserver.llm.ParsedConversation;
 import org.mockserver.llm.ParsedMessage;
+import org.mockserver.model.Completion;
 import org.mockserver.model.Header;
 import org.mockserver.model.HttpRequest;
+import org.mockserver.model.HttpResponse;
 import org.mockserver.model.Provider;
+import org.mockserver.model.Usage;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -19,9 +23,10 @@ import java.util.regex.Pattern;
 /**
  * Runtime client for Amazon Bedrock's Anthropic models
  * ({@code POST /model/{modelId}/invoke}). The request body and response shape
- * are Anthropic's (so response parsing is inherited from
+ * are Anthropic's (so InvokeModel response parsing is inherited from
  * {@link AnthropicLlmClient}), wrapped with the Bedrock
- * {@code anthropic_version} field.
+ * {@code anthropic_version} field. Converse responses are also recognised when
+ * parsing, for proxied {@code /converse} traffic.
  * <p>
  * <strong>Auth — SigV4 signing:</strong> When {@link LlmBackend#apiKey()} is set
  * in the format {@code accessKeyId:secretAccessKey} (optionally
@@ -133,6 +138,52 @@ public class BedrockLlmClient extends AnthropicLlmClient {
         }
 
         return request;
+    }
+
+    /**
+     * Parses either Bedrock response shape: the Anthropic body that {@code InvokeModel} returns
+     * for Claude (inherited), or the Converse envelope ({@code output.message.content[]},
+     * camelCase {@code usage}) that proxied {@code /converse} traffic carries, so token and cost
+     * observability work for both APIs.
+     */
+    @Override
+    public Completion parseCompletionResponse(HttpResponse response) {
+        JsonNode root = readBody(response);
+        JsonNode message = root.path("output").path("message");
+        if (!message.isObject()) {
+            return super.parseCompletionResponse(response);
+        }
+        Completion completion = Completion.completion();
+        StringBuilder text = new StringBuilder();
+        for (JsonNode block : message.path("content")) {
+            if (block.path("text").isTextual()) {
+                text.append(block.path("text").asText());
+            }
+        }
+        if (text.length() > 0) {
+            completion.withText(text.toString());
+        }
+        if (root.hasNonNull("stopReason")) {
+            completion.withStopReason(root.path("stopReason").asText());
+        }
+        JsonNode usageNode = root.path("usage");
+        if (usageNode.isObject()) {
+            Usage usage = Usage.usage();
+            if (usageNode.has("inputTokens")) {
+                usage.withInputTokens(usageNode.path("inputTokens").asInt());
+            }
+            if (usageNode.has("outputTokens")) {
+                usage.withOutputTokens(usageNode.path("outputTokens").asInt());
+            }
+            if (usageNode.has("cacheReadInputTokens")) {
+                usage.withCachedInputTokens(usageNode.path("cacheReadInputTokens").asInt());
+            }
+            if (usageNode.has("cacheWriteInputTokens")) {
+                usage.withCacheCreationTokens(usageNode.path("cacheWriteInputTokens").asInt());
+            }
+            completion.withUsage(usage);
+        }
+        return completion;
     }
 
     /**

@@ -371,6 +371,24 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
 
 ### Fixed
 
+- **`httpLlmResponse` with `provider: BEDROCK` now returns the AWS Bedrock Converse format on
+  `/model/{model}/converse` and `/model/{model}/converse-stream`** (discussion #2757). It always returned
+  the InvokeModel format for Anthropic Claude: the Anthropic Messages body, with snake_case
+  `usage.input_tokens`, no total, a top-level `content[]` and a `msg_` id. The documentation promised
+  the Converse API, so AWS SDK Converse clients and tools reading `/usage/totalTokens` (such as
+  Kuadrant's `TokenRateLimitPolicy` default) could not use the mock. A Converse request now gets
+  `{"output":{"message":{"role":"assistant","content":[...]}},"stopReason":...,"usage":{"inputTokens","outputTokens","totalTokens"},"metrics":{"latencyMs"}}`.
+  Tool calls are `toolUse` blocks, and `cachedInputTokens` / `cacheCreationTokens` appear as
+  `cacheReadInputTokens` / `cacheWriteInputTokens`. A streamed Converse response is the ConverseStream
+  event sequence (`messageStart` to `metadata`) in AWS event-stream framing, with each event's JSON sent as-is.
+  `/invoke` and `/invoke-with-response-stream` paths are unchanged. On other paths a Converse-style
+  request body selects the Converse format; anything else gets InvokeModel as before. Conversation
+  matchers now also read Converse requests (`system`, `messages[].content[]` text, `toolUse` and
+  `toolResult` blocks), and token and cost tracking of proxied Bedrock traffic now reads Converse
+  responses. Some limitations remain. For `BEDROCK`, the chaos content-filter block and the `errorStatus` and
+  structured-output error bodies still use the Anthropic format on Converse paths, and the dashboard does
+  not yet show Converse traffic as LLM traffic.
+
 - **Setting `maxResponseBodySize` or `maxRequestBodySize` to zero no longer removes the limit on a
   streamed response.** At `0` an ordinary response or request with a body was refused, but several
   limits on bodies that are not collected whole read `0` as "no limit": a streamed upstream response

@@ -737,13 +737,14 @@ public class HttpActionHandler {
                                     || Boolean.TRUE.equals(llmAction.getChaos().getMalformedSse()))) {
                                     metrics.increment(org.mockserver.metrics.Metrics.Name.LLM_CHAOS_INJECTED_COUNT);
                                 }
-                                org.mockserver.llm.StreamingFormat streamingFormat = getHttpLlmResponseActionHandler().streamingFormatFor(llmAction.getProvider());
+                                org.mockserver.llm.StreamingFormat streamingFormat = getHttpLlmResponseActionHandler().streamingFormatFor(llmAction.getProvider(), request);
                                 String contentType;
                                 switch (streamingFormat) {
                                     case NDJSON:
                                         contentType = "application/x-ndjson";
                                         break;
                                     case AWS_EVENT_STREAM:
+                                    case AWS_CONVERSE_EVENT_STREAM:
                                         contentType = org.mockserver.llm.codec.BedrockEventStreamEncoder.CONTENT_TYPE;
                                         break;
                                     default:

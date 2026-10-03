@@ -141,7 +141,7 @@ public class HttpLlmResponseActionHandler {
             // Non-streaming completion path
             Completion completion = withInferredUsageIfEnabled(httpLlmResponse.getCompletion(), codecInstance, request);
             if (completion != null && !Boolean.TRUE.equals(completion.getStreaming())) {
-                HttpResponse encoded = codecInstance.encode(completion, model);
+                HttpResponse encoded = codecInstance.encode(completion, model, request);
                 applyAzureContentFilterAnnotations(encoded, provider, httpLlmResponse.getContentFilter());
                 validateStructuredOutput(completion, encoded, provider, request);
                 applyRateLimitHeaders(encoded, provider, false, httpLlmResponse.getChaos());
@@ -394,8 +394,16 @@ public class HttpLlmResponseActionHandler {
      * @return the streaming format (defaults to {@link StreamingFormat#SSE})
      */
     public StreamingFormat streamingFormatFor(Provider provider) {
+        return streamingFormatFor(provider, null);
+    }
+
+    /**
+     * As {@link #streamingFormatFor(Provider)}, but lets a provider that serves several wire APIs
+     * pick the format from the request (Bedrock InvokeModel vs ConverseStream framing).
+     */
+    public StreamingFormat streamingFormatFor(Provider provider, HttpRequest request) {
         return ProviderCodecRegistry.getInstance().lookup(provider)
-            .map(ProviderCodec::streamingFormat)
+            .map(codec -> codec.streamingFormat(request))
             .orElse(StreamingFormat.SSE);
     }
 
@@ -417,7 +425,7 @@ public class HttpLlmResponseActionHandler {
         String model = httpLlmResponse.getModel();
         StreamingPhysics physics = completion.getStreamingPhysics();
 
-        List<SseEvent> events = codecInstance.encodeStreaming(completion, model, physics);
+        List<SseEvent> events = codecInstance.encodeStreaming(completion, model, physics, request);
         validateStructuredOutput(completion, null, provider, request);
         org.mockserver.telemetry.GenAiSpans.recordCompletion(provider, model, completion);
         HttpActionHandler.recordLlmUsageMetrics(provider, model, completion);

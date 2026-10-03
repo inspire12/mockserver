@@ -37,7 +37,7 @@ import static org.mockserver.model.ToolUse.toolUse;
 import static org.mockserver.stop.Stop.stopQuietly;
 
 /**
- * End-to-end agent loop test for all 7 providers. For each provider:
+ * End-to-end agent loop test for all 7 providers (Bedrock on both InvokeModel and Converse). For each provider:
  * <ul>
  *   <li>Turn 1: register a response that returns a tool_use / function_call</li>
  *   <li>Turn 2: after the client sends a tool_result, return the final answer</li>
@@ -389,6 +389,75 @@ public class LlmAgentLoopE2eTest {
         JsonNode turn2 = OBJECT_MAPPER.readTree(extractJsonBody(turn2Response));
         assertThat(turn2.get("stop_reason").asText(), is("end_turn"));
         assertTextBlockContains(turn2, "18C and sunny");
+    }
+
+    // ---- AWS Bedrock Converse (GitHub discussion #2757) ----
+
+    @Test
+    public void shouldReturnBedrockConverseEnvelopeForDiscussion2757Expectation() throws Exception {
+        // the exact expectation from the discussion, registered as raw JSON over the REST API
+        String expectation = "{"
+            + "\"httpRequest\": { \"method\": \"POST\", \"path\": \"/model/amazon.titan-text-express-v1/converse\" },"
+            + "\"httpLlmResponse\": {"
+            + "  \"provider\": \"BEDROCK\","
+            + "  \"model\": \"amazon.titan-text-express-v1\","
+            + "  \"completion\": { \"text\": \"mocked response\", \"usage\": { \"inputTokens\": 5, \"outputTokens\": 5 } }"
+            + "}}";
+        assertThat(sendRequest("PUT", "/mockserver/expectation", expectation), containsString("201"));
+
+        String converseRequest = "{\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"Hello\"}]}]}";
+        String rawResponse = sendPost("/model/amazon.titan-text-express-v1/converse", converseRequest);
+
+        assertThat(rawResponse, containsString("200"));
+        JsonNode body = OBJECT_MAPPER.readTree(extractJsonBody(rawResponse));
+        // the JSON Pointer Kuadrant's TokenRateLimitPolicy uses by default: /usage/totalTokens
+        assertThat(body.at("/usage/totalTokens").asInt(-1), is(10));
+        assertThat(body.at("/usage/inputTokens").asInt(-1), is(5));
+        assertThat(body.at("/usage/outputTokens").asInt(-1), is(5));
+        assertThat(body.at("/output/message/content/0/text").asText(), is("mocked response"));
+        assertThat(body.at("/output/message/role").asText(), is("assistant"));
+        assertThat(body.path("stopReason").asText(), is("end_turn"));
+        assertThat(body.has("type"), is(false));
+        assertThat(body.has("id"), is(false));
+    }
+
+    @Test
+    public void shouldCompleteAgentLoopForBedrockConverse() throws Exception {
+        String path = "/model/anthropic.claude-3-5-sonnet-20241022-v2:0/converse";
+        conversation()
+            .withPath(path)
+            .withProvider(BEDROCK)
+            .withModel("anthropic.claude-3-5-sonnet-20241022-v2:0")
+            .turn()
+                .whenTurnIndex(0)
+                .respondingWith(completion()
+                    .withToolCall(toolUse("search").withArguments("{\"q\":\"weather\"}")))
+            .andThen()
+            .turn()
+                .whenContainsToolResultFor("search")
+                .respondingWith(completion()
+                    .withText("It is 18C and sunny in Paris."))
+            .andThen()
+            .applyTo(mockServerClient);
+
+        String turn1Body = "{\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"What is the weather?\"}]}],"
+            + "\"toolConfig\":{\"tools\":[{\"toolSpec\":{\"name\":\"search\",\"inputSchema\":{\"json\":{\"type\":\"object\"}}}}]}}";
+        JsonNode turn1 = OBJECT_MAPPER.readTree(extractJsonBody(sendPost(path, turn1Body)));
+        assertThat(turn1.path("stopReason").asText(), is("tool_use"));
+        JsonNode toolUse = turn1.at("/output/message/content/0/toolUse");
+        assertThat(toolUse.path("name").asText(), is("search"));
+        assertThat(toolUse.at("/input/q").asText(), is("weather"));
+        String toolUseId = toolUse.path("toolUseId").asText();
+
+        // turn 2 sends the toolResult back in Converse shape; the matcher must decode it
+        String turn2Body = "{\"messages\":["
+            + "{\"role\":\"user\",\"content\":[{\"text\":\"What is the weather?\"}]},"
+            + "{\"role\":\"assistant\",\"content\":[{\"toolUse\":{\"toolUseId\":\"" + toolUseId + "\",\"name\":\"search\",\"input\":{\"q\":\"weather\"}}}]},"
+            + "{\"role\":\"user\",\"content\":[{\"toolResult\":{\"toolUseId\":\"" + toolUseId + "\",\"content\":[{\"text\":\"18C and sunny\"}]}}]}"
+            + "]}";
+        JsonNode turn2 = OBJECT_MAPPER.readTree(extractJsonBody(sendPost(path, turn2Body)));
+        assertThat(turn2.path("stopReason").asText(), is("end_turn"));
+        assertThat(turn2.at("/output/message/content/0/text").asText(), containsString("18C and sunny"));
     }
 
     // ---- Azure OpenAI ----
@@ -800,6 +869,80 @@ public class LlmAgentLoopE2eTest {
         assertThat(reconstructed.toString(), is(completionText));
     }
 
+    @Test
+    public void shouldStreamBedrockConverseStreamEventsThroughNettyPipeline() throws Exception {
+        // ConverseStream: AWS event-stream frames whose :event-type is the Converse event name and
+        // whose payload is the event JSON itself (no {"bytes":"<base64>"} wrapper as in InvokeModel)
+        String completionText = "Hello from Converse streaming";
+        String path = "/model/amazon.nova-pro-v1:0/converse-stream";
+        llmMock(path)
+            .withProvider(BEDROCK)
+            .withModel("amazon.nova-pro-v1:0")
+            .respondingWith(completion()
+                .withText(completionText)
+                .withUsage(org.mockserver.model.Usage.usage().withInputTokens(9).withOutputTokens(4))
+                .withStreaming(true))
+            .applyTo(mockServerClient);
+
+        byte[] rawBytes = sendPostRaw(path, "{\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"Hi\"}]}]}");
+        int headerEnd = indexOfSequence(rawBytes, "\r\n\r\n".getBytes(StandardCharsets.US_ASCII), 0);
+        assertThat("response must have a header/body boundary", headerEnd, greaterThanOrEqualTo(0));
+        String headerText = new String(rawBytes, 0, headerEnd, StandardCharsets.US_ASCII);
+        assertThat(headerText, containsString("200"));
+        assertThat(headerText.toLowerCase(), containsString("application/vnd.amazon.eventstream"));
+
+        byte[] chunked = new byte[rawBytes.length - (headerEnd + 4)];
+        System.arraycopy(rawBytes, headerEnd + 4, chunked, 0, chunked.length);
+        java.util.List<BedrockEventStreamEncoder.DecodedMessage> messages = BedrockEventStreamEncoder.decode(deChunkHttpBody(chunked));
+
+        java.util.List<String> eventTypes = new java.util.ArrayList<>();
+        StringBuilder reconstructed = new StringBuilder();
+        JsonNode metadata = null;
+        for (BedrockEventStreamEncoder.DecodedMessage message : messages) {
+            String eventType = message.getHeaders().get(":event-type");
+            eventTypes.add(eventType);
+            assertThat(message.getHeaders().get(":message-type"), is("event"));
+            JsonNode payload = OBJECT_MAPPER.readTree(message.getPayloadAsString());
+            assertThat("payload must be the raw event, not base64-wrapped", payload.has("bytes"), is(false));
+            if ("contentBlockDelta".equals(eventType)) {
+                reconstructed.append(payload.at("/delta/text").asText());
+            } else if ("metadata".equals(eventType)) {
+                metadata = payload;
+            }
+        }
+        assertThat(eventTypes.get(0), is("messageStart"));
+        assertThat(eventTypes.get(eventTypes.size() - 2), is("messageStop"));
+        assertThat(eventTypes.get(eventTypes.size() - 1), is("metadata"));
+        assertThat(reconstructed.toString(), is(completionText));
+        assertThat(metadata.at("/usage/totalTokens").asInt(-1), is(13));
+    }
+
+    @Test
+    public void shouldDeliverMalformedSseChaosChunkAsNamedConverseStreamEvent() throws Exception {
+        // the malformed-SSE chaos chunk has no event name; an empty :event-type would be dropped
+        // silently by AWS SDKs, so it must arrive as a contentBlockDelta carrying the broken JSON
+        String path = "/model/amazon.nova-pro-v1:0/converse-stream";
+        String expectation = "{"
+            + "\"httpRequest\": { \"method\": \"POST\", \"path\": \"" + path + "\" },"
+            + "\"httpLlmResponse\": {"
+            + "  \"provider\": \"BEDROCK\","
+            + "  \"model\": \"amazon.nova-pro-v1:0\","
+            + "  \"completion\": { \"text\": \"Hi\", \"streaming\": true },"
+            + "  \"chaos\": { \"malformedSse\": true }"
+            + "}}";
+        assertThat(sendRequest("PUT", "/mockserver/expectation", expectation), containsString("201"));
+
+        byte[] rawBytes = sendPostRaw(path, "{\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"Hi\"}]}]}");
+        int headerEnd = indexOfSequence(rawBytes, "\r\n\r\n".getBytes(StandardCharsets.US_ASCII), 0);
+        byte[] chunked = new byte[rawBytes.length - (headerEnd + 4)];
+        System.arraycopy(rawBytes, headerEnd + 4, chunked, 0, chunked.length);
+        java.util.List<BedrockEventStreamEncoder.DecodedMessage> messages = BedrockEventStreamEncoder.decode(deChunkHttpBody(chunked));
+
+        BedrockEventStreamEncoder.DecodedMessage last = messages.get(messages.size() - 1);
+        assertThat(last.getHeaders().get(":event-type"), is("contentBlockDelta"));
+        assertThat(last.getPayloadAsString(), is("{\"malformed\":true"));
+    }
+
     // ---- Helpers ----
 
     /**
@@ -932,12 +1075,16 @@ public class LlmAgentLoopE2eTest {
     }
 
     private String sendPost(String path, String body) throws Exception {
+        return sendRequest("POST", path, body);
+    }
+
+    private String sendRequest(String method, String path, String body) throws Exception {
         try (Socket socket = new Socket("localhost", mockServerPort)) {
             socket.setSoTimeout(5000);
             OutputStream output = socket.getOutputStream();
             byte[] bodyBytes = body != null ? body.getBytes(StandardCharsets.UTF_8) : new byte[0];
             StringBuilder request = new StringBuilder();
-            request.append("POST ").append(path).append(" HTTP/1.1\r\n");
+            request.append(method).append(" ").append(path).append(" HTTP/1.1\r\n");
             request.append("Host: localhost:").append(mockServerPort).append("\r\n");
             request.append("Content-Type: application/json\r\n");
             request.append("Connection: close\r\n");

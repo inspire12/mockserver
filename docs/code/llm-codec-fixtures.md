@@ -72,9 +72,14 @@ Key properties a future maintainer must preserve:
 ### Coverage and the two families
 
 Seven chat/completion providers are pinned. Because Azure OpenAI delegates to
-`OpenAiChatCompletionsCodec` and Bedrock delegates to `AnthropicCodec`, the
+`OpenAiChatCompletionsCodec` and Bedrock InvokeModel delegates to `AnthropicCodec`, the
 assertions are grouped by wire family, so a defect in a base codec is caught for
-both the base and the delegating provider.
+both the base and the delegating provider. Bedrock's second wire API, **Converse**,
+has its own test (`shouldEncodeBedrockConverseStructureOnConversePaths`). It drives the
+registered `BEDROCK` codec with `/converse` and `/converse-stream` requests and pins
+the AWS API reference shape: `output.message.content[]` union-keyed blocks,
+`stopReason`, `usage.{inputTokens,outputTokens,totalTokens}`, and the
+`messageStart … metadata` event sequence.
 
 ### Proven to bite
 
@@ -96,7 +101,8 @@ mockserver/mockserver-core/src/test/resources/llm/fixtures/<provider>/
 ```
 
 One subdirectory per provider: `anthropic`, `openai`, `openai-responses`,
-`gemini`, `bedrock`, `azure-openai`, `ollama`.
+`gemini`, `bedrock` (InvokeModel), `bedrock-converse` (Converse / ConverseStream),
+`azure-openai`, `ollama`. That makes 32 golden files in all.
 
 Each directory contains:
 
@@ -149,8 +155,8 @@ writing/comparing:
 
 | Field | Applies to | Placeholder |
 |-------|-----------|-------------|
-| `id`, `item_id`, `tool_call_id` | All providers | `"<id>"` |
-| String values matching `chatcmpl-*`, `msg_*`, `resp_*`, `call_*`, `toolu_*`, `fc_*` | All providers | `"<id>"` |
+| `id`, `item_id`, `tool_call_id`, `toolUseId` | All providers | `"<id>"` |
+| String values matching `chatcmpl-*`, `msg_*`, `resp_*`, `call_*`, `toolu_*`, `tooluse_*`, `fc_*` | All providers | `"<id>"` |
 | `created` (numeric) | OpenAI, Azure OpenAI, OpenAI Responses | `0` |
 | `created_at` (numeric) | OpenAI Responses | `0` |
 | `created_at` (ISO 8601 string) | Ollama | `"<timestamp>"` |
@@ -170,10 +176,14 @@ Streaming goldens use JSONL (one entry per line):
   normalized JSON payload directly. Non-JSON sentinels (e.g. `[DONE]`) are
   quoted as JSON strings.
 - **NDJSON** (Ollama): each line is the normalized JSON chunk directly.
-- **AWS_EVENT_STREAM** (Bedrock): uses the same SSE-with-events format as
+- **AWS_EVENT_STREAM** (Bedrock InvokeModel): uses the same SSE-with-events format as
   Anthropic (since Bedrock delegates to the Anthropic codec internally). The
   binary event-stream framing is not exercised in this test -- it is covered by
   `BedrockEventStreamEncoderTest`.
+- **AWS_CONVERSE_EVENT_STREAM** (Bedrock ConverseStream, `bedrock-converse`): each
+  line is `{"event":"<Converse event name>","data":<event JSON>}`. The binary
+  framing is covered by `BedrockEventStreamEncoderTest` and, over a real socket, by
+  `LlmAgentLoopE2eTest`.
 
 ## Streaming physics
 

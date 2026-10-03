@@ -9,37 +9,68 @@ import org.mockserver.llm.StreamingFormat;
 import org.mockserver.model.*;
 
 import java.util.List;
+import java.util.Locale;
+import java.util.regex.Pattern;
 
 import static org.mockserver.model.HttpResponse.response;
 
 /**
- * Codec for AWS Bedrock (Anthropic-on-Bedrock) invokeModel API (version bedrock-2023-05-31).
+ * Codec for AWS Bedrock Runtime. One {@link Provider#BEDROCK} covers two Bedrock wire APIs,
+ * selected per request by {@link #isConverse(HttpRequest)}:
+ * <ul>
+ *   <li><strong>InvokeModel</strong> ({@code /model/{id}/invoke},
+ *       {@code /model/{id}/invoke-with-response-stream}) for Anthropic Claude (version
+ *       bedrock-2023-05-31): the response is the plain Anthropic Messages body, so this codec
+ *       delegates to {@link AnthropicCodec}. Streaming wraps each Anthropic chunk as an AWS
+ *       event-stream {@code chunk} frame whose payload is {@code {"bytes":"<base64(chunkJson)>"}}
+ *       ({@link StreamingFormat#AWS_EVENT_STREAM}, encoded by {@link BedrockEventStreamEncoder}).</li>
+ *   <li><strong>Converse</strong> ({@code /model/{id}/converse}, {@code /model/{id}/converse-stream}):
+ *       the model-agnostic Converse envelope, delegated to {@link BedrockConverseCodec}
+ *       ({@link StreamingFormat#AWS_CONVERSE_EVENT_STREAM} for streaming).</li>
+ * </ul>
+ * The request-less {@link #encode(Completion, String)} / {@link #encodeStreaming(Completion, String, StreamingPhysics)}
+ * overloads keep the original InvokeModel behaviour.
  * <p>
- * This codec targets the <strong>plain Anthropic body</strong> wire format used by
- * Bedrock's {@code invokeModel} endpoint for Anthropic Claude models. The request and
- * response shapes are essentially identical to native Anthropic Messages API — the
- * key difference is the model identifier format and URL path.
- * <p>
- * <strong>Streaming:</strong> Bedrock's {@code InvokeModelWithResponseStream} uses the
- * AWS event-stream binary framing ({@code application/vnd.amazon.eventstream}). Each
- * streaming chunk is wrapped as a binary message with headers
- * ({@code :event-type=chunk}, {@code :content-type=application/json},
- * {@code :message-type=event}) and a payload of
- * {@code {"bytes":"<base64(chunkJson)>"}}. This codec declares
- * {@link StreamingFormat#AWS_EVENT_STREAM} and the downstream write handler
- * ({@link org.mockserver.mock.action.http.HttpSseResponseActionHandler}) encodes each
- * chunk into the binary event-stream format via {@link BedrockEventStreamEncoder}.
- * <p>
- * <strong>SigV4 signing:</strong> automatic AWS SigV4 request signing for calling
- * real Bedrock is <em>not yet implemented</em>. Callers should supply auth headers
- * via the {@code LlmBackend.headers()} escape hatch or a signing proxy. This remains
- * a follow-up.
+ * <strong>SigV4 signing</strong> applies to the runtime client path ({@code BedrockLlmClient}),
+ * not to this codec.
  */
 public class BedrockCodec implements ProviderCodec {
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
+    private static final Pattern CONVERSE_PATH = Pattern.compile("/converse(-stream)?/*$");
+    private static final Pattern INVOKE_PATH = Pattern.compile("/invoke(-with-response-stream)?/*$");
+
     private final AnthropicCodec delegate = new AnthropicCodec();
+    private final BedrockConverseCodec converse = new BedrockConverseCodec();
+
+    /**
+     * Whether this request targets the Converse API rather than InvokeModel. The path decides
+     * when it names either API; otherwise (a gateway or custom mock path) a Converse-shaped
+     * request body selects Converse. Anything else, including a {@code null} request, is
+     * InvokeModel, which preserves the behaviour that predates Converse support.
+     */
+    public static boolean isConverse(HttpRequest request) {
+        if (request == null) {
+            return false;
+        }
+        String path = request.getPath() != null ? request.getPath().getValue() : null;
+        if (path != null) {
+            String lowerPath = path.toLowerCase(Locale.ROOT);
+            if (CONVERSE_PATH.matcher(lowerPath).find()) {
+                return true;
+            }
+            if (INVOKE_PATH.matcher(lowerPath).find()) {
+                return false;
+            }
+        }
+        try {
+            String body = request.getBodyAsText();
+            return body != null && !body.isEmpty() && BedrockConverseCodec.isConverseShaped(OBJECT_MAPPER.readTree(body));
+        } catch (Exception e) {
+            return false;
+        }
+    }
 
     @Override
     public Provider provider() {
@@ -54,6 +85,21 @@ public class BedrockCodec implements ProviderCodec {
     @Override
     public StreamingFormat streamingFormat() {
         return StreamingFormat.AWS_EVENT_STREAM;
+    }
+
+    @Override
+    public StreamingFormat streamingFormat(HttpRequest request) {
+        return isConverse(request) ? converse.streamingFormat() : streamingFormat();
+    }
+
+    @Override
+    public HttpResponse encode(Completion completion, String model, HttpRequest request) {
+        return isConverse(request) ? converse.encode(completion, model) : encode(completion, model);
+    }
+
+    @Override
+    public List<SseEvent> encodeStreaming(Completion completion, String model, StreamingPhysics physics, HttpRequest request) {
+        return isConverse(request) ? converse.encodeStreaming(completion, model, physics) : encodeStreaming(completion, model, physics);
     }
 
     @Override
@@ -86,7 +132,7 @@ public class BedrockCodec implements ProviderCodec {
 
     @Override
     public ParsedConversation decode(HttpRequest request) {
-        return delegate.decode(request);
+        return isConverse(request) ? converse.decode(request) : delegate.decode(request);
     }
 
     /**

@@ -1,0 +1,26 @@
+{
+  "output" : {
+    "message" : {
+      "role" : "assistant",
+      "content" : [ {
+        "toolUse" : {
+          "toolUseId" : "<id>",
+          "name" : "get_weather",
+          "input" : {
+            "city" : "London",
+            "units" : "celsius"
+          }
+        }
+      } ]
+    }
+  },
+  "stopReason" : "tool_use",
+  "usage" : {
+    "inputTokens" : 0,
+    "outputTokens" : 0,
+    "totalTokens" : 0
+  },
+  "metrics" : {
+    "latencyMs" : 0
+  }
+}
