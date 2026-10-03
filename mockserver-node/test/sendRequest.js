@@ -7,7 +7,7 @@ module.exports = (function () {
     return function (method, host, port, path, jsonBody, protocol) {
         var deferred = Q.defer();
 
-        var body = (typeof jsonBody === "string" ? jsonBody : JSON.stringify(jsonBody || ""));
+        var body = (jsonBody === undefined || typeof jsonBody === "string" ? jsonBody : JSON.stringify(jsonBody));
         var options = {
             method: method,
             host: host,
@@ -44,7 +44,11 @@ module.exports = (function () {
             deferred.reject(error);
         });
 
-        req.write(body);
+        // Node frames a written body only for methods that usually carry one: on a GET the bytes go out
+        // unframed and the server reads them as the start of the next request on the kept-alive connection
+        if (body !== undefined) {
+            req.write(body);
+        }
         req.end();
 
         return deferred.promise;

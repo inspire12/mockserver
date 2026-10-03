@@ -142,10 +142,17 @@ module.exports = (function () {
       return deferred;
     }
   
+    // The launcher's own requests each use their own connection: a pooled one is shared with the caller's
+    // requests, and bytes a caller wrote unframed on it would be read as the start of the launcher's request.
+    function controlRequest(request, callback) {
+      request.agent = new http.Agent();
+      return http.request(request, callback);
+    }
+
     function checkStarted(request, retries, promise, verbose) {
       var deferred = promise || defer();
   
-      var req = http.request(request);
+      var req = controlRequest(request);
       req.setTimeout(2000);
   
       req.once('response', function (response) {
@@ -200,7 +207,7 @@ module.exports = (function () {
     function checkStopped(request, retries, promise, verbose) {
       var deferred = promise || defer();
   
-      var req = http.request(request);
+      var req = controlRequest(request);
   
       req.once('response', function (response) {
         var body = '';
@@ -235,6 +242,8 @@ module.exports = (function () {
       return deferred.promise;
     }
   
+    var STOP_REQUEST_TIMEOUT_MILLIS = 10000;
+
     function sendRequest(request) {
       var deferred = defer();
   
@@ -258,10 +267,15 @@ module.exports = (function () {
         });
       };
   
-      var req = http.request(request, callback);
+      var req = controlRequest(request, callback);
   
       req.once('error', function (err) {
         deferred.reject(err);
+      });
+
+      req.setTimeout(STOP_REQUEST_TIMEOUT_MILLIS, function () {
+        req.destroy(new Error('MockServer did not answer "' + request.method + ' ' + request.path + '" within ' +
+          (STOP_REQUEST_TIMEOUT_MILLIS / 1000) + ' seconds'));
       });
   
       req.end();
@@ -298,13 +312,15 @@ module.exports = (function () {
             }, 100, deferred, options && options.verbose); // wait for 10 seconds
           },
           function (err) {
-            if ((err && err.code === "ECONNREFUSED") || err === 404) {
-              try {
-                if (mockServer) {
-                  mockServer.kill();
-                }
-              } catch (e) {
+            // however the stop request failed, the launched process must not outlive it: left running, the
+            // child process keeps the calling Node process from exiting
+            try {
+              if (mockServer) {
+                mockServer.kill();
               }
+            } catch (e) {
+            }
+            if ((err && err.code === "ECONNREFUSED") || err === 404) {
               deferred.resolve();
             } else {
               deferred.reject(err);

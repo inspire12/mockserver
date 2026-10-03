@@ -27,8 +27,8 @@ function checkFileExists(path) {
 test('should allow expectation to be set up', async function () {
     var port = 1081;
 
-    await mockserver.start_mockserver({serverPort: port});
     try {
+        await mockserver.start_mockserver({serverPort: port});
         var response = await sendRequest("PUT", "localhost", port, "/expectation", {
             'httpRequest': {
                 'path': '/somePath'
@@ -50,11 +50,11 @@ test('should allow expectation to be set up', async function () {
 test('allow multiple system properties to be specified in single string', async function () {
     var port = 1082;
 
-    await mockserver.start_mockserver({
-        serverPort: port,
-        jvmOptions: '-Dmockserver.dynamicallyCreateCertificateAuthorityCertificate=true -Dmockserver.directoryToSaveDynamicSSLCertificate=./tmp/' + port
-    });
     try {
+        await mockserver.start_mockserver({
+            serverPort: port,
+            jvmOptions: '-Dmockserver.dynamicallyCreateCertificateAuthorityCertificate=true -Dmockserver.directoryToSaveDynamicSSLCertificate=./tmp/' + port
+        });
         await waitForTlsReady("localhost", port);
 
         var response = await sendRequest("PUT", "localhost", port, "/expectation", {
@@ -80,11 +80,11 @@ test('allow multiple system properties to be specified in single string', async 
 test('allow multiple system properties to be specified as array', async function () {
     var port = 1083;
 
-    await mockserver.start_mockserver({
-        serverPort: port,
-        jvmOptions: ['-Dmockserver.dynamicallyCreateCertificateAuthorityCertificate=true', '-Dmockserver.directoryToSaveDynamicSSLCertificate=./tmp/' + port]
-    });
     try {
+        await mockserver.start_mockserver({
+            serverPort: port,
+            jvmOptions: ['-Dmockserver.dynamicallyCreateCertificateAuthorityCertificate=true', '-Dmockserver.directoryToSaveDynamicSSLCertificate=./tmp/' + port]
+        });
         await waitForTlsReady("localhost", port);
 
         var response = await sendRequest("PUT", "localhost", port, "/expectation", {
