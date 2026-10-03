@@ -88,8 +88,7 @@ import static org.mockserver.test.Http2FlowControlBodies.Size.OVER_WINDOW;
  * client's streams are answered at once rather than at Netty's 30 s graceful-shutdown timeout: a stream whose request
  * never reached the loopback's server is refused ({@code REFUSED_STREAM}), one that may have is reset with
  * {@code INTERNAL_ERROR}, and a write that fails for one stream resets only that stream. A stream whose whole response
- * was relayed is not cut short: it is written out in full, then reset with {@code NO_ERROR} if the client is still
- * uploading. The loopback's server is
+ * was relayed is not cut short: it is written out in full. The loopback's server is
  * either a second MockServer (the relaying one's {@code proxyRemotePort}) or a Netty HTTP/2 server answering the relay's
  * {@code PROXIED_} handshake, so the tests control how the loopback fails.
  */
@@ -285,34 +284,17 @@ public class ConnectRelayLoopbackCloseIntegrationTest {
     }
 
     @Test(timeout = 30_000)
-    public void shouldNotRefuseAnExpectContinueRequestAlreadyRelayedWhenTheLoopbackFails() throws Exception {
+    public void shouldRefuseAnExpectContinueUploadToldToContinueWhenTheLoopbackFails() throws Exception {
         try (Tunnel tunnel = Tunnel.open(null); RelayClient client = RelayClient.connect(tunnel.proxyPort())) {
-            // the client is still uploading, but the loopback's server has the request's headers, so may act on it
+            // the relay has told the client to continue, but hands the request on only once its body is complete
             RelayStream uploading = client.startExpectContinueUpload("/expect-upload");
-            tunnel.upstream.awaitHeld("/expect-upload");
+            assertThat(uploading.informational.get(PROMPT_MILLIS, TimeUnit.MILLISECONDS), is(100));
             client.ping();
 
             long failedNanos = System.nanoTime();
             tunnel.upstream.resetConnection();
 
-            assertReset(uploading, Http2Error.INTERNAL_ERROR, failedNanos);
-        }
-    }
-
-    @Test(timeout = 30_000)
-    public void shouldNotRefuseAnExpectContinueRequestAlreadyAnsweredWhenTheLoopbackFails() throws Exception {
-        try (Tunnel tunnel = Tunnel.open(null); RelayClient client = RelayClient.connect(tunnel.proxyPort())) {
-            RelayStream uploading = client.startExpectContinueUpload("/expect-upload");
-            tunnel.upstream.respond("/expect-upload");
-            assertHealthy(uploading);
-            client.ping();
-
-            long failedNanos = System.nanoTime();
-            tunnel.upstream.resetConnection();
-
-            assertThat("the client is still uploading, so its answered stream is reset, only to stop the upload",
-                uploading.resetCode.get(PROMPT_MILLIS, TimeUnit.MILLISECONDS), is(Http2Error.NO_ERROR.code()));
-            assertThat(millisBetween(failedNanos, System.nanoTime()), lessThan(PROMPT_MILLIS));
+            assertReset(uploading, Http2Error.REFUSED_STREAM, failedNanos);
         }
     }
 
@@ -324,19 +306,6 @@ public class ConnectRelayLoopbackCloseIntegrationTest {
 
             assertWholeBig(big);
             assertGoAwayCovering(client, big);
-            assertClosedPromptly(client, sentNanos);
-        }
-    }
-
-    @Test(timeout = 30_000)
-    public void shouldStopAnUploadOnlyOnceItsWholeQueuedResponseIsWrittenWhenTheLoopbackCloses() throws Exception {
-        try (Tunnel tunnel = Tunnel.open(null); RelayClient client = RelayClient.connect(tunnel.proxyPort())) {
-            long sentNanos = System.nanoTime();
-            // the loopback's server answers the relayed headers, then closes, while the client is still uploading
-            RelayStream uploading = client.startExpectContinueUpload(Upstream.BIG_THEN_CLOSE);
-
-            assertWholeBig(uploading);
-            assertThat(uploading.resetCode.get(PROMPT_MILLIS, TimeUnit.MILLISECONDS), is(Http2Error.NO_ERROR.code()));
             assertClosedPromptly(client, sentNanos);
         }
     }
@@ -629,8 +598,7 @@ public class ConnectRelayLoopbackCloseIntegrationTest {
 
     private static final class RelayStream {
         private final CompletableFuture<StreamOutcome> outcome = new CompletableFuture<>();
-        // also after a complete response, which the client may receive while it is still uploading
-        private final CompletableFuture<Long> resetCode = new CompletableFuture<>();
+        private final CompletableFuture<Integer> informational = new CompletableFuture<>();
         private Http2StreamChannel channel;
     }
 
@@ -726,7 +694,7 @@ public class ConnectRelayLoopbackCloseIntegrationTest {
         }
 
         /**
-         * The relay hands a request with {@code Expect} on as its headers at once, before the body arrives.
+         * The relay answers {@code 100} at once, and hands the request on only when its body is complete.
          */
         RelayStream startExpectContinueUpload(String path) throws Exception {
             return start(HttpMethod.POST, path, false, true);
@@ -745,7 +713,12 @@ public class ConnectRelayLoopbackCloseIntegrationTest {
                             if (msg instanceof Http2HeadersFrame) {
                                 Http2HeadersFrame headers = (Http2HeadersFrame) msg;
                                 if (headers.headers().status() != null) {
-                                    status = Integer.parseInt(headers.headers().status().toString());
+                                    int headersStatus = Integer.parseInt(headers.headers().status().toString());
+                                    if (headersStatus < 200) {
+                                        relayStream.informational.complete(headersStatus);
+                                    } else {
+                                        status = headersStatus;
+                                    }
                                 }
                                 if (headers.isEndStream()) {
                                     complete(null);
@@ -758,7 +731,7 @@ public class ConnectRelayLoopbackCloseIntegrationTest {
                                     complete(null);
                                 }
                             } else if (msg instanceof Http2ResetFrame) {
-                                reset(((Http2ResetFrame) msg).errorCode());
+                                complete(((Http2ResetFrame) msg).errorCode());
                             }
                         } finally {
                             ReferenceCountUtil.release(msg);
@@ -768,7 +741,7 @@ public class ConnectRelayLoopbackCloseIntegrationTest {
                     @Override
                     public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
                         if (evt instanceof Http2ResetFrame) {
-                            reset(((Http2ResetFrame) evt).errorCode());
+                            complete(((Http2ResetFrame) evt).errorCode());
                         }
                         ReferenceCountUtil.release(evt);
                     }
@@ -776,11 +749,6 @@ public class ConnectRelayLoopbackCloseIntegrationTest {
                     @Override
                     public void channelInactive(ChannelHandlerContext ctx) {
                         relayStream.outcome.completeExceptionally(new IOException("stream closed without a response or a reset: " + body.size() + " body bytes"));
-                    }
-
-                    private void reset(long errorCode) {
-                        relayStream.resetCode.complete(errorCode);
-                        complete(errorCode);
                     }
 
                     private void complete(Long resetCode) {

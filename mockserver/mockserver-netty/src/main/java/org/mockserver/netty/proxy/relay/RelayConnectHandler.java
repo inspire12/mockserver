@@ -400,11 +400,7 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
             final HttpToHttp2ConnectionHandlerBuilder http2ConnectionHandlerBuilder = new HttpToHttp2ConnectionHandlerBuilder()
                 .frameListener(pipelineToMockServer.get(LoopbackHttp2StreamErrorHandler.class).proxyClientFrameListener(
                     connection,
-                    new InboundHttp2ToHttpAdapterBuilder(connection)
-                        .maxContentLength(configuration.maxRequestBodySize())
-                        .propagateSettings(true)
-                        .validateHttpHeaders(false)
-                        .build()
+                    ExpectContinueInboundHttp2ToHttpAdapter.forConnection(connection, configuration.maxRequestBodySize())
                 ));
             if (mockServerLogger.isEnabledForInstance(TRACE)) {
                 http2ConnectionHandlerBuilder.frameLogger(new Http2FrameLogger(LogLevel.TRACE, RelayConnectHandler.class.getName()));

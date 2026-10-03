@@ -78,9 +78,9 @@ public class LoopbackHttp2StreamIdRemapper extends ChannelDuplexHandler {
             loopbackId = pair(clientId);
         }
         if (loopbackId == null) {
-            // a second request on a client stream whose relayed request has already been sent whole: a request with
-            // Expect reaches the relay as its headers, then its body, and a HEADERS frame on that stream now would close
-            // the whole loopback (if it is still open) or have MockServer answer the request twice (if it has closed)
+            // a second request on a client stream whose relayed request has already been sent whole, which the
+            // client-facing adapter does not produce: a HEADERS frame on that stream now would close the whole loopback
+            // (if it is still open) or have MockServer answer the request twice (if it has closed)
             if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
                 mockServerLogger.logEvent(
                     new LogEntry()
@@ -162,9 +162,8 @@ public class LoopbackHttp2StreamIdRemapper extends ChannelDuplexHandler {
      * which is paired with it until that loopback stream is removed. A new id is the last stream created plus 2, so the
      * stream must be opened (or the pair forgotten) before another client stream is paired. {@code null} for a client
      * stream that was paired before and whose loopback stream has closed: a second request on a stream MockServer has
-     * already answered (a request with {@code Expect} reaches the relay as its headers, then later its body). The mark
-     * lives on the client's own stream, so it goes with it; a loopback stream that never opens leaves the client stream
-     * marked as paired but not relayed.
+     * already answered. The mark lives on the client's own stream, so it goes with it; a loopback stream that never
+     * opens leaves the client stream marked as paired but not relayed.
      */
     Integer pair(int clientStreamId) {
         Integer paired = loopbackIdByClientId.get(clientStreamId);
@@ -197,7 +196,6 @@ public class LoopbackHttp2StreamIdRemapper extends ChannelDuplexHandler {
 
     /**
      * Whether a request on this proxy client stream has been handed to the loopback, so MockServer may have received it.
-     * A request with {@code Expect} is handed on as its headers while the client is still sending the body.
      */
     boolean relayed(int clientStreamId) {
         Http2Stream clientStream = proxyClientStream(clientStreamId);

@@ -21,11 +21,13 @@ import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpScheme;
 import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.codec.http2.DefaultHttp2DataFrame;
+import io.netty.handler.codec.http2.DefaultHttp2FrameWriter;
 import io.netty.handler.codec.http2.DefaultHttp2Headers;
 import io.netty.handler.codec.http2.DefaultHttp2HeadersFrame;
 import io.netty.handler.codec.http2.DefaultHttp2ResetFrame;
 import io.netty.handler.codec.http2.Http2Error;
 import io.netty.handler.codec.http2.Http2DataFrame;
+import io.netty.handler.codec.http2.Http2FrameCodec;
 import io.netty.handler.codec.http2.Http2FrameCodecBuilder;
 import io.netty.handler.codec.http2.Http2HeadersFrame;
 import io.netty.handler.codec.http2.Http2MultiplexHandler;
@@ -46,6 +48,7 @@ import org.junit.Test;
 import org.mockserver.client.MockServerClient;
 import org.mockserver.configuration.ConfigurationProperties;
 import org.mockserver.model.HttpError;
+import org.mockserver.model.HttpRequest;
 import org.mockserver.netty.MockServer;
 import org.mockserver.socket.tls.PEMToFile;
 import org.mockserver.test.Http2FlowControlBodies;
@@ -96,8 +99,9 @@ public class ConnectRelayHttp2InterleavedUploadIntegrationTest {
         mockServerClient = new MockServerClient("localhost", mockServerPort);
         // each answer names its request and needs its exact upload, so a crossed or truncated stream reads as a 404
         mockServerClient.when(request().withMethod("POST").withPath("/large").withBody(exact(LARGE_UPLOAD))).respond(response().withBody(answer("/large")));
-        mockServerClient.when(request().withPath("/expect")).respond(response().withBody(answer("/expect")));
-        mockServerClient.when(request().withPath("/expect-slow")).respond(response().withBody(answer("/expect-slow")).withDelay(TimeUnit.MILLISECONDS, 1_000));
+        // answered only with the whole upload, so a request relayed without its body reads as a 404
+        mockServerClient.when(request().withPath("/expect").withBody(exact(upload("/expect")))).respond(response().withBody(answer("/expect")));
+        mockServerClient.when(request().withPath("/expect-slow").withBody(exact(upload("/expect-slow")))).respond(response().withBody(answer("/expect-slow")).withDelay(TimeUnit.MILLISECONDS, 1_000));
         mockServerClient.when(request().withMethod("GET").withPath("/slow-get")).respond(response().withBody(answer("/slow-get")).withDelay(TimeUnit.MILLISECONDS, 1_500));
         mockServerClient.when(request().withMethod("GET").withPath("/get")).respond(response().withBody(answer("/get")));
         for (int i = 0; i <= SMALL_STREAMS; i++) {
@@ -157,28 +161,33 @@ public class ConnectRelayHttp2InterleavedUploadIntegrationTest {
     }
 
     @Test(timeout = 30_000)
-    public void shouldNotRelayARequestSentWithExpectTwice() throws Exception {
+    public void shouldRelayARequestSentWithExpectOnceWithItsBody() throws Exception {
         try (RelayClient client = RelayClient.connect(true)) {
             RelayStream expecting = client.open("/expect", HttpMethod.POST, false, "expect", "100-continue");
-            // the client-facing adapter hands the headers on at once, and MockServer answers them
-            assertAnswered(expecting, "/expect");
+            // a client that honours the expectation sends nothing more until it is told to continue
+            assertThat(expecting.informational.get(5, TimeUnit.SECONDS), is(100));
             TimeUnit.MILLISECONDS.sleep(200);
+            assertThat("nothing is answered before the body arrives", expecting.outcome.isDone(), is(false));
             expecting.send(upload("/expect"), true);
+            assertAnswered(expecting, "/expect");
 
             RelayStream after = client.open("/get", HttpMethod.GET, true);
             assertAnswered(after, "/get");
             // a second /expect would be on its way to the log by now; give it time to land
             TimeUnit.MILLISECONDS.sleep(500);
-            assertThat(mockServerClient.retrieveRecordedRequests(request().withPath("/expect")).length, is(1));
+            HttpRequest[] recorded = mockServerClient.retrieveRecordedRequests(request().withPath("/expect"));
+            assertThat(recorded.length, is(1));
+            assertThat(recorded[0].getBodyAsString(), is(upload("/expect")));
+            assertThat("the relay has met the expectation", recorded[0].containsHeader("expect"), is(false));
         }
     }
 
     @Test(timeout = 30_000)
-    public void shouldKeepTheTunnelWhenAnExpectRequestsBodyFollowsAtOnce() throws Exception {
+    public void shouldRelayAnExpectRequestWhoseBodyFollowsAtOnceWithItsBody() throws Exception {
         try (RelayClient client = RelayClient.connect(true)) {
             RelayStream slowGet = client.open("/slow-get", HttpMethod.GET, true);
             RelayStream expecting = client.open("/expect-slow", HttpMethod.POST, false, "expect", "100-continue");
-            // the body arrives while MockServer is still answering the headers the relay has already sent on
+            // a client that does not wait to be told to continue
             expecting.send(upload("/expect-slow"), true);
 
             assertAnswered(slowGet, "/slow-get");
@@ -235,17 +244,16 @@ public class ConnectRelayHttp2InterleavedUploadIntegrationTest {
     }
 
     @Test(timeout = 30_000)
-    public void shouldKeepTheTunnelWhenTheRelayResetsAStreamWhoseExpectHeadersItHasRelayed() throws Exception {
+    public void shouldKeepTheTunnelWhenTheRelayResetsAStreamWhoseRequestItHasRelayed() throws Exception {
         try (RelayClient client = RelayClient.connect(true)) {
             RelayStream kept = client.get("/held");
-            // relayed as its headers at once; its body then breaks the content-length it declared, which is a stream
-            // error in the relay, not a reset from the client
-            RelayStream broken = client.open("/held", HttpMethod.POST, false, "expect", "100-continue", "content-length", "1");
+            RelayStream broken = client.get("/held");
             TimeUnit.MILLISECONDS.sleep(200);
-            broken.send("longer than declared", true);
+            // DATA after the request's end is a stream error in the relay, not a reset from the client
+            client.sendRawData(broken, "after the end");
 
             StreamOutcome brokenOutcome = broken.outcome.get(5, TimeUnit.SECONDS);
-            assertThat(brokenOutcome.toString(), brokenOutcome.resetCode, is(Http2Error.PROTOCOL_ERROR.code()));
+            assertThat(brokenOutcome.toString(), brokenOutcome.resetCode, is(Http2Error.STREAM_CLOSED.code()));
             assertAnswered(kept, "/held");
             // past the delay of the answer MockServer was preparing for the broken stream
             TimeUnit.MILLISECONDS.sleep(1_200);
@@ -328,6 +336,7 @@ public class ConnectRelayHttp2InterleavedUploadIntegrationTest {
 
     private static final class RelayStream {
         private final CompletableFuture<StreamOutcome> outcome = new CompletableFuture<>();
+        private final CompletableFuture<Integer> informational = new CompletableFuture<>();
         private Http2StreamChannel channel;
 
         void send(String data, boolean endOfStream) throws Exception {
@@ -418,6 +427,9 @@ public class ConnectRelayHttp2InterleavedUploadIntegrationTest {
                                 Http2HeadersFrame headers = (Http2HeadersFrame) msg;
                                 if (headers.headers().status() != null) {
                                     status = Integer.parseInt(headers.headers().status().toString());
+                                    if (status < 200) {
+                                        relayStream.informational.complete(status);
+                                    }
                                 }
                                 if (headers.isEndStream()) {
                                     complete(null);
@@ -460,6 +472,18 @@ public class ConnectRelayHttp2InterleavedUploadIntegrationTest {
             }
             relayStream.channel.writeAndFlush(new DefaultHttp2HeadersFrame(headers, endOfStream)).sync();
             return relayStream;
+        }
+
+        /**
+         * Writes a DATA frame on a stream the client has already ended, below the client's codec, which would refuse it.
+         */
+        void sendRawData(RelayStream stream, String data) throws Exception {
+            int streamId = stream.channel.stream().id();
+            connection.eventLoop().submit(() -> {
+                ChannelHandlerContext codecCtx = connection.pipeline().context(Http2FrameCodec.class);
+                new DefaultHttp2FrameWriter().writeData(codecCtx, streamId, Unpooled.copiedBuffer(data, StandardCharsets.UTF_8), 0, false, codecCtx.newPromise());
+                codecCtx.flush();
+            }).sync();
         }
 
         @Override

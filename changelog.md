@@ -596,10 +596,7 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   the MockServer it relays to stopped or the connection failed, requests still waiting for their response got
   nothing for about 30 seconds, until the tunnel closed. Each is now reset at once: with `REFUSED_STREAM`, which
   tells the client a retry is safe, if none of the request had been passed on to MockServer, and otherwise with
-  `INTERNAL_ERROR`. (A request sent with `Expect: 100-continue` is passed on before its body arrives, so it gets
-  `INTERNAL_ERROR` even while it is still uploading.) A response MockServer had already sent in full is still
-  delivered whole, as before; if the client is still uploading that request's body, it is then told to stop,
-  with `NO_ERROR`.
+  `INTERNAL_ERROR`. A response MockServer had already sent in full is still delivered whole, as before.
   A request that could not be passed on, because MockServer had sent a `GOAWAY` or was already handling as many
   requests on the connection as it allows, used to close the whole tunnel; now only that request is refused.
   The client is also sent a `GOAWAY` when MockServer sends one, so it opens a new connection for new requests.
@@ -612,13 +609,19 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   did not process is refused at once with `REFUSED_STREAM`, rather than when MockServer's side of the tunnel
   closes. Over HTTP/1.1 such a response now gets a `502` rather than a closed connection, unless a streamed
   response has already started, in which case the connection is still closed before the response ends.
-- **MockServer now stops working on an HTTP/2 request that a `CONNECT` or SOCKS tunnel rejects part-way
-  through.** A request sent with `Expect: 100-continue` is passed on to MockServer before its body arrives. If
-  the tunnel then rejected the request, because its body was longer than its `content-length` header or than
-  `maxRequestBodySize`, the client was told at once but MockServer was not: it carried on preparing a response
-  nobody could receive, and the tunnel kept the request open until that response arrived or the tunnel closed.
-  MockServer's copy of the request is now cancelled at the same moment. A request the client cancels itself was
-  already handled this way.
+- **MockServer now stops working on an HTTP/2 request that a `CONNECT` or SOCKS tunnel rejects after passing
+  it on.** If the tunnel rejected a request it had already passed to MockServer, for example because the client
+  sent more of it after its end, the client was told at once but MockServer was not: it carried on preparing a
+  response nobody could receive, and the tunnel kept the request open until that response arrived or the tunnel
+  closed. MockServer's copy of the request is now cancelled at the same moment. A request the client cancels
+  itself was already handled this way.
+- **HTTP/2 requests sent with `Expect: 100-continue` through a `CONNECT` or SOCKS tunnel now reach MockServer
+  with their body.** The tunnel passed such a request on as soon as its headers arrived, without its body, so
+  MockServer matched, recorded and answered it (or forwarded it upstream) with an empty body, and the body was
+  thrown away. The tunnel now answers `100 Continue` itself and passes the request on once, with its whole body,
+  as MockServer already did for requests sent to it directly and through HTTP/1.1 tunnels. As there, a request
+  expecting anything other than `100-continue` is answered `417`, and one whose `content-length` is over
+  `maxRequestBodySize` is answered `413`; neither is passed on.
 - **HTTPS forward proxying over HTTP/2 no longer runs out of local ports under sustained load.**
   When a client negotiated HTTP/2 inside a `CONNECT` tunnel (k6, Go clients and browsers do by
   default), MockServer opened and closed a new upstream connection for every request, because only

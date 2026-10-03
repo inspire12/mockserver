@@ -216,8 +216,8 @@ public class LoopbackHttp2StreamIdRemapperTest {
     public void shouldDropASecondRequestWhileTheFirstStillAwaitsItsResponse() throws Exception {
         serverAnswers = false;
         openClientStreams(5);
-        // as the client-facing adapter hands on a request sent with Expect whose body follows at once: an empty request,
-        // then the whole request again, both on client stream 5
+        // as Netty's own InboundHttp2ToHttpAdapter hands on a request sent with Expect whose body follows at once (the
+        // relay's adapter does not): an empty request, then the whole request again, both on client stream 5
         FullHttpRequest headers = request(5, "/expect", "");
         headers.headers().set("expect", "100-continue");
         loopback.writeAndFlush(headers);
@@ -244,7 +244,7 @@ public class LoopbackHttp2StreamIdRemapperTest {
         pump();
         assertThat(responsesByClientStream.get(5), is("answer for /headers"));
 
-        // as the client-facing adapter hands on a request sent with Expect: its headers, then later its body
+        // as Netty's own InboundHttp2ToHttpAdapter hands on a request sent with Expect: its headers, then later its body
         FullHttpRequest body = request(5, "/body");
         ChannelFuture written = loopback.writeAndFlush(body);
         pump();

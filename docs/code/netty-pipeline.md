@@ -922,7 +922,7 @@ in either order: the remapper is the only one that reads a message.
 
 | Direction | What it does |
 |---|---|
-| Request written to the loopback | Gives it the next loopback stream id (the last one created plus 2, or 1), records the pair, and rewrites `x-http2-stream-id`. A second message on the same client stream reuses the pair only while the loopback stream's local side is still open, which the relay's own requests never leave it: each is written whole. Otherwise it is dropped and released, with a WARN. A request sent with `Expect` reaches the relay as its headers and then its body (plan item #71). If the body arrives while MockServer is still answering the headers, a second HEADERS frame on that half-closed stream would close the whole loopback; if it arrives after that loopback stream has closed, MockServer would answer the request twice. To tell the second case from a new stream, the client's stream carries the mark that it was paired, so the mark goes when that stream does. A priority dependency (`x-http2-stream-dependency-id`) is translated, or dropped if it names no open stream or the stream itself |
+| Request written to the loopback | Gives it the next loopback stream id (the last one created plus 2, or 1), records the pair, and rewrites `x-http2-stream-id`. A second message on the same client stream reuses the pair only while the loopback stream's local side is still open, which the relay's own requests never leave it: each is written whole. Otherwise it is dropped and released, with a WARN. The relay's client-facing adapter hands each request on once (see [HTTP/2 `Expect` on the relay](#http2-expect-on-the-relay)), so this is a guard: a second HEADERS frame on a half-closed loopback stream would close the whole loopback, and one after that loopback stream has closed would have MockServer answer the request twice. To tell the second case from a new stream, the client's stream carries the mark that it was paired, so the mark goes when that stream does. A priority dependency (`x-http2-stream-dependency-id`) is translated, or dropped if it names no open stream or the stream itself |
 | Response read from the loopback | Rewrites `x-http2-stream-id` back to the client's id, and marks the client's stream answered when the response is a whole final (not `1xx`) one. A response with no pair, which only a server push could produce (MockServer does not push), is dropped and released. So is a response, `1xx` included, whose client stream has ended: writing it would fail, and a failed write closes the client's connection |
 | Loopback stream removed | Forgets the pair, so a long-lived tunnel holds one entry per open stream. A request whose stream was never opened (the write failed first) is forgotten at once, and its client stream marked as not relayed |
 
@@ -932,6 +932,26 @@ loopback receives one, or closes, the client is sent a GOAWAY of its own, built 
 (see [Relay loopback connection loss](#relay-loopback-connection-loss-http2)). Server push is not relayed
 either. The loopback never opens a stream of its own:
 the remapper's ids are the only ones it uses.
+
+### HTTP/2 `Expect` on the relay
+
+The relay hands each HTTP/2 request on to the loopback once, with its whole body, and meets an `Expect` header
+itself, as `HttpObjectAggregator` does on MockServer's own HTTP/2 streams and on an HTTP/1.1 tunnel. Netty's
+`InboundHttp2ToHttpAdapter` hands a request carrying `Expect` on as soon as its headers arrive, with no body, then
+again with the body, so MockServer answered the headers alone and the body was lost (plan item #71). The relay's
+client-facing pipeline uses `ExpectContinueInboundHttp2ToHttpAdapter` instead. For a request whose headers do not
+end the stream, it removes `Expect` and answers:
+
+| `Expect` | `content-length` | The relay sends the client | The request |
+|---|---|---|---|
+| `100-continue` (any case) | absent, or at most `maxRequestBodySize` | `100` | handed on once its body is complete |
+| `100-continue` | over `maxRequestBodySize` | `413`, then `RST_STREAM` `NO_ERROR` | not handed on |
+| anything else | any | `417`, then `RST_STREAM` `NO_ERROR` | not handed on |
+
+The reset after a `413` or `417` asks the client to stop uploading (RFC 9113 section 8.1), and keeps the tunnel up:
+DATA already on its way for a stream left open would reach the adapter with no request to add it to, a connection
+error. A request whose headers
+end the stream is complete already and is handed on as it is, `Expect` included.
 
 ### Relay loopback connection loss (HTTP/2)
 
@@ -946,22 +966,19 @@ graceful-shutdown timeout for streams that could no longer be answered.
 | The connection closes (MockServer stopping, a TCP reset, a connection error) | a `GOAWAY`, then each open stream ended as below, then the connection closed once no stream is left |
 | — a stream on which no request has been relayed | `REFUSED_STREAM`: MockServer never saw it, so a retry is safe |
 | — a stream whose request was relayed but whose final response was not | `INTERNAL_ERROR`: MockServer may have acted on it |
-| — a stream whose whole final response was relayed but is still queued behind the client's flow-control window | nothing yet: the response is written out in full, then, if the client is still uploading, `NO_ERROR` |
-| — a stream whose whole final response has been written while the client is still uploading | `NO_ERROR`: the response is complete, so the client need only stop sending (RFC 9113 section 8.1) |
+| — a stream whose whole final response was relayed but is still queued behind the client's flow-control window | nothing: the response is written out in full |
 | MockServer sends a `GOAWAY` | a `GOAWAY` (`NO_ERROR`, last stream id = the client's last stream), so new requests go to a new connection; a stream already open on the loopback above the `GOAWAY`'s last stream id is reset `REFUSED_STREAM` at once by `LoopbackHttp2StreamErrorHandler` (see [Relay failure signalling](#relay-failure-signalling)) |
 | One request cannot be written to the loopback because of that stream (a stream error) | that stream reset: `REFUSED_STREAM` when Netty refused to open the loopback stream (above a received `GOAWAY`'s last stream id, or past MockServer's concurrent-stream limit), otherwise `INTERNAL_ERROR`; the loopback and the other streams carry on |
 
-A request is usually relayed only once the client has sent all of it, but one sent with `Expect` is relayed as its
-headers while the client is still uploading the body (plan item #71), so "still uploading" does not mean "not seen".
+A request is relayed only once the client has sent all of it, `Expect` included (see
+[HTTP/2 `Expect` on the relay](#http2-expect-on-the-relay)), so a stream still uploading has not been seen.
 The handler asks `LoopbackHttp2StreamIdRemapper`, which marks each client stream it pairs with a loopback stream
 (unmarking it if the loopback stream never opens), and refuses only a stream not so marked. The remapper also marks
 a client stream answered when it hands on a whole final response; a `1xx` does not count, as it is handed on as
 soon as it arrives. An answered stream's response is with the client's encoder in full, but the encoder writes it
 only as fast as the client's flow-control window allows, so an answered stream whose local side is still open is
 not reset: that would cut the response short. The client connection's graceful close waits for it, bounded by
-the client handler's graceful-shutdown timeout (Netty's default 30 s) for a client that stops reading. A
-connection listener resets such a stream with `NO_ERROR` once its last frame is written, if the client is still
-uploading, on the event loop's next task rather than inside the encoder's write.
+the client handler's graceful-shutdown timeout (Netty's default 30 s) for a client that stops reading.
 
 `LoopbackHttp2ConnectionCloseHandler` (after `LoopbackHttp2StreamIdRemapper`, before
 `DownstreamProxyRelayHandler`) handles every row but the last; it runs before `DownstreamProxyRelayHandler`'s
@@ -1064,7 +1081,7 @@ stops working on the request:
 | The client's stream ends because | The loopback stream is reset with |
 |---|---|
 | the client sent `RST_STREAM` (taken from the frame listener: the client-facing adapter would have closed the whole tunnel) | the client's error code |
-| the relay reset it for a stream error in the client's request, such as a body longer than its `content-length` or than `maxRequestBodySize`, after a request sent with `Expect` had been relayed as its headers | `CANCEL` |
+| the relay reset it for a stream error in the client's request after the request was relayed, such as a DATA frame after the request's end | `CANCEL` |
 
 The second row comes from the client connection's `onStreamClosed`, since a reset the relay sends never reaches
 its own frame listener. That event fires for every close, so it does nothing in four cases:
@@ -1376,6 +1393,7 @@ flowchart LR
 | `UpstreamProxyRelayHandler` | `mockserver-netty/.../netty/proxy/relay/UpstreamProxyRelayHandler.java` | Client → MockServer relay |
 | `DownstreamProxyRelayHandler` | `mockserver-netty/.../netty/proxy/relay/DownstreamProxyRelayHandler.java` | MockServer → client relay |
 | `LoopbackHttp2ConnectionCloseHandler` | `mockserver-netty/.../netty/proxy/relay/LoopbackHttp2ConnectionCloseHandler.java` | Answers the client's HTTP/2 streams when the loopback connection closes or receives a GOAWAY |
+| `ExpectContinueInboundHttp2ToHttpAdapter` | `mockserver-netty/.../netty/proxy/relay/ExpectContinueInboundHttp2ToHttpAdapter.java` | Hands each relayed HTTP/2 request on once, whole, answering `Expect` itself (`100`, `413` or `417`) |
 | `BinaryRequestProxyingHandler` | `mockserver-netty/.../netty/proxy/BinaryRequestProxyingHandler.java` | Raw binary proxying |
 | `SocksDetector` | `mockserver-netty/.../netty/proxy/socks/SocksDetector.java` | SOCKS4/5 protocol detection |
 | `SocksProxyHandler` | `mockserver-netty/.../netty/proxy/socks/SocksProxyHandler.java` | Abstract SOCKS handler base |
