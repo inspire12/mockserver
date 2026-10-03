@@ -11,6 +11,7 @@ import io.netty.util.AttributeKey;
 import io.netty.util.ReferenceCountUtil;
 import org.mockserver.closurecallback.websocketregistry.LocalCallbackRegistry;
 import org.mockserver.closurecallback.websocketregistry.WebSocketClientRegistry;
+import org.mockserver.codec.HttpChunkLineLimiter;
 import org.mockserver.codec.MockServerHttpServerCodec;
 import org.mockserver.dashboard.DashboardWebSocketHandler;
 import org.mockserver.log.model.LogEntry;
@@ -171,7 +172,9 @@ public class CallbackWebSocketServerHandler extends ChannelInboundHandlerAdapter
 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-        if (directMemoryLimitReached(cause)) {
+        if (HttpChunkLineLimiter.isRejectedRequestCutShort(ctx.channel(), cause)) {
+            // already logged as the rejection that closed the connection
+        } else if (directMemoryLimitReached(cause)) {
             mockServerLogger.logEvent(
                 new LogEntry()
                     .setLogLevel(Level.ERROR)

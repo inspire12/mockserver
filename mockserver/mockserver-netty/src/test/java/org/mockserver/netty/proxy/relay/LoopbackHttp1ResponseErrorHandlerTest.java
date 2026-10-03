@@ -5,6 +5,7 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.DecoderException;
+import io.netty.handler.codec.DecoderResult;
 import io.netty.handler.codec.http.DefaultFullHttpResponse;
 import io.netty.handler.codec.http.DefaultHttpContent;
 import io.netty.handler.codec.http.DefaultHttpResponse;
@@ -66,6 +67,23 @@ public class LoopbackHttp1ResponseErrorHandlerTest {
         assertThat(written.headers().getInt(HttpHeaderNames.CONTENT_LENGTH), is(0));
         written.release();
         assertThat("passed on, so the relay still logs and closes", exceptionsPassedOn, contains(corrupt));
+    }
+
+    @Test
+    public void shouldAnswerA502InsteadOfRelayingAResponseTheCodecFailedToDecode() {
+        FullHttpResponse failed = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK, Unpooled.copiedBuffer(new byte[]{'x'}));
+        IllegalArgumentException invalid = new IllegalArgumentException("invalid header");
+        failed.setDecoderResult(DecoderResult.failure(invalid));
+
+        loopbackChannel.writeInbound(failed);
+
+        FullHttpResponse written = proxyClientChannel.readOutbound();
+        assertThat(written.status(), is(HttpResponseStatus.BAD_GATEWAY));
+        written.release();
+        assertThat("not relayed", loopbackChannel.readInbound(), nullValue());
+        assertThat(failed.refCnt(), is(0));
+        assertThat(exceptionsPassedOn.size(), is(1));
+        assertThat("passed on as a decoder fault, so the relay logs it as one", exceptionsPassedOn.get(0).getCause(), is((Throwable) invalid));
     }
 
     @Test

@@ -359,7 +359,7 @@ graph LR
 | PacedLargeWriteHandler | `o.m.netty.unification` | Writes an encoded buffer larger than 64 KB (in practice a response body) in 32 KB slices, only while the connection is writable, so a slow reader does not hold a direct-memory copy of the whole body. See [Outbound Buffering and Backpressure](#outbound-buffering-and-backpressure) |
 | HttpChunkLineLimiter (before codec) | `o.m.codec` | Counts the bytes handed to the codec while a chunked request body is being read, and rejects the request when more than 8 KiB is waiting with nothing decoded. See [Chunk-size line limit](#chunk-size-line-limit) |
 | HttpServerCodec | Netty built-in | HTTP/1.1 request decoding / response encoding |
-| HttpChunkLineLimiter (after codec) | `o.m.codec` | The other half of the limiter: resets the count on every decoded HTTP object, and tracks whether the connection is in a chunked body and whether a `400` can be written |
+| HttpChunkLineLimiter (after codec) | `o.m.codec` | The other half of the limiter: resets the count on every decoded HTTP object, and tracks whether the connection is in a chunked body and whether a `400` can be written. Also refuses any request the codec could not decode, before anything after it sees it. See [Undecodable requests](#undecodable-requests) |
 | PreserveHeadersNettyRemoves | `o.m.codec` | Preserves `Content-Encoding`/`Transfer-Encoding` headers that the downstream `HttpContentDecompressor`/`HttpObjectAggregator` strip (reset per request so they cannot leak across a pooled connection — issue #2322). Also captures the original (still compressed) request body bytes before decompression, so the decompressed body and the original on-the-wire bytes are both available (issue #2326). Both are published per request as one immutable `PreservedRequest` channel attribute, read once by `NettyHttpToMockServerHttpRequestDecoder` |
 | MockServerHttpContentDecompressor | `o.m.codec` | Netty's `HttpContentDecompressor` (`gzip`, `x-gzip`, `deflate`, `x-deflate`, `snappy`, and `zstd` / `br` when their native libraries load), except that `snappy` accepts the raw block format Prometheus remote-write sends as well as the framing format (`SnappyBlockOrFrameDecoder`). The same class decompresses HTTP/2 streams and HTTP/3 request bodies. The original compressed bytes are still preserved by `PreserveHeadersNettyRemoves` above and exposed via `HttpRequest#getBodyAsOriginalRawBytes()`; a forward of an unchanged body sends them (see [request-processing.md](request-processing.md#bodies-with-a-content-encoding)) |
 | HttpContentLengthRemover | `o.m.netty.unification` | Strips empty Content-Length headers |
@@ -375,7 +375,7 @@ graph LR
 
 **A chunk-size line (the hex size and any chunk extensions) or trailer section of a chunked HTTP/1.1 request is rejected once more than 8 KiB of it is waiting to be decoded.** The limit is fixed (`HttpChunkLineLimiter.MAX_CHUNK_LINE_BYTES`, 8,192 bytes) and applies wherever MockServer builds an HTTP/1.1 server codec: `PortUnificationHandler.switchToHttp` and the client-facing side of the CONNECT/SOCKS relay (`RelayConnectHandler`).
 
-**Why it is needed.** Netty's `HttpObjectDecoder` parses the request line and every chunk-size line with one parser, bounded by `maxInitialLineLength`, and bounds the trailer section with `maxHeaderSize`. MockServer defaults both to `Integer.MAX_VALUE`, so by default the decoder would buffer one chunk-size line for as long as the client kept sending it. Lowering `maxInitialLineLength` would also shorten the longest request URL MockServer accepts.
+**Why it is needed.** Netty's `HttpObjectDecoder` parses the request line and every chunk-size line with one parser, bounded by `maxInitialLineLength`, and bounds the trailer section with `maxHeaderSize`. Those default to 64 KiB and 256 KiB (see [Request line and header limits](#request-line-and-header-limits)), sized for long URLs and large headers, so on their own they would let a chunked body carry 64 KiB of framing per chunk; lowering `maxInitialLineLength` to bound chunk-size lines would also shorten the longest request URL MockServer accepts.
 
 **Why two handlers.** `HttpServerCodec` is final, its decoder is private, and neither says which line is being parsed, so the limit cannot be set on the decoder or added by subclassing it. Inside a chunked body the decoder passes chunk data on as it arrives, so the only bytes it keeps without decoding anything are an unfinished chunk-size line or trailer section. The handler before the codec adds each read's bytes to a count; the handler after the codec zeroes the count for every decoded object. A count over the limit (plus the two bytes of the CRLF that ends the previous chunk) after a read means the codec is holding that much of one line.
 
@@ -384,11 +384,41 @@ graph LR
 | Chunk-size line, or `0` line plus trailers, of 8,192 bytes or fewer | Always accepted, however it is split across reads |
 | Longer, and still unfinished when the bytes waiting pass the limit | Rejected. The codec holds at most the limit plus the socket reads either side |
 | Longer, but ended (with chunk data after it) within the socket read it started in or the next | Can be accepted: it was never buffered beyond those reads. The limit bounds what is buffered; it is not a protocol check on line length |
-| Request line, headers, chunk data, `Content-Length` bodies | Not affected (`maxInitialLineLength`, `maxHeaderSize`, `maxRequestBodySize` apply as before) |
+| Request line, headers, chunk data, `Content-Length` bodies | Not affected (`maxInitialLineLength`, `maxHeaderSize`, `maxRequestBodySize` apply) |
 
 **Rejection.** If the rejected request is the only one awaiting a response on the connection and no response to it has started, the limiter writes `400 Bad Request` with `Connection: close` from the context after the codec, keeps reading and dropping what the client sends for one second so the client can read the response (closing with unread bytes resets the connection, which can discard it), then closes. Otherwise (an early response under way, or an earlier pipelined request unanswered) it closes at once. It logs one `WARN` entry. The limit matches Tomcat's defaults for chunk extensions and trailers; a signed upload (`aws-chunked`) uses about 100 bytes per chunk-size line.
 
-**Client codecs.** The forward client (`HttpClientInitializer`) and the WebSocket clients build `HttpClientCodec` with Netty's defaults, which bound every line of an upstream response, chunk-size lines included, at 4,096 bytes. The relay's loopback `HttpClientCodec` is built with MockServer's limits but reads only MockServer's own responses.
+**Client codecs.** The forward client (`HttpClientInitializer`) and the WebSocket clients build `HttpClientCodec` with Netty's defaults, which bound every line of an upstream response, chunk-size lines included, at 4,096 bytes. The relay's loopback `HttpClientCodec` reads only MockServer's own responses, so it is built with no line or header limit: `maxInitialLineLength` and `maxHeaderSize` limit what clients send, and a mocked response with headers over them must reach the client through a tunnel intact. A response that loopback codec still fails to decode is answered with `502` by `LoopbackHttp1ResponseErrorHandler` rather than relayed.
+
+##### Request line and header limits
+
+**The request line is limited to `maxInitialLineLength` (default 65,536 bytes) and the header section, all header lines together, to `maxHeaderSize` (default 262,144 bytes).** The decoder buffers each until it ends, so before these defaults (both were `Integer.MAX_VALUE`) a client that never ended its request line, or kept sending header lines, was held in memory without limit. Both are read from the `Configuration` when a connection's codec is built, so a runtime change applies to new connections; zero or less is read as 1, as for the body-size limits. A request over either limit is refused (next section) with `414` or `431`.
+
+| Server | Request line | Header section |
+|--------|--------------|----------------|
+| Netty `HttpServerCodec` defaults | 4 KiB | 8 KiB |
+| Tomcat, Jetty | 8 KiB (line and headers together) | |
+| nginx (`large_client_header_buffers 4 8k`) | 8 KiB | 8 KiB per line, 32 KiB in all |
+| Apache httpd | 8,190 bytes | 8,190 bytes per line, 100 lines |
+| AWS Application Load Balancer | 16 KiB | 64 KiB |
+| Go `net/http` | 1 MiB (line and headers together) | |
+| **MockServer** | **64 KiB** | **256 KiB** |
+
+The defaults are well above what common servers and load balancers accept (four times an ALB's), and fit a Kerberos `Negotiate` token at Windows' 48,000-byte `MaxTokenSize` (about 64 KB encoded); only a server like Go's, with a 1 MiB allowance, accepts more. Each bounds memory per connection to well under the 10 MiB `maxRequestBodySize` a request can already hold, so neither is the larger exposure. `maxChunkSize` needs no bound: the decoder passes body bytes on as they arrive and only splits them at that size.
+
+**HTTP/2 and HTTP/3 are not governed by these properties.** Their header lists, pseudo-headers and the path included, are limited to 8 KiB by Netty's defaults whatever `maxHeaderSize` is set to: on HTTP/2 `SETTINGS_MAX_HEADER_LIST_SIZE` (a stream over it is answered `431`; a header block over 10 KiB closes the connection), on HTTP/3 `SETTINGS_MAX_FIELD_SECTION_SIZE`. Tying them to `maxHeaderSize` is plan item 99.
+
+##### Undecodable requests
+
+**An HTTP/1.1 request the codec cannot decode is answered and the connection closed; it is never dispatched.** On any decoding error (a request line or header section over its limit, an invalid header such as a non-numeric `Content-Length`, an invalid chunk size or chunk extension) Netty's decoder passes the request on with a failed decoder result (a synthetic `GET /bad-request` if the request line itself failed, otherwise the request as far as it was read, or a failed last content when the body broke) and discards the rest of the connection's input. `HttpChunkLineLimiter`'s handler after the codec drops that object and rejects the request the same way it rejects a long chunk-size line:
+
+| Failure | Status |
+|---------|--------|
+| Request line over `maxInitialLineLength` (`TooLongHttpLineException` on the request) | `414 Request-URI Too Long` |
+| Header section over `maxHeaderSize` (`TooLongHttpHeaderException` on the request) | `431 Request Header Fields Too Large` |
+| Anything else, including a chunk-size line or trailer section over those limits in the body | `400 Bad Request` |
+
+The status is sent with `Connection: close` when it is the only response owed and none has started; otherwise the connection is closed at once. It logs one `WARN` entry, or a `DEBUG` entry when the client had already closed the connection part-way through a request head (the decoder reports that as a failed request too). When the request's head had already been passed on, the aggregator reports the part it was holding as a `PrematureChannelClosureException` when the connection closes; the handlers that would log that (`CallbackWebSocketServerHandler`, `DashboardWebSocketHandler`, and `UpstreamProxyRelayHandler` on the relay) skip it on a connection the limiter rejected (`HttpChunkLineLimiter.isRejectedRequestCutShort`). The check has to sit directly after the codec: the content decompressor replaces a failed last content with a successful one, after which the aggregator would emit a complete-looking request, and `EarlyMatchingHandler` would match a failed request head. Before this, `FullHttpRequestToMockServerHttpRequest` logged the failure at `ERROR` and the request was matched and answered from whatever had been decoded (headers cut short at the limit, a body cut short by an invalid chunk, or `/bad-request`), including on the CONNECT relay, which forwarded it to MockServer. `NettyHttpToMockServerHttpRequestDecoder` still refuses a failed request (closing the connection without dispatching it) should one reach it through a pipeline without the limiter.
 
 #### HTTP/2 Pipeline
 
@@ -1062,7 +1092,7 @@ HTTP/2 loopback one sits after its `HttpToHttp2ConnectionHandler`, and listens t
 | HTTP/2 (`LoopbackHttp2StreamErrorHandler`) | MockServer resets the loopback stream | its stream reset with the same error code |
 | HTTP/2 | the request never reached MockServer (its HEADERS were not sent, or a `GOAWAY` says it was not processed) | its stream reset with `REFUSED_STREAM`, which tells it a retry is safe |
 | HTTP/2 | the response fails to decode, or passes `maxRequestBodySize` (`InboundHttp2ToHttpAdapter` resets it with `ENHANCE_YOUR_CALM`) | its stream reset with `INTERNAL_ERROR` |
-| HTTP/1.1 (`LoopbackHttp1ResponseErrorHandler`) | a decoder fault (corrupt body, over `maxRequestBodySize`) before the response head was relayed | `502` with `Connection: close` |
+| HTTP/1.1 (`LoopbackHttp1ResponseErrorHandler`) | a decoder fault (corrupt body, over `maxRequestBodySize`, or a response the codec marked as failed) before the response head was relayed | `502` with `Connection: close` |
 | HTTP/1.1 | a decoder fault after the head (a streamed response) | the connection closed without the terminating chunk |
 
 The HTTP/2 handler answers the client from the loopback connection's `onStreamClosed`, and resets the client

@@ -65,19 +65,14 @@ public class FullHttpRequestToMockServerHttpRequest {
         return mapFullHttpRequestToMockServerRequest(fullHttpRequest, preservedHeaders, null, localAddress, remoteAddress, protocol);
     }
 
+    /**
+     * Maps a request as decoded, without checking its decoder result: a request the HTTP/1.1 codec could not decode
+     * is refused before it reaches a mapper (see {@code HttpChunkLineLimiter}).
+     */
     public HttpRequest mapFullHttpRequestToMockServerRequest(FullHttpRequest fullHttpRequest, List<Header> preservedHeaders, byte[] originalRawBody, SocketAddress localAddress, SocketAddress remoteAddress, Protocol protocol) {
         HttpRequest httpRequest = new HttpRequest();
         try {
             if (fullHttpRequest != null) {
-                if (fullHttpRequest.decoderResult().isFailure()) {
-                    mockServerLogger.logEvent(
-                        new LogEntry()
-                            .setLogLevel(Level.ERROR)
-                            .setHttpRequestIfPresent(NettyMessageForLog.request(fullHttpRequest))
-                            .setMessageFormat("exception decoding request " + fullHttpRequest.decoderResult().cause().getMessage())
-                            .setThrowable(fullHttpRequest.decoderResult().cause())
-                    );
-                }
                 populateHeadersAndMetadata(httpRequest, fullHttpRequest, preservedHeaders, localAddress, remoteAddress, protocol);
                 setBody(httpRequest, fullHttpRequest, originalRawBody);
             }
@@ -102,15 +97,6 @@ public class FullHttpRequestToMockServerHttpRequest {
         HttpRequest httpRequest = new HttpRequest();
         try {
             if (nettyHttpRequest != null) {
-                if (nettyHttpRequest.decoderResult().isFailure()) {
-                    mockServerLogger.logEvent(
-                        new LogEntry()
-                            .setLogLevel(Level.ERROR)
-                            .setHttpRequestIfPresent(NettyMessageForLog.request(nettyHttpRequest))
-                            .setMessageFormat("exception decoding request " + nettyHttpRequest.decoderResult().cause().getMessage())
-                            .setThrowable(nettyHttpRequest.decoderResult().cause())
-                    );
-                }
                 populateHeadersAndMetadata(httpRequest, nettyHttpRequest, preservedHeaders, localAddress, remoteAddress, protocol);
             }
         } catch (Throwable throwable) {

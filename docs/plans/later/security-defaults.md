@@ -30,7 +30,7 @@ release.
 | DEF-5 | `forwardProxyBlockPrivateNetworks` | `false` | `true` | Yes |
 | DEF-6 | `localBoundIP` | `""` (all interfaces, `0.0.0.0`) | `127.0.0.1` | Yes (large impact) |
 | DEF-7 | `attemptToProxyIfNoMatchingExpectation` | `true` | `false` | Yes |
-| DEF-8 | `maxInitialLineLength` / `maxHeaderSize` / `maxChunkSize` | `Integer.MAX_VALUE` | `8 KiB` / `16 KiB` / `16 KiB` | Hardening; breaks only pathological clients |
+| DEF-8 | `maxInitialLineLength` / `maxHeaderSize` / `maxChunkSize` | 64 KiB / 256 KiB (bounded 2026-10, were `Integer.MAX_VALUE`) / `Integer.MAX_VALUE` | `8 KiB` / `16 KiB` / `16 KiB` | Hardening; breaks only pathological clients |
 
 ---
 
@@ -126,7 +126,7 @@ If the disruption is judged too high, an alternative is to keep `0.0.0.0` and ad
 ## DEF-8 — Bound HTTP parsing limits
 
 **Properties:** `mockserver.maxInitialLineLength`, `mockserver.maxHeaderSize`, `mockserver.maxChunkSize`
-**Today:** All default to `Integer.MAX_VALUE` (~2 GiB). A single malicious client can exhaust the heap by sending an unbounded header or request line — none of the already-shipped body limits cover the request line or headers.
+**Today:** `maxInitialLineLength` defaults to 64 KiB and `maxHeaderSize` to 256 KiB (performance-programme item 89, 2026-10: bounded in a minor release at values well above what common servers and load balancers accept, so the request line and headers are no longer an unbounded buffer); an over-limit request is refused with `414` / `431`. `maxChunkSize` is still `Integer.MAX_VALUE`, but it only splits body bytes as they arrive and bounds no buffer. What remains of DEF-8 is tightening the first two to the values below, which a real client can exceed (long URLs, large cookies or Kerberos tokens).
 **Flip:** Defaults aligned with Netty's own defaults and standard reverse proxies:
 
 | Property | New default |

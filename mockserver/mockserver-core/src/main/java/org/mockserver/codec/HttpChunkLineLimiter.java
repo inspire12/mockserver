@@ -10,6 +10,7 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.ChannelPromise;
+import io.netty.handler.codec.PrematureChannelClosureException;
 import io.netty.handler.codec.http.DefaultFullHttpResponse;
 import io.netty.handler.codec.http.HttpExpectationFailedEvent;
 import io.netty.handler.codec.http.FullHttpResponse;
@@ -23,6 +24,9 @@ import io.netty.handler.codec.http.HttpStatusClass;
 import io.netty.handler.codec.http.HttpUtil;
 import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.codec.http.LastHttpContent;
+import io.netty.handler.codec.http.TooLongHttpHeaderException;
+import io.netty.handler.codec.http.TooLongHttpLineException;
+import io.netty.util.AttributeKey;
 import io.netty.util.ReferenceCountUtil;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
@@ -35,9 +39,9 @@ import java.util.concurrent.TimeUnit;
  * Bounds what an HTTP/1.1 server codec buffers while it reads a chunked request body.
  * <p>
  * Netty's decoder limits a chunk-size line (the hex size and any chunk extensions) with the same setting as the
- * request line, {@code maxInitialLineLength}, and limits the trailer section with {@code maxHeaderSize}. MockServer
- * leaves both unbounded by default, so without this a client could make the decoder buffer one endless chunk-size
- * line. The codec is final and does not say which line it is parsing, so the limit is applied around it: one handler
+ * request line, {@code maxInitialLineLength}, and limits the trailer section with {@code maxHeaderSize}. Those are
+ * sized for long URLs and large headers (64 KiB and 256 KiB by default, and can be unbounded), so on their own they
+ * would let each chunk carry that much framing. The codec is final and does not say which line it is parsing, so the limit is applied around it: one handler
  * {@link #beforeCodec() before the codec} counts the bytes handed to it, one {@link #afterCodec() after the codec}
  * resets the count whenever the codec decodes anything. Inside a chunked body the decoder passes chunk data on as it
  * arrives, so bytes that pile up with nothing decoded are an unfinished chunk-size line or trailer section.
@@ -47,6 +51,13 @@ import java.util.concurrent.TimeUnit;
  * the bytes waiting for its end pass the limit, which is on a later socket read than the one it started in, so the
  * codec holds at most the limit plus the reads either side. A rejected request is answered with {@code 400} when no
  * other response is owed or under way on the connection, which is then closed.
+ * <p>
+ * The handler after the codec also refuses, in the same way, any request the codec could not decode (a request line
+ * or header section over its limit, an invalid header or chunk size): the codec passes such a request on with a failed
+ * decoder result and then discards the rest of the connection's input, so it is never dispatched. It answers
+ * {@code 414} for a request line over {@code maxInitialLineLength}, {@code 431} for a header section over
+ * {@code maxHeaderSize}, and {@code 400} otherwise. It has to run before the content decompressor, which replaces a
+ * failed last content with a successful one.
  */
 public final class HttpChunkLineLimiter {
 
@@ -56,6 +67,8 @@ public final class HttpChunkLineLimiter {
     public static final int MAX_CHUNK_LINE_BYTES = 8192;
 
     static final long CLOSE_DELAY_MILLIS = 1000;
+
+    private static final AttributeKey<Boolean> REJECTED = AttributeKey.valueOf("HTTP_CHUNK_LINE_LIMITER_REJECTED");
 
     // the CRLF ending the previous chunk can be counted with the line that follows it
     private static final int CHUNK_DELIMITER_BYTES = 2;
@@ -90,6 +103,14 @@ public final class HttpChunkLineLimiter {
     }
 
     /**
+     * Whether {@code cause} is the aggregator reporting the part of a request it held when a connection this limiter
+     * rejected was closed: expected, and already logged as the rejection, so not worth logging again.
+     */
+    public static boolean isRejectedRequestCutShort(Channel channel, Throwable cause) {
+        return cause instanceof PrematureChannelClosureException && channel.hasAttr(REJECTED);
+    }
+
+    /**
      * Removes both handlers, if present, for when the connection stops carrying HTTP/1.1 (a CONNECT or SOCKS tunnel).
      */
     public static void removeFrom(ChannelPipeline pipeline) {
@@ -101,9 +122,7 @@ public final class HttpChunkLineLimiter {
         }
     }
 
-    private void reject(Channel channel) {
-        rejected = true;
-        inChunkedBody = false;
+    private void rejectChunkLine(Channel channel) {
         if (mockServerLogger != null && mockServerLogger.isEnabledForInstance(Level.WARN)) {
             mockServerLogger.logEvent(
                 new LogEntry()
@@ -112,12 +131,47 @@ public final class HttpChunkLineLimiter {
                     .setArguments(channel.remoteAddress())
             );
         }
+        reject(channel, HttpResponseStatus.BAD_REQUEST);
+    }
+
+    private void rejectUndecodable(Channel channel, HttpObject undecodable) {
+        HttpResponseStatus status = statusFor(undecodable);
+        // a connection closed part-way through a request head is reported this way too, with no one left to answer
+        Level level = channel.isActive() ? Level.WARN : Level.DEBUG;
+        if (mockServerLogger != null && mockServerLogger.isEnabledForInstance(level)) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(level)
+                    .setMessageFormat("closing connection from:{}with status:{}because its request could not be decoded:{}")
+                    .setArguments(channel.remoteAddress(), status.code(), undecodable.decoderResult().cause().getMessage())
+            );
+        }
+        reject(channel, status);
+    }
+
+    static HttpResponseStatus statusFor(HttpObject undecodable) {
+        Throwable cause = undecodable.decoderResult().cause();
+        if (undecodable instanceof HttpRequest) {
+            if (cause instanceof TooLongHttpLineException) {
+                return HttpResponseStatus.REQUEST_URI_TOO_LONG;
+            }
+            if (cause instanceof TooLongHttpHeaderException) {
+                return HttpResponseStatus.REQUEST_HEADER_FIELDS_TOO_LARGE;
+            }
+        }
+        return HttpResponseStatus.BAD_REQUEST;
+    }
+
+    private void reject(Channel channel, HttpResponseStatus status) {
+        rejected = true;
+        channel.attr(REJECTED).set(Boolean.TRUE);
+        inChunkedBody = false;
         boolean canRespond = afterCodecContext != null && requestsAwaitingResponse == 1 && !responseStarted && channel.isActive();
         if (!canRespond) {
             channel.close();
             return;
         }
-        FullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.BAD_REQUEST, Unpooled.EMPTY_BUFFER);
+        FullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, status, Unpooled.EMPTY_BUFFER);
         response.headers()
             .set(HttpHeaderNames.CONNECTION, HttpHeaderValues.CLOSE)
             .set(HttpHeaderNames.CONTENT_LENGTH, 0);
@@ -145,7 +199,7 @@ public final class HttpChunkLineLimiter {
                 bytesSinceLastDecoded += ((ByteBuf) msg).readableBytes();
                 ctx.fireChannelRead(msg);
                 if (inChunkedBody && bytesSinceLastDecoded > MAX_CHUNK_LINE_BYTES + CHUNK_DELIMITER_BYTES) {
-                    reject(ctx.channel());
+                    rejectChunkLine(ctx.channel());
                 }
             } else {
                 ctx.fireChannelRead(msg);
@@ -170,6 +224,13 @@ public final class HttpChunkLineLimiter {
                 }
                 if (msg instanceof LastHttpContent) {
                     inChunkedBody = false;
+                }
+                if (((HttpObject) msg).decoderResult().isFailure()) {
+                    ReferenceCountUtil.release(msg);
+                    if (!rejected) {
+                        rejectUndecodable(ctx.channel(), (HttpObject) msg);
+                    }
+                    return;
                 }
             }
             ctx.fireChannelRead(msg);

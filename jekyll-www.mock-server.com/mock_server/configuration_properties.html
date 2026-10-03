@@ -1019,9 +1019,11 @@ mockserver.enableCORSForAllResponses=true</code></pre>
 
 <button id="button_configuration_max_initial_line_length" class="accordion title"><strong>Maximum HTTP Request Initial Line Length</strong></button>
 <div class="panel title">
-    <p>Maximum size the first line of an HTTP request</p>
+    <p>Maximum size in bytes of the first line of an HTTP/1.1 request (the method, the URL with its query string, and the protocol version)</p>
+    <p>A longer request line is answered with <span class="inline code">414 Request-URI Too Long</span> and the connection is closed; the request is not matched against any expectation. The default, 64 KB, is well above what web servers and load balancers usually accept (8 KB to 16 KB). Raise it if you deliberately send longer URLs; set <span class="inline code">2147483647</span> to remove the limit, which lets a client that never ends its request line make MockServer hold it in memory. Zero or a negative value is read as 1.</p>
     <p>This also limits each chunk-size line of a chunked HTTP/1.1 request body (the chunk size and any chunk extensions). Whatever value is set, MockServer rejects a chunk-size line once more than 8 KiB of it is waiting to be read, with a <span class="inline code">400</span> response, and closes the connection.</p>
-    <p>Type: <span class="keyword">int</span> Default: <span class="this_value">Integer.MAX_VALUE</span></p>
+    <p>HTTP/2 and HTTP/3 requests are not affected: their URL and headers together are limited to 8 KB.</p>
+    <p>Type: <span class="keyword">int</span> Default: <span class="this_value">65536</span></p>
     <p>Java Code:</p>
     <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.maxInitialLineLength(int length)</code></pre>
     <p>System Property:</p>
@@ -1036,9 +1038,11 @@ mockserver.enableCORSForAllResponses=true</code></pre>
 
 <button id="button_configuration_max_header_size" class="accordion title"><strong>Maximum HTTP Request Header Size</strong></button>
 <div class="panel title">
-    <p>Maximum size HTTP request headers</p>
+    <p>Maximum size in bytes of the headers of an HTTP/1.1 request, all header lines counted together</p>
+    <p>Larger headers are answered with <span class="inline code">431 Request Header Fields Too Large</span> and the connection is closed; the request is not matched against any expectation. The default, 256 KB, is well above what web servers and load balancers usually accept (8 KB to 64 KB) and fits large cookies and authentication tokens. Raise it if you deliberately send larger headers; set <span class="inline code">2147483647</span> to remove the limit, which lets a client that keeps sending header lines make MockServer hold them in memory. Zero or a negative value is read as 1.</p>
     <p>This also limits the trailers that can follow a chunked HTTP/1.1 request body. Whatever value is set, MockServer rejects trailers once more than 8 KiB of them is waiting to be read, with a <span class="inline code">400</span> response, and closes the connection.</p>
-    <p>Type: <span class="keyword">int</span> Default: <span class="this_value">Integer.MAX_VALUE</span></p>
+    <p>HTTP/2 and HTTP/3 requests are not affected: their URL and headers together are limited to 8 KB.</p>
+    <p>Type: <span class="keyword">int</span> Default: <span class="this_value">262144</span></p>
     <p>Java Code:</p>
     <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.maxHeaderSize(int size)</code></pre>
     <p>System Property:</p>

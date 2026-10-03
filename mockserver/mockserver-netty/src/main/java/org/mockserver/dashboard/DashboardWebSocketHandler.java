@@ -18,6 +18,7 @@ import io.netty.buffer.Unpooled;
 import io.netty.handler.codec.http.DefaultFullHttpResponse;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpVersion;
+import org.mockserver.codec.HttpChunkLineLimiter;
 import org.mockserver.collections.CircularHashMap;
 import org.mockserver.dashboard.model.DashboardLogEntryDTO;
 import org.mockserver.dashboard.model.DashboardLogEntryDTOGroup;
@@ -866,7 +867,9 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-        if (directMemoryLimitReached(cause)) {
+        if (HttpChunkLineLimiter.isRejectedRequestCutShort(ctx.channel(), cause)) {
+            // already logged as the rejection that closed the connection
+        } else if (directMemoryLimitReached(cause)) {
             mockServerLogger.logEvent(
                 new LogEntry()
                     .setLogLevel(Level.ERROR)

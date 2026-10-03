@@ -203,7 +203,7 @@ ConfigurationProperties.controlPlaneScopeMapping(Map.of(
 <a id="hardening_parsing" class="anchor" href="#hardening_parsing">&nbsp;</a>
 
 <h3>Request parsing limits</h3>
-<p>Bound the size of inbound request lines, headers, and chunks so a single client cannot exhaust memory with an oversized request:</p>
+<p>The request line and headers are bounded by default (64&nbsp;KiB and 256&nbsp;KiB), so a single client cannot exhaust memory with an oversized request. If every client you expect sends ordinary requests, tighten the bounds further:</p>
 <ul>
     <li><code class="inline_code">mockserver.maxInitialLineLength=8192</code> &mdash; cap the request line (method + URI + version) at 8&nbsp;KiB.</li>
     <li><code class="inline_code">mockserver.maxHeaderSize=16384</code> &mdash; cap the combined request headers at 16&nbsp;KiB.</li>

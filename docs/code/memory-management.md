@@ -484,9 +484,9 @@ as an aggregated response's limit is per response, so concurrent streams each ho
 
 #### Chunk-size lines and trailers
 
-**A chunked HTTP/1.1 request cannot make the decoder buffer more than about 8 KiB of chunk framing.** A chunk-size line with its chunk extensions, or the trailer section, is rejected with `400` and the connection closed once more than 8,192 bytes of it are waiting to be decoded; the decoder holds at most that plus the socket reads either side. Before, both were bounded only by `maxInitialLineLength` and `maxHeaderSize`, which default to `Integer.MAX_VALUE`. The mechanism and its exact edges are in [netty-pipeline.md → Chunk-size line limit](netty-pipeline.md#chunk-size-line-limit).
+**A chunked HTTP/1.1 request cannot make the decoder buffer more than about 8 KiB of chunk framing.** A chunk-size line with its chunk extensions, or the trailer section, is rejected with `400` and the connection closed once more than 8,192 bytes of it are waiting to be decoded; the decoder holds at most that plus the socket reads either side. Before, both were bounded only by `maxInitialLineLength` and `maxHeaderSize`, which defaulted to `Integer.MAX_VALUE`. The mechanism and its exact edges are in [netty-pipeline.md → Chunk-size line limit](netty-pipeline.md#chunk-size-line-limit).
 
-**Not covered.** The request line and the header section are still bounded only by `maxInitialLineLength` and `maxHeaderSize`, so with the defaults a client can make the decoder buffer either without limit.
+**The request line and the header section are bounded by default.** `maxInitialLineLength` defaults to 64 KiB and `maxHeaderSize` to 256 KiB (they were `Integer.MAX_VALUE`, so a client that never ended either was held without limit); a request over either is refused with `414` or `431` and the connection closed. See [netty-pipeline.md → Request line and header limits](netty-pipeline.md#request-line-and-header-limits).
 
 ### Connection Memory
 

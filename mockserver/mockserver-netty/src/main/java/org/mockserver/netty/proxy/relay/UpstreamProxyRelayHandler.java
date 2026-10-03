@@ -12,6 +12,7 @@ import io.netty.handler.codec.http2.Http2Error;
 import io.netty.handler.codec.http2.Http2Exception;
 import io.netty.handler.codec.http2.Http2Stream;
 import io.netty.handler.ssl.SslHandler;
+import org.mockserver.codec.HttpChunkLineLimiter;
 import org.mockserver.codec.StreamingAwareHttpObjectAggregator;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
@@ -166,7 +167,9 @@ public class UpstreamProxyRelayHandler extends SimpleChannelInboundHandler<FullH
 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-        if (directMemoryLimitReached(cause)) {
+        if (HttpChunkLineLimiter.isRejectedRequestCutShort(ctx.channel(), cause)) {
+            // already logged as the rejection that closed the connection
+        } else if (directMemoryLimitReached(cause)) {
             mockServerLogger.logEvent(
                 new LogEntry()
                     .setLogLevel(Level.ERROR)

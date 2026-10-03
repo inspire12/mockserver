@@ -1836,7 +1836,7 @@ public class ConfigurationTest {
         int original = ConfigurationProperties.maxInitialLineLength();
         try {
             // then - default value
-            assertThat(configuration.maxInitialLineLength(), equalTo(Integer.MAX_VALUE));
+            assertThat(configuration.maxInitialLineLength(), equalTo(64 * 1024));
 
             // when - system property setter
             ConfigurationProperties.maxInitialLineLength(10);
@@ -1851,6 +1851,16 @@ public class ConfigurationTest {
 
             // then - getter
             assertThat(configuration.maxInitialLineLength(), equalTo(20));
+
+            // then - zero or less is read as 1, from either store
+            configuration.maxInitialLineLength(0);
+            assertThat(configuration.maxInitialLineLength(), equalTo(1));
+            configuration.maxInitialLineLength(-5);
+            assertThat(configuration.maxInitialLineLength(), equalTo(1));
+            ConfigurationProperties.maxInitialLineLength(0);
+            assertThat(ConfigurationProperties.maxInitialLineLength(), equalTo(1));
+            ConfigurationProperties.maxInitialLineLength(Integer.MIN_VALUE);
+            assertThat(ConfigurationProperties.maxInitialLineLength(), equalTo(1));
         } finally {
             ConfigurationProperties.maxInitialLineLength(original);
         }
@@ -1861,7 +1871,7 @@ public class ConfigurationTest {
         int original = ConfigurationProperties.maxHeaderSize();
         try {
             // then - default value
-            assertThat(configuration.maxHeaderSize(), equalTo(Integer.MAX_VALUE));
+            assertThat(configuration.maxHeaderSize(), equalTo(256 * 1024));
 
             // when - system property setter
             ConfigurationProperties.maxHeaderSize(10);
@@ -1876,6 +1886,16 @@ public class ConfigurationTest {
 
             // then - getter
             assertThat(configuration.maxHeaderSize(), equalTo(20));
+
+            // then - zero or less is read as 1, from either store
+            configuration.maxHeaderSize(0);
+            assertThat(configuration.maxHeaderSize(), equalTo(1));
+            configuration.maxHeaderSize(-5);
+            assertThat(configuration.maxHeaderSize(), equalTo(1));
+            ConfigurationProperties.maxHeaderSize(0);
+            assertThat(ConfigurationProperties.maxHeaderSize(), equalTo(1));
+            ConfigurationProperties.maxHeaderSize(Integer.MIN_VALUE);
+            assertThat(ConfigurationProperties.maxHeaderSize(), equalTo(1));
         } finally {
             ConfigurationProperties.maxHeaderSize(original);
         }

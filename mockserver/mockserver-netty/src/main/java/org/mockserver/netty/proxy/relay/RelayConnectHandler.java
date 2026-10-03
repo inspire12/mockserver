@@ -418,7 +418,8 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
     }
 
     private void configureHttp1LoopbackPipeline(ChannelPipeline pipelineToMockServer, ChannelHandlerContext proxyClientCtx) {
-        pipelineToMockServer.addLast(new HttpClientCodec(configuration.maxInitialLineLength(), configuration.maxHeaderSize(), configuration.maxChunkSize()));
+        // reads only responses MockServer itself wrote, so the limits on what clients send must not apply
+        pipelineToMockServer.addLast(new HttpClientCodec(Integer.MAX_VALUE, Integer.MAX_VALUE, configuration.maxChunkSize()));
         pipelineToMockServer.addLast(new BoundedZstdHttpContentDecompressor());
         pipelineToMockServer.addLast(new StreamingAwareHttpObjectAggregator(configuration.maxRequestBodySize(), configuration, mockServerLogger, true));
         pipelineToMockServer.addLast(new LoopbackHttp1ResponseErrorHandler(proxyClientCtx.channel()));

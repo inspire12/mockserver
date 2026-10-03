@@ -140,7 +140,7 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
 - **A chunked HTTP/1.1 request can no longer make MockServer buffer an endless chunk-size line.**
   Each chunk of a chunked request body starts with a line giving its size, which may carry extra
   parameters (chunk extensions), and the body may end with trailer headers. MockServer limited that
-  line only by `maxInitialLineLength` and the trailers only by `maxHeaderSize`, which are both
+  line only by `maxInitialLineLength` and the trailers only by `maxHeaderSize`, which were both
   unlimited by default, so MockServer kept buffering a line its client never ended, up to 2 GB or
   until its network memory ran out. MockServer now answers `400` and closes the connection once more
   than 8 KB of one chunk-size line, or of the final `0` line and its trailers counted together, is
@@ -149,6 +149,22 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   8 KB is what Tomcat allows. Anything within the limit, the request line, headers and body sizes
   are unaffected, and a lower `maxInitialLineLength` or `maxHeaderSize` still applies. HTTP/2 and
   HTTP/3 have no chunk-size lines.
+- **The request line and headers of an HTTP/1.1 request are now limited by default, and a request
+  MockServer cannot read is refused instead of answered.** `maxInitialLineLength` (the request line:
+  method, URL and version) and `maxHeaderSize` (all header lines together) were unlimited by default,
+  so a client that never ended its request line, or kept sending header lines, made MockServer hold
+  them in memory until it ran out. They now default to 64 KB and 256 KB, several times what web
+  servers and load balancers usually accept (8 KB to 64 KB); set either to `2147483647` to remove
+  the limit. A longer request
+  line is answered with `414`, larger headers with `431`, and any other request MockServer cannot read
+  (an invalid header such as a non-numeric `Content-Length`, or a chunked body with an invalid chunk
+  size) with `400`; the connection is then closed. Before, such a request was logged as an `ERROR` and
+  then matched and answered from whatever had been read: headers cut short at the limit, a body cut
+  short at the invalid chunk, or a request line over the limit as `GET /bad-request`. The same applies
+  to requests sent through a `CONNECT` or SOCKS tunnel, which were forwarded. HTTP/2 and HTTP/3 are
+  unchanged: their URL and headers together were and are limited to 8 KB. The limits apply only to
+  requests MockServer receives: a mocked or proxied response with larger headers is sent intact,
+  through a tunnel too.
 - **A client can no longer make the server hold far more memory than the request it is sending.** Each piece
   of a request body is a slice of the network read it arrived in, and the server kept the whole read allocated
   while it held any piece of it. Over HTTP/2, a client that put each small DATA frame of a request in a read

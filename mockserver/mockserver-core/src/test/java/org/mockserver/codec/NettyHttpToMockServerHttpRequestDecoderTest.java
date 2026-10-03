@@ -1,6 +1,8 @@
 package org.mockserver.codec;
 
 import io.netty.buffer.Unpooled;
+import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.codec.DecoderResult;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.HttpMethod;
@@ -46,6 +48,22 @@ public class NettyHttpToMockServerHttpRequestDecoderTest {
     public void setupFixture() {
         mockServerRequestDecoder = new NettyHttpToMockServerHttpRequestDecoder(configuration(), new MockServerLogger(), false, null, null);
         output = new ArrayList<>();
+    }
+
+    @Test
+    public void shouldCloseWithoutDispatchingARequestThatFailedToDecode() {
+        // given
+        EmbeddedChannel channel = new EmbeddedChannel(mockServerRequestDecoder);
+        fullHttpRequest = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, "/uri", Unpooled.copiedBuffer("hel", UTF_8));
+        fullHttpRequest.setDecoderResult(DecoderResult.failure(new NumberFormatException("invalid chunk size")));
+
+        // when
+        channel.writeInbound(fullHttpRequest);
+
+        // then
+        assertThat(channel.readInbound(), nullValue());
+        assertThat(channel.isOpen(), is(false));
+        assertThat(fullHttpRequest.refCnt(), is(0));
     }
 
     @Test

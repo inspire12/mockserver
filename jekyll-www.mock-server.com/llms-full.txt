@@ -958,13 +958,13 @@ Local IP address to bind for accepting socket connections.
 ### HTTP Request Parsing Configuration
 
 **maxInitialLineLength**
-Maximum size of the first line of an HTTP request.
-- Default: Integer.MAX_VALUE
+Maximum size in bytes of the first line of an HTTP/1.1 request; a longer one is answered with 414 and the connection closed.
+- Default: 65536 (64 KB)
 - Environment variable: MOCKSERVER_MAX_INITIAL_LINE_LENGTH
 
 **maxHeaderSize**
-Maximum size of HTTP request headers.
-- Default: Integer.MAX_VALUE
+Maximum size in bytes of the headers of an HTTP/1.1 request, all header lines together; larger headers are answered with 431 and the connection closed.
+- Default: 262144 (256 KB)
 - Environment variable: MOCKSERVER_MAX_HEADER_SIZE
 
 **maxChunkSize**

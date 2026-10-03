@@ -4,10 +4,16 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.codec.DecoderResult;
+import io.netty.handler.codec.PrematureChannelClosureException;
 import io.netty.handler.codec.http.DefaultFullHttpResponse;
+import io.netty.handler.codec.http.DefaultHttpRequest;
+import io.netty.handler.codec.http.DefaultLastHttpContent;
 import io.netty.handler.codec.http.DefaultHttpResponse;
 import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.HttpContent;
+import io.netty.handler.codec.http.HttpContentDecompressor;
+import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpObject;
 import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpRequest;
@@ -15,6 +21,8 @@ import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.codec.http.LastHttpContent;
+import io.netty.handler.codec.http.TooLongHttpHeaderException;
+import io.netty.handler.codec.http.TooLongHttpLineException;
 import io.netty.util.ReferenceCountUtil;
 import org.junit.After;
 import org.junit.Test;
@@ -262,6 +270,139 @@ public class HttpChunkLineLimiterTest {
     }
 
     @Test
+    public void shouldRefuseABodyCutShortByAnInvalidChunkSizeWithoutPassingItOn() {
+        EmbeddedChannel channel = limited();
+
+        channel.writeInbound(buffer(CHUNKED_HEAD + "5\r\nhello\r\nzz\r\nworld\r\n0\r\n\r\n"));
+
+        assertRefused(channel, "HTTP/1.1 400 Bad Request\r\n");
+        // the head and the valid chunk were passed on, the failed last content was not, so the body never completes
+        List<HttpObject> decoded = decoded(channel);
+        assertThat(decoded, contains(instanceOf(HttpRequest.class), instanceOf(HttpContent.class)));
+        assertThat(decoded.get(1), not(instanceOf(LastHttpContent.class)));
+    }
+
+    @Test
+    public void shouldRefuseAnUndecodableCompressedBodyBeforeTheDecompressorHidesTheFailure() {
+        HttpChunkLineLimiter limiter = new HttpChunkLineLimiter(null);
+        EmbeddedChannel channel = channel(limiter.beforeCodec(), new HttpServerCodec(Integer.MAX_VALUE, Integer.MAX_VALUE, 8192), limiter.afterCodec(),
+            new HttpContentDecompressor(0), new HttpObjectAggregator(1 << 20));
+
+        channel.writeInbound(buffer("POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n"));
+
+        assertThat(response(channel), startsWith("HTTP/1.1 400 Bad Request\r\n"));
+        // the decompressor would pass a successful last content on, and the aggregator a complete request
+        assertThat(decoded(channel), is(empty()));
+        channel.advanceTimeBy(HttpChunkLineLimiter.CLOSE_DELAY_MILLIS, TimeUnit.MILLISECONDS);
+        channel.runScheduledPendingTasks();
+        try {
+            channel.runPendingTasks();
+            channel.checkException();
+        } catch (PrematureChannelClosureException expected) {
+            // the aggregator reports the request it was still holding when the connection closes
+            assertThat(HttpChunkLineLimiter.isRejectedRequestCutShort(channel, expected), is(true));
+        }
+        assertThat(channel.isOpen(), is(false));
+    }
+
+    @Test
+    public void shouldRefuseARequestLineOverMaxInitialLineLengthWith414() {
+        EmbeddedChannel channel = limited(64, Integer.MAX_VALUE);
+
+        channel.writeInbound(buffer("GET /" + "p".repeat(64) + " HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+
+        assertRefused(channel, "HTTP/1.1 414 Request-URI Too Long\r\n");
+        assertThat(decoded(channel), is(empty()));
+    }
+
+    @Test
+    public void shouldRefuseAnEndlessRequestLineOnceItPassesMaxInitialLineLength() {
+        EmbeddedChannel channel = limited(4 * READ_BYTES, Integer.MAX_VALUE);
+        channel.writeInbound(buffer("GET /"));
+
+        int reads = 0;
+        while (reads < 100 && channel.outboundMessages().isEmpty()) {
+            channel.writeInbound(buffer("p".repeat(READ_BYTES)));
+            reads++;
+        }
+
+        assertThat(reads, is(4));
+        assertRefused(channel, "HTTP/1.1 414 Request-URI Too Long\r\n");
+        assertThat(decoded(channel), is(empty()));
+    }
+
+    @Test
+    public void shouldRefuseAHeaderSectionOverMaxHeaderSizeWith431() {
+        EmbeddedChannel channel = limited(Integer.MAX_VALUE, 4 * READ_BYTES);
+        channel.writeInbound(buffer("GET /next HTTP/1.1\r\nHost: localhost\r\n"));
+
+        int reads = 0;
+        while (reads < 100 && channel.outboundMessages().isEmpty()) {
+            channel.writeInbound(buffer("x-pad-" + reads + ": " + "v".repeat(READ_BYTES / 2) + "\r\n"));
+            reads++;
+        }
+
+        assertThat(reads, lessThanOrEqualTo(8 + 1));
+        assertRefused(channel, "HTTP/1.1 431 Request Header Fields Too Large\r\n");
+        assertThat(decoded(channel), is(empty()));
+    }
+
+    @Test
+    public void shouldRefuseAnInvalidHeaderWith400() {
+        EmbeddedChannel channel = limited();
+
+        channel.writeInbound(buffer("POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: abc\r\n\r\nhello"));
+
+        assertRefused(channel, "HTTP/1.1 400 Bad Request\r\n");
+        assertThat(decoded(channel), is(empty()));
+    }
+
+    @Test
+    public void shouldCloseWithoutRespondingToAnUndecodableRequestBehindAnUnansweredOne() {
+        EmbeddedChannel channel = limited(64, Integer.MAX_VALUE);
+
+        channel.writeInbound(buffer("GET /first HTTP/1.1\r\nHost: localhost\r\n\r\nGET /" + "p".repeat(64) + " HTTP/1.1\r\n\r\n"));
+
+        List<HttpObject> decoded = decoded(channel);
+        assertThat(decoded, contains(instanceOf(HttpRequest.class), instanceOf(LastHttpContent.class)));
+        assertThat(channel.outboundMessages(), is(empty()));
+        assertThat(channel.isOpen(), is(false));
+    }
+
+    @Test
+    public void shouldPassNothingOnWhenTheClientClosesPartWayThroughTheHead() {
+        EmbeddedChannel channel = limited();
+        channel.writeInbound(buffer("GET /partial HTTP/1.1\r\nHost: local"));
+
+        // the codec reports the unfinished head as a failed request when the connection closes
+        channel.close();
+
+        assertThat(decoded(channel), is(empty()));
+        assertThat(channel.outboundMessages(), is(empty()));
+    }
+
+    @Test
+    public void shouldTreatOnlyTheAggregatorsReportOnARejectedConnectionAsExpected() {
+        EmbeddedChannel rejected = limited();
+        rejected.writeInbound(buffer(CHUNKED_HEAD + "zz\r\n"));
+        assertThat(response(rejected), startsWith("HTTP/1.1 400 Bad Request\r\n"));
+
+        assertThat(HttpChunkLineLimiter.isRejectedRequestCutShort(rejected, new PrematureChannelClosureException("cut short")), is(true));
+        assertThat(HttpChunkLineLimiter.isRejectedRequestCutShort(rejected, new IllegalStateException("other")), is(false));
+        assertThat(HttpChunkLineLimiter.isRejectedRequestCutShort(limited(), new PrematureChannelClosureException("cut short")), is(false));
+    }
+
+    @Test
+    public void shouldAnswerEachUndecodableRequestWithItsStatus() {
+        assertThat(HttpChunkLineLimiter.statusFor(failed(new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/"), new TooLongHttpLineException("line"))), is(HttpResponseStatus.REQUEST_URI_TOO_LONG));
+        assertThat(HttpChunkLineLimiter.statusFor(failed(new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/"), new TooLongHttpHeaderException("headers"))), is(HttpResponseStatus.REQUEST_HEADER_FIELDS_TOO_LARGE));
+        assertThat(HttpChunkLineLimiter.statusFor(failed(new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/"), new IllegalArgumentException("header"))), is(HttpResponseStatus.BAD_REQUEST));
+        // a chunk-size line over maxInitialLineLength, or a trailer section over maxHeaderSize, is in the body
+        assertThat(HttpChunkLineLimiter.statusFor(failed(new DefaultLastHttpContent(), new TooLongHttpLineException("chunk-size line"))), is(HttpResponseStatus.BAD_REQUEST));
+        assertThat(HttpChunkLineLimiter.statusFor(failed(new DefaultLastHttpContent(), new TooLongHttpHeaderException("trailers"))), is(HttpResponseStatus.BAD_REQUEST));
+    }
+
+    @Test
     public void shouldDecodeExactlyWhatTheCodecAloneDecodes() {
         Random random = new Random(74);
         for (int iteration = 0; iteration < 300; iteration++) {
@@ -302,7 +443,8 @@ public class HttpChunkLineLimiterTest {
                         requests.append(size).append("\r\n");
                         break;
                     case 1:
-                        requests.append(size).append(";sig=").append("e".repeat(random.nextInt(200))).append("\r\n");
+                        // an empty extension value is invalid, so at least one character
+                        requests.append(size).append(";sig=").append("e".repeat(1 + random.nextInt(200))).append("\r\n");
                         break;
                     case 2:
                         requests.append(chunkSizeLine(size, MAX_CHUNK_LINE_BYTES - random.nextInt(3)));
@@ -341,8 +483,32 @@ public class HttpChunkLineLimiterTest {
     }
 
     private EmbeddedChannel limited() {
+        return limited(Integer.MAX_VALUE, Integer.MAX_VALUE);
+    }
+
+    private EmbeddedChannel limited(int maxInitialLineLength, int maxHeaderSize) {
         HttpChunkLineLimiter limiter = new HttpChunkLineLimiter(null);
-        return channel(limiter.beforeCodec(), new HttpServerCodec(Integer.MAX_VALUE, Integer.MAX_VALUE, 8192), limiter.afterCodec());
+        return channel(limiter.beforeCodec(), new HttpServerCodec(maxInitialLineLength, maxHeaderSize, 8192), limiter.afterCodec());
+    }
+
+    /**
+     * The status line, then {@code Connection: close}; reads are dropped for a moment so the client sees it, then the
+     * channel closes.
+     */
+    private static void assertRefused(EmbeddedChannel channel, String statusLine) {
+        assertThat(response(channel), allOf(startsWith(statusLine), containsString("connection: close\r\n"), containsString("content-length: 0\r\n")));
+        ByteBuf dropped = buffer("GET /after HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        channel.writeInbound(dropped);
+        assertThat(dropped.refCnt(), is(0));
+        assertThat(channel.isOpen(), is(true));
+        channel.advanceTimeBy(HttpChunkLineLimiter.CLOSE_DELAY_MILLIS, TimeUnit.MILLISECONDS);
+        channel.runScheduledPendingTasks();
+        assertThat(channel.isOpen(), is(false));
+    }
+
+    private static HttpObject failed(HttpObject object, Exception cause) {
+        object.setDecoderResult(DecoderResult.failure(cause));
+        return object;
     }
 
     private EmbeddedChannel channel(io.netty.channel.ChannelHandler... handlers) {

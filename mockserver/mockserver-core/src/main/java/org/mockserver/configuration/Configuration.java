@@ -2749,13 +2749,14 @@ public class Configuration {
         if (maxInitialLineLength == null) {
             return ConfigurationProperties.maxInitialLineLength();
         }
-        return maxInitialLineLength;
+        return Math.max(1, maxInitialLineLength);
     }
 
     /**
-     * Maximum size of the first line of an HTTP request
+     * Maximum size in bytes of the first line of an HTTP/1.1 request; a longer one is refused with 414 and the
+     * connection closed
      * <p>
-     * The default is Integer.MAX_VALUE
+     * The default is 65,536 (64 KiB). The smallest limit is 1: zero or a negative value is read as 1.
      *
      * @param maxInitialLineLength maximum size of the first line of an HTTP request
      */
@@ -2768,13 +2769,14 @@ public class Configuration {
         if (maxHeaderSize == null) {
             return ConfigurationProperties.maxHeaderSize();
         }
-        return maxHeaderSize;
+        return Math.max(1, maxHeaderSize);
     }
 
     /**
-     * Maximum size of HTTP request headers
+     * Maximum size in bytes of the header section of an HTTP/1.1 request, all header lines together; a larger one is
+     * refused with 431 and the connection closed
      * <p>
-     * The default is Integer.MAX_VALUE
+     * The default is 262,144 (256 KiB). The smallest limit is 1: zero or a negative value is read as 1.
      *
      * @param maxHeaderSize maximum size of HTTP request headers
      */

@@ -19,56 +19,28 @@ import java.util.concurrent.TimeUnit;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
-import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.emptyArray;
+import static org.hamcrest.Matchers.startsWith;
 import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.model.Header.header;
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
 
 /**
- * Behavioural guard that the HTTP parser limit {@code maxHeaderSize} is actually wired into the
- * Netty {@code HttpServerCodec} in the HTTP/1.1 request pipeline
- * ({@code PortUnificationHandler.switchToHttp}) and that the <em>configured</em> value — not Netty's
- * 8192-byte default — is the one enforced against a real socket.
+ * Behavioural guard that the HTTP parser limits {@code maxHeaderSize} and {@code maxInitialLineLength} are wired into
+ * the Netty {@code HttpServerCodec} in the HTTP/1.1 request pipeline ({@code PortUnificationHandler.switchToHttp}) and
+ * that the <em>configured</em> values, not Netty's defaults (8192 and 4096 bytes), are the ones enforced against a
+ * real socket.
  * <p>
- * Prior to this test the three parser limits ({@code maxInitialLineLength}, {@code maxHeaderSize},
- * {@code maxChunkSize}) had no behavioural coverage: a regression that dropped the configured value
- * and fell back to the default — or removed the wiring entirely — would have gone unnoticed.
+ * An over-limit request is refused: {@code 431} for a header section over {@code maxHeaderSize}, {@code 414} for a
+ * request line over {@code maxInitialLineLength}, each with {@code Connection: close}, and the request is not
+ * dispatched (nothing is recorded). Netty's decoder marks such a request as failed and stops parsing it; before
+ * {@code HttpChunkLineLimiter} refused it, the request was served from the headers parsed so far, or as Netty's
+ * synthetic {@code /bad-request}.
  * <p>
- * What the limit actually does, observed end-to-end: MockServer does not send an error status for an
- * over-limit request — Netty's {@code HttpObjectDecoder} raises a {@code TooLongHttpHeaderException},
- * marks the request as a decode failure and stops parsing at the byte that crossed the limit, so
- * every header <em>after</em> that point is silently dropped;
- * {@code FullHttpRequestToMockServerHttpRequest} logs the failure but still serves the request from
- * the headers it did parse. The client-observable effect is therefore <strong>header truncation</strong>:
- * a header positioned beyond the configured {@code maxHeaderSize} boundary never reaches the matcher.
- * <p>
- * The test pins that effect with an expectation that only matches when a marker header is present, and
- * drives two raw HTTP/1.1 requests over a plain {@link Socket} against a server configured with
- * {@code maxHeaderSize=1024}:
- * <ul>
- *   <li>a <strong>control</strong> request whose marker header sits well within the limit — matched
- *       and answered with the mocked 200 response; and</li>
- *   <li>an <strong>over-limit</strong> request identical except that a ~2KB filler header is inserted
- *       ahead of the marker, pushing the marker past the 1024-byte boundary — the marker is dropped,
- *       the request no longer matches, and MockServer returns a 404.</li>
- * </ul>
- * The filler size (2KB) sits strictly between the configured limit (1024) and Netty's 8192-byte
- * default, so the test is a genuine positive control: reverting the wiring to ignore the configured
- * {@code maxHeaderSize} (using the default) lets the whole header block through, the marker survives,
- * the over-limit request matches and returns 200 — turning the over-limit assertion red.
- * <p>
- * {@code Connection: close} is placed ahead of the filler so it is always parsed regardless of the
- * limit, ensuring the server closes each connection promptly and the raw read terminates.
- * <p>
- * The same wiring ({@code PortUnificationHandler.switchToHttp}) also passes the configured
- * {@code maxInitialLineLength} into the {@code HttpServerCodec}. That limit is proven the same way:
- * an over-limit <em>request line</em> (method + URI + version) makes Netty's decoder raise a
- * {@code TooLongHttpLineException}, enter the bad-message state and synthesise an invalid request with
- * URI {@code /bad-request} — so the configured path is never seen, the expectation does not match and
- * MockServer returns a 404. A filler query string sized strictly between the configured limit and
- * Netty's 4096-byte default makes it a genuine positive control: reverting the wiring to the default
- * lets the whole line parse, the path survives, the request matches and returns 200.
+ * Each filler sits strictly between the configured limit and Netty's default, so the tests are a positive control:
+ * reverting the wiring to the defaults lets the whole request through, it matches the expectation, and the
+ * over-limit assertions turn red.
  * <p>
  * The third parser limit, {@code maxChunkSize}, is deliberately <strong>not</strong> covered here: in
  * Netty's {@code HttpObjectDecoder} it is only ever applied as {@code Math.min(bytesAvailable,
@@ -136,10 +108,8 @@ public class HttpParserLimitsIntegrationTest {
     }
 
     @Test
-    public void shouldDropMarkerHeaderPushedBeyondTheConfiguredMaxHeaderSize() throws Exception {
-        // a ~2KB filler header ahead of the marker pushes the cumulative header size past the
-        // 1024-byte cap before the marker is reached, so the decoder drops the marker (and every
-        // header after the overflow). Connection: close is ahead of the filler so it always parses.
+    public void shouldRefuseAHeaderSectionOverTheConfiguredMaxHeaderSize() throws Exception {
+        // a ~2KB filler header ahead of the marker pushes the header section past the 1024-byte cap
         String rawRequest = "GET /limits HTTP/1.1\r\n"
             + "Host: localhost:" + mockServer.getLocalPort() + "\r\n"
             + "Connection: close\r\n"
@@ -149,17 +119,11 @@ public class HttpParserLimitsIntegrationTest {
 
         String response = sendRawRequestAndReadResponse(rawRequest);
 
-        // the marker is dropped by the enforced limit, so the header-conditional expectation does
-        // not match and MockServer returns a 404 rather than the mocked 200 body. If the configured
-        // maxHeaderSize were NOT enforced (the positive control reverts the wiring to Netty's 8192
-        // default), the whole header block would parse, the marker would survive and this request
-        // would be answered with "marker-seen".
-        assertThat("an over-limit marker header must be dropped so the expectation does not match — "
-                + "the configured maxHeaderSize was not enforced, actual response:\n" + response,
-            response, not(containsString("marker-seen")));
-        assertThat("an unmatched request (marker dropped by the header limit) must return 404, "
-                + "actual response:\n" + response,
-            response, containsString("404"));
+        // with the configured limit not enforced (Netty's 8192 default) the request would match: "marker-seen"
+        assertThat("an over-limit header section must be refused with 431, actual response:\n" + response,
+            response, startsWith("HTTP/1.1 431 Request Header Fields Too Large\r\n"));
+        assertThat(response.toLowerCase(), containsString("connection: close\r\n"));
+        assertNothingDispatched();
     }
 
     @Test
@@ -180,12 +144,8 @@ public class HttpParserLimitsIntegrationTest {
     }
 
     @Test
-    public void shouldRejectRequestWhoseInitialLineExceedsTheConfiguredMaxInitialLineLength() throws Exception {
-        // a ~1KB filler query string pushes the request line past the 250-byte cap. Netty raises
-        // TooLongHttpLineException, enters the bad-message state and synthesises an invalid request with
-        // uri "/bad-request" (the configured "/limits" path is never parsed), so the expectation does
-        // not match. The filler stays under Netty's 4096-byte default, so the positive control (reverting
-        // the wiring to the default) parses the whole line, the path survives and the request matches.
+    public void shouldRefuseARequestLineOverTheConfiguredMaxInitialLineLength() throws Exception {
+        // a ~1KB filler query string pushes the request line past the 250-byte cap
         String rawRequest = "GET /limits?filler=" + repeat('a', INITIAL_LINE_FILLER_LENGTH) + " HTTP/1.1\r\n"
             + "Host: localhost:" + mockServer.getLocalPort() + "\r\n"
             + "Connection: close\r\n"
@@ -194,17 +154,15 @@ public class HttpParserLimitsIntegrationTest {
 
         String response = sendRawRequestAndReadResponse(rawRequest);
 
-        // the request line is rejected by the enforced limit, so the path-conditional expectation does
-        // not match and MockServer returns a 404 rather than the mocked 200 body. If the configured
-        // maxInitialLineLength were NOT enforced (the positive control reverts the wiring to Netty's
-        // 4096 default), the whole line would parse, the path would survive and this request would be
-        // answered with "marker-seen".
-        assertThat("an over-limit request line must be rejected so the expectation does not match — "
-                + "the configured maxInitialLineLength was not enforced, actual response:\n" + response,
-            response, not(containsString("marker-seen")));
-        assertThat("a request with an over-limit initial line (rejected by maxInitialLineLength) must "
-                + "return 404, actual response:\n" + response,
-            response, containsString("404"));
+        // with the configured limit not enforced (Netty's 4096 default) the request would match: "marker-seen"
+        assertThat("an over-limit request line must be refused with 414, actual response:\n" + response,
+            response, startsWith("HTTP/1.1 414 Request-URI Too Long\r\n"));
+        assertThat(response.toLowerCase(), containsString("connection: close\r\n"));
+        assertNothingDispatched();
+    }
+
+    private void assertNothingDispatched() {
+        assertThat(mockServerClient.retrieveRecordedRequests(request()), emptyArray());
     }
 
     private String sendRawRequestAndReadResponse(String rawRequest) throws IOException {

@@ -3,10 +3,12 @@ package org.mockserver.netty.proxy.relay;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.handler.codec.DecoderException;
 import io.netty.handler.codec.http.DefaultFullHttpResponse;
 import io.netty.handler.codec.http.FullHttpResponse;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaderValues;
+import io.netty.handler.codec.http.HttpObject;
 import io.netty.handler.codec.http.HttpResponse;
 import io.netty.handler.codec.http.HttpStatusClass;
 import io.netty.handler.codec.http.LastHttpContent;
@@ -18,7 +20,8 @@ import static org.mockserver.exception.ExceptionHandling.isSslOrDecoderFault;
 
 /**
  * Answers the proxy client with a {@code 502} when the CONNECT/SOCKS relay's HTTP/1.1 loopback fails to decode a
- * response (a corrupt compressed body, or one larger than {@code maxRequestBodySize}) before its head has been relayed.
+ * response (a corrupt compressed body, one larger than {@code maxRequestBodySize}, or one the codec marks as failed)
+ * before its head has been relayed.
  * After the head the client is left with an incomplete response: {@link DownstreamProxyRelayHandler} closes both
  * connections and no terminating chunk is written. Either way the exception carries on to it, which logs and closes,
  * and anything decoded after it is dropped.
@@ -39,6 +42,13 @@ public class LoopbackHttp1ResponseErrorHandler extends ChannelInboundHandlerAdap
         if (failed) {
             // what is still decoded from the rest of the read is no longer a valid response
             ReferenceCountUtil.release(msg);
+            return;
+        }
+        if (msg instanceof HttpObject && ((HttpObject) msg).decoderResult().isFailure()) {
+            // the codec reports a response it cannot decode in the message, not as an exception
+            Throwable cause = ((HttpObject) msg).decoderResult().cause();
+            ReferenceCountUtil.release(msg);
+            exceptionCaught(ctx, cause instanceof DecoderException ? cause : new DecoderException(cause));
             return;
         }
         if (msg instanceof HttpResponse && ((HttpResponse) msg).status().codeClass() != HttpStatusClass.INFORMATIONAL) {

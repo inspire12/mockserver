@@ -176,6 +176,9 @@ public class ConfigurationProperties {
     // http request parsing
     private static final String MOCKSERVER_MAX_INITIAL_LINE_LENGTH = "mockserver.maxInitialLineLength";
     private static final String MOCKSERVER_MAX_HEADER_SIZE = "mockserver.maxHeaderSize";
+    // the request line and header section are buffered until they end, so they must have a bound by default
+    private static final int DEFAULT_MAX_INITIAL_LINE_LENGTH = 64 * 1024;
+    private static final int DEFAULT_MAX_HEADER_SIZE = 256 * 1024;
     private static final String MOCKSERVER_MAX_CHUNK_SIZE = "mockserver.maxChunkSize";
     private static final String MOCKSERVER_MAX_REQUEST_BODY_SIZE = "mockserver.maxRequestBodySize";
     private static final String MOCKSERVER_MAX_GRPC_MESSAGE_SIZE = "mockserver.maxGrpcMessageSize";
@@ -3198,13 +3201,14 @@ public class ConfigurationProperties {
     // http request parsing
 
     public static int maxInitialLineLength() {
-        return readIntegerProperty(MOCKSERVER_MAX_INITIAL_LINE_LENGTH, "MOCKSERVER_MAX_INITIAL_LINE_LENGTH", Integer.MAX_VALUE);
+        return Math.max(1, readIntegerProperty(MOCKSERVER_MAX_INITIAL_LINE_LENGTH, "MOCKSERVER_MAX_INITIAL_LINE_LENGTH", DEFAULT_MAX_INITIAL_LINE_LENGTH));
     }
 
     /**
-     * Maximum size of the first line of an HTTP request
+     * Maximum size in bytes of the first line of an HTTP/1.1 request; a longer one is refused with 414 and the
+     * connection closed
      * <p>
-     * The default is Integer.MAX_VALUE
+     * The default is 65,536 (64 KiB). The smallest limit is 1: zero or a negative value is read as 1.
      *
      * @param length maximum size of the first line of an HTTP request
      */
@@ -3213,13 +3217,14 @@ public class ConfigurationProperties {
     }
 
     public static int maxHeaderSize() {
-        return readIntegerProperty(MOCKSERVER_MAX_HEADER_SIZE, "MOCKSERVER_MAX_HEADER_SIZE", Integer.MAX_VALUE);
+        return Math.max(1, readIntegerProperty(MOCKSERVER_MAX_HEADER_SIZE, "MOCKSERVER_MAX_HEADER_SIZE", DEFAULT_MAX_HEADER_SIZE));
     }
 
     /**
-     * Maximum size of HTTP request headers
+     * Maximum size in bytes of the header section of an HTTP/1.1 request, all header lines together; a larger one is
+     * refused with 431 and the connection closed
      * <p>
-     * The default is Integer.MAX_VALUE
+     * The default is 262,144 (256 KiB). The smallest limit is 1: zero or a negative value is read as 1.
      *
      * @param size maximum size of HTTP request headers
      */
