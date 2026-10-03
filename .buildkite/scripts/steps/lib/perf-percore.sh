@@ -693,6 +693,7 @@ sample_peaks() {
 # mode. Sets RW_RC, XRATES, STATE_JSON and the memory peaks, and removes the SUT. The VU ceiling is
 # pinned at sweep.js's 2,048 so a point measures the same client on every host. k6's GOGC stays 400
 # unless the build sets one: the arm's 1600 default rests on perf-xl evidence the matrix never had.
+# Its recorded p99-bounded ceiling keeps the whole-rung p99 (unmasked_p99), not the arm's masked rule.
 run_point_multik6() {
   local rw_dir="$POINT_DIR"
   RW_RC=0
@@ -706,7 +707,7 @@ run_point_multik6() {
     PERF_RW_UPSTREAM_CPUS="" PERF_RW_IMAGE="$MOCKSERVER_IMAGE" PERF_RW_K6_IMAGE="$K6_IMAGE" \
     PERF_RW_RATES="$POINT_RATES" PERF_RW_STEP="$SWEEP_STEP" PERF_RW_GAP="$SWEEP_GAP" PERF_RW_SETTLE_S="$SWEEP_SETTLE_S" \
     PERF_RW_WARMUP_RATE="$POINT_WARMUP_RATE" PERF_RW_WARMUP_DURATION="$WARMUP_DURATION" \
-    PERF_RW_XCHECK=true PERF_RW_XCHECK_RATES="$XRATES" PERF_RW_P99_MAX_MS="$HW_P99_MAX_MS" \
+    PERF_RW_XCHECK=true PERF_RW_XCHECK_RATES="$XRATES" PERF_RW_P99_MAX_MS="$HW_P99_MAX_MS" PERF_RW_HEADLINE_RULE=unmasked_p99 \
     PERF_RW_K6_VU_CEILING=2048 PERF_RW_K6_GOGC="${PERF_RW_K6_GOGC:-400}" PERF_RW_DEBUG_DIR="$rw_dir" \
     bash "$REPO_ROOT/mockserver-performance-test/scripts/rw-multi-k6-sweep.sh" "$rw_dir/rw-result.json" >&2 || RW_RC=$?
   kill "$SAMPLER_PID" >/dev/null 2>&1 || true

@@ -252,7 +252,11 @@ for bad_env in PERF_RW_TAIL_INSTRUMENT=yes PERF_RW_HOST_SAMPLER_INTERVAL_S=0 PER
   check "rejected at startup: $bad_env" "2" "$RC"
 done
 run_h PERF_RW_TEST_PLACEMENT_ONLY=true STUB_MEM=103079215104
-check "default run: .ab all null, not a trial" "false|5" "$(jq -r '"\(.ab.trial)|\([.ab[] | select(. == null)] | length)"' <<<"$R")"
+check "default run: .ab all null, not a trial" "false|7" "$(jq -r '"\(.ab.trial)|\([.ab[] | select(. == null)] | length)"' <<<"$R")"
+run_h PERF_RW_TEST_PLACEMENT_ONLY=true STUB_MEM=103079215104 PERF_RW_P99_MAX_MS=10
+check "the headline bound set, even to its default (10 ms), is a trial" "true|10" "$(jq -r '"\(.ab.trial)|\(.ab.p99_max_ms)"' <<<"$R")"
+run_h PERF_RW_TEST_PLACEMENT_ONLY=true STUB_MEM=103079215104 PERF_RW_GC_MASK_MIN_QUIET_S=3
+check "the masked figure's minimum of quiet seconds set, even to its default (3), is a trial" "true|3" "$(jq -r '"\(.ab.trial)|\(.ab.gc_mask_min_quiet_s)"' <<<"$R")"
 run_h PERF_RW_TEST_PLACEMENT_ONLY=true STUB_MEM=103079215104 PERF_RW_K6_GOGC=800
 check "k6 GC A/B (GOGC=800) is recorded as a trial" "true|800" "$(jq -r '"\(.ab.trial)|\(.ab.k6_gogc)"' <<<"$R")"
 check "  ... and logged as not a counting run" "yes" "$(has 'A/B trial, not a counting run' "$(cat "$T/err")")"
@@ -425,7 +429,7 @@ check "the PromQL over two windows: cumulative at each end less cumulative at ea
   '(sum(H{a="b"} @ 20) - sum(H{a="b"} @ 10)) + (sum(H{a="b"} @ 45) - sum(H{a="b"} @ 40))' "$(k6_gc_masked_expr 'H{a="b"}' '[[10,20],[40,45]]')"
 
 echo "--- 8b. GC-masked figure in the harness (stub Prometheus; the p99 answers are synthetic, the seconds are the run's)"
-for f in headline_for gc_masked_query gc_masked_unavailable build_gc_masked gc_masked_result; do
+for f in headline_for gc_masked_query gc_masked_unavailable build_gc_masked gc_masked_result headline_by_rule; do
   src="$(awk "/^$f\\(\\) \\{/,/^}/" "$HARNESS")"
   if [ -n "$src" ]; then eval "$src"; else bad "the harness defines $f()"; fi
 done
@@ -443,7 +447,7 @@ curl() {
     histogram_count*) a=1000 ;;
     "histogram_quantile(0.99,"*) case "$r" in 125|250|500|1000|2000|4000|6000|8000|9000|1[0-8]000|20000) a=0.0004 ;;
                                    24000) a=0.0005 ;; 26000) a="${STUB_GM_P99_104K:-0.0006}" ;; 28000) a=0.0029 ;; 30000) a=0.0031 ;;
-                                   32000) a=0.0027 ;; 34000) a="${STUB_GM_P99_136K:-0.0048}" ;; 36000) a=0.0142 ;; *) a=NaN ;; esac ;;
+                                   32000) a=0.0027 ;; 34000) a="${STUB_GM_P99_136K:-0.0048}" ;; 36000) a="${STUB_GM_P99_144K:-0.0142}" ;; *) a=NaN ;; esac ;;
     "histogram_quantile(0.999,"*) a=0.02 ;;
     *) a=0.001 ;;
   esac
@@ -459,6 +463,7 @@ gm_env() { # the globals build_gc_masked reads, over the fixture
       | "\($m.start_at_s + $k * ($m.step_s + $m.gap_s) + $t),main-p\($p),\($m.agg_rates[$k]),\($t),100,0.0,100,0,5,0,0.0"' "$FX/main-meta.json"
   } > "$WORK/main-k6-timeseries.csv"
   TAIL_INSTRUMENT=true K6_GCTRACE=true N=4 SETTLE_S=3 PUSH_S=1 P99_MAX_MS=10 GC_MASK_MIN_QUIET_S=3 KEEP=0.95 NOW_ISO=x
+  HEADLINE_RULE=gc_masked_p99
   MAIN_META="$FX/main-meta.json" FIGURES_JQ="$REPO_ROOT/.buildkite/scripts/steps/lib/perf-website-figures.jq"
   SYNTH="$(cat "$FX/synth.json")"; HEADLINE="$(headline_for "$SYNTH")"
   PROM_FAILURES="$T/gm-prom-failures.txt"; : > "$PROM_FAILURES"; : > "$T/gm-queries.txt"
@@ -468,7 +473,7 @@ gm_env
 check "  (fixture: the run's own ceiling is 104k, its 112k p99 over the 10 ms bound)" "104000|17.631" \
   "$(jq -r .healthy_ceiling_rps <<<"$HEADLINE")|$(jq -r '.sweep.points[] | select(.offered_rps == 112000) | .p99_ms' <<<"$SYNTH")"
 GM="$(build_gc_masked)"
-check "available, report-only, with the bound, the minimum and where the measured seconds start" "true|true|10|3|4" \
+check "available, read by the headline rule (not report-only), with the bound, the minimum and where the measured seconds start" "true|false|10|3|4" \
   "$(gm '"\(.available)|\(.report_only)|\(.p99_max_ms)|\(.min_quiet_s)|\(.measured_from_s)"')"
 check "the result states its method and its error" "yes|yes" \
   "$(gm '.method | test("union of quiet seconds") and test("histogram_quantile")' | sed 's/true/yes/')|$(gm '.error | test("bucket") and test("push") and test("sample of the rung")' | sed 's/true/yes/')"
@@ -530,12 +535,57 @@ gm_env; rm "$WORK/main-k6-gc.csv"; GM="$(build_gc_masked)"
 check "no GC file at all: unavailable, exit 0" "false|0" "$(gm .available)|$?"
 gm_env; GC_MASKED="$(build_gc_masked)"
 check "a valid run carries the ceiling" "136000|null" "$(gc_masked_result true | jq -r '"\(.healthy_ceiling.rps)|\(.healthy_ceiling_if_valid)"')"
+check "the full masked headline is built for the rule, and left out of the result's .gc_masked" "136000|false|false" \
+  "$(jq -r .headline.healthy_ceiling_rps <<<"$GC_MASKED")|$(gc_masked_result true | jq 'has("headline")')|$(gc_masked_result false | jq 'has("headline")')"
 check "an invalid run states no ceiling; the computed one stays for diagnosis" "null|136000" \
   "$(gc_masked_result false | jq -r '"\(.healthy_ceiling)|\(.healthy_ceiling_if_valid.rps)"')"
 # shellcheck disable=SC2034
 GC_MASKED="$(gc_masked_unavailable why)"
-check "an unavailable figure passes through unchanged on an invalid run" '{"available":false,"reason":"why","report_only":true,"rungs":[],"healthy_ceiling":null}' "$(gc_masked_result false)"
-unset -f curl prom_url headline_for gc_masked_query gc_masked_unavailable build_gc_masked gc_masked_result
+check "an unavailable figure passes through unchanged on an invalid run" '{"available":false,"reason":"why","report_only":false,"rungs":[],"healthy_ceiling":null}' "$(gc_masked_result false)"
+# shellcheck disable=SC2034
+HEADLINE_RULE=unmasked_p99
+check "under unmasked_p99 (the hardware matrix) the figure is report-only, available or not" "true|true" \
+  "$(gc_masked_unavailable why | jq .report_only)|$(build_gc_masked | jq .report_only)"
+
+echo "--- 8c. the headline rule: the bound reads the masked p99 (gc_masked_p99), fail-closed"
+br() { headline_by_rule | jq -r "$1"; }
+gm_env; GC_MASKED="$(build_gc_masked)"
+check "gc_masked_p99: the headline is the masked ceiling (136k at 4.8 ms), not the whole-rung 104k" "gc_masked_p99|136000|4.8|104000" \
+  "$(br '"\(.rule.name)|\(.headline.healthy_ceiling_rps)|\(.headline.healthy_ceiling_p99_ms)|\(.rule.unmasked_ceiling_rps)"')"
+check "  ... the same rung as .gc_masked.healthy_ceiling, with the rest of the headline (p50, lower bound) whole-rung" "136000|0.103|false" \
+  "$(jq -r .healthy_ceiling.rps <<<"$GC_MASKED")|$(br '.headline.healthy_ceiling_p50_ms')|$(br '.headline.lower_bound')"
+check "  ... and it states its bound and has no reason to give" "10|null" "$(br '"\(.rule.p99_max_ms)|\(.rule.reason)"')"
+check "(3): the first rung above the ceiling over the masked bound (144k, 14.2 ms) has a masked figure, so it holds" \
+  "true|144000|14.2|52.006|3" "$(br '.rule.condition_3 | "\(.ok)|\(.first_failure.offered_rps)|\(.first_failure.p99_ms)|\(.first_failure.unmasked_p99_ms)|\(.first_failure.quiet_s)"')"
+check "  ... and points at the transport share as evidence, not a gate" "yes" "$(has 'tail_localisation' "$(br .rule.condition_3.evidence)")"
+gm_env; STUB_GM_P99_144K=NaN; GC_MASKED="$(build_gc_masked)"; unset STUB_GM_P99_144K
+check "(3) fails when the first failing rung has no masked figure: its tail was not observed in GC-free seconds" "136000|false|144000|null|yes" \
+  "$(br '"\(.headline.healthy_ceiling_rps)|\(.rule.condition_3.ok)|\(.rule.condition_3.first_failure.offered_rps)|\(.rule.condition_3.first_failure.p99_ms)"')|$(has 'has no masked figure' "$(br .rule.condition_3.reason)")"
+gm_env; STUB_GM_P99_104K=NaN; GC_MASKED="$(build_gc_masked)"; unset STUB_GM_P99_104K
+check "a rung without a masked figure stops the climb: 96k, never the whole-rung 104k, and (3) fails there" "96000|false|104000" \
+  "$(br '"\(.headline.healthy_ceiling_rps)|\(.rule.condition_3.ok)|\(.rule.condition_3.first_failure.offered_rps)"')"
+gm_env; STUB_GM_FAIL=1; GC_MASKED="$(build_gc_masked)"; unset STUB_GM_FAIL
+check "Prometheus down: no rung has a masked figure, so no headline (the whole-rung 104k is not used) and (3) fails" \
+  "null|no rung holds the bound on its masked p99|false|104000" \
+  "$(br '"\(.headline)|\(.rule.reason)|\(.rule.condition_3.ok)|\(.rule.unmasked_ceiling_rps)"')"
+for degrade in K6_GCTRACE=false TAIL_INSTRUMENT=false; do
+  gm_env; eval "$degrade"; GC_MASKED="$(build_gc_masked)"
+  check "no GC-masked figure ($degrade): no headline, never the whole-rung one, and (3) fails" "null|yes|false|null" \
+    "$(br .headline)|$(has 'never falls back' "$(br .rule.reason)")|$(br .rule.condition_3.ok)|$(br .rule.condition_3.first_failure)"
+done
+gm_env; GC_MASKED="$(gc_masked_unavailable "the GC-masked figure could not be assembled")"
+check "a figure that could not be assembled: no headline" "null|false" "$(br .headline)|$(br .rule.condition_3.ok)"
+gm_env; GC_MASKED='{"available":true,"p99_max_ms":10,"rungs":[{"offered_rps":100,"p99_ms":1,"seconds":{"quiet":9}}],"headline":{"healthy_ceiling_rps":100}}'
+check "(3) fails when no rung above the ceiling fails the bound: the tail was not observed" "100|false|null|yes" \
+  "$(br '"\(.headline.healthy_ceiling_rps)|\(.rule.condition_3.ok)|\(.rule.condition_3.first_failure)"')|$(has 'not observed' "$(br .rule.condition_3.reason)")"
+gm_env; GC_MASKED='{"available":true,"p99_max_ms":10,"rungs":[{"offered_rps":100,"p99_ms":1,"seconds":{"quiet":9}},{"offered_rps":200,"p99_ms":10,"seconds":{"quiet":9}},{"offered_rps":300,"p99_ms":10.001,"seconds":{"quiet":9}}],"headline":{"healthy_ceiling_rps":100}}'
+check "(3) reads the bound as the ceiling rule does: 10 ms is inside it, 10.001 ms over" "300" "$(br .rule.condition_3.first_failure.offered_rps)"
+gm_env
+# shellcheck disable=SC2034
+HEADLINE_RULE=unmasked_p99; GC_MASKED="$(build_gc_masked)"
+check "unmasked_p99: the headline is the whole-rung one, with no (3) of this rule" "unmasked_p99|104000|9.493|null" \
+  "$(br '"\(.rule.name)|\(.headline.healthy_ceiling_rps)|\(.headline.healthy_ceiling_p99_ms)|\(.rule.condition_3)"')"
+unset -f curl prom_url headline_for gc_masked_query gc_masked_unavailable build_gc_masked gc_masked_result headline_by_rule
 check "the result carries it as .gc_masked, shaped by the run's validity" "yes|yes" \
   "$(has '^      gc_masked: \$gcmasked,$' "$H")|$(awk '/^GC_MASKED_OUT="\$\(gc_masked_result "\$\(jq -r .\.valid. <<<"\$VALIDITY"\)" 2>\/dev\/null\)" \|\| GC_MASKED_OUT=""$/ { a = 1 } /--argjson gcmasked "\$GC_MASKED_OUT"/ && a { print "yes"; exit }' "$HARNESS")"
 check "a shaped figure that is not one JSON object reaches the result as null, never an aborted assembly" "yes" \
@@ -543,10 +593,20 @@ check "a shaped figure that is not one JSON object reaches the result as null, n
 check "a figure that cannot be assembled becomes an unavailable one, never an abort" "yes" \
   "$(awk '/^GC_MASKED="\$\( \( build_gc_masked \) 2>\/dev\/null \)" \|\| GC_MASKED=""$/ { a = NR } /GC_MASKED="\$\(gc_masked_unavailable / && a && NR <= a + 4 { print "yes"; exit }' "$HARNESS")"
 VBLOCK="$(awk '/^VALIDITY="\$\(jq -nc/,/^     reasons:/' "$HARNESS")"
-check "report-only: the validity checks never read it" "yes|no" "$(has 'rw_assembly_steps_ok' "$VBLOCK")|$(has '[gG][cC]_?[mM][aA][sS][kK]' "$VBLOCK")"
-check "report-only: the headline is still computed from the unmasked run" "yes" "$(has '^headline_of\(\) \{ headline_for "\$SYNTH"; \}$' "$H")"
+check "never a validity gate: the validity checks never read it" "yes|no" "$(has 'rw_assembly_steps_ok' "$VBLOCK")|$(has '[gG][cC]_?[mM][aA][sS][kK]' "$VBLOCK")"
+check "the whole-rung headline is still computed, from the unmasked run" "yes" "$(has '^headline_of\(\) \{ headline_for "\$SYNTH"; \}$' "$H")"
+check "the rule is a soft step: a failure gives no headline and fails rw_assembly_steps_ok" "yes|yes" \
+  "$(has "^soft_capture HEADLINE_BY_RULE '\\{\"headline\":null,\"rule\":null\\}' headline_rule headline_by_rule$" "$H")|$(has '^SOFT_STEPS=".* headline_rule .*"$' "$H")"
+check "  ... and runs before the validity checks read the failed steps" "yes" \
+  "$(awk '/^soft_capture HEADLINE_BY_RULE / { r = NR } /^VALIDITY="\$\(jq -nc/ { v = NR } END { print (r && v && r < v) ? "yes" : "no" }' "$HARNESS")"
+check "the result's headline follows the rule; the whole-rung one stays beside it" "yes|yes|yes|yes" \
+  "$(has '^      headline: \(if \$validity\.valid then \$byrule\.headline else null end\),$' "$H")|$(has '^      headline_if_valid: \$byrule\.headline,$' "$H")|$(has '^      headline_rule: \$byrule\.rule,$' "$H")|$(has '^      headline_unmasked: \(if \$validity\.valid then \$headline else null end\),$' "$H")"
+PERCORE_RUN="$(awk 'index($0, "run_point_multik6() {") == 1 {on = 1} on {print} on && /^}/ {exit}' \
+  "$REPO_ROOT/.buildkite/scripts/steps/lib/perf-percore.sh")"
+check "the hardware matrix keeps the whole-rung rule for its recorded p99-bounded ceiling" "yes" \
+  "$(grep -qE '(^|[[:space:]])PERF_RW_HEADLINE_RULE=unmasked_p99([[:space:]]|$)' <<<"$PERCORE_RUN" && echo yes || echo no)"
 STEPS="$REPO_ROOT/.buildkite/scripts/steps"
-check "report-only: no compare, publish or run step reads .gc_masked" "" \
+check "no compare, publish or run step reads .gc_masked (only the arm's own headline rule does)" "" \
   "$(grep -l 'gc_masked' "$STEPS"/*.sh "$STEPS"/lib/*.jq "$STEPS"/lib/perf-percore.sh 2>/dev/null | tr '\n' ' ')"
 for bad_env in PERF_RW_GC_MASK_MIN_QUIET_S=0 PERF_RW_GC_MASK_MIN_QUIET_S=2.5 PERF_RW_GC_MASK_MIN_QUIET_S=some; do
   run_h PERF_RW_TEST_RESOLVE_ONLY=true PERF_RW_K6_GOMEMLIMIT=off "$bad_env"
@@ -554,6 +614,14 @@ for bad_env in PERF_RW_GC_MASK_MIN_QUIET_S=0 PERF_RW_GC_MASK_MIN_QUIET_S=2.5 PER
 done
 run_h PERF_RW_TEST_RESOLVE_ONLY=true PERF_RW_K6_GOMEMLIMIT=off PERF_RW_GC_MASK_MIN_QUIET_S=5
 check "accepted: PERF_RW_GC_MASK_MIN_QUIET_S=5" "0" "$RC"
+for bad_env in PERF_RW_HEADLINE_RULE=gc_masked PERF_RW_HEADLINE_RULE=unmasked PERF_RW_HEADLINE_RULE=masked; do
+  run_h PERF_RW_TEST_RESOLVE_ONLY=true PERF_RW_K6_GOMEMLIMIT=off "$bad_env"
+  check "rejected at startup: $bad_env" "2|yes" "$RC|$(has 'PERF_RW_HEADLINE_RULE' "$(cat "$T/err")")"
+done
+for good_env in PERF_RW_HEADLINE_RULE= PERF_RW_HEADLINE_RULE=gc_masked_p99 PERF_RW_HEADLINE_RULE=unmasked_p99 PERF_RW_TEST_FAIL_STEP=headline_rule; do
+  run_h PERF_RW_TEST_RESOLVE_ONLY=true PERF_RW_K6_GOMEMLIMIT=off "$good_env"
+  check "accepted: $good_env" "0" "$RC"
+done
 
 echo
 if [ "$FAILS" -gt 0 ]; then echo ":x: $FAILS check(s) failed" >&2; exit 1; fi

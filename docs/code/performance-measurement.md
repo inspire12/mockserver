@@ -231,7 +231,11 @@ Tests: `.buildkite/scripts/test/perf-healthy-ceiling-test.sh`.
 
 **Outcome.** The multi-k6 (remote-write) arm counts a rung as healthy only if p99 is also at or
 under **10 ms** (`rw-multi-k6-sweep.sh` passes `p99_max_ms` to `lib/perf-website-figures.jq`; a
-rung with no p99 is not healthy; `PERF_RW_P99_MAX_MS` overrides it). Every other caller, including
+rung with no p99 is not healthy; `PERF_RW_P99_MAX_MS` overrides it). Since item 44's rule change
+the arm's `.headline` reads that bound on the **GC-masked p99**, the p99 over the seconds with no
+k6 process in or just after a GC cycle; the whole-rung headline stays beside it as
+`.headline_unmasked` (see [The headline rule](#the-headline-rule-item-44)). The hardware matrix
+keeps the whole-rung p99 for its recorded p99-bounded ceiling. Every other caller, including
 the published single-process headline and the per-core, hardware-matrix and multi-process
 ceilings, stays p50-only: for every input the old filter accepted, its output is byte-identical
 (checked on builds 533, 527, 511, 505, 464 and 517). The one intended difference is a latent fix:
@@ -418,8 +422,9 @@ offers each rung from N **independent** k6 processes (1/N of the rate each, no k
 coordination), all starting the ladder at one wall-clock instant and pushing native histograms to
 a pinned Prometheus by remote write. Latency is a **true merged percentile**
 (`histogram_quantile` over the summed histograms), throughput is the summed request count, and the
-healthy ceiling comes from `lib/perf-website-figures.jq` with the p99 ≤ 10 ms bound on
-([The multi-k6 arm's p99 bound](#the-multi-k6-arms-p99-bound)). It is opt-in and never
+healthy ceiling comes from `lib/perf-website-figures.jq` with the p99 ≤ 10 ms bound on, read on
+each rung's GC-masked p99 ([The multi-k6 arm's p99 bound](#the-multi-k6-arms-p99-bound),
+[The headline rule](#the-headline-rule-item-44)). It is opt-in and never
 published; switching the published method over is a separate, approved step once the arm is
 stable (performance-programme item 44).
 
@@ -491,7 +496,7 @@ and a rung with a missing figure as `"incomplete"`; neither is divided or compar
 
 **Once inputs are validated and an output file is given, a result is always written.** A soft step that fails (the cross-check phase, or any
 post-measurement step: `xcheck_phase`, `merge_main`, `sweep_json`, `saturation`, `headline`,
-`per_process`, `cross_check`, the only values `PERF_RW_TEST_FAIL_STEP` accepts) is recorded by
+`headline_rule`, `per_process`, `cross_check`, the only values `PERF_RW_TEST_FAIL_STEP` accepts) is recorded by
 `rw_assembly_steps_ok` and replaced by a default. If the harness still aborts, its exit trap writes
 `valid: false` with an `rw_harness_completed` check naming the command running when it exited (for
 a pipeline, its last stage; read from `$BASH_COMMAND` before the trap runs anything, so it works
@@ -883,7 +888,8 @@ under 1,000, and `PERF_RW_K6_GOGC=off` with `PERF_RW_K6_GOMEMLIMIT=off` (Go woul
 
 **The A/B knobs.** Both suspects with a knob have one already. Each arm is a trial: the result's
 `.method.ab` records the knobs set (`PERF_K6_NUMA_NODE=same`, `PERF_RW_K6_GOGC`,
-`PERF_RW_K6_GOMEMLIMIT`, `PERF_RW_K6_CORES_PER_PROC`, `PERF_RW_K6_VU_CEILING`),
+`PERF_RW_K6_GOMEMLIMIT`, `PERF_RW_K6_CORES_PER_PROC`, `PERF_RW_K6_VU_CEILING`, and the headline's
+`PERF_RW_P99_MAX_MS` and `PERF_RW_GC_MASK_MIN_QUIET_S`),
 `.method.ab.trial` is `true`, and the log says it is not a counting run, so it never counts
 towards item 44's five. Hardware-matrix points set `PERF_RW_K6_VU_CEILING=2048` and
 `PERF_RW_K6_GOGC`, so they read as trials too; they are never item 44 runs. An arm-only `perf-xl` step is never
@@ -924,8 +930,10 @@ the arm's ceiling reports when the four k6 processes collected, not what MockSer
 run's result now carries `.gc_masked`: per rung, the request count, the share over 5 ms and the p99
 (and p99.9) of the requests pushed in seconds with no k6 process in or just after a GC cycle, the
 count of quiet and GC seconds, and the healthy ceiling the same first-failure rule gives on that
-p99. It is **report-only**. It changes no validity check, `.headline`, compare metric or published
-figure, and no step script reads it.
+p99. Under the arm's default headline rule (`gc_masked_p99`, below) that ceiling **is** the arm's
+`.headline`, and `.gc_masked.report_only` is `false`. It changes no validity check, compare metric
+or published figure, and no step script reads it. Under `unmasked_p99` (the hardware matrix) it is
+report-only, as it was for every run before the rule change.
 
 ```mermaid
 flowchart LR
@@ -989,8 +997,7 @@ one. p50, achieved rate, errors and rig validity stay those of the whole rung.
   after it completed, and a push that lands late moves its requests to a later second. A quantile
   is interpolated inside a native-histogram bucket 10% wide, so it resolves to about 5%, and the
   share over 5 ms and the p99 can disagree inside one bucket.
-- Not a result. Item 44's count still reads `.headline` and condition (3). Whether the bound should
-  read the masked p99 is a rule change with its own review.
+- Not a measurement of every request. `.gc_masked.rungs[].seconds` gives each rung's measured, quiet, GC and incomplete seconds.
 
 **Offline.** A bundle re-derives the seconds and the row sums, not the p99:
 
@@ -1005,6 +1012,80 @@ under 1% of requests over 5 ms has a masked p99 under 5 ms. On that reading buil
 runtime) and 612 (`PERF_RW_K6_GOGC=off`) give 136k and 128k against unmasked ceilings of 104k and
 112k. `.buildkite/scripts/test/perf-tail-instrument-test.sh` covers the seconds on rows trimmed
 from 611's bundle, the query text, the ceiling, and every unavailable and too-few-seconds path.
+
+#### The headline rule (item 44)
+
+**Outcome.** The arm's p99 ≤ 10 ms bound reads the GC-masked p99. `.headline` is the
+`.gc_masked` ceiling; `.headline_rule` names the rule that produced it (`gc_masked_p99`); the
+whole-rung headline stays as `.headline_unmasked`. A run whose result has no `.headline_rule` ran
+the old whole-rung rule, so item 44's 5-run series restarts at 0 of 5 with this change.
+
+```mermaid
+flowchart LR
+  rungs["per rung: masked p99\n(.gc_masked.rungs)"] --> fig["perf-website-figures.jq\nfirst-failure rule, p99 <= 10 ms"]
+  fig --> head[".headline\n(.headline_rule.name = gc_masked_p99)"]
+  whole["per rung: whole-rung p99"] --> fig2["the same rule"] --> unm[".headline_unmasked"]
+  head --> c3[".headline_rule.condition_3\nfirst failing rung has a masked figure"]
+```
+
+| `PERF_RW_HEADLINE_RULE` | `.headline` reads | Used by |
+|---|---|---|
+| `gc_masked_p99` (default) | each rung's masked p99; a rung without one fails the bound | the multi-k6 arm |
+| `unmasked_p99` | each rung's whole-rung p99 | the hardware matrix (`lib/perf-percore.sh`), whose k6 runs at `GOGC` 400 |
+
+**Why masked.** On `perf-xl` the first rung that fails the whole-rung bound is set by k6's own Go
+GC: in 611 about 94–98% of over-5 ms requests from 96k to 136k fall in a second around a k6 mark
+phase, and in 623, 624 and 626–628 MockServer's transport share is at most 0.00003 at every rung to 160k. Under the old rule
+condition (3) could not pass on this rig, and the ceiling moved with when the four k6 processes
+collected. The masked p99 leaves those seconds out and keeps the bound. Builds 623, 624 and 626–628 (all
+`GOGC=1600`; 623 and 624 trials, 626–628 default runs) read:
+
+| Build | Masked ceiling | Its masked p99 | Whole-rung ceiling | First masked failure above it |
+|---|---|---|---|---|
+| 623 | 144k | 9.672 ms | 136k | 152k, 10.646 ms |
+| 624 | 136k | 6.265 ms | 96k | 144k, 12.156 ms |
+| 626 | 136k | 5.455 ms | 96k | 144k, 13.029 ms |
+| 627 | 144k | 9.704 ms | 128k | 152k, 12.207 ms |
+| 628 | 144k | 9.554 ms | 96k | 152k, 15.106 ms |
+
+Every rung had a masked figure (6–11 quiet seconds from 96k up), so no ceiling was set by a
+missing one. The masked ceilings sit on two adjacent rungs; the whole-rung ones range from 96k to 136k.
+
+**Rejected:** the alternative was to keep the whole-rung bound and rewrite (3) to accept a tail
+attributed to the client, with MockServer's transport p99 plus receive-queue wait inside the bound.
+That needs a receive-queue sampler at 10 Hz or better, which the `/proc` read cannot give.
+
+**Criterion (3) under this rule: GC-masked observation** (`.headline_rule.condition_3`, a report, not
+a validity check). It is a data-sufficiency check, not an attribution one: `ok` only when the first rung
+above the ceiling whose masked p99 is over the bound or missing **has** a masked figure, so the first
+rung above the ceiling that fails the bound was observed in seconds with no k6 GC. It is `false`
+when that rung has no masked figure, when no rung above the ceiling fails (the tail was not observed),
+or when there is no masked ceiling. `first_failure` names the rung, its masked and whole-rung p99
+and its quiet seconds. The transport-share test of the old (3) is kept as evidence: the client and
+transport shares at that rung are in `.tail_localisation.rungs[]`, and they still show a tail outside
+MockServer's timers, whose origin from 144k up is unresolved.
+
+**Fail-closed.** A rung without a masked figure fails the bound, so a missing figure can only lower
+the ceiling. When the figure is unavailable (`PERF_RW_K6_GCTRACE=false`, `PERF_RW_TAIL_INSTRUMENT=false`,
+a process without GC cycles, no per-second series, an assembly failure) or no rung holds the bound
+on its masked p99, `.headline` is null with `.headline_rule.reason`, and the run fails criterion (1).
+It never falls back to the whole-rung headline. The rule is a soft step (`headline_rule`): if it
+fails, `.headline` is null and `rw_assembly_steps_ok` fails the run.
+
+**Limits.** Everything in [What it is not](#the-gc-masked-figure-item-44) applies to the headline
+now. The quiet seconds are a sample (as few as 3 of 11), the masked ceiling still moves with how
+many seconds are masked, and three of the five runs above put the ceiling at 144k with a masked p99
+of 9.55–9.70 ms, inside the bound by under 0.5 ms. The rule removes the client's GC, not the
+unresolved tail from 144k up, where the SUT's receive queue builds and one sample a second cannot
+attribute it.
+
+**Series.** Item 44 counts a `perf-xl` run only when `.serving_rw_multik6.headline_rule.name` is
+`gc_masked_p99`, `.headline_rule.p99_max_ms` is 10 and `.gc_masked.min_quiet_s` is 3, besides the
+existing conditions (shipped event-log budget, default ladder, derived VU ceiling, `GOGC` 1600 by
+default, `method.ab.trial` false). Setting `PERF_RW_P99_MAX_MS` or `PERF_RW_GC_MASK_MIN_QUIET_S`
+makes a run a trial (`.method.ab.p99_max_ms`, `.method.ab.gc_mask_min_quiet_s`). 626–628 do not count: their results
+were produced under the whole-rung rule and state none, even though their `.gc_masked` blocks would
+read 136k, 144k and 144k with (3) holding at each.
 
 ### `forward.js` — forward connection-pool guard
 

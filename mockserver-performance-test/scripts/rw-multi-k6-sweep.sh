@@ -109,7 +109,7 @@ case "$CUT_FAULT" in
   ""|?*:query|?*:empty|?*:stale|?*:late) ;;
   *) echo ":x: PERF_RW_TEST_CUT_FAULT='$CUT_FAULT' must be <proc>:query, <proc>:empty, <proc>:stale or <proc>:late" >&2; exit 2 ;;
 esac
-SOFT_STEPS="xcheck_phase merge_main sweep_json saturation headline per_process cross_check"
+SOFT_STEPS="xcheck_phase merge_main sweep_json saturation headline headline_rule per_process cross_check"
 if [ -n "${PERF_RW_TEST_NULL_RUNG:-}" ]; then
   case ",$RATES," in
     *",$PERF_RW_TEST_NULL_RUNG,"*) ;;
@@ -147,9 +147,16 @@ P99_MAX_MS="${PERF_RW_P99_MAX_MS:-10}"
 if ! [[ "$P99_MAX_MS" =~ ^[0-9]+(\.[0-9]+)?$ ]] || ! awk -v v="$P99_MAX_MS" 'BEGIN{exit !(v+0 > 0)}'; then
   echo ":x: PERF_RW_P99_MAX_MS='$P99_MAX_MS' must be a number of milliseconds above 0" >&2; exit 2
 fi
-# Report-only GC-masked figure (.gc_masked): a rung with fewer quiet seconds than this states no figure.
+# The GC-masked figure (.gc_masked): a rung with fewer quiet seconds than this states no figure.
 GC_MASK_MIN_QUIET_S="${PERF_RW_GC_MASK_MIN_QUIET_S:-3}"
 [[ "$GC_MASK_MIN_QUIET_S" =~ ^[1-9][0-9]{0,3}$ ]] || { echo ":x: PERF_RW_GC_MASK_MIN_QUIET_S='$GC_MASK_MIN_QUIET_S' must be a whole number of seconds from 1" >&2; exit 2; }
+# Which p99 the headline's bound reads (item 44): the GC-masked one, or the whole rung's. The hardware
+# matrix passes unmasked_p99, as its k6 runs at GOGC 400, where too few seconds are quiet.
+HEADLINE_RULE="${PERF_RW_HEADLINE_RULE:-gc_masked_p99}"
+case "$HEADLINE_RULE" in
+  gc_masked_p99|unmasked_p99) ;;
+  *) echo ":x: PERF_RW_HEADLINE_RULE='$HEADLINE_RULE' must be gc_masked_p99 or unmasked_p99" >&2; exit 2 ;;
+esac
 
 # Rig-validity tunables — the same names and defaults perf-test-run.sh passes to
 # derive_saturation, so both methods judge a rung by one rule.
@@ -293,10 +300,12 @@ k6_runtime_json() { # the result's .config.k6_runtime
 # never one of item 44's counting runs (docs/code/performance-measurement.md, "Tail attribution files").
 ab_json() {
   jq -nc --arg numa "$K6_NUMA_NODE" --arg gogc "${PERF_RW_K6_GOGC:-}" --arg gomem "${PERF_RW_K6_GOMEMLIMIT:-}" \
-    --arg cpp "${PERF_RW_K6_CORES_PER_PROC:-}" --arg vuc "${PERF_RW_K6_VU_CEILING:-}" '
+    --arg cpp "${PERF_RW_K6_CORES_PER_PROC:-}" --arg vuc "${PERF_RW_K6_VU_CEILING:-}" \
+    --arg p99max "${PERF_RW_P99_MAX_MS:-}" --arg minq "${PERF_RW_GC_MASK_MIN_QUIET_S:-}" '
     def v: if . == "" then null else . end;
     {k6_numa_node:(if $numa == "same" then $numa else null end), k6_gogc:($gogc | v), k6_gomemlimit:($gomem | v),
-     k6_cores_per_proc:($cpp | v), k6_vu_ceiling:($vuc | v)} | . + {trial:any(.[]; . != null)}'
+     k6_cores_per_proc:($cpp | v), k6_vu_ceiling:($vuc | v), p99_max_ms:($p99max | v), gc_mask_min_quiet_s:($minq | v)}
+    | . + {trial:any(.[]; . != null)}'
 }
 case "$WINDOW_MODE" in wallclock|vu_tag) ;; *) echo ":x: PERF_RW_WINDOW_MODE must be wallclock or vu_tag" >&2; exit 1 ;; esac
 [[ "$PUSH_S" =~ ^[1-9][0-9]*$ ]] || { echo ":x: PERF_RW_PUSH_INTERVAL_S must be a whole number of seconds >= 1" >&2; exit 1; }
@@ -1201,10 +1210,11 @@ headline_for() { # a SYNTH-shaped run
   jq -c --arg now "$NOW_ISO" --argjson lat_mult 3 --argjson keep "$KEEP" --arg fix_date "2026-09-16" \
     --argjson p99_max_ms "$P99_MAX_MS" -f "$FIGURES_JQ" <<<"$1" | jq -c '.headline'
 }
+# HEADLINE is the whole-rung (unmasked) headline; the result's .headline follows HEADLINE_RULE (below).
 headline_of() { headline_for "$SYNTH"; }
 soft_capture HEADLINE null headline headline_of
 
-# --- GC-masked figure (report-only, item 44; never a gate) ------------------------
+# --- GC-masked figure (item 44; never a validity gate) ---------------------------
 # .gc_masked: per rung, the requests pushed in seconds where no k6 process was in or just after a GC
 # cycle (lib/perf-tail-instrument.sh), with p99 from the native histograms over those seconds, and the
 # ceiling the rule above gives on that p99. Its queries bypass promq, so a failure here is a null
@@ -1217,7 +1227,8 @@ gc_masked_query() { # expr -> a finite number, or null
   echo "$v"
 }
 gc_masked_unavailable() { # reason
-  jq -nc --arg r "$1" '{available:false, reason:$r, report_only:true, rungs:[], healthy_ceiling:null}'
+  jq -nc --arg r "$1" --arg rule "$HEADLINE_RULE" \
+    '{available:false, reason:$r, report_only:($rule != "gc_masked_p99"), rungs:[], healthy_ceiling:null}'
 }
 build_gc_masked() {
   local base rungs="[]" k count rate nominal entry windows quiet expr vals q synth head bound_s
@@ -1274,29 +1285,67 @@ build_gc_masked() {
   synth="$(jq -c --argjson g "$rungs" '.sweep.points |= [ to_entries[] | .value + {p99_ms: $g[.key].p99_ms} ]' <<<"$SYNTH")"
   head="$(headline_for "$synth")"
   jq -nc --argjson g "$rungs" --argjson h "$head" --argjson unmasked "$HEADLINE" --argjson min "$GC_MASK_MIN_QUIET_S" \
-    --argjson settle "$SETTLE_S" --argjson push "$PUSH_S" --arg bound "$P99_MAX_MS" '
+    --argjson settle "$SETTLE_S" --argjson push "$PUSH_S" --arg bound "$P99_MAX_MS" --arg rule "$HEADLINE_RULE" '
     ($bound | tonumber) as $b
-    | {available: true, reason: null, report_only: true,
+    | {available: true, reason: null, report_only: ($rule != "gc_masked_p99"),
        p99_max_ms: $b, min_quiet_s: $min, measured_from_s: ($settle + $push),
        method: "per rung, the native histograms of every k6 process over the union of quiet seconds: sum over windows [a, b) of (cumulative at b) - (cumulative at a), then histogram_quantile. A second is quiet when no k6 process has a GC cycle (gctrace: sweep termination to mark termination) overlapping the \($push + 1) s its row can hold requests from; seconds run from settle + one push interval into the rung",
        error: "a quantile is interpolated in a native-histogram bucket 10% wide (about 5%); a request is counted in the push that carried it, up to \($push) s after it completed, which is why the second after a cycle is masked too; the quiet seconds are a sample of the rung, not all of it; p50, achieved rate and errors in the ceiling rule stay those of the whole rung",
        rungs: $g,
+       headline: $h,
        healthy_ceiling: {
          rps: ($h.healthy_ceiling_rps // null), p99_ms: ($h.healthy_ceiling_p99_ms // null), p99_max_ms: $b,
          unmasked_rps: ($unmasked.healthy_ceiling_rps // null),
          no_masked_figure_at: [ $g[] | select(.p99_ms == null) | .offered_rps ],
          note: "the first-failure rule of .headline with each rung p99 replaced by its masked p99; a rung without a masked figure (listed in no_masked_figure_at) fails the bound, so a missing figure can only lower this ceiling"}}'
 }
-# As the headline: an invalid run states no ceiling; the computed one stays for diagnosis.
+# As the headline: an invalid run states no ceiling; the computed one stays for diagnosis. The full
+# masked headline is dropped: under gc_masked_p99 it is the result's .headline.
 gc_masked_result() { # valid
-  jq -c --arg valid "$1" 'if $valid == "true" or .healthy_ceiling == null then .
+  jq -c --arg valid "$1" 'del(.headline) | if $valid == "true" or .healthy_ceiling == null then .
     else . + {healthy_ceiling: null, healthy_ceiling_if_valid: .healthy_ceiling} end' <<<"$GC_MASKED"
 }
 GC_MASKED="$( ( build_gc_masked ) 2>/dev/null )" || GC_MASKED=""
 if ! jq -e 'type == "object"' >/dev/null 2>&1 <<<"$GC_MASKED"; then
-  echo "WARNING: rw-multi-k6: the GC-masked figure could not be assembled (report-only, not a gate)" >&2
+  echo "WARNING: rw-multi-k6: the GC-masked figure could not be assembled (not a validity gate; under gc_masked_p99 the run states no ceiling)" >&2
   GC_MASKED="$(gc_masked_unavailable "the GC-masked figure could not be assembled")"
 fi
+
+# --- the headline rule (item 44) ---------------------------------------------------
+# gc_masked_p99: the ceiling is .gc_masked's, a rung without a masked figure fails the bound, and a
+# missing figure gives no headline, never the whole-rung one. condition_3 is item 44's criterion (3)
+# under this rule. Docs: performance-measurement.md, "The headline rule".
+headline_by_rule() { # -> {headline, rule}
+  jq -nc --arg rule "$HEADLINE_RULE" --argjson unmasked "$HEADLINE" --argjson g "$GC_MASKED" --arg bound "$P99_MAX_MS" '
+    ($bound | tonumber) as $b
+    | ($unmasked.healthy_ceiling_rps // null) as $urps
+    | if $rule == "unmasked_p99" then
+        {headline: $unmasked,
+         rule: {name: $rule, p99: "the whole rung", p99_max_ms: $b, reason: null, unmasked_ceiling_rps: $urps, condition_3: null}}
+      else
+        (if $g.available == true then $g.headline else null end) as $h
+        | (if $h == null then null
+           else [ $g.rungs[] | select(.offered_rps > $h.healthy_ceiling_rps and (.p99_ms == null or .p99_ms > $b)) ]
+                | sort_by(.offered_rps) | first end) as $f
+        | {headline: $h,
+           rule: {name: $rule,
+             p99: "GC-masked: per rung, over the seconds with no k6 process in or just after a GC cycle (.gc_masked)",
+             p99_max_ms: $b,
+             reason: (if $h != null then null
+                      elif $g.available != true then "no GC-masked figure (\($g.reason)), so this rule states no ceiling; it never falls back to the whole-rung p99"
+                      else "no rung holds the bound on its masked p99" end),
+             unmasked_ceiling_rps: $urps,
+             condition_3: ({first_failure: (if $f == null then null
+                              else {offered_rps: $f.offered_rps, p99_ms: $f.p99_ms, unmasked_p99_ms: $f.unmasked_p99_ms,
+                                    quiet_s: $f.seconds.quiet, reason: $f.reason} end),
+                            evidence: "the client and transport shares over 5 ms at first_failure are .tail_localisation.rungs[] (not a gate)"}
+               + if $h == null then {ok: false, reason: "no masked ceiling"}
+                 elif $f == null then {ok: false, reason: "no rung above the ceiling fails the masked bound, so the tail was not observed"}
+                 elif $f.p99_ms == null then {ok: false, reason: "the first rung above the ceiling that fails the bound, \($f.offered_rps), has no masked figure (\($f.reason)), so its tail was not observed in GC-free seconds"}
+                 else {ok: true, reason: null} end)}}
+      end'
+}
+soft_capture HEADLINE_BY_RULE '{"headline":null,"rule":null}' headline_rule headline_by_rule
 
 # --- per-process, CPU and Prometheus cost ---------------------------------------
 cpu_stats() { # csv name from_s to_s -> {mean,max,samples} over [from_s, to_s), as derive_saturation
@@ -1458,7 +1507,7 @@ VALIDITY="$(jq -nc --slurpfile m "$WORK/main-merged.json" --argjson pp "$PER_PRO
 # --- output -------------------------------------------------------------------------
 GC_MASKED_OUT="$(gc_masked_result "$(jq -r '.valid' <<<"$VALIDITY")" 2>/dev/null)" || GC_MASKED_OUT=""
 jq -e 'type == "object"' >/dev/null 2>&1 <<<"$GC_MASKED_OUT" || GC_MASKED_OUT=null
-jq -n --argjson synth "$SYNTH" --argjson headline "$HEADLINE" --slurpfile m "$WORK/main-merged.json" \
+jq -n --argjson synth "$SYNTH" --argjson headline "$HEADLINE" --argjson byrule "$HEADLINE_BY_RULE" --slurpfile m "$WORK/main-merged.json" \
   --argjson validity "$VALIDITY" --argjson cross "$CROSS" --argjson pp "$PER_PROCESS" \
   --argjson sutcpu "$SUT_CPU" --argjson promcpu "$PROM_CPU" --argjson n "$N" --argjson push "$PUSH_S" \
   --argjson quiet "$QUIET_S" --argjson lead "$START_LEAD_S" --argjson maxskew "$MAX_SKEW_MS" \
@@ -1475,9 +1524,12 @@ jq -n --argjson synth "$SYNTH" --argjson headline "$HEADLINE" --slurpfile m "$WO
   | $synth + {
       rig_valid_peak_achieved_rps: $synth.saturation.rig_valid_peak_achieved_rps,
       saturation_rps: $synth.saturation.saturation_rps,
-      # An invalid run carries no headline; the computed one stays for diagnosis.
-      headline: (if $validity.valid then $headline else null end),
-      headline_if_valid: $headline,
+      # An invalid run carries no headline; the computed one stays for diagnosis. .headline follows
+      # .headline_rule; .headline_unmasked is the whole-rung one, kept for comparison.
+      headline: (if $validity.valid then $byrule.headline else null end),
+      headline_if_valid: $byrule.headline,
+      headline_rule: $byrule.rule,
+      headline_unmasked: (if $validity.valid then $headline else null end),
       valid: $validity.valid,
       invalid_reasons: $validity.reasons,
       validity: {valid: $validity.valid, checks: $validity.checks},
@@ -1527,8 +1579,8 @@ jq -n --argjson synth "$SYNTH" --argjson headline "$HEADLINE" --slurpfile m "$WO
 cp "$WORK/result.json" "$OUT_FILE"
 RESULT_WRITTEN=1
 
-echo "--- rw-multi-k6: valid=$(jq -r '.valid' "$WORK/result.json") $(jq -r 'if .valid == true then "healthy_ceiling=\(.headline.healthy_ceiling_rps // "null")" else "healthy_ceiling_if_valid=\(.headline_if_valid.healthy_ceiling_rps // "null") (NOT a result: the run is invalid)" end' "$WORK/result.json") rig_valid_peak=$(jq -r '.rig_valid_peak_achieved_rps' "$WORK/result.json") skew_max_ms=$(jq -r '.method.observed_max_start_skew_ms' "$WORK/result.json") k6_us_per_req=$(jq -r '.cpu.k6_cpu_us_per_request_mean' "$WORK/result.json") cross_check_equivalent=$(jq -r '.cross_check.equivalent | if . == null then "n/a" else tostring end' "$WORK/result.json") cross_run_agrees=$(jq -r '.cross_check.cross_run.agrees | if . == null then "n/a" else tostring end' "$WORK/result.json")" >&2
-echo "--- rw-multi-k6 GC-masked (report-only, never the result): $(jq -r '.gc_masked | if .available then (.healthy_ceiling // .healthy_ceiling_if_valid) as $c | "ceiling\(if .healthy_ceiling == null then "_if_valid" else "" end)=\($c.rps // "null") at masked p99 \($c.p99_ms // "null") ms (bound \(.p99_max_ms) ms; unmasked ceiling \($c.unmasked_rps // "null")); no masked figure, so failing the bound, at \($c.no_masked_figure_at | length) rung(s)" else "unavailable: \(.reason)" end' "$WORK/result.json")" >&2
+echo "--- rw-multi-k6: valid=$(jq -r '.valid' "$WORK/result.json") rule=$(jq -r '.headline_rule.name // "none"' "$WORK/result.json") $(jq -r 'if .valid == true then "healthy_ceiling=\(.headline.healthy_ceiling_rps // "null")" else "healthy_ceiling_if_valid=\(.headline_if_valid.healthy_ceiling_rps // "null") (NOT a result: the run is invalid)" end' "$WORK/result.json") rig_valid_peak=$(jq -r '.rig_valid_peak_achieved_rps' "$WORK/result.json") skew_max_ms=$(jq -r '.method.observed_max_start_skew_ms' "$WORK/result.json") k6_us_per_req=$(jq -r '.cpu.k6_cpu_us_per_request_mean' "$WORK/result.json") cross_check_equivalent=$(jq -r '.cross_check.equivalent | if . == null then "n/a" else tostring end' "$WORK/result.json") cross_run_agrees=$(jq -r '.cross_check.cross_run.agrees | if . == null then "n/a" else tostring end' "$WORK/result.json")" >&2
+echo "--- rw-multi-k6 GC-masked ($(jq -r 'if .gc_masked.report_only == false then "the headline rule reads it" else "report-only" end' "$WORK/result.json")): $(jq -r '.gc_masked | if .available then (.healthy_ceiling // .healthy_ceiling_if_valid) as $c | "ceiling\(if .healthy_ceiling == null then "_if_valid" else "" end)=\($c.rps // "null") at masked p99 \($c.p99_ms // "null") ms (bound \(.p99_max_ms) ms; unmasked ceiling \($c.unmasked_rps // "null")); no masked figure, so failing the bound, at \($c.no_masked_figure_at | length) rung(s)" else "unavailable: \(.reason)" end' "$WORK/result.json")" >&2
 if [ "$(jq -r '.valid' "$WORK/result.json")" != true ]; then
   echo ":x: remote-write multi-k6 run INVALID:" >&2
   jq -r '.invalid_reasons[] | "    - " + .' "$WORK/result.json" >&2
