@@ -858,6 +858,7 @@
                         <exclude>**/MaxLlmConversationBodySizeTest.java</exclude>
                         <exclude>**/WatchInitializationJsonPollPeriodMillisTest.java</exclude>
                         <exclude>**/InboundConnectionConfigurationTest.java</exclude>
+                        <exclude>**/BodySizeLimitConfigurationTest.java</exclude>
                         <exclude>**/SslCertificateLeafValidityInDaysTest.java</exclude>
                         <exclude>**/SlowRequestConfigurationTest.java</exclude>
                         <exclude>**/HttpActionHandlerLlmCostBudgetTest.java</exclude>
@@ -1070,6 +1071,7 @@
                                 <include>**/MaxLlmConversationBodySizeTest.java</include>
                                 <include>**/WatchInitializationJsonPollPeriodMillisTest.java</include>
                                 <include>**/InboundConnectionConfigurationTest.java</include>
+                                <include>**/BodySizeLimitConfigurationTest.java</include>
                                 <include>**/SslCertificateLeafValidityInDaysTest.java</include>
                                 <include>**/SlowRequestConfigurationTest.java</include>
                                 <include>**/HttpActionHandlerLlmCostBudgetTest.java</include>

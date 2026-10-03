@@ -135,6 +135,92 @@ public class StreamingBodyUnwrittenBytesBoundTest {
     }
 
     @Test
+    public void shouldNotRequestAReadOnSubscribeWhileDrainedChunksWaitAboveTheWatermark() {
+        StreamingBody body = new StreamingBody(0, false, 4 * CHUNK);
+        AtomicInteger requests = new AtomicInteger();
+        body.setRequestMoreCallback(requests::incrementAndGet);
+        for (int i = 0; i < 3; i++) {
+            addChunk(body, CHUNK);
+        }
+
+        // a client that has not finished a write yet
+        body.subscribe(chunk -> {
+        }, () -> {
+        }, error -> {
+        });
+        assertThat("3 KiB waiting, over a quarter of the bound", requests.get(), is(0));
+        assertThat(body.isAwaitingClient(), is(true));
+
+        body.chunkWritten(CHUNK);
+        assertThat(requests.get(), is(0));
+        body.chunkWritten(CHUNK);
+        assertThat("the write that drains the backlog to the watermark requests the read", requests.get(), is(1));
+        assertThat(body.isAwaitingClient(), is(false));
+    }
+
+    @Test
+    public void shouldRequestAReadOnSubscribeWhenDrainedChunksAreWithinTheWatermark() {
+        StreamingBody body = new StreamingBody(0, false, 4 * CHUNK);
+        AtomicInteger requests = new AtomicInteger();
+        body.setRequestMoreCallback(requests::incrementAndGet);
+        addChunk(body, CHUNK);
+
+        body.subscribe(chunk -> {
+        }, () -> {
+        }, error -> {
+        });
+
+        assertThat(requests.get(), is(1));
+    }
+
+    @Test
+    public void shouldRequestAReadOnSubscribeWhenNothingArrivedBeforeIt() {
+        StreamingBody body = new StreamingBody(0, false, 4 * CHUNK);
+        AtomicInteger requests = new AtomicInteger();
+        body.setRequestMoreCallback(requests::incrementAndGet);
+
+        body.subscribe(chunk -> {
+        }, () -> {
+        }, error -> {
+        });
+
+        assertThat(requests.get(), is(1));
+    }
+
+    @Test
+    public void shouldRequestAReadWhenChunksDrainedOnSubscribeAreWrittenAtOnce() {
+        StreamingBody body = new StreamingBody(0, false, 4 * CHUNK);
+        AtomicInteger requests = new AtomicInteger();
+        body.setRequestMoreCallback(requests::incrementAndGet);
+        for (int i = 0; i < 3; i++) {
+            addChunk(body, CHUNK);
+        }
+
+        body.subscribe(chunk -> body.chunkWritten(chunk.readableBytes()), () -> {
+        }, error -> {
+        });
+
+        assertThat("the stream is not left without a read", requests.get() > 0, is(true));
+    }
+
+    @Test
+    public void shouldRequestAReadOnSubscribeWhateverWaitsWithoutABound() {
+        StreamingBody body = new StreamingBody(0, false);
+        AtomicInteger requests = new AtomicInteger();
+        body.setRequestMoreCallback(requests::incrementAndGet);
+        for (int i = 0; i < 100; i++) {
+            addChunk(body, CHUNK);
+        }
+
+        body.subscribe(chunk -> {
+        }, () -> {
+        }, error -> {
+        });
+
+        assertThat(requests.get(), is(1));
+    }
+
+    @Test
     public void shouldRequestMoreForEveryWrittenChunkWithoutABound() {
         StreamingBody body = new StreamingBody(0, false);
         AtomicInteger requests = new AtomicInteger();

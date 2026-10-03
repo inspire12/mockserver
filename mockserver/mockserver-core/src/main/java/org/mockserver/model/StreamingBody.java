@@ -123,7 +123,8 @@ public class StreamingBody {
      * {@link #setEventLoop(EventLoop)} and the caller is not on that event loop, the
      * subscribe body is marshalled onto the event loop to serialise with addChunk/complete/error.
      * Any chunks that arrived before subscription are drained in order and then the first
-     * upstream read is triggered via {@link #requestMore()}.
+     * upstream read is triggered via {@link #requestMore()}, unless with a bound the drained chunks
+     * leave more unwritten than the watermark, when {@link #chunkWritten} triggers it instead.
      *
      * @param onChunk    called for each {@link ByteBuf} chunk; the consumer must NOT release the buffer, and must
      *                   call {@link #chunkWritten} with its size once it is written or discarded
@@ -141,7 +142,7 @@ public class StreamingBody {
     /**
      * Runs on the upstream event loop (or inline when no event loop is set). Sets subscriber
      * callbacks, drains any pending pre-subscribe chunks, replays terminal signals, and
-     * triggers the first upstream read.
+     * triggers the first upstream read if the backlog allows it.
      */
     private void subscribeOnEventLoop(Consumer<ByteBuf> onChunk, Runnable onComplete, Consumer<Throwable> onError) {
         this.onChunk = onChunk;
@@ -174,8 +175,10 @@ public class StreamingBody {
             return;
         }
 
-        // Trigger the first upstream read now that the subscriber is ready
-        requestMore();
+        // Chunks drained above the watermark are still unwritten: chunkWritten requests the read once they drain
+        if (maxUnwrittenBytes <= 0 || unwrittenBytes.get() <= requestMoreAtOrBelowBytes) {
+            requestMore();
+        }
     }
 
     /**

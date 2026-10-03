@@ -329,6 +329,18 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
 
 ### Fixed
 
+- **Setting `maxResponseBodySize` or `maxRequestBodySize` to zero no longer removes the limit on a
+  streamed response.** At `0` an ordinary response or request with a body was refused, but several
+  limits on bodies that are not collected whole read `0` as "no limit": a streamed upstream response
+  (for example Server-Sent Events) could queue any amount for a slow client, as could one relayed
+  through a `CONNECT` tunnel, an HTTP/3 request body was not limited, and the declared size of a raw
+  Snappy request block was not checked. A negative value stopped MockServer setting up the connection
+  at all. Both properties
+  now have a minimum of 1 byte: zero or a negative value is treated as 1, so every path refuses the
+  same bodies. A streamed response whose first network read decompresses to more than 64 KB is also no
+  longer followed by a second upstream read before the client has taken the first, so a very
+  compressible stream is less likely to reach the limit and be stopped.
+
 - **Inbound WebSocket and GraphQL breakpoints now actually stop the connection reading while a frame is paused.**
   A decompression handler left in the WebSocket pipeline kept requesting reads, so later frames were
   still read, and could be parked or processed, while the first frame waited for its decision.

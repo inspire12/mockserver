@@ -351,6 +351,12 @@ more than the same limit of decoded bytes not yet written to the client: past it
 | MockServer's own response on the CONNECT relay's loopback, HTTP/1.1 / HTTP/2 (`RelayConnectHandler`) | `BoundedZstdHttpContentDecompressor` / `BoundedZstdDecompressorFrameListener` | `maxRequestBodySize` |
 | Streamed response (`text/event-stream`, or a client that asked to stream) | the forward client's or the relay's, as above | bytes not yet written to the client: `maxResponseBodySize` (forward) or `maxRequestBodySize` (relay), then the stream is aborted |
 
+Both limits are read as at least 1 byte (`Configuration` and `ConfigurationProperties` clamp them). An
+aggregator refuses every body at a limit of 0 and cannot be built with a negative one, while the bounds
+on bodies that are not aggregated (`StreamingBody`, `DownstreamProxyRelayHandler`, the HTTP/3 request cap
+and its decompressor, `SnappyBlockOrFrameDecoder`, the relay's streaming scan) take zero or less to mean
+"no limit", so without the clamp `0` refused an aggregated body and left those unbounded.
+
 Each decoder passes its output on in pieces as it produces it, and the aggregator after it refuses the
 body once the decompressed size passes the limit: a 256 MiB zstd bomb (8 KiB on the wire) gets `413` over
 HTTP/1.1 and HTTP/2 at `-Xmx256m`, and a 1 GiB zstd response bomb forwarded at `-Xmx256m` gets `502` at a
@@ -386,7 +392,9 @@ incomplete response rather than a complete short one. The rest of the read that 
 decoded, and released piece by piece: the same CPU an aggregated response spends past its limit.
 
 Read demand follows the backlog, so a legitimate stream is not affected: `chunkWritten` requests the next
-upstream read only once the unwritten bytes have drained to min(64 KiB, limit / 4), and the relay loopback
+upstream read only once the unwritten bytes have drained to min(64 KiB, limit / 4) (`subscribe` applies
+the same test after draining what arrived before it, so a first read that decodes to more than the
+watermark is written before a second is requested), and the relay loopback
 stops reading above min(256 KiB, limit / 2) unwritten and resumes at half that (it no longer reads after
 every completed write while paused). A slow client therefore holds back the upstream, however many chunks
 one read holds, and the backlog passes the limit only when what arrives in one read (one upstream read

@@ -1,6 +1,8 @@
 package org.mockserver.httpclient;
 
 import io.netty.buffer.Unpooled;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.DefaultHttpContent;
 import io.netty.handler.codec.http.DefaultHttpResponse;
@@ -57,6 +59,43 @@ public class StreamingResponseRelayHandlerUnwrittenBytesBoundTest {
         for (HttpContent piece : oneRead) {
             assertThat(piece.refCnt(), is(0));
         }
+        upstream.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldNotReadTheUpstreamAgainUntilAFirstReadOverTheWatermarkHasBeenWritten() throws Exception {
+        AtomicInteger reads = new AtomicInteger();
+        EmbeddedChannel upstream = new EmbeddedChannel(new ChannelOutboundHandlerAdapter() {
+            @Override
+            public void read(ChannelHandlerContext ctx) {
+                reads.incrementAndGet();
+                ctx.read();
+            }
+        }, new StreamingResponseRelayHandler(Configuration.configuration(), new MockServerLogger(), 1024 * 1024));
+        CompletableFuture<Message> future = new CompletableFuture<>();
+        upstream.attr(RESPONSE_FUTURE).set(future);
+        // the head and 96 KiB of decoded body arrive before the client's writer subscribes
+        upstream.writeInbound(new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK));
+        for (int i = 0; i < 96; i++) {
+            upstream.writeInbound(new DefaultHttpContent(Unpooled.buffer(1024).writeZero(1024)));
+        }
+        StreamingBody body = ((HttpResponse) future.get(10, TimeUnit.SECONDS)).getStreamingBody();
+        reads.set(0);
+
+        AtomicInteger delivered = new AtomicInteger();
+        body.subscribe(chunk -> delivered.addAndGet(chunk.readableBytes()), () -> {
+        }, error -> {
+        });
+
+        assertThat(delivered.get(), is(96 * 1024));
+        assertThat("96 KiB waits for the client, over the 64 KiB watermark", reads.get(), is(0));
+
+        for (int i = 0; i < 31; i++) {
+            body.chunkWritten(1024);
+        }
+        assertThat("65 KiB still waiting", reads.get(), is(0));
+        body.chunkWritten(1024);
+        assertThat("the write that drains the backlog to the watermark reads the upstream", reads.get(), is(1));
         upstream.finishAndReleaseAll();
     }
 

@@ -365,4 +365,45 @@ public class StreamingAwareHttpObjectAggregatorTest {
             channel.finishAndReleaseAll();
         }
     }
+
+    @Test
+    public void shouldRefuseAStreamedBodyAtAResponseLimitOfZeroAsItRefusesAnAggregatedOne() {
+        for (int configured : new int[]{0, -1}) {
+            Configuration configuration = new Configuration().streamingResponsesEnabled(true).maxResponseBodySize(configured);
+
+            // aggregated: a body over the limit never reaches the next handler
+            EmbeddedChannel aggregating = new EmbeddedChannel(new StreamingAwareHttpObjectAggregator(configuration.maxResponseBodySize(), configuration, null));
+            DefaultHttpResponse aggregatedHead = new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK);
+            HttpUtil.setTransferEncodingChunked(aggregatedHead, true);
+            Throwable refused = null;
+            try {
+                aggregating.writeInbound(aggregatedHead, new DefaultHttpContent(Unpooled.copiedBuffer("ab", StandardCharsets.US_ASCII)), LastHttpContent.EMPTY_LAST_CONTENT);
+            } catch (Exception tooLong) {
+                refused = tooLong;
+            }
+            assertThat("limit " + configured, refused, instanceOf(TooLongHttpContentException.class));
+            assertThat(aggregating.readInbound(), is(nullValue()));
+            aggregating.finishAndReleaseAll();
+
+            // streamed: the same body, not yet written to the client, fails the stream and closes the upstream
+            EmbeddedChannel streaming = new EmbeddedChannel(new StreamingAwareHttpObjectAggregator(configuration.maxResponseBodySize(), configuration, null));
+            CompletableFuture<Message> responseFuture = new CompletableFuture<>();
+            streaming.attr(AttributeKey.<CompletableFuture<Message>>valueOf("RESPONSE_FUTURE")).set(responseFuture);
+            DefaultHttpResponse streamedHead = new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK);
+            streamedHead.headers().set(HttpHeaderNames.CONTENT_TYPE, "text/event-stream");
+            HttpUtil.setTransferEncodingChunked(streamedHead, true);
+            streaming.writeInbound(streamedHead);
+            org.mockserver.model.StreamingBody body = ((org.mockserver.model.HttpResponse) responseFuture.getNow(null)).getStreamingBody();
+            body.subscribe(chunk -> {
+            }, () -> {
+            }, error -> {
+            });
+
+            streaming.writeInbound(new DefaultHttpContent(Unpooled.copiedBuffer("ab", StandardCharsets.US_ASCII)));
+
+            assertThat("limit " + configured, body.getError(), instanceOf(org.mockserver.model.StreamingBody.UnwrittenBytesLimitExceededException.class));
+            assertThat(streaming.isOpen(), is(false));
+            streaming.finishAndReleaseAll();
+        }
+    }
 }

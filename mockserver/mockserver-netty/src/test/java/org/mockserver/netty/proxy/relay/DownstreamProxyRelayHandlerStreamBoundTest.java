@@ -21,6 +21,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
+import static org.mockserver.configuration.Configuration.configuration;
 
 /**
  * The CONNECT relay's loopback passes a streamed response on piece by piece; the pieces not yet written to the proxy
@@ -104,6 +105,22 @@ public class DownstreamProxyRelayHandlerStreamBoundTest {
         assertThat("reads resume at a quarter of the bound", loopback.config().isAutoRead(), is(true));
         assertThat(proxyClient.isOpen(), is(true));
         assertThat(loopback.isOpen(), is(true));
+    }
+
+    @Test
+    public void shouldBoundAStreamedResponseAtARequestBodyLimitOfZero() {
+        for (int configured : new int[]{0, -1}) {
+            proxyClient = new EmbeddedChannel();
+            loopback = new EmbeddedChannel(new DownstreamProxyRelayHandler(new MockServerLogger(), proxyClient, configuration().maxRequestBodySize(configured).maxRequestBodySize()));
+
+            HttpContent passesTheBound = piece(2);
+            loopback.writeInbound(passesTheBound);
+
+            assertThat("limit " + configured, passesTheBound.refCnt(), is(0));
+            assertThat(proxyClient.isOpen(), is(false));
+            assertThat(loopback.isOpen(), is(false));
+            releaseEverything();
+        }
     }
 
     @Test

@@ -3221,7 +3221,7 @@ public class ConfigurationProperties {
     }
 
     public static int maxRequestBodySize() {
-        return readIntegerProperty(MOCKSERVER_MAX_REQUEST_BODY_SIZE, "MOCKSERVER_MAX_REQUEST_BODY_SIZE", 10 * 1024 * 1024);
+        return Math.max(1, readIntegerProperty(MOCKSERVER_MAX_REQUEST_BODY_SIZE, "MOCKSERVER_MAX_REQUEST_BODY_SIZE", 10 * 1024 * 1024));
     }
 
     /**
@@ -3230,6 +3230,8 @@ public class ConfigurationProperties {
      * <p>
      * The default is 10,485,760 bytes (10 MiB). Raise this only if you intentionally mock
      * large uploads; very large limits make MockServer susceptible to memory exhaustion.
+     * <p>
+     * The smallest limit is 1 byte: zero or a negative value is read as 1, never as "no limit".
      *
      * @param size maximum inbound request body size in bytes
      */
@@ -3259,7 +3261,7 @@ public class ConfigurationProperties {
     }
 
     public static int maxResponseBodySize() {
-        return readIntegerProperty(MOCKSERVER_MAX_RESPONSE_BODY_SIZE, "MOCKSERVER_MAX_RESPONSE_BODY_SIZE", 50 * 1024 * 1024);
+        return Math.max(1, readIntegerProperty(MOCKSERVER_MAX_RESPONSE_BODY_SIZE, "MOCKSERVER_MAX_RESPONSE_BODY_SIZE", 50 * 1024 * 1024));
     }
 
     /**
@@ -3269,7 +3271,8 @@ public class ConfigurationProperties {
      * A streamed response is not aggregated; this instead bounds its decoded bytes not yet written
      * to the client, past which the stream is aborted and the client's response ends incomplete.
      * <p>
-     * The default is 52,428,800 bytes (50 MiB).
+     * The default is 52,428,800 bytes (50 MiB). The smallest limit is 1 byte: zero or a negative
+     * value is read as 1, never as "no limit".
      *
      * @param size maximum upstream response body size in bytes
      */

@@ -2784,13 +2784,14 @@ public class Configuration {
         if (maxRequestBodySize == null) {
             return ConfigurationProperties.maxRequestBodySize();
         }
-        return maxRequestBodySize;
+        return Math.max(1, maxRequestBodySize);
     }
 
     /**
      * Maximum aggregated body size (in bytes) accepted on inbound HTTP/1.1 and HTTP/2 requests.
      * <p>
-     * The default is 10,485,760 bytes (10 MiB).
+     * The default is 10,485,760 bytes (10 MiB). The smallest limit is 1 byte: zero or a negative
+     * value is read as 1, never as "no limit".
      *
      * @param maxRequestBodySize maximum inbound request body size in bytes
      */
@@ -2823,7 +2824,7 @@ public class Configuration {
         if (maxResponseBodySize == null) {
             return ConfigurationProperties.maxResponseBodySize();
         }
-        return maxResponseBodySize;
+        return Math.max(1, maxResponseBodySize);
     }
 
     /**
@@ -2833,7 +2834,8 @@ public class Configuration {
      * A streamed response is not aggregated; this instead bounds its decoded bytes not yet written
      * to the client, past which the stream is aborted and the client's response ends incomplete.
      * <p>
-     * The default is 52,428,800 bytes (50 MiB).
+     * The default is 52,428,800 bytes (50 MiB). The smallest limit is 1 byte: zero or a negative
+     * value is read as 1, never as "no limit".
      *
      * @param maxResponseBodySize maximum upstream response body size in bytes
      */
