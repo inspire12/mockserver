@@ -10,6 +10,7 @@ import io.netty.handler.codec.quic.QuicStreamChannel;
 import io.netty.util.concurrent.ScheduledFuture;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
+import org.mockserver.metrics.Metrics;
 import org.mockserver.netty.connection.WriteStallTimeoutHandler;
 import org.slf4j.event.Level;
 
@@ -98,6 +99,7 @@ public final class Http3StreamWriteStallHandler extends ChannelOutboundHandlerAd
                     .setArguments(channel, timeoutMillis)
             );
         }
+        Metrics.incrementResponseWriteStalls(Metrics.ResponseWriteStall.HTTP3_STREAM);
         if (channel instanceof QuicStreamChannel) {
             ((QuicStreamChannel) channel).shutdownOutput(Http3ErrorCode.H3_INTERNAL_ERROR.code());
         }

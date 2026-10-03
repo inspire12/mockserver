@@ -31,6 +31,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.core.Is.is;
@@ -940,6 +941,63 @@ public class MetricsTest {
 
         assertThat(scrapeContains("mock_server_inbound_connections_rejected"), is(false));
         assertThat(scrapeContains("mock_server_inbound_connections_idle_closed"), is(false));
+    }
+
+    // --- Response write-stall counter ---
+
+    @Test
+    public void exportsEveryResponseWriteStallKindAtZeroBeforeAnyStall() {
+        new Metrics(configuration().metricsEnabled(true));
+
+        List<String> series = new ArrayList<>();
+        for (MetricSnapshot snapshot : PrometheusRegistry.defaultRegistry.scrape()) {
+            if (snapshot.getMetadata().getName().equals("mock_server_response_write_stalls") && snapshot instanceof CounterSnapshot counterSnapshot) {
+                for (CounterSnapshot.CounterDataPointSnapshot dataPoint : counterSnapshot.getDataPoints()) {
+                    assertThat(dataPoint.getValue(), is(0.0));
+                    series.add(dataPoint.getLabels().get("protocol") + "/" + dataPoint.getLabels().get("scope"));
+                }
+            }
+        }
+        assertThat(series, containsInAnyOrder(
+            "http1_1/connection", "http2/connection", "http2/stream", "http3/stream",
+            "tunnel/connection", "websocket/connection", "other/connection"
+        ));
+    }
+
+    @Test
+    public void countsResponseWriteStallsUnderTheirProtocolAndScope() {
+        new Metrics(configuration().metricsEnabled(true));
+
+        Metrics.incrementResponseWriteStalls(Metrics.ResponseWriteStall.HTTP2_STREAM);
+        Metrics.incrementResponseWriteStalls(Metrics.ResponseWriteStall.HTTP2_STREAM);
+        Metrics.incrementResponseWriteStalls(Metrics.ResponseWriteStall.HTTP2_CONNECTION);
+
+        assertThat(scrapeResponseWriteStalls("http2", "stream"), is(2.0));
+        assertThat(scrapeResponseWriteStalls("http2", "connection"), is(1.0));
+        assertThat(scrapeResponseWriteStalls("http1_1", "connection"), is(0.0));
+        assertThat(Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP2_STREAM), is(2L));
+        assertThat(scrapeClassicText(), containsString("mock_server_response_write_stalls_total{protocol=\"http2\",scope=\"stream\"} 2.0"));
+    }
+
+    @Test
+    public void responseWriteStallCounterIsANoOpWhenMetricsDisabled() {
+        Metrics.incrementResponseWriteStalls(Metrics.ResponseWriteStall.HTTP1_CONNECTION);
+
+        assertThat(scrapeContains("mock_server_response_write_stalls"), is(false));
+        assertThat(Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP1_CONNECTION), is(0L));
+    }
+
+    private static double scrapeResponseWriteStalls(String protocol, String scope) {
+        for (MetricSnapshot snapshot : PrometheusRegistry.defaultRegistry.scrape()) {
+            if (snapshot.getMetadata().getName().equals("mock_server_response_write_stalls") && snapshot instanceof CounterSnapshot counterSnapshot) {
+                for (CounterSnapshot.CounterDataPointSnapshot dataPoint : counterSnapshot.getDataPoints()) {
+                    if (protocol.equals(dataPoint.getLabels().get("protocol")) && scope.equals(dataPoint.getLabels().get("scope"))) {
+                        return dataPoint.getValue();
+                    }
+                }
+            }
+        }
+        return -1.0;
     }
 
     // --- Accept-queue backlog gauge tests ---

@@ -74,6 +74,8 @@ public class Metrics {
     // Inbound connections refused by maxInboundConnections, and closed by inboundConnectionIdleTimeoutMillis.
     private static volatile Counter inboundConnectionsRejectedTotal;
     private static volatile Counter inboundConnectionsIdleClosedTotal;
+    // Responses cut by responseWriteStallTimeoutMillis, labelled by protocol and by what was cut.
+    private static volatile Counter responseWriteStallsTotal;
     // Live queue depths of the shared scheduler pool and the template-action pool, set by HttpState.
     private static final AtomicReference<IntSupplier> schedulerQueueDepthSupplier = new AtomicReference<>();
     private static final AtomicReference<IntSupplier> templateActionQueueDepthSupplier = new AtomicReference<>();
@@ -301,6 +303,14 @@ public class Metrics {
                         .name("mock_server_inbound_connections_idle_closed")
                         .help("Inbound connections closed after inboundConnectionIdleTimeoutMillis with nothing in progress")
                         .register();
+                    responseWriteStallsTotal = Counter.builder()
+                        .name("mock_server_response_write_stalls")
+                        .help("Responses cut because their client took none of what was waiting for it for responseWriteStallTimeoutMillis, by protocol (http1_1, http2, http3, tunnel, websocket, other) and scope (connection: the connection was closed; stream: one HTTP/2 or HTTP/3 stream was reset)")
+                        .labelNames("protocol", "scope")
+                        .register();
+                    for (ResponseWriteStall stall : ResponseWriteStall.values()) {
+                        responseWriteStallsTotal.labelValues(stall.protocol, stall.scope);
+                    }
                     GaugeWithCallback.builder()
                         .name("mock_server_scheduler_queued_tasks")
                         .help("Tasks queued on the shared action scheduler pool (response delays, forward continuations, drift analysis)")
@@ -701,6 +711,7 @@ public class Metrics {
             webSocketReadPausesTotal = null;
             inboundConnectionsRejectedTotal = null;
             inboundConnectionsIdleClosedTotal = null;
+            responseWriteStallsTotal = null;
             forwardHostLabels.clear();
             forwardHostLabelCount.set(0);
             forwardRequestDurationSeconds = null;
@@ -943,6 +954,54 @@ public class Metrics {
     public static long getInboundConnectionsIdleClosedCount() {
         Counter counter = inboundConnectionsIdleClosedTotal;
         return counter != null ? (long) counter.get() : 0L;
+    }
+
+    /**
+     * What {@code responseWriteStallTimeoutMillis} cut: the {@code protocol} and {@code scope} labels of
+     * {@code mock_server_response_write_stalls}, so the label set is fixed and exported from the first scrape.
+     */
+    public enum ResponseWriteStall {
+        HTTP1_CONNECTION("http1_1", "connection"),
+        HTTP2_CONNECTION("http2", "connection"),
+        HTTP2_STREAM("http2", "stream"),
+        HTTP3_STREAM("http3", "stream"),
+        TUNNEL_CONNECTION("tunnel", "connection"),
+        WEBSOCKET_CONNECTION("websocket", "connection"),
+        OTHER_CONNECTION("other", "connection");
+
+        private final String protocol;
+        private final String scope;
+
+        ResponseWriteStall(String protocol, String scope) {
+            this.protocol = protocol;
+            this.scope = scope;
+        }
+
+        public String protocol() {
+            return protocol;
+        }
+
+        public String scope() {
+            return scope;
+        }
+    }
+
+    /**
+     * Count one response cut by {@code responseWriteStallTimeoutMillis}. No-op unless metrics are enabled.
+     */
+    public static void incrementResponseWriteStalls(ResponseWriteStall stall) {
+        Counter counter = responseWriteStallsTotal;
+        if (counter != null && stall != null) {
+            counter.labelValues(stall.protocol, stall.scope).inc();
+        }
+    }
+
+    /**
+     * Return the count of responses cut as {@code stall}, or 0 if metrics are disabled.
+     */
+    public static long getResponseWriteStallsCount(ResponseWriteStall stall) {
+        Counter counter = responseWriteStallsTotal;
+        return counter != null ? (long) counter.labelValues(stall.protocol, stall.scope).get() : 0L;
     }
 
     /**

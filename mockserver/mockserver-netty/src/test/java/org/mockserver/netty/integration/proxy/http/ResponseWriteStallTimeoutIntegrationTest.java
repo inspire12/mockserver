@@ -7,7 +7,10 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInitializer;
+import io.netty.channel.ChannelOption;
+import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.FixedRecvByteBufAllocator;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
@@ -31,20 +34,25 @@ import io.netty.handler.codec.http2.DefaultHttp2HeadersFrame;
 import io.netty.handler.codec.http2.DefaultHttp2PriorityFrame;
 import io.netty.handler.codec.http2.DefaultHttp2WindowUpdateFrame;
 import io.netty.handler.codec.http2.Http2ChannelDuplexHandler;
+import io.netty.handler.codec.http2.Http2CodecUtil;
 import io.netty.handler.codec.http2.Http2FrameStream;
 import io.netty.handler.codec.http2.Http2DataFrame;
 import io.netty.handler.codec.http2.Http2Error;
 import io.netty.handler.codec.http2.Http2FrameCodecBuilder;
 import io.netty.handler.codec.http2.Http2HeadersFrame;
 import io.netty.handler.codec.http2.Http2ResetFrame;
+import io.netty.handler.codec.http2.Http2Settings;
 import io.netty.handler.codec.http2.Http2StreamFrame;
 import io.netty.util.ReferenceCountUtil;
 import org.junit.AfterClass;
+import org.junit.Assume;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.mockserver.client.MockServerClient;
+import org.mockserver.metrics.Metrics;
 import org.mockserver.netty.MockServer;
+import org.mockserver.socket.NettyTransport;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -66,11 +74,16 @@ import java.util.function.Predicate;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.endsWith;
+import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
 import static org.mockserver.configuration.Configuration.configuration;
+import static org.mockserver.metrics.Metrics.ResponseWriteStall.HTTP1_CONNECTION;
+import static org.mockserver.metrics.Metrics.ResponseWriteStall.HTTP2_CONNECTION;
+import static org.mockserver.metrics.Metrics.ResponseWriteStall.HTTP2_STREAM;
+import static org.mockserver.metrics.Metrics.ResponseWriteStall.TUNNEL_CONNECTION;
 import static org.mockserver.model.HttpForward.forward;
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.stop.Stop.stopQuietly;
@@ -78,9 +91,10 @@ import static org.mockserver.testing.tls.SSLSocketFactory.sslSocketFactory;
 
 /**
  * {@code responseWriteStallTimeoutMillis} ends a response whose client takes none of it for the timeout: an HTTP/1.1
- * connection (or the CONNECT tunnel it reads through) is closed and an HTTP/2 stream reset, and a streamed response's
- * upstream is closed. A client that keeps taking some of it at least once per timeout period gets its whole response,
- * and a disabled timeout leaves a stalled client alone.
+ * connection (or the CONNECT tunnel it reads through) is closed, an HTTP/2 stream reset (or, when the client stops
+ * reading its socket, the HTTP/2 connection closed), and a streamed response's upstream is closed; each cut is counted.
+ * A client that keeps taking some of it at least once per timeout period gets its whole response, and a disabled
+ * timeout leaves a stalled client alone.
  * <p>
  * Responses are forwarded from an upstream: {@code /fixed} is a 16 MiB body with a {@code Content-Length}, so it is
  * aggregated; {@code /big} is 16 MiB of server-sent events in one write, so it is streamed; {@code /trickle} is about
@@ -99,6 +113,8 @@ public class ResponseWriteStallTimeoutIntegrationTest {
     private static final long SLOW_PHASE_MILLIS = 3 * STALL_MILLIS;
     private static final long READ_PAUSE_MILLIS = STALL_MILLIS / 3;
     private static final int READ_BURST_BYTES = 1024 * 1024;
+    private static final int SLOW_SOCKET_READ_BYTES = 8 * 1024;
+    private static final long SLOW_SOCKET_READ_PAUSE_MILLIS = 200;
     private static final String TERMINATING_CHUNK = "0\r\n\r\n";
     private static final Map<String, Channel> UPSTREAM_CHANNELS = new ConcurrentHashMap<>();
 
@@ -138,6 +154,7 @@ public class ResponseWriteStallTimeoutIntegrationTest {
         // keeps the 16 MiB forwarded bodies out of the event log
         mockServer = new MockServer(configuration()
             .logLevel("WARN")
+            .metricsEnabled(true)
             .streamingResponsesEnabled(true)
             .streamIdleTimeoutSeconds(120)
             .responseWriteStallTimeoutMillis(STALL_MILLIS));
@@ -179,12 +196,14 @@ public class ResponseWriteStallTimeoutIntegrationTest {
 
     @Test
     public void shouldEndAStalledHttp1ReadersAggregatedResponseIncomplete() throws Exception {
+        long countedBefore = Metrics.getResponseWriteStallsCount(HTTP1_CONNECTION);
         try (Socket socket = connect(mockServer, "/forward/fixed?test=http1-aggregated-stalled")) {
             TimeUnit.MILLISECONDS.sleep(CUT_WITHIN_MILLIS);
             Received received = read(socket, 0, Received::aggregatedResponseComplete);
             assertThat("the response was cut short", received.isAggregatedResponseComplete(), is(false));
             assertThat("MockServer closed the connection", received.endedBy, is(Ending.CLOSED));
         }
+        assertCounted(HTTP1_CONNECTION, countedBefore);
     }
 
     @Test
@@ -234,6 +253,7 @@ public class ResponseWriteStallTimeoutIntegrationTest {
     @Test
     public void shouldCloseAStalledConnectTunnelReadersTunnelAndTheStreamedResponsesUpstream() throws Exception {
         String uri = "/forward/big?test=tunnel-streamed-stalled";
+        long countedBefore = Metrics.getResponseWriteStallsCount(TUNNEL_CONNECTION);
         try (Socket socket = connectThroughTunnel(mockServer, uri)) {
             Channel upstream = awaitUpstream(uri);
             assertThat("the upstream was closed", upstream.closeFuture().await(CUT_WITHIN_MILLIS, TimeUnit.MILLISECONDS), is(true));
@@ -241,6 +261,7 @@ public class ResponseWriteStallTimeoutIntegrationTest {
             assertThat("no terminating chunk made the response look complete", received.text(), not(endsWith(TERMINATING_CHUNK)));
             assertThat("MockServer closed the tunnel", received.endedBy, is(Ending.CLOSED));
         }
+        assertCounted(TUNNEL_CONNECTION, countedBefore);
     }
 
     @Test
@@ -299,11 +320,56 @@ public class ResponseWriteStallTimeoutIntegrationTest {
 
     @Test
     public void shouldResetAStalledHttp2StreamOfAnAggregatedResponse() throws Exception {
+        long countedBefore = Metrics.getResponseWriteStallsCount(HTTP2_STREAM);
         try (Http2Client client = Http2Client.open(mockServer)) {
             Http2Client.Stream stream = client.request("/forward/fixed?test=http2-aggregated-stalled");
             assertThat("the stream ended", stream.ended.await(CUT_WITHIN_MILLIS, TimeUnit.MILLISECONDS), is(true));
             assertThat("the stream was reset", stream.resetErrorCode.get(), is(Http2Error.CANCEL.code()));
             assertThat("the connection, whose socket kept being read, stayed open", client.channel.isActive(), is(true));
+        }
+        assertCounted(HTTP2_STREAM, countedBefore);
+    }
+
+    @Test
+    public void shouldCloseAnHttp2ConnectionWhoseClientStopsReadingItsSocketAndTheStreamedResponsesUpstream() throws Exception {
+        String uri = "/forward/big?test=http2-socket-stalled";
+        long streamsCountedBefore = Metrics.getResponseWriteStallsCount(HTTP2_STREAM);
+        long connectionsCountedBefore = Metrics.getResponseWriteStallsCount(HTTP2_CONNECTION);
+        try (Http2Client client = Http2Client.openWithOpenWindows(mockServer)) {
+            Http2Client.Stream stream = client.request(uri);
+            client.stopReading();
+            Channel upstream = awaitUpstream(uri);
+            assertThat("the upstream was closed", upstream.closeFuture().await(CUT_WITHIN_MILLIS, TimeUnit.MILLISECONDS), is(true));
+            client.resumeReading();
+            assertThat("MockServer closed the connection", client.channel.closeFuture().await(10, TimeUnit.SECONDS), is(true));
+            assertThat("the response was cut short", stream.endStream.get(), is(false));
+        }
+        // the stream's own window stayed open, so it waited only for the socket, which the connection watcher times
+        assertCounted(HTTP2_CONNECTION, connectionsCountedBefore);
+        assertThat("no stream was reset", Metrics.getResponseWriteStallsCount(HTTP2_STREAM), is(streamsCountedBefore));
+    }
+
+    @Test
+    public void shouldNotResetAnHttp2StreamOfASlowReaderWhoseSocketIsProgressing() throws Exception {
+        // On epoll the connection watcher sees a slow reader's progress in the kernel's lastDataSent, while the send
+        // buffer frees too little to wake MockServer's writer, so the stream's open window does not change for longer
+        // than the timeout. On NIO the connection watcher cannot see this reader's progress between bursts and cuts it.
+        Assume.assumeTrue("needs the native epoll transport", NettyTransport.useNativeTransport(mockServer.getConfiguration().useNativeTransport()));
+        long streamsCountedBefore = Metrics.getResponseWriteStallsCount(HTTP2_STREAM);
+        long connectionsCountedBefore = Metrics.getResponseWriteStallsCount(HTTP2_CONNECTION);
+        try (Http2Client client = Http2Client.openWithOpenWindows(mockServer, SLOW_SOCKET_READ_BYTES)) {
+            Http2Client.Stream stream = client.request("/forward/fixed?test=http2-slow-socket-reader");
+            client.stopReading();
+            long started = System.nanoTime();
+            while (TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) < SLOW_PHASE_MILLIS) {
+                TimeUnit.MILLISECONDS.sleep(SLOW_SOCKET_READ_PAUSE_MILLIS);
+                client.readOnce();
+            }
+            // a reset would reach this client only after the data queued ahead of it, so it is read from the counters
+            assertThat("no stream was reset during the slow phase", Metrics.getResponseWriteStallsCount(HTTP2_STREAM), is(streamsCountedBefore));
+            assertThat("the connection was not closed during the slow phase", Metrics.getResponseWriteStallsCount(HTTP2_CONNECTION), is(connectionsCountedBefore));
+            client.resumeReading();
+            assertCompleteWithFixedBody(stream);
         }
     }
 
@@ -363,6 +429,13 @@ public class ResponseWriteStallTimeoutIntegrationTest {
     }
 
     // ---- harness ----
+
+    private static void assertCounted(Metrics.ResponseWriteStall stall, long countedBefore) throws InterruptedException {
+        for (int i = 0; i < 500 && Metrics.getResponseWriteStallsCount(stall) == countedBefore; i++) {
+            TimeUnit.MILLISECONDS.sleep(10);
+        }
+        assertThat("the cut was counted as " + stall, Metrics.getResponseWriteStallsCount(stall), greaterThan(countedBefore));
+    }
 
     private static Socket connect(MockServer server, String uri) throws IOException {
         Socket socket = new Socket();
@@ -508,6 +581,7 @@ public class ResponseWriteStallTimeoutIntegrationTest {
      */
     private static final class Http2Client extends Http2ChannelDuplexHandler implements AutoCloseable {
         private final Map<Http2FrameStream, Stream> streams = new ConcurrentHashMap<>();
+        private final ReadGate readGate = new ReadGate();
         private Channel channel;
         private ChannelHandlerContext ctx;
 
@@ -522,18 +596,92 @@ public class ResponseWriteStallTimeoutIntegrationTest {
         }
 
         static Http2Client open(MockServer server) throws Exception {
+            return open(server, Http2FrameCodecBuilder.forClient(), 0, 0);
+        }
+
+        /**
+         * Grants every stream, and the connection, close to the largest window HTTP/2 allows, so nothing MockServer
+         * sends waits for flow-control window, and reads its socket through a 32 KiB receive buffer.
+         */
+        static Http2Client openWithOpenWindows(MockServer server) throws Exception {
+            return openWithOpenWindows(server, 0);
+        }
+
+        /**
+         * @param readBytes if above 0, each read of the socket takes at most this many bytes
+         */
+        static Http2Client openWithOpenWindows(MockServer server, int readBytes) throws Exception {
+            return open(server, Http2FrameCodecBuilder.forClient().initialSettings(Http2Settings.defaultSettings().initialWindowSize(Http2CodecUtil.MAX_INITIAL_WINDOW_SIZE)),
+                Http2CodecUtil.MAX_INITIAL_WINDOW_SIZE - Http2CodecUtil.DEFAULT_WINDOW_SIZE, 32 * 1024, readBytes);
+        }
+
+        private static Http2Client open(MockServer server, Http2FrameCodecBuilder codec, int connectionWindowIncrement, int receiveBufferSize) throws Exception {
+            return open(server, codec, connectionWindowIncrement, receiveBufferSize, 0);
+        }
+
+        private static Http2Client open(MockServer server, Http2FrameCodecBuilder codec, int connectionWindowIncrement, int receiveBufferSize, int readBytes) throws Exception {
             Http2Client client = new Http2Client();
-            client.channel = new Bootstrap()
+            Bootstrap bootstrap = new Bootstrap()
                 .group(clientGroup)
-                .channel(NioSocketChannel.class)
+                .channel(NioSocketChannel.class);
+            if (receiveBufferSize > 0) {
+                bootstrap.option(ChannelOption.SO_RCVBUF, receiveBufferSize);
+            }
+            if (readBytes > 0) {
+                bootstrap.option(ChannelOption.RCVBUF_ALLOCATOR, new FixedRecvByteBufAllocator(readBytes));
+            }
+            client.channel = bootstrap
                 .handler(new ChannelInitializer<SocketChannel>() {
                     @Override
                     protected void initChannel(SocketChannel ch) {
-                        ch.pipeline().addLast(Http2FrameCodecBuilder.forClient().build(), client);
+                        ch.pipeline().addLast(client.readGate, codec.build(), client);
                     }
                 })
                 .connect("127.0.0.1", server.getLocalPort()).sync().channel();
+            if (connectionWindowIncrement > 0) {
+                client.channel.writeAndFlush(new DefaultHttp2WindowUpdateFrame(connectionWindowIncrement)).sync();
+            }
             return client;
+        }
+
+        void stopReading() throws Exception {
+            ctx.executor().submit(() -> {
+                readGate.closed = true;
+                channel.config().setAutoRead(false);
+            }).get(5, TimeUnit.SECONDS);
+        }
+
+        void readOnce() throws Exception {
+            ctx.executor().submit(() -> {
+                readGate.permits++;
+                channel.read();
+            }).get(5, TimeUnit.SECONDS);
+        }
+
+        void resumeReading() throws Exception {
+            ctx.executor().submit(() -> {
+                readGate.closed = false;
+                channel.config().setAutoRead(true);
+            }).get(5, TimeUnit.SECONDS);
+        }
+
+        /**
+         * With auto-read off, Netty's HTTP/2 codec still asks for the next read after every read, so a stopped client
+         * also drops those requests here, letting through only the reads it asks for itself.
+         */
+        private static final class ReadGate extends ChannelOutboundHandlerAdapter {
+            private boolean closed;
+            private int permits;
+
+            @Override
+            public void read(ChannelHandlerContext ctx) {
+                if (!closed) {
+                    ctx.read();
+                } else if (permits > 0) {
+                    permits--;
+                    ctx.read();
+                }
+            }
         }
 
         @Override

@@ -13,6 +13,7 @@ import io.netty.handler.codec.http2.Http2WindowUpdateFrame;
 import io.netty.util.concurrent.ScheduledFuture;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
+import org.mockserver.metrics.Metrics;
 import org.slf4j.event.Level;
 
 import java.util.ArrayList;
@@ -30,8 +31,10 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
  * {@code WINDOW_UPDATE} for it (the client consumed some of it). Between those the window cannot change, so an
  * unchanged window with no update means nothing moved. A stream whose own window is still open is waiting its turn
  * for the connection's window, behind other streams by weight or priority, so it also counts as progressing while any
- * stream (or the connection window) does. The reset ({@code CANCEL}) closes the stream's child channel, which ends its
- * response incomplete and fails the writes still queued for it.
+ * stream (or the connection window) does, and while the connection's socket is not writable: the flow controller then
+ * writes nothing to any stream, and a socket the client is not taking is {@link WriteStallTimeoutHandler}'s to time,
+ * which tolerates the gaps in which a slow reader's kernel frees its send buffer. The reset ({@code CANCEL}) closes the
+ * stream's child channel, which ends its response incomplete and fails the writes still queued for it.
  * <p>
  * Sits between {@link Http2FrameCodec} and {@code Http2MultiplexHandler}, the only place that sees stream window
  * updates, which the multiplex handler drops. A timer runs only while the connection has active streams.
@@ -122,10 +125,14 @@ public final class Http2StreamWriteStallHandler extends ChannelDuplexHandler imp
         } catch (Http2Exception unexpected) {
             // the visitor throws nothing; anything else leaves the streams as they are until the next check
         }
+        // the connection's own channel: its socket is what the flow controller waits on to write an open-windowed stream;
+        // a socket stall is left to WriteStallTimeoutHandler only where one is watching this connection
+        boolean socketStallWatched = !ctx.channel().isWritable() && ctx.pipeline().get(WriteStallTimeoutHandler.class) != null;
         for (Http2Stream stream : unmovedStreams) {
             StreamWriteProgress progress = stream.getProperty(progressKey);
-            if (anyProgress && progress.window > 0) {
-                // its own window is open, so it is queued behind streams the client is still taking
+            if (progress.window > 0 && (anyProgress || socketStallWatched)) {
+                // its own window is open, so it is queued behind streams the client is still taking, or behind a
+                // socket the client is not taking, which is WriteStallTimeoutHandler's to time
                 progress.lastProgressNanos = now;
             } else if (now - progress.lastProgressNanos >= timeoutNanos) {
                 stalledStreamIds.add(stream.id());
@@ -144,7 +151,8 @@ public final class Http2StreamWriteStallHandler extends ChannelDuplexHandler imp
 
     private void checkStream(Http2Stream stream, Http2RemoteFlowController flowController) {
         StreamWriteProgress progress = stream.getProperty(progressKey);
-        if (!flowController.hasFlowControlled(stream)) {
+        // a stream already reset stays active until its RST_STREAM is written, which a stalled socket delays
+        if (stream.isResetSent() || !flowController.hasFlowControlled(stream)) {
             if (progress != null) {
                 stream.removeProperty(progressKey);
             }
@@ -172,6 +180,7 @@ public final class Http2StreamWriteStallHandler extends ChannelDuplexHandler imp
                     .setArguments(streamId, ctx.channel().remoteAddress(), timeoutMillis)
             );
         }
+        Metrics.incrementResponseWriteStalls(Metrics.ResponseWriteStall.HTTP2_STREAM);
         codec.resetStream(codecCtx, streamId, Http2Error.CANCEL.code(), codecCtx.newPromise());
     }
 

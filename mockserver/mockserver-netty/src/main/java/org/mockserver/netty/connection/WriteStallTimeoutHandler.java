@@ -4,10 +4,17 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelOutboundBuffer;
 import io.netty.channel.ChannelOutboundHandlerAdapter;
+import io.netty.channel.ChannelPipeline;
+import io.netty.handler.codec.http.HttpResponseEncoder;
+import io.netty.handler.codec.http.HttpServerCodec;
+import io.netty.handler.codec.http.websocketx.WebSocketFrameEncoder;
+import io.netty.handler.codec.http2.Http2FrameCodec;
 import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.ScheduledFuture;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
+import org.mockserver.metrics.Metrics;
+import org.mockserver.netty.proxy.relay.UpstreamProxyRelayHandler;
 import org.slf4j.event.Level;
 
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
@@ -149,10 +156,30 @@ public final class WriteStallTimeoutHandler extends ChannelOutboundHandlerAdapte
                     .setArguments(channel.remoteAddress(), pendingBytes, timeoutMillis)
             );
         }
+        Metrics.incrementResponseWriteStalls(kind(channel.pipeline()));
         // The socket is closed directly, not through the pipeline: asked to close, a TLS handler first queues a
         // close_notify (and an HTTP/2 codec a GOAWAY) behind the bytes the client is not taking, and leaves the
         // connection open, refusing further writes, until that is flushed or its own timeout passes.
         channel.unsafe().close(channel.unsafe().voidPromise());
+    }
+
+    /**
+     * What the connection carries, read from its pipeline when it is cut: a tunnel first, because a tunnel's proxy-client
+     * pipeline also holds the HTTP/1.1 or HTTP/2 codec of the protocol it relays. A connection whose protocol is not yet
+     * known (a TLS handshake, or a tunnel still reading its first bytes) or is not HTTP (binary proxying) is other.
+     */
+    private static Metrics.ResponseWriteStall kind(ChannelPipeline pipeline) {
+        if (pipeline.get(UpstreamProxyRelayHandler.class) != null) {
+            return Metrics.ResponseWriteStall.TUNNEL_CONNECTION;
+        } else if (pipeline.get(Http2FrameCodec.class) != null) {
+            return Metrics.ResponseWriteStall.HTTP2_CONNECTION;
+        } else if (pipeline.get(WebSocketFrameEncoder.class) != null) {
+            return Metrics.ResponseWriteStall.WEBSOCKET_CONNECTION;
+        } else if (pipeline.get(HttpResponseEncoder.class) != null || pipeline.get(HttpServerCodec.class) != null) {
+            return Metrics.ResponseWriteStall.HTTP1_CONNECTION;
+        } else {
+            return Metrics.ResponseWriteStall.OTHER_CONNECTION;
+        }
     }
 
     private void disarm() {

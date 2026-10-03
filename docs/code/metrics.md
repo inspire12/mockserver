@@ -464,6 +464,16 @@ Track how many client connections MockServer holds and what the two connection b
 
 Updated through `Metrics.inboundConnectionOpened()` / `inboundConnectionClosed()` (from `InboundConnectionLimiter`), `incrementInboundConnectionsRejected()` and `incrementInboundConnectionsIdleClosed()` (from `InboundConnectionIdleHandler`); the two counters are no-ops until metrics are enabled. Not mirrored to OTLP.
 
+### Response Write-Stall Metric
+
+Counts responses cut by `responseWriteStallTimeoutMillis` because their client took none of what was waiting for it (see [netty-pipeline.md](netty-pipeline.md#response-write-stall-timeout)). A rising count means clients are stopping mid-response, or the timeout is too short for slow readers.
+
+| Metric Name | Type | Labels | Description |
+|-------------|------|--------|-------------|
+| `mock_server_response_write_stalls_total` | Counter | `protocol`, `scope` | One per cut. `scope="connection"`: `WriteStallTimeoutHandler` closed the connection, and `protocol` is read from its pipeline at that moment (`tunnel` for a CONNECT/SOCKS proxy client, then `http2`, `websocket`, `http1_1`, or `other` for a connection whose protocol is not yet known or is not HTTP). `scope="stream"`: one stream was reset, `protocol="http2"` by `Http2StreamWriteStallHandler` or `protocol="http3"` by `Http3StreamWriteStallHandler`. |
+
+The seven label pairs are the values of `Metrics.ResponseWriteStall`, all exported at 0 from the first scrape. Incremented through `Metrics.incrementResponseWriteStalls(ResponseWriteStall)`, a no-op until metrics are enabled. Not mirrored to OTLP.
+
 ### Load Injection Metrics (`mock_server_load_*`)
 
 The `mock_server_load_*` family is registered by `Metrics.registerLoadMetrics()` when `metricsEnabled` is `true` (there is no `loadGenerationEnabled` check in `Metrics` registration — that flag only gates the PUT endpoint). All metrics in this family are also mirrored to OTLP by `OtelMetricsExporter` — see [telemetry.md](telemetry.md).

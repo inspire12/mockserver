@@ -40,6 +40,7 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.mockserver.client.MockServerClient;
+import org.mockserver.metrics.Metrics;
 import org.mockserver.netty.MockServer;
 import org.mockserver.testing.socket.Ipv4DatagramChannelFactory;
 
@@ -54,6 +55,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.lessThan;
 import static org.mockserver.configuration.Configuration.configuration;
@@ -118,6 +120,7 @@ public class Http3ResponseWriteStallTimeoutIntegrationTest {
 
         mockServer = new MockServer(configuration()
             .logLevel("WARN")
+            .metricsEnabled(true)
             .http3Port(org.mockserver.testing.socket.TestPortFactory.findFreeUdpPort())
             .http3MaxIdleTimeout(60_000L)
             .streamingResponsesEnabled(true)
@@ -159,6 +162,7 @@ public class Http3ResponseWriteStallTimeoutIntegrationTest {
 
     @Test
     public void shouldResetAStalledHttp3StreamOfAnAggregatedResponse() throws Exception {
+        long countedBefore = Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP3_STREAM);
         Http3Stream stream = open("/forward/fixed?test=http3-aggregated-stalled");
         TimeUnit.MILLISECONDS.sleep(CUT_WITHIN_MILLIS);
 
@@ -167,6 +171,7 @@ public class Http3ResponseWriteStallTimeoutIntegrationTest {
         assertThat("the stream ended", stream.ended.await(10, TimeUnit.SECONDS), is(true));
         assertThat("the response was cut short", stream.dataBytes.get(), lessThan((long) fixedBody.length));
         assertThat("the stream did not end cleanly", stream.endedCleanly.get(), is(false));
+        assertThat("the reset was counted", Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP3_STREAM), greaterThan(countedBefore));
     }
 
     @Test

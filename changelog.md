@@ -277,7 +277,11 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   an HTTP/2 or HTTP/3 stream is reset (other streams on the connection carry on), and a streamed response's
   upstream connection is closed. A client that keeps taking some of the response at least once per timeout
   period is not affected, nor is one waiting for a delayed or slow response, which has nothing waiting for it. Each stall is logged as a
-  `WARN`. The value applies to connections accepted after it is changed.
+  `WARN` and counted by the new `mock_server_response_write_stalls_total` metric, labelled by `protocol`
+  (`http1_1`, `http2`, `http3`, `tunnel`, `websocket` or `other`) and `scope` (`connection` when the connection
+  was closed, `stream` when one HTTP/2 or HTTP/3 stream was reset). An HTTP/2 client that stops reading the
+  connection altogether has the connection closed, as an HTTP/1.1 client does. The value applies to
+  connections accepted after it is changed.
 - **Behaviour change: idle client connections are now closed after 5 minutes by default** (`inboundConnectionIdleTimeoutMillis`); set it to `0` to restore the previous behaviour. Only a connection that has sent and received nothing for the whole timeout with nothing in progress is closed: one waiting for a delayed or breakpoint-paused response, streaming a response (SSE, chunked, gRPC), carrying an open HTTP/2 stream, or used as a WebSocket, CONNECT/SOCKS tunnel or raw binary proxy is never closed by it. An `error()` action that sends nothing and keeps the connection open is not waiting for anything, so that connection counts as idle and is closed once the timeout passes. Mainstream HTTP clients reconnect transparently; in rare cases a request sent at the exact moment of closure may need a retry.
 - `mock_server_evicted_log_entries_total` now counts evicted log entries rather than eviction
   episodes. It used to go up by one when the event log started evicting (and once more after each
