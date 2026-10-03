@@ -14,6 +14,7 @@ import org.mockserver.lifecycle.LifeCycle;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.netty.proxy.relay.RelayConnectHandler;
+import org.mockserver.codec.HttpChunkLineLimiter;
 import org.mockserver.codec.MockServerHttpServerCodec;
 
 import static org.mockserver.model.HttpResponse.response;
@@ -28,6 +29,7 @@ public final class HttpConnectHandler extends RelayConnectHandler<HttpRequest> {
     protected void removeCodecSupport(ChannelHandlerContext ctx) {
         ChannelPipeline pipeline = ctx.pipeline();
         removeHandler(pipeline, HttpServerCodec.class);
+        HttpChunkLineLimiter.removeFrom(pipeline);
         removeHandler(pipeline, HttpContentDecompressor.class);
         removeHandler(pipeline, HttpObjectAggregator.class);
         removeHandler(pipeline, MockServerHttpServerCodec.class);

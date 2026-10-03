@@ -155,7 +155,9 @@ public class HttpProxyUnificationInitializerSOCKSErrorTest {
             assertThat(String.valueOf(embeddedChannel.pipeline().names()), embeddedChannel.pipeline().names(), contains(
                 "LoggingHandler#0",
                 "PacedLargeWriteHandler#0",
+                "HttpChunkLineLimiter$BeforeCodec#0",
                 "HttpServerCodec#0",
+                "HttpChunkLineLimiter$AfterCodec#0",
                 "MockServerHttpContentDecompressor#0",
                 "HttpContentLengthRemover#0",
                 "CoalescingHttpObjectAggregator#0",
@@ -171,7 +173,9 @@ public class HttpProxyUnificationInitializerSOCKSErrorTest {
             assertThat(String.valueOf(embeddedChannel.pipeline().names()), embeddedChannel.pipeline().names(), contains(
                 "inbound-idle",
                 "PacedLargeWriteHandler#0",
+                "HttpChunkLineLimiter$BeforeCodec#0",
                 "HttpServerCodec#0",
+                "HttpChunkLineLimiter$AfterCodec#0",
                 "HttpExchangeTracker#0",
                 "PreserveHeadersNettyRemoves#0",
                 "MockServerHttpContentDecompressor#0",

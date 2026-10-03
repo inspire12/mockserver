@@ -16,7 +16,7 @@ import org.mockserver.responsewriter.HttpExchangeEndedEvent;
  * exchange starts when a request head is decoded and ends when the last part of its response has been
  * written to the socket, so a delayed, paused or streaming response keeps the connection busy.
  * <p>
- * Must sit directly after {@code HttpServerCodec}, so it sees every decoded request and every
+ * Must sit after {@code HttpServerCodec}, ahead of every handler that answers, so it sees every decoded request and every
  * encoded response whichever handler writes it. A {@code 101 Switching Protocols} response makes the
  * connection long-lived (it is a WebSocket from then on); other {@code 1xx} responses, such as
  * {@code 100 Continue}, precede the real response and do not end the exchange. An exchange that ends

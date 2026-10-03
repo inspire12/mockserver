@@ -125,7 +125,9 @@ public class HttpProxyUnificationInitializerTest {
         assertThat(String.valueOf(embeddedChannel.pipeline().names()), embeddedChannel.pipeline().names(), contains(
             "inbound-idle",
             "PacedLargeWriteHandler#0",
+            "HttpChunkLineLimiter$BeforeCodec#0",
             "HttpServerCodec#0",
+            "HttpChunkLineLimiter$AfterCodec#0",
             "HttpExchangeTracker#0",
             "PreserveHeadersNettyRemoves#0",
             "MockServerHttpContentDecompressor#0",
@@ -142,7 +144,7 @@ public class HttpProxyUnificationInitializerTest {
     }
 
     @Test
-    public void shouldTimeHttpExchangesDirectlyAfterTheCodecWhenMetricsAreEnabled() {
+    public void shouldTimeHttpExchangesAfterTheCodecWhenMetricsAreEnabled() {
         // given
         embeddedChannel = new EmbeddedChannel();
         embeddedChannel.pipeline().addLast(new MockServerUnificationInitializer(configuration().metricsEnabled(true), mock(LifeCycle.class), new HttpState(configuration(), new MockServerLogger(), mock(Scheduler.class)), mock(HttpActionHandler.class), null));
@@ -154,7 +156,9 @@ public class HttpProxyUnificationInitializerTest {
         assertThat(String.valueOf(embeddedChannel.pipeline().names()), embeddedChannel.pipeline().names(), contains(
             "inbound-idle",
             "PacedLargeWriteHandler#0",
+            "HttpChunkLineLimiter$BeforeCodec#0",
             "HttpServerCodec#0",
+            "HttpChunkLineLimiter$AfterCodec#0",
             "HttpExchangeTracker#0",
             "HttpTransportTimer#0",
             "PreserveHeadersNettyRemoves#0",

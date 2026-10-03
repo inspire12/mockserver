@@ -17,7 +17,7 @@ import org.mockserver.responsewriter.HttpExchangeEndedEvent;
  * socket. Unlike the handler timer it includes aggregation, event-loop hand-off of a response written from
  * another thread, encoding, and a slow reader holding the write back.
  * <p>
- * Installed directly after {@code HttpServerCodec}, one instance per connection, only when metrics are
+ * Installed after {@code HttpServerCodec}, ahead of every handler that aggregates or answers, one instance per connection, only when metrics are
  * enabled. Requests are paired with responses in arrival order, as HTTP/1.1 requires, so pipelined
  * requests are timed separately. A {@code 1xx} response other than {@code 101} precedes the real response
  * and ends nothing; a {@code 101} turns the connection into a WebSocket and the timer removes itself.

@@ -14,6 +14,7 @@ import io.netty.handler.logging.LogLevel;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.util.AttributeKey;
 import org.apache.commons.lang3.StringUtils;
+import org.mockserver.codec.HttpChunkLineLimiter;
 import org.mockserver.codec.HttpObjectAggregators;
 import org.mockserver.codec.MockServerHttpContentDecompressor;
 import org.mockserver.codec.MockServerHttpServerCodec;
@@ -473,11 +474,14 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
                 pipeline.addLast("tcp-chaos", new TcpChaosHandler());
             }
             addLastIfNotPresent(pipeline, new PacedLargeWriteHandler());
+            HttpChunkLineLimiter chunkLineLimiter = new HttpChunkLineLimiter(mockServerLogger);
+            addLastIfNotPresent(pipeline, chunkLineLimiter.beforeCodec());
             addLastIfNotPresent(pipeline, new HttpServerCodec(
                 configuration.maxInitialLineLength(),
                 configuration.maxHeaderSize(),
                 configuration.maxChunkSize()
             ));
+            addLastIfNotPresent(pipeline, chunkLineLimiter.afterCodec());
             if (InboundConnectionActivity.isTracked(ctx.channel())) {
                 addLastIfNotPresent(pipeline, HttpExchangeTracker.INSTANCE);
             }

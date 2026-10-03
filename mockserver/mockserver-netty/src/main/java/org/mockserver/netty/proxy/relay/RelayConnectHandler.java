@@ -10,6 +10,7 @@ import io.netty.handler.codec.socksx.v4.Socks4ServerDecoder;
 import io.netty.handler.codec.socksx.v5.Socks5CommandRequestDecoder;
 import org.mockserver.codec.BoundedZstdDecompressorFrameListener;
 import org.mockserver.codec.BoundedZstdHttpContentDecompressor;
+import org.mockserver.codec.HttpChunkLineLimiter;
 import org.mockserver.codec.HttpObjectAggregators;
 import org.mockserver.socket.NettyAllocator;
 import org.mockserver.socket.NettyTransport;
@@ -409,7 +410,10 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
             }
             pipelineToProxyClient.addLast(http2ConnectionHandlerBuilder.connection(connection).build());
         } else {
+            HttpChunkLineLimiter chunkLineLimiter = new HttpChunkLineLimiter(mockServerLogger);
+            pipelineToProxyClient.addLast(chunkLineLimiter.beforeCodec());
             pipelineToProxyClient.addLast(new HttpServerCodec(configuration.maxInitialLineLength(), configuration.maxHeaderSize(), configuration.maxChunkSize()));
+            pipelineToProxyClient.addLast(chunkLineLimiter.afterCodec());
             pipelineToProxyClient.addLast(HttpObjectAggregators.httpObjectAggregator(configuration.maxRequestBodySize()));
         }
 

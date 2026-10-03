@@ -5,6 +5,7 @@ import io.netty.handler.codec.http.*;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockserver.codec.HttpChunkLineLimiter;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.lifecycle.LifeCycle;
 import org.mockserver.logging.MockServerLogger;
@@ -77,8 +78,11 @@ public class HttpConnectHandlerTest {
     @Test
     public void shouldRemoveHttpCodecHandlersFromPipeline() {
         // given - a pipeline with HTTP codec handlers and the HttpConnectHandler
+        HttpChunkLineLimiter chunkLineLimiter = new HttpChunkLineLimiter(mockServerLogger);
         EmbeddedChannel channel = new EmbeddedChannel(
+            chunkLineLimiter.beforeCodec(),
             new HttpServerCodec(),
+            chunkLineLimiter.afterCodec(),
             new HttpTransportTimer(),
             new HttpContentDecompressor(),
             new HttpObjectAggregator(1024),
@@ -92,6 +96,7 @@ public class HttpConnectHandlerTest {
                 channel.pipeline().get(HttpContentDecompressor.class), is(notNullValue()));
             assertThat("HttpObjectAggregator should be present",
                 channel.pipeline().get(HttpObjectAggregator.class), is(notNullValue()));
+            assertThat(channel.pipeline().names(), hasItems("HttpChunkLineLimiter$BeforeCodec#0", "HttpChunkLineLimiter$AfterCodec#0"));
 
             // when
             handler.removeCodecSupport(channel.pipeline().context(handler));
@@ -105,6 +110,8 @@ public class HttpConnectHandlerTest {
                 channel.pipeline().get(HttpObjectAggregator.class), is(nullValue()));
             assertThat("HttpTransportTimer should be removed, the tunnel carries no more HTTP exchanges",
                 channel.pipeline().get(HttpTransportTimer.class), is(nullValue()));
+            assertThat("the chunk-line limiter should be removed with the codec",
+                channel.pipeline().names(), everyItem(not(containsString("HttpChunkLineLimiter"))));
             // HttpConnectHandler itself should also be removed
             assertThat("HttpConnectHandler should be removed",
                 channel.pipeline().get(HttpConnectHandler.class), is(nullValue()));
