@@ -256,6 +256,8 @@ check "default run: .ab all null, not a trial" "false|5" "$(jq -r '"\(.ab.trial)
 run_h PERF_RW_TEST_PLACEMENT_ONLY=true STUB_MEM=103079215104 PERF_RW_K6_GOGC=800
 check "k6 GC A/B (GOGC=800) is recorded as a trial" "true|800" "$(jq -r '"\(.ab.trial)|\(.ab.k6_gogc)"' <<<"$R")"
 check "  ... and logged as not a counting run" "yes" "$(has 'A/B trial, not a counting run' "$(cat "$T/err")")"
+run_h PERF_RW_TEST_PLACEMENT_ONLY=true STUB_MEM=103079215104 PERF_RW_K6_GOGC=400
+check "the previous GOGC default set back (400) is a trial, not the 1600 series" "true|400" "$(jq -r '"\(.ab.trial)|\(.ab.k6_gogc)"' <<<"$R")"
 run_h PERF_RW_TEST_PLACEMENT_ONLY=true STUB_MEM=103079215104 PERF_RW_K6_VU_CEILING=2048
 check "VU-ceiling A/B (PERF_RW_K6_VU_CEILING) is recorded as a trial" "true|2048" "$(jq -r '"\(.ab.trial)|\(.ab.k6_vu_ceiling)"' <<<"$R")"
 run_h PERF_RW_TEST_PLACEMENT_ONLY=true STUB_MEM=103079215104 PERF_K6_NUMA_NODE=same

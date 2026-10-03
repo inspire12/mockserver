@@ -71,9 +71,10 @@ SUT_RECVQ="${PERF_RW_SUT_RECVQ:-true}"
 case "$SUT_RECVQ" in true|false) ;; *) echo ":x: PERF_RW_SUT_RECVQ must be true or false" >&2; exit 2 ;; esac
 # Go GC knobs passed to every measured k6 process as GOGC / GOMEMLIMIT. Unset GOMEMLIMIT is derived
 # from the k6 processes' NUMA node memory, else the Docker host's, once N is known
-# (lib/perf-k6-runtime.sh). Go's own defaults are
-# PERF_RW_K6_GOGC=100 and PERF_RW_K6_GOMEMLIMIT=off.
-K6_GOGC="${PERF_RW_K6_GOGC:-400}"
+# (lib/perf-k6-runtime.sh); it bounds the heap that a high GOGC lets grow. Go's own defaults are
+# PERF_RW_K6_GOGC=100 and PERF_RW_K6_GOMEMLIMIT=off. The hardware matrix (lib/perf-percore.sh) pins
+# 400, the previous default, so its baseline signature is unchanged.
+K6_GOGC="${PERF_RW_K6_GOGC:-1600}"
 K6_GOMEMLIMIT="${PERF_RW_K6_GOMEMLIMIT:-}"
 if [ -n "$K6_GOGC" ] && ! [[ "$K6_GOGC" =~ ^(off|[0-9]+)$ ]]; then
   echo ":x: PERF_RW_K6_GOGC='$K6_GOGC' must be a whole percentage or off (Go would silently use 100)" >&2; exit 2

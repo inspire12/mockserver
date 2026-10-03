@@ -635,9 +635,9 @@ the single-process ladder shows too (build 527: pool hit at 4k–24k with p95 ac
 occupancy rule reads them as stalls, so they are not a sizing fault.
 
 **k6 heap and GC.** The arm runs every measured k6 process with a `gracefulStop` equal to the gap
-(at least 1 s), `GOGC=400`, and a `GOMEMLIMIT` of half the memory k6 can use divided by N: the NUMA
-node it is bound to, else the Docker host. On the c5.12xlarge (one node, N=4) that is 5 s, 400 and
-about 12 GiB, the values the rig A/B below measured. Each stays
+(at least 1 s), `GOGC=1600`, and a `GOMEMLIMIT` of half the memory k6 can use divided by N: the NUMA
+node it is bound to, else the Docker host. On the c5.12xlarge (one node, N=4) that is 5 s, 1600 and
+about 12 GiB; the rig A/B below measured the earlier `GOGC=400`, which the hardware matrix keeps. Each stays
 overridable, and `PERF_RW_K6_GRACEFUL_STOP=30s PERF_RW_K6_GOGC=100 PERF_RW_K6_GOMEMLIMIT=off` restores
 k6's and Go's own defaults. The single-process published sweep is unchanged: `sweep.js` keeps k6's
 30 s `gracefulStop` unless `K6_SWEEP_GRACEFUL_STOP` is passed, and only this harness passes it or the
@@ -690,9 +690,16 @@ unconfirmed; the k6-side ones are what the default rests on.
   553 interrupted none. The check stays fail-closed on the default, so a run that does interrupt an
   iteration is `valid: false`, never a quieter count.
 - **GC knobs.** Every measured k6 process (xcheck and main phases) gets `GOGC` and `GOMEMLIMIT`.
-  `PERF_RW_K6_GOGC` defaults to 400 (`100` is Go's default). Raising `GOGC` only pays once the live
+  `PERF_RW_K6_GOGC` defaults to 1600 (`100` is Go's default). Raising `GOGC` only pays once the live
   heap is small: on the 6,016-VU heap, `GOGC=400` left GC CPU per request unchanged and pushed the
   heap goal to 6.2 GB, which is why it ships together with the shorter `gracefulStop`.
+- **Why 1600, not 400 (item 44).** At 400, k6's GC cycles on `perf-xl` left too few quiet seconds for
+  the GC-masked figure (below): 1–6 of the 11 measured seconds of each rung from 96k up in builds
+  617–619, and 2, 5 and 1 rungs per run with under 3, so no figure. `GOGC=off` (621, 622) and
+  `GOGC=1600` (623, 624) both left 7–11 at every rung and gave the same masked ceilings, 144k and
+  136k. Unlike `off`, 1600 still collects on heap growth, and the derived `GOMEMLIMIT` still bounds the
+  heap. The change starts a new item 44 series. The hardware matrix (`lib/perf-percore.sh`) keeps 400 unless the build sets
+  `PERF_RW_K6_GOGC`: the evidence is the arm's on `perf-xl`, and its compare signature stays put.
 - **`GOMEMLIMIT` default: half the k6 node's memory over the processes on it.** Unset,
   `PERF_RW_K6_GOMEMLIMIT` is derived by `k6_gomemlimit_resolve` (`lib/perf-k6-runtime.sh`). Each k6
   container runs with `--cpuset-mems` for the node its cpuset is on, so it can only allocate that
@@ -705,9 +712,9 @@ unconfirmed; the k6-side ones are what the default rests on.
   meminfo, or a cpuset across nodes) it falls back to `docker info`'s `MemTotal` × 50% ÷ N, in whole MiB:
   12,288 MiB for a full 96 GiB at N=4, ~1.3 GiB per process in an 8 GiB Docker Desktop VM at N=3. 12,288 MiB is the
   formula's figure; the rig's `MemTotal` is slightly below 96 GiB, so its limit is a little lower, and
-  `.gomemlimit_basis` records the real `MemTotal`. `GOGC=400` sets each
-  heap goal at 5× the live heap, so without a limit four processes on a 3 GB live heap could aim at
-  60 GB together. The limit caps the k6 processes at half the host between them, and the other half
+  `.gomemlimit_basis` records the real `MemTotal`. `GOGC=1600` sets each
+  heap goal at 17× the live heap, so without a limit four processes on a 3 GB live heap could aim at
+  204 GB together. The limit caps the k6 processes at half the host between them, and the other half
   covers the SUT (2 GB by default, in `perf-test-run.sh` and at the hardware matrix's largest point),
   Prometheus, the upstream, Docker, the OS and the page cache. It reads Docker's memory, not the
   machine's, because under Docker Desktop the containers run in a smaller VM. `GOMEMLIMIT` is soft: a
@@ -720,9 +727,10 @@ unconfirmed; the k6-side ones are what the default rests on.
   `numa_nodes[]` (`node`, `mem_total_bytes`, `procs`, `per_proc_mib`), or `numa_fallback_reason`; and
   Docker's `MemTotal`, N and the 50% either way. Compare's baseline key reads only the source
   (`derived`), so the change of basis does not reset a baseline. Each hardware-matrix point copies it
-  to `.measurement.k6_runtime`. `perf-test-run.sh` and `lib/perf-percore.sh` pass none of the three, so
-  both the trial arm and every hardware-matrix point run on the defaults, and a value set in the build
-  environment reaches the harness unchanged. `.buildkite/scripts/test/perf-k6-runtime-test.sh` checks
+  to `.measurement.k6_runtime`. `perf-test-run.sh` passes none of the three, so the trial arm runs on the
+  defaults. `lib/perf-percore.sh` passes only `PERF_RW_K6_GOGC`, as 400 when the build sets none, so every
+  hardware-matrix point keeps its earlier signature. A value set in the build environment reaches the harness
+  unchanged either way. `.buildkite/scripts/test/perf-k6-runtime-test.sh` checks
   the formula, the defaults, the overrides, the fail-closed paths and that wiring
   (`PERF_RW_TEST_RESOLVE_ONLY=true` prints the resolved `.config.k6_runtime` and starts nothing).
 - **Side effects of the shorter `gracefulStop`.** These fall outside the measured window. The SUT
@@ -877,14 +885,14 @@ under 1,000, and `PERF_RW_K6_GOGC=off` with `PERF_RW_K6_GOMEMLIMIT=off` (Go woul
 `.method.ab` records the knobs set (`PERF_K6_NUMA_NODE=same`, `PERF_RW_K6_GOGC`,
 `PERF_RW_K6_GOMEMLIMIT`, `PERF_RW_K6_CORES_PER_PROC`, `PERF_RW_K6_VU_CEILING`),
 `.method.ab.trial` is `true`, and the log says it is not a counting run, so it never counts
-towards item 44's five. Hardware-matrix points set `PERF_RW_K6_VU_CEILING=2048`, so they read
-as trials too; they are never item 44 runs. An arm-only `perf-xl` step is never
+towards item 44's five. Hardware-matrix points set `PERF_RW_K6_VU_CEILING=2048` and
+`PERF_RW_K6_GOGC`, so they read as trials too; they are never item 44 runs. An arm-only `perf-xl` step is never
 baseline-eligible in any case.
 
 | Suspect | Trial arm | Control arm |
 |---|---|---|
 | Cross-socket kernel path: the kernel and bridge path, cross-socket wakeups | `PERF_K6_NUMA_NODE=same`: k6 on the SUT's node, 4 × 6 cores on the c6i | `PERF_RW_K6_CORES_PER_PROC=6`: k6 on the other node at the same 24 cores |
-| k6 GC: Go GC mark phases in a k6 process near its CPU ceiling | `PERF_RW_K6_GOGC=off`: the derived `GOMEMLIMIT`, NUMA-sized to about 15.5 GiB per process on the c6i (see the `GOMEMLIMIT` default above), becomes the only GC trigger; the bundle's `main-k6-gc.csv` records how many cycles each process ran. That limit is half of build 605's 31,725 MiB, so a `GOGC=off` run now is a new arm: to repeat 605, also set `PERF_RW_K6_GOMEMLIMIT=31725MiB`. `PERF_RW_K6_GOGC=800` is the milder variant | the default, `GOGC` 400 |
+| k6 GC: Go GC mark phases in a k6 process near its CPU ceiling | `PERF_RW_K6_GOGC=off`: the derived `GOMEMLIMIT`, NUMA-sized to about 15.5 GiB per process on the c6i (see the `GOMEMLIMIT` default above), becomes the only GC trigger; the bundle's `main-k6-gc.csv` records how many cycles each process ran. That limit is half of build 605's 31,725 MiB, so a `GOGC=off` run now is a new arm: to repeat 605, also set `PERF_RW_K6_GOMEMLIMIT=31725MiB`. `PERF_RW_K6_GOGC=400` is the earlier default | the default, `GOGC` 1600 (400 until item 44's trials) |
 
 Run each arm as a manual perf build with `PERF_XL=true` and the knob in the build environment (an
 API-triggered build needs `[perf-run]` in its message). Builds can land on different VMs, so repeat
@@ -2164,7 +2172,9 @@ point with no runtime counts as k6's and Go's defaults (100, 30 s, `off`), so a 
 back explicitly compares with the runs from before the change. Those metrics stay `:new:` (the
 "sweep latency baseline reset" annotation, now naming the k6 runtime) until `MIN_BASELINE` runs share
 the new signature. `.buildkite/scripts/test/perf-k6-runtime-test.sh` checks the signature. The
-other hardware-matrix figures built on rig validity are notify-only and annotate the move.
+other hardware-matrix figures built on rig validity are notify-only and annotate the move. Item 44
+later moved the arm's default to `GOGC=1600`; the hardware matrix pins 400, so its signature did not move,
+and a matrix run at 1600 would key a series of its own.
 
 The INFO SUT's event-log budget is a sixth break, in every `info_*` metric. Until item 40 the INFO
 SUT was handed the harness's 256 MiB `maxEventLogSizeInBytes`, which exists for the ERROR SUT's

@@ -63,7 +63,7 @@ resolve() { # env assignments... -> the harness's k6_runtime JSON in $R, its exi
 : > "$T/docker.log"
 resolve STUB_MEM="$C5_MEM"
 check "defaults: exit 0" "0" "$RC"
-check "defaults: gogc 400, 12 GiB, gracefulStop = the 5 s gap" '"400" "12288MiB" "5s"' \
+check "defaults: gogc 1600, 12 GiB, gracefulStop = the 5 s gap" '"1600" "12288MiB" "5s"' \
   "$(jq -r '"\"\(.gogc)\" \"\(.gomemlimit)\" \"\(.graceful_stop)\""' <<<"$R")"
 check "defaults: sources" "default derived default (the gap)" \
   "$(jq -r '[.source.gogc, .source.gomemlimit, .source.graceful_stop] | join(" ")' <<<"$R")"
@@ -72,7 +72,7 @@ check "defaults: GOMEMLIMIT basis recorded" "$C5_MEM 4 50" \
 resolve STUB_MEM="$C5_MEM" PERF_RW_GAP=4s
 check "a 4 s gap gives a 4 s gracefulStop" "4s" "$(jq -r .graceful_stop <<<"$R")"
 resolve STUB_MEM="$C5_MEM" PERF_RW_K6_GOGC= PERF_RW_K6_GOMEMLIMIT= PERF_RW_K6_GRACEFUL_STOP=
-check "an empty variable (a caller forwarding an unset one) gets the default" '400 12288MiB 5s' \
+check "an empty variable (a caller forwarding an unset one) gets the default" '1600 12288MiB 5s' \
   "$(jq -r '"\(.gogc) \(.gomemlimit) \(.graceful_stop)"' <<<"$R")"
 : > "$T/docker.log"
 resolve STUB_MEM= PERF_RW_K6_GOGC=100 PERF_RW_K6_GOMEMLIMIT=off PERF_RW_K6_GRACEFUL_STOP=30s
@@ -83,6 +83,8 @@ check "k6 defaults: sources env, no basis" "env env env null" \
 check "an explicit GOMEMLIMIT never asks Docker" "" "$(cat "$T/docker.log")"
 resolve STUB_MEM= PERF_RW_K6_GOMEMLIMIT=8GiB
 check "an explicit GOMEMLIMIT is applied as given" "8GiB" "$(jq -r .gomemlimit <<<"$R")"
+resolve STUB_MEM="$C5_MEM" PERF_RW_K6_GOGC=400
+check "the previous default set back explicitly is recorded as env" "400 env" "$(jq -r '"\(.gogc) \(.source.gogc)"' <<<"$R")"
 
 echo "--- 4. fail closed when the default cannot be derived or a value is invalid"
 resolve STUB_MEM=
@@ -93,7 +95,7 @@ env PATH="$T/bin:$PATH" STUB_DOCKER_LOG="$T/docker.log" PERF_RW_K6_CPUSETS="1;2;
   PERF_SYSFS_ROOT="$T/nosys" PERF_RW_REPO_ROOT="$REPO_ROOT" bash "$HARNESS" "$T/fallback.json" 2>/dev/null || true
 check "Docker memory unreadable: the written result is invalid and names it" "false true" \
   "$(jq -r '"\(.valid) \(.validity.checks[0].detail | test("GOMEMLIMIT"))"' "$T/fallback.json" 2>/dev/null || echo unreadable)"
-check "Docker memory unreadable: the result still records the resolved knobs" "400 null 5s" \
+check "Docker memory unreadable: the result still records the resolved knobs" "1600 null 5s" \
   "$(jq -r '"\(.config.k6_runtime.gogc) \(.config.k6_runtime.gomemlimit) \(.config.k6_runtime.graceful_stop)"' "$T/fallback.json" 2>/dev/null || echo unreadable)"
 rm -f "$T/resolve-out.json"; RC=0
 env PATH="$T/bin:$PATH" STUB_DOCKER_LOG="$T/docker.log" STUB_MEM="$C5_MEM" PERF_RW_TEST_RESOLVE_ONLY=true \
@@ -116,8 +118,9 @@ check "K6_GO_ENV always carries both Go knobs" "yes" \
   "$(has '^K6_GO_ENV=\(-e "GOGC=\$K6_GOGC" -e "GOMEMLIMIT=\$K6_GOMEMLIMIT"\)$' "$(cat "$HARNESS")")"
 OVERRIDES="$(grep -nE 'PERF_RW_K6_(GOGC|GOMEMLIMIT|GRACEFUL_STOP)=' \
   "$REPO_ROOT/.buildkite/scripts/steps/perf-test-run.sh" "$REPO_ROOT/.buildkite/scripts/steps/lib/perf-percore.sh" \
-  "$REPO_ROOT"/.buildkite/*.yml 2>/dev/null || true)"
-check "perf-test-run.sh, perf-percore.sh and the pipelines inherit the defaults" "" "$OVERRIDES"
+  "$REPO_ROOT"/.buildkite/*.yml 2>/dev/null \
+  | grep -vF 'PERF_RW_K6_VU_CEILING=2048 PERF_RW_K6_GOGC="${PERF_RW_K6_GOGC:-400}" PERF_RW_DEBUG_DIR=' || true)"
+check "perf-test-run.sh, perf-percore.sh and the pipelines inherit the defaults (bar the matrix's GOGC)" "" "$OVERRIDES"
 
 echo "--- 6. perf-test-compare.sh: the hardware matrix baseline keys on the k6 runtime"
 COMPARE_SH="${PERF_K6RT_COMPARE:-$REPO_ROOT/.buildkite/scripts/steps/perf-test-compare.sh}"
@@ -133,12 +136,14 @@ hw() { # k6_runtime_json [client] -> a hardware-matrix block whose points carry 
     '{sweep: {latency_settle_s: 3}, client: $c, points: [{measurement: null}, {measurement: {k6_runtime: $rt}}]}'
 }
 K6DEF="3|multik6|gogc=100,graceful_stop=30s,gomemlimit=off"
-NEWDEF="3|multik6|gogc=400,graceful_stop=5s,gomemlimit=derived"
+NEWDEF="3|multik6|gogc=400,graceful_stop=5s,gomemlimit=derived" # the matrix's pinned GOGC
 check "no runtime (runs before the default) is k6 defaults" "$K6DEF" "$(fp serving_hw_matrix "$(hw null)")"
 check "k6 defaults set back explicitly match older runs" "$K6DEF" \
   "$(fp serving_hw_matrix "$(hw '{"gogc":"100","gomemlimit":"off","graceful_stop":"30s","source":{"gogc":"env","gomemlimit":"env","graceful_stop":"env"}}')")"
 DERIVED='{"gogc":"400","gomemlimit":"12288MiB","graceful_stop":"5s","source":{"gogc":"default","gomemlimit":"derived","graceful_stop":"default (the gap)"}}'
-check "the new default" "$NEWDEF" "$(fp serving_hw_matrix "$(hw "$DERIVED")")"
+check "the hardware matrix's runtime (GOGC 400, derived limit)" "$NEWDEF" "$(fp serving_hw_matrix "$(hw "$DERIVED")")"
+check "the arm's GOGC 1600 default is its own signature, never the 400 series" "3|multik6|gogc=1600,graceful_stop=5s,gomemlimit=derived" \
+  "$(fp serving_hw_matrix "$(hw "$(jq -c '.gogc = "1600"' <<<"$DERIVED")")")"
 check "a different derived MiB (host memory) does not reset the baseline" "$NEWDEF" \
   "$(fp serving_hw_matrix "$(hw "$(jq -c '.gomemlimit = "11770MiB"' <<<"$DERIVED")")")"
 check "an A/B-era explicit limit (no .source) is its own signature" "3|multik6|gogc=400,graceful_stop=5s,gomemlimit=env" \
@@ -155,6 +160,8 @@ PERCORE_RUN="$(awk 'index($0, "run_point_multik6() {") == 1 {on = 1} on {print} 
   "$REPO_ROOT/.buildkite/scripts/steps/lib/perf-percore.sh")"
 check "every hardware-matrix point pins the VU ceiling at 2,048 (comparable across hosts)" "yes" \
   "$(grep -qE '(^|[[:space:]])PERF_RW_K6_VU_CEILING=2048([[:space:]]|$)' <<<"$PERCORE_RUN" && echo yes || echo no)"
+check "every hardware-matrix point keeps GOGC 400 unless the build sets one (its baseline signature)" "yes" \
+  "$(grep -qF ' PERF_RW_K6_GOGC="${PERF_RW_K6_GOGC:-400}" ' <<<"$PERCORE_RUN" && echo yes || echo no)"
 
 echo "--- 7. GOMEMLIMIT on a NUMA host: the memory of the node the k6 processes are bound to"
 # shellcheck source=../steps/lib/perf-cpu-topology.sh
