@@ -26,6 +26,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.startsWith;
 import static org.mockserver.client.LlmConversationBuilder.conversation;
 import static org.mockserver.client.LlmMockBuilder.llmMock;
 import static org.mockserver.model.Completion.completion;
@@ -209,17 +210,20 @@ public class LlmAgentLoopE2eTest {
         }
         assertThat("Turn 1 should have function_call output", hasFunctionCall, is(true));
 
-        // Turn 2: send function_call_output
+        // Turn 2: send function_call_output, answering the call by its call_id (distinct from the fc_ item id)
         String fcId = "";
+        String callId = "";
         for (JsonNode item : turn1.get("output")) {
             if ("function_call".equals(item.get("type").asText())) {
                 fcId = item.get("id").asText();
+                callId = item.get("call_id").asText();
             }
         }
+        assertThat(callId, startsWith("call_"));
         String turn2Body = "{\"model\":\"gpt-4o\",\"input\":["
             + "{\"role\":\"user\",\"content\":\"What is the weather in Paris?\"},"
-            + "{\"type\":\"function_call\",\"id\":\"" + fcId + "\",\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"},"
-            + "{\"type\":\"function_call_output\",\"call_id\":\"" + fcId + "\",\"output\":\"18C and sunny\"}"
+            + "{\"type\":\"function_call\",\"id\":\"" + fcId + "\",\"call_id\":\"" + callId + "\",\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"},"
+            + "{\"type\":\"function_call_output\",\"call_id\":\"" + callId + "\",\"output\":\"18C and sunny\"}"
             + "]}";
         String turn2Response = sendPost("/v1/responses", turn2Body);
         assertThat(turn2Response, containsString("200"));

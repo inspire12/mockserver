@@ -3,8 +3,8 @@ package org.mockserver.llm.codec;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import org.mockserver.llm.JsonEscape;
 import org.mockserver.llm.OpenAiResponsesStore;
 import org.mockserver.llm.ParsedConversation;
 import org.mockserver.llm.ParsedMessage;
@@ -17,6 +17,7 @@ import org.mockserver.uuid.UUIDService;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 import static org.mockserver.model.HttpResponse.response;
@@ -46,234 +47,393 @@ public class OpenAiResponsesCodec implements ProviderCodec {
 
     @Override
     public HttpResponse encode(Completion completion, String model) {
-        ObjectNode root = OBJECT_MAPPER.createObjectNode();
-        String responseId = "resp_" + randomId(24);
-        root.put("id", responseId);
-        root.put("object", "response");
-        root.put("created_at", System.currentTimeMillis() / 1000);
-        root.put("model", model != null ? model : "unknown");
-        root.put("status", "completed");
+        return encode(completion, model, (JsonNode) null);
+    }
 
-        ArrayNode output = root.putArray("output");
-
-        // Reasoning output item (prepended before the text message) when reasoning is set.
-        // The Responses API surfaces extended-thinking as a leading
-        // {"type":"reasoning","summary":[{"type":"summary_text","text":"..."}]} output item.
-        // Additive — absent unless Completion.reasoningText is set.
-        String reasoningText = completion.getReasoningText();
-        if (reasoningText != null && !reasoningText.isEmpty()) {
-            ObjectNode reasoningItem = output.addObject();
-            reasoningItem.put("type", "reasoning");
-            reasoningItem.put("id", "rs_" + randomId(24));
-            ArrayNode summary = reasoningItem.putArray("summary");
-            ObjectNode summaryPart = summary.addObject();
-            summaryPart.put("type", "summary_text");
-            summaryPart.put("text", reasoningText);
-        }
-
-        // Text message output item
-        String text = completion.getText();
-        boolean hasText = text != null && !text.isEmpty();
-        if (hasText) {
-            ObjectNode msgItem = output.addObject();
-            msgItem.put("type", "message");
-            msgItem.put("id", "msg_" + randomId(24));
-            msgItem.put("role", "assistant");
-            ArrayNode content = msgItem.putArray("content");
-            ObjectNode textBlock = content.addObject();
-            textBlock.put("type", "output_text");
-            textBlock.put("text", text);
-        }
-
-        // Function call output items
-        List<ToolUse> toolCalls = completion.getToolCalls();
-        boolean hasToolCalls = toolCalls != null && !toolCalls.isEmpty();
-        if (hasToolCalls) {
-            for (ToolUse toolCall : toolCalls) {
-                ObjectNode fcItem = output.addObject();
-                fcItem.put("type", "function_call");
-                fcItem.put("id", "fc_" + randomId(24));
-                fcItem.put("name", toolCall.getName());
-                fcItem.put("arguments", toolCall.getArguments() != null ? toolCall.getArguments() : "{}");
-            }
-        }
-
-        // usage
-        ObjectNode usage = root.putObject("usage");
-        Usage completionUsage = completion.getUsage();
-        int inputTokens = completionUsage != null && completionUsage.getInputTokens() != null ? completionUsage.getInputTokens() : 0;
-        int outputTokens = completionUsage != null && completionUsage.getOutputTokens() != null ? completionUsage.getOutputTokens() : 0;
-        usage.put("input_tokens", inputTokens);
-        usage.put("output_tokens", outputTokens);
-        usage.put("total_tokens", inputTokens + outputTokens);
-        // Cached-input and reasoning token details — the Responses API nests these under
-        // input_tokens_details / output_tokens_details (distinct from Chat Completions'
-        // prompt_/completion_ names). Emitted only when set so existing fixtures stay byte-identical.
-        if (completionUsage != null) {
-            Integer cachedInputTokens = completionUsage.getCachedInputTokens();
-            if (cachedInputTokens != null && cachedInputTokens != 0) {
-                usage.putObject("input_tokens_details").put("cached_tokens", cachedInputTokens);
-            }
-            Integer reasoningTokens = completionUsage.getReasoningTokens();
-            if (reasoningTokens != null && reasoningTokens != 0) {
-                usage.putObject("output_tokens_details").put("reasoning_tokens", reasoningTokens);
-            }
-        }
-
-        try {
-            String json = OBJECT_MAPPER.writeValueAsString(root);
-            return response()
-                .withStatusCode(200)
-                .withHeader("content-type", "application/json")
-                .withBody(json);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to encode OpenAI Responses response", e);
-        }
+    @Override
+    public HttpResponse encode(Completion completion, String model, HttpRequest request) {
+        return encode(completion, model, requestBody(request));
     }
 
     @Override
     public List<SseEvent> encodeStreaming(Completion completion, String model, StreamingPhysics physics) {
-        List<SseEvent> events = new ArrayList<>();
-        String responseId = "resp_" + randomId(24);
+        return encodeStreaming(completion, model, physics, (JsonNode) null);
+    }
+
+    @Override
+    public List<SseEvent> encodeStreaming(Completion completion, String model, StreamingPhysics physics, HttpRequest request) {
+        return encodeStreaming(completion, model, physics, requestBody(request));
+    }
+
+    private static JsonNode requestBody(HttpRequest request) {
+        try {
+            String body = request != null ? request.getBodyAsText() : null;
+            JsonNode root = body != null && !body.isEmpty() ? OBJECT_MAPPER.readTree(body) : null;
+            return root != null && root.isObject() ? root : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private HttpResponse encode(Completion completion, String model, JsonNode requestBody) {
         String modelName = model != null ? model : "unknown";
         long createdAt = System.currentTimeMillis() / 1000;
+        ArrayNode output = OBJECT_MAPPER.createArrayNode();
+        for (OutputItem item : outputItems(completion)) {
+            output.add(item.completed());
+        }
+        ObjectNode root = responseObject(responseId(), createdAt, modelName, "completed",
+            output, usageNode(completion.getUsage()), completion.getToolChoice(), requestBody);
+        return response()
+            .withStatusCode(200)
+            .withHeader("content-type", "application/json")
+            .withBody(toJson(root));
+    }
 
-        Usage completionUsage = completion.getUsage();
-        int inputTokens = completionUsage != null && completionUsage.getInputTokens() != null ? completionUsage.getInputTokens() : 0;
-        int outputTokens = completionUsage != null && completionUsage.getOutputTokens() != null ? completionUsage.getOutputTokens() : 0;
+    private List<SseEvent> encodeStreaming(Completion completion, String model, StreamingPhysics physics, JsonNode requestBody) {
+        String responseId = responseId();
+        String modelName = model != null ? model : "unknown";
+        long createdAt = System.currentTimeMillis() / 1000;
+        String toolChoice = completion.getToolChoice();
+        EventSink sink = new EventSink();
 
-        // 1. response.created
-        String createdData = "{\"type\":\"response.created\",\"response\":{\"id\":\"" + responseId +
-            "\",\"object\":\"response\",\"status\":\"in_progress\",\"model\":\"" + escapeJson(modelName) +
-            "\",\"created_at\":" + createdAt + ",\"output\":[]}}";
-        events.add(sseEvent().withEvent("response.created").withData(createdData));
+        ObjectNode created = sink.event("response.created");
+        created.set("response", responseObject(responseId, createdAt, modelName, "in_progress",
+            OBJECT_MAPPER.createArrayNode(), null, toolChoice, requestBody));
+        sink.emit(created);
+        ObjectNode inProgress = sink.event("response.in_progress");
+        inProgress.set("response", responseObject(responseId, createdAt, modelName, "in_progress",
+            OBJECT_MAPPER.createArrayNode(), null, toolChoice, requestBody));
+        sink.emit(inProgress);
 
-        // 2. response.in_progress
-        String inProgressData = "{\"type\":\"response.in_progress\",\"response\":{\"id\":\"" + responseId +
-            "\",\"object\":\"response\",\"status\":\"in_progress\"}}";
-        events.add(sseEvent().withEvent("response.in_progress").withData(inProgressData));
-
+        ArrayNode output = OBJECT_MAPPER.createArrayNode();
         int outputIndex = 0;
+        for (OutputItem item : outputItems(completion)) {
+            ObjectNode added = sink.event("response.output_item.added");
+            added.put("output_index", outputIndex);
+            added.set("item", item.inProgress());
+            sink.emit(added);
+            item.streamBody(sink, outputIndex, physics);
+            ObjectNode done = sink.event("response.output_item.done");
+            done.put("output_index", outputIndex);
+            done.set("item", item.completed());
+            sink.emit(done);
+            output.add(item.completed());
+            outputIndex++;
+        }
 
-        // 2b. Reasoning output item (before text) when reasoning is set. Mirrors the non-streaming
-        // reasoning item via the Responses reasoning-summary streaming events. Additive.
+        ObjectNode completed = sink.event("response.completed");
+        completed.set("response", responseObject(responseId, createdAt, modelName, "completed",
+            output, usageNode(completion.getUsage()), toolChoice, requestBody));
+        sink.emit(completed);
+
+        return StreamingPhysicsExpander.applyPhysics(sink.events, physics);
+    }
+
+    /**
+     * The Response object as the real API returns it on the non-streaming body and on the
+     * response.created / in_progress / completed events; the Agents SDK reads its final turn
+     * from response.completed's output. Request fields the real API echoes are copied from the
+     * request body when there is one.
+     */
+    private static ObjectNode responseObject(String id, long createdAt, String model, String status,
+                                             ArrayNode output, ObjectNode usage, String toolChoice,
+                                             JsonNode requestBody) {
+        JsonNode echo = requestBody != null ? requestBody : OBJECT_MAPPER.createObjectNode();
+        ObjectNode root = OBJECT_MAPPER.createObjectNode();
+        root.put("id", id);
+        root.put("object", "response");
+        root.put("created_at", createdAt);
+        root.put("status", status);
+        if ("completed".equals(status)) {
+            root.put("completed_at", createdAt);
+        }
+        root.putNull("error");
+        root.putNull("incomplete_details");
+        root.set("instructions", echo.path("instructions").isTextual() ? echo.get("instructions") : NullNode.getInstance());
+        root.put("model", model);
+        root.set("output", output);
+        root.put("parallel_tool_calls", !echo.path("parallel_tool_calls").isBoolean() || echo.get("parallel_tool_calls").booleanValue());
+        root.set("previous_response_id", echo.path("previous_response_id").isTextual() ? echo.get("previous_response_id") : NullNode.getInstance());
+        boolean echoToolChoice = (toolChoice == null || toolChoice.trim().isEmpty())
+            && (echo.path("tool_choice").isTextual() || echo.path("tool_choice").isObject());
+        root.set("tool_choice", echoToolChoice ? echo.get("tool_choice").deepCopy() : toolChoiceNode(toolChoice));
+        root.set("tools", echo.path("tools").isArray() ? echo.get("tools").deepCopy() : OBJECT_MAPPER.createArrayNode());
+        if (usage != null) {
+            root.set("usage", usage);
+        } else {
+            root.putNull("usage");
+        }
+        root.set("metadata", echo.path("metadata").isObject() ? echo.get("metadata").deepCopy() : OBJECT_MAPPER.createObjectNode());
+        return root;
+    }
+
+    private static JsonNode toolChoiceNode(String toolChoice) {
+        if (toolChoice == null || toolChoice.trim().isEmpty()) {
+            return OBJECT_MAPPER.getNodeFactory().textNode("auto");
+        }
+        String trimmed = toolChoice.trim();
+        String lower = trimmed.toLowerCase(Locale.ROOT);
+        if ("auto".equals(lower) || "none".equals(lower) || "required".equals(lower)) {
+            return OBJECT_MAPPER.getNodeFactory().textNode(lower);
+        }
+        ObjectNode named = OBJECT_MAPPER.createObjectNode();
+        named.put("type", "function");
+        named.put("name", trimmed);
+        return named;
+    }
+
+    private static ObjectNode usageNode(Usage completionUsage) {
+        int inputTokens = intOrZero(completionUsage != null ? completionUsage.getInputTokens() : null);
+        int outputTokens = intOrZero(completionUsage != null ? completionUsage.getOutputTokens() : null);
+        ObjectNode usage = OBJECT_MAPPER.createObjectNode();
+        usage.put("input_tokens", inputTokens);
+        ObjectNode inputDetails = usage.putObject("input_tokens_details");
+        inputDetails.put("cached_tokens", intOrZero(completionUsage != null ? completionUsage.getCachedInputTokens() : null));
+        inputDetails.put("cache_write_tokens", intOrZero(completionUsage != null ? completionUsage.getCacheCreationTokens() : null));
+        usage.put("output_tokens", outputTokens);
+        usage.putObject("output_tokens_details")
+            .put("reasoning_tokens", intOrZero(completionUsage != null ? completionUsage.getReasoningTokens() : null));
+        usage.put("total_tokens", inputTokens + outputTokens);
+        return usage;
+    }
+
+    private static int intOrZero(Integer value) {
+        return value != null ? value : 0;
+    }
+
+    /** Output items in API order: optional reasoning, then the assistant message, then one per tool call. */
+    private static List<OutputItem> outputItems(Completion completion) {
+        List<OutputItem> items = new ArrayList<>();
         String reasoningText = completion.getReasoningText();
         if (reasoningText != null && !reasoningText.isEmpty()) {
-            String rsId = "rs_" + randomId(24);
-
-            String rsAddedData = "{\"type\":\"response.output_item.added\",\"output_index\":" + outputIndex +
-                ",\"item\":{\"type\":\"reasoning\",\"id\":\"" + rsId + "\",\"summary\":[]}}";
-            events.add(sseEvent().withEvent("response.output_item.added").withData(rsAddedData));
-
-            String partAddedData = "{\"type\":\"response.reasoning_summary_part.added\",\"item_id\":\"" + rsId +
-                "\",\"output_index\":" + outputIndex + ",\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}";
-            events.add(sseEvent().withEvent("response.reasoning_summary_part.added").withData(partAddedData));
-
-            String summaryDeltaData = "{\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"" + rsId +
-                "\",\"output_index\":" + outputIndex + ",\"summary_index\":0,\"delta\":\"" + escapeJson(reasoningText) + "\"}";
-            events.add(sseEvent().withEvent("response.reasoning_summary_text.delta").withData(summaryDeltaData));
-
-            String summaryDoneData = "{\"type\":\"response.reasoning_summary_text.done\",\"item_id\":\"" + rsId +
-                "\",\"output_index\":" + outputIndex + ",\"summary_index\":0,\"text\":\"" + escapeJson(reasoningText) + "\"}";
-            events.add(sseEvent().withEvent("response.reasoning_summary_text.done").withData(summaryDoneData));
-
-            String partDoneData = "{\"type\":\"response.reasoning_summary_part.done\",\"item_id\":\"" + rsId +
-                "\",\"output_index\":" + outputIndex + ",\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"" +
-                escapeJson(reasoningText) + "\"}}";
-            events.add(sseEvent().withEvent("response.reasoning_summary_part.done").withData(partDoneData));
-
-            String rsDoneData = "{\"type\":\"response.output_item.done\",\"output_index\":" + outputIndex +
-                ",\"item\":{\"type\":\"reasoning\",\"id\":\"" + rsId + "\"}}";
-            events.add(sseEvent().withEvent("response.output_item.done").withData(rsDoneData));
-
-            outputIndex++;
+            items.add(new ReasoningItem("rs_" + randomId(24), reasoningText));
         }
-
-        // 3. Text content
         String text = completion.getText();
         if (text != null && !text.isEmpty()) {
-            String msgId = "msg_" + randomId(24);
+            items.add(new MessageItem("msg_" + randomId(24), text));
+        }
+        List<ToolUse> toolCalls = completion.getToolCalls();
+        if (toolCalls != null) {
+            for (ToolUse toolCall : toolCalls) {
+                // call_id is what a client echoes back in function_call_output; id is the item id.
+                // A configured ToolUse id becomes the call_id so a test can answer it by a known value.
+                String callId = toolCall.getId() != null && !toolCall.getId().isEmpty() ? toolCall.getId() : "call_" + randomId(24);
+                items.add(new FunctionCallItem("fc_" + randomId(24), callId,
+                    toolCall.getName(), toolCall.getArguments() != null ? toolCall.getArguments() : "{}"));
+            }
+        }
+        return items;
+    }
 
-            // output_item.added
-            String itemAddedData = "{\"type\":\"response.output_item.added\",\"output_index\":" + outputIndex +
-                ",\"item\":{\"type\":\"message\",\"id\":\"" + msgId +
-                "\",\"role\":\"assistant\",\"content\":[]}}";
-            events.add(sseEvent().withEvent("response.output_item.added").withData(itemAddedData));
+    /** Assigns every streamed event its type and a sequence_number counting from 0. */
+    private static final class EventSink {
+        private final List<SseEvent> events = new ArrayList<>();
+        private int sequenceNumber;
 
-            // text deltas
-            List<String> tokens = TokenCounter.streamingTextTokens(text, physics);
-            for (String token : tokens) {
+        ObjectNode event(String type) {
+            ObjectNode data = OBJECT_MAPPER.createObjectNode();
+            data.put("type", type);
+            return data;
+        }
+
+        void emit(ObjectNode data) {
+            data.put("sequence_number", sequenceNumber++);
+            events.add(sseEvent().withEvent(data.get("type").asText()).withData(toJson(data)));
+        }
+    }
+
+    private abstract static class OutputItem {
+        final String id;
+
+        OutputItem(String id) {
+            this.id = id;
+        }
+
+        abstract ObjectNode inProgress();
+
+        abstract ObjectNode completed();
+
+        abstract void streamBody(EventSink sink, int outputIndex, StreamingPhysics physics);
+
+        ObjectNode itemEvent(EventSink sink, String type, int outputIndex) {
+            ObjectNode data = sink.event(type);
+            data.put("item_id", id);
+            data.put("output_index", outputIndex);
+            return data;
+        }
+    }
+
+    private static final class ReasoningItem extends OutputItem {
+        private final String text;
+
+        ReasoningItem(String id, String text) {
+            super(id);
+            this.text = text;
+        }
+
+        @Override
+        ObjectNode inProgress() {
+            ObjectNode item = OBJECT_MAPPER.createObjectNode();
+            item.put("id", id);
+            item.put("type", "reasoning");
+            item.putArray("summary");
+            return item;
+        }
+
+        @Override
+        ObjectNode completed() {
+            ObjectNode item = inProgress();
+            ((ArrayNode) item.get("summary")).add(summaryPart(text));
+            return item;
+        }
+
+        @Override
+        void streamBody(EventSink sink, int outputIndex, StreamingPhysics physics) {
+            ObjectNode partAdded = itemEvent(sink, "response.reasoning_summary_part.added", outputIndex);
+            partAdded.put("summary_index", 0);
+            partAdded.set("part", summaryPart(""));
+            sink.emit(partAdded);
+            ObjectNode delta = itemEvent(sink, "response.reasoning_summary_text.delta", outputIndex);
+            delta.put("summary_index", 0);
+            delta.put("delta", text);
+            sink.emit(delta);
+            ObjectNode textDone = itemEvent(sink, "response.reasoning_summary_text.done", outputIndex);
+            textDone.put("summary_index", 0);
+            textDone.put("text", text);
+            sink.emit(textDone);
+            ObjectNode partDone = itemEvent(sink, "response.reasoning_summary_part.done", outputIndex);
+            partDone.put("summary_index", 0);
+            partDone.set("part", summaryPart(text));
+            sink.emit(partDone);
+        }
+
+        private static ObjectNode summaryPart(String text) {
+            ObjectNode part = OBJECT_MAPPER.createObjectNode();
+            part.put("type", "summary_text");
+            part.put("text", text);
+            return part;
+        }
+    }
+
+    private static final class MessageItem extends OutputItem {
+        private final String text;
+
+        MessageItem(String id, String text) {
+            super(id);
+            this.text = text;
+        }
+
+        @Override
+        ObjectNode inProgress() {
+            return message("in_progress");
+        }
+
+        @Override
+        ObjectNode completed() {
+            ObjectNode item = message("completed");
+            ((ArrayNode) item.get("content")).add(outputText(text));
+            return item;
+        }
+
+        private ObjectNode message(String status) {
+            ObjectNode item = OBJECT_MAPPER.createObjectNode();
+            item.put("id", id);
+            item.put("type", "message");
+            item.put("status", status);
+            item.put("role", "assistant");
+            item.putArray("content");
+            return item;
+        }
+
+        @Override
+        void streamBody(EventSink sink, int outputIndex, StreamingPhysics physics) {
+            ObjectNode partAdded = itemEvent(sink, "response.content_part.added", outputIndex);
+            partAdded.put("content_index", 0);
+            partAdded.set("part", outputText(""));
+            sink.emit(partAdded);
+            for (String token : TokenCounter.streamingTextTokens(text, physics)) {
                 if (!token.isEmpty()) {
-                    String deltaData = "{\"type\":\"response.output_text.delta\",\"item_id\":\"" + msgId +
-                        "\",\"output_index\":" + outputIndex + ",\"content_index\":0,\"delta\":\"" + escapeJson(token) + "\"}";
-                    events.add(sseEvent().withEvent("response.output_text.delta").withData(deltaData));
+                    ObjectNode delta = itemEvent(sink, "response.output_text.delta", outputIndex);
+                    delta.put("content_index", 0);
+                    delta.put("delta", token);
+                    delta.putArray("logprobs");
+                    sink.emit(delta);
                 }
             }
-
-            // output_text.done
-            String textDoneData = "{\"type\":\"response.output_text.done\",\"item_id\":\"" + msgId +
-                "\",\"output_index\":" + outputIndex + ",\"content_index\":0,\"text\":\"" + escapeJson(text) + "\"}";
-            events.add(sseEvent().withEvent("response.output_text.done").withData(textDoneData));
-
-            // output_item.done
-            String itemDoneData = "{\"type\":\"response.output_item.done\",\"output_index\":" + outputIndex +
-                ",\"item\":{\"type\":\"message\",\"id\":\"" + msgId + "\",\"role\":\"assistant\"}}";
-            events.add(sseEvent().withEvent("response.output_item.done").withData(itemDoneData));
-
-            outputIndex++;
+            ObjectNode textDone = itemEvent(sink, "response.output_text.done", outputIndex);
+            textDone.put("content_index", 0);
+            textDone.put("text", text);
+            textDone.putArray("logprobs");
+            sink.emit(textDone);
+            ObjectNode partDone = itemEvent(sink, "response.content_part.done", outputIndex);
+            partDone.put("content_index", 0);
+            partDone.set("part", outputText(text));
+            sink.emit(partDone);
         }
 
-        // 4. Tool calls
-        List<ToolUse> toolCalls = completion.getToolCalls();
-        if (toolCalls != null && !toolCalls.isEmpty()) {
-            for (ToolUse toolCall : toolCalls) {
-                String fcId = "fc_" + randomId(24);
-                String args = toolCall.getArguments() != null ? toolCall.getArguments() : "{}";
+        private static ObjectNode outputText(String text) {
+            ObjectNode part = OBJECT_MAPPER.createObjectNode();
+            part.put("type", "output_text");
+            part.put("text", text);
+            part.putArray("annotations");
+            part.putArray("logprobs");
+            return part;
+        }
+    }
 
-                // output_item.added
-                String fcAddedData = "{\"type\":\"response.output_item.added\",\"output_index\":" + outputIndex +
-                    ",\"item\":{\"type\":\"function_call\",\"id\":\"" + fcId +
-                    "\",\"name\":\"" + escapeJson(toolCall.getName()) + "\",\"arguments\":\"\"}}";
-                events.add(sseEvent().withEvent("response.output_item.added").withData(fcAddedData));
+    private static final class FunctionCallItem extends OutputItem {
+        private final String callId;
+        private final String name;
+        private final String arguments;
 
-                // output_item.done — the Responses API serialises function_call
-                // arguments as a JSON-encoded string (escaped + quoted), matching the
-                // non-streaming encode() path which writes the arguments string verbatim
-                // via fcItem.put("arguments", ...).
-                String fcDoneData = "{\"type\":\"response.output_item.done\",\"output_index\":" + outputIndex +
-                    ",\"item\":{\"type\":\"function_call\",\"id\":\"" + fcId +
-                    "\",\"name\":\"" + escapeJson(toolCall.getName()) +
-                    "\",\"arguments\":\"" + escapeJson(args) + "\"}}";
-                events.add(sseEvent().withEvent("response.output_item.done").withData(fcDoneData));
-
-                outputIndex++;
-            }
+        FunctionCallItem(String id, String callId, String name, String arguments) {
+            super(id);
+            this.callId = callId;
+            this.name = name;
+            this.arguments = arguments;
         }
 
-        // 5. response.completed — mirror cached/reasoning token details into the completed usage
-        // when set (non-null, non-zero), matching the non-streaming encode(). Omitted when unset so
-        // existing streaming fixtures stay byte-identical.
-        StringBuilder completedUsage = new StringBuilder();
-        completedUsage.append("{\"input_tokens\":").append(inputTokens)
-            .append(",\"output_tokens\":").append(outputTokens)
-            .append(",\"total_tokens\":").append(inputTokens + outputTokens);
-        if (completionUsage != null) {
-            Integer cachedInputTokens = completionUsage.getCachedInputTokens();
-            if (cachedInputTokens != null && cachedInputTokens != 0) {
-                completedUsage.append(",\"input_tokens_details\":{\"cached_tokens\":").append(cachedInputTokens).append("}");
-            }
-            Integer reasoningTokens = completionUsage.getReasoningTokens();
-            if (reasoningTokens != null && reasoningTokens != 0) {
-                completedUsage.append(",\"output_tokens_details\":{\"reasoning_tokens\":").append(reasoningTokens).append("}");
-            }
+        @Override
+        ObjectNode inProgress() {
+            return functionCall("in_progress", "");
         }
-        completedUsage.append("}");
-        String completedData = "{\"type\":\"response.completed\",\"response\":{\"id\":\"" + responseId +
-            "\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"" + escapeJson(modelName) +
-            "\",\"usage\":" + completedUsage + "}}";
-        events.add(sseEvent().withEvent("response.completed").withData(completedData));
 
-        return StreamingPhysicsExpander.applyPhysics(events, physics);
+        @Override
+        ObjectNode completed() {
+            return functionCall("completed", arguments);
+        }
+
+        private ObjectNode functionCall(String status, String args) {
+            ObjectNode item = OBJECT_MAPPER.createObjectNode();
+            item.put("id", id);
+            item.put("type", "function_call");
+            item.put("status", status);
+            item.put("arguments", args);
+            item.put("call_id", callId);
+            item.put("name", name);
+            return item;
+        }
+
+        @Override
+        void streamBody(EventSink sink, int outputIndex, StreamingPhysics physics) {
+            for (String chunk : TokenCounter.streamingTextTokens(arguments, physics)) {
+                ObjectNode delta = itemEvent(sink, "response.function_call_arguments.delta", outputIndex);
+                delta.put("delta", chunk);
+                sink.emit(delta);
+            }
+            ObjectNode done = itemEvent(sink, "response.function_call_arguments.done", outputIndex);
+            done.put("arguments", arguments);
+            sink.emit(done);
+        }
+    }
+
+    private static String toJson(JsonNode node) {
+        try {
+            return OBJECT_MAPPER.writeValueAsString(node);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to encode OpenAI Responses response", e);
+        }
     }
 
     @Override
@@ -294,6 +454,7 @@ public class OpenAiResponsesCodec implements ProviderCodec {
             }
 
             List<ParsedMessage> parsed = new ArrayList<>();
+            ParsedMessage instructions = instructionsMessage(root);
 
             if (inputNode.isTextual()) {
                 // Single string input treated as user message
@@ -320,13 +481,18 @@ public class OpenAiResponsesCodec implements ProviderCodec {
                             toolResults
                         ));
                     } else if ("function_call".equals(type)) {
-                        // Tool call from prior response (assistant turn)
-                        String fcId = item.has("id") ? item.get("id").asText("") : null;
+                        // Tool call from prior response (assistant turn). function_call_output
+                        // references it by call_id, not by the fc_ item id; the id fallback keeps
+                        // inputs that omit call_id correlatable.
+                        String callId = item.path("call_id").asText("");
+                        if (callId.isEmpty()) {
+                            callId = item.path("id").asText("");
+                        }
                         String name = item.has("name") ? item.get("name").asText("") : "";
                         String arguments = item.has("arguments") ? item.get("arguments").asText("") : "{}";
                         ToolUse tu = ToolUse.toolUse(name).withArguments(arguments);
-                        if (fcId != null && !fcId.isEmpty()) {
-                            tu.withId(fcId);
+                        if (!callId.isEmpty()) {
+                            tu.withId(callId);
                         }
                         List<ToolUse> toolCalls = new ArrayList<>();
                         toolCalls.add(tu);
@@ -370,13 +536,13 @@ public class OpenAiResponsesCodec implements ProviderCodec {
             // No-op when there is no previous_response_id or the id is unknown/not stored.
             List<ParsedMessage> priorMessages =
                 OpenAiResponsesStore.getInstance().priorMessagesFor(body);
-            if (!priorMessages.isEmpty()) {
-                List<ParsedMessage> chained = new ArrayList<>(priorMessages);
-                chained.addAll(parsed);
-                return ParsedConversation.of(chained);
+            List<ParsedMessage> conversation = new ArrayList<>();
+            if (instructions != null) {
+                conversation.add(instructions);
             }
-
-            return ParsedConversation.of(parsed);
+            conversation.addAll(priorMessages);
+            conversation.addAll(parsed);
+            return ParsedConversation.of(conversation);
         } catch (Exception e) {
             return ParsedConversation.empty();
         }
@@ -387,22 +553,44 @@ public class OpenAiResponsesCodec implements ProviderCodec {
         throw new UnsupportedOperationException("OpenAI Responses API does not expose an embeddings endpoint");
     }
 
+    /**
+     * The request's top-level {@code instructions} as a leading SYSTEM message, or null when
+     * absent. Instructions apply to this request only and are not carried over by
+     * {@code previous_response_id}, so {@link OpenAiResponsesStore} does not store it.
+     */
+    static ParsedMessage instructionsMessage(JsonNode root) {
+        JsonNode instructions = root.get("instructions");
+        if (instructions == null || !instructions.isTextual() || instructions.asText("").isEmpty()) {
+            return null;
+        }
+        return new ParsedMessage(ParsedMessage.Role.SYSTEM, instructions.asText(""), null, null);
+    }
+
     private static ParsedMessage.Role mapRole(String rawRole) {
         if (rawRole == null) {
             return ParsedMessage.Role.USER;
         }
-        switch (rawRole.toLowerCase()) {
+        switch (rawRole.toLowerCase(Locale.ROOT)) {
             case "assistant":
                 return ParsedMessage.Role.ASSISTANT;
             case "user":
                 return ParsedMessage.Role.USER;
             case "system":
+            case "developer":
                 return ParsedMessage.Role.SYSTEM;
             case "tool":
                 return ParsedMessage.Role.TOOL;
             default:
                 return ParsedMessage.Role.USER;
         }
+    }
+
+    /**
+     * A resp_ id is the only guard on GET /v1/responses/{id}, which returns the request's echoed
+     * instructions, tools and metadata, so it comes from the secure generator.
+     */
+    private static String responseId() {
+        return "resp_" + UUIDService.getUUID().replace("-", "").substring(0, 24);
     }
 
     private static String randomId(int length) {
@@ -413,7 +601,4 @@ public class OpenAiResponsesCodec implements ProviderCodec {
         return uuid.substring(0, length);
     }
 
-    private static String escapeJson(String value) {
-        return JsonEscape.escape(value);
-    }
 }

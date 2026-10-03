@@ -182,8 +182,9 @@ public final class OpenAiResponsesStore {
             List<ParsedMessage> messages = new ArrayList<>();
             if (chainedConversation != null) {
                 messages.addAll(chainedConversation.getMessages());
+                dropLeadingInstructions(requestBody, messages);
             }
-            messages.add(assistantMessage(completion));
+            messages.add(assistantMessage(completion, encodedBody));
             put(new StoredResponse(id, ParsedConversation.of(messages), encodedBody));
         } catch (Exception ignored) {
             // fail-soft: state recording must never affect the served response
@@ -222,10 +223,54 @@ public final class OpenAiResponsesStore {
         return null;
     }
 
-    private static ParsedMessage assistantMessage(Completion completion) {
+    /**
+     * The codec decodes a request's {@code instructions} as a leading SYSTEM message, but the
+     * real API does not carry instructions over to a chained turn, so they are not stored.
+     */
+    private static void dropLeadingInstructions(String requestBody, List<ParsedMessage> messages) {
+        if (messages.isEmpty() || messages.get(0).getRole() != ParsedMessage.Role.SYSTEM) {
+            return;
+        }
+        try {
+            JsonNode instructions = OBJECT_MAPPER.readTree(requestBody).get("instructions");
+            if (instructions != null && instructions.isTextual()
+                && instructions.asText("").equals(messages.get(0).getTextContent())) {
+                messages.remove(0);
+            }
+        } catch (Exception ignored) {
+            // fail-soft: keep the conversation as decoded
+        }
+    }
+
+    /**
+     * This turn's assistant message. Tool calls carry the {@code call_id} issued in the encoded
+     * body, so a chained turn's {@code function_call_output} correlates to them.
+     */
+    private static ParsedMessage assistantMessage(Completion completion, String encodedBody) {
         String text = completion != null && completion.getText() != null ? completion.getText() : "";
         List<ToolUse> toolCalls = completion != null ? completion.getToolCalls() : null;
-        return new ParsedMessage(ParsedMessage.Role.ASSISTANT, text, toolCalls, null);
+        List<ToolUse> issued = issuedToolCalls(encodedBody);
+        return new ParsedMessage(ParsedMessage.Role.ASSISTANT, text, issued.isEmpty() ? toolCalls : issued, null);
+    }
+
+    private static List<ToolUse> issuedToolCalls(String encodedBody) {
+        List<ToolUse> toolCalls = new ArrayList<>();
+        try {
+            for (JsonNode item : OBJECT_MAPPER.readTree(encodedBody).path("output")) {
+                if ("function_call".equals(item.path("type").asText(""))) {
+                    ToolUse toolUse = ToolUse.toolUse(item.path("name").asText(""))
+                        .withArguments(item.path("arguments").asText("{}"));
+                    String callId = item.path("call_id").asText("");
+                    if (!callId.isEmpty()) {
+                        toolUse.withId(callId);
+                    }
+                    toolCalls.add(toolUse);
+                }
+            }
+        } catch (Exception ignored) {
+            // fail-soft: fall back to the completion's tool calls
+        }
+        return toolCalls;
     }
 
     // --- retrieval -----------------------------------------------------------

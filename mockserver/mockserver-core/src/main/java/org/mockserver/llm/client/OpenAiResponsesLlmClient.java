@@ -79,6 +79,9 @@ public class OpenAiResponsesLlmClient extends AbstractLlmClient {
             if (inputDetails.isObject() && inputDetails.has("cached_tokens")) {
                 usage.withCachedInputTokens(inputDetails.path("cached_tokens").asInt());
             }
+            if (inputDetails.isObject() && inputDetails.has("cache_write_tokens")) {
+                usage.withCacheCreationTokens(inputDetails.path("cache_write_tokens").asInt());
+            }
             JsonNode outputDetails = usageNode.path("output_tokens_details");
             if (outputDetails.isObject() && outputDetails.has("reasoning_tokens")) {
                 usage.withReasoningTokens(outputDetails.path("reasoning_tokens").asInt());

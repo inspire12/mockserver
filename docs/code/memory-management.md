@@ -1000,6 +1000,21 @@ An expectation id must stay resolvable after the expectation is gone: verifying 
 
 **Why bytes and not only count.** The previous `CircularHashMap<String, RequestDefinition>` was sized to `maxExpectations` and held every definition ever added until reset, with no byte bound: a suite that churns through times-limited expectations with large request bodies kept up to `maxExpectations` of them (15,000 at the default cap, e.g. 15,000 x 1 MB) after the expectations themselves were gone. **Rejected alternative:** dropping the definition on removal — it breaks verify-by-id for a used-up expectation. **Rejected alternative:** keeping it only while the event log still references the id — verification matches the definition against logged requests, not log entries tagged with the id, so there is no reference to track.
 
+## OpenAI Responses Store
+
+`OpenAiResponsesStore` keeps each non-streamed `OPENAI_RESPONSES` turn so a later request can chain to it with `previous_response_id` or fetch it with `GET /v1/responses/{id}`. It is bounded **by count only**: 10,000 responses, least recently used evicted first, with no byte budget. It is not covered by `maxLogEntries`, `maxExpectations` or their byte budgets.
+
+| Aspect | Behaviour |
+|--------|-----------|
+| What an entry holds | The encoded response body (one JSON string) and the decoded conversation up to that turn |
+| What drives its size | The body echoes the request's `tools`, `instructions` and `metadata`, so an entry is at least as large as the tool definitions the client sent with that turn |
+| Count bound | 10,000 (`OpenAiResponsesStore.MAX_RESPONSES`), not configurable |
+| Byte bound | None |
+| Not stored | A turn whose request sets `store:false`, and streamed turns |
+| Cleared by | `reset` |
+
+Before the echo was added the stored body held little more than the completion's own text and tool calls. An agent that sends, say, 50 KB of tool definitions on every turn now retains about 50 KB per stored turn, which is about 500 MB if the store fills to its cap. A byte budget is tracked as item 19 of [llm-provider-wire-shapes.md](../plans/llm-provider-wire-shapes.md); until then, a long-running mock for such an agent should `reset` between runs or have the client send `store:false`.
+
 ## How the Estimates Were Chosen
 
 The per-entry estimates (8 KB for log entries, 10 KB for expectations) are based on the field-level analysis in the sections above. They target the **realistic weighted average** for typical API mocking workloads (small-to-medium JSON bodies, a handful of headers), with a modest safety margin.

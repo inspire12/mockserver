@@ -74,6 +74,8 @@ public class OpenAiResponsesCodecTest {
         assertThat(output.size(), is(1));
         assertThat(output.get(0).get("type").asText(), is("function_call"));
         assertThat(output.get(0).get("id").asText(), startsWith("fc_"));
+        assertThat(output.get(0).get("call_id").asText(), startsWith("call_"));
+        assertThat(output.get(0).get("status").asText(), is("completed"));
         assertThat(output.get(0).get("name").asText(), is("search"));
         assertThat(output.get(0).get("arguments").asText(), is("{\"q\":\"foo\"}"));
     }
@@ -246,7 +248,7 @@ public class OpenAiResponsesCodecTest {
             .withBody("{\n" +
                 "  \"input\": [\n" +
                 "    {\"role\": \"user\", \"content\": \"Search for X\"},\n" +
-                "    {\"type\": \"function_call_output\", \"call_id\": \"fc_abc\", \"output\": \"search result data\"}\n" +
+                "    {\"type\": \"function_call_output\", \"call_id\": \"call_abc\", \"output\": \"search result data\"}\n" +
                 "  ]\n" +
                 "}");
 
@@ -255,11 +257,25 @@ public class OpenAiResponsesCodecTest {
         assertThat(parsed.getMessages(), hasSize(2));
         ParsedMessage toolMsg = parsed.getMessages().get(1);
         assertThat(toolMsg.getRole(), is(ParsedMessage.Role.TOOL));
-        assertThat(toolMsg.getToolResults(), hasEntry("fc_abc", "search result data"));
+        assertThat(toolMsg.getToolResults(), hasEntry("call_abc", "search result data"));
     }
 
     @Test
-    public void shouldDecodeFunctionCallItem() {
+    public void shouldDecodeFunctionCallItemKeyedByCallId() {
+        HttpRequest request = request()
+            .withBody("{\n" +
+                "  \"input\": [\n" +
+                "    {\"type\": \"function_call\", \"id\": \"fc_xyz\", \"call_id\": \"call_xyz\", \"name\": \"search\", \"arguments\": \"{}\"}\n" +
+                "  ]\n" +
+                "}");
+
+        ParsedConversation parsed = codec.decode(request);
+
+        assertThat(parsed.getMessages().get(0).getToolCalls().get(0).getId(), is("call_xyz"));
+    }
+
+    @Test
+    public void shouldDecodeFunctionCallItemWithoutCallIdUsingItemId() {
         HttpRequest request = request()
             .withBody("{\n" +
                 "  \"input\": [\n" +

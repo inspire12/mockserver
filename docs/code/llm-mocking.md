@@ -114,11 +114,28 @@ flowchart LR
     GET["GET /v1/responses/resp_A"] --> STORE1
 ```
 
-- **Recording** — `HttpLlmResponseActionHandler` calls `OpenAiResponsesStore.recordIfStored(...)` after encoding an `OPENAI_RESPONSES` completion. It honours the request's `store` flag (default `true`; `store:false` skips recording) and stores, keyed by the issued `resp_…` id, the fully-chained decode of the request plus this turn's assistant output — so a later turn referencing this id reconstructs the entire dialogue.
+- **Recording** — `HttpLlmResponseActionHandler` calls `OpenAiResponsesStore.recordIfStored(...)` after encoding an `OPENAI_RESPONSES` completion. It honours the request's `store` flag (default `true`; `store:false` skips recording) and stores, keyed by the issued `resp_…` id, the fully-chained decode of the request plus this turn's assistant output — so a later turn referencing this id reconstructs the entire dialogue. Only non-streaming turns are recorded, so `previous_response_id` cannot chain from a streamed turn.
 - **Chaining** — `OpenAiResponsesCodec.decode` calls `OpenAiResponsesStore.priorMessagesFor(body)`; when the request carries a `previous_response_id` whose response is stored, the prior conversation is prepended to the current turn's messages, so conversation matchers and usage inference see the whole dialogue.
 - **Retrieval** — `GET /v1/responses/{id}` is served from the store by `HttpActionHandler` (on the otherwise-404 path, so user expectations always win) via `OpenAiResponsesStore.retrievalResponseOrNull(request)`, returning the stored body verbatim; an unknown id falls through to normal handling.
+- **Tool calls and instructions** — the stored assistant turn carries the `call_id`s issued in the encoded body, so a chained turn that sends only `function_call_output` (plus `previous_response_id`) still satisfies `whenContainsToolResultFor`. A request's top-level `instructions` decodes as a leading SYSTEM message but is not stored, because the real API does not carry instructions over to a chained turn.
 
 The store is bounded (LRU, 10k) and cleared on `HttpState.reset()`. It is fail-soft — recording never affects the served response — and fully back-compatible: a request with no `previous_response_id` and the default `store:true` behaves exactly as before.
+
+## OpenAI Responses API wire shape
+
+`OpenAiResponsesCodec` follows the official Responses API reference and the openai-python types (`Response`, `ResponseFunctionToolCall`, `ResponseCompletedEvent` and the streaming event models). Clients built on the OpenAI Agents SDK read each streamed turn from `response.completed`'s `response.output` and answer a tool call with `function_call_output` keyed by its `call_id`, so both must be present.
+
+| Element | Shape |
+|---------|-------|
+| Response object (non-streaming body, and the `response` of `response.created` / `.in_progress` / `.completed`) | `id`, `object:"response"`, `created_at`, `status`, `completed_at` (completed only), `error` and `incomplete_details` (`null`), `instructions`, `model`, `output`, `parallel_tool_calls`, `previous_response_id`, `tool_choice`, `tools`, `usage` (`null` until completed), `metadata` |
+| Echoed request fields | `instructions`, `parallel_tool_calls` (default `true`), `previous_response_id`, `tools` (default `[]`), `metadata` (default `{}`) and `tool_choice` are copied from the request body. `Completion.toolChoice`, when set, wins over the request's `tool_choice`: `auto`/`none`/`required` as a string, any other value as `{"type":"function","name":…}`; with neither, it is `auto` |
+| `function_call` item | `id` (`fc_…`), `type`, `status`, `arguments` (JSON string), `call_id` (the configured `ToolUse.id` when set, else a generated `call_…`; always distinct from `id`), `name` |
+| `message` item | `id`, `type`, `status`, `role:"assistant"`, `content:[{"type":"output_text","text":…,"annotations":[],"logprobs":[]}]` |
+| Streaming envelope | every event carries `type` and a `sequence_number` counting from `0` |
+| Streamed text | `output_item.added` → `content_part.added` → `output_text.delta`… → `output_text.done` → `content_part.done` → `output_item.done` |
+| Streamed tool call | `output_item.added` (`arguments:""`) → `function_call_arguments.delta`… → `function_call_arguments.done` → `output_item.done` |
+
+The codec reads these from the request through the request-aware `encode`/`encodeStreaming` overloads; the two-argument forms (used by the golden-file test) echo nothing. `decode` links a prior `function_call` input item to its result by `call_id` (falling back to `id` when `call_id` is absent), maps the `developer` role to SYSTEM, and decodes top-level `instructions` as a leading SYSTEM message.
 
 ## Streaming Physics
 
@@ -309,16 +326,16 @@ When the opt-in `mockserver.llmInferUsageEnabled` flag is set, `HttpLlmResponseA
 
 ## Cached/reasoning token usage and reasoning content encoding
 
-The `Usage` optional fields and the `Completion` reasoning fields are **encoded** by every chat codec onto the response wire — additively, and only when set, so a completion that omits them encodes byte-identically to before (the golden fixtures are unchanged).
+The `Usage` optional fields and the `Completion` reasoning fields are **encoded** by every chat codec onto the response wire. Each is added only when set, so a completion that omits them encodes without them; the one exception is the `OPENAI_RESPONSES` usage details described next.
 
-**Usage token details** — emitted only when the corresponding `Usage` field is non-null and non-zero, under each provider's native key (the same keys the runtime-LLM clients *decode*, so encode/decode are symmetric):
+**Usage token details** — emitted only when the corresponding `Usage` field is non-null and non-zero, under each provider's native key (the same keys the runtime-LLM clients *decode*, so encode/decode are symmetric). The exception is `OPENAI_RESPONSES`, whose `ResponseUsage` declares both details objects as required: it always emits them, with `0` for an unset count.
 
 | Provider(s) | `cachedInputTokens` key | `cacheCreationTokens` key | `reasoningTokens` key |
 |-------------|-------------------------|---------------------------|-----------------------|
 | ANTHROPIC / BEDROCK (InvokeModel) | `usage.cache_read_input_tokens` | `usage.cache_creation_input_tokens` | — (no native field) |
 | BEDROCK (Converse) | `usage.cacheReadInputTokens` | `usage.cacheWriteInputTokens` | — (no native field) |
 | OPENAI / AZURE_OPENAI | `usage.prompt_tokens_details.cached_tokens` | — | `usage.completion_tokens_details.reasoning_tokens` |
-| OPENAI_RESPONSES | `usage.input_tokens_details.cached_tokens` | — | `usage.output_tokens_details.reasoning_tokens` |
+| OPENAI_RESPONSES | `usage.input_tokens_details.cached_tokens` | `usage.input_tokens_details.cache_write_tokens` | `usage.output_tokens_details.reasoning_tokens` |
 | GEMINI | `usageMetadata.cachedContentTokenCount` | — | `usageMetadata.thoughtsTokenCount` |
 | OLLAMA | — (no native field) | — | — (no native field) |
 

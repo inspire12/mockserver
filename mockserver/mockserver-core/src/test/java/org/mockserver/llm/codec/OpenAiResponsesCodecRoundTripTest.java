@@ -77,13 +77,15 @@ public class OpenAiResponsesCodecRoundTripTest {
         assertThat(output.get(1).get("type").asText(), is("function_call"));
 
         String fcId = output.get(0).get("id").asText();
+        String callId = output.get(0).get("call_id").asText();
+        assertThat(callId, is(not(fcId)));
         String fcName = output.get(0).get("name").asText();
         String fcArgs = output.get(0).get("arguments").asText();
 
-        // Build request including function_call and function_call_output
+        // Echo the function_call item as a client does, then answer it by call_id (not the fc_ item id)
         String requestBody = "{\"input\":[" +
-            "{\"type\":\"function_call\",\"id\":\"" + fcId + "\",\"name\":\"" + fcName + "\",\"arguments\":\"" + escapeForJson(fcArgs) + "\"}," +
-            "{\"type\":\"function_call_output\",\"call_id\":\"" + fcId + "\",\"output\":\"25C and sunny\"}" +
+            "{\"type\":\"function_call\",\"id\":\"" + fcId + "\",\"call_id\":\"" + callId + "\",\"name\":\"" + fcName + "\",\"arguments\":\"" + escapeForJson(fcArgs) + "\"}," +
+            "{\"type\":\"function_call_output\",\"call_id\":\"" + callId + "\",\"output\":\"25C and sunny\"}" +
             "]}";
         ParsedConversation decoded = codec.decode(request().withBody(requestBody));
 
@@ -92,10 +94,10 @@ public class OpenAiResponsesCodecRoundTripTest {
         assertThat(decoded.getMessages().get(0).getRole(), is(ParsedMessage.Role.ASSISTANT));
         assertThat(decoded.getMessages().get(0).getToolCalls(), hasSize(1));
         assertThat(decoded.getMessages().get(0).getToolCalls().get(0).getName(), is("get_weather"));
-        assertThat(decoded.getMessages().get(0).getToolCalls().get(0).getId(), is(fcId));
+        assertThat(decoded.getMessages().get(0).getToolCalls().get(0).getId(), is(callId));
         // Second message: function_call_output -> TOOL
         assertThat(decoded.getMessages().get(1).getRole(), is(ParsedMessage.Role.TOOL));
-        assertThat(decoded.getMessages().get(1).getToolResults(), hasEntry(fcId, "25C and sunny"));
+        assertThat(decoded.getMessages().get(1).getToolResults(), hasEntry(callId, "25C and sunny"));
     }
 
     // --- Edge cases ---
@@ -207,14 +209,16 @@ public class OpenAiResponsesCodecRoundTripTest {
         // A request containing a user message, function_call, and function_call_output
         String body = "{\"input\":[" +
             "{\"role\":\"user\",\"content\":\"Search X\"}," +
-            "{\"type\":\"function_call\",\"id\":\"fc_1\",\"name\":\"search\",\"arguments\":\"{}\"}," +
-            "{\"type\":\"function_call_output\",\"call_id\":\"fc_1\",\"output\":\"result data\"}" +
+            "{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"search\",\"arguments\":\"{}\"}," +
+            "{\"type\":\"function_call_output\",\"call_id\":\"call_1\",\"output\":\"result data\"}" +
             "]}";
         ParsedConversation parsed = codec.decode(request().withBody(body));
         assertThat(parsed.getMessages(), hasSize(3));
         assertThat(parsed.getMessages().get(0).getRole(), is(ParsedMessage.Role.USER));
         assertThat(parsed.getMessages().get(1).getRole(), is(ParsedMessage.Role.ASSISTANT));
         assertThat(parsed.getMessages().get(2).getRole(), is(ParsedMessage.Role.TOOL));
+        assertThat(parsed.getMessages().get(1).getToolCalls().get(0).getId(), is("call_1"));
+        assertThat(parsed.getMessages().get(2).getToolResults(), hasKey("call_1"));
     }
 
     @Test

@@ -65,7 +65,11 @@ Key properties a future maintainer must preserve:
   and the exact SSE event-name sequence for the event-typed providers
   (Anthropic/Bedrock `message_start … content_block_delta … message_stop`;
   Responses `response.created … response.output_text.delta …
-  response.completed`).
+  response.completed`). For Responses it also pins the stream envelope
+  (`type` and a `sequence_number` counting from 0 on every event, a full
+  Response object on `response.created` / `.in_progress` / `.completed`, the
+  completed `output`), the `function_call` `call_id`, and the
+  `function_call_arguments` delta/done events.
 - **Streaming text is asserted by reassembly, not by chunk boundaries.** The
   test concatenates the streamed deltas and asserts the whole text, so it is not
   coupled to streaming physics / token chunking (which `LlmAgentLoopE2eTest`
@@ -161,6 +165,7 @@ writing/comparing:
 | String values matching `chatcmpl-*`, `msg_*`, `resp_*`, `call_*`, `toolu_*`, `tooluse_*`, `fc_*` | All providers | `"<id>"` |
 | `created` (numeric) | OpenAI, Azure OpenAI, OpenAI Responses | `0` |
 | `created_at` (numeric) | OpenAI Responses | `0` |
+| `completed_at` (numeric) | OpenAI Responses | `0` |
 | `created_at` (ISO 8601 string) | Ollama | `"<timestamp>"` |
 | `system_fingerprint` | OpenAI | `"<fp>"` |
 | `usage.*`, `usageMetadata.*` (numeric values) | All providers | `0` (structure preserved) |

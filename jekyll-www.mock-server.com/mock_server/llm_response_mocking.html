@@ -678,6 +678,31 @@ data: [DONE]</code></pre>
   }
 }</code></pre>
 
+<p>
+    With the <span class="inline_code">OPENAI_RESPONSES</span> provider, each tool call is returned as a
+    <span class="inline_code">function_call</span> output item with an item <span class="inline_code">id</span>
+    (<span class="inline_code">fc_&hellip;</span>) and a separate <span class="inline_code">call_id</span>
+    (<span class="inline_code">call_&hellip;</span>), as the real Responses API does. If you set an
+    <span class="inline_code">id</span> on the tool call, such as <span class="inline_code">call_abc123</span> above,
+    that becomes the <span class="inline_code">call_id</span>. Your agent sends the tool's
+    result back as a <span class="inline_code">function_call_output</span> carrying that
+    <span class="inline_code">call_id</span>, and that is what <span class="inline_code">containsToolResultFor</span>
+    matches on. After a non-streamed turn, this also works when the next request sends only the result plus
+    <span class="inline_code">previous_response_id</span>. When streaming, the arguments arrive as
+    <span class="inline_code">response.function_call_arguments.delta</span> events, and the final
+    <span class="inline_code">response.completed</span> event carries the whole response, including its
+    <span class="inline_code">output</span>. The OpenAI Agents SDK reads each turn from that event.
+</p>
+
+<p>
+    The streamed arguments are split into small pieces the same way text is, one
+    <span class="inline_code">delta</span> event per piece, and each event is paced by
+    <span class="inline_code">tokensPerSecond</span> when you set
+    <a href="#streaming">streaming physics</a>. A streamed tool call with long arguments therefore takes
+    longer with <span class="inline_code">OPENAI_RESPONSES</span> than with the other providers, which send a tool
+    call's arguments in one piece.
+</p>
+
 <a id="embeddings" class="anchor" href="#embeddings">&nbsp;</a>
 <h2>Embeddings</h2>
 
@@ -1176,7 +1201,10 @@ geminiLive()
 <p>
     <code>org.mockserver.model.Usage</code> has three optional fields in addition to the baseline
     <code>inputTokens</code> / <code>outputTokens</code> pair. These are <strong>back-compatible and optional</strong>:
-    omitting them leaves behaviour unchanged.
+    omitting them leaves the response without the matching provider fields. The one exception is
+    <code>OPENAI_RESPONSES</code>, which always returns <code>usage.input_tokens_details</code> and
+    <code>usage.output_tokens_details</code>, as the real Responses API does, with <code>0</code> for each count you
+    do not set.
 </p>
 
 <table class="table table-bordered table-striped">
@@ -1187,17 +1215,17 @@ geminiLive()
         <tr>
             <td><code>cachedInputTokens</code></td>
             <td>Input tokens served from a prompt cache at a reduced rate. A <strong>subset</strong> of <code>inputTokens</code> (not additive).</td>
-            <td>OpenAI: <code>usage.prompt_tokens_details.cached_tokens</code><br/>Anthropic: <code>usage.cache_read_input_tokens</code><br/>Gemini: <code>usageMetadata.cachedContentTokenCount</code></td>
+            <td>OpenAI: <code>usage.prompt_tokens_details.cached_tokens</code><br/>OpenAI Responses: <code>usage.input_tokens_details.cached_tokens</code><br/>Anthropic: <code>usage.cache_read_input_tokens</code><br/>Gemini: <code>usageMetadata.cachedContentTokenCount</code></td>
         </tr>
         <tr>
             <td><code>cacheCreationTokens</code></td>
             <td>Input tokens written to a prompt cache at a premium rate.</td>
-            <td>Anthropic: <code>usage.cache_creation_input_tokens</code></td>
+            <td>Anthropic: <code>usage.cache_creation_input_tokens</code><br/>OpenAI Responses: <code>usage.input_tokens_details.cache_write_tokens</code></td>
         </tr>
         <tr>
             <td><code>reasoningTokens</code></td>
             <td>Reasoning/thinking tokens billed as output but not part of the visible completion. A <strong>subset</strong> of <code>outputTokens</code> (not additive).</td>
-            <td>OpenAI: <code>usage.completion_tokens_details.reasoning_tokens</code><br/>Gemini: <code>usageMetadata.thoughtsTokenCount</code></td>
+            <td>OpenAI: <code>usage.completion_tokens_details.reasoning_tokens</code><br/>OpenAI Responses: <code>usage.output_tokens_details.reasoning_tokens</code><br/>Gemini: <code>usageMetadata.thoughtsTokenCount</code></td>
         </tr>
     </tbody>
 </table>

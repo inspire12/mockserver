@@ -162,15 +162,28 @@ public class LlmCachedReasoningTokenEncodingTest {
     }
 
     @Test
-    public void openAiResponsesOmitsDetailsWhenUnset() throws Exception {
+    public void openAiResponsesEmitsZeroDetailsWhenUnset() throws Exception {
+        // ResponseUsage declares both details objects as required, so they are always present.
         Completion completion = completion()
             .withText("hi")
             .withUsage(usage().withInputTokens(100).withOutputTokens(40));
 
         JsonNode usage = parse(new OpenAiResponsesCodec().encode(completion, "gpt-4o")).get("usage");
 
-        assertThat(usage.has("input_tokens_details"), is(false));
-        assertThat(usage.has("output_tokens_details"), is(false));
+        assertThat(usage.get("input_tokens_details").get("cached_tokens").asInt(), is(0));
+        assertThat(usage.get("input_tokens_details").get("cache_write_tokens").asInt(), is(0));
+        assertThat(usage.get("output_tokens_details").get("reasoning_tokens").asInt(), is(0));
+    }
+
+    @Test
+    public void openAiResponsesEncodesCacheCreationAsCacheWriteTokens() throws Exception {
+        Completion completion = completion()
+            .withText("hi")
+            .withUsage(usage().withInputTokens(100).withOutputTokens(40).withCacheCreationTokens(25));
+
+        JsonNode usage = parse(new OpenAiResponsesCodec().encode(completion, "gpt-4o")).get("usage");
+
+        assertThat(usage.get("input_tokens_details").get("cache_write_tokens").asInt(), is(25));
     }
 
     @Test

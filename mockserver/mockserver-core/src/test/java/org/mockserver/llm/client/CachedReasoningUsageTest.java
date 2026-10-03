@@ -1,6 +1,7 @@
 package org.mockserver.llm.client;
 
 import org.junit.Test;
+import org.mockserver.llm.codec.OpenAiResponsesCodec;
 import org.mockserver.model.Completion;
 import org.mockserver.model.Usage;
 
@@ -58,6 +59,16 @@ public class CachedReasoningUsageTest {
         Usage usage = completion.getUsage();
         assertThat(usage.getCachedInputTokens(), is(35));
         assertThat(usage.getReasoningTokens(), is(18));
+    }
+
+    @Test
+    public void shouldDecodeOpenAiResponsesCacheWriteTokensTheCodecEncodes() {
+        Completion encoded = Completion.completion().withText("hi")
+            .withUsage(Usage.usage().withInputTokens(60).withOutputTokens(40).withCacheCreationTokens(25));
+        String body = new OpenAiResponsesCodec().encode(encoded, "gpt-4o").getBodyAsString();
+
+        Usage usage = new OpenAiResponsesLlmClient().parseCompletionResponse(response().withBody(body)).getUsage();
+        assertThat(usage.getCacheCreationTokens(), is(25));
     }
 
     @Test

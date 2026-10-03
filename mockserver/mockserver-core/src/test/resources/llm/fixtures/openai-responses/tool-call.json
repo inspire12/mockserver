@@ -2,17 +2,35 @@
   "id" : "<id>",
   "object" : "response",
   "created_at" : 0,
-  "model" : "gpt-4o",
   "status" : "completed",
+  "completed_at" : 0,
+  "error" : null,
+  "incomplete_details" : null,
+  "instructions" : null,
+  "model" : "gpt-4o",
   "output" : [ {
-    "type" : "function_call",
     "id" : "<id>",
-    "name" : "get_weather",
-    "arguments" : "{\"city\":\"London\",\"units\":\"celsius\"}"
+    "type" : "function_call",
+    "status" : "completed",
+    "arguments" : "{\"city\":\"London\",\"units\":\"celsius\"}",
+    "call_id" : "<id>",
+    "name" : "get_weather"
   } ],
+  "parallel_tool_calls" : true,
+  "previous_response_id" : null,
+  "tool_choice" : "auto",
+  "tools" : [ ],
   "usage" : {
     "input_tokens" : 0,
+    "input_tokens_details" : {
+      "cached_tokens" : 0,
+      "cache_write_tokens" : 0
+    },
     "output_tokens" : 0,
+    "output_tokens_details" : {
+      "reasoning_tokens" : 0
+    },
     "total_tokens" : 0
-  }
+  },
+  "metadata" : { }
 }

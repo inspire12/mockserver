@@ -555,7 +555,7 @@ public class LlmCodecGoldenFileTest {
      * <ul>
      *   <li>{@code id}, fields matching {@code msg_*}, {@code chatcmpl-*}, {@code resp_*},
      *       {@code call_*}, {@code toolu_*}, {@code fc_*} patterns in string values -> {@code "<id>"}</li>
-     *   <li>{@code created}, {@code created_at} -> {@code 0}</li>
+     *   <li>{@code created}, {@code created_at}, {@code completed_at} -> {@code 0}</li>
      *   <li>Usage numeric values -> {@code 0} (structure preserved)</li>
      *   <li>{@code system_fingerprint} -> {@code "<fp>"}</li>
      *   <li>Duration fields ({@code total_duration}, {@code load_duration}, etc.) -> {@code 0}</li>
@@ -591,7 +591,7 @@ public class LlmCodecGoldenFileTest {
         }
 
         // Timestamp fields
-        if ("created".equals(fieldName) || "created_at".equals(fieldName)) {
+        if ("created".equals(fieldName) || "created_at".equals(fieldName) || "completed_at".equals(fieldName)) {
             if (value.isNumber()) {
                 parent.put(fieldName, 0);
             } else if (value.isTextual()) {

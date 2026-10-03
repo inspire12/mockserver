@@ -7,6 +7,7 @@ import org.junit.Before;
 import org.junit.Test;
 import org.mockserver.llm.codec.OpenAiResponsesCodec;
 import org.mockserver.logging.MockServerLogger;
+import org.mockserver.matchers.LlmConversationMatcher;
 import org.mockserver.mock.action.http.HttpLlmResponseActionHandler;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
@@ -20,9 +21,11 @@ import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
+import static org.hamcrest.Matchers.startsWith;
 import static org.mockserver.model.Completion.completion;
 import static org.mockserver.model.HttpLlmResponse.llmResponse;
 import static org.mockserver.model.HttpRequest.request;
+import static org.mockserver.model.ToolUse.toolUse;
 
 /**
  * OpenAI Responses API server-side state: {@code previous_response_id} chaining,
@@ -151,5 +154,75 @@ public class OpenAiResponsesStateTest {
         assertThat(OpenAiResponsesStore.getInstance().get(id).isPresent(), is(true));
         OpenAiResponsesStore.getInstance().reset();
         assertThat(OpenAiResponsesStore.getInstance().get(id).isPresent(), is(false));
+    }
+
+    @Test
+    public void chainedFunctionCallOutputCorrelatesToTheIssuedCallId() throws Exception {
+        HttpRequest firstRequest = request().withMethod("POST").withPath("/v1/responses")
+            .withBody("{\"model\":\"gpt-4o\",\"input\":\"weather in Paris?\"}");
+        HttpResponse first = handler.handle(
+            llmResponse()
+                .withProvider(Provider.OPENAI_RESPONSES)
+                .withModel("gpt-4o")
+                .withCompletion(completion()
+                    .withToolCall(toolUse("get_weather").withArguments("{\"city\":\"Paris\"}"))
+                    .withToolCall(toolUse("get_time").withArguments("{\"tz\":\"CET\"}"))),
+            firstRequest);
+        JsonNode firstRoot = OBJECT_MAPPER.readTree(first.getBodyAsString());
+        String weatherCallId = firstRoot.path("output").path(0).path("call_id").asText();
+        assertThat(weatherCallId, startsWith("call_"));
+
+        // The chained turn sends only one tool result; the prior function_calls come from the store.
+        // Two tools are called so the matcher cannot fall back to positional correlation.
+        HttpRequest chained = request().withMethod("POST").withPath("/v1/responses")
+            .withBody("{\"model\":\"gpt-4o\",\"previous_response_id\":\"" + firstRoot.path("id").asText() + "\","
+                + "\"input\":[{\"type\":\"function_call_output\",\"call_id\":\"" + weatherCallId + "\",\"output\":\"18C\"}]}");
+
+        assertThat(new LlmConversationMatcher().withProvider(Provider.OPENAI_RESPONSES)
+            .withContainsToolResultFor("get_weather").matches(chained), is(true));
+        assertThat(new LlmConversationMatcher().withProvider(Provider.OPENAI_RESPONSES)
+            .withContainsToolResultFor("get_time").matches(chained), is(false));
+    }
+
+    @Test
+    public void chainedFunctionCallOutputCorrelatesToAConfiguredToolUseId() throws Exception {
+        HttpResponse first = handler.handle(
+            llmResponse()
+                .withProvider(Provider.OPENAI_RESPONSES)
+                .withModel("gpt-4o")
+                .withCompletion(completion()
+                    .withToolCall(toolUse("get_weather").withId("call_abc123").withArguments("{\"city\":\"Paris\"}"))
+                    .withToolCall(toolUse("get_time").withId("call_def456").withArguments("{\"tz\":\"CET\"}"))),
+            request().withMethod("POST").withPath("/v1/responses").withBody("{\"model\":\"gpt-4o\",\"input\":\"weather?\"}"));
+        String firstId = OBJECT_MAPPER.readTree(first.getBodyAsString()).path("id").asText();
+
+        HttpRequest chained = request().withMethod("POST").withPath("/v1/responses")
+            .withBody("{\"model\":\"gpt-4o\",\"previous_response_id\":\"" + firstId + "\","
+                + "\"input\":[{\"type\":\"function_call_output\",\"call_id\":\"call_abc123\",\"output\":\"18C\"}]}");
+
+        assertThat(new LlmConversationMatcher().withProvider(Provider.OPENAI_RESPONSES)
+            .withContainsToolResultFor("get_weather").matches(chained), is(true));
+        assertThat(new LlmConversationMatcher().withProvider(Provider.OPENAI_RESPONSES)
+            .withContainsToolResultFor("get_time").matches(chained), is(false));
+    }
+
+    @Test
+    public void instructionsAreNotCarriedIntoAChainedTurn() throws Exception {
+        String firstId = serveTurn("{\"model\":\"gpt-4o\",\"instructions\":\"Be terse.\",\"input\":\"hi\"}", "hello");
+
+        List<ParsedMessage> stored = OpenAiResponsesStore.getInstance().get(firstId).get()
+            .getConversation().getMessages();
+        assertThat(stored, hasSize(2));
+        assertThat(stored.get(0).getRole(), is(ParsedMessage.Role.USER));
+
+        ParsedConversation chained = codec.decode(request().withMethod("POST").withPath("/v1/responses")
+            .withBody("{\"model\":\"gpt-4o\",\"instructions\":\"Be verbose.\",\"previous_response_id\":\"" + firstId + "\","
+                + "\"input\":\"again\"}"));
+        List<ParsedMessage> messages = chained.getMessages();
+        assertThat(messages, hasSize(4));
+        assertThat(messages.get(0).getRole(), is(ParsedMessage.Role.SYSTEM));
+        assertThat(messages.get(0).getTextContent(), is("Be verbose."));
+        assertThat(messages.get(1).getTextContent(), is("hi"));
+        assertThat(messages.get(3).getTextContent(), is("again"));
     }
 }

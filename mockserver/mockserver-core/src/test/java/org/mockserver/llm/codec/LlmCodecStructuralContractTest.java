@@ -167,6 +167,17 @@ public class LlmCodecStructuralContractTest {
                 JsonNode content = item.path("content").path(0);
                 assertThat(ctx + " content[0].type", content.path("type").asText(ABSENT), is("output_text"));
                 assertThat(ctx + " content[0].text", content.path("text").asText(ABSENT), is(TEXT));
+                assertThat(ctx + " content[0].annotations is array", content.path("annotations").isArray(), is(true));
+                assertThat(ctx + " output[0].status", item.path("status").asText(ABSENT), is("completed"));
+                // Response fields openai-python declares without a default.
+                assertThat(ctx + " parallel_tool_calls is boolean", root.path("parallel_tool_calls").isBoolean(), is(true));
+                assertThat(ctx + " tool_choice present", root.has("tool_choice"), is(true));
+                assertThat(ctx + " tools is array", root.path("tools").isArray(), is(true));
+                assertThat(ctx + " created_at is number", root.path("created_at").isNumber(), is(true));
+                assertThat(ctx + " usage.input_tokens_details.cached_tokens",
+                    root.path("usage").path("input_tokens_details").path("cached_tokens").isInt(), is(true));
+                assertThat(ctx + " usage.output_tokens_details.reasoning_tokens",
+                    root.path("usage").path("output_tokens_details").path("reasoning_tokens").isInt(), is(true));
                 break;
             }
             case OLLAMA: {
@@ -227,6 +238,9 @@ public class LlmCodecStructuralContractTest {
                 // Responses emits function-call arguments as a JSON *string*.
                 assertThat(ctx + " arguments is string", item.path("arguments").isTextual(), is(true));
                 assertThat(ctx + " arguments", item.path("arguments").asText(ABSENT), is(TOOL_ARGS_JSON));
+                // function_call_output echoes call_id, which is distinct from the fc_ item id.
+                assertThat(ctx + " output[0].call_id", item.path("call_id").asText(ABSENT), startsWith("call_"));
+                assertThat(ctx + " output[0].id", item.path("id").asText(ABSENT), startsWith("fc_"));
                 break;
             }
             case OLLAMA: {
@@ -325,6 +339,10 @@ public class LlmCodecStructuralContractTest {
                     concat(dataOf(events, "response.output_text.delta"), d -> d.path("delta").asText("")), is(TEXT));
                 assertThat(ctx + " output_text.done text",
                     dataOf(events, "response.output_text.done").get(0).path("text").asText(ABSENT), is(TEXT));
+                assertResponsesStreamEnvelope(ctx, events);
+                JsonNode completedOutput = dataOf(events, "response.completed").get(0).path("response").path("output");
+                assertThat(ctx + " completed output[0].content[0].text",
+                    completedOutput.path(0).path("content").path(0).path("text").asText(ABSENT), is(TEXT));
                 break;
             }
             case OLLAMA: {
@@ -395,6 +413,17 @@ public class LlmCodecStructuralContractTest {
                 assertThat(ctx + " item.type", doneItem.path("type").asText(ABSENT), is("function_call"));
                 assertThat(ctx + " item.name", doneItem.path("name").asText(ABSENT), is("get_weather"));
                 assertThat(ctx + " item.arguments", doneItem.path("arguments").asText(ABSENT), is(TOOL_ARGS_JSON));
+                assertThat(ctx + " item.call_id", doneItem.path("call_id").asText(ABSENT), startsWith("call_"));
+                assertThat(ctx + " reassembled argument deltas",
+                    concat(dataOf(events, "response.function_call_arguments.delta"), d -> d.path("delta").asText("")),
+                    is(TOOL_ARGS_JSON));
+                assertThat(ctx + " function_call_arguments.done arguments",
+                    dataOf(events, "response.function_call_arguments.done").get(0).path("arguments").asText(ABSENT),
+                    is(TOOL_ARGS_JSON));
+                assertResponsesStreamEnvelope(ctx, events);
+                JsonNode completedItem = dataOf(events, "response.completed").get(0).path("response").path("output").path(0);
+                assertThat(ctx + " completed output[0].call_id",
+                    completedItem.path("call_id").asText(ABSENT), is(doneItem.path("call_id").asText()));
                 break;
             }
             case OLLAMA: {
@@ -564,6 +593,29 @@ public class LlmCodecStructuralContractTest {
                 + "Present event names: " + eventNames(events));
         }
         return out;
+    }
+
+    /**
+     * Every Responses stream event carries its type and a sequence_number counting from 0, and
+     * response.created / in_progress / completed each carry a full Response object
+     * (openai-python ResponseCreatedEvent / ResponseInProgressEvent / ResponseCompletedEvent).
+     */
+    private void assertResponsesStreamEnvelope(String ctx, List<StreamEvent> events) {
+        for (int i = 0; i < events.size(); i++) {
+            JsonNode json = events.get(i).json;
+            assertThat(ctx + " event " + i + " type", json.path("type").asText(ABSENT), is(events.get(i).event));
+            assertThat(ctx + " event " + i + " sequence_number", json.path("sequence_number").asInt(-1), is(i));
+        }
+        for (String name : new String[]{"response.created", "response.in_progress", "response.completed"}) {
+            JsonNode response = dataOf(events, name).get(0).path("response");
+            assertThat(ctx + " " + name + " object", response.path("object").asText(ABSENT), is("response"));
+            assertThat(ctx + " " + name + " output is array", response.path("output").isArray(), is(true));
+            assertThat(ctx + " " + name + " model", response.has("model"), is(true));
+        }
+        JsonNode completed = dataOf(events, "response.completed").get(0).path("response");
+        assertThat(ctx + " completed status", completed.path("status").asText(ABSENT), is("completed"));
+        assertThat(ctx + " completed output not empty", completed.path("output").size(), greaterThan(0));
+        assertThat(ctx + " completed usage", completed.path("usage").has("total_tokens"), is(true));
     }
 
     private String lastDataLiteral(List<StreamEvent> events) {
