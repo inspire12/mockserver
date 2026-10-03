@@ -109,7 +109,7 @@ exec "$SCRIPT_DIR/../run-in-docker.sh" \
     ./mvnw -pl ${MODULE} verify \
       -Dtest='ZzzNoSuchUnitTest' \
       -Dit.test='TproxyEndToEndIntegrationTest,SoOriginalDstEndToEndIntegrationTest,EbpfOriginalDestinationEndToEndIntegrationTest' \
-      -DfailIfNoTests=false \
+      -Dsurefire.failIfNoSpecifiedTests=false \
       -Djacoco.skip=true -Dmaven.gitcommitid.skip=true \
       --batch-mode --no-transfer-progress
 

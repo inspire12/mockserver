@@ -11,8 +11,7 @@
           <option name="goals">
             <list>
               <option value="install" />
-              <option value="-DskipAssembly=true" />
-              <option value="-DfailIfNoTests=false" />
+              <option value="-Dsurefire.failIfNoSpecifiedTests=false" />
               <option value="-Dtest=none" />
               <option value="-Dit.test=*IntegrationTest" />
             </list>

@@ -1599,6 +1599,28 @@
                         </fileset>
                     </filesets>
                 </configuration>
+                <executions>
+                    <!-- Failsafe leaves failsafe-summary.xml untouched when it executes no test, so
+                         verify would read the previous run's result. Remove it before each run. -->
+                    <execution>
+                        <id>delete-stale-failsafe-summary</id>
+                        <phase>pre-integration-test</phase>
+                        <goals>
+                            <goal>clean</goal>
+                        </goals>
+                        <configuration>
+                            <excludeDefaultDirectories>true</excludeDefaultDirectories>
+                            <filesets combine.self="override">
+                                <fileset>
+                                    <directory>${project.build.directory}/failsafe-reports</directory>
+                                    <includes>
+                                        <include>failsafe-summary.xml</include>
+                                    </includes>
+                                </fileset>
+                            </filesets>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
             <!-- code coverage -->
             <plugin>

@@ -213,11 +213,14 @@ cd "$REPO_ROOT/mockserver" && ./mvnw -pl mockserver-core test \
 ### netty — integration tests
 
 ```bash
-cd "$REPO_ROOT/mockserver" && ./mvnw -pl mockserver-netty -am verify \
-  -Dtest=none -DfailIfNoTests=false \
+cd "$REPO_ROOT/mockserver" && ./mvnw -pl mockserver-netty -am clean verify \
+  -Dtest=none -Dsurefire.failIfNoSpecifiedTests=false \
+  -Dfailsafe.failIfNoSpecifiedTests=false -Dmockserver.failIfNoIntegrationTests=false \
   -Dit.test="CustomPrivateKeyAndCertificateWithECKeysMockingIntegrationTest,ClientAuthenticationCustomPrivateKeyAndCertificateMockingIntegrationTest,ClientAuthenticationAdditionalCertificateChainMockingIntegrationTest,ForwardWithCustomClientCertificateIntegrationTest" \
   -Djava.security.egd=file:/dev/urandom
 ```
+
+Those flags let a class name that matches nothing pass, so confirm the Maven output shows `Tests run: … -- in <class>` for each of the four classes above (a renamed or deleted class otherwise passes silently).
 
 ## Step 7: Clean Up
 
