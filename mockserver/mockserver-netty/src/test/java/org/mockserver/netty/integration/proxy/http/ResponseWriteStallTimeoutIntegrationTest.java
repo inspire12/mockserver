@@ -401,11 +401,15 @@ public class ResponseWriteStallTimeoutIntegrationTest {
     public void shouldNotResetAnHttp2StreamQueuedBehindAStreamItsClientIsTaking() throws Exception {
         try (Http2Client client = Http2Client.open(mockServer)) {
             Http2Client.Stream first = client.request("/forward/fixed?test=http2-priority-first");
+            // a stream with nothing to send yields to its dependants, so the queued stream is opened only once the first's
+            // response is flowing; had its response reached MockServer first, it would be sent a window's worth and stall
+            awaitData(first);
             // depends exclusively on the first, so it gets no data, and its window does not change, while the first has any to send
             Http2Client.Stream queued = client.request("/forward/fixed?test=http2-priority-queued", first);
             consumeSlowly(client, first);
-            assertThat("the queued stream is still in progress", queued.ended.getCount(), is(1L));
             assertThat("the queued stream got nothing while the first had data to send", queued.dataBytes.get(), is(0L));
+            assertThat("the queued stream is still in progress, not reset with " + queued.resetErrorCode.get(), queued.ended.getCount(), is(1L));
+            assertThat("the first stream is still in progress, not reset with " + first.resetErrorCode.get(), first.ended.getCount(), is(1L));
             client.consumeAll(first, queued);
             assertCompleteWithFixedBody(first);
             assertCompleteWithFixedBody(queued);
@@ -419,6 +423,13 @@ public class ResponseWriteStallTimeoutIntegrationTest {
             TimeUnit.MILLISECONDS.sleep(READ_PAUSE_MILLIS);
             client.consumeReceived(stream);
         }
+    }
+
+    private static void awaitData(Http2Client.Stream stream) throws InterruptedException {
+        for (int i = 0; i < 3000 && stream.dataBytes.get() == 0 && stream.ended.getCount() > 0; i++) {
+            TimeUnit.MILLISECONDS.sleep(10);
+        }
+        assertThat("the stream's response is flowing", stream.dataBytes.get(), greaterThan(0L));
     }
 
     private static void assertCompleteWithFixedBody(Http2Client.Stream stream) throws InterruptedException {
