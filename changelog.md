@@ -393,7 +393,9 @@ This release delivers a sustained performance and memory programme alongside dat
   only absorbs short bursts), events dropped because the bodies waiting to be logged went over their
   memory limit (lower the log level or raise `maxEventLogSizeInBytes`), and recorded entries evicted
   (raise `maxLogEntries`, or `maxEventLogSizeInBytes` when that was the limit reached). The matching
-  entry in the dashboard log says whether events were dropped, evicted or both. Tests that check this
+  entry in the dashboard log shows the same: each limit that was reached, how many entries were lost
+  to it and the setting to change, whether or not metrics are enabled. In the server's own log the
+  entry lists those counts and limits. Tests that check this
   message's wording may need updating. A verification already failed this way on count-based eviction
   before this release; what is new is that it also fails on eviction driven by the new byte budget, and
   on dropped events.

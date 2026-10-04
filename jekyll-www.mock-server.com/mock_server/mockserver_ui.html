@@ -291,6 +291,8 @@ sitemap:
 
 <p>MockServer keeps only a bounded number of recent log events in memory (controlled by <code>maxLogEntries</code>). Once that limit is reached the oldest events are dropped — a common, easy-to-miss cause of "verification intermittently fails" or requests seeming to vanish from the dashboard. When this happens, the Dashboard and Traffic views show a dismissible warning telling you how many events have been dropped; increase <a href="/mock_server/configuration_properties.html">maxLogEntries</a> (see also the <a href="/mock_server/performance.html">performance guide</a>) so events are retained. The warning only appears when the server is started with metrics enabled and events are actually being dropped.</p>
 
+<p>When a verification fails because of this (see <a href="/mock_server/configuration_properties.html#button_configuration_fail_verification_on_evicted_log">failVerificationOnEvictedLog</a>), its <code>VERIFICATION_FAILED</code> entry in the log says which limit was reached, how many entries were lost to it since the event log was last reset, and which setting to change. This is the same information the failed <code>verify</code> call returns, and it is shown whether or not metrics are enabled.</p>
+
 <a id="ui_active_expectations_section" class="anchor" href="#ui_active_expectations_section">&nbsp;</a>
 
 <h2>Active Expectations</h2>

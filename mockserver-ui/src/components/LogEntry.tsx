@@ -21,11 +21,13 @@ import BoltIcon from '@mui/icons-material/Bolt';
 import type { LogEntryValue, MessagePart } from '../types';
 import JsonViewer from './JsonViewer';
 import BecauseSection from './BecauseSection';
+import EventLogLossDetails from './EventLogLossDetails';
 import CopyButton from './CopyButton';
 import { useDebugMismatchContext } from '../hooks/DebugMismatchContext';
 import { useGenerateStubContext } from '../hooks/GenerateStubContext';
 import { useSetBreakpointContext, type SetBreakpointFn } from '../hooks/SetBreakpointContext';
 import { entryToText } from '../lib/logEntryText';
+import { parseEventLogLoss } from '../lib/eventLogLoss';
 import { parseLogTimestamp, formatCompactTime, formatAbsoluteTime } from '../lib/logEntryTime';
 import { monospaceFontFamily } from '../theme';
 import { useDashboardStore } from '../store';
@@ -390,6 +392,8 @@ function renderMessagePart(part: MessagePart) {
   }
 
   if (part.json) {
+    const loss = parseEventLogLoss(part.value);
+    if (loss) return <EventLogLossDetails key={part.key} loss={loss} />;
     if (typeof part.value === 'object' && part.value !== null) {
       return (
         // Trailing non-breaking space separates the expandable JSON block from
@@ -454,8 +458,10 @@ function isNotMatchedEntry(entry: LogEntryValue): boolean {
 
 function extractRequestFromEntry(entry: LogEntryValue): Record<string, unknown> | null {
   if (!entry.messageParts) return null;
+  // The loss summary of an incomplete-log verification failure is an object
+  // argument too, but it is not a request.
   const jsonParts = entry.messageParts.filter(
-    (p) => p.json && p.argument && typeof p.value === 'object' && p.value !== null,
+    (p) => p.json && p.argument && typeof p.value === 'object' && p.value !== null && !parseEventLogLoss(p.value),
   );
   if (jsonParts.length >= 2) {
     return jsonParts[1]!.value as Record<string, unknown>;

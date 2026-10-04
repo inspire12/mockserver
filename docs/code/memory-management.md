@@ -927,7 +927,16 @@ Two byte bounds apply to the event log: `maxEventLogSizeInBytes` to the deque (r
 | Eviction, count bound | `N recorded entries were EVICTED after the log reached its maximum number of entries (maxLogEntries=…)` | raise `maxLogEntries`, or lower the log level |
 | Eviction, byte bound | `… its maximum size in bytes (maxEventLogSizeInBytes=…)` | raise `maxEventLogSizeInBytes`, or set `maxLoggedBodyBytes` to truncate large bodies |
 
-The `VERIFICATION_FAILED` log entry (shown in the dashboard) ends `because the event log has dropped log events`, `evicted entries`, or `dropped log events and evicted entries` to match. The REST `406` body and every client's assertion message carry the full message unchanged.
+The `VERIFICATION_FAILED` log entry (shown in the dashboard) ends `because the event log has dropped log events`, `evicted entries`, or `dropped log events and evicted entries` to match, followed by a second argument: the same counts and bounds as a map, holding only the causes that occurred. The REST `406` body and every client's assertion message carry the full message unchanged.
+
+| Cause | Fields in the entry's argument |
+|---|---|
+| Ring-full drops | `droppedRingFull` |
+| In-flight byte drops | `droppedInFlightBytes`, `inFlightBytesBudget` |
+| Eviction, count bound | `evictedAtMaxLogEntries`, `maxLogEntries` |
+| Eviction, byte bound | `evictedAtMaxEventLogSizeInBytes`, `maxEventLogSizeInBytes` |
+
+The map is passed as an argument, not concatenated into the format, so the text log prints it after the sentence and the dashboard receives it as a JSON message part, which it renders as one line per cause with that cause's remedy (see [dashboard-ui.md](dashboard-ui.md#failed-verification-on-an-incomplete-event-log)). The remedy wording is the dashboard's own, kept in step with the message by hand. The field names and the entry's text are pinned on both sides by `mockserver-ui/src/__fixtures__/incompleteLogVerificationFailure.json`.
 
 **Clearing the taint.** `reset()` and `clear(null)` reset both taint counters to zero (`clearDropTaint()`) and re-arm both warn-once latches (`droppedLogEventWarned`, `inFlightBytesDropWarned`), so a suite that clears or resets between tests starts each test with a clean slate. A filtered `clear(request)` deliberately does not reset the taint, since removing some entries says nothing about the evidence already lost by prior drops.
 

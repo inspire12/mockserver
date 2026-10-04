@@ -1482,8 +1482,8 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
                                     .setLogLevel(Level.INFO)
                                     .setCorrelationId(logCorrelationId)
                                     .setHttpRequest(verification.getHttpRequest())
-                                    .setMessageFormat("request:{}could not be verified " + verification.getTimes() + " because the event log has " + (evictionFailure.dropped ? evictionFailure.evicted ? "dropped log events and evicted entries" : "dropped log events" : "evicted entries"))
-                                    .setArguments(verification.getHttpRequest())
+                                    .setMessageFormat("request:{}could not be verified " + verification.getTimes() + " because the event log has " + (evictionFailure.dropped ? evictionFailure.evicted ? "dropped log events and evicted entries" : "dropped log events" : "evicted entries") + ":{}")
+                                    .setArguments(verification.getHttpRequest(), evictionFailure.loss)
                             );
                         }
                         resultConsumer.accept(evictionFailure.message);
@@ -1520,7 +1520,8 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
 
     /**
      * Decide whether a would-be PASS is actually unprovable because the event log has evicted
-     * entries, returning the failure message when so and {@code null} when the PASS stands.
+     * entries, returning the failure message (and the same counts and bounds as data, for the
+     * {@code VERIFICATION_FAILED} log entry) when so and {@code null} when the PASS stands.
      * <p>
      * Only verifications carrying an <strong>upper</strong> bound are affected. The asymmetry is the
      * whole point: eviction can only ever make the observed count too LOW, so
@@ -1565,32 +1566,45 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
             .append(" could not be verified ").append(verification.getTimes())
             .append(" because the event log is not a complete record: ");
         StringBuilder remedy = new StringBuilder("To fix: ");
+        // The message's counts and bounds as data, for the log entry's argument. The dashboard reads these
+        // keys (mockserver-ui/src/__fixtures__/incompleteLogVerificationFailure.json pins them on both sides).
+        Map<String, Long> loss = new LinkedHashMap<>();
         if (ringFull > 0) {
+            loss.put("droppedRingFull", ringFull);
             message
                 .append(ringFull).append(ringFull == 1 ? " log event was" : " log events were")
                 .append(" DROPPED before being recorded because the ring buffer was full (log events arrived faster than the single logging thread could record them). ");
             remedy.append("for the ring-full drops, lower the log level (e.g. to WARN) if they persist under steady load — a larger ringBufferSize only absorbs short bursts; ");
         }
         if (inFlightBytes > 0) {
+            long inFlightBudget = maxInFlightBytes;
+            loss.put("droppedInFlightBytes", inFlightBytes);
+            loss.put("inFlightBytesBudget", inFlightBudget);
             message
                 .append(inFlightBytes).append(inFlightBytes == 1 ? " log event was" : " log events were")
                 .append(" DROPPED before being recorded because the request/response bodies waiting to be logged exceeded the in-flight byte budget of ")
-                .append(maxInFlightBytes).append(" bytes (the larger of maxEventLogSizeInBytes and a heap-derived cap). ");
+                .append(inFlightBudget).append(" bytes (the larger of maxEventLogSizeInBytes and a heap-derived cap). ");
             remedy.append("for the in-flight byte drops, lower the log level or, if you have heap to spare, raise maxEventLogSizeInBytes above that budget (maxLoggedBodyBytes does not help: it truncates bodies only after they leave this backlog); ");
         }
         if (countEvicted > 0) {
+            long maxLogEntries = configuration.maxLogEntries();
+            loss.put("evictedAtMaxLogEntries", countEvicted);
+            loss.put("maxLogEntries", maxLogEntries);
             message
                 .append(countEvicted).append(countEvicted == 1 ? " recorded entry was" : " recorded entries were")
-                .append(" EVICTED after the log reached its maximum number of entries (maxLogEntries=").append(configuration.maxLogEntries()).append("). ");
+                .append(" EVICTED after the log reached its maximum number of entries (maxLogEntries=").append(maxLogEntries).append("). ");
             remedy.append("for the evictions at maxLogEntries, raise it, or lower the log level so fewer entries are recorded per request; ");
         }
         if (byteEvicted > 0) {
+            long maxEventLogSizeInBytes = configuration.maxEventLogSizeInBytes();
+            loss.put("evictedAtMaxEventLogSizeInBytes", byteEvicted);
+            loss.put("maxEventLogSizeInBytes", maxEventLogSizeInBytes);
             message
                 .append(byteEvicted).append(byteEvicted == 1 ? " recorded entry was" : " recorded entries were")
-                .append(" EVICTED after the log reached its maximum size in bytes (maxEventLogSizeInBytes=").append(configuration.maxEventLogSizeInBytes()).append("). ");
+                .append(" EVICTED after the log reached its maximum size in bytes (maxEventLogSizeInBytes=").append(maxEventLogSizeInBytes).append("). ");
             remedy.append("for the evictions at maxEventLogSizeInBytes, raise it, or set maxLoggedBodyBytes to truncate large bodies so each recorded entry is smaller; ");
         }
-        return new UnprovableUpperBound(ringFull > 0 || inFlightBytes > 0, evicted > 0, message
+        return new UnprovableUpperBound(ringFull > 0 || inFlightBytes > 0, evicted > 0, Collections.unmodifiableMap(loss), message
             .append("Absence cannot be proven — the matching requests may have been discarded rather than never made. ")
             .append(remedy)
             .append("or reset the event log between tests, or set failVerificationOnEvictedLog=false to restore the previous (unsound) behaviour.")
@@ -1601,11 +1615,13 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
     private static final class UnprovableUpperBound {
         private final boolean dropped;
         private final boolean evicted;
+        private final Map<String, Long> loss;
         private final String message;
 
-        private UnprovableUpperBound(boolean dropped, boolean evicted, String message) {
+        private UnprovableUpperBound(boolean dropped, boolean evicted, Map<String, Long> loss, String message) {
             this.dropped = dropped;
             this.evicted = evicted;
+            this.loss = loss;
             this.message = message;
         }
     }
@@ -1684,8 +1700,8 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
                                     .setLogLevel(Level.INFO)
                                     .setCorrelationId(logCorrelationId)
                                     .setHttpRequest(verification.getHttpRequest())
-                                    .setMessageFormat("response:{}could not be verified " + verification.getTimes() + " because the event log has " + (evictionFailure.dropped ? evictionFailure.evicted ? "dropped log events and evicted entries" : "dropped log events" : "evicted entries"))
-                                    .setArguments(verification.getHttpResponse())
+                                    .setMessageFormat("response:{}could not be verified " + verification.getTimes() + " because the event log has " + (evictionFailure.dropped ? evictionFailure.evicted ? "dropped log events and evicted entries" : "dropped log events" : "evicted entries") + ":{}")
+                                    .setArguments(verification.getHttpResponse(), evictionFailure.loss)
                             );
                         }
                         resultConsumer.accept(evictionFailure.message);

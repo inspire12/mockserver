@@ -1,5 +1,7 @@
 package org.mockserver.log;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.After;
 import org.junit.Test;
 import org.mockserver.configuration.Configuration;
@@ -11,7 +13,12 @@ import org.mockserver.scheduler.Scheduler;
 import org.mockserver.verify.Verification;
 import org.slf4j.event.Level;
 
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.stream.Collectors;
@@ -23,6 +30,8 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.greaterThan;
+import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.instanceOf;
 import static org.junit.Assert.fail;
 import static org.mockito.Mockito.mock;
 import static org.mockserver.log.MockServerEventLog.DropReason.IN_FLIGHT_BYTES;
@@ -255,6 +264,119 @@ public class MockServerEventLogVerifyIncompleteLogCauseTest {
         assertThat(verificationFailedMessageFormats(), contains(containsString("could not be verified exactly 0 times because the event log has dropped log events and evicted entries")));
     }
 
+    @Test
+    public void shouldGiveTheRingFullDropCountInTheVerificationFailedLogEntry() throws Exception {
+        log = eventLogRecordingItsOwnVerifications(smallRing().maxLogEntries(1000).maxEventLogSizeInBytes(0L));
+        dropBecauseTheRingIsFull();
+
+        String failure = verifyNever("/absent");
+
+        Map<String, Long> loss = lossInTheVerificationFailedLogEntry();
+        assertThat(new ArrayList<>(loss.keySet()), contains("droppedRingFull"));
+        assertThat(loss.get("droppedRingFull"), greaterThan(1L));
+        assertThat(failure, containsString(loss.get("droppedRingFull") + " log events were DROPPED before being recorded " + RING_FULL_CAUSE));
+    }
+
+    @Test
+    public void shouldGiveTheInFlightDropCountAndBudgetInTheVerificationFailedLogEntry() throws Exception {
+        log = eventLogRecordingItsOwnVerifications(smallRing().maxLogEntries(1000).maxEventLogSizeInBytes(0L));
+        dropBecauseOfInFlightBytes();
+
+        String failure = verifyNever("/absent");
+
+        Map<String, Long> loss = lossInTheVerificationFailedLogEntry();
+        assertThat(new ArrayList<>(loss.keySet()), contains("droppedInFlightBytes", "inFlightBytesBudget"));
+        assertThat(loss.get("droppedInFlightBytes"), is(3L));
+        assertThat(loss.get("inFlightBytesBudget"), is((long) IN_FLIGHT_CAP));
+        assertThat(failure, containsString("3 log events were DROPPED before being recorded"));
+        assertThat(failure, containsString(IN_FLIGHT_CAUSE));
+    }
+
+    @Test
+    public void shouldGiveTheCountEvictionsAndBoundInTheVerificationFailedLogEntry() {
+        log = eventLogRecordingItsOwnVerifications(smallRing().maxLogEntries(8).maxEventLogSizeInBytes(0L));
+        addAndDrain("/1", "/2", "/3", "/4", "/5", "/6", "/7", "/8", "/9", "/10");
+
+        String failure = verifyNever("/absent");
+
+        Map<String, Long> loss = lossInTheVerificationFailedLogEntry();
+        assertThat(new ArrayList<>(loss.keySet()), contains("evictedAtMaxLogEntries", "maxLogEntries"));
+        assertThat(loss.get("evictedAtMaxLogEntries"), greaterThan(1L));
+        assertThat(loss.get("maxLogEntries"), is(8L));
+        assertThat(failure, containsString(loss.get("evictedAtMaxLogEntries") + " recorded entries were " + COUNT_EVICTED_CAUSE + "8)"));
+    }
+
+    @Test
+    public void shouldGiveTheByteEvictionsAndBoundInTheVerificationFailedLogEntry() {
+        log = eventLogRecordingItsOwnVerifications(smallRing().maxLogEntries(1000).maxEventLogSizeInBytes(1500L));
+        addAndDrain("/first", "/second", "/third", "/fourth");
+
+        String failure = verifyNever("/absent");
+
+        Map<String, Long> loss = lossInTheVerificationFailedLogEntry();
+        assertThat(new ArrayList<>(loss.keySet()), contains("evictedAtMaxEventLogSizeInBytes", "maxEventLogSizeInBytes"));
+        assertThat(loss.get("evictedAtMaxEventLogSizeInBytes"), greaterThan(1L));
+        assertThat(loss.get("maxEventLogSizeInBytes"), is(1500L));
+        assertThat(failure, containsString(loss.get("evictedAtMaxEventLogSizeInBytes") + " recorded entries were " + BYTE_EVICTED_CAUSE + "1500)"));
+    }
+
+    @Test
+    public void shouldGiveTheLossInTheResponseVerificationFailedLogEntry() {
+        log = eventLogRecordingItsOwnVerifications(smallRing().maxLogEntries(8).maxEventLogSizeInBytes(0L));
+        addAndDrain("/1", "/2", "/3", "/4", "/5", "/6", "/7", "/8", "/9", "/10");
+
+        verify(verification().withRequest(request("/absent")).withResponse(response().withStatusCode(200)).withTimes(never()));
+
+        assertThat(verificationFailedMessageFormats(), contains("response:{}could not be verified exactly 0 times because the event log has evicted entries:{}"));
+        Map<String, Long> loss = lossInTheVerificationFailedLogEntry();
+        assertThat(new ArrayList<>(loss.keySet()), contains("evictedAtMaxLogEntries", "maxLogEntries"));
+        assertThat(loss.get("maxLogEntries"), is(8L));
+    }
+
+    @Test
+    public void shouldGiveTheCountsAndBoundsInTheRenderedLogMessage() {
+        log = eventLogRecordingItsOwnVerifications(smallRing().maxLogEntries(8).maxEventLogSizeInBytes(0L));
+        addAndDrain("/1", "/2", "/3", "/4", "/5", "/6", "/7", "/8", "/9", "/10");
+
+        verifyNever("/absent");
+
+        Map<String, Long> loss = lossInTheVerificationFailedLogEntry();
+        String rendered = verificationFailedEntries().get(0).getMessage();
+        assertThat(rendered, containsString("because the event log has evicted entries:"));
+        assertThat(rendered, containsString("evictedAtMaxLogEntries=" + loss.get("evictedAtMaxLogEntries")));
+        assertThat(rendered, containsString("maxLogEntries=8"));
+    }
+
+    // The dashboard reads the entry's text and the loss fields by name; the fixture is the entry as the
+    // dashboard receives it with every cause present, and the UI's tests render the same file.
+    @Test
+    public void shouldLogTheTextAndLossFieldsTheDashboardReads() throws Exception {
+        JsonNode dashboardParts = dashboardFixture().get("logEntry").get("messageParts");
+        // the count bound evicts for each small entry past the third, then the large body evicts by bytes
+        log = eventLogRecordingItsOwnVerifications(smallRing().maxLogEntries(3).maxEventLogSizeInBytes(4000L));
+        addAndDrain("/first", "/second", "/third", "/fourth", "/fifth");
+        log.add(receivedRequest(request("/large").withMethod("POST").withBody(new byte[3000])));
+        drain();
+        dropBecauseTheRingIsFull();
+        dropBecauseOfInFlightBytes();
+
+        String failure = verifyNever("/absent");
+
+        String[] text = verificationFailedMessageFormats().get(0).split("\\{}");
+        assertThat(text.length, is(2));
+        assertThat(text[0], is(dashboardParts.get(0).get("value").asText()));
+        assertThat(text[1], is(dashboardParts.get(2).get("value").asText()));
+        List<String> dashboardLossFields = new ArrayList<>();
+        dashboardParts.get(3).get("value").fieldNames().forEachRemaining(dashboardLossFields::add);
+        assertThat(dashboardLossFields, hasSize(7));
+        Map<String, Long> loss = lossInTheVerificationFailedLogEntry();
+        assertThat(new ArrayList<>(loss.keySet()), is(dashboardLossFields));
+        assertThat(failure, containsString(loss.get("droppedRingFull") + " log events were DROPPED before being recorded " + RING_FULL_CAUSE));
+        assertThat(failure, containsString(loss.get("droppedInFlightBytes") + " log events were DROPPED before being recorded because the request/response bodies"));
+        assertThat(failure, containsString(loss.get("evictedAtMaxLogEntries") + " recorded entries were " + COUNT_EVICTED_CAUSE + loss.get("maxLogEntries") + ")"));
+        assertThat(failure, containsString(loss.get("evictedAtMaxEventLogSizeInBytes") + " recorded entries were " + BYTE_EVICTED_CAUSE + loss.get("maxEventLogSizeInBytes") + ")"));
+    }
+
     // A four-slot ring and a pinned in-flight cap, so each drop path can be reached with a handful of
     // entries. The cap is derived and never below the heap-derived default, so it is pinned by override.
     private static Configuration smallRing() {
@@ -354,10 +476,40 @@ public class MockServerEventLogVerifyIncompleteLogCauseTest {
     }
 
     private List<String> verificationFailedMessageFormats() {
-        return drain().stream()
-            .filter(entry -> entry.getType() == VERIFICATION_FAILED)
+        return verificationFailedEntries().stream()
             .map(LogEntry::getMessageFormat)
             .collect(Collectors.toList());
+    }
+
+    private List<LogEntry> verificationFailedEntries() {
+        return drain().stream()
+            .filter(entry -> entry.getType() == VERIFICATION_FAILED)
+            .collect(Collectors.toList());
+    }
+
+    // The second argument of the one VERIFICATION_FAILED entry: every value must be a count or a bound.
+    @SuppressWarnings("unchecked")
+    private Map<String, Long> lossInTheVerificationFailedLogEntry() {
+        List<LogEntry> failed = verificationFailedEntries();
+        assertThat(failed, hasSize(1));
+        Object[] arguments = failed.get(0).getArguments();
+        assertThat(arguments.length, is(2));
+        assertThat(arguments[1], instanceOf(Map.class));
+        for (Object value : ((Map<String, Object>) arguments[1]).values()) {
+            assertThat(value, instanceOf(Long.class));
+        }
+        return (Map<String, Long>) arguments[1];
+    }
+
+    private static JsonNode dashboardFixture() throws IOException {
+        String relativePath = "mockserver-ui/src/__fixtures__/incompleteLogVerificationFailure.json";
+        for (File dir = new File(System.getProperty("user.dir")).getAbsoluteFile(); dir != null; dir = dir.getParentFile()) {
+            File candidate = new File(dir, relativePath);
+            if (candidate.isFile()) {
+                return new ObjectMapper().readTree(candidate);
+            }
+        }
+        throw new FileNotFoundException("could not find '" + relativePath + "' above " + System.getProperty("user.dir"));
     }
 
     private String verifyNever(String path) {

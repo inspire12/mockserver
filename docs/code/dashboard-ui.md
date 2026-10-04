@@ -862,6 +862,21 @@ See [docs/code/breakpoints.md](breakpoints.md) for the server-side architecture 
 
 Any drop makes it a warning titled **Log Events Dropped**; eviction alone is an info `Alert` titled **Log Events Evicted**, since a busy server keeps evicting by design. Drops use `role="alert"`; the eviction-only notice uses `role="status"` so a count that grows on every poll is announced politely rather than as an alert. Every cause present gets its own line. `App.tsx` mounts it only on the Dashboard and Traffic views (the request/log views that the loss would make incomplete, which also avoids polling metrics from unrelated tabs). The counts come from `useLogPressure` (`src/hooks/useLogPressure.ts`, parsed by `src/lib/logPressure.ts`), which polls the existing `GET /mockserver/metrics` endpoint slowly (15s), pauses while the tab is hidden, and stops permanently on a `404` (metrics disabled — the counters are then unavailable, so the banner can never fire). Dismissal is remembered at the counts seen at dismiss time: more drops re-show it, further eviction alone does not, and a counter falling below its dismissed value (a server restart) clears the dismissal. It stays hidden on a healthy server (all counts 0) or when metrics are disabled. "Learn more" links to the performance page on www.mock-server.com.
 
+## Failed Verification on an Incomplete Event Log
+
+A verification that asserts an upper bound fails, rather than passes, once the event log has lost entries (see [memory-management.md](memory-management.md)). Its `VERIFICATION_FAILED` log entry carries the per-cause counts and bounds as a JSON message part, and `LogEntry` renders that part with `src/components/EventLogLossDetails.tsx` instead of the generic JSON viewer, so the entry shows what a REST client reads in the failure message:
+
+| Field(s) in the message part | Line shown | Remedy shown |
+|------------------------------|------------|--------------|
+| `droppedRingFull` | N log events were dropped because the ring buffer was full | lower the log level; a larger `ringBufferSize` only absorbs short bursts |
+| `droppedInFlightBytes`, `inFlightBytesBudget` | N log events were dropped because the bodies waiting to be logged exceeded the in-flight byte budget of B bytes | lower the log level, or raise `maxEventLogSizeInBytes` above the budget (not `maxLoggedBodyBytes`) |
+| `evictedAtMaxLogEntries`, `maxLogEntries` | N recorded entries were evicted at `maxLogEntries=…` | raise `maxLogEntries`, or lower the log level |
+| `evictedAtMaxEventLogSizeInBytes`, `maxEventLogSizeInBytes` | N recorded entries were evicted at `maxEventLogSizeInBytes=…` | raise `maxEventLogSizeInBytes`, or set `maxLoggedBodyBytes` |
+
+Only the causes that happened are listed, followed by the two alternatives common to all (reset the event log between tests, or `failVerificationOnEvictedLog=false`). Unlike the log-pressure banner, this needs no metrics endpoint and its counts are since the event log was last reset, not lifetime totals.
+
+`src/lib/eventLogLoss.ts` holds the parsing and the wording. `parseEventLogLoss` is strict: a part with a field it does not know, a value that is not a number, or no loss at all is left to the JSON viewer, so an unrecognised summary is shown raw rather than partly. The same check keeps the summary from being taken for the entry's request (the "Create from this request" menu and the breakpoint prefill read the request part), and the copy button copies the sentences the row shows. The field names are the server's; `src/__fixtures__/incompleteLogVerificationFailure.json` is the entry as the dashboard receives it and is read by the UI tests, by `DashboardLogEntryDTOSerializerTest` (wire shape) and by `MockServerEventLogVerifyIncompleteLogCauseTest` (the text and field names the server logs).
+
 ## AppBar Styling and Responsive Behaviour
 
 The AppBar navigation is driven by `NAV_GROUPS` — six top-level group-button entries, each of which opens a dropdown `Menu` of its member views. Groups, in order:
@@ -1078,6 +1093,7 @@ Expandable match failure reasons"]
 | `CopyButton` | `CopyButton.tsx` | Hover-reveal icon button that copies text to clipboard |
 | `DescriptionDisplay` | `DescriptionDisplay.tsx` | Renders description variants: plain string, structured `{first, second}`, or JSON object |
 | `BecauseSection` | `BecauseSection.tsx` | Expandable list of match failure reasons for `EXPECTATION_NOT_MATCHED` entries |
+| `EventLogLossDetails` | `EventLogLossDetails.tsx` | What the event log lost and the setting to change, inside a `VERIFICATION_FAILED` entry for a verification that failed on an incomplete log |
 | `ErrorBoundary` | `ErrorBoundary.tsx` | Catches render-time exceptions; shows a recoverable inline fallback; keyed-reset on `view`; hard-reload for chunk-load failures |
 | `HumanErrorAlert` | `HumanErrorAlert.tsx` | Shared error alert: short `message` + inline "Details" expander for the raw server body |
 | `SamlDialog` | `SamlDialog.tsx` | Mock SAML 2.0 IdP registration dialog; backed by `lib/saml.ts` → `PUT /mockserver/saml` |
@@ -1252,7 +1268,7 @@ Vitest + React Testing Library + jsdom — see `mockserver-ui/src/__tests__/` fo
 |------|--------------------|
 | Store + hooks | `store.test.ts`, `useConnectionParams.test.ts`, `useKeyboardShortcuts.test.ts`, `useWebSocket.test.ts`, `useAutoRefresh.test.ts` |
 | App-chrome components | `AppBar.test.tsx`, `Panel.test.tsx`, `BecauseSection.test.tsx`, `CopyButton.test.tsx`, `DescriptionDisplay.test.tsx`, `HumanErrorAlert.test.tsx` |
-| Log and request panels | `LogEntry.test.tsx`, `LogGroup.test.tsx`, `LogPanel.test.tsx`, `RequestPanel.test.tsx`, `ExpectationPanel.test.tsx`, `FilterPanel.test.tsx`, `JsonListItem.test.tsx` |
+| Log and request panels | `LogEntry.test.tsx`, `EventLogLossDetails.test.tsx`, `LogGroup.test.tsx`, `LogPanel.test.tsx`, `RequestPanel.test.tsx`, `ExpectationPanel.test.tsx`, `FilterPanel.test.tsx`, `JsonListItem.test.tsx` |
 | Traffic / Sessions inspectors | `TrafficInspector.test.tsx`, `SessionInspector.test.tsx`, `PredicatePills.test.tsx`, `AgentRunGraph.test.tsx` |
 | Responsive layout | `responsiveLayout.test.tsx` |
 | Metrics view | `MetricsView.test.tsx` |

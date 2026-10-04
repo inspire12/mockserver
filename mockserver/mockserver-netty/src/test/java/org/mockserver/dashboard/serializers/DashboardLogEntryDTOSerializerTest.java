@@ -1,7 +1,10 @@
 package org.mockserver.dashboard.serializers;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectWriter;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.base.Joiner;
 import com.google.common.base.Splitter;
 import io.netty.buffer.ByteBufUtil;
@@ -12,10 +15,15 @@ import org.mockserver.log.model.LogEntry;
 import org.mockserver.serialization.ObjectMapperFactory;
 import org.slf4j.event.Level;
 
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.not;
@@ -23,6 +31,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.core.Is.is;
 import static org.mockserver.character.Character.NEW_LINE;
 import static org.mockserver.log.model.LogEntry.LogMessageType.FORWARDED_REQUEST;
+import static org.mockserver.log.model.LogEntry.LogMessageType.VERIFICATION_FAILED;
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
 
@@ -777,5 +786,43 @@ public class DashboardLogEntryDTOSerializerTest {
             "    } ]\n" +
             "  }\n" +
             "}"));
+    }
+
+    // The fixture is the entry as the dashboard receives it; the UI's tests render the same file, and
+    // MockServerEventLogVerifyIncompleteLogCauseTest checks the server logs its text and loss fields.
+    @Test
+    public void shouldSerialiseIncompleteLogVerificationFailureAsTheDashboardReadsIt() throws IOException {
+        // given
+        JsonNode expectedParts = dashboardFixture("incompleteLogVerificationFailure.json").get("logEntry").get("messageParts");
+        Map<String, Long> loss = new LinkedHashMap<>();
+        expectedParts.get(3).get("value").fields().forEachRemaining(field -> loss.put(field.getKey(), field.getValue().asLong()));
+        LogEntry logEntry = new LogEntry()
+            .setLogLevel(Level.INFO)
+            .setEpochTime(epochTime)
+            .setType(VERIFICATION_FAILED)
+            .setMessageFormat(expectedParts.get(0).get("value").asText() + "{}" + expectedParts.get(2).get("value").asText() + "{}")
+            .setArguments(request().withPath("/absent"), loss);
+
+        // when
+        String json = objectWriter.writeValueAsString(new DashboardLogEntryDTO(logEntry).setDescription(getDescription(logEntry)));
+
+        // then
+        JsonNode actualParts = new ObjectMapper().readTree(json).get("value").get("messageParts");
+        for (JsonNode part : actualParts) {
+            // the fixture's keys stand in "0" for the entry's id
+            ((ObjectNode) part).put("key", part.get("key").asText().replace(logEntry.id(), "0"));
+        }
+        assertThat(actualParts, is(expectedParts));
+    }
+
+    private static JsonNode dashboardFixture(String name) throws IOException {
+        String relativePath = "mockserver-ui/src/__fixtures__/" + name;
+        for (File dir = new File(System.getProperty("user.dir")).getAbsoluteFile(); dir != null; dir = dir.getParentFile()) {
+            File candidate = new File(dir, relativePath);
+            if (candidate.isFile()) {
+                return new ObjectMapper().readTree(candidate);
+            }
+        }
+        throw new FileNotFoundException("could not find '" + relativePath + "' above " + System.getProperty("user.dir"));
     }
 }
