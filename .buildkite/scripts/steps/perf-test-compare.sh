@@ -27,7 +27,8 @@ set -euo pipefail
 # Every other metric (k6 latency percentiles, growth ratios, rig_valid_peak_achieved_rps,
 # live_set_bytes) runs notify-only until it has >=10 clean runs of history and a
 # budget derived from them — a gate that fires on noise gets switched off, which is
-# the failure mode this design avoids. See docs/plans/performance-programme.md item 1.
+# the failure mode this design avoids. See docs/operations/performance-tuning.md
+# -> "Regression thresholds".
 #
 # Robust stats (median/MAD, not mean/stddev) so a single noisy run doesn't move
 # the baseline. Latency/CPU/heap/alloc: higher = worse. Throughput: lower = worse.
@@ -56,8 +57,7 @@ annotate() { # style, body
 # JSON file (mockserver-performance-test/perf-budgets.json), NOT hardcoded in
 # this jq, so a floor can only be loosened by a reviewed diff. FAIL CLOSED: a
 # missing or unparseable budget file, or a run metric with no budget entry, must
-# go RED — a silent default of "no floor" would be a false green. See
-# docs/plans/performance-programme.md -> "Budgets that ratchet".
+# go RED — a silent default of "no floor" would be a false green.
 BUDGETS_FILE="${PERF_BUDGETS_FILE:-$REPO_ROOT/mockserver-performance-test/perf-budgets.json}"
 if [ ! -f "$BUDGETS_FILE" ]; then
   annotate "error" ":no_entry: **Perf budget file MISSING — cannot compare** — expected \`${BUDGETS_FILE}\`.
@@ -185,7 +185,7 @@ fi
 if [ -f "$WORK/perf-scaling.json" ]; then
   jq -s '.[0] * .[1]' "$RESULT" "$WORK/perf-scaling.json" > "$WORK/merged.json" && mv "$WORK/merged.json" "$RESULT"
 fi
-# G1 churn gate (docs/plans/performance-programme.md -> "G1 churn gate"). Merges
+# G1 churn gate. Merges
 # {churn:{alloc_ratio_index_n15000, ...}} into the run. UNLIKE .scaling above, this block IS
 # enumerated and budgeted below, so churn.alloc_ratio_index_n15000 GATES (a rebuild-on-read
 # regression moves the churn/static allocation ratio by ~3 orders of magnitude). Best-effort
@@ -279,7 +279,7 @@ fi
 # build goes GREEN — "No performance regressions" against a run that measured nothing —
 # AND the empty object is persisted, so it silently enters every later baseline window
 # (where bmapof drops its nulls, shrinking the comparison set invisibly). This is the
-# exact decay docs/plans/performance-programme.md ("Baseline freshness") calls out: a
+# exact decay this check exists to catch: a
 # freshness check that keys off object age/liveness "passes forever against a producer
 # writing valid empty JSON every day", so the newest object must be asserted to contain
 # the expected keys with NON-NULL values in PLAUSIBLE RANGES — the same plausibility

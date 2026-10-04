@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Close the loop from S3 back to the website (performance-programme item 19).
+# Close the loop from S3 back to the website.
 #
 # WHAT THIS DOES
 # --------------
-# The daily perf pipeline writes a dated, self-describing run to S3 (item 0).
+# The daily perf pipeline writes a dated, self-describing run to S3.
 # The public "Scalability & Latency" page renders its figures from a COMMITTED
 # data file (jekyll-www.mock-server.com/_data/perf_figures.json). Nothing joined
-# the two, so the published figures drifted into a stale customer-facing claim
-# (docs/plans/performance-programme.md, Finding 1). This step regenerates that
+# the two, so the published figures drifted into a stale customer-facing claim.
+# This step regenerates that
 # data file from the latest VALID run in S3 and, when the committed figures have
 # genuinely gone stale or moved, EMITS THE REFRESH AS BUILD ARTIFACTS: a
 # ready-to-apply patch plus the regenerated files themselves.

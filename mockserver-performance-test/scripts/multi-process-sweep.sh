@@ -3,11 +3,10 @@ set -euo pipefail
 
 # ---------------------------------------------------------------------------
 # multi-process-sweep.sh — a load generator that can SATURATE the server, so
-# the performance programme can finally answer item 18's open question:
+# the performance programme can finally answer its open question:
 # "why does a single k6 process drop iterations with three quarters of its VU
 # pool unused, and is the flat ~6,000 rps healthy ceiling a CLIENT limit or a
-# SERVER limit?" (docs/plans/performance-programme.md, item 18 + "item 18's
-# experiment" row in "What remains").
+# SERVER limit?"
 #
 # WHY THIS EXISTS (the evidence it is built to act on).
 #   * The per-core serving curve (perf-percore.sh) is flat at ~6,000 rps for

@@ -150,7 +150,8 @@ if [ "$PERF_WORKLOAD" = "forward" ]; then
   done
 fi
 
-# --- OPT-IN latency-tail experiment levers (performance-programme.md §1) ---------
+# --- OPT-IN latency-tail experiment levers (docs/code/performance-measurement.md
+# -> "Rung-onset exclusion") ---------
 # Both default so a run with neither set is byte-identical to before AND stays
 # baseline-eligible; each flips a profile below so an experiment never enters the
 # published baseline. PERF_NETWORK_MODE=host puts SUT+upstream+k6 on --network host
@@ -2605,7 +2606,8 @@ if [ "${PERF_SERVING_RW_MULTIK6:-false}" = "true" ]; then
   fi
 fi
 
-# --- OPT-IN steady-state latency-tail experiment (performance-programme.md §1) --
+# --- OPT-IN steady-state latency-tail experiment (docs/code/performance-measurement.md
+# -> "Rung-onset exclusion") --
 # One constant-arrival-rate pass at PERF_STEADY_RATE on the main SUT, before growth.
 # The server histogram delta approximates the client's measured window: it starts
 # WARMUP_S after the k6 container launches (so it may hold a few seconds of warm-up)
@@ -4666,7 +4668,8 @@ jq -n \
     workload: $workload,
     # OPT-IN steady-state pass (PERF_STEADY_RATE): one fixed rate, warm-up excluded,
     # with the client tail and the server request-duration histogram over the same
-    # window plus their comparison (performance-programme.md §1). {} on a default run.
+    # window plus their comparison (docs/code/performance-measurement.md ->
+    # "Rung-onset exclusion"). {} on a default run.
     steady_experiment: $steady,
     validity: $validity,
     # Part C — baseline eligibility. false for any non-default run (PERF_JVM_DIAGNOSTICS

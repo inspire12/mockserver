@@ -10,8 +10,7 @@ set -euo pipefail
 # stops firing, or fires but its run breaks, the baseline silently goes stale and
 # every subsequent comparison measures an ancient number while still reporting
 # green. That is the exact decay this programme exists to eliminate (a JMH backstop
-# in this repo went dark for four days unnoticed — see
-# docs/plans/performance-programme.md, "Keeping the system itself alive").
+# in this repo went dark for four days unnoticed).
 #
 # WHAT IT KEYS OFF (and what it deliberately does NOT)
 # ----------------------------------------------------

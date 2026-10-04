@@ -9,9 +9,7 @@
 #   budgets live in mockserver-performance-test/perf-budgets.json. This gate reads
 #   the newest successful run for the release branch and the budget file, and
 #   refuses the release when the performance picture is stale, invalid, or in an
-#   unaccepted gating-budget breach. See docs/plans/performance-programme.md ->
-#   "Mechanism 1: the release-preflight gate needs no human" and
-#   "What should block a merge".
+#   unaccepted gating-budget breach.
 #
 # THE 8.0.0 LESSON THIS FOLLOWS
 #   8.0.0 half-published because a check confirmed a credential *existed* without

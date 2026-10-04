@@ -10,9 +10,9 @@
 #
 #   * the throughput/latency knee curve, with healthy_ceiling_rps as the
 #     headline and peak_achieved_rps beside it EXPLICITLY labelled degraded
-#     (docs/plans/performance-programme.md, Finding 1); and
-#   * per-behaviour percentiles from the FIXED regression.js (Finding 3,
-#     resolved 2026-09-16) — emitted only when the run actually carries them.
+#     (docs/code/performance-measurement.md -> "The healthy ceiling rule"); and
+#   * per-behaviour percentiles from the FIXED regression.js (its settle-excluded
+#     window, resolved 2026-09-16) — emitted only when the run actually carries them.
 #
 # It NEVER emits the internal-only regression detectors the plan marks
 # "gated internally, never published": the JMH absolute backstops, growth/soak
@@ -22,7 +22,8 @@
 # absolute public figure), the startup median-of-9, and the baseline-freshness
 # assertion. Those metrics exist to move under regression, not to be quoted.
 #
-# healthy_ceiling_rps is computed here to Finding 1's definition — the highest
+# healthy_ceiling_rps is computed here to the healthy-ceiling rule's definition
+# (docs/code/performance-measurement.md -> "The healthy ceiling rule") — the highest
 # offered rung where achieved stayed within (1 - keep) of offered, errors were
 # zero, AND p50 stayed within lat_mult x the flat-region p50 — rather than
 # trusting the run's own saturation_rps, so a reader can see exactly which rung
@@ -100,8 +101,8 @@ def commafy: (. // 0 | floor | tostring) | gsub("(?<=\\d)(?=(\\d{3})+$)"; ",");
 | ($s | max_by(.achieved_rps)) as $pk
 | .config as $c
 | .agent as $a
-# POST-FIX gate for per-behaviour percentiles. schema_version (item 0) and the
-# regression.js tail fix (Finding 3, 2026-09-16) are INDEPENDENT axes — a run can
+# POST-FIX gate for per-behaviour percentiles. schema_version and the
+# regression.js tail fix (its settle-excluded window, 2026-09-16) are INDEPENDENT axes — a run can
 # be schema>=2 yet pre-fix (perf-test-run.sh notes the same), and a pre-fix run's
 # p95 is a NON-NULL ~1014 ms client-side rig artefact. So a p95-presence check is
 # NOT a fix check. Publish behaviours only when the run is provably post-fix:

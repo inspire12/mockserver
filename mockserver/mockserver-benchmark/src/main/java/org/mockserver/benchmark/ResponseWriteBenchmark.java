@@ -45,8 +45,7 @@ import java.util.concurrent.TimeUnit;
  * model&rarr;object&rarr;bytes allocation, exactly the response-write cost {@code MatchingBenchmark}
  * (matching only) and {@code InboundDecodeBenchmark} (request decode only) do not touch. It is the
  * response-write arm the allocation backstop needs to stop a regression that merely moves bytes out
- * of the matcher and into the response writer reading as an improvement (see
- * docs/plans/performance-programme.md item 16).
+ * of the matcher and into the response writer reading as an improvement.
  *
  * <pre>./run.sh -prof gc ResponseWriteBenchmark</pre>
  *

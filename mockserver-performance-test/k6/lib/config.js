@@ -162,8 +162,7 @@ export const REGRESSION = {
   // LOWERING of maxVUs (200 -> 50) to remove the ramp — reproductions showed the
   // tail GROWS with pool size (a larger fixed pool = more concurrent connections
   // hammering the core-limited SUT), so the fix is a modest EQUAL pool, not a
-  // large one. See docs/plans/performance-programme.md Finding 3. Keep
-  // K6_REG_PRE_VUS and K6_REG_MAX_VUS equal if overriding.
+  // large one. Keep K6_REG_PRE_VUS and K6_REG_MAX_VUS equal if overriding.
   preAllocatedVUs: num('K6_REG_PRE_VUS', 50),
   maxVUs: num('K6_REG_MAX_VUS', 50),
   // The four measured scenarios start staggered by this gap (op index x stagger)
@@ -309,8 +308,7 @@ export const SWEEP = {
   // compounding into a connection storm.
   //
   // WHY PER RUNG, NOT ONE FLAT POOL — the trap a single number falls into on a
-  // 500 -> 64,000 CI ladder (see docs/plans/performance-programme.md -> "Why
-  // sweep.js still ramps", build #347; the CI ladder tops at 64k via
+  // 500 -> 64,000 CI ladder (build #347; the CI ladder tops at 64k via
   // perf-test-run.sh, not the 32k local default above):
   //   * rig_valid (perf-test-run.sh) requires dropped_iterations == 0. A pool
   //     sized for the LOW rungs (e.g. a flat 512) would undersize a near-knee rung

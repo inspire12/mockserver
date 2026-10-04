@@ -28,8 +28,7 @@
 //   k6 run mockserver-performance-test/k6/regression.js
 //   k6 run -e BASE_URL=https://localhost:1080 -e PROTO=https_h2 .../regression.js
 //
-// Measured-window hygiene (Finding 3 in docs/plans/performance-programme.md).
-// The recorded percentiles must describe the SERVER, not a client-side rig
+// Measured-window hygiene. The recorded percentiles must describe the SERVER, not a client-side rig
 // artefact. Three coordinated defences, none of which throws away steady-state
 // data:
 //   1. STAGGER — the four scenarios start K6_REG_STAGGER apart (op index x gap)

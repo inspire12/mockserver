@@ -1,4 +1,5 @@
-// Steady-state latency probe — performance-programme.md §1 (the unattributed tail).
+// Steady-state latency probe — see docs/code/performance-measurement.md ->
+// "Rung-onset exclusion" (the unattributed tail).
 //
 // ONE constant-arrival-rate scenario at a SINGLE rate (K6_STEADY_RATE), no ladder,
 // no per-rung ramp. A warm-up prefix (K6_STEADY_WARMUP) is EXCLUDED from the

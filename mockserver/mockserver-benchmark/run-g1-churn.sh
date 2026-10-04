@@ -27,8 +27,7 @@
 #   that JMH error exit non-zero so `set -e` reds the step. The ratio is a within-run A/B
 #   (the CandidateIndexBenchmark gold-standard shape) so it cancels host/JVM/GC noise and is
 #   machine-independent — allocation is bytes/op, not timing. A regression that reintroduced
-#   rebuild-on-read would move it ~1.06x -> ~1000x+ (three orders of magnitude). See
-#   docs/plans/performance-programme.md -> "G1 churn gate".
+#   rebuild-on-read would move it ~1.06x -> ~1000x+ (three orders of magnitude).
 #
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -19,14 +19,14 @@ set -euo pipefail
 #      match / verify / retrieve arms must each carry samples, AND the SUT must
 #      have received enough traffic that the log genuinely filled. A soak that
 #      "ran" but produced no 10b measurement fails here, LOUD — it is never a
-#      green with an empty result block (the item-8 lesson).
+#      green with an empty result block.
 #
 # NOTIFY-ONLY otherwise. The soak result is uploaded as its OWN artifact
 # (perf-soak.json) and is DELIBERATELY NOT fed to perf-test-compare.sh: no soak
 # budget keys exist yet, and the daily compare's fail-closed missing-budget rule
 # would red the build on a soak metric it cannot resolve. Soak metrics stay
 # notify-only until ~8 weekly runs of variance let a budget be derived (~2
-# months). See docs/plans/performance-programme.md item 10.
+# months).
 #
 # WHY WEEKLY, OUT OF THE DAILY'S SLOT: a daily regression build can hold every
 # perf agent at once, so a 2h soak starting in its 04:00 UTC window would queue
