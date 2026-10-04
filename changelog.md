@@ -298,7 +298,8 @@ This release delivers a sustained performance and memory programme alongside dat
   an HTTP/2 or HTTP/3 stream is reset, including an HTTP/2 stream inside a `CONNECT`/SOCKS tunnel (other streams
   on the connection, and the tunnel, carry on; an HTTP/2 stream that was waiting only for flow-control window
   the stalled stream held is not reset before it, and gets another timeout period to receive that window once
-  the stalled stream is reset), and a
+  the stalled stream is reset; an HTTP/3 stream that has been sent little or nothing because stalled streams
+  hold the connection's flow-control credit also gets another timeout period once such a stream is reset), and a
   streamed response's upstream connection is closed. A client that keeps
   taking some of the response at least once per timeout period is not affected, nor is one waiting for a
   delayed or slow response, which has nothing waiting for it. An HTTP/2 client takes a stream's response

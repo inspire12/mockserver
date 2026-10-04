@@ -22,6 +22,7 @@ import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http.HttpUtil;
 import io.netty.handler.codec.http.HttpVersion;
+import io.netty.handler.codec.http3.DefaultHttp3DataFrame;
 import io.netty.handler.codec.http3.DefaultHttp3HeadersFrame;
 import io.netty.handler.codec.http3.Http3;
 import io.netty.handler.codec.http3.Http3ClientConnectionHandler;
@@ -59,8 +60,10 @@ import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.lessThan;
 import static org.mockserver.configuration.Configuration.configuration;
+import static org.mockserver.model.BinaryBody.binary;
 import static org.mockserver.model.HttpForward.forward;
 import static org.mockserver.model.HttpRequest.request;
+import static org.mockserver.model.HttpResponse.response;
 import static org.mockserver.stop.Stop.stopQuietly;
 
 /**
@@ -70,7 +73,7 @@ import static org.mockserver.stop.Stop.stopQuietly;
  * <p>
  * Responses are forwarded from an upstream: {@code /fixed} is a 4 MiB body with a {@code Content-Length}, so it is
  * aggregated; {@code /trickle} is about 100 KB of server-sent events and then nothing, with the upstream left open.
- * Skips where the native QUIC transport is unavailable.
+ * The gRPC response is mocked: one 1 MiB message. Skips where the native QUIC transport is unavailable.
  */
 public class Http3ResponseWriteStallTimeoutIntegrationTest {
 
@@ -81,6 +84,7 @@ public class Http3ResponseWriteStallTimeoutIntegrationTest {
     private static final Map<String, Channel> UPSTREAM_CHANNELS = new ConcurrentHashMap<>();
 
     private static byte[] fixedBody;
+    private static byte[] grpcMessage;
     private static byte[] events;
     private static EventLoopGroup upstreamGroup;
     private static Channel upstreamChannel;
@@ -98,6 +102,8 @@ public class Http3ResponseWriteStallTimeoutIntegrationTest {
         assumeQuicAvailable();
         fixedBody = new byte[4 * 1024 * 1024];
         new Random(72).nextBytes(fixedBody);
+        grpcMessage = new byte[1024 * 1024];
+        new Random(93).nextBytes(grpcMessage);
         StringBuilder trickle = new StringBuilder();
         for (int id = 0; trickle.length() < 100_000; id++) {
             trickle.append("id: ").append(id).append("\ndata: ").append("x".repeat(800)).append("\n\n");
@@ -200,7 +206,33 @@ public class Http3ResponseWriteStallTimeoutIntegrationTest {
         assertThat("the stream ended cleanly", stream.endedCleanly.get(), is(true));
     }
 
+    @Test
+    public void shouldDeliverALargeGrpcMessageWholeToASlowButProgressingHttp3Reader() throws Exception {
+        // the gRPC writer sends its message as one DATA frame, so the stream shows progress only if that write does
+        mockServerClient.when(request().withMethod("POST").withPath("/stall.Service/Large")).respond(response()
+            .withHeader("content-type", "application/grpc")
+            .withHeader("grpc-status", "0")
+            .withBody(binary(grpcMessage)));
+        Http3Stream stream = open("/stall.Service/Large", true);
+        long started = System.nanoTime();
+        while (TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) < 3 * STALL_MILLIS) {
+            TimeUnit.MILLISECONDS.sleep(READ_PAUSE_MILLIS);
+            stream.channel.read();
+        }
+        assertThat("still in progress after the slow phase", stream.ended.getCount(), is(1L));
+
+        stream.readAll();
+
+        assertThat("the stream ended", stream.ended.await(30, TimeUnit.SECONDS), is(true));
+        assertThat(stream.dataBytes.get(), is((long) grpcMessage.length));
+        assertThat("the stream ended cleanly", stream.endedCleanly.get(), is(true));
+    }
+
     private Http3Stream open(String uri) throws Exception {
+        return open(uri, false);
+    }
+
+    private Http3Stream open(String uri, boolean grpc) throws Exception {
         clientGroup = new NioEventLoopGroup(1);
         QuicSslContext sslContext = QuicSslContextBuilder.forClient()
             .trustManager(InsecureTrustManagerFactory.INSTANCE)
@@ -228,9 +260,16 @@ public class Http3ResponseWriteStallTimeoutIntegrationTest {
         // nothing is read, and so no credit granted, until read() is called
         stream.channel.config().setAutoRead(false);
         DefaultHttp3HeadersFrame headers = new DefaultHttp3HeadersFrame();
-        headers.headers().method("GET").path(uri).scheme("https").authority("127.0.0.1:" + http3Port)
-            .add("accept", uri.startsWith("/forward/fixed") ? "application/octet-stream" : "text/event-stream");
-        stream.channel.writeAndFlush(headers).addListener(QuicStreamChannel.SHUTDOWN_OUTPUT).sync();
+        headers.headers().path(uri).scheme("https").authority("127.0.0.1:" + http3Port);
+        if (grpc) {
+            headers.headers().method("POST").add("content-type", "application/grpc").add("te", "trailers");
+            stream.channel.write(headers);
+            // an empty gRPC message: no compression, zero length
+            stream.channel.writeAndFlush(new DefaultHttp3DataFrame(Unpooled.wrappedBuffer(new byte[5]))).addListener(QuicStreamChannel.SHUTDOWN_OUTPUT).sync();
+        } else {
+            headers.headers().method("GET").add("accept", uri.startsWith("/forward/fixed") ? "application/octet-stream" : "text/event-stream");
+            stream.channel.writeAndFlush(headers).addListener(QuicStreamChannel.SHUTDOWN_OUTPUT).sync();
+        }
         return stream;
     }
 

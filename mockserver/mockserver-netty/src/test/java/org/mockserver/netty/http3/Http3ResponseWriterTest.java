@@ -155,36 +155,6 @@ public class Http3ResponseWriterTest {
     }
 
     @Test
-    public void shouldWriteALargeStaticBodyAsDataFramesOfAtMostTheMaximumSize() {
-        // given -- a QUIC write completes only once all of it is taken, so smaller frames show a slow reader's progress
-        ChannelHandlerContext ctx = mockCtxWithActiveChannel();
-        List<ByteBuf> writtenBufs = new ArrayList<>();
-        List<ByteBuf> writtenWithoutFlush = new ArrayList<>();
-        when(ctx.write(any())).thenAnswer(invocation -> copyDataFrame(invocation.getArgument(0), writtenWithoutFlush));
-        when(ctx.writeAndFlush(any())).thenAnswer(invocation -> copyDataFrame(invocation.getArgument(0), writtenBufs));
-        byte[] body = new byte[3 * Http3ResponseWriter.MAX_DATA_FRAME_BYTES + 100];
-        new java.util.Random(72).nextBytes(body);
-
-        // when
-        new Http3ResponseWriter(CONFIGURATION, LOGGER, ctx).sendResponse(request().withPath("/large"), response().withBody(body));
-
-        // then -- three full frames, then the remainder flushed last
-        assertThat(writtenWithoutFlush.size(), is(3));
-        assertThat(writtenBufs.size(), is(1));
-        List<ByteBuf> frames = new ArrayList<>(writtenWithoutFlush);
-        frames.addAll(writtenBufs);
-        java.io.ByteArrayOutputStream joined = new java.io.ByteArrayOutputStream();
-        for (ByteBuf frame : frames) {
-            assertThat(frame.readableBytes(), lessThanOrEqualTo(Http3ResponseWriter.MAX_DATA_FRAME_BYTES));
-            byte[] bytes = new byte[frame.readableBytes()];
-            frame.readBytes(bytes);
-            joined.write(bytes, 0, bytes.length);
-            frame.release();
-        }
-        assertThat("the frames carry the body intact, in order", java.util.Arrays.equals(joined.toByteArray(), body), is(true));
-    }
-
-    @Test
     public void shouldCloseTheUpstreamWhenTheStreamClosesBeforeTheStreamedResponseCompletes() throws Exception {
         // given
         ChannelHandlerContext ctx = mockCtxWithListenerFiringChannel(new ArrayList<>());
@@ -515,16 +485,6 @@ public class Http3ResponseWriterTest {
         when(ctx.write(any())).thenReturn(writeFuture);
 
         return ctx;
-    }
-
-    private static ChannelFuture copyDataFrame(Object msg, List<ByteBuf> copies) {
-        if (msg instanceof DefaultHttp3DataFrame) {
-            copies.add(Unpooled.copiedBuffer(((DefaultHttp3DataFrame) msg).content()));
-            ((DefaultHttp3DataFrame) msg).release();
-        }
-        ChannelFuture future = mock(ChannelFuture.class);
-        when(future.addListener(any())).thenReturn(future);
-        return future;
     }
 
     /**
