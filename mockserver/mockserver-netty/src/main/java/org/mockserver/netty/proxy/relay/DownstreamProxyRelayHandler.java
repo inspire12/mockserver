@@ -116,7 +116,7 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
                         new LogEntry()
                             .setLogLevel(Level.DEBUG)
                             .setMessageFormat("response on stream {} to {} was not relayed because the stream had closed: {}")
-                            .setArguments(clientStreamId, upstreamChannel.remoteAddress(), String.valueOf(future.cause().getMessage()))
+                            .setArguments(clientStreamId, upstreamChannel.remoteAddress(), future.cause().getMessage())
                     );
                 }
                 if (!readsPaused && !relayEnded) {
