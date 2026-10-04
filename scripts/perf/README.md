@@ -108,9 +108,7 @@ prints a median/min/max table. Docker-kind variants measure from `docker run`
 
 `InJvmParallelBench.java` and `parallel_instances.py` measure the two shapes of the "lots of
 parallel tests on a laptop" profile. The measured findings (14-core laptop, 2026-09-17) are
-recorded in full under item 17 of
-[docs/plans/performance-programme.md](../../docs/plans/performance-programme.md). Three that
-matter to anyone reading a `flaky only on CI` report:
+recorded in full below. Three that matter to anyone reading a `flaky only on CI` report:
 
 - **Thread counts are far below the naive arithmetic.** Pools start lazily — the action-handler
   (`Scheduler`) pool holds **zero** threads until a delayed/callback response schedules onto it

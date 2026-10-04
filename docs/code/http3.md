@@ -364,8 +364,9 @@ event loop as a lazy task that does not wake the loop. Once a QUIC connection ha
 wake-up is the idle timer, so the write and the test stall for up to `maxIdleTimeout` (30 s in these
 tests). The tests still pass, because the write goes out when the timer wakes the loop, before the
 connection times out. Server code is not affected: each of its `ctx.write(...)` calls is followed by a
-`writeAndFlush` or `flush`, which wakes the loop and runs the queued write in order. Plan item 57
-(performance-programme.md) traced three tests that took about 30 s each in full-suite runs to this.
+`writeAndFlush` or `flush`, which wakes the loop and runs the queued write in order. The
+performance programme traced three tests that took about 30 s each in full-suite runs to this
+(item 57, closed and removed from the plan — see its history).
 
 ## Dependencies
 

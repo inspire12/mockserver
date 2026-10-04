@@ -1,11 +1,13 @@
 # Security Defaults — Next Major Release
 
-**Status:** Partly landed — **DEF-2 and DEF-3 shipped 2026-07-27** in response to
+**Status:** Open. DEF-2 and DEF-3 (the Velocity/JavaScript template RCE defaults) shipped
+2026-07-27 in response to
 [GHSA-7pwj-xvc2-hfpc](https://github.com/mock-server/mockserver-monorepo/security/advisories/GHSA-7pwj-xvc2-hfpc)
-(template RCE); the remaining six items are still open (last verified 2026-06-19: every other property and
+and are removed from this plan; evidence of what shipped is in `changelog.md` and the advisory, not
+here. The remaining six items are still open (last verified 2026-06-19: every other property and
 mitigation is wired in `ConfigurationProperties.java` / `Configuration.java`, and every other default is still
 the insecure value below). The "ship every flip in one release" goal below was deliberately broken for the two
-template items only, because leaving a reported RCE default in place until the next major release was not
+template items, because leaving a reported RCE default in place until the next major release was not
 defensible; the rest still travel together. Insecure-by-default configuration values to flip in a single major
 release.
 **Created:** 2026-05-26 (supersedes `security-remediation.md`)
@@ -16,7 +18,7 @@ release.
 
 1. Ship every insecure default flip in one release so users perform a single migration.
 2. Each flip is **fully reversible** by setting one property — no functionality is removed.
-3. DEF-1, DEF-2, DEF-3, and DEF-4 already emit a WARN today when set to their insecure values, so users of those properties have had a deprecation window. DEF-5, DEF-6, DEF-7, and DEF-8 do **not** currently warn — each implementation PR for those four items must add a startup WARN in a prior minor release before the default is flipped.
+3. DEF-1 and DEF-4 already emit a WARN today when set to their insecure values, so users of those properties have had a deprecation window. DEF-5, DEF-6, DEF-7, and DEF-8 do **not** currently warn — each implementation PR for those four items must add a startup WARN in a prior minor release before the default is flipped.
 4. One consolidated migration guide. One major version bump.
 
 ## Items
@@ -24,8 +26,6 @@ release.
 | ID | Property | Old default | New default | Breaking? |
 |----|----------|-------------|-------------|-----------|
 | DEF-1 | `forwardProxyTLSX509CertificatesTrustManagerType` | `ANY` | `JVM` | Yes |
-| ~~DEF-2~~ | ~~`velocityDisallowClassLoading`~~ | ~~`false`~~ | `true` | **LANDED 2026-07-27** |
-| ~~DEF-3~~ | ~~JavaScript template class access~~ | ~~deny-list (empty)~~ | deny everything | **LANDED 2026-07-27** |
 | DEF-4 | `tlsAllowInsecureProtocols` | `true` | `false` | Yes (drops TLSv1/1.1) |
 | DEF-5 | `forwardProxyBlockPrivateNetworks` | `false` | `true` | Yes |
 | DEF-6 | `localBoundIP` | `""` (all interfaces, `0.0.0.0`) | `127.0.0.1` | Yes (large impact) |
@@ -42,38 +42,6 @@ release.
 **Flip:** Default to `JVM` so the JDK trust store validates upstream certificates the same way any standard Java HTTPS client would.
 **Opt-out:** `mockserver.forwardProxyTLSX509CertificatesTrustManagerType=ANY` (a WARN is logged when this is in effect — already implemented). Users with a small set of trusted self-signed CAs should prefer `=CUSTOM` plus `mockserver.forwardProxyTLSCustomTrustX509Certificates` pointing at the CA bundle, rather than disabling validation entirely.
 **Why it's safe to flip now:** the WARN has been in place since the prior security remediation pass; no functionality is removed.
-
----
-
-## DEF-2 — Velocity templates block class loading — ✅ LANDED 2026-07-27
-
-**Property:** `mockserver.velocityDisallowClassLoading`
-**Today:** Defaults to `false`. A user-supplied Velocity template can call `$Class.forName("java.lang.Runtime").getRuntime().exec(...)`.
-**Flip:** Default to `true`, installing `SecureUberspector` so templates cannot reach arbitrary classes.
-**Opt-out:** `mockserver.velocityDisallowClassLoading=false` (WARN already logged).
-**Notes:** Velocity templates that legitimately need class loading are rare; the opt-out covers them.
-
----
-
-## DEF-3 — JavaScript templates use an allowlist, not a deny-list — ✅ LANDED 2026-07-27 (stricter than planned)
-
-**As shipped, this went further than the plan below:** rather than a built-in allowlist of "safe core types",
-the default allowlist is EMPTY and resolves nothing, and `javascriptDisallowedClasses` was kept rather than
-removed (setting it now *widens* the safe default, and it is documented as not a security boundary). A curated
-"safe types" default would have to be re-audited every time the JDK grows a new reachable class, and templates
-rarely need Java at all given the full ES2023 standard library; `javascriptAllowedClasses=*` is the documented
-escape hatch for the previous unrestricted behaviour. The original plan text follows for the record.
-
-**Today:** `javascriptDisallowedClasses` is a deny-list defaulting to empty, so all classes (`java.lang.Runtime`, `java.io.File`, etc.) are reachable via `Java.type(...)`. A WARN is logged when the deny-list is empty.
-**Flip:** Introduce `mockserver.javascriptAllowedClasses` (new property) and switch to allowlist semantics. Default allowlist covers common safe types only:
-
-```
-java.lang.String, java.lang.Integer, java.lang.Long, java.lang.Double, java.lang.Boolean,
-java.util.List, java.util.Map, java.util.Set, java.util.ArrayList, java.util.HashMap
-```
-
-**Opt-out:** Extend the allowlist via `mockserver.javascriptAllowedClasses=...`. The legacy `javascriptDisallowedClasses` property is removed (deprecation period was the WARN log).
-**Why this is more invasive than DEF-1/2:** the property name itself changes. Migration guide must call this out explicitly.
 
 ---
 
@@ -157,7 +125,7 @@ For the record so future contributors don't re-litigate:
 
 - **Version:** Single major version bump.
 - **Migration guide:** One document with one section per `DEF-*` ID, each containing: *what changed*, *how to detect if you're affected*, and *one-line opt-out*.
-- **Release notes:** Top-line summary "secure-by-default" framing; explicit BREAKING block listing all eight flips.
+- **Release notes:** Top-line summary "secure-by-default" framing; explicit BREAKING block listing the remaining flips (DEF-2 and DEF-3 already shipped 2026-07-27 and are not part of this release).
 - **Container image:** Set `ENV MOCKSERVER_LOCAL_BOUND_IP=0.0.0.0` in the Dockerfile so the container experience is unchanged. Document this carve-out clearly so users running the raw JAR/WAR know they're getting the loopback default.
 - **Helm chart:** Pass `MOCKSERVER_LOCAL_BOUND_IP=0.0.0.0` (already needed for in-cluster reachability).
 - **Pre-release validation:** Run the full Buildkite suite plus a manual smoke test against the official Docker image and the Helm chart to confirm `DEF-6` does not break the default container path.
@@ -167,10 +135,9 @@ For the record so future contributors don't re-litigate:
 All flips are independent property changes; order does not matter functionally. Suggested PR sequencing for review clarity:
 
 0. **Prerequisite (prior minor release):** add startup WARN logs for DEF-5, DEF-6, DEF-7, and DEF-8 when set to their insecure defaults. These four items have no existing deprecation log, so a release window with a WARN must precede the default flip.
-1. DEF-1, DEF-2, DEF-4 — single-character default changes; trivial review.
+1. DEF-1, DEF-4 — single-character default changes; trivial review.
 2. DEF-5, DEF-7 — boolean flips on existing well-tested validators.
 3. DEF-8 — three numeric defaults; verify all integration tests still pass.
 4. DEF-6 — bind-address change; bundled with Dockerfile ENV and Helm chart updates.
-5. DEF-3 — property rename + allowlist semantics; needs the migration guide entry written before merging.
 
 Each PR must update `jekyll-www.mock-server.com/mock_server/configuration_properties.html` and the relevant `docs/` entry under `code/` or `operations/`.

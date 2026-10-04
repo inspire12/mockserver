@@ -45,6 +45,7 @@ Deep-dive documentation of MockServer's codebase, from high-level module structu
 | [HTTP/3 (QUIC)](code/http3.md) | Low | Experimental HTTP/3 support: Http3Server, QUIC native dependency, MVP boundaries |
 | [Clustered State](code/clustered-state.md) | Low | StateBackend SPI, InMemoryStateBackend, InfinispanStateBackend (LOCAL/CLUSTERED), cross-node invalidation, config knobs, limitations |
 | [LLM Security Audit](code/llm-security-audit.md) | Low | M5 security review: known codec limitations, Bedrock SigV4, Ollama NDJSON, adversarial-response safety |
+| [Decision Records](code/decisions/README.md) | Low | Settled "considered and declined" (or "considered and designed") questions, kept so they are not re-investigated; index of individual records |
 
 ### Infrastructure
 
@@ -85,7 +86,7 @@ Build process, releases, dependencies, security scanning, and the documentation 
 
 | Document | Description |
 |----------|-------------|
-| [Security Defaults](plans/security-defaults.md) | Insecure default flips planned for the next major release |
+| [Security Defaults](plans/later/security-defaults.md) | Insecure default flips planned for the next major release |
 
 ### Other
 
