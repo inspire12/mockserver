@@ -1906,6 +1906,17 @@ When it runs, a k6 threshold breach (data-plane p99 drift, error rate) or a miss
 result reds that build; the result, `perf-soak.json`, is uploaded as its own artifact and is not
 fed to `perf-test-compare.sh`.
 
+**Build 637 (2026-10-04, the first scheduled weekly soak to actually run) found no leak at the
+50% image heap.** Standard image (`mockserver/mockserver:mockserver-snapshot`, revision
+`38dadef60`, `-XX:MaxRAMPercentage=50.0`), `--memory=2g` container, `MOCKSERVER_LOG_LEVEL=ERROR`,
+200 rps match rate, 7,200 s: 1,440,001 match samples, p95 0.487 ms, p99 3.115 ms, 0 errors, 0
+transport errors, 0 dropped log events (summary and all 240 samples), 1,521,544 requests
+received. Used heap by half-hour window, min/mean/max MiB: 76.0/441.6/902.0, 82.0/501.9/910.0,
+76.0/437.0/960.0, 130.0/500.7/880.0 — no growth trend across the 2 hours. Threads flat at 49
+after start-up. Not recorded by the run, only inferred from the container limit and
+`MaxRAMPercentage`: the resolved max heap (1.0 GiB) and `maxLogEntries` (~128.5k). See
+[Run Provenance](#run-provenance) below for the gaps in what the soak artifact itself records.
+
 `stress.js` passes `k6 inspect` in `perf-test-lint.sh` and is executed by no CI step. Published
 documentation that calls it part of how MockServer is tested is wrong: it is tooling for optional
 local use.
@@ -2257,7 +2268,8 @@ other hardware-matrix figures built on rig validity are notify-only and annotate
 later moved the arm's default to `GOGC=1600`; the hardware matrix pins 400, so its signature did not move,
 and a matrix run at 1600 would key a series of its own.
 
-The INFO SUT's event-log budget is a sixth break, in every `info_*` metric. Until item 40 the INFO
+The INFO SUT's event-log budget is a sixth break, in every `info_*` metric. Until the image-heap
+change's harness fix (closed as item 40 of the performance plan; see its history) the INFO
 SUT was handed the harness's 256 MiB `maxEventLogSizeInBytes`, which exists for the ERROR SUT's
 `growth.js` fill. At INFO that is over three times the shipped default (heap/12, 75.2 MiB on the
 GraalJS SUT's 922 MiB heap), so the INFO arm never measured the out-of-the-box figure. When the
@@ -2268,8 +2280,8 @@ earlier old-heap run, so it does not settle the question: build 579 (565's image
 256 MiB budget) decides it. 565 still used the 256 MiB INFO budget. Its INFO SUT logged 777
 `Allocation Stall` events totalling 21.4 s (longest 107 ms), against 12 totalling 62 ms on the ERROR
 SUT. Summing the four phase columns of the `Allocation Stalls:` lines gives 763, which corroborates it. The
-256 MiB INFO budget as the way the smaller heap hurts is a hypothesis; the 579/580 A/B tests it (see
-item 40 in `docs/plans/performance-programme.md`).
+256 MiB INFO budget as the way the smaller heap hurts is a hypothesis; the 579/580 A/B tests it
+(closed as item 40 of the performance plan; see its history for the run data).
 
 The INFO SUT now gets no budget, so the INFO arm measures the out-of-the-box figure. Only
 `PERF_INFO_MAX_EVENT_LOG_BYTES` sets one, and setting it marks the run `tuned`;
