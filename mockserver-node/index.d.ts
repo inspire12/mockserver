@@ -18,7 +18,16 @@ export interface StartServerOptions {
   initializationJsonPath?: string;
   trace?: boolean;
   verbose?: boolean;
+  /**
+   * How many times the readiness check is retried, 100 milliseconds apart: 110 by default, 500 when
+   * javaDebugPort is set. A check left unanswered for 2 seconds uses up 20 further retries. A start
+   * that runs out of retries rejects, and the JVM it launched is stopped unless javaDebugPort is set.
+   */
   startupRetries?: number;
+  /**
+   * Starts the JVM suspended until a debugger attaches on this port. A start that gives up waiting
+   * leaves this JVM running, and says so in its rejection.
+   */
   javaDebugPort?: number;
   proxyRemotePort?: number;
   proxyRemoteHost?: string;

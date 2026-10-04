@@ -149,99 +149,159 @@ module.exports = (function () {
       return http.request(request, callback);
     }
 
-    function checkStarted(request, retries, promise, verbose) {
-      var deferred = promise || defer();
-  
+    var POLL_INTERVAL_MILLIS = 100;
+    var POLL_REQUEST_TIMEOUT_MILLIS = 2000;
+
+    function secondsSince(millis) {
+      return ((Date.now() - millis) / 1000).toFixed(1);
+    }
+
+    // Sends one poll request and calls done(error, response) exactly once. A poll not fully answered within
+    // the timeout is ended with error.timedOut set. The timeout runs by the clock, not on an idle connection,
+    // so an answer that trickles in cannot outlast it.
+    function pollOnce(request, done) {
+      var settled = false;
+      var timer;
+
+      function settle(error, response) {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          done(error, response);
+        }
+      }
+
       var req = controlRequest(request);
-      req.setTimeout(2000);
-  
+
+      timer = setTimeout(function () {
+        var error = new Error('no answer to "' + request.method + ' ' + request.path + '" within ' +
+          (POLL_REQUEST_TIMEOUT_MILLIS / 1000) + ' seconds');
+        error.code = 'ETIMEDOUT';
+        error.timedOut = true;
+        settle(error);
+        req.destroy();
+      }, POLL_REQUEST_TIMEOUT_MILLIS);
+
       req.once('response', function (response) {
         var body = '';
-  
+
         response.on('data', function (chunk) {
           body += chunk;
         });
-  
+
+        response.on('error', settle);
+
         response.on('end', function () {
-          deferred.resolve({
+          settle(undefined, {
             statusCode: response.statusCode,
             body: body
           });
         });
       });
-  
-      req.once('error', function (error) {
-        if (retries > 0) {
-          setTimeout(function () {
-            if (verbose) {
-              console.log("waiting for MockServer to start retries remaining: " + retries);
-            }
-            checkStarted(request, retries - 1, promise, verbose);
-          }, 100);
+
+      req.on('error', settle);
+
+      req.end();
+    }
+
+    // Polls until decided(error, response) is true or the retries run out, then calls finished(true, response)
+    // or finished(false, error) with the last poll's error if it had one. A poll that timed out took the time
+    // of many retries and is charged for them, so a server that accepts and never answers is given up on about
+    // as soon as one that refuses. Only the count limits other polls: a slow host must not shorten the wait.
+    function pollUntil(request, retries, waitingMessage, decided, finished) {
+      function attempt(retriesLeft) {
+        pollOnce(request, function (error, response) {
+          if (decided(error, response)) {
+            finished(true, response);
+            return;
+          }
+          if (error && error.timedOut) {
+            retriesLeft -= POLL_REQUEST_TIMEOUT_MILLIS / POLL_INTERVAL_MILLIS;
+          }
+          if (retriesLeft > 0) {
+            setTimeout(function () {
+              if (waitingMessage) {
+                console.log(waitingMessage + " retries remaining: " + retriesLeft);
+              }
+              attempt(retriesLeft - 1);
+            }, POLL_INTERVAL_MILLIS);
+          } else {
+            finished(false, error);
+          }
+        });
+      }
+
+      attempt(retries);
+    }
+
+    // ready as soon as any answer arrives; rejects with the last poll's error
+    function checkStarted(request, retries, verbose) {
+      var deferred = defer();
+
+      pollUntil(request, retries, verbose && "waiting for MockServer to start", function (error) {
+        return !error;
+      }, function (ready, result) {
+        if (ready) {
+          deferred.resolve(result);
         } else {
-          if (verbose) {
-            console.log("MockServer failed to start");
-          }
-          // Surface the diagnostic evidence that non-verbose starts used to discard: whether the java
-          // process is still alive (and its exit status if not) and the tail of MockServer's own output.
-          if (mockServerExit) {
-            console.error("MockServer java process exited before becoming ready (code=" +
-              mockServerExit.code + ", signal=" + mockServerExit.signal + ")");
-          } else if (mockServer && mockServer.pid) {
-            console.error("MockServer java process (pid " + mockServer.pid +
-              ") is still running but did not become ready");
-          }
-          var tail = capturedOutputTail(30);
-          if (tail) {
-            console.error("last MockServer output:\n" + tail);
-          }
-          deferred.reject(error);
+          deferred.reject(result);
         }
       });
-  
-      req.end();
-  
+
       return deferred.promise;
     }
-  
-    function checkStopped(request, retries, promise, verbose) {
-      var deferred = promise || defer();
-  
-      var req = controlRequest(request);
-  
-      req.once('response', function (response) {
-        var body = '';
-  
-        response.on('data', function (chunk) {
-          body += chunk;
-        });
-  
-        response.on('end', function () {
-          if (retries > 0) {
-            if (verbose) {
-              console.log("waiting for MockServer to stop retries remaining: " + retries);
-            }
-            setTimeout(function () {
-              checkStopped(request, retries - 1, promise, verbose);
-            }, 100);
-          } else {
-            if (verbose) {
-              console.log("MockServer failed to stop");
-            }
-            deferred.reject();
+
+    // stopped once a connection fails; a server that still accepts one, answering or not, has not stopped
+    function checkStopped(request, retries, verbose) {
+      var deferred = defer();
+      var since = Date.now();
+
+      pollUntil(request, retries, verbose && "waiting for MockServer to stop", function (error) {
+        return !!error && !error.timedOut;
+      }, function (stopped) {
+        if (stopped) {
+          deferred.resolve();
+        } else {
+          if (verbose) {
+            console.log("MockServer failed to stop");
           }
-        });
+          deferred.reject(new Error('MockServer is still accepting connections on port ' + request.port + ' ' +
+            secondsSince(since) + ' seconds after it was asked to stop'));
+        }
       });
-  
-      req.once('error', function () {
-        deferred.resolve();
-      });
-  
-      req.end();
-  
+
       return deferred.promise;
     }
-  
+
+    // The rejection for a start whose readiness polls ran out. Ends the launched process, unless it was
+    // started suspended for a debugger (javaDebugPort): that one is waiting to be attached to by hand.
+    function failedStart(launched, lastError, port, since, javaDebugPort, verbose) {
+      if (verbose) {
+        console.log("MockServer failed to start");
+      }
+      var message = 'MockServer did not become ready on port ' + port + ' within ' +
+        secondsSince(since) + ' seconds (' + (lastError.message || lastError.code) + '); its java process ';
+      if (launched.exitCode !== null || launched.signalCode !== null) {
+        message += 'had already exited (code=' + launched.exitCode + ', signal=' + launched.signalCode + ')';
+      } else if (javaDebugPort) {
+        message += '(pid ' + launched.pid + ') was left running because "javaDebugPort" is set: it is waiting ' +
+          'for a debugger to attach on port ' + javaDebugPort;
+      } else {
+        launched.kill();
+        message += '(pid ' + launched.pid + ') was stopped';
+      }
+      // also printed, with the server's last output: a start that is not verbose has shown none of it
+      console.error(message);
+      var tail = capturedOutputTail(30);
+      if (tail) {
+        console.error("last MockServer output:\n" + tail);
+      }
+      var error = new Error(message);
+      error.code = lastError.code;
+      error.cause = lastError;
+      return error;
+    }
+
     var STOP_REQUEST_TIMEOUT_MILLIS = 10000;
 
     function sendRequest(request) {
@@ -309,7 +369,11 @@ module.exports = (function () {
               host: "localhost",
               path: "/reset",
               port: port
-            }, 100, deferred, options && options.verbose); // wait for 10 seconds
+            }, 100, options && options.verbose).then(function () { // wait for 10 seconds
+              deferred.resolve();
+            }, function (error) {
+              deferred.reject(error);
+            });
           },
           function (err) {
             // however the stop request failed, the launched process must not outlive it: left running, the
@@ -367,7 +431,8 @@ module.exports = (function () {
         logLevel = 'DEBUG';
       }
   
-      var startupRetries = options.startupRetries || options.javaDebugPort ? 500 : 110;
+      var startupRetries = options.startupRetries || (options.javaDebugPort ? 500 : 110);
+      var launched;
 
       // An explicitly-provided jar (the jarPath option or the MOCKSERVER_JAR_PATH
       // environment variable) is used as-is and short-circuits the download
@@ -473,14 +538,20 @@ module.exports = (function () {
         mockServer.once('exit', function (code, signal) {
           mockServerExit = { code: code, signal: signal };
         });
-  
+        launched = mockServer;
+
       }).then(function () {
-        return checkStarted({
+        var since = Date.now();
+        checkStarted({
           method: 'PUT',
           host: "localhost",
           path: "/mockserver/retrieve?type=ACTIVE_EXPECTATIONS",
           port: port
-        }, startupRetries, deferred, options.verbose);
+        }, startupRetries, options.verbose).then(function (response) {
+          deferred.resolve(response);
+        }, function (lastError) {
+          deferred.reject(failedStart(launched, lastError, port, since, options.javaDebugPort, options.verbose));
+        });
       }, function (error) {
         deferred.reject(error);
       });

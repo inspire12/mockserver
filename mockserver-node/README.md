@@ -188,7 +188,7 @@ This value indicates whether Java debugging should be enabled and if so which po
 "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=" + javaDebugPort
 ```  
 
-Note that `suspend=y` is used so the MockServer will pause until the debugger is attached.  The grunt task will wait 50 seconds for the debugger to be attached before it exits with a failure status.
+Note that `suspend=y` is used so the MockServer will pause until the debugger is attached.  The grunt task will wait 50 seconds for the debugger to be attached before it exits with a failure status.  The paused JVM is left running when that happens, so a debugger can still be attached to it; stop it yourself when you are done.
   
 #### options.jvmOptions
 Type: `String`
@@ -211,6 +211,8 @@ Default value if javaDebugPort is not set: `110`
 Default value if javaDebugPort is set: `500`
 
 This value indicates the how many times we will call the check to confirm if the mock server started up correctly. It will default to 110 which will take about 11 seconds to complete, this is normally long enough for the server to startup. The server can take longer to start up if Java debugging is enabled so this will default to 500. The default will, in some cases, need to be overridden as the JVM may take longer to start up on some architectures,  e.g. Mac seems to take a little longer.
+
+The checks are 100 milliseconds apart, and each one waits up to 2 seconds for an answer.  A check that gets no answer in that time uses up 20 further retries, so a server that accepts connections and never answers makes the start give up after about `startupRetries` × 100 milliseconds plus 2 seconds, much as one that refuses connections does.  When the start gives up it fails with a message saying so and stops the JVM it launched, unless `javaDebugPort` is set.
 
 ## Contributing
 In lieu of a formal styleguide, take care to maintain the existing coding style. Add unit tests for any new or changed functionality. Lint and test your code using [Grunt](http://gruntjs.com/).
