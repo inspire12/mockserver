@@ -88,24 +88,32 @@ public class GeminiLlmClient extends AbstractLlmClient {
         if (candidate.hasNonNull("finishReason")) {
             completion.withStopReason(candidate.path("finishReason").asText());
         }
-        JsonNode usageNode = root.path("usageMetadata");
-        if (usageNode.isObject()) {
-            Usage usage = Usage.usage();
-            if (usageNode.has("promptTokenCount")) {
-                usage.withInputTokens(usageNode.path("promptTokenCount").asInt());
-            }
-            if (usageNode.has("candidatesTokenCount")) {
-                usage.withOutputTokens(usageNode.path("candidatesTokenCount").asInt());
-            }
-            if (usageNode.has("cachedContentTokenCount")) {
-                usage.withCachedInputTokens(usageNode.path("cachedContentTokenCount").asInt());
-            }
-            // Gemini reports reasoning ("thinking") tokens as thoughtsTokenCount.
-            if (usageNode.has("thoughtsTokenCount")) {
-                usage.withReasoningTokens(usageNode.path("thoughtsTokenCount").asInt());
-            }
+        Usage usage = parseUsage(root.path("usageMetadata"));
+        if (usage != null) {
             completion.withUsage(usage);
         }
         return completion;
+    }
+
+    @Override
+    public Usage parseUsage(JsonNode usageNode) {
+        if (usageNode == null || !usageNode.isObject()) {
+            return null;
+        }
+        Usage usage = Usage.usage();
+        if (usageNode.has("promptTokenCount")) {
+            usage.withInputTokens(usageNode.path("promptTokenCount").asInt());
+        }
+        if (usageNode.has("candidatesTokenCount")) {
+            usage.withOutputTokens(usageNode.path("candidatesTokenCount").asInt());
+        }
+        if (usageNode.has("cachedContentTokenCount")) {
+            usage.withCachedInputTokens(usageNode.path("cachedContentTokenCount").asInt());
+        }
+        // Gemini reports reasoning ("thinking") tokens as thoughtsTokenCount.
+        if (usageNode.has("thoughtsTokenCount")) {
+            usage.withReasoningTokens(usageNode.path("thoughtsTokenCount").asInt());
+        }
+        return usage;
     }
 }

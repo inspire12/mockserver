@@ -1116,6 +1116,67 @@ geminiLive()
     not an invoice.
 </p>
 
+<p>
+    <strong>Streamed responses are counted too.</strong> MockServer reads the token usage the provider reports
+    in the stream and adds the call's cost when the stream ends. The budget is checked before each call is
+    forwarded, so a call that is already streaming when the budget is reached still completes and the next
+    one is blocked. MockServer never estimates usage: a stream that reports none is not counted, and
+    MockServer logs a warning naming the provider and model
+    (<span class="inline_code">no token usage in the streamed ... response</span>, at most once a minute for
+    each provider and model), so check that your client asks for usage where the provider needs it:
+</p>
+
+<table class="table table-bordered table-striped">
+    <thead>
+        <tr><th>Provider</th><th>Usage in a streamed response</th></tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>OpenAI Chat Completions, Azure OpenAI Chat Completions</td>
+            <td>Only when the client asks for it. Set <span class="inline_code">"stream_options": {"include_usage": true}</span>
+                in the request (most SDKs and agent frameworks have a setting for this). Without it the call
+                is <strong>not counted</strong> towards the budget.</td>
+        </tr>
+        <tr>
+            <td>OpenAI Responses API</td>
+            <td>Always sent, in the final <span class="inline_code">response.completed</span> event. Nothing to set.</td>
+        </tr>
+        <tr>
+            <td>Anthropic</td>
+            <td>Always sent. If the stream is cut off part-way, the input tokens and the output tokens reported
+                up to that point are counted.</td>
+        </tr>
+        <tr>
+            <td>Gemini</td>
+            <td>Always sent, on every chunk. Nothing to set.</td>
+        </tr>
+        <tr>
+            <td>AWS Bedrock</td>
+            <td>Always sent by ConverseStream, for every model. Tokens are counted, but a Converse call is not
+                yet priced, so it does not add to the budget. For InvokeModelWithResponseStream only Anthropic
+                models are counted; streams from other model families (Nova, Titan, Llama, Mistral) are
+                <strong>not counted</strong>.</td>
+        </tr>
+        <tr>
+            <td>Mistral, OpenRouter, Groq</td>
+            <td>Sent without being asked for. Nothing to set.</td>
+        </tr>
+        <tr>
+            <td>Other OpenAI-compatible providers</td>
+            <td>If the provider follows OpenAI, set <span class="inline_code">stream_options.include_usage</span> as above.</td>
+        </tr>
+        <tr>
+            <td>Ollama</td>
+            <td>Always sent. Local models have no cost, so they are counted in tokens only.</td>
+        </tr>
+    </tbody>
+</table>
+
+<p>
+    Calls through <span class="inline_code">proxyPassMappings</span> reverse-proxy routes are blocked once the
+    budget is exceeded, but are not yet counted towards it.
+</p>
+
 <a id="moderation" class="anchor" href="#moderation">&nbsp;</a>
 <h2>Moderation, Content Filter &amp; Refusal</h2>
 

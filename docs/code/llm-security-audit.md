@@ -133,6 +133,24 @@ The `GeminiCodec.encodeStreaming()` method re-serialises tool-call arguments thr
 
 **Resolved.** This was previously reported as an E2E-only false-negative (the matcher unit tests passed for all providers, but the predicate was believed to fail through the full Netty pipeline for Gemini/Ollama turn-2 requests). It no longer reproduces: `LlmAgentLoopE2eTest.shouldMatchContainsToolResultForGeminiEndToEnd` and `…ForOllamaEndToEnd` drive turn 2 purely via `whenContainsToolResultFor` (not scenario ordering), through the real Netty pipeline, and both pass — Gemini's name-keyed correlation and Ollama's positional fallback work end-to-end. These regression tests guard against recurrence. (The earlier behaviour was fixed by subsequent matcher/codec work; the body is delivered to the matcher correctly E2E, as the Anthropic/OpenAI/Azure/Bedrock predicate-driven E2E tests also demonstrate.) Not a security issue.
 
+## Usage scanning of proxied LLM streams (2026-10-04)
+
+**Outcome:** Counting a streamed proxied LLM call reads bytes an upstream controls, on the upstream
+event loop, without being able to hold the stream, throw into the relay, or log its content.
+
+| Concern | Control |
+|---------|---------|
+| Memory | `LlmStreamUsageScanner` holds one captured value of at most 8 KiB (`MAX_VALUE_BYTES`; a larger value is dropped) and a 32-byte field name. The usage merged across events is capped at 32 fields, each a whole number or an object of at most 16 whole numbers, under names of at most 64 characters (under 64 KiB as JSON): a known field is replaced, a further new one refused, and anything that is not a whole-number count is ignored. Model name and stop reason are kept only up to 128 characters. Strings it does not want are skipped byte by byte, so event length is unbounded without cost. A `bytes` value (Bedrock) is base64-decoded only after passing the same 8 KiB bound. |
+| Malformed or hostile input | The skimmer has no failure state: unbalanced or invalid JSON moves counters that are clamped at zero, and they reset at the next Server-Sent Event or event-stream message (newline-delimited JSON has no such boundary, so a malformed line can hide the usage of the lines after it: the call is then reported as not counted). An AWS event-stream prelude with an impossible length stops the scan. A captured value is parsed by Jackson inside a catch; its nesting limit rejects a deeply nested value. `accept` catches every runtime exception and disables the scanner. |
+| Effect on the response | The observer runs in `StreamingBody.addChunk` on a slice of the chunk, before the chunk is relayed; an observer that throws is dropped and the chunk is relayed as normal. The accounting at stream end is inside `emitForwardGenAiSpan`'s catch. |
+| Logging | The usage log lines carry only the provider and the model name. No header, body or event text is logged, and the message formats are constants (`LogMessageFormatGuardTest`). Each line is written at most once a minute per provider and model, from a map capped at 256 keys and cleared when full: repeats of one provider and model are limited to one line a minute, and distinct model names are bounded only by the call rate. |
+| False counting | A hostile upstream can report any usage it likes, which is the same trust the whole-response path already places in it; it can only raise the recorded cost of its own calls. Usage is read only at the top of a document or one object down inside a known parent (arrays do not count as depth), so text that quotes a usage object, a tool schema or a guardrail trace is not counted. |
+
+Evidence: `LlmStreamUsageScannerTest` (hostile and oversized input, cut-off streams, and
+`shouldKeepABoundedUsageHoweverManyDistinctFieldsTheStreamSends`),
+`HttpActionHandlerStreamedLlmUsageTest.shouldRelayAHostileStreamUnchangedAndCountNothing`,
+`StreamingBodyTest.shouldKeepRelayingTheStreamWhenTheObserverThrows`.
+
 ## Embedding request limits (2026-10-03)
 
 **Outcome:** An embedding mock's response size is bounded whatever the request asks for. The request chooses how many vectors come back (one per input) and, when the expectation sets no `dimensions`, how long each is, so without a limit a request of a few kilobytes could ask for a response of any size. A request over a limit gets a `400` in the provider's own error shape before any vector is built.

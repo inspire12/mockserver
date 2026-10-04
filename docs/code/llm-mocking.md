@@ -596,9 +596,108 @@ Optional, off-by-default OTLP export, in two independent parts (both fail-soft �
 - **Metrics** (`org.mockserver.metrics.OtelMetricsExporter`, `mockserver.otelMetricsEnabled`) — bridges the existing `Metrics.Name` gauges (the same set exposed for Prometheus, including the LLM/SSE/chaos counters) to OTLP as observable gauges that read the current values, so Prometheus and OTLP stay consistent. An alternative to the Prometheus endpoint.
 - **GenAI spans** (`org.mockserver.telemetry.GenAiSpanExporter` + `GenAiSpans`, `mockserver.otelTracesEnabled`) — emits one span per LLM completion with GenAI semantic-convention attributes (`gen_ai.system`, `gen_ai.request.model`, `gen_ai.usage.*`, `gen_ai.response.finish_reasons`, tool-call count). When a provider reports them, cached-input and reasoning token counts are also emitted under the `mockserver.gen_ai.usage.*` namespace (`cached_input_tokens`, `cache_creation_tokens`, `reasoning_tokens`) — there is no GenAI semconv attribute for these yet, and they are omitted entirely when absent. These are spans MockServer codes deliberately — **no auto-instrumentation**. `GenAiSpans` is a process-wide no-op until `GenAiSpanExporter` installs a tracer. Spans fire on two paths:
   - **Mock action path** — `HttpLlmResponseActionHandler` calls `GenAiSpans.recordCompletion()` for mocked responses (streaming and non-streaming).
-  - **Forward/proxy path** — `HttpActionHandler.emitForwardGenAiSpan()` detects LLM traffic via `LlmProviderSniffer` (maps the forwarded request's target host to a `Provider`), parses the upstream response using the provider's `LlmClient.parseCompletionResponse()`, and records a completion span. Covers matched-expectation forwards and unmatched proxy-pass. Streaming forward paths emit the GenAI span in the completion listener after the full SSE body is captured. Model is extracted from the response body (most providers include it), falling back to the request body.
+  - **Forward/proxy path** — `HttpActionHandler.emitForwardGenAiSpan()` detects LLM traffic via `LlmProviderSniffer` (maps the forwarded request's target host to a `Provider`), reads the upstream response's usage with the provider's `LlmClient`, and records a completion span. Covers matched-expectation forwards, breakpoint-continuation forwards and the unmatched proxy path. A whole JSON response is parsed by `parseCompletionResponse()`; a streamed response is read as it passes and the span is emitted when the stream ends (see [Proxied LLM usage and cost](#proxied-llm-usage-and-cost)). Model is extracted from the response (most providers include it), falling back to the request body.
 
 Both use the OTLP HTTP/protobuf exporter with the JDK HttpClient sender (no gRPC/OkHttp) and share `mockserver.otelEndpoint` (a base collector URL; `/v1/metrics` and `/v1/traces` appended per signal, resolved by `telemetry.OtelEndpoints`).
+
+## Proxied LLM usage and cost
+
+A forwarded LLM call is counted from the usage the provider reports: tokens go on the GenAI span and
+the `mock_server_llm_*` counters, and the estimated cost goes towards `llmCostBudgetUsd`. This holds
+whether the response is one JSON document or a stream. Nothing is estimated: a response that
+reports no usage is counted as nothing, and MockServer logs that it was not counted.
+
+```mermaid
+flowchart LR
+    U["Upstream response"] --> S{"Relayed as\na stream?"}
+    S -- "no" --> W["Whole body:\nparseCompletionResponse"]
+    W -- "no usage, or not\none JSON document" --> B["LlmStreamUsageScanner\nover the body bytes"]
+    S -- "yes" --> O["LlmStreamUsageScanner\nobserves each chunk"]
+    O --> E["Stream ends"]
+    B --> P["LlmClient.parseUsage"]
+    E --> P
+    W --> R["Span, token counters,\ncost budget"]
+    P --> R
+```
+
+| Provider | Where a stream carries usage | Shape validated against |
+|---|---|---|
+| OpenAI Chat Completions, Azure OpenAI | `usage` on a final chunk with `choices: []`, only when the request set `stream_options.include_usage: true`; otherwise no chunk has it | openai-python `ChatCompletionChunk`, `CompletionUsage` |
+| Mistral | `usage` on the chunk that carries the finish reason, with no opt-in | mistralai client `CompletionChunk` |
+| OpenRouter | `usage` on a final chunk, always sent | OpenRouter usage accounting documentation |
+| Groq | `x_groq.usage` (and `usage`) on the final chunk | groq-python `ChatCompletionChunk`, `XGroq` |
+| xAI, DeepSeek, OrcaRouter | read as OpenAI Chat Completions; not separately validated | none |
+| OpenAI Responses | `response.usage` on `response.completed` (or `response.incomplete`) | openai-python `ResponseCompletedEvent`, `ResponseUsage` |
+| Anthropic | `message.usage` on `message_start`, then cumulative `usage` on `message_delta` | anthropic-sdk-python `RawMessageStartEvent`, `MessageDeltaUsage` |
+| Gemini | `usageMetadata` on each chunk, the last one complete; as SSE with `alt=sse`, otherwise one JSON array | Gemini API reference (`UsageMetadata`); the JSON-array form was not checked against a primary source |
+| Bedrock ConverseStream | `usage` on the `metadata` event of the AWS event stream | AWS API reference, ConverseStream |
+| Bedrock InvokeModelWithResponseStream | Anthropic events, each base64 in a `chunk` event's `bytes` | AWS API reference, InvokeModelWithResponseStream |
+| Ollama | `prompt_eval_count` and `eval_count` on the `done: true` line of the NDJSON | Ollama `docs/api.md` |
+
+**Why the stream is read as it passes.** A relayed stream is never held whole: the event log keeps
+only its first `maxStreamingCaptureBytes` (256 KiB by default), and usage is at the end. So
+`HttpActionHandler` attaches an `LlmStreamUsageScanner` to the `StreamingBody`
+(`observeChunks`) before the response is written. The scanner sees every chunk as it arrives from
+the upstream, after decompression (`Content-Encoding` is decoded ahead of the relay on both the
+HTTP/1.1 and HTTP/2 client pipelines). The same scanner reads an aggregated body that is really an
+event stream: Ollama NDJSON whose request did not say `"stream": true`, a Gemini JSON array, a
+Bedrock event stream, or SSE when `streamingResponsesEnabled` is off.
+
+**What the scanner keeps.** It follows the framing (Server-Sent Events, newline-delimited or
+concatenated JSON, AWS event stream) and skims the JSON one byte at a time, tracking only nesting
+depth and the current field name. It captures the raw value of a few named fields at the top of a
+document or one object down inside a known parent (`response`, `message`, `x_groq`, `choices`,
+`delta`, `candidates`): the usage object, the model and the stop reason. Arrays do not count as
+depth, so `choices[0].finish_reason` and a document inside a top-level JSON array are both read.
+Text, tool arguments and base64 are skipped without being held, so the length of an event does not
+matter: the `response.completed` event of the Responses API repeats the whole response and can run
+to megabytes. The depth rule is what keeps a tool schema's `usage` property, or Bedrock's guardrail
+`invocationMetrics.usage`, from being read as token usage.
+
+Everything it holds for the life of the stream is bounded, whatever the upstream sends:
+
+| Held | Bound (`LlmStreamUsageScanner`) |
+|---|---|
+| The value being captured | 8 KiB (`MAX_VALUE_BYTES`); a larger value is dropped, not truncated |
+| The field name being read | 32 bytes |
+| The merged usage | 32 fields (`MAX_USAGE_FIELDS`). A field already kept is replaced by a later event; a further new field is refused. Only whole-number counts are kept, directly or as an object of at most 16 of them (`MAX_USAGE_DETAIL_FIELDS`), under names of at most 64 characters: under 64 KiB as JSON. Nulls, text, decimals and arrays are ignored, so a `null` in a later event leaves the earlier count |
+| Model name, stop reason | 128 characters each (`MAX_TEXT_CHARS`); a longer one is ignored |
+
+The merge keeps counts only because an unfiltered merge grew with the stream: usage events with
+ever-new field names added to one object for as long as the stream ran.
+
+**One mapping.** The merged usage object goes through `LlmClient.parseUsage`, which
+`parseCompletionResponse` also uses, so a streamed and a whole response with the same usage are
+counted the same. Gemini's `thoughtsTokenCount` is therefore still reported as reasoning tokens and
+not added to output on either path (plan item 6).
+
+**When a stream has no usage.** A `2xx` streamed response with no usage, or one that ended before
+its final usage event, emits a span with no token attributes and logs one line, at `WARN` when
+`llmCostBudgetUsd` is set and `INFO` otherwise:
+
+- `no token usage in the streamed {provider} response for model {model}, so the call is not counted in LLM token and cost metrics or towards llmCostBudgetUsd`, with a hint to set `stream_options.include_usage` for OpenAI and for Azure OpenAI Chat Completions (not for an Azure `/responses` path, where usage is not opt-in).
+- `the streamed {provider} response for model {model} ended before its final usage event, so only the tokens reported before it ended are counted ...`: an Anthropic stream cut off after `message_start` is counted with its input tokens and the output tokens reported so far. Gemini repeats its counts on every chunk, so its stream is reported this way only when the upstream connection failed before a chunk with a `finishReason`.
+
+Each line is written at most once a minute for each provider and model, so a client that never
+sends usage does not flood the log; every call still gets its span. The line is also written for a
+streamed `2xx` response from an LLM host that is not a completion, such as Ollama's `/api/pull`
+(plan item 30).
+
+**Limits.**
+
+- The budget is checked before a forward is sent and a streamed call is added when its stream ends,
+  so calls already in flight when the budget is reached still complete.
+- `proxyPassMappings` routes check the budget but do not record usage, streamed or not (plan item 25).
+- The breakpoint-continuation forward is wired like the other two paths but has no test of its own;
+  the matched forward and the unmatched proxy path are tested end to end.
+- For Bedrock `InvokeModelWithResponseStream` only Anthropic-shaped events are read, so streams from
+  other model families (Nova, Titan, Llama, Mistral) are not counted.
+- Azure OpenAI Responses API traffic is read with the Chat Completions mapping and is not counted,
+  streamed or not (plan item 29).
+- Bedrock model ids are in the request path, not the body, so a proxied Converse call has tokens
+  but no model and no cost (plan item 27).
+- A scanner or parse failure is swallowed in the accounting path: `StreamingBody` drops an observer
+  that throws, and the relayed bytes are never changed.
 
 ## Drift detection
 
@@ -708,7 +807,7 @@ These are operational settings (config + MCP, for CI/automation), not dashboard 
 | `mockserver.otelEndpoint` | _(unset)_ | — | OTLP base endpoint shared by metrics and span export |
 | `mockserver.otelMetricsExportIntervalSeconds` | `60` | ≥1 | How often metrics are pushed to the OTLP collector |
 | `mockserver.llmMetricsEnabled` | `false` | — | Enable LLM token/cost Prometheus counters (requires `metricsEnabled`); activates forward-path response parsing even without OTLP tracing |
-| `mockserver.llmCostBudgetUsd` | `-1.0` (disabled) | — | Cumulative LLM cost budget in USD; enforced on ALL forward paths (matched FORWARD, breakpoint-continuation, unmatched proxy). When exceeded, LLM forwards return 429. Negative = disabled. Resets on server reset. Trip surfaces via `mock_server_llm_cost_budget_tripped` counter, WARN log, and the dashboard Circuit Breakers section |
+| `mockserver.llmCostBudgetUsd` | `-1.0` (disabled) | — | Cumulative LLM cost budget in USD; checked before every LLM forward (matched FORWARD, breakpoint-continuation, unmatched proxy, `proxyPassMappings`). When exceeded, LLM forwards return 429. A streamed call counts when its stream ends, and only if the stream reports usage (see [Proxied LLM usage and cost](#proxied-llm-usage-and-cost)). Negative = disabled. Resets on server reset. Trip surfaces via `mock_server_llm_cost_budget_tripped` counter, WARN log, and the dashboard Circuit Breakers section |
 
 ## LLM failover scenarios
 
@@ -783,6 +882,7 @@ Key source files under `mockserver/mockserver-core/src/main/java/org/mockserver/
 | `llm/client/LlmClientRegistry.java` | Singleton registry of runtime-LLM clients keyed by `Provider` |
 | `llm/client/{Ollama,OpenAi,OpenAiResponses,AzureOpenAi,Anthropic,Gemini,Bedrock}LlmClient.java` | Per-provider runtime clients |
 | `llm/client/LlmProviderSniffer.java` | Maps forwarded request host/path to LLM Provider for forward-path GenAI observability (path-gated fallback) |
+| `llm/client/LlmStreamUsageScanner.java` | Reads token usage from a proxied LLM response as it is relayed (SSE, NDJSON, JSON array, AWS event stream), holding at most 8 KiB of any one value |
 | `llm/client/LlmBackend.java` | Immutable backend config record (apiKey redacted) |
 | `llm/client/LlmBackendResolver.java` | Three-layer backend resolution (env / properties / named JSON) |
 | `llm/client/LlmCompletionService.java` | Orchestrator: off-unless-configured, fail-closed, cached |

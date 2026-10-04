@@ -1019,6 +1019,13 @@ sequenceDiagram
     SR->>C: Write LastHttpContent
 ```
 
+A forwarded LLM response relayed this way is also read for its token usage as it passes:
+`HttpActionHandler` registers an `LlmStreamUsageScanner` with `StreamingBody.observeChunks` before the
+response is written. The observer sees every chunk on arrival (including chunks that arrived before
+the writer subscribed, and past the capture limit), holds at most a few KiB, and cannot affect the
+relay: an observer that throws is dropped. See
+[Proxied LLM usage and cost](llm-mocking.md#proxied-llm-usage-and-cost).
+
 Key behavioural points:
 
 - The `CompletableFuture<HttpResponse>` completes at **response-head time** (not after the full body is received), so the global socket timeout (`maxSocketTimeoutInMillis`) no longer applies to the streamed portion. A per-stream `IdleStateHandler` enforces `streamIdleTimeoutSeconds` instead, while MockServer is reading the upstream: `StreamIdleTimeoutHandler` ignores an idle event while more than the read watermark waits for the client (`StreamingBody.isAwaitingClient()`), because reads are then withheld on purpose, so a slow or paused client keeps its stream. A body nothing has subscribed to (a streamed response replaced or dropped before it was written) is never awaiting a client, so its upstream still times out; a breakpoint `CLOSE` closes the upstream directly. An upstream that closes, fails, or sends invalid framing mid-stream also ends the client's response without its terminating chunk (`StreamAbortedException`; `StreamedResponseDecoderResultGuard` turns a codec's failed decoder result into that abort before a decompressor can replace it with a clean end), while a body the upstream delimits by closing its connection still ends normally. When the client has gone, the writer closes the upstream (`StreamingBody.closeUpstream()`). A stream that times out fails with `StreamingBody.IdleTimeoutException` and, like a bound abort, ends the client's response without its terminating chunk (HTTP/2, HTTP/3: reset).

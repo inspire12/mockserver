@@ -1,10 +1,12 @@
 package org.mockserver.llm.client;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import org.mockserver.llm.ParsedConversation;
 import org.mockserver.model.Completion;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.model.Provider;
+import org.mockserver.model.Usage;
 
 /**
  * Per-provider knowledge for calling a real LLM as a client. Mirrors
@@ -43,4 +45,15 @@ public interface LlmClient {
      * handled (fail-closed) by {@link LlmCompletionService}.
      */
     Completion parseCompletionResponse(HttpResponse response);
+
+    /**
+     * Map the provider's usage object to a {@link Usage}: the same object whether it came from a
+     * whole response body or from the usage event of a stream, so both are counted alike.
+     *
+     * @param usage the provider's usage object, in its own field names
+     * @return the usage, or null when the node carries none
+     */
+    default Usage parseUsage(JsonNode usage) {
+        return null;
+    }
 }

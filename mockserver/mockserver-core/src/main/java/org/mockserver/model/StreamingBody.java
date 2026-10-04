@@ -7,6 +7,7 @@ import io.netty.channel.EventLoop;
 import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
@@ -50,6 +51,7 @@ public class StreamingBody {
     private List<Runnable> completionListeners;
     private volatile Runnable requestMoreCallback;
     private volatile Runnable upstreamCloser;
+    private volatile Consumer<ByteBuf> chunkObserver;
 
     /** The upstream channel's event loop, used to serialise subscribe/addChunk/complete/error. */
     private volatile EventLoop eventLoop;
@@ -116,6 +118,61 @@ public class StreamingBody {
      */
     public void setEventLoop(EventLoop eventLoop) {
         this.eventLoop = eventLoop;
+    }
+
+    /**
+     * Observe every chunk as it arrives from the upstream, including any that arrived before this call and any past
+     * the capture limit. Call it before {@link #subscribe}. The observer runs on the event loop, must not release or
+     * keep the buffer, and is dropped if it throws. Read its result through {@link #afterChunksObserved}.
+     */
+    public void observeChunks(Consumer<ByteBuf> observer) {
+        if (eventLoop != null && !eventLoop.inEventLoop()) {
+            eventLoop.execute(() -> observeChunksOnEventLoop(observer));
+        } else {
+            observeChunksOnEventLoop(observer);
+        }
+    }
+
+    private void observeChunksOnEventLoop(Consumer<ByteBuf> observer) {
+        chunkObserver = observer;
+        if (pendingChunks != null) {
+            for (byte[] chunkBytes : pendingChunks) {
+                ByteBuf buffered = Unpooled.wrappedBuffer(chunkBytes);
+                try {
+                    notifyChunkObserver(buffered);
+                } finally {
+                    buffered.release();
+                }
+            }
+        }
+    }
+
+    private void notifyChunkObserver(ByteBuf chunk) {
+        Consumer<ByteBuf> observer = chunkObserver;
+        if (observer != null) {
+            try {
+                observer.accept(chunk);
+            } catch (Exception e) {
+                // an observer must never affect the relayed stream
+                chunkObserver = null;
+            }
+        }
+    }
+
+    /**
+     * Run a task on the event loop, behind an observer still waiting to be attached there. A completion listener can
+     * run on another thread before {@link #observeChunks} has taken effect, so it reads the observer's result here.
+     */
+    public void afterChunksObserved(Runnable task) {
+        if (eventLoop != null && !eventLoop.inEventLoop()) {
+            try {
+                eventLoop.execute(task);
+                return;
+            } catch (RejectedExecutionException e) {
+                // the event loop has shut down, so nothing more will be observed
+            }
+        }
+        task.run();
     }
 
     /**
@@ -227,6 +284,9 @@ public class StreamingBody {
                 // discard timestamps — truncated recordings use fixed-delay fallback
                 chunkTimestampsNanos = null;
             }
+        }
+        if (chunkObserver != null) {
+            notifyChunkObserver(chunk.slice());
         }
         // forward to subscriber or buffer for later
         if (onChunk != null) {

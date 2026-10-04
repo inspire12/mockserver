@@ -21,6 +21,7 @@ import org.mockserver.mock.CrossProtocolEventBus;
 import org.mockserver.mock.Expectation;
 import org.mockserver.mock.HttpState;
 import org.mockserver.mock.crud.CrudDispatcher;
+import org.mockserver.llm.client.LlmStreamUsageScanner;
 import org.mockserver.model.*;
 import org.mockserver.model.StreamingBody;
 import org.mockserver.openapi.OpenAPIRequestValidator;
@@ -1168,6 +1169,7 @@ public class HttpActionHandler {
                             emitRequestSpan(request, streamingResponse, null, ctx, responseTimeMs, remoteAddress);
                             // Metrics: per-upstream forward latency + status for the unmatched proxy path
                             recordForwardMetrics(null, streamingResponse, remoteAddress, responseTimeMs);
+                            final LlmStreamUsageScanner streamUsage = observeForwardedLlmStream(clonedRequest, streamingResponse);
                             responseWriter.writeResponse(request, streamingResponse, false);
                             final long streamForwardStartNanos = forwardStartNanos;
                             streamingResponse.getStreamingBody().addCompletionListener(() -> {
@@ -1193,8 +1195,8 @@ public class HttpActionHandler {
                                         .setArguments(logResponse, request, deferredCurl(request, remoteAddress))
                                 );
                                 // OpenTelemetry: emit GenAI span for the unmatched streaming forward path
-                                // after the stream completes and the full body is available
-                                emitForwardGenAiSpan(clonedRequest, logResponse);
+                                // after the stream completes
+                                emitStreamedForwardGenAiSpan(clonedRequest, logResponse, streamingResponse.getStreamingBody(), streamUsage);
                             });
                         } else {
                             // validation proxy: validate non-streaming response (enforce mode returns 502)
@@ -1394,6 +1396,7 @@ public class HttpActionHandler {
                 final HttpResponse streamingResponse = response;
                 // OpenTelemetry: emit SERVER span for the breakpoint-continuation streaming forward path
                 emitRequestSpan(originalRequest, streamingResponse, null, null, responseTimeMs);
+                final LlmStreamUsageScanner streamUsage = observeForwardedLlmStream(requestToForward, streamingResponse);
                 responseWriter.writeResponse(originalRequest, streamingResponse, false);
                 final long streamForwardStartNanos = forwardStartNanos;
                 streamingResponse.getStreamingBody().addCompletionListener(() -> {
@@ -1417,8 +1420,8 @@ public class HttpActionHandler {
                             .setMessageFormat("returning response:{}for forwarded request" + NEW_LINE + NEW_LINE + " in json:{}" + NEW_LINE + NEW_LINE + " in curl:{}")
                             .setArguments(logResponse, originalRequest, deferredCurl(originalRequest, remoteAddress))
                     );
-                    // OpenTelemetry: emit GenAI span after stream completes and full body is available
-                    emitForwardGenAiSpan(requestToForward, logResponse);
+                    // OpenTelemetry: emit GenAI span after stream completes
+                    emitStreamedForwardGenAiSpan(requestToForward, logResponse, streamingResponse.getStreamingBody(), streamUsage);
                 });
             } else {
                 if (validationEnabled) {
@@ -2866,7 +2869,7 @@ public class HttpActionHandler {
                 final long capturedForwardStartNanos = forwardStartNanos;
                 if (isStreaming) {
                     // Streaming path: GenAI span is deferred to the completion listener
-                    // inside writeStreamingForwardActionResponse where the full body is available
+                    // inside writeStreamingForwardActionResponse, once the stream has ended
                     writeCommand = () -> writeStreamingForwardActionResponse(effectiveResponse, responseWriter, request, action, responseFuture, postProcessor, capturedForwardStartNanos);
                 } else {
                     // Non-streaming path: GenAI span already emitted above (before breakpoint check)
@@ -2934,6 +2937,7 @@ public class HttpActionHandler {
         // a stream and verifies before the stream ends may not yet see this entry; that is inherent to
         // streaming (the exchange genuinely is not finished) rather than a lost race. Verifications
         // against streamed exchanges should await stream completion.
+        final LlmStreamUsageScanner streamUsage = observeForwardedLlmStream(responseFuture.getHttpRequest(), response);
         responseWriter.writeResponse(request, response, false);
 
         // Register a completion callback on the streaming body to write the log entry
@@ -2961,8 +2965,8 @@ public class HttpActionHandler {
                             : new Object[]{logResponse, responseFuture.getHttpRequest(), deferredCurl(responseFuture.getHttpRequest(), responseFuture.getRemoteAddress())}
                         )
                 );
-                // OpenTelemetry: emit GenAI span after stream completes and full body is available
-                emitForwardGenAiSpan(responseFuture.getHttpRequest(), logResponse);
+                // OpenTelemetry: emit GenAI span after stream completes
+                emitStreamedForwardGenAiSpan(responseFuture.getHttpRequest(), logResponse, streamingBody, streamUsage);
             } catch (Throwable throwable) {
                 if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
                     mockServerLogger.logEvent(
@@ -4286,19 +4290,61 @@ public class HttpActionHandler {
 
     /**
      * Process a forwarded LLM response: emit a GenAI span, increment token/cost
-     * metrics, record cost against the budget monitor, and annotate the response
-     * with usage headers for dashboard display. Fail-soft: telemetry and metrics
-     * must never affect the served response.
+     * metrics and record cost against the budget monitor. Fail-soft: telemetry and
+     * metrics must never affect the served response.
      * <p>
      * The gate is widened beyond just {@code GenAiSpans.isEnabled()} — the parse
      * also runs when LLM metrics are enabled or a cost budget is configured, so
      * token/cost tracking works without requiring full OTLP tracing.
      */
     private void emitForwardGenAiSpan(HttpRequest forwardedRequest, HttpResponse upstreamResponse) {
+        emitForwardGenAiSpan(forwardedRequest, upstreamResponse, null, false);
+    }
+
+    private boolean isForwardLlmAccountingEnabled() {
+        return GenAiSpans.isEnabled()
+            || org.mockserver.metrics.Metrics.isLlmMetricsActive()
+            || configuration.llmCostBudgetUsd() > 0;
+    }
+
+    /**
+     * Start reading the usage out of a forwarded LLM response relayed as a stream: the captured body
+     * keeps only the start of a stream, and usage is at its end. Call before the response is written.
+     *
+     * @return the scanner, or null when this is not LLM traffic or nothing would use the result
+     */
+    private LlmStreamUsageScanner observeForwardedLlmStream(HttpRequest forwardedRequest, HttpResponse streamingResponse) {
+        try {
+            if (!isForwardLlmAccountingEnabled()
+                || org.mockserver.llm.client.LlmProviderSniffer.sniff(forwardedRequest).isEmpty()) {
+                return null;
+            }
+            LlmStreamUsageScanner streamUsage = new LlmStreamUsageScanner();
+            streamingResponse.getStreamingBody().observeChunks(streamUsage::accept);
+            return streamUsage;
+        } catch (Exception e) {
+            // fail-soft: telemetry must never affect the served response
+            return null;
+        }
+    }
+
+    private void emitStreamedForwardGenAiSpan(HttpRequest forwardedRequest, HttpResponse logResponse,
+                                              StreamingBody streamingBody, LlmStreamUsageScanner streamUsage) {
+        if (streamUsage == null) {
+            emitForwardGenAiSpan(forwardedRequest, logResponse, null, false);
+        } else {
+            streamingBody.afterChunksObserved(() -> emitForwardGenAiSpan(forwardedRequest, logResponse, streamUsage, streamingBody.getError() != null));
+        }
+    }
+
+    /**
+     * @param streamUsage  the usage read from the response as it was relayed as a stream, or null
+     *                     when the whole body is in {@code upstreamResponse}
+     * @param streamCutOff whether the relayed stream ended in an error rather than completing
+     */
+    private void emitForwardGenAiSpan(HttpRequest forwardedRequest, HttpResponse upstreamResponse, LlmStreamUsageScanner streamUsage, boolean streamCutOff) {
         boolean spanEnabled = GenAiSpans.isEnabled();
-        boolean metricsEnabled = org.mockserver.metrics.Metrics.isLlmMetricsActive();
-        boolean budgetEnabled = configuration.llmCostBudgetUsd() > 0;
-        if (!spanEnabled && !metricsEnabled && !budgetEnabled) {
+        if (!isForwardLlmAccountingEnabled()) {
             return;
         }
         try {
@@ -4313,13 +4359,42 @@ public class HttpActionHandler {
             if (clientOpt.isEmpty()) {
                 return;
             }
-            // Parse the upstream response body into a Completion (extracts model from
-            // the already-parsed JSON — no second parse needed for the model)
-            Completion completion = clientOpt.get().parseCompletionResponse(upstreamResponse);
+            org.mockserver.llm.client.LlmClient client = clientOpt.get();
+            Completion completion = null;
+            LlmStreamUsageScanner scanned = streamUsage;
+            if (scanned != null) {
+                completion = streamedCompletion(client, scanned);
+            } else {
+                RuntimeException notOneJsonDocument = null;
+                try {
+                    completion = client.parseCompletionResponse(upstreamResponse);
+                } catch (RuntimeException e) {
+                    notOneJsonDocument = e;
+                }
+                if (completion == null || completion.getUsage() == null) {
+                    // an event stream that was aggregated rather than relayed as a stream
+                    scanned = scanBody(upstreamResponse);
+                    if (scanned != null && (scanned.usage() != null || scanned.streamed())) {
+                        completion = streamedCompletion(client, scanned);
+                    } else {
+                        scanned = null;
+                    }
+                }
+                if (completion == null) {
+                    if (notOneJsonDocument != null) {
+                        throw notOneJsonDocument;
+                    }
+                    // a client that returned no completion without failing: nothing to record
+                    return;
+                }
+            }
             // Prefer the model from the parsed completion; fall back to the request body
             String model = completion.getModel();
             if (model == null) {
                 model = org.mockserver.llm.client.LlmProviderSniffer.extractModelFromRequest(forwardedRequest);
+            }
+            if (scanned != null) {
+                logStreamedUsageUnavailable(provider, model, forwardedRequest, upstreamResponse, completion.getUsage(), scanned, streamCutOff);
             }
             if (spanEnabled) {
                 GenAiSpans.recordCompletion(provider, model, completion);
@@ -4338,6 +4413,89 @@ public class HttpActionHandler {
                 );
             }
         }
+    }
+
+    private static LlmStreamUsageScanner scanBody(HttpResponse upstreamResponse) {
+        byte[] body = upstreamResponse.getBodyAsRawBytes();
+        if (body == null || body.length == 0) {
+            return null;
+        }
+        LlmStreamUsageScanner scanned = new LlmStreamUsageScanner();
+        scanned.accept(body);
+        return scanned;
+    }
+
+    private static Completion streamedCompletion(org.mockserver.llm.client.LlmClient client, LlmStreamUsageScanner scanned) {
+        Completion completion = Completion.completion();
+        if (scanned.model() != null) {
+            completion.withModel(scanned.model());
+        }
+        if (scanned.stopReason() != null) {
+            completion.withStopReason(scanned.stopReason());
+        }
+        Usage usage = scanned.usage() != null ? client.parseUsage(scanned.usage()) : null;
+        if (usage != null) {
+            completion.withUsage(usage);
+        }
+        return completion;
+    }
+
+    static final String STREAMED_USAGE_MISSING_MESSAGE_FORMAT =
+        "no token usage in the streamed {} response for model {}, so the call is not counted in LLM token and cost metrics or towards llmCostBudgetUsd";
+    static final String STREAMED_USAGE_MISSING_OPENAI_MESSAGE_FORMAT = STREAMED_USAGE_MISSING_MESSAGE_FORMAT
+        + " - set stream_options.include_usage to true in the client's request for it to be counted";
+    static final String STREAMED_USAGE_INCOMPLETE_MESSAGE_FORMAT =
+        "the streamed {} response for model {} ended before its final usage event, so only the tokens reported before it ended are counted in LLM token and cost metrics and towards llmCostBudgetUsd";
+
+    private static final long USAGE_LOG_INTERVAL_NANOS = java.util.concurrent.TimeUnit.MINUTES.toNanos(1);
+    private static final int USAGE_LOG_KEYS = 256;
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> usageLogTimes = new java.util.concurrent.ConcurrentHashMap<>();
+
+    // nothing is estimated in place of missing usage, so the operator is told the call was not counted
+    private void logStreamedUsageUnavailable(Provider provider, String model, HttpRequest forwardedRequest, HttpResponse upstreamResponse,
+                                             Usage usage, LlmStreamUsageScanner scanned, boolean streamCutOff) {
+        Integer statusCode = upstreamResponse.getStatusCode();
+        if (statusCode != null && (statusCode < 200 || statusCode > 299)) {
+            return;
+        }
+        boolean counted = usage != null && (usage.getInputTokens() != null || usage.getOutputTokens() != null);
+        // a stream that repeats its counts on every chunk is whole unless it was cut off
+        boolean whole = scanned.finalUsageSeen() || (scanned.usageOnEveryChunk() && !streamCutOff);
+        if ((counted && whole) || !usageLogDue(provider, model, counted)) {
+            return;
+        }
+        // an uncounted call is a hole in the budget, so it is a warning once a budget is set
+        Level level = configuration.llmCostBudgetUsd() > 0 ? Level.WARN : Level.INFO;
+        String path = forwardedRequest.getPath() != null ? forwardedRequest.getPath().getValue() : null;
+        // Azure serves the Responses API too, where usage is not opt-in
+        boolean usageIsOptIn = provider == Provider.OPENAI
+            || (provider == Provider.AZURE_OPENAI && (path == null || !path.toLowerCase().contains("/responses")));
+        if (mockServerLogger.isEnabledForInstance(level)) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(level)
+                    .setMessageFormat(counted
+                        ? STREAMED_USAGE_INCOMPLETE_MESSAGE_FORMAT
+                        : (usageIsOptIn ? STREAMED_USAGE_MISSING_OPENAI_MESSAGE_FORMAT : STREAMED_USAGE_MISSING_MESSAGE_FORMAT))
+                    .setArguments(provider, model)
+            );
+        }
+    }
+
+    // one line a minute for each provider and model, so a client that never sends usage does not flood the log
+    private boolean usageLogDue(Provider provider, String model, boolean counted) {
+        String modelKey = model == null ? "" : model.substring(0, Math.min(model.length(), LlmStreamUsageScanner.MAX_TEXT_CHARS));
+        String key = provider.name() + '|' + counted + '|' + modelKey;
+        long now = org.mockserver.time.TimeService.nanoTime();
+        Long last = usageLogTimes.get(key);
+        if (last != null && now - last < USAGE_LOG_INTERVAL_NANOS) {
+            return false;
+        }
+        if (usageLogTimes.size() >= USAGE_LOG_KEYS) {
+            usageLogTimes.clear();
+        }
+        usageLogTimes.put(key, now);
+        return true;
     }
 
     /**

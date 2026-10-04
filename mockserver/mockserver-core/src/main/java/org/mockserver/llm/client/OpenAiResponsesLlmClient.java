@@ -66,28 +66,36 @@ public class OpenAiResponsesLlmClient extends AbstractLlmClient {
         if (root.hasNonNull("status")) {
             completion.withStopReason(root.path("status").asText());
         }
-        JsonNode usageNode = root.path("usage");
-        if (usageNode.isObject()) {
-            Usage usage = Usage.usage();
-            if (usageNode.has("input_tokens")) {
-                usage.withInputTokens(usageNode.path("input_tokens").asInt());
-            }
-            if (usageNode.has("output_tokens")) {
-                usage.withOutputTokens(usageNode.path("output_tokens").asInt());
-            }
-            JsonNode inputDetails = usageNode.path("input_tokens_details");
-            if (inputDetails.isObject() && inputDetails.has("cached_tokens")) {
-                usage.withCachedInputTokens(inputDetails.path("cached_tokens").asInt());
-            }
-            if (inputDetails.isObject() && inputDetails.has("cache_write_tokens")) {
-                usage.withCacheCreationTokens(inputDetails.path("cache_write_tokens").asInt());
-            }
-            JsonNode outputDetails = usageNode.path("output_tokens_details");
-            if (outputDetails.isObject() && outputDetails.has("reasoning_tokens")) {
-                usage.withReasoningTokens(outputDetails.path("reasoning_tokens").asInt());
-            }
+        Usage usage = parseUsage(root.path("usage"));
+        if (usage != null) {
             completion.withUsage(usage);
         }
         return completion;
+    }
+
+    @Override
+    public Usage parseUsage(JsonNode usageNode) {
+        if (usageNode == null || !usageNode.isObject()) {
+            return null;
+        }
+        Usage usage = Usage.usage();
+        if (usageNode.has("input_tokens")) {
+            usage.withInputTokens(usageNode.path("input_tokens").asInt());
+        }
+        if (usageNode.has("output_tokens")) {
+            usage.withOutputTokens(usageNode.path("output_tokens").asInt());
+        }
+        JsonNode inputDetails = usageNode.path("input_tokens_details");
+        if (inputDetails.isObject() && inputDetails.has("cached_tokens")) {
+            usage.withCachedInputTokens(inputDetails.path("cached_tokens").asInt());
+        }
+        if (inputDetails.isObject() && inputDetails.has("cache_write_tokens")) {
+            usage.withCacheCreationTokens(inputDetails.path("cache_write_tokens").asInt());
+        }
+        JsonNode outputDetails = usageNode.path("output_tokens_details");
+        if (outputDetails.isObject() && outputDetails.has("reasoning_tokens")) {
+            usage.withReasoningTokens(outputDetails.path("reasoning_tokens").asInt());
+        }
+        return usage;
     }
 }

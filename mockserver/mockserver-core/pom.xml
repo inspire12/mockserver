@@ -863,6 +863,7 @@
                         <exclude>**/SslCertificateLeafValidityInDaysTest.java</exclude>
                         <exclude>**/SlowRequestConfigurationTest.java</exclude>
                         <exclude>**/HttpActionHandlerLlmCostBudgetTest.java</exclude>
+                        <exclude>**/HttpActionHandlerStreamedLlmUsageTest.java</exclude>
                         <exclude>**/GrpcChaosRegistryTest.java</exclude>
                         <exclude>**/ValidationProxyTest.java</exclude>
                         <exclude>**/HttpLlmResponseActionHandlerTest.java</exclude>
@@ -1079,6 +1080,7 @@
                                 <include>**/SslCertificateLeafValidityInDaysTest.java</include>
                                 <include>**/SlowRequestConfigurationTest.java</include>
                                 <include>**/HttpActionHandlerLlmCostBudgetTest.java</include>
+                                <include>**/HttpActionHandlerStreamedLlmUsageTest.java</include>
                                 <include>**/GrpcChaosRegistryTest.java</include>
                                 <include>**/ValidationProxyTest.java</include>
                                 <include>**/HttpLlmResponseActionHandlerTest.java</include>

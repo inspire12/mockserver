@@ -308,6 +308,9 @@ rate(mock_server_requests_received_total[5m])</code></pre>
     These counters are incremented on both the mock path (when MockServer serves an
     <span class="inline_code">httpLlmResponse</span>) and the forward/proxy path (when MockServer forwards
     requests to a real LLM provider). Cost estimation uses an internal pricing table and is approximate.
+    A forwarded call whose response is streamed is counted when the stream ends, from the usage the provider
+    reports in it; a stream that reports no usage adds nothing to these counters
+    (see <a href="/mock_server/llm_response_mocking.html#cost_budget">Cost Budget</a> for what each provider needs).
 </p>
 
 <p>The cost-budget circuit-breaker (<span class="inline_code">mock_server_llm_cost_budget_tripped_total</span> counter) is documented in <a href="/mock_server/llm_response_mocking.html#cost_budget">LLM Response Mocking &rarr; Cost Budget</a>.</p>

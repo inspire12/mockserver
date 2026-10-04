@@ -85,23 +85,31 @@ public class AnthropicLlmClient extends AbstractLlmClient {
         if (root.hasNonNull("stop_reason")) {
             completion.withStopReason(root.path("stop_reason").asText());
         }
-        JsonNode usageNode = root.path("usage");
-        if (usageNode.isObject()) {
-            Usage usage = Usage.usage();
-            if (usageNode.has("input_tokens")) {
-                usage.withInputTokens(usageNode.path("input_tokens").asInt());
-            }
-            if (usageNode.has("output_tokens")) {
-                usage.withOutputTokens(usageNode.path("output_tokens").asInt());
-            }
-            if (usageNode.has("cache_read_input_tokens")) {
-                usage.withCachedInputTokens(usageNode.path("cache_read_input_tokens").asInt());
-            }
-            if (usageNode.has("cache_creation_input_tokens")) {
-                usage.withCacheCreationTokens(usageNode.path("cache_creation_input_tokens").asInt());
-            }
+        Usage usage = parseUsage(root.path("usage"));
+        if (usage != null) {
             completion.withUsage(usage);
         }
         return completion;
+    }
+
+    @Override
+    public Usage parseUsage(JsonNode usageNode) {
+        if (usageNode == null || !usageNode.isObject()) {
+            return null;
+        }
+        Usage usage = Usage.usage();
+        if (usageNode.has("input_tokens")) {
+            usage.withInputTokens(usageNode.path("input_tokens").asInt());
+        }
+        if (usageNode.has("output_tokens")) {
+            usage.withOutputTokens(usageNode.path("output_tokens").asInt());
+        }
+        if (usageNode.has("cache_read_input_tokens")) {
+            usage.withCachedInputTokens(usageNode.path("cache_read_input_tokens").asInt());
+        }
+        if (usageNode.has("cache_creation_input_tokens")) {
+            usage.withCacheCreationTokens(usageNode.path("cache_creation_input_tokens").asInt());
+        }
+        return usage;
     }
 }

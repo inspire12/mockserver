@@ -425,6 +425,25 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   applies to `OPENAI`, `AZURE_OPENAI` and the OpenAI-compatible providers (`MISTRAL`, `XAI`, `DEEPSEEK`,
   `GROQ`, `OPENROUTER`, `ORCAROUTER`). A request that does not ask gets no usage, as from the real
   OpenAI and Azure APIs, and is unchanged; the compatible providers follow the same opt-in.
+- **A proxied LLM call whose response is streamed is now counted, so `llmCostBudgetUsd` applies to
+  streaming clients.** Token and cost tracking of forwarded LLM traffic read the response as one JSON
+  document, so a Server-Sent Events stream failed to parse and was silently skipped, and an Ollama
+  stream was read only as far as its first line. Coding CLIs and most agents always stream, so they
+  recorded no tokens and no cost, emitted no GenAI span, and never tripped the cost budget. MockServer
+  now reads the usage each provider reports in its stream as the stream is relayed: the final usage
+  chunk of OpenAI Chat Completions (and of Mistral, OpenRouter and Groq, which send it without being
+  asked), `response.completed` for the OpenAI Responses API, `message_start` and `message_delta` for
+  Anthropic, `usageMetadata` for Gemini, the `metadata` event of Bedrock ConverseStream and the wrapped
+  events of InvokeModelWithResponseStream, and the `done` line of Ollama. The call is counted when its
+  stream ends, wherever in the stream the usage is and however long the stream. Nothing is estimated:
+  a stream that reports no usage is not counted, and MockServer now logs that, at `WARN` when a budget
+  is set and at most once a minute for each provider and model. OpenAI Chat Completions only reports
+  usage in a stream when the client sets
+  `stream_options.include_usage` to `true`, so set it for those calls to count towards the budget. A
+  stream cut off after Anthropic's `message_start` is counted with the tokens reported up to then.
+  Calls through `proxyPassMappings` routes are still not counted, a proxied Bedrock Converse call is
+  counted in tokens but not in cost, and for Bedrock InvokeModelWithResponseStream only Anthropic
+  models are counted.
 - **`httpLlmResponse` embedding mocks now return one vector per input, read each provider's own
   input field, and use each provider's real response shape.** Only a top-level `input` was read, so
   Gemini `content.parts[].text`, Bedrock Titan `inputText`, Bedrock Cohere `texts` and Ollama

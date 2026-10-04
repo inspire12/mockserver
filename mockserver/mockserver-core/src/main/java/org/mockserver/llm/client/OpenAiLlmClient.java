@@ -64,25 +64,33 @@ public class OpenAiLlmClient extends AbstractLlmClient {
         if (choice.hasNonNull("finish_reason")) {
             completion.withStopReason(choice.path("finish_reason").asText());
         }
-        JsonNode usageNode = root.path("usage");
-        if (usageNode.isObject()) {
-            Usage usage = Usage.usage();
-            if (usageNode.has("prompt_tokens")) {
-                usage.withInputTokens(usageNode.path("prompt_tokens").asInt());
-            }
-            if (usageNode.has("completion_tokens")) {
-                usage.withOutputTokens(usageNode.path("completion_tokens").asInt());
-            }
-            JsonNode promptDetails = usageNode.path("prompt_tokens_details");
-            if (promptDetails.isObject() && promptDetails.has("cached_tokens")) {
-                usage.withCachedInputTokens(promptDetails.path("cached_tokens").asInt());
-            }
-            JsonNode completionDetails = usageNode.path("completion_tokens_details");
-            if (completionDetails.isObject() && completionDetails.has("reasoning_tokens")) {
-                usage.withReasoningTokens(completionDetails.path("reasoning_tokens").asInt());
-            }
+        Usage usage = parseUsage(root.path("usage"));
+        if (usage != null) {
             completion.withUsage(usage);
         }
         return completion;
+    }
+
+    @Override
+    public Usage parseUsage(JsonNode usageNode) {
+        if (usageNode == null || !usageNode.isObject()) {
+            return null;
+        }
+        Usage usage = Usage.usage();
+        if (usageNode.has("prompt_tokens")) {
+            usage.withInputTokens(usageNode.path("prompt_tokens").asInt());
+        }
+        if (usageNode.has("completion_tokens")) {
+            usage.withOutputTokens(usageNode.path("completion_tokens").asInt());
+        }
+        JsonNode promptDetails = usageNode.path("prompt_tokens_details");
+        if (promptDetails.isObject() && promptDetails.has("cached_tokens")) {
+            usage.withCachedInputTokens(promptDetails.path("cached_tokens").asInt());
+        }
+        JsonNode completionDetails = usageNode.path("completion_tokens_details");
+        if (completionDetails.isObject() && completionDetails.has("reasoning_tokens")) {
+            usage.withReasoningTokens(completionDetails.path("reasoning_tokens").asInt());
+        }
+        return usage;
     }
 }

@@ -56,16 +56,29 @@ public class OllamaLlmClient extends AbstractLlmClient {
         if (root.hasNonNull("done_reason")) {
             completion.withStopReason(root.path("done_reason").asText());
         }
-        if (root.has("prompt_eval_count") || root.has("eval_count")) {
-            Usage usage = Usage.usage();
-            if (root.has("prompt_eval_count")) {
-                usage.withInputTokens(root.path("prompt_eval_count").asInt());
-            }
-            if (root.has("eval_count")) {
-                usage.withOutputTokens(root.path("eval_count").asInt());
-            }
+        Usage usage = parseUsage(root);
+        if (usage != null) {
             completion.withUsage(usage);
         }
         return completion;
+    }
+
+    /**
+     * Ollama has no usage object: the counts sit at the top of the response, or of the
+     * {@code done: true} line of a stream.
+     */
+    @Override
+    public Usage parseUsage(JsonNode root) {
+        if (root == null || !(root.has("prompt_eval_count") || root.has("eval_count"))) {
+            return null;
+        }
+        Usage usage = Usage.usage();
+        if (root.has("prompt_eval_count")) {
+            usage.withInputTokens(root.path("prompt_eval_count").asInt());
+        }
+        if (root.has("eval_count")) {
+            usage.withOutputTokens(root.path("eval_count").asInt());
+        }
+        return usage;
     }
 }

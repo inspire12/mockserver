@@ -548,4 +548,103 @@ public class StreamingBodyTest {
             channel.finishAndReleaseAll();
         }
     }
+
+    private static String text(ByteBuf chunk) {
+        return chunk.toString(StandardCharsets.UTF_8);
+    }
+
+    @Test
+    public void shouldShowTheObserverEveryChunkIncludingThoseBeforeItWasAttachedAndPastTheCaptureLimit() {
+        StreamingBody body = new StreamingBody(4);
+        StringBuilder observed = new StringBuilder();
+        StringBuilder relayed = new StringBuilder();
+        ByteBuf beforeObserver = Unpooled.copiedBuffer("hello ", StandardCharsets.UTF_8);
+        ByteBuf afterSubscribe = Unpooled.copiedBuffer("world", StandardCharsets.UTF_8);
+
+        body.addChunk(beforeObserver);
+        body.observeChunks(chunk -> observed.append(text(chunk)));
+        body.subscribe(chunk -> relayed.append(text(chunk)), () -> {}, error -> {});
+        body.addChunk(afterSubscribe);
+        body.complete();
+
+        assertThat(observed.toString(), is("hello world"));
+        assertThat(relayed.toString(), is("hello world"));
+        assertThat(new String(body.capturedBytes(), StandardCharsets.UTF_8), is("hell"));
+        assertThat(afterSubscribe.readerIndex(), is(0));
+
+        beforeObserver.release();
+        afterSubscribe.release();
+    }
+
+    @Test
+    public void shouldKeepRelayingTheStreamWhenTheObserverThrows() {
+        StreamingBody body = new StreamingBody(1024);
+        AtomicInteger observerCalls = new AtomicInteger();
+        StringBuilder relayed = new StringBuilder();
+        AtomicBoolean completed = new AtomicBoolean(false);
+        AtomicBoolean listenerRan = new AtomicBoolean(false);
+        ByteBuf chunk1 = Unpooled.copiedBuffer("hello ", StandardCharsets.UTF_8);
+        ByteBuf chunk2 = Unpooled.copiedBuffer("world", StandardCharsets.UTF_8);
+
+        body.observeChunks(chunk -> {
+            observerCalls.incrementAndGet();
+            throw new IllegalStateException("observer failed");
+        });
+        body.subscribe(chunk -> relayed.append(text(chunk)), () -> completed.set(true), error -> {});
+        body.addCompletionListener(() -> listenerRan.set(true));
+        assertThat(body.addChunk(chunk1), is(true));
+        assertThat(body.addChunk(chunk2), is(true));
+        body.complete();
+
+        assertThat(relayed.toString(), is("hello world"));
+        assertThat(completed.get(), is(true));
+        assertThat(listenerRan.get(), is(true));
+        assertThat(body.getError(), is(nullValue()));
+        assertThat("a failed observer is not called again", observerCalls.get(), is(1));
+
+        chunk1.release();
+        chunk2.release();
+    }
+
+    @Test
+    public void shouldRunAfterChunksObservedOnlyOnceAnObserverAttachedFromAnotherThreadHasSeenTheStream() throws Exception {
+        EventLoopGroup group = new DefaultEventLoopGroup(1);
+        try {
+            EventLoop eventLoop = group.next();
+            StreamingBody body = new StreamingBody(1024);
+            body.setEventLoop(eventLoop);
+            ByteBuf chunk = Unpooled.copiedBuffer("whole stream", StandardCharsets.UTF_8);
+            // the whole stream arrives and completes before anything is attached
+            eventLoop.submit(() -> {
+                body.addChunk(chunk);
+                body.complete();
+            }).get(5, TimeUnit.SECONDS);
+
+            CountDownLatch eventLoopBusy = new CountDownLatch(1);
+            eventLoop.execute(() -> {
+                try {
+                    eventLoopBusy.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+            StringBuffer observed = new StringBuffer();
+            AtomicReference<String> observedWhenRead = new AtomicReference<>();
+            CountDownLatch read = new CountDownLatch(1);
+
+            body.observeChunks(observedChunk -> observed.append(text(observedChunk)));
+            // already complete, so this listener runs at once on this thread, ahead of the observer
+            body.addCompletionListener(() -> body.afterChunksObserved(() -> {
+                observedWhenRead.set(observed.toString());
+                read.countDown();
+            }));
+            eventLoopBusy.countDown();
+
+            assertThat(read.await(5, TimeUnit.SECONDS), is(true));
+            assertThat(observedWhenRead.get(), is("whole stream"));
+            chunk.release();
+        } finally {
+            group.shutdownGracefully(0, 1, TimeUnit.SECONDS).sync();
+        }
+    }
 }

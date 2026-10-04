@@ -166,24 +166,44 @@ public class BedrockLlmClient extends AnthropicLlmClient {
         if (root.hasNonNull("stopReason")) {
             completion.withStopReason(root.path("stopReason").asText());
         }
-        JsonNode usageNode = root.path("usage");
-        if (usageNode.isObject()) {
-            Usage usage = Usage.usage();
-            if (usageNode.has("inputTokens")) {
-                usage.withInputTokens(usageNode.path("inputTokens").asInt());
-            }
-            if (usageNode.has("outputTokens")) {
-                usage.withOutputTokens(usageNode.path("outputTokens").asInt());
-            }
-            if (usageNode.has("cacheReadInputTokens")) {
-                usage.withCachedInputTokens(usageNode.path("cacheReadInputTokens").asInt());
-            }
-            if (usageNode.has("cacheWriteInputTokens")) {
-                usage.withCacheCreationTokens(usageNode.path("cacheWriteInputTokens").asInt());
-            }
+        Usage usage = parseConverseUsage(root.path("usage"));
+        if (usage != null) {
             completion.withUsage(usage);
         }
         return completion;
+    }
+
+    /**
+     * Maps either usage shape: the camelCase object of Converse and of the ConverseStream
+     * {@code metadata} event, or the Anthropic object of {@code InvokeModel} and of the events
+     * inside an {@code InvokeModelWithResponseStream} stream (inherited).
+     */
+    @Override
+    public Usage parseUsage(JsonNode usageNode) {
+        if (usageNode != null && (usageNode.has("inputTokens") || usageNode.has("outputTokens"))) {
+            return parseConverseUsage(usageNode);
+        }
+        return super.parseUsage(usageNode);
+    }
+
+    private static Usage parseConverseUsage(JsonNode usageNode) {
+        if (usageNode == null || !usageNode.isObject()) {
+            return null;
+        }
+        Usage usage = Usage.usage();
+        if (usageNode.has("inputTokens")) {
+            usage.withInputTokens(usageNode.path("inputTokens").asInt());
+        }
+        if (usageNode.has("outputTokens")) {
+            usage.withOutputTokens(usageNode.path("outputTokens").asInt());
+        }
+        if (usageNode.has("cacheReadInputTokens")) {
+            usage.withCachedInputTokens(usageNode.path("cacheReadInputTokens").asInt());
+        }
+        if (usageNode.has("cacheWriteInputTokens")) {
+            usage.withCacheCreationTokens(usageNode.path("cacheWriteInputTokens").asInt());
+        }
+        return usage;
     }
 
     /**
