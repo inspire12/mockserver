@@ -95,6 +95,9 @@ public class StreamedResponseDecodeBoundIntegrationTest {
     // a client that does not read holds at most the kernel's socket buffers, far below the decoded total
     private static final int MOST_A_STALLED_CLIENT_RECEIVES = 64 * 1024 * 1024;
     private static final long TIMEOUT_MILLIS = TimeUnit.SECONDS.toMillis(60);
+    // 127.0.0.1 itself, where MockServer is told to forward: bound to the wildcard, the port can be one another
+    // process listens on at 127.0.0.1, and that process then receives the forwarded requests
+    private static final InetSocketAddress UPSTREAM_ADDRESS = new InetSocketAddress("127.0.0.1", 0);
 
     private static byte[] zstdBomb;
     private static byte[] gzipBomb;
@@ -134,7 +137,7 @@ public class StreamedResponseDecodeBoundIntegrationTest {
                     ch.pipeline().addLast(new HttpServerCodec(), new HttpObjectAggregator(1024 * 1024), handler);
                 }
             })
-            .bind(0).sync().channel();
+            .bind(UPSTREAM_ADDRESS).sync().channel();
         plainUpstreamPort = ((InetSocketAddress) plainUpstreamChannel.localAddress()).getPort();
 
         SelfSignedCertificate certificate = new SelfSignedCertificate();
@@ -172,7 +175,7 @@ public class StreamedResponseDecodeBoundIntegrationTest {
                     });
                 }
             })
-            .bind(0).sync().channel();
+            .bind(UPSTREAM_ADDRESS).sync().channel();
         tlsUpstreamPort = ((InetSocketAddress) tlsUpstreamChannel.localAddress()).getPort();
 
         // maxResponseBodySize bounds a forwarded stream, maxRequestBodySize one relayed by the CONNECT relay

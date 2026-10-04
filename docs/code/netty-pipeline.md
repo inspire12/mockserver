@@ -1470,6 +1470,23 @@ When no known protocol is detected, `BinaryRequestProxyingHandler` handles the r
 - **Waiting mode**: Blocks until upstream response arrives, writes it back
 - **Non-waiting mode**: Fire-and-forget with optional `BinaryProxyListener` callback. `BinaryProxyListener` (`o.m.model.BinaryProxyListener`) is a functional interface with `onProxy(BinaryMessage binaryRequest, CompletableFuture<BinaryMessage> binaryResponse, SocketAddress serverAddress, SocketAddress clientAddress)` invoked when binary data is proxied
 
+Each socket read is one binary message, and each message is forwarded on an upstream connection of its own. In non-waiting mode a client can send its next message before the previous one has been forwarded, so `BinaryRequestProxyingHandler` serialises two things per client connection:
+
+- **Forwards**: a connection's messages wait in a per-connection queue (`ForwardQueue`, a channel attribute used only on that connection's event loop). The next message's upstream connection is opened only once the previous message has been connected and written, which `NettyHttpClient.sendRequest(BinaryMessage, ...)` reports through its `onRequestSent` callback. So a message can wait for the previous one's connect, up to `socketConnectionTimeoutInMillis`. Without this the connections are opened from different forward-client event loops and the upstream can accept them in either order.
+- **Listener calls**: the listener is user code and may block on the response future, so it runs on the `Scheduler` local-callback pool (`scheduleLocalCallback`), never on the worker event loop, which would otherwise forward nothing more on that thread until the listener returned. One connection's messages are reported one at a time, in arrival order; a listener that throws closes the client connection, as it did when it ran on the event loop.
+
+What this does and does not give:
+
+| Behaviour | Detail |
+|-----------|--------|
+| Order within one client connection | Kept: forwards start in arrival order, each after the previous was written |
+| Order across client connections | None: each connection has its own queue |
+| A forward fails (connect, write, or cannot be started) | The client connection is closed, as before; messages still queued behind it are not attempted, their responses fail, and one WARN reports how many |
+| The client closes after sending | Every message it sent is still forwarded |
+| Queue size | Unbounded. A client that sends faster than the upstream accepts connections is held in memory here; before, it held one upstream connection per message |
+
+Waiting mode is unchanged: forwards are not queued and the listener is called from the scheduler once the response has arrived.
+
 ## SOCKS Protocol Detection
 
 `SocksDetector` provides static detection methods:

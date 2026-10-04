@@ -208,6 +208,10 @@ This release delivers a sustained performance and memory programme alongside dat
 
 ### Changed
 
+- **`EchoServer` (the echo server in `mockserver-core` used by tests) listens on IPv4 only.** It still
+  listens on every IPv4 address and an OS-assigned port, but no longer accepts connections to `::1`.
+  On macOS its previous dual-stack socket could be given a port another application already listened
+  on at 127.0.0.1, and requests sent to `127.0.0.1` or `localhost` then reached that application.
 - **Behaviour change: the event log is now bounded by size as well as entry count by default.**
   `maxEventLogSizeInBytes` previously existed but was off by default; it now defaults to a share of the JVM heap ceiling: a **twentieth** at `WARN` and below and a **twelfth** at `INFO` and above (at `-Xmx1g`, about 50 MiB and 84 MiB). At `WARN` that is about a third of what the heap could safely hold, because under heavy load entries kept longer outlive the garbage collector's young generation and keep it busy (measured on a 2-core, 1 GB container: a byte budget of a seventh of the heap (66 MB) capped healthy throughput — the highest load with a median under 1 ms — at about 31,000 req/s, while budgets of 16–32 MB, either side of the twentieth this release defaults to, kept it at about 36,000–38,000 by the same measure); the cost is that `verify`, `retrieve` and the dashboard see about a third as many past requests wherever the byte budget is what limits the log, and raising `maxEventLogSizeInBytes` restores them. On large heaps with small bodies the entry-count cap (`maxLogEntries`) can bind first, so the loss is smaller: with ~1.3 KB entries at a 4 GB heap the log keeps about two-thirds as many as before. Entries still waiting to be logged are capped separately, at the larger of `maxEventLogSizeInBytes` and a seventh of the ceiling at `WARN` (a twelfth at `INFO`), so a small budget does not drop log events during a burst; the defaults are set from measurements of the two together, so the whole log stays at or below about a quarter of the heap ceiling at either level, even when the server receives more traffic than it can log. The waiting-entries cap is tighter at `INFO` so that the whole log stays near a quarter of the heap there, because kept entries are heavier at `INFO`: each also keeps its formatted log message. **Set `maxEventLogSizeInBytes=0` to restore count-only bounding.** Any `verify` with an upper bound (`never`, `atMost`, `exactly`, `once`, `between`) now **fails** rather than passing on incomplete evidence when the log has been truncated (this guard also covers the pre-existing case where the in-flight queue was full). Under-budgeting evicts early and says so, while over-budgeting can cause `OutOfMemoryError`, so set `maxEventLogSizeInBytes` explicitly if you need more history and have the heap headroom, or a smaller value if the heap is shared with other large workloads (a value below the default limits only the kept entries; to limit the waiting backlog too, lower `ringBufferSize` or `-Xmx`).
 - **Behaviour change: delayed and templated responses are now bounded under overload by default.**
@@ -425,6 +429,21 @@ This release delivers a sustained performance and memory programme alongside dat
 
 ### Fixed
 
+- **Forwarding binary (non-HTTP) messages without waiting for a response no longer stalls behind a
+  `binaryProxyListener`, and keeps one connection's messages in order.** With
+  `forwardBinaryRequestsWithoutWaitingForResponse` enabled, the listener was called on the thread that
+  reads the client's connection. A listener that waited on the response it is handed stopped MockServer
+  forwarding that client's next message, and anything else that thread serves, until the listener
+  returned. The listener now runs on a thread of its own, so the next message is forwarded at once; one
+  connection's messages are still reported to it one at a time, in the order they arrived, and a
+  listener that throws still closes the connection. Separately, each message is forwarded on its own
+  connection to the upstream server, and two messages sent in quick succession on one connection could
+  reach the upstream in either order. A connection's messages are now sent one after another: the next
+  is sent only once the previous one has been connected and written, so a slow connection to the
+  upstream delays the messages behind it. Messages waiting their turn are held in memory without a
+  limit, and nothing is ordered between different client connections. If a message cannot be forwarded
+  the client's connection is closed, as before, and the messages still waiting behind it are not sent
+  (one warning reports how many).
 - **The internal connection behind an HTTP/2 CONNECT or SOCKS proxy tunnel is now closed as soon as its client disconnects.** When a client left with a request still unanswered, MockServer kept its own half of the tunnel open, and went on working on that request, until it was answered or for up to 30 seconds.
 - **A SOCKS client that connects and then disconnects without sending anything no longer leaves a connection open inside MockServer.** Each such client left MockServer's internal connection for the tunnel open until MockServer was stopped.
 - **`httpLlmResponse` with `provider: BEDROCK` now returns the AWS Bedrock Converse format on

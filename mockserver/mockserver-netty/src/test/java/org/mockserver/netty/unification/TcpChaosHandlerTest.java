@@ -198,8 +198,9 @@ public class TcpChaosHandlerTest {
                     });
                 }
             })
-            .bind(0).sync().channel();
-        try (Socket socket = new Socket("localhost", ((InetSocketAddress) server.localAddress()).getPort())) {
+            // 127.0.0.1 itself: bound to the wildcard, the port can be one another process listens on at 127.0.0.1
+            .bind(new InetSocketAddress("127.0.0.1", 0)).sync().channel();
+        try (Socket socket = new Socket("127.0.0.1", ((InetSocketAddress) server.localAddress()).getPort())) {
             OutputStream outputStream = socket.getOutputStream();
             for (int offset = 0; offset < sent.length; offset += 64 * 1024) {
                 outputStream.write(sent, offset, Math.min(64 * 1024, sent.length - offset));

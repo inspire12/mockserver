@@ -6,6 +6,7 @@ import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
+import io.netty.util.AttributeKey;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.httpclient.NettyHttpClient;
 import org.mockserver.log.model.LogEntry;
@@ -22,8 +23,12 @@ import org.mockserver.uuid.UUIDService;
 import org.slf4j.event.Level;
 
 import java.net.InetSocketAddress;
+import java.net.SocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.RejectedExecutionException;
 
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.mockserver.exception.ExceptionHandling.closeOnFlush;
@@ -42,6 +47,9 @@ import static org.mockserver.netty.unification.PortUnificationHandler.isSslEnabl
  */
 @ChannelHandler.Sharable
 public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<ByteBuf> {
+
+    private static final AttributeKey<ForwardQueue> FORWARD_QUEUE = AttributeKey.valueOf("BINARY_FORWARD_QUEUE");
+    private static final AttributeKey<CompletableFuture<Void>> PREVIOUS_LISTENER_CALL = AttributeKey.valueOf("PREVIOUS_BINARY_PROXY_LISTENER_CALL");
 
     private final Configuration configuration;
     private final MockServerLogger mockServerLogger;
@@ -128,24 +136,176 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
     }
 
     private void sendMessage(ChannelHandlerContext ctx, BinaryMessage binaryRequest, String logCorrelationId, InetSocketAddress remoteAddress) {
-        CompletableFuture<BinaryMessage> binaryResponseFuture = httpClient
-            .sendRequest(
-                binaryRequest,
-                isSslEnabledUpstream(ctx.channel()),
-                remoteAddress,
-                configuration.socketConnectionTimeoutInMillis()
-            );
-
         if (configuration.forwardBinaryRequestsWithoutWaitingForResponse()) {
-            processNotWaitingForResponse(ctx, binaryRequest, logCorrelationId, remoteAddress, binaryResponseFuture);
+            processNotWaitingForResponse(ctx, binaryRequest, logCorrelationId, remoteAddress, sendInArrivalOrder(ctx, binaryRequest, remoteAddress));
         } else {
+            CompletableFuture<BinaryMessage> binaryResponseFuture = httpClient
+                .sendRequest(
+                    binaryRequest,
+                    isSslEnabledUpstream(ctx.channel()),
+                    remoteAddress,
+                    configuration.socketConnectionTimeoutInMillis()
+                );
             processWaitingForResponse(ctx, binaryRequest, logCorrelationId, remoteAddress, binaryResponseFuture);
+        }
+    }
+
+    /**
+     * Without waiting for responses a client can send its next message at once, and each message is forwarded on
+     * a connection of its own, so the next is only started once the previous has been written: otherwise the
+     * upstream could accept the two in either order. Once a forward fails the messages behind it are not
+     * attempted, as the connection is then closed. A client that has sent its messages and closed still has
+     * every one of them forwarded.
+     */
+    private CompletableFuture<BinaryMessage> sendInArrivalOrder(ChannelHandlerContext ctx, BinaryMessage binaryRequest, InetSocketAddress remoteAddress) {
+        ForwardQueue queue = ctx.channel().attr(FORWARD_QUEUE).get();
+        if (queue == null) {
+            queue = new ForwardQueue();
+            ctx.channel().attr(FORWARD_QUEUE).set(queue);
+        }
+        QueuedForward forward = new QueuedForward(binaryRequest, remoteAddress, isSslEnabledUpstream(ctx.channel()));
+        queue.waiting.add(forward);
+        startWaitingForwards(ctx, queue);
+        return forward.response;
+    }
+
+    private void startWaitingForwards(ChannelHandlerContext ctx, ForwardQueue queue) {
+        if (queue.starting) {
+            // called back from inside sendRequest: the loop below carries on, so a long queue does not recurse
+            return;
+        }
+        queue.starting = true;
+        try {
+            int notForwarded = 0;
+            InetSocketAddress remoteAddress = null;
+            QueuedForward forward;
+            while (!queue.inFlight && (forward = queue.waiting.poll()) != null) {
+                if (queue.failed) {
+                    forward.response.completeExceptionally(new NotForwardedException());
+                    remoteAddress = forward.remoteAddress;
+                    notForwarded++;
+                } else {
+                    start(ctx, queue, forward);
+                }
+            }
+            if (notForwarded > 0 && mockServerLogger.isEnabledForInstance(Level.WARN)) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.WARN)
+                        .setMessageFormat("not forwarding{}binary message(s) to{}because an earlier message on the same connection could not be forwarded")
+                        .setArguments(notForwarded, remoteAddress)
+                );
+            }
+        } finally {
+            queue.starting = false;
+        }
+    }
+
+    private void start(ChannelHandlerContext ctx, ForwardQueue queue, QueuedForward forward) {
+        queue.inFlight = true;
+        try {
+            httpClient
+                .sendRequest(forward.request, forward.secure, forward.remoteAddress, configuration.socketConnectionTimeoutInMillis(), sendFailure -> onEventLoop(ctx, () -> {
+                    queue.inFlight = false;
+                    if (sendFailure != null) {
+                        queue.failed = true;
+                        // a request that was not written gets no response; without this it would complete empty
+                        forward.response.completeExceptionally(sendFailure);
+                    }
+                    startWaitingForwards(ctx, queue);
+                }))
+                .whenComplete((binaryResponse, throwable) -> {
+                    if (throwable != null) {
+                        forward.response.completeExceptionally(throwable);
+                        onEventLoop(ctx, () -> {
+                            queue.failed = true;
+                            startWaitingForwards(ctx, queue);
+                        });
+                    } else {
+                        forward.response.complete(binaryResponse);
+                    }
+                });
+        } catch (RuntimeException cannotStart) {
+            forward.response.completeExceptionally(cannotStart);
+            queue.inFlight = false;
+            queue.failed = true;
+        }
+    }
+
+    private static void onEventLoop(ChannelHandlerContext ctx, Runnable task) {
+        if (ctx.executor().inEventLoop()) {
+            task.run();
+        } else {
+            try {
+                ctx.executor().execute(task);
+            } catch (RejectedExecutionException serverStopping) {
+                // the event loop has shut down, so nothing more can be forwarded for this connection
+            }
+        }
+    }
+
+    /**
+     * One client connection's messages waiting for the one being forwarded. Used only on that connection's event
+     * loop. Unbounded: a client that sends faster than the upstream accepts connections is held here, where
+     * before it held one upstream connection per message.
+     */
+    private static final class ForwardQueue {
+        private final Deque<QueuedForward> waiting = new ArrayDeque<>();
+        private boolean inFlight;
+        private boolean failed;
+        private boolean starting;
+    }
+
+    private static final class QueuedForward {
+        private final BinaryMessage request;
+        private final InetSocketAddress remoteAddress;
+        private final boolean secure;
+        private final CompletableFuture<BinaryMessage> response = new CompletableFuture<>();
+
+        private QueuedForward(BinaryMessage request, InetSocketAddress remoteAddress, boolean secure) {
+            this.request = request;
+            this.remoteAddress = remoteAddress;
+            this.secure = secure;
+        }
+    }
+
+    /**
+     * Fails the response of a message that was not forwarded because an earlier one on its connection failed.
+     */
+    static final class NotForwardedException extends RuntimeException {
+        NotForwardedException() {
+            super("not forwarded because an earlier message on the same connection could not be forwarded", null, false, false);
+        }
+    }
+
+    /**
+     * The listener is the user's code and may wait on the response, so it runs off the event loop, which would
+     * otherwise forward nothing more until it returned. One connection's messages are still reported one at a
+     * time, in arrival order, and a listener that throws still closes the connection.
+     */
+    private void notifyListener(ChannelHandlerContext ctx, BinaryMessage binaryRequest, CompletableFuture<BinaryMessage> binaryResponseFuture, InetSocketAddress remoteAddress) {
+        SocketAddress clientAddress = ctx.channel().remoteAddress();
+        CompletableFuture<Void> called = new CompletableFuture<>();
+        CompletableFuture<Void> previousCalled = ctx.channel().attr(PREVIOUS_LISTENER_CALL).getAndSet(called);
+        Runnable call = () -> scheduler.scheduleLocalCallback(() -> {
+            try {
+                binaryExchangeCallback.onProxy(binaryRequest, binaryResponseFuture, remoteAddress, clientAddress);
+            } catch (Throwable throwable) {
+                ctx.executor().execute(() -> exceptionCaught(ctx, throwable));
+            } finally {
+                called.complete(null);
+            }
+        }, false);
+        if (previousCalled == null) {
+            call.run();
+        } else {
+            previousCalled.thenRun(call);
         }
     }
 
     private void processNotWaitingForResponse(ChannelHandlerContext ctx, BinaryMessage binaryRequest, String logCorrelationId, InetSocketAddress remoteAddress, CompletableFuture<BinaryMessage> binaryResponseFuture) {
         if (binaryExchangeCallback != null) {
-            binaryExchangeCallback.onProxy(binaryRequest, binaryResponseFuture, remoteAddress, ctx.channel().remoteAddress());
+            notifyListener(ctx, binaryRequest, binaryResponseFuture, remoteAddress);
         }
         scheduler.submit(binaryResponseFuture, () -> {
             try {
@@ -162,7 +322,8 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
                     ctx.writeAndFlush(Unpooled.copiedBuffer(binaryResponse.getBytes()));
                 }
             } catch (Throwable throwable) {
-                if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+                // messages not attempted behind a failed forward are logged once, together, when they are failed
+                if (!(throwable.getCause() instanceof NotForwardedException) && mockServerLogger.isEnabledForInstance(Level.WARN)) {
                     mockServerLogger.logEvent(
                         new LogEntry()
                             .setLogLevel(Level.WARN)

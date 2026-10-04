@@ -15,12 +15,14 @@ import org.mockserver.scheduler.Scheduler;
 import org.mockserver.test.IsDebug;
 
 import javax.net.ssl.SSLServerSocket;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeoutException;
 
 import static java.util.concurrent.TimeUnit.*;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -48,6 +50,16 @@ public class BinaryProxyIntegrationTest {
         clientEventLoopGroup.shutdownGracefully(0, 0, MILLISECONDS).syncUninterruptibly();
     }
 
+    private static Socket upstreamConnection(CompletableFuture<Socket> socketFuture) throws Exception {
+        try {
+            Socket socket = socketFuture.get(10, SECONDS);
+            socket.setSoTimeout(10_000);
+            return socket;
+        } catch (TimeoutException notForwarded) {
+            throw new AssertionError("MockServer did not connect to the upstream within 10 seconds", notForwarded);
+        }
+    }
+
     @Test
     public void shouldForwardBinaryMessages() throws Exception {
         // given
@@ -55,7 +67,9 @@ public class BinaryProxyIntegrationTest {
         byte[] randomResponseBytes = UUID.randomUUID().toString().getBytes(StandardCharsets.UTF_8);
         ClientAndServer proxyClientAndServer = null;
         try {
-            try (ServerSocket serverSocket = new ServerSocket(0)) {
+            // 127.0.0.1 itself, where the proxy forwards: bound to the wildcard, the port can be one another
+            // process listens on at 127.0.0.1
+            try (ServerSocket serverSocket = new ServerSocket(0, 50, InetAddress.getByAddress(new byte[]{127, 0, 0, 1}))) {
                 // and
                 int serverSocketPort = serverSocket.getLocalPort();
                 proxyClientAndServer = startClientAndServer("127.0.0.1", serverSocketPort);
@@ -79,7 +93,7 @@ public class BinaryProxyIntegrationTest {
                     );
 
                 // then
-                Socket socket = socketFuture.get(5, MINUTES);
+                Socket socket = upstreamConnection(socketFuture);
                 byte[] receivedBytes = new byte[randomRequestBytes.length];
                 int bytesRead = socket.getInputStream().read(receivedBytes);
                 assertThat(bytesRead, is(randomRequestBytes.length));
@@ -137,7 +151,7 @@ public class BinaryProxyIntegrationTest {
                     );
 
                 // then
-                Socket socket = socketFuture.get(5, MINUTES);
+                Socket socket = upstreamConnection(socketFuture);
                 byte[] receivedBytes = new byte[randomRequestBytes.length];
                 int bytesRead = socket.getInputStream().read(receivedBytes);
                 assertThat(bytesRead, is(randomRequestBytes.length));

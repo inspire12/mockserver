@@ -39,6 +39,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -525,6 +526,15 @@ public class NettyHttpClient {
     }
 
     public CompletableFuture<BinaryMessage> sendRequest(final BinaryMessage binaryRequest, final boolean isSecure, InetSocketAddress remoteAddress, Long connectionTimeoutMillis) throws SocketConnectionException {
+        return sendRequest(binaryRequest, isSecure, remoteAddress, connectionTimeoutMillis, null);
+    }
+
+    /**
+     * @param onRequestSent called exactly once, with {@code null} once the request has been written to the upstream
+     *                      connection, or with the cause when it could not be connected or written; may be
+     *                      {@code null}
+     */
+    public CompletableFuture<BinaryMessage> sendRequest(final BinaryMessage binaryRequest, final boolean isSecure, InetSocketAddress remoteAddress, Long connectionTimeoutMillis, final Consumer<Throwable> onRequestSent) throws SocketConnectionException {
         final EventLoopGroup eventLoopGroup = eventLoopGroup();
         if (!eventLoopGroup.isShuttingDown()) {
             if (proxyConfigurations != null && !isSecure && proxyConfigurations.containsKey(ProxyConfiguration.Type.HTTP)) {
@@ -553,18 +563,26 @@ public class NettyHttpClient {
                 .connect(remoteAddress)
                 .addListener((ChannelFutureListener) future -> {
                     if (future.isSuccess()) {
-                        if (mockServerLogger.isEnabledForInstance(Level.DEBUG)) {
-                            mockServerLogger.logEvent(
-                                new LogEntry()
-                                    .setLogLevel(Level.DEBUG)
-                                    .setMessageFormat("sending bytes hex{}to{}")
-                                    .setArguments(SensitiveLogValue.of(ByteBufUtil.hexDump(binaryRequest.getBytes())), future.channel().attr(REMOTE_SOCKET).get())
-                            );
+                        try {
+                            if (mockServerLogger.isEnabledForInstance(Level.DEBUG)) {
+                                mockServerLogger.logEvent(
+                                    new LogEntry()
+                                        .setLogLevel(Level.DEBUG)
+                                        .setMessageFormat("sending bytes hex{}to{}")
+                                        .setArguments(SensitiveLogValue.of(ByteBufUtil.hexDump(binaryRequest.getBytes())), future.channel().attr(REMOTE_SOCKET).get())
+                                );
+                            }
+                            // send the binary request
+                            future.channel().writeAndFlush(Unpooled.copiedBuffer(binaryRequest.getBytes())).addListener(written -> reportRequestSent(onRequestSent, written.cause()));
+                        } catch (Throwable notWritten) {
+                            // nothing was written, so no response can arrive and the caller must not wait for either
+                            binaryResponseFuture.completeExceptionally(notWritten);
+                            reportRequestSent(onRequestSent, notWritten);
+                            future.channel().close();
                         }
-                        // send the binary request
-                        future.channel().writeAndFlush(Unpooled.copiedBuffer(binaryRequest.getBytes()));
                     } else {
                         binaryResponseFuture.completeExceptionally(future.cause());
+                        reportRequestSent(onRequestSent, future.cause());
                     }
                 });
 
@@ -588,6 +606,12 @@ public class NettyHttpClient {
             return binaryResponseFuture;
         } else {
             throw new IllegalStateException("Request sent after client has been stopped - the event loop has been shutdown so it is not possible to send a request");
+        }
+    }
+
+    private static void reportRequestSent(Consumer<Throwable> onRequestSent, Throwable failure) {
+        if (onRequestSent != null) {
+            onRequestSent.accept(failure);
         }
     }
 

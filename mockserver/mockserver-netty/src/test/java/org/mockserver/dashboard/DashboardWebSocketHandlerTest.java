@@ -46,6 +46,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedList;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
@@ -2682,7 +2683,7 @@ public class DashboardWebSocketHandlerTest {
         return new LogEntry().setType(FORWARDED_REQUEST).setHttpRequest(request(path)).setHttpResponse(response("ok")).setMessageFormat("forwarded {}").setArguments(path);
     }
 
-    private DashboardWebSocketHandler newSeededHandler(List<LogEntry> entries) {
+    private DashboardWebSocketHandler newSeededHandler(List<LogEntry> entries) throws Exception {
         MockServerLogger mockServerLogger = new MockServerLogger(DashboardWebSocketHandlerTest.class);
         Configuration configuration = configuration().maxLogEntries(50000);
         Scheduler scheduler = track(new Scheduler(configuration, mockServerLogger, true));
@@ -2691,6 +2692,12 @@ public class DashboardWebSocketHandlerTest {
         for (LogEntry entry : entries) {
             eventLog.add(entry);
         }
+        // add() only queues an entry, and a dashboard update reads the log without waiting for that queue,
+        // so an update driven before the entries are recorded sends a frame without them. This query is
+        // answered in queue order, after every entry added above.
+        CompletableFuture<Integer> recorded = new CompletableFuture<>();
+        eventLog.retrieveMessageLogEntries(null, logEntries -> recorded.complete(logEntries.size()));
+        assertThat("the seeded log entries are recorded before any update is driven", recorded.get(10, SECONDS) >= entries.size(), is(true));
         return track(new DashboardWebSocketHandler(httpState, false, true)).registerListeners();
     }
 

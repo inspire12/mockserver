@@ -6,6 +6,7 @@ import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.socket.SocketProtocolFamily;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import io.netty.handler.logging.LoggingHandler;
@@ -23,6 +24,7 @@ import org.mockserver.stop.Stoppable;
 import org.slf4j.event.Level;
 
 import java.net.InetSocketAddress;
+import java.nio.channels.spi.SelectorProvider;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -48,6 +50,7 @@ public class EchoServer implements Stoppable {
     private final NextResponse nextResponse = new NextResponse();
     private final LastRequest lastRequest = new LastRequest();
     private final CompletableFuture<Integer> boundPort = new CompletableFuture<>();
+    private volatile InetSocketAddress localAddress;
     private final List<String> registeredClients;
     private final List<Channel> websocketChannels;
     private final List<TextWebSocketFrame> textWebSocketFrames;
@@ -74,7 +77,10 @@ public class EchoServer implements Stoppable {
             bossGroup = new NioEventLoopGroup(3, new Scheduler.SchedulerThreadFactory(this.getClass().getSimpleName() + "-bossEventLoop"));
             workerGroup = new NioEventLoopGroup(5, new Scheduler.SchedulerThreadFactory(this.getClass().getSimpleName() + "-workerEventLoop"));
             new ServerBootstrap().group(bossGroup, workerGroup)
-                .channel(NioServerSocketChannel.class)
+                // IPv4 only: on macOS a dual-stack socket bound to port 0 can be given a port another process
+                // already listens on at 127.0.0.1, and that process then receives the connections made to
+                // 127.0.0.1. Binding such a socket to 0.0.0.0 does not prevent it; an IPv4 socket does.
+                .channelFactory(() -> new NioServerSocketChannel(SelectorProvider.provider(), SocketProtocolFamily.INET))
                 .option(ChannelOption.SO_BACKLOG, 100)
                 .childOption(ChannelOption.ALLOCATOR, NettyAllocator.ALLOCATOR)
                 .handler(new LoggingHandler(EchoServer.class))
@@ -85,7 +91,8 @@ public class EchoServer implements Stoppable {
                 .bind(0)
                 .addListener((ChannelFutureListener) future -> {
                     if (future.isSuccess()) {
-                        boundPort.complete(((InetSocketAddress) future.channel().localAddress()).getPort());
+                        localAddress = (InetSocketAddress) future.channel().localAddress();
+                        boundPort.complete(localAddress.getPort());
                     } else {
                         boundPort.completeExceptionally(future.cause());
                     }
@@ -115,6 +122,11 @@ public class EchoServer implements Stoppable {
     @Override
     public void close() {
         stop();
+    }
+
+    // the address the listener is bound to, known once getPort() has returned
+    InetSocketAddress localAddress() {
+        return localAddress;
     }
 
     public Integer getPort() {

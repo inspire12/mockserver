@@ -19,23 +19,32 @@ import org.junit.Before;
 import org.junit.Test;
 import org.mockserver.netty.http3.Http3Server;
 import org.mockserver.testing.socket.Ipv4DatagramChannelFactory;
+import org.mockserver.testing.socket.TestPortFactory;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.net.DatagramSocket;
+import java.net.BindException;
 import java.net.HttpURLConnection;
 import java.net.InetSocketAddress;
+import java.net.StandardProtocolFamily;
 import java.net.URL;
+import java.nio.channels.DatagramChannel;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.IntSupplier;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.Assume.assumeTrue;
 import static org.mockserver.configuration.Configuration.configuration;
@@ -49,18 +58,65 @@ import static org.mockserver.configuration.Configuration.configuration;
 public class Http3ConfigurationIdentityIntegrationTest {
 
     private static final String RUNTIME_HEADER = "x-runtime-http3";
+    private static final int UDP_PORT_CANDIDATES = 5;
 
     private MockServer server;
 
     @Before
     public void startServer() throws Exception {
         assumeTrue("native QUIC not available on this platform", Http3Server.isQuicAvailable());
-        int udpPort;
-        try (DatagramSocket socket = new DatagramSocket(0)) {
-            udpPort = socket.getLocalPort();
+        server = startWithHttp3(TestPortFactory::findFreeUdpPort);
+    }
+
+    /**
+     * MockServer binds the HTTP/3 port itself and {@code http3Port} cannot ask for an ephemeral one, so a
+     * candidate can be taken between being found and being bound. A server that did not get its candidate is
+     * replaced by one on the next candidate only when that port is seen to be held by another socket; HTTP/3
+     * failing to start on a port that is free fails the test at once.
+     */
+    private static MockServer startWithHttp3(IntSupplier candidateUdpPorts) throws IOException {
+        List<Integer> held = new ArrayList<>();
+        for (int attempt = 0; attempt < UDP_PORT_CANDIDATES; attempt++) {
+            int udpPort = candidateUdpPorts.getAsInt();
+            MockServer candidate = new MockServer(configuration().http3Port(udpPort), 0);
+            if (candidate.getHttp3Port() == udpPort) {
+                return candidate;
+            }
+            candidate.stop();
+            assertThat("HTTP/3 must have started: UDP port " + udpPort + " is free", isHeldByAnotherSocket(udpPort), is(true));
+            held.add(udpPort);
         }
-        server = new MockServer(configuration().http3Port(udpPort), 0);
-        assertThat("HTTP/3 must have started", server.getHttp3Port(), greaterThan(0));
+        throw new AssertionError("HTTP/3 must have started, but another socket held each of the UDP ports " + held);
+    }
+
+    // held on IPv4, where MockServer refuses the port, or not bindable at all
+    private static boolean isHeldByAnotherSocket(int udpPort) throws IOException {
+        try (DatagramChannel ipv4 = DatagramChannel.open(StandardProtocolFamily.INET); DatagramChannel dualStack = DatagramChannel.open()) {
+            ipv4.bind(new InetSocketAddress(udpPort));
+            ipv4.close();
+            dualStack.bind(new InetSocketAddress(udpPort));
+            return false;
+        } catch (BindException inUse) {
+            return true;
+        }
+    }
+
+    @Test
+    public void aUdpPortTakenAfterItWasFoundMustBeReplacedByTheNextCandidate() throws Exception {
+        // the port a find-then-bind loses: held by another IPv4 socket when MockServer comes to bind it
+        try (DatagramChannel holder = DatagramChannel.open(StandardProtocolFamily.INET)) {
+            holder.bind(new InetSocketAddress(0));
+            int taken = ((InetSocketAddress) holder.getLocalAddress()).getPort();
+            AtomicBoolean first = new AtomicBoolean(true);
+
+            MockServer started = startWithHttp3(() -> first.getAndSet(false) ? taken : TestPortFactory.findFreeUdpPort());
+            try {
+                assertThat("HTTP/3 must have started", started.getHttp3Port(), greaterThan(0));
+                assertThat("on a port no other socket holds", started.getHttp3Port(), not(taken));
+            } finally {
+                started.stop();
+            }
+        }
     }
 
     @After
