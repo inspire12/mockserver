@@ -42,6 +42,9 @@ public class UpstreamProxyRelayHandler extends SimpleChannelInboundHandler<FullH
     private final String host;
     private final int port;
     private final int maxRequestBodySize;
+    // both confined to the proxy client's event loop, which the loopback shares
+    private int requestWritesInProgress;
+    private boolean clientGone;
 
     /**
      * @param maxRequestBodySize the most decoded bytes of a compressed request body scanned for a streaming request
@@ -95,7 +98,12 @@ public class UpstreamProxyRelayHandler extends SimpleChannelInboundHandler<FullH
         downstreamChannel.attr(StreamingAwareHttpObjectAggregator.REQUEST_LINE).set(request.method() + " " + org.apache.commons.lang3.StringUtils.substringBefore(request.uri(), "?"));
         // read before the write, which may change it on the loopback
         final Integer clientStreamId = request.headers().getInt(STREAM_ID.text());
+        requestWritesInProgress++;
         downstreamChannel.writeAndFlush(request).addListener((ChannelFutureListener) future -> {
+            requestWritesInProgress--;
+            if (clientGone && requestWritesInProgress == 0) {
+                RelayLegClose.afterFlush(downstreamChannel);
+            }
             if (future.isSuccess()) {
                 ctx.channel().read();
             } else if (clientStreamId != null && future.channel().isActive() && resetFailedStream(ctx, clientStreamId, future.cause())) {
@@ -161,7 +169,15 @@ public class UpstreamProxyRelayHandler extends SimpleChannelInboundHandler<FullH
 
     @Override
     public void channelInactive(ChannelHandlerContext ctx) {
-        closeOnFlush(downstreamChannel);
+        clientGone = true;
+        if (requestWritesInProgress == 0) {
+            // no response the loopback still has in flight can be delivered
+            RelayLegClose.afterFlush(downstreamChannel);
+        } else {
+            // a request still being written (HTTP/2 DATA waiting for flow-control window is not in the socket's
+            // buffer) would be lost to a socket close, so the socket is closed by the last such write's listener
+            closeOnFlush(downstreamChannel);
+        }
     }
 
     @Override

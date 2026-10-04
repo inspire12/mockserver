@@ -11,6 +11,8 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.net.ProxySelector;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.net.URI;
@@ -39,8 +41,10 @@ import static org.mockserver.stop.Stop.stopQuietly;
 /**
  * inboundConnectionIdleTimeoutMillis over real sockets: a quiet connection is closed after the timeout,
  * while every kind of connection that is legitimately waiting - a delayed response, a streaming
- * response with long gaps, an open HTTP/2 stream, a WebSocket, a CONNECT tunnel, a paused breakpoint -
- * outlives it. Each "stays open" case waits for at least three times the timeout.
+ * response with long gaps, an open HTTP/2 stream, a WebSocket, a paused breakpoint - outlives it. A
+ * CONNECT or SOCKS tunnel is treated the same way: both of its legs are closed once it has carried
+ * nothing for the timeout with no exchange in progress, and a tunnel with one in progress outlives it.
+ * Each "stays open" case waits for at least three times the timeout.
  */
 public class InboundConnectionIdleTimeoutIntegrationTest {
 
@@ -229,18 +233,216 @@ public class InboundConnectionIdleTimeoutIntegrationTest {
     }
 
     @Test
-    public void shouldNotCloseConnectTunnelThatIsQuietForLongerThanTimeout() throws Exception {
+    public void shouldCloseBothLegsOfAConnectTunnelOnceIdleAfterItsResponse() throws Exception {
+        startServer(IDLE_MILLIS);
+        mockServerClient.when(request().withPath("/through-tunnel")).respond(response().withBody("tunnelled"));
+        long idleClosedBefore = Metrics.getInboundConnectionsIdleClosedCount();
+        try (Socket socket = new Socket("localhost", port)) {
+            socket.setSoTimeout(10_000);
+            openConnectTunnel(socket);
+            assertThat(exchange(socket, "/through-tunnel"), containsString("tunnelled"));
+            // taken before the tunnel's last activity, so the bound holds however long the client takes to read it
+            long beforeLastExchange = System.nanoTime();
+            assertThat("the tunnel is kept alive between requests", exchange(socket, "/through-tunnel"), containsString("tunnelled"));
+
+            assertThat(socket.getInputStream().read(), is(-1));
+
+            assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - beforeLastExchange), greaterThanOrEqualTo(IDLE_MILLIS - 50));
+            awaitNoInboundConnections("the tunnel's loopback leg closes with it");
+        }
+        assertThat(Metrics.getInboundConnectionsIdleClosedCount() - idleClosedBefore, greaterThanOrEqualTo(1L));
+    }
+
+    @Test
+    public void shouldCloseBothLegsOfAConnectTunnelThatNeverCarriesAnything() throws Exception {
+        startServer(IDLE_MILLIS);
+        try (Socket socket = new Socket("localhost", port)) {
+            socket.setSoTimeout(10_000);
+            long beforeOpening = System.nanoTime();
+            openConnectTunnel(socket);
+            assertThat("the client's leg and the loopback leg", mockServer.getInboundConnectionCount(), is(2));
+
+            assertThat(socket.getInputStream().read(), is(-1));
+
+            assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - beforeOpening), greaterThanOrEqualTo(IDLE_MILLIS - 50));
+            awaitNoInboundConnections("the tunnel's loopback leg closes with it");
+        }
+    }
+
+    @Test
+    public void shouldCloseBothLegsOfASocksTunnelOnceIdleAfterItsResponse() throws Exception {
         startServer(IDLE_MILLIS);
         mockServerClient.when(request().withPath("/through-tunnel")).respond(response().withBody("tunnelled"));
         try (Socket socket = new Socket("localhost", port)) {
             socket.setSoTimeout(10_000);
-            send(socket, "CONNECT localhost:" + port + " HTTP/1.1\r\nHost: localhost:" + port + "\r\n\r\n");
-            assertThat(readHead(socket.getInputStream()), containsString("200"));
+            openSocks5Tunnel(socket);
+            long beforeLastExchange = System.nanoTime();
+            assertThat(exchange(socket, "/through-tunnel"), containsString("tunnelled"));
+
+            assertThat(socket.getInputStream().read(), is(-1));
+
+            assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - beforeLastExchange), greaterThanOrEqualTo(IDLE_MILLIS - 50));
+            awaitNoInboundConnections("the tunnel's loopback leg closes with it");
+        }
+    }
+
+    @Test
+    public void shouldCloseTheLoopbackLegOfATunnelWhoseClientLeavesBeforeSendingAnything() throws Exception {
+        startServer(0);
+        try (Socket socket = new Socket("localhost", port)) {
+            socket.setSoTimeout(10_000);
+            openSocks5Tunnel(socket);
+            assertThat("the client's leg and the loopback leg", mockServer.getInboundConnectionCount(), is(2));
+        }
+        awaitNoInboundConnections("a SOCKS tunnel's loopback leg closes when its client leaves");
+        try (Socket socket = new Socket("localhost", port)) {
+            socket.setSoTimeout(10_000);
+            openConnectTunnel(socket);
+            assertThat("the client's leg and the loopback leg", mockServer.getInboundConnectionCount(), is(2));
+        }
+        awaitNoInboundConnections("a CONNECT tunnel's loopback leg closes when its client leaves");
+    }
+
+    @Test
+    public void shouldNotCloseConnectTunnelWhenTimeoutDisabled() throws Exception {
+        startServer(0);
+        mockServerClient.when(request().withPath("/through-tunnel")).respond(response().withBody("tunnelled"));
+        try (Socket socket = new Socket("localhost", port)) {
+            socket.setSoTimeout(10_000);
+            openConnectTunnel(socket);
 
             Thread.sleep(WAIT_MILLIS);
 
             assertThat("both tunnel legs survive the silence", exchange(socket, "/through-tunnel"), containsString("tunnelled"));
         }
+    }
+
+    @Test
+    public void shouldNotCloseConnectTunnelWhileItsResponseIsDelayed() throws Exception {
+        startServer(IDLE_MILLIS);
+        mockServerClient.when(request().withPath("/slow")).respond(response().withBody("slow but sure").withDelay(TimeUnit.MILLISECONDS, WAIT_MILLIS));
+        try (Socket socket = new Socket("localhost", port)) {
+            socket.setSoTimeout(10_000);
+            openConnectTunnel(socket);
+
+            assertThat(exchange(socket, "/slow"), containsString("slow but sure"));
+        }
+    }
+
+    @Test
+    public void shouldNotCloseConnectTunnelWhileItsRequestIsNeverAnswered() throws Exception {
+        startServer(IDLE_MILLIS);
+        // answered with nothing, and the connection left open
+        mockServerClient.when(request().withPath("/held")).error(error());
+        try (Socket socket = new Socket("localhost", port)) {
+            socket.setSoTimeout(10_000);
+            openConnectTunnel(socket);
+            send(socket, "GET /held HTTP/1.1\r\nHost: localhost:" + port + "\r\n\r\n");
+
+            assertStillOpenAfter(socket, WAIT_MILLIS);
+        }
+    }
+
+    @Test
+    public void shouldNotCloseConnectTunnelThatHasSwitchedProtocols() throws Exception {
+        startServer(IDLE_MILLIS);
+        mockServerClient.when(request().withPath("/upgrade")).respond(response().withStatusCode(101).withHeader("Upgrade", "custom").withHeader("Connection", "Upgrade"));
+        try (Socket socket = new Socket("localhost", port)) {
+            socket.setSoTimeout(10_000);
+            openConnectTunnel(socket);
+            send(socket, "GET /upgrade HTTP/1.1\r\nHost: localhost:" + port + "\r\nConnection: Upgrade\r\nUpgrade: custom\r\n\r\n");
+            assertThat(readHead(socket.getInputStream()), containsString("101"));
+
+            assertStillOpenAfter(socket, WAIT_MILLIS);
+        }
+    }
+
+    @Test
+    public void shouldNotCloseConnectTunnelWhileItsRequestIsStillBeingUploaded() throws Exception {
+        startServer(IDLE_MILLIS);
+        mockServerClient.when(request().withPath("/upload").withBody("first half, second half")).respond(response().withBody("uploaded"));
+        try (Socket socket = new Socket("localhost", port)) {
+            socket.setSoTimeout(10_000);
+            openConnectTunnel(socket);
+            send(socket, "POST /upload HTTP/1.1\r\nHost: localhost:" + port + "\r\nContent-Length: 23\r\n\r\nfirst half, ");
+
+            // nothing crosses either leg: the relay holds the request until its body is complete
+            Thread.sleep(WAIT_MILLIS);
+            send(socket, "second half");
+
+            String head = readHead(socket.getInputStream());
+            assertThat(head, containsString("200"));
+            assertThat(new String(readBytes(socket.getInputStream(), "uploaded".length()), StandardCharsets.UTF_8), is("uploaded"));
+        }
+    }
+
+    @Test
+    public void shouldNotCloseConnectTunnelWhileAStreamedResponseHasGapsLongerThanTimeout() throws Exception {
+        startServer(IDLE_MILLIS);
+        mockServerClient.when(request().withPath("/sse")).respondWithSse(
+            sseResponse()
+                .withEvent(sseEvent().withData("first"))
+                .withEvent(sseEvent().withData("second").withDelay(TimeUnit.MILLISECONDS, WAIT_MILLIS))
+                .withEvent(sseEvent().withData("third").withDelay(TimeUnit.MILLISECONDS, WAIT_MILLIS))
+                .withCloseConnection(true)
+        );
+        try (Socket socket = new Socket("localhost", port)) {
+            socket.setSoTimeout(10_000);
+            openConnectTunnel(socket);
+            send(socket, "GET /sse HTTP/1.1\r\nHost: localhost:" + port + "\r\n\r\n");
+
+            String stream = readUntilClosed(socket);
+
+            assertThat(stream, containsString("data: first"));
+            assertThat(stream, containsString("data: second"));
+            assertThat(stream, containsString("data: third"));
+        }
+    }
+
+    @Test
+    public void shouldNotCloseConnectTunnelWhileBytesKeepArrivingWithNoExchangeInProgress() throws Exception {
+        long idleMillis = 1_000;
+        startServer(idleMillis);
+        mockServerClient.when(request().withPath("/through-tunnel")).respond(response().withBody("tunnelled"));
+        try (Socket socket = new Socket("localhost", port)) {
+            socket.setSoTimeout(10_000);
+            openConnectTunnel(socket);
+            String request = "GET /through-tunnel HTTP/1.1\r\nHost: localhost:" + port + "\r\n\r\n";
+            long started = System.nanoTime();
+
+            // a request head arriving a few bytes at a time: no request has been decoded, so only the bytes keep it open
+            for (int sent = 0; sent < request.length(); sent += 4) {
+                send(socket, request.substring(sent, Math.min(request.length(), sent + 4)));
+                Thread.sleep(idleMillis / 5);
+            }
+
+            assertThat("the head took longer than the timeout to arrive", TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started), greaterThanOrEqualTo(2 * idleMillis));
+            String head = readHead(socket.getInputStream());
+            assertThat(head, containsString("200"));
+            assertThat(new String(readBytes(socket.getInputStream(), "tunnelled".length()), StandardCharsets.UTF_8), is("tunnelled"));
+        }
+    }
+
+    @Test
+    public void shouldNotCloseHttp2ConnectTunnelWhileStreamIsOpenAndCloseItOnceIdle() throws Exception {
+        startServer(IDLE_MILLIS);
+        mockServerClient.when(request().withPath("/h2-slow")).respond(response().withBody("h2 slow").withDelay(TimeUnit.MILLISECONDS, WAIT_MILLIS));
+        HttpClient httpClient = HttpClient.newBuilder()
+            .version(HttpClient.Version.HTTP_2)
+            .proxy(ProxySelector.of(new InetSocketAddress("localhost", port)))
+            .sslContext(MockServerCaTrustTestSupport.caTrustingSslContext())
+            .connectTimeout(Duration.ofSeconds(10))
+            .build();
+
+        HttpResponse<String> response = httpClient.send(
+            java.net.http.HttpRequest.newBuilder(URI.create("https://localhost:" + port + "/h2-slow")).timeout(Duration.ofSeconds(10)).build(),
+            HttpResponse.BodyHandlers.ofString()
+        );
+
+        assertThat(response.version(), is(HttpClient.Version.HTTP_2));
+        assertThat(response.body(), is("h2 slow"));
+        // the client keeps its tunnel pooled, so only the idle timeout closes it
+        awaitNoInboundConnections("the idle HTTP/2 tunnel and its loopback leg are closed");
     }
 
     @Test
@@ -260,6 +462,32 @@ public class InboundConnectionIdleTimeoutIntegrationTest {
 
         assertThat(response.version(), is(HttpClient.Version.HTTP_2));
         assertThat(response.body(), is("h2 slow"));
+    }
+
+    private void openConnectTunnel(Socket socket) throws IOException {
+        send(socket, "CONNECT localhost:" + port + " HTTP/1.1\r\nHost: localhost:" + port + "\r\n\r\n");
+        assertThat(readHead(socket.getInputStream()), containsString("200"));
+    }
+
+    private void openSocks5Tunnel(Socket socket) throws IOException {
+        OutputStream output = socket.getOutputStream();
+        // version 5, one method offered: no authentication
+        output.write(new byte[]{5, 1, 0});
+        output.flush();
+        assertThat(readBytes(socket.getInputStream(), 2), is(new byte[]{5, 0}));
+        // version 5, CONNECT, reserved, IPv4 127.0.0.1, port
+        output.write(new byte[]{5, 1, 0, 1, 127, 0, 0, 1, (byte) (port >> 8), (byte) port});
+        output.flush();
+        byte[] reply = readBytes(socket.getInputStream(), 10);
+        assertThat("SOCKS5 success", reply[1], is((byte) 0));
+    }
+
+    private void awaitNoInboundConnections(String reason) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (mockServer.getInboundConnectionCount() != 0 && System.nanoTime() < deadline) {
+            Thread.sleep(20);
+        }
+        assertThat(reason, mockServer.getInboundConnectionCount(), is(0));
     }
 
     private static void send(Socket socket, String request) throws IOException {

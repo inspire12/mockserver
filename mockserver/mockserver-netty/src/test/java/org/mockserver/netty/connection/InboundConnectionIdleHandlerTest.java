@@ -166,7 +166,7 @@ public class InboundConnectionIdleHandlerTest {
         channel.runPendingTasks();
         idleFor(IDLE_MILLIS * 10);
 
-        assertThat("tunnels and relays are exempt", channel.isOpen(), is(true));
+        assertThat("WebSockets, binary relays and a tunnel's loopback leg are exempt", channel.isOpen(), is(true));
         assertThat("their traffic no longer pays for idle tracking", channel.pipeline().get(InboundConnectionIdleHandler.class), is(nullValue()));
         assertThat(channel.pipeline().get(HttpExchangeTracker.class), is(nullValue()));
     }

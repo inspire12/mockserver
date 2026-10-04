@@ -2122,8 +2122,9 @@ public class Configuration {
      * <p>How long, in milliseconds, an inbound client connection may sit idle - nothing read or written
      * and no request in progress - before MockServer closes it. Default {@code 300000} (5 minutes),
      * {@code 0} disables it. Connections with a request in progress, a streaming response, an active
-     * HTTP/2 stream, or that have become a WebSocket, CONNECT/SOCKS tunnel or binary relay are never
-     * closed by this timeout. Applies to connections accepted after it is set.</p>
+     * HTTP/2 stream, or that have become a WebSocket or binary relay are never closed by this timeout;
+     * a CONNECT/SOCKS tunnel is closed on the same terms as any other connection. Applies to
+     * connections accepted after it is set.</p>
      *
      * @param inboundConnectionIdleTimeoutMillis idle timeout in milliseconds, 0 to disable
      */

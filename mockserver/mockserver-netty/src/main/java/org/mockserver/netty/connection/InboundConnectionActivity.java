@@ -39,9 +39,10 @@ public final class InboundConnectionActivity {
     }
 
     /**
-     * Exempt a connection from the idle timeout for the rest of its life: it has become a tunnel, a
-     * relay or a WebSocket, whose silences are legitimate and whose traffic is not HTTP exchanges.
-     * The idle handler and exchange tracker are then removed, so its traffic no longer pays for them.
+     * Exempt a connection from the idle timeout for the rest of its life: it has become a WebSocket, a
+     * raw binary relay or the loopback leg of a tunnel, whose silences are legitimate and whose traffic
+     * is not HTTP exchanges. The idle handler and exchange tracker are then removed, so its traffic no
+     * longer pays for them. The client's leg of a CONNECT/SOCKS tunnel is not exempt.
      */
     public static void markLongLived(Channel channel) {
         InboundConnectionActivity activity = of(channel);

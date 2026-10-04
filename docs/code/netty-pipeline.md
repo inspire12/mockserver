@@ -252,11 +252,27 @@ idle-closed counter"]
 | Component | Where | Role |
 |-----------|-------|------|
 | `InboundConnectionLimiter` | `ServerBootstrap.handler(...)` on the listening socket, ahead of `ServerBootstrapAcceptor` (and behind the loopback-shadow probe) | Per-server `AtomicInteger` of open connections, decremented on each child's `closeFuture`; refuses the N+1th with a reset, so a refused connection never gets a worker event loop or a pipeline. Also feeds the JVM-wide `mock_server_inbound_connections_open` gauge |
-| `InboundConnectionIdleHandler` | `addFirst` in `MockServerUnificationInitializer.handlerAdded`, only when the timeout is `> 0` | An `IdleStateHandler(0, 0, timeout)` whose `channelIdle` consults the activity instead of firing the event, so no other handler reacting to `IdleStateEvent` can see it. Closes through `channel().close()` so an HTTP/2 codec sends GOAWAY and TLS sends close_notify |
+| `InboundConnectionIdleHandler` | `addFirst` in `MockServerUnificationInitializer.handlerAdded`, only when the timeout is `> 0` | An `IdleStateHandler(0, 0, timeout)` whose `channelIdle` consults the activity instead of firing the event, so no other handler reacting to `IdleStateEvent` can see it. Closes through `channel().close()` so an HTTP/2 codec sends GOAWAY and TLS sends close_notify. Kept on the client leg of a CONNECT/SOCKS tunnel (see *Tunnels and the idle timeout* below) |
 | `InboundConnectionActivity` | channel attribute, created by the idle handler | Busy when: an HTTP/1.1 exchange is in progress, an HTTP/2 stream is active (`Http2ConnectionHandler.connection().numActiveStreams()`), auto-read is off (connection delay, relay back-pressure), the server certificate is being generated off the event loop (`SniHandler.SSL_CONTEXT_PENDING`), a TLS handshake is incomplete (bounded by the handshake's own timeout), or the connection is marked long-lived |
-| `HttpExchangeTracker` | `@Sharable` singleton after `HttpServerCodec` (and the chunk-line limiter) in `switchToHttp`, only on tracked channels | An exchange starts at a decoded `HttpRequest` and ends when the `LastHttpContent` of its response **has been written** (promise completion), so delayed, breakpoint-paused and streaming responses count, and so does a large body `PacedLargeWriteHandler` is still slicing to a slow reader (its promise completes only when the last slice is written). Pipeline order: `inbound-idle`, `PacedLargeWriteHandler`, `HttpChunkLineLimiter$BeforeCodec`, `HttpServerCodec`, `HttpChunkLineLimiter$AfterCodec`, `HttpExchangeTracker` — the tracker must stay after the codec. `1xx` responses do not end an exchange; `101` also marks the connection long-lived |
+| `HttpExchangeTracker` | `@Sharable` singleton after `HttpServerCodec` (and the chunk-line limiter) in `switchToHttp`, and after the tunnel's own codec on the client leg of an HTTP/1.1 CONNECT/SOCKS tunnel (`RelayConnectHandler.configurePipelines`), only on tracked channels | An exchange starts at a decoded `HttpRequest` and ends when the `LastHttpContent` of its response **has been written** (promise completion), so delayed, breakpoint-paused and streaming responses count, and so does a large body `PacedLargeWriteHandler` is still slicing to a slow reader (its promise completes only when the last slice is written). Pipeline order: `inbound-idle`, `PacedLargeWriteHandler`, `HttpChunkLineLimiter$BeforeCodec`, `HttpServerCodec`, `HttpChunkLineLimiter$AfterCodec`, `HttpExchangeTracker` — the tracker must stay after the codec. `1xx` responses do not end an exchange; `101` also marks the connection long-lived |
 
-**Long-lived (exempt) connections** — marked with `InboundConnectionActivity.markLongLived(channel)`: a `101 Switching Protocols` (WebSocket: dashboard, callback, mocked and proxied), the client leg of a CONNECT/SOCKS tunnel once `RelayConnectHandler` has set it up, MockServer's own loopback leg (`PortUnificationHandler.switchToProxyConnected`), and raw binary proxying (`switchToBinaryRequestProxying`). Their silences are legitimate and their traffic is not HTTP exchanges the tracker could see. Marking also removes the idle handler and the exchange tracker from the pipeline (on the event loop), so a WebSocket or tunnel stops paying their per-write cost, and `isTracked` stops a later `switchToHttp` on the loopback leg from re-installing the tracker. An exchange whose response never passes the tracker as HTTP objects — raw bytes (an `HttpError` `responseBytes`, written from `HttpServerCodec`'s context), an `HttpError` that writes nothing and keeps the connection open, or a mocked final `1xx` other than `101` — is ended by `HttpExchangeEndedEvent` (`mockserver-core`, `org.mockserver.responsewriter`). `HttpErrorActionHandler` (from a listener on the raw write, so it runs on the event loop as the write completes and any drop is chained after it) and `NettyResponseWriter` fire it from the codec's context, so it travels inbound through exactly the tracker and `HttpTransportTimer`, which each end their oldest exchange; without it the connection would count as busy for the rest of its life and never be closed as idle.
+**Long-lived (exempt) connections** — marked with `InboundConnectionActivity.markLongLived(channel)`: a `101 Switching Protocols` (WebSocket: dashboard, callback, mocked and proxied), MockServer's own loopback leg of a CONNECT/SOCKS tunnel (`PortUnificationHandler.switchToProxyConnected`), and raw binary proxying (`switchToBinaryRequestProxying`). Their silences are legitimate and their traffic is not HTTP exchanges the tracker could see. Marking also removes the idle handler and the exchange tracker from the pipeline (on the event loop), so a WebSocket or tunnel stops paying their per-write cost, and `isTracked` stops a later `switchToHttp` on the loopback leg from re-installing the tracker. An exchange whose response never passes the tracker as HTTP objects — raw bytes (an `HttpError` `responseBytes`, written from `HttpServerCodec`'s context), an `HttpError` that writes nothing and keeps the connection open, or a mocked final `1xx` other than `101` — is ended by `HttpExchangeEndedEvent` (`mockserver-core`, `org.mockserver.responsewriter`). `HttpErrorActionHandler` (from a listener on the raw write, so it runs on the event loop as the write completes and any drop is chained after it) and `NettyResponseWriter` fire it from the codec's context, so it travels inbound through exactly the tracker and `HttpTransportTimer`, which each end their oldest exchange; without it the connection would count as busy for the rest of its life and never be closed as idle.
+
+**Tunnels and the idle timeout.** A CONNECT/SOCKS tunnel is closed as idle like any other connection, both legs together. The timer and the busy check are the client leg's: its `InboundConnectionIdleHandler` stays in place when the tunnel is set up, near the head of the pipeline, so every byte the client sends or is sent (TLS records and HTTP/2 control frames included) restarts it. `RelayConnectHandler` terminates every tunnel, so the client leg has an HTTP codec of its own, and the busy check reads it as on any connection: an HTTP/1.1 tunnel gets an `HttpExchangeTracker` after its `HttpServerCodec`, and an HTTP/2 tunnel's `HttpToHttp2ConnectionHandler` is asked for its active streams.
+
+| Tunnel state | Idle-closed? |
+|---|---|
+| Established, the client has sent nothing yet | yes |
+| Between requests on a kept-alive tunnel | yes |
+| A request is being uploaded: the relay holds it until its body is complete, so nothing reaches the loopback | no: the exchange began when the client leg decoded the request head |
+| A response is delayed, paused at a breakpoint, or streamed with gaps | no: the exchange ends when the last of the response is written to the client |
+| An HTTP/2 stream is open | no |
+| A `101 Switching Protocols` has passed through | no: the client leg becomes long-lived |
+| Bytes arrive that complete no request (a request head sent slowly) | no: each read restarts the timer |
+
+The client leg is watched, not the loopback, because only it sees an upload in progress. Closing it closes the loopback (see [Relay close](#relay-close)); the loopback leg MockServer accepts stays long-lived, so it is never closed on its own and only counts once in `mock_server_inbound_connections_idle_closed_total`. The relay carries no opaque tunnel: what cannot be read as TLS, h2c or HTTP/1.1 fails to decode and is closed. Raw binary proxying is a connection of its own, not a tunnel, and stays exempt.
+
+One case differs from a direct connection: a tunnelled exchange MockServer answers with an `error()` that sends nothing and keeps the connection open keeps its tunnel open, as before. On a direct connection `HttpExchangeEndedEvent` ends that exchange, but the event is fired on the loopback leg and does not reach the client leg, which still counts the exchange as in progress.
 
 **Tunnels and the cap.** A CONNECT/SOCKS tunnel whose target is MockServer itself holds two slots: the client's connection and the internal loopback connection `RelayConnectHandler` opens. If the loopback is refused by the cap, the loopback channel closes before `PROXIED_RESPONSE_` arrives; `RelayConnectHandler`'s `channelInactive` then answers the client with the failure response (`502` for CONNECT) and closes, where it previously waited forever.
 
@@ -973,12 +989,7 @@ with a `ChannelReadPause` hold it never releases, closes both legs, and releases
 Every write already queued behind the failed one fails the same way and is not logged. Exceeding the streamed-bytes
 bound (`maxRequestBodySize` of unwritten streamed content) ends the relay the same way.
 
-Both legs are closed through their pipelines, which for an HTTP/2 leg is not immediate. Its
-`HttpToHttp2ConnectionHandler` answers `close` with a `GOAWAY` and keeps the connection open while it has active
-streams, for up to Netty's graceful-shutdown timeout (30 s). The loopback's streams cannot complete, because the relay
-no longer reads it, so an HTTP/2 loopback with a stream open stays connected for the full 30 s, reading and relaying
-nothing. The client-facing leg closes once its client has ended its streams, or after the same 30 s. Closing the
-socket directly, as `WriteStallTimeoutHandler` does, is plan item #110.
+The loopback's socket is closed directly and the client's leg through its pipeline (see [Relay close](#relay-close)).
 
 A failure of one HTTP/2 stream does not end the relay. When the response carries the client's stream id
 (`x-http2-stream-id`, read before the write), the failure is an HTTP/2 stream error, and the proxy client's connection
@@ -991,6 +1002,54 @@ Closing only the proxy client's channel, as before, was not enough (plan item #9
 refusing writes, such as a TLS engine whose `close_notify` waits behind bytes its client has not taken, never fires
 the `channelInactive` that closes the loopback, so the relay kept reading and wrote every chunk into it: one cut
 tunnel logged 2,500–6,300 `ERROR` entries and kept its event loop busy for up to ~41 s.
+
+### Relay close
+
+**Outcome:** when a tunnel ends, its loopback connection closes at once, or as soon as a request the client had
+already sent has been written to it. Asked to close through its pipeline, an
+`HttpToHttp2ConnectionHandler` sends a `GOAWAY` and keeps the connection open while it has active streams, for up to
+Netty's graceful-shutdown timeout (30 s). On the loopback those streams have nowhere to go once the client's leg has
+finished, so `RelayLegClose` closes the loopback's socket with `channel.unsafe().close(...)`, as
+`WriteStallTimeoutHandler` does. The client's leg keeps its pipeline close and its `GOAWAY`.
+
+| The relay ends because | Loopback leg | Client leg |
+|---|---|---|
+| A write to the client failed, or too much streamed content was waiting (`DownstreamProxyRelayHandler.endRelay`) | socket closed at once | `close()` through the pipeline |
+| The client's connection closed with no request still being written to the loopback (`UpstreamProxyRelayHandler.channelInactive`, or a listener on its close for a tunnel that has no relay handlers yet) | the outbound buffer is flushed, then the socket is closed | already closed |
+| The client's connection closed with a request still being written to the loopback (`UpstreamProxyRelayHandler.channelInactive`) | `closeOnFlush` through the pipeline; the socket is closed when the last such write completes or fails | already closed |
+| The loopback closed (`DownstreamProxyRelayHandler.channelInactive`) | already closed | open streams ended as in [Relay loopback connection loss](#relay-loopback-connection-loss-http2), then `closeOnFlush` |
+| The loopback closed before the tunnel's protocol was known (`RelayConnectHandler`) | already closed | `closeOnFlush` |
+
+Why the client's leg is not closed at its socket too: it does not wait. A write to it that fails for the whole
+connection is a connection error to its `Http2ConnectionHandler`, which closes the connection with its other streams
+still open (`RelayHttp2LegCloseTest`). Where the client is still taking writes, the loopback's close resets every stream that has no whole
+response (`LoopbackHttp2ConnectionCloseHandler`), and the graceful close then waits only for whole responses still
+being written out, which is what a healthy client is owed. An HTTP/1.1 leg has no streams to wait for. (A TLS
+handler can still hold either kind of client leg open until its `close_notify` is flushed or its flush timeout
+passes, as described under [Response Write-Stall Timeout](#response-write-stall-timeout).)
+
+A client that leaves is therefore seen by MockServer as it would be on a direct connection: a request it had sent
+in full is still received, but its response is not waited for. Before, an HTTP/2 loopback stayed connected until
+MockServer had answered every stream, or for 30 s.
+
+A request is received whole even when the client leaves the moment it has sent it. `UpstreamProxyRelayHandler` counts
+its writes of requests to the loopback that have not completed. An HTTP/2 request body above the stream's flow-control
+window (65,535 bytes by default) waits in the loopback's flow controller, not in the socket's outbound buffer, so a
+socket close would fail it however the buffer was flushed first. While the count is above zero the loopback is
+therefore closed through its pipeline, which goes on writing as MockServer extends the window, and the listener of
+the last write to complete, or fail, closes the socket. That wait has the graceful shutdown's 30 s bound. The count
+covers requests only: a response the loopback is still reading has no one to go to. The listener on the client
+channel's close future acts only while the tunnel has no `UpstreamProxyRelayHandler`: it runs before
+`channelInactive` and would close the socket whatever the count (`RelayHttp2LegCloseTest`,
+`RelayHttp2TunnelCloseIntegrationTest`).
+
+`endRelay` does not consult the count. On a tunnel with several streams, a response on another stream that is
+still being written to the client when it leaves, or that arrives afterwards, fails to write and ends the relay,
+which closes the loopback's socket at once with any request still being written.
+
+Until the client's first bytes show which protocol the tunnel carries, neither leg has a relay handler, so each is
+tied to the other's close by `RelayConnectHandler` itself. Before, a client that connected and left without sending
+anything left the loopback connection open for good, and a loopback lost in that interval left the client waiting.
 
 ### HTTP/2 loopback stream ids
 

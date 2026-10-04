@@ -29,6 +29,7 @@ import org.mockserver.logging.LoggingHandler;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.Protocol;
 import org.mockserver.netty.connection.Http2StreamWriteStallHandler;
+import org.mockserver.netty.connection.HttpExchangeTracker;
 import org.mockserver.netty.connection.InboundConnectionActivity;
 import org.mockserver.netty.connection.WriteStallTimeoutHandler;
 import org.mockserver.netty.unification.PortUnificationHandler;
@@ -101,8 +102,15 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
                                 .writeAndFlush(successResponse(request))
                                 .addListener((ChannelFutureListener) channelFuture -> {
                                     removeCodecSupport(proxyClientCtx);
-                                    // a tunnel may legitimately stay silent for as long as the client likes
-                                    InboundConnectionActivity.markLongLived(proxyClientCtx.channel());
+                                    // the tunnel's own codec is given a tracker of its own, after it
+                                    removeHandler(proxyClientCtx.pipeline(), HttpExchangeTracker.class);
+                                    // until the relay handlers are installed nothing else closes the loopback with the client;
+                                    // once they are, UpstreamProxyRelayHandler does, after a request still being written
+                                    proxyClientCtx.channel().closeFuture().addListener(closed -> {
+                                        if (proxyClientCtx.pipeline().get(UpstreamProxyRelayHandler.class) == null) {
+                                            RelayLegClose.afterFlush(mockServerCtx.channel());
+                                        }
+                                    });
 
                                     // downstream (to proxy client)
                                     ChannelPipeline pipelineToProxyClient = proxyClientCtx.channel().pipeline();
@@ -171,6 +179,9 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
                         Channel proxyClientChannel = proxyClientCtx.channel();
                         proxyClientChannel.writeAndFlush(failureResponse(request));
                         closeOnFlush(proxyClientChannel);
+                    } else if (mockServerCtx.pipeline().get(DownstreamProxyRelayHandler.class) == null) {
+                        // the tunnel's protocol is not yet known, so no relay handler is there to close the client's leg
+                        closeOnFlush(proxyClientCtx.channel());
                     }
                     mockServerCtx.fireChannelInactive();
                 }
@@ -419,6 +430,10 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
             pipelineToProxyClient.addLast(chunkLineLimiter.beforeCodec());
             pipelineToProxyClient.addLast(new HttpServerCodec(configuration.maxInitialLineLength(), configuration.maxHeaderSize(), configuration.maxChunkSize()));
             pipelineToProxyClient.addLast(chunkLineLimiter.afterCodec());
+            if (InboundConnectionActivity.isTracked(proxyClientCtx.channel())) {
+                // a tunnel with a request being uploaded or a response still being relayed is not idle
+                pipelineToProxyClient.addLast(HttpExchangeTracker.INSTANCE);
+            }
             pipelineToProxyClient.addLast(HttpObjectAggregators.httpObjectAggregator(configuration.maxRequestBodySize()));
         }
 

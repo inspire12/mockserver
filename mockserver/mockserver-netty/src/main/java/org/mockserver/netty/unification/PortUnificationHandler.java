@@ -553,7 +553,7 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
     }
 
     private void switchToProxyConnected(ChannelHandlerContext ctx, ByteBuf msg) {
-        // MockServer's own loopback leg of a CONNECT/SOCKS tunnel: idle-closing it would tear the tunnel down
+        // MockServer's own loopback leg of a CONNECT/SOCKS tunnel: the client's leg is the one timed, and closes this one
         InboundConnectionActivity.markLongLived(ctx.channel());
         if (RelayLoopbackAddresses.isRelayLoopback(ctx.channel())) {
             WriteStallTimeoutHandler.exempt(ctx.channel());

@@ -2512,8 +2512,10 @@ public class ConfigurationProperties {
      *
      * <p>Only quiet connections are closed: a connection with a request awaiting its response (a
      * delayed response, a paused breakpoint), a streaming response (SSE, chunked, gRPC), an active
-     * HTTP/2 stream, or one that has become a WebSocket, a CONNECT/SOCKS tunnel or a raw binary relay
-     * is never closed by this timeout.</p>
+     * HTTP/2 stream, or one that has become a WebSocket or a raw binary relay is never closed by this
+     * timeout. A CONNECT/SOCKS tunnel is closed on the same terms, together with MockServer's internal
+     * connection for it: once nothing has passed through it for the timeout and no request sent
+     * through it is in progress.</p>
      *
      * @param millis idle timeout in milliseconds, 0 to disable
      */

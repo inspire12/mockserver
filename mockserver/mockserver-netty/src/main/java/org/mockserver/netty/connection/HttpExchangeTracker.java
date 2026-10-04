@@ -17,7 +17,9 @@ import org.mockserver.responsewriter.HttpExchangeEndedEvent;
  * written to the socket, so a delayed, paused or streaming response keeps the connection busy.
  * <p>
  * Must sit after {@code HttpServerCodec}, ahead of every handler that answers, so it sees every decoded request and every
- * encoded response whichever handler writes it. A {@code 101 Switching Protocols} response makes the
+ * encoded response whichever handler writes it. The client's leg of an HTTP/1.1 CONNECT/SOCKS tunnel has one after the
+ * tunnel's own codec, where an exchange spans the upload of its request and the relay of its response.
+ * A {@code 101 Switching Protocols} response makes the
  * connection long-lived (it is a WebSocket from then on); other {@code 1xx} responses, such as
  * {@code 100 Continue}, precede the real response and do not end the exchange. An exchange that ends
  * without a {@code LastHttpContent} passing through (a raw-bytes {@code HttpError}, an abandoned

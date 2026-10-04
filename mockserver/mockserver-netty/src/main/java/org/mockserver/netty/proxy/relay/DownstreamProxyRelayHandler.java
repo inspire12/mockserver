@@ -147,16 +147,15 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
      * Closes both legs and stops reading the loopback. Closing the proxy client's channel is not enough: one that stays
      * open while refusing writes (a TLS engine closed with its {@code close_notify} queued behind unread bytes) never
      * fires the {@code channelInactive} that closes the loopback, which would keep reading and relaying into it.
-     * <p>
-     * The loopback is closed through its pipeline, so an HTTP/2 loopback with streams still open sends a {@code GOAWAY}
-     * and stays connected, reading nothing, until Netty's graceful-shutdown timeout (30 s) closes it.
+     * The loopback's socket is closed directly ({@link RelayLegClose}): its streams can no longer complete, and an
+     * HTTP/2 loopback closed through its pipeline would wait for them.
      */
     private void endRelay(ChannelHandlerContext ctx) {
         relayEnded = true;
-        // never released: a loopback closing through its own TLS handler can still read until that close completes
+        // never released: it also stops a read in progress from going on to read the socket closed below
         ChannelReadPause.pause(ctx.channel());
         upstreamChannel.close();
-        ctx.close();
+        RelayLegClose.now(ctx.channel());
     }
 
     /**
