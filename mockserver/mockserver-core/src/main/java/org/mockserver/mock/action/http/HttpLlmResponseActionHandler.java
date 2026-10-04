@@ -17,6 +17,7 @@ import org.mockserver.llm.ProviderCodec;
 import org.mockserver.llm.ProviderCodecRegistry;
 import org.mockserver.llm.StreamingFormat;
 import org.mockserver.llm.TokenCounter;
+import org.mockserver.llm.codec.EmbeddingWire;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.*;
@@ -128,8 +129,11 @@ public class HttpLlmResponseActionHandler {
 
             // Embedding path
             if (httpLlmResponse.getEmbedding() != null) {
-                String inputText = extractInputFromRequest(request);
-                return codecInstance.encodeEmbedding(httpLlmResponse.getEmbedding(), inputText, model);
+                try {
+                    return codecInstance.encodeEmbedding(httpLlmResponse.getEmbedding(), request, model);
+                } catch (EmbeddingWire.InvalidEmbeddingRequestException e) {
+                    return EmbeddingWire.invalidRequest(provider, e);
+                }
             }
 
             // Rerank path
@@ -875,25 +879,6 @@ public class HttpLlmResponseActionHandler {
                 response.withHeader("Retry-After", retryAfter);
             }
         }
-    }
-
-    private String extractInputFromRequest(HttpRequest request) {
-        if (request.getBody() != null) {
-            String bodyString = request.getBodyAsText();
-            try {
-                JsonNode bodyNode = OBJECT_MAPPER.readTree(bodyString);
-                JsonNode inputNode = bodyNode.get("input");
-                if (inputNode != null) {
-                    if (inputNode.isTextual()) {
-                        return inputNode.asText();
-                    }
-                    return inputNode.toString();
-                }
-            } catch (Exception e) {
-                // not parseable, return empty
-            }
-        }
-        return "";
     }
 
     /**

@@ -15,6 +15,7 @@ import org.mockserver.model.*;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -302,19 +303,12 @@ public class OllamaCodec implements ProviderCodec {
         }
     }
 
+    private static final String DEFAULT_EMBEDDING_MODEL = "nomic-embed-text";
+    private static final int DEFAULT_EMBEDDING_DIMENSIONS = 768;
+
     /**
-     * Encodes an Ollama embedding response. Ollama exposes two endpoints:
-     * <ul>
-     *   <li>the newer {@code POST /api/embed} returning a batch shape
-     *       ({@code {"embeddings":[[...]]}}, plus {@code model} and
-     *       {@code prompt_eval_count}), and</li>
-     *   <li>the legacy {@code POST /api/embeddings} returning a single-vector
-     *       shape ({@code {"embedding":[...]}}).</li>
-     * </ul>
-     * This codec emits the {@code /api/embed} batch shape with a single embedding
-     * (the modern, recommended endpoint), which also satisfies clients that read
-     * the {@code embeddings} array. The Ollama default dimensionality for
-     * {@code nomic-embed-text} is 768.
+     * Encodes an Ollama {@code /api/embed} response for a single input. The default
+     * dimensionality ({@code nomic-embed-text}) is 768.
      */
     @Override
     public HttpResponse encodeEmbedding(EmbeddingResponse embedding, String input) {
@@ -323,27 +317,54 @@ public class OllamaCodec implements ProviderCodec {
 
     @Override
     public HttpResponse encodeEmbedding(EmbeddingResponse embedding, String input, String model) {
-        double[] vector = EmbeddingVectors.build(embedding, input, 768);
+        return encodeEmbed(embedding, Collections.singletonList(input), model != null ? model : DEFAULT_EMBEDDING_MODEL, null);
+    }
 
+    /**
+     * Encodes the response for the request's endpoint:
+     * <ul>
+     *   <li>{@code POST /api/embed}: {@code input} is a string or an array of strings, and the
+     *       response is {@code {"model":...,"embeddings":[[...], ...],"total_duration":N,
+     *       "load_duration":N,"prompt_eval_count":N}} with one vector per input.</li>
+     *   <li>{@code POST /api/embeddings} (deprecated): {@code prompt} is one string, and the
+     *       response is {@code {"embedding":[...]}}.</li>
+     * </ul>
+     * On another path a body with {@code prompt} and no {@code input} selects the legacy shape.
+     */
+    @Override
+    public HttpResponse encodeEmbedding(EmbeddingResponse embedding, HttpRequest request, String model) {
+        JsonNode body = EmbeddingWire.body(request);
+        String path = EmbeddingWire.path(request);
+        Integer dimensions = EmbeddingWire.requestedDimensions(body.get("dimensions"), "dimensions");
+        boolean legacy = path.endsWith("/api/embeddings")
+            || (!path.endsWith("/api/embed") && body.has("prompt") && !body.has("input"));
+        if (legacy) {
+            JsonNode prompt = body.get("prompt");
+            String text = prompt != null && prompt.isTextual() ? prompt.asText() : "";
+            ObjectNode root = OBJECT_MAPPER.createObjectNode();
+            EmbeddingWire.addFloats(root.putArray("embedding"), EmbeddingWire.vector(embedding, text, dimensions, DEFAULT_EMBEDDING_DIMENSIONS));
+            return EmbeddingWire.json(root, "Ollama");
+        }
+        return encodeEmbed(
+            embedding,
+            EmbeddingWire.stringOrArrayInputs(body.get("input")),
+            EmbeddingWire.firstNonBlank(EmbeddingWire.text(body, "model"), model, DEFAULT_EMBEDDING_MODEL),
+            dimensions
+        );
+    }
+
+    private HttpResponse encodeEmbed(EmbeddingResponse embedding, List<String> inputs, String model, Integer dimensions) {
+        EmbeddingWire.checkTotalValues(embedding, dimensions, DEFAULT_EMBEDDING_DIMENSIONS, inputs.size());
         ObjectNode root = OBJECT_MAPPER.createObjectNode();
-        root.put("model", model != null ? model : "nomic-embed-text");
+        root.put("model", model);
         ArrayNode embeddings = root.putArray("embeddings");
-        ArrayNode first = embeddings.addArray();
-        for (double v : vector) {
-            first.add(v);
+        for (String input : inputs) {
+            EmbeddingWire.addFloats(embeddings.addArray(), EmbeddingWire.vector(embedding, input, dimensions, DEFAULT_EMBEDDING_DIMENSIONS));
         }
-        int approxTokens = EmbeddingVectors.approximateTokens(input);
-        root.put("prompt_eval_count", approxTokens);
-
-        try {
-            String json = OBJECT_MAPPER.writeValueAsString(root);
-            return response()
-                .withStatusCode(200)
-                .withHeader("content-type", "application/json")
-                .withBody(json);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to encode Ollama embedding response", e);
-        }
+        root.put("total_duration", 14143917L);
+        root.put("load_duration", 1019500L);
+        root.put("prompt_eval_count", EmbeddingWire.tokens(inputs));
+        return EmbeddingWire.json(root, "Ollama");
     }
 
     private static ParsedMessage.Role mapOllamaRole(String rawRole) {

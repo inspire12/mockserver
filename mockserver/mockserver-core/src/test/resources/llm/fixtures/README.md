@@ -20,6 +20,7 @@ fixtures/
   bedrock-converse/   AWS Bedrock Converse / ConverseStream codec output
   azure-openai/       Azure OpenAI Chat Completions codec output
   ollama/             Ollama /api/chat codec output
+  embeddings/         every embedding wire shape (LlmEmbeddingGoldenFileTest)
 ```
 
 Each directory contains:

@@ -1,0 +1,8 @@
+200
+{
+  "embedding" : "<vector:512>",
+  "inputTextTokenCount" : 11,
+  "embeddingsByType" : {
+    "float" : "<vector:512>"
+  }
+}

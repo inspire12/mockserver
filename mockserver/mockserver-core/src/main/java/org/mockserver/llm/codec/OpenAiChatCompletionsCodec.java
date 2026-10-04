@@ -14,6 +14,7 @@ import org.mockserver.model.*;
 import org.mockserver.uuid.UUIDService;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -299,40 +300,59 @@ public class OpenAiChatCompletionsCodec implements ProviderCodec {
         }
     }
 
+    private static final String DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small";
+    private static final int DEFAULT_EMBEDDING_DIMENSIONS = 1536;
+
     @Override
     public HttpResponse encodeEmbedding(EmbeddingResponse embedding, String input) {
-        double[] vector = EmbeddingVectors.build(embedding, input, 1536);
+        return encodeEmbeddings(embedding, Collections.singletonList(input), DEFAULT_EMBEDDING_MODEL, null, false);
+    }
 
-        // Build response
+    /**
+     * Encodes an OpenAI {@code POST /v1/embeddings} response with one {@code data[i]} entry per
+     * input, in input order. The request's {@code input} may be a string, an array of strings, an
+     * array of token integers (one input) or an array of token arrays. The request's
+     * {@code model} is echoed, its {@code dimensions} is honoured unless the expectation sets
+     * dimensions, and {@code encoding_format: "base64"} returns each vector as base64
+     * little-endian float32, which the OpenAI SDKs request by default.
+     */
+    @Override
+    public HttpResponse encodeEmbedding(EmbeddingResponse embedding, HttpRequest request, String model) {
+        JsonNode body = EmbeddingWire.body(request);
+        return encodeEmbeddings(
+            embedding,
+            EmbeddingWire.stringOrArrayInputs(body.get("input")),
+            EmbeddingWire.firstNonBlank(EmbeddingWire.text(body, "model"), model, DEFAULT_EMBEDDING_MODEL),
+            EmbeddingWire.requestedDimensions(body.get("dimensions"), "dimensions"),
+            "base64".equals(EmbeddingWire.text(body, "encoding_format"))
+        );
+    }
+
+    private HttpResponse encodeEmbeddings(EmbeddingResponse embedding, List<String> inputs, String model, Integer requestedDimensions, boolean base64) {
+        EmbeddingWire.checkTotalValues(
+            EmbeddingWire.dimensions(embedding, requestedDimensions, DEFAULT_EMBEDDING_DIMENSIONS) * (long) inputs.size(),
+            base64 ? EmbeddingWire.MAX_TOTAL_BASE64_VALUES : EmbeddingWire.MAX_TOTAL_VALUES
+        );
         ObjectNode root = OBJECT_MAPPER.createObjectNode();
         root.put("object", "list");
-
         ArrayNode data = root.putArray("data");
-        ObjectNode embeddingObj = data.addObject();
-        embeddingObj.put("object", "embedding");
-        embeddingObj.put("index", 0);
-        ArrayNode embeddingArray = embeddingObj.putArray("embedding");
-        for (double v : vector) {
-            embeddingArray.add(v);
+        for (int i = 0; i < inputs.size(); i++) {
+            double[] vector = EmbeddingWire.build(embedding, inputs.get(i), requestedDimensions, DEFAULT_EMBEDDING_DIMENSIONS);
+            ObjectNode embeddingObj = data.addObject();
+            embeddingObj.put("object", "embedding");
+            embeddingObj.put("index", i);
+            if (base64) {
+                embeddingObj.put("embedding", EmbeddingWire.base64Float32(vector));
+            } else {
+                EmbeddingWire.addFloats(embeddingObj.putArray("embedding"), vector);
+            }
         }
-
-        root.put("model", "text-embedding-3-small");
-
-        // approximate token count from input
-        int approxTokens = EmbeddingVectors.approximateTokens(input);
+        root.put("model", model);
+        int approxTokens = EmbeddingWire.tokens(inputs);
         ObjectNode usage = root.putObject("usage");
         usage.put("prompt_tokens", approxTokens);
         usage.put("total_tokens", approxTokens);
-
-        try {
-            String json = OBJECT_MAPPER.writeValueAsString(root);
-            return response()
-                .withStatusCode(200)
-                .withHeader("content-type", "application/json")
-                .withBody(json);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to encode OpenAI embedding response", e);
-        }
+        return EmbeddingWire.json(root, "OpenAI");
     }
 
     static double[] generateDeterministicVector(String input, int dimensions, long seed) {

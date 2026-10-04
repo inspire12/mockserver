@@ -1,5 +1,6 @@
 package org.mockserver.llm.codec;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -7,12 +8,15 @@ import org.mockserver.llm.ParsedConversation;
 import org.mockserver.llm.ProviderCodec;
 import org.mockserver.llm.StreamingFormat;
 import org.mockserver.model.*;
+import org.mockserver.uuid.UUIDService;
 
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-
-import static org.mockserver.model.HttpResponse.response;
 
 /**
  * Codec for AWS Bedrock Runtime. One {@link Provider#BEDROCK} covers two Bedrock wire APIs,
@@ -135,56 +139,207 @@ public class BedrockCodec implements ProviderCodec {
         return isConverse(request) ? converse.decode(request) : delegate.decode(request);
     }
 
-    /**
-     * Bedrock embeddings without a model hint default to the Amazon Titan shape.
-     * Use the model-aware overload to select Cohere-on-Bedrock.
-     */
+    private enum EmbeddingFamily { TITAN_V1, TITAN_V2, TITAN_IMAGE, COHERE_V3, COHERE_V4 }
+
+    /** Cohere Embed on Bedrock accepts at most 96 texts or inputs per call. */
+    private static final int COHERE_MAX_INPUTS = 96;
+
+    private static final Pattern MODEL_IN_PATH = Pattern.compile("/model/([^/]+)/");
+
+    /** A request-less embedding encodes one input in the Titan Text Embeddings V2 shape. */
     @Override
     public HttpResponse encodeEmbedding(EmbeddingResponse embedding, String input) {
-        return encodeEmbedding(embedding, input, null);
+        return encodeEmbedding(embedding, input, (String) null);
     }
 
     /**
-     * Encodes a Bedrock {@code InvokeModel} embedding response. Bedrock's
-     * embedding wire shape is model-family specific:
-     * <ul>
-     *   <li><strong>Amazon Titan</strong> ({@code amazon.titan-embed-text-*}) —
-     *       {@code {"embedding":[...],"inputTextTokenCount":N}}</li>
-     *   <li><strong>Cohere</strong> ({@code cohere.embed-*}) —
-     *       {@code {"embeddings":[[...]]}}</li>
-     * </ul>
-     * When {@code model} starts with {@code cohere} the Cohere shape is emitted,
-     * otherwise the Titan shape (the Bedrock default). Both default to 1024
-     * dimensions.
+     * Encodes one input, in the Cohere Embed shape when {@code model} names a Cohere embed
+     * model and otherwise in the Titan shape. See {@link #encodeEmbedding(EmbeddingResponse, HttpRequest, String)}.
      */
     @Override
     public HttpResponse encodeEmbedding(EmbeddingResponse embedding, String input, String model) {
-        double[] vector = EmbeddingVectors.build(embedding, input, 1024);
-        ObjectNode root = OBJECT_MAPPER.createObjectNode();
-
-        boolean cohere = model != null && model.toLowerCase().startsWith("cohere");
-        if (cohere) {
-            ArrayNode embeddings = root.putArray("embeddings");
-            ArrayNode first = embeddings.addArray();
-            for (double v : vector) {
-                first.add(v);
-            }
-        } else {
-            ArrayNode embeddingArray = root.putArray("embedding");
-            for (double v : vector) {
-                embeddingArray.add(v);
-            }
-            root.put("inputTextTokenCount", EmbeddingVectors.approximateTokens(input));
+        EmbeddingFamily family = familyFromModel(model);
+        ObjectNode body = EmbeddingWire.object();
+        if (family == EmbeddingFamily.COHERE_V3 || family == EmbeddingFamily.COHERE_V4) {
+            body.putArray("texts").add(input);
+            return encodeCohereEmbedding(embedding, body, family);
         }
+        body.put("inputText", input);
+        return encodeTitanEmbedding(embedding, body, family != null ? family : EmbeddingFamily.TITAN_V2);
+    }
 
+    /**
+     * Encodes a Bedrock {@code InvokeModel} embedding response in the shape of the model
+     * family. The model id comes from the {@code /model/{modelId}/invoke} path, then the
+     * expectation's {@code model}; region prefixes ({@code us.cohere...}) and ARNs match. With no
+     * embedding model named, a {@code texts} or {@code inputs} body selects Cohere and anything
+     * else Titan.
+     * <ul>
+     *   <li><strong>Titan Text Embeddings G1</strong> ({@code amazon.titan-embed-text-v1}):
+     *       {@code inputText} in; {@code {"embedding":[...],"inputTextTokenCount":N}} out,
+     *       1536 dimensions.</li>
+     *   <li><strong>Titan Text Embeddings V2</strong> ({@code amazon.titan-embed-text-v2:0}, the
+     *       default): adds {@code embeddingsByType} keyed by the requested
+     *       {@code embeddingTypes} ({@code float} by default, {@code binary} as 0/1 per
+     *       dimension), omits {@code embedding} when only {@code binary} is requested, and
+     *       honours {@code dimensions} (256, 512 or 1024); 1024 dimensions.</li>
+     *   <li><strong>Titan Multimodal Embeddings G1</strong> ({@code amazon.titan-embed-image-v1}):
+     *       {@code inputText} in; {@code {"embedding":[...],"inputTextTokenCount":N}} out, 1024
+     *       dimensions or {@code embeddingConfig.outputEmbeddingLength} (256, 384 or 1024).</li>
+     *   <li><strong>Cohere Embed v3 / v4</strong> ({@code cohere.embed-english-v3},
+     *       {@code cohere.embed-v4:0}): one vector per {@code texts} entry (or v4
+     *       {@code inputs} item) in {@code {"id":...,"embeddings":[[...]],
+     *       "response_type":"embeddings_floats","texts":[...]}}; with {@code embedding_types}
+     *       the embeddings are an object keyed by type and {@code response_type} is
+     *       {@code embeddings_by_type}. v3 has 1024 dimensions; v4 1536 or
+     *       {@code output_dimension} (256, 512, 1024 or 1536). At most 96 texts or inputs.</li>
+     * </ul>
+     * A request the real API rejects on these limits throws
+     * {@link EmbeddingWire.InvalidEmbeddingRequestException}.
+     */
+    @Override
+    public HttpResponse encodeEmbedding(EmbeddingResponse embedding, HttpRequest request, String model) {
+        JsonNode body = EmbeddingWire.body(request);
+        EmbeddingFamily family = familyFromModel(modelFromPath(request));
+        if (family == null) {
+            family = familyFromModel(model);
+        }
+        if (family == null) {
+            if (body.has("texts") || body.has("inputs")) {
+                family = body.has("inputs") || body.has("output_dimension") ? EmbeddingFamily.COHERE_V4 : EmbeddingFamily.COHERE_V3;
+            } else {
+                family = EmbeddingFamily.TITAN_V2;
+            }
+        }
+        if (family == EmbeddingFamily.COHERE_V3 || family == EmbeddingFamily.COHERE_V4) {
+            return encodeCohereEmbedding(embedding, body, family);
+        }
+        return encodeTitanEmbedding(embedding, body, family);
+    }
+
+    private static String modelFromPath(HttpRequest request) {
+        if (request == null || request.getPath() == null || request.getPath().getValue() == null) {
+            return null;
+        }
+        Matcher matcher = MODEL_IN_PATH.matcher(request.getPath().getValue());
+        if (!matcher.find()) {
+            return null;
+        }
         try {
-            String json = OBJECT_MAPPER.writeValueAsString(root);
-            return response()
-                .withStatusCode(200)
-                .withHeader("content-type", "application/json")
-                .withBody(json);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to encode Bedrock embedding response", e);
+            return URLDecoder.decode(matcher.group(1), StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            return matcher.group(1);
         }
+    }
+
+    private static EmbeddingFamily familyFromModel(String model) {
+        if (model == null) {
+            return null;
+        }
+        String id = model.toLowerCase(Locale.ROOT);
+        if (id.contains("cohere.embed")) {
+            return id.contains("embed-v4") ? EmbeddingFamily.COHERE_V4 : EmbeddingFamily.COHERE_V3;
+        }
+        if (id.contains("titan-embed-text-v2")) {
+            return EmbeddingFamily.TITAN_V2;
+        }
+        if (id.contains("titan-embed-text-v1") || id.contains("titan-embed-g1-text")) {
+            return EmbeddingFamily.TITAN_V1;
+        }
+        if (id.contains("titan-embed-image")) {
+            return EmbeddingFamily.TITAN_IMAGE;
+        }
+        return null;
+    }
+
+    private HttpResponse encodeTitanEmbedding(EmbeddingResponse embedding, JsonNode body, EmbeddingFamily family) {
+        JsonNode inputText = body.get("inputText");
+        String text = inputText != null && inputText.isTextual() ? inputText.asText() : "";
+        ObjectNode root = EmbeddingWire.object();
+        if (family == EmbeddingFamily.TITAN_V1) {
+            EmbeddingWire.addFloats(root.putArray("embedding"), EmbeddingWire.vector(embedding, text, null, 1536));
+            root.put("inputTextTokenCount", EmbeddingVectors.approximateTokens(text));
+            return EmbeddingWire.json(root, "Bedrock Titan");
+        }
+        if (family == EmbeddingFamily.TITAN_IMAGE) {
+            JsonNode config = body.get("embeddingConfig");
+            Integer length = config != null
+                ? EmbeddingWire.requestedDimensions(config.get("outputEmbeddingLength"), "embeddingConfig.outputEmbeddingLength", 256, 384, 1024)
+                : null;
+            EmbeddingWire.addFloats(root.putArray("embedding"), EmbeddingWire.vector(embedding, text, length, 1024));
+            root.put("inputTextTokenCount", EmbeddingVectors.approximateTokens(text));
+            return EmbeddingWire.json(root, "Bedrock Titan");
+        }
+        Integer dimensions = EmbeddingWire.requestedDimensions(body.get("dimensions"), "dimensions", 256, 512, 1024);
+        List<String> types = EmbeddingWire.requestedTypes(body.get("embeddingTypes"), "embeddingTypes", "float", "binary");
+        boolean floats = types.isEmpty() || types.contains("float");
+        EmbeddingWire.checkTotalValues(embedding, dimensions, 1024, (floats ? 2 : 0) + (types.contains("binary") ? 1 : 0));
+        double[] vector = EmbeddingWire.vector(embedding, text, dimensions, 1024);
+        if (floats) {
+            EmbeddingWire.addFloats(root.putArray("embedding"), vector);
+        }
+        root.put("inputTextTokenCount", EmbeddingVectors.approximateTokens(text));
+        ObjectNode byType = root.putObject("embeddingsByType");
+        if (types.contains("binary")) {
+            EmbeddingWire.titanBinary(byType.putArray("binary"), vector);
+        }
+        if (floats) {
+            EmbeddingWire.addFloats(byType.putArray("float"), vector);
+        }
+        return EmbeddingWire.json(root, "Bedrock Titan");
+    }
+
+    private HttpResponse encodeCohereEmbedding(EmbeddingResponse embedding, JsonNode body, EmbeddingFamily family) {
+        List<String> inputs = new ArrayList<>();
+        JsonNode texts = body.get("texts");
+        JsonNode items = body.get("inputs");
+        if (texts != null && texts.isArray()) {
+            EmbeddingWire.checkInputCount(texts.size(), COHERE_MAX_INPUTS, "texts");
+            for (JsonNode text : texts) {
+                inputs.add(text.isTextual() ? text.asText() : text.isNull() ? null : text.toString());
+            }
+        } else if (items != null && items.isArray()) {
+            EmbeddingWire.checkInputCount(items.size(), COHERE_MAX_INPUTS, "inputs");
+            for (JsonNode item : items) {
+                inputs.add(EmbeddingWire.joinTextParts(item.get("content"), "text"));
+            }
+        }
+        Integer requested = family == EmbeddingFamily.COHERE_V4
+            ? EmbeddingWire.requestedDimensions(body.get("output_dimension"), "output_dimension", 256, 512, 1024, 1536)
+            : null;
+        int defaultDimensions = family == EmbeddingFamily.COHERE_V4 ? 1536 : 1024;
+        List<String> types = EmbeddingWire.requestedTypes(body.get("embedding_types"), "embedding_types", "float", "int8", "uint8", "binary", "ubinary");
+        EmbeddingWire.checkTotalValues(embedding, requested, defaultDimensions, (long) inputs.size() * Math.max(1, types.size()));
+        List<double[]> vectors = new ArrayList<>(inputs.size());
+        for (String input : inputs) {
+            vectors.add(EmbeddingWire.vector(embedding, input, requested, defaultDimensions));
+        }
+
+        ObjectNode root = EmbeddingWire.object();
+        root.put("id", UUIDService.getNonSecureUUID());
+        if (types.isEmpty()) {
+            ArrayNode embeddings = root.putArray("embeddings");
+            for (double[] vector : vectors) {
+                EmbeddingWire.addFloats(embeddings.addArray(), vector);
+            }
+            root.put("response_type", "embeddings_floats");
+        } else {
+            ObjectNode embeddings = root.putObject("embeddings");
+            for (String type : types) {
+                ArrayNode typed = embeddings.putArray(type);
+                for (double[] vector : vectors) {
+                    EmbeddingWire.cohereTyped(typed.addArray(), vector, type);
+                }
+            }
+            root.put("response_type", "embeddings_by_type");
+        }
+        if (texts != null && texts.isArray()) {
+            root.set("texts", texts.deepCopy());
+        } else if (items != null && items.isArray()) {
+            root.set("inputs", items.deepCopy());
+        } else {
+            root.putArray("texts");
+        }
+        return EmbeddingWire.json(root, "Bedrock Cohere");
     }
 }

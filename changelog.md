@@ -425,6 +425,29 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   applies to `OPENAI`, `AZURE_OPENAI` and the OpenAI-compatible providers (`MISTRAL`, `XAI`, `DEEPSEEK`,
   `GROQ`, `OPENROUTER`, `ORCAROUTER`). A request that does not ask gets no usage, as from the real
   OpenAI and Azure APIs, and is unchanged; the compatible providers follow the same opt-in.
+- **`httpLlmResponse` embedding mocks now return one vector per input, read each provider's own
+  input field, and use each provider's real response shape.** Only a top-level `input` was read, so
+  Gemini `content.parts[].text`, Bedrock Titan `inputText`, Bedrock Cohere `texts` and Ollama
+  `/api/embeddings` `prompt` all embedded an empty string: every document got the same vector, which made
+  `deterministicFromInput` useless for retrieval tests. A batch also returned a single vector of the
+  array's JSON text. Now an OpenAI, Azure OpenAI or OpenAI-compatible `input` array returns one
+  `data[i]` per entry, with `index`. Gemini `:batchEmbedContents` returns `embeddings[]`, and both Gemini
+  endpoints carry `usageMetadata.promptTokenCount`. Ollama `/api/embed` returns `embeddings[][]` and the
+  legacy `/api/embeddings` returns `{"embedding":[...]}`. Bedrock Cohere Embed v3 and v4 return `id`,
+  `response_type` and `texts`, and an object keyed by type when `embedding_types` is sent. Bedrock Titan
+  Text Embeddings V2 adds `embeddingsByType`, and Titan G1 vectors are 1536 long, as the real model's.
+  The Bedrock model is read from the `/model/{modelId}/invoke` path, including region-prefixed IDs such
+  as `us.cohere.embed-v4:0`. OpenAI-style responses echo the
+  request `model` rather than always saying `text-embedding-3-small`, and honour
+  `encoding_format: "base64"`, which the OpenAI SDKs send by default. A request's own dimensions
+  (`dimensions`, `outputDimensionality`, `output_dimension`) apply when the expectation sets none; Cohere
+  Embed v4 defaults to 1,536 dimensions and Titan Multimodal (`amazon.titan-embed-image-v1`) to 1,024.
+  Because the request now picks how many vectors come back and how long they are, both are limited, so
+  a small request cannot make MockServer build a very large response. A request gets a 400 in the
+  provider's error format when it asks for more than 8,192 dimensions, more than 2,048 inputs or 96
+  Cohere texts, a Titan or Cohere size or embedding type the provider does not have, or more than
+  262,144 values in total (1,048,576 with `encoding_format: "base64"`), which keeps the largest
+  response at about 5.6 MB. The same text, seed and dimensions give the same vector on every provider.
 
 - **Setting `maxResponseBodySize` or `maxRequestBodySize` to zero no longer removes the limit on a
   streamed response.** At `0` an ordinary response or request with a body was refused, but several

@@ -1,0 +1,22 @@
+200
+{
+  "object" : "list",
+  "data" : [ {
+    "object" : "embedding",
+    "index" : 0,
+    "embedding" : "<vector:1536>"
+  }, {
+    "object" : "embedding",
+    "index" : 1,
+    "embedding" : "<vector:1536>"
+  }, {
+    "object" : "embedding",
+    "index" : 2,
+    "embedding" : "<vector:1536>"
+  } ],
+  "model" : "text-embedding-3-small",
+  "usage" : {
+    "prompt_tokens" : 16,
+    "total_tokens" : 16
+  }
+}

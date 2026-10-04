@@ -133,6 +133,53 @@ The `GeminiCodec.encodeStreaming()` method re-serialises tool-call arguments thr
 
 **Resolved.** This was previously reported as an E2E-only false-negative (the matcher unit tests passed for all providers, but the predicate was believed to fail through the full Netty pipeline for Gemini/Ollama turn-2 requests). It no longer reproduces: `LlmAgentLoopE2eTest.shouldMatchContainsToolResultForGeminiEndToEnd` and `…ForOllamaEndToEnd` drive turn 2 purely via `whenContainsToolResultFor` (not scenario ordering), through the real Netty pipeline, and both pass — Gemini's name-keyed correlation and Ollama's positional fallback work end-to-end. These regression tests guard against recurrence. (The earlier behaviour was fixed by subsequent matcher/codec work; the body is delivered to the matcher correctly E2E, as the Anthropic/OpenAI/Azure/Bedrock predicate-driven E2E tests also demonstrate.) Not a security issue.
 
+## Embedding request limits (2026-10-03)
+
+**Outcome:** An embedding mock's response size is bounded whatever the request asks for. The request chooses how many vectors come back (one per input) and, when the expectation sets no `dimensions`, how long each is, so without a limit a request of a few kilobytes could ask for a response of any size. A request over a limit gets a `400` in the provider's own error shape before any vector is built.
+
+| Limit | Value | Constant (`EmbeddingWire`) |
+|-------|-------|----------------------------|
+| Request-supplied dimensions (`dimensions`, `outputDimensionality`, `output_dimension`, `embeddingConfig.outputEmbeddingLength`) | an integer from 1 to 8,192; the provider's own set where it has one (Titan V2 256/512/1024, Titan Multimodal 256/384/1024, Cohere v4 256/512/1024/1536) | `MAX_REQUESTED_DIMENSIONS` |
+| Inputs per request (OpenAI-style `input`, Gemini `requests`, Ollama `input`) | 2,048; Cohere `texts` / `inputs` 96 | `MAX_INPUTS` |
+| Values per response, as JSON numbers | 262,144: inputs x dimensions, x the number of Cohere `embedding_types`; Titan V2 counts each array it returns. Also bounds a `dimensions` set on the expectation | `MAX_TOTAL_VALUES` |
+| Values per response, as OpenAI `encoding_format: "base64"` | 1,048,576 | `MAX_TOTAL_BASE64_VALUES` |
+| Embedding types (Cohere `embedding_types`, Titan V2 `embeddingTypes`) | only the provider's own values, so at most 5 and 2 | `EmbeddingWire.requestedTypes` |
+
+**Why these totals.** A value costs about 21 characters as a JSON number and about 5.4 as base64 float32, so both totals bound the response body at about 5.6 MB. That is under the 10 MiB a request body may be by default (`maxRequestBodySize`), so an embedding response is never larger than a response body an expectation could have been given through the control plane. The largest real Cohere batch (96 texts at 1,536 dimensions, 147,456 values) fits; 170 OpenAI inputs at 1,536 dimensions fit as JSON numbers and 682 as base64, which the OpenAI SDKs ask for by default.
+
+**Measured (2026-10-03, JDK 17, random full-precision vectors, the worst case for size).**
+
+Through `HttpLlmResponseActionHandler` alone, one request:
+
+| Response | Request | Body | Allocated | Smallest heap that completed |
+|----------|---------|------|-----------|------------------------------|
+| 262,144 JSON values (the limit) | 0.8 KB | 5.6 MB | 63 MB | `-Xmx48m` |
+| 1,048,576 base64 values (the limit) | 3.5 KB | 5.6 MB | 55 MB | `-Xmx48m` |
+| 524,288 JSON values | 1.7 KB | 11.1 MB | 120 MB | `-Xmx80m` |
+| 4,194,304 JSON values | 15 KB | 89 MB | 931 MB | `-Xmx512m` (`OutOfMemoryError` at `-Xmx384m`) |
+
+Through the built server (`mockserver-netty` jar-with-dependencies, `-Xmx256m`, the Docker images' smallest heap), requests of 2,048 inputs sent by 4, 8, 16 and then 32 concurrent clients, four rounds each; the figure is responses received in full:
+
+| Response | Log level | 4 clients | 8 clients | 16 clients | 32 clients |
+|----------|-----------|-----------|-----------|------------|------------|
+| 262,144 JSON values (the limit) | `WARN` | 16/16 | 32/32 | 64/64 | 119/128 |
+| 262,144 JSON values (the limit) | `INFO` | 16/16 | 32/32 | 61/64 | 110/128 |
+| 1,048,576 base64 values (the limit) | `WARN` | 16/16 | 32/32 | 64/64 | 114/128 |
+| 1,048,576 base64 values (the limit) | `INFO` | 16/16 | 32/32 | 61/64 | 105/128 |
+| A static 5.6 MB `httpResponse` body, for comparison | `INFO` | 16/16 | 32/32 | 64/64 | 114/128 |
+| 131,072 JSON values | `INFO` | 16/16 | 32/32 | 64/64 | 128/128 |
+
+In every run the server stayed up and answered `PUT /mockserver/status` afterwards; a request that failed got no response, and the server log shows `OutOfMemoryError` on request threads. A request one dimension over the limit (2,048 inputs at 129) got its `400` at every concurrency, with no `OutOfMemoryError`. A limit of 524,288 JSON values (an 11 MB body, which the control plane could not have been given by default) was tried first and rejected on this measurement: at `-Xmx256m` and `WARN` it lost requests from 4 concurrent clients (15/16, then 29/32 at 8 and 54/64 at 16).
+
+**Error text.** The `400` body is built with Jackson and names only the parameter, the limit and counts; no request value is copied into it.
+
+**Residual:**
+- **(MEDIUM) The limits are per request; nothing bounds the embedding responses in flight.** As the table shows, at the smallest heap 16 or more concurrent requests at the limit can exhaust it, as 32 concurrent requests for a static body of the same size do. Building a response costs more than serving a stored one (about 60 MB allocated per request at the limit), so embeddings reach that point at about half the concurrency. An in-flight budget like the one for inbound request bodies would close this; it is not part of this change.
+- **With `deterministicFromInput`, allocation scales with the size of the input text, not with these limits.** `EmbeddingVectors.build` (`generateDeterministicVector`, reached through `EmbeddingWire.build`) tokenises each input and builds word and character n-gram maps before hashing them into the vector. The reviewer of this change measured, on a single thread with all-unique short tokens, about 46 MiB allocated for a 256 KiB input, 175 MiB for 1 MiB and 355 MiB for 2 MiB: roughly 175 bytes per input byte. A request at the default 10 MiB `maxRequestBodySize` would therefore allocate on the order of 1.75 GB over its lifetime (extrapolated, not measured). The figures above of about 60 MB allocated per request at the limit, and of a request completing at `-Xmx48m`, hold for random vectors only. The mode is opt-in on the expectation and predates this change on the OpenAI path, where a top-level `input` was already embedded; this change widens it to Gemini, Titan, Cohere and Ollama `prompt`, whose text was not read before. Plan item 20 in [llm-provider-wire-shapes.md](../plans/llm-provider-wire-shapes.md) caps the text length.
+- (LOW) The limits are fixed, not configurable. A larger batch must be split, or the expectation given a smaller `dimensions`. A LangChain `OpenAIEmbeddings` batch at its default `chunk_size` of 1,000 and 1,536 dimensions (1,536,000 base64 values) is over the limit.
+- (LOW) Two Cohere embedding types for a full batch of 96 at 1,536 dimensions (294,912 values) is over the limit; one type, or two at 1,024 dimensions, fits.
+- (LOW) A zero or negative `dimensions` on the expectation (control plane) is not validated: it gives empty vectors, except that a negative value without `deterministicFromInput` fails the request with a `502`. Neither allocates.
+
 ## Outbound prompt redaction — `generateExpectation` and drift (2026-09-28)
 
 **Outcome:** Prompts built for an external LLM backend are redacted before they leave the process. This closes a gap where `PUT /mockserver/generateExpectation`, with an LLM backend configured, sent the unmatched request's `Authorization`, `Cookie` and API-key headers, up to 2,000 characters of body, and the paths of up to 10 existing expectations to a third-party service unredacted.

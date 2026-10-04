@@ -325,33 +325,73 @@ public class GeminiCodec implements ProviderCodec {
         }
     }
 
+    private static final int DEFAULT_EMBEDDING_DIMENSIONS = 768;
+
     /**
-     * Encodes a Gemini {@code embedContent} response
-     * ({@code POST /v1beta/models/{model}:embedContent}). The response carries a
-     * single {@code embedding} object with a {@code values} array
-     * ({@code {"embedding":{"values":[...]}}}). The Gemini default dimensionality
-     * for {@code text-embedding-004} is 768.
+     * Encodes a Gemini {@code embedContent} response ({@code {"embedding":{"values":[...]}}})
+     * for a single input. The default dimensionality ({@code text-embedding-004}) is 768.
      */
     @Override
     public HttpResponse encodeEmbedding(EmbeddingResponse embedding, String input) {
-        double[] vector = EmbeddingVectors.build(embedding, input, 768);
-
         ObjectNode root = OBJECT_MAPPER.createObjectNode();
-        ObjectNode embeddingObj = root.putObject("embedding");
-        ArrayNode values = embeddingObj.putArray("values");
-        for (double v : vector) {
-            values.add(v);
-        }
+        EmbeddingWire.addFloats(root.putObject("embedding").putArray("values"), EmbeddingWire.vector(embedding, input, null, DEFAULT_EMBEDDING_DIMENSIONS));
+        root.putObject("usageMetadata").put("promptTokenCount", EmbeddingVectors.approximateTokens(input));
+        return EmbeddingWire.json(root, "Gemini");
+    }
 
-        try {
-            String json = OBJECT_MAPPER.writeValueAsString(root);
-            return response()
-                .withStatusCode(200)
-                .withHeader("content-type", "application/json")
-                .withBody(json);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to encode Gemini embedding response", e);
+    /**
+     * Encodes the response for the request's API:
+     * <ul>
+     *   <li>{@code models/{model}:embedContent} embeds {@code content.parts[].text} as one
+     *       vector: {@code {"embedding":{"values":[...]}}}.</li>
+     *   <li>{@code models/{model}:batchEmbedContents} (or any body with a {@code requests}
+     *       array) embeds each {@code requests[i].content} in order:
+     *       {@code {"embeddings":[{"values":[...]}, ...]}}.</li>
+     * </ul>
+     * Both carry {@code usageMetadata.promptTokenCount}. Each request's
+     * {@code outputDimensionality} (top level or in {@code embedContentConfig}) is honoured
+     * unless the expectation sets dimensions.
+     */
+    @Override
+    public HttpResponse encodeEmbedding(EmbeddingResponse embedding, HttpRequest request, String model) {
+        JsonNode body = EmbeddingWire.body(request);
+        JsonNode requests = body.get("requests");
+        boolean batch = EmbeddingWire.path(request).endsWith(":batchembedcontents") || (requests != null && requests.isArray());
+        ObjectNode root = OBJECT_MAPPER.createObjectNode();
+        List<String> inputs = new ArrayList<>();
+        if (batch) {
+            ArrayNode embeddings = root.putArray("embeddings");
+            if (requests != null && requests.isArray()) {
+                EmbeddingWire.checkInputCount(requests.size(), EmbeddingWire.MAX_INPUTS, "requests");
+                long totalValues = 0;
+                for (JsonNode embedRequest : requests) {
+                    totalValues += EmbeddingWire.dimensions(embedding, outputDimensionality(embedRequest), DEFAULT_EMBEDDING_DIMENSIONS);
+                }
+                EmbeddingWire.checkTotalValues(totalValues, EmbeddingWire.MAX_TOTAL_VALUES);
+                for (JsonNode embedRequest : requests) {
+                    String text = EmbeddingWire.geminiContentText(embedRequest.get("content"));
+                    inputs.add(text);
+                    EmbeddingWire.addFloats(embeddings.addObject().putArray("values"),
+                        EmbeddingWire.vector(embedding, text, outputDimensionality(embedRequest), DEFAULT_EMBEDDING_DIMENSIONS));
+                }
+            }
+        } else {
+            String text = EmbeddingWire.geminiContentText(body.get("content"));
+            inputs.add(text);
+            EmbeddingWire.addFloats(root.putObject("embedding").putArray("values"),
+                EmbeddingWire.vector(embedding, text, outputDimensionality(body), DEFAULT_EMBEDDING_DIMENSIONS));
         }
+        root.putObject("usageMetadata").put("promptTokenCount", EmbeddingWire.tokens(inputs));
+        return EmbeddingWire.json(root, "Gemini");
+    }
+
+    private static Integer outputDimensionality(JsonNode embedRequest) {
+        Integer topLevel = EmbeddingWire.requestedDimensions(embedRequest.get("outputDimensionality"), "outputDimensionality");
+        if (topLevel != null) {
+            return topLevel;
+        }
+        JsonNode config = embedRequest.get("embedContentConfig");
+        return config != null ? EmbeddingWire.requestedDimensions(config.get("outputDimensionality"), "embedContentConfig.outputDimensionality") : null;
     }
 
     private static ParsedMessage.Role mapGeminiRole(String rawRole) {

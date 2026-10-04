@@ -1,5 +1,6 @@
 package org.mockserver.llm;
 
+import org.mockserver.llm.codec.EmbeddingWire;
 import org.mockserver.model.*;
 
 import java.util.List;
@@ -59,6 +60,15 @@ public interface ProviderCodec {
      */
     default HttpResponse encodeEmbedding(EmbeddingResponse embedding, String input, String model) {
         return encodeEmbedding(embedding, input);
+    }
+
+    /**
+     * Request-aware embedding encode, the one the action handler calls. Codecs override it to
+     * read their provider's own input field(s) and return one vector per input. The default
+     * embeds a top-level {@code input} as one text, for codecs without their own parsing.
+     */
+    default HttpResponse encodeEmbedding(EmbeddingResponse embedding, HttpRequest request, String model) {
+        return encodeEmbedding(embedding, EmbeddingWire.legacyInputText(request), model);
     }
 
     /**

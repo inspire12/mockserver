@@ -55,4 +55,9 @@ public class AzureOpenAiCodec implements ProviderCodec {
     public HttpResponse encodeEmbedding(EmbeddingResponse embedding, String input) {
         return delegate.encodeEmbedding(embedding, input);
     }
+
+    @Override
+    public HttpResponse encodeEmbedding(EmbeddingResponse embedding, HttpRequest request, String model) {
+        return delegate.encodeEmbedding(embedding, request, model);
+    }
 }

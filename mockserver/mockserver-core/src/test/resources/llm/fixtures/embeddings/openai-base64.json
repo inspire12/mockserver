@@ -1,0 +1,18 @@
+200
+{
+  "object" : "list",
+  "data" : [ {
+    "object" : "embedding",
+    "index" : 0,
+    "embedding" : "<base64-float32:256>"
+  }, {
+    "object" : "embedding",
+    "index" : 1,
+    "embedding" : "<base64-float32:256>"
+  } ],
+  "model" : "text-embedding-3-small",
+  "usage" : {
+    "prompt_tokens" : 2,
+    "total_tokens" : 2
+  }
+}

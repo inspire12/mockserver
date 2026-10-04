@@ -117,6 +117,17 @@ Each directory contains:
 - `streaming-text.jsonl` -- normalized streaming encode of a text completion (one event per line)
 - `streaming-tool-call.jsonl` -- normalized streaming encode of a tool-call completion
 
+Embedding shapes have their own directory, `embeddings/`, asserted by
+`LlmEmbeddingGoldenFileTest`: one `<provider>-<case>.json` per wire shape (OpenAI batch
+and base64, Azure, Gemini `embedContent` and `batchEmbedContents`, Ollama `/api/embed` and
+`/api/embeddings`, Bedrock Titan G1 / V2 / V2 binary / Multimodal, Cohere v3 / v4 by type / v4 `inputs`).
+Each sends a fixed request in the provider's real request shape through
+`HttpLlmResponseActionHandler`. The first line is the status code. Vectors become
+`"<vector:N>"`, base64 vectors `"<base64-float32:N>"` and Cohere's `id` `"<id>"`, so the
+goldens pin the envelope, the number and length of vectors, and the token counts (which are
+not zeroed). The same `-Dmockserver.updateLlmGoldens=true` switch regenerates them. The
+hand-authored shape assertions for these responses are in `EmbeddingProviderWireShapeTest`.
+
 ## Regenerating golden files
 
 After intentional codec changes, regenerate goldens:

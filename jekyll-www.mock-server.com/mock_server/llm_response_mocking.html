@@ -740,24 +740,78 @@ data: [DONE]</code></pre>
   }
 }</code></pre>
 
+<p>
+    MockServer reads each provider's own input field and returns <strong>one vector per input</strong>, in the
+    order sent, so a batch of documents gets a batch of vectors. With
+    <span class="inline_code">deterministicFromInput</span>, the same text gets the same vector in every request
+    and on every provider, as long as the seed and dimensions match.
+</p>
+
 <table class="table table-bordered table-striped">
     <thead>
-        <tr><th>Provider</th><th>Response shape</th><th>Default dimensions</th></tr>
+        <tr><th>Provider and endpoint</th><th>Input read from the request</th><th>Response shape</th><th>Default dimensions</th></tr>
     </thead>
     <tbody>
-        <tr><td><span class="inline_code">OPENAI</span> / <span class="inline_code">AZURE_OPENAI</span></td><td><span class="inline_code">{"object":"list","data":[{"embedding":[...]}]}</span></td><td>1536</td></tr>
-        <tr><td><span class="inline_code">GEMINI</span></td><td><span class="inline_code">{"embedding":{"values":[...]}}</span></td><td>768</td></tr>
-        <tr><td><span class="inline_code">OLLAMA</span></td><td><span class="inline_code">{"embeddings":[[...]]}</span> (the <span class="inline_code">/api/embed</span> shape)</td><td>768</td></tr>
-        <tr><td><span class="inline_code">BEDROCK</span> (Titan)</td><td><span class="inline_code">{"embedding":[...],"inputTextTokenCount":N}</span></td><td>1024</td></tr>
-        <tr><td><span class="inline_code">BEDROCK</span> (Cohere)</td><td><span class="inline_code">{"embeddings":[[...]]}</span> (when <span class="inline_code">model</span> starts with <span class="inline_code">cohere</span>)</td><td>1024</td></tr>
+        <tr><td><span class="inline_code">OPENAI</span>, <span class="inline_code">AZURE_OPENAI</span> and the OpenAI-compatible providers (for example <span class="inline_code">MISTRAL</span>)</td><td><span class="inline_code">input</span>: a string, an array of strings, or token arrays</td><td><span class="inline_code">{"object":"list","data":[{"object":"embedding","index":0,"embedding":[...]}, ...],"model":...,"usage":{...}}</span>, one <span class="inline_code">data</span> entry per input. The request's <span class="inline_code">model</span> is echoed. With <span class="inline_code">"encoding_format":"base64"</span>, which the OpenAI SDKs send by default, each embedding is a base64 string</td><td>1536</td></tr>
+        <tr><td><span class="inline_code">GEMINI</span> <span class="inline_code">:embedContent</span></td><td><span class="inline_code">content.parts[].text</span></td><td><span class="inline_code">{"embedding":{"values":[...]},"usageMetadata":{...}}</span></td><td>768</td></tr>
+        <tr><td><span class="inline_code">GEMINI</span> <span class="inline_code">:batchEmbedContents</span></td><td><span class="inline_code">requests[].content.parts[].text</span></td><td><span class="inline_code">{"embeddings":[{"values":[...]}, ...],"usageMetadata":{...}}</span>, one per request</td><td>768</td></tr>
+        <tr><td><span class="inline_code">OLLAMA</span> <span class="inline_code">/api/embed</span></td><td><span class="inline_code">input</span>: a string or an array of strings</td><td><span class="inline_code">{"model":...,"embeddings":[[...], ...],"prompt_eval_count":N,...}</span>, one per input</td><td>768</td></tr>
+        <tr><td><span class="inline_code">OLLAMA</span> <span class="inline_code">/api/embeddings</span> (deprecated)</td><td><span class="inline_code">prompt</span></td><td><span class="inline_code">{"embedding":[...]}</span></td><td>768</td></tr>
+        <tr><td><span class="inline_code">BEDROCK</span> Titan Text Embeddings V2 (<span class="inline_code">amazon.titan-embed-text-v2:0</span>, also the default when no embedding model is named)</td><td><span class="inline_code">inputText</span></td><td><span class="inline_code">{"embedding":[...],"inputTextTokenCount":N,"embeddingsByType":{"float":[...]}}</span>. <span class="inline_code">embeddingTypes</span> can add <span class="inline_code">binary</span></td><td>1024</td></tr>
+        <tr><td><span class="inline_code">BEDROCK</span> Titan Embeddings G1 (<span class="inline_code">amazon.titan-embed-text-v1</span>)</td><td><span class="inline_code">inputText</span></td><td><span class="inline_code">{"embedding":[...],"inputTextTokenCount":N}</span></td><td>1536</td></tr>
+        <tr><td><span class="inline_code">BEDROCK</span> Titan Multimodal Embeddings G1 (<span class="inline_code">amazon.titan-embed-image-v1</span>)</td><td><span class="inline_code">inputText</span></td><td><span class="inline_code">{"embedding":[...],"inputTextTokenCount":N}</span></td><td>1024</td></tr>
+        <tr><td><span class="inline_code">BEDROCK</span> Cohere Embed v3 (<span class="inline_code">cohere.embed-english-v3</span>, <span class="inline_code">cohere.embed-multilingual-v3</span>)</td><td><span class="inline_code">texts</span></td><td><span class="inline_code">{"id":...,"embeddings":[[...], ...],"response_type":"embeddings_floats","texts":[...]}</span>, one per text. With <span class="inline_code">embedding_types</span>, <span class="inline_code">embeddings</span> is an object keyed by type (<span class="inline_code">float</span>, <span class="inline_code">int8</span>, <span class="inline_code">uint8</span>, <span class="inline_code">binary</span>, <span class="inline_code">ubinary</span>) and <span class="inline_code">response_type</span> is <span class="inline_code">embeddings_by_type</span></td><td>1024</td></tr>
+        <tr><td><span class="inline_code">BEDROCK</span> Cohere Embed v4 (<span class="inline_code">cohere.embed-v4:0</span>)</td><td><span class="inline_code">texts</span>, or the text parts of each <span class="inline_code">inputs</span> item</td><td>As Cohere Embed v3</td><td>1536</td></tr>
     </tbody>
 </table>
 
 <p>
-    <span class="inline_code">dimensions</span> overrides the vector length; <span class="inline_code">seed</span> makes the
-    deterministic vector reproducible across runs. <span class="inline_code">ANTHROPIC</span> and
-    <span class="inline_code">OPENAI_RESPONSES</span> have no embeddings endpoint and return an error if used for an
-    embedding mock.
+    For <span class="inline_code">BEDROCK</span>, the model comes from the request path
+    (<span class="inline_code">/model/{modelId}/invoke</span>), then from the expectation's
+    <span class="inline_code">model</span>. Region-prefixed IDs such as <span class="inline_code">us.cohere.embed-v4:0</span>
+    work. If neither names an embedding model, a request with <span class="inline_code">texts</span> or
+    <span class="inline_code">inputs</span> gets the Cohere shape and any other request gets the Titan V2 shape.
+</p>
+
+<p>
+    <span class="inline_code">dimensions</span> on the expectation sets the vector length. If it is not set, the size the
+    request asks for (<span class="inline_code">dimensions</span>, <span class="inline_code">outputDimensionality</span> or
+    <span class="inline_code">output_dimension</span>) is used, and then the default above.
+    <span class="inline_code">seed</span> makes the deterministic vector reproducible across runs.
+</p>
+
+<p>
+    MockServer rejects an embedding request that is over a limit with a <span class="inline_code">400</span> in the
+    provider's own error format. Some of the limits are the provider's own, which the real API enforces too: the Titan
+    and Cohere sizes and embedding types, 96 Cohere texts or inputs, and 2,048 OpenAI inputs. The rest are MockServer's
+    own limits, which keep its responses small: 8,192 dimensions, 2,048 Gemini
+    <span class="inline_code">requests</span> or Ollama inputs, and the total number of vector values. A request is
+    rejected when:
+</p>
+<ul>
+    <li>the request asks for more than 8,192 dimensions, or for a size that is not a positive whole number;</li>
+    <li>the request asks for a size the provider does not offer: Titan Text Embeddings V2
+        <span class="inline_code">dimensions</span> must be 256, 512 or 1024, Titan Multimodal
+        <span class="inline_code">embeddingConfig.outputEmbeddingLength</span> 256, 384 or 1024, and Cohere Embed v4
+        <span class="inline_code">output_dimension</span> 256, 512, 1024 or 1536;</li>
+    <li>the request has more than 2,048 inputs (Gemini <span class="inline_code">requests</span>), or more than 96
+        Cohere <span class="inline_code">texts</span> or <span class="inline_code">inputs</span>;</li>
+    <li>the request asks for a Cohere <span class="inline_code">embedding_types</span> or Titan
+        <span class="inline_code">embeddingTypes</span> value the provider does not have;</li>
+    <li>the response would hold more than 262,144 vector values in total (inputs &times; dimensions, and &times; the
+        number of Cohere embedding types), for example 171 inputs at 1,536 dimensions. An OpenAI-style request with
+        <span class="inline_code">"encoding_format":"base64"</span>, which the OpenAI SDKs send by default, may hold
+        four times as many, 1,048,576 (682 inputs at 1,536 dimensions), because a base64 value is about a quarter of
+        the size.</li>
+</ul>
+<p>
+    These limits keep the largest embedding response at about 5.6 MB, so a small request cannot make MockServer build a
+    very large one. If a test needs a bigger batch, send it in several requests, or set a smaller
+    <span class="inline_code">dimensions</span> on the expectation: 2,048 inputs fit at 128 dimensions.
+</p>
+<p>
+    <span class="inline_code">ANTHROPIC</span> and <span class="inline_code">OPENAI_RESPONSES</span> have no embeddings
+    endpoint and return an error if used for an embedding mock.
 </p>
 
 <a id="rerank" class="anchor" href="#rerank">&nbsp;</a>

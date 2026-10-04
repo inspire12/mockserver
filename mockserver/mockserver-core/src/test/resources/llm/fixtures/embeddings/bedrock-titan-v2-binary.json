@@ -1,0 +1,7 @@
+200
+{
+  "inputTextTokenCount" : 11,
+  "embeddingsByType" : {
+    "binary" : "<vector:1024>"
+  }
+}
