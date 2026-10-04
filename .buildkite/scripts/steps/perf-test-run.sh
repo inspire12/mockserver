@@ -3591,8 +3591,8 @@ abort_if_sut_died
 # residence = maxLogEntries / total_ACHIEVED_rps (LONGER, without bound, as achieved
 # throughput falls). k6 drives ONLY the entry node (control, or cluster node A), so
 # ONLY that node's ring fills with request bodies — exactly like the main SUT, and it
-# gets the SAME PERF_CLUSTERED_MEMORY (2 GB default -> 1.0 GiB heap,
-# maxLogEntries ~= 128,500). The per-arm rate x residence x body figures
+# gets the SAME PERF_CLUSTERED_MEMORY (2 GB default -> 0.9 GiB heap,
+# maxLogEntries ~= 115,500). The per-arm rate x residence x body figures
 # (large_10mb@0.1rps -> ~172 MB, large_1mb@0.5rps -> ~86 MB,
 # large-4KB@200rps -> ~137 MB) hold ONLY at residence ~172 s; they run away as this node
 # contends. So the clustered nodes get the fixed harness maxEventLogSizeInBytes body-byte OOM
@@ -3724,7 +3724,7 @@ JGROUPS_XML
     # (match/forward/template/template_mustache/large/large_1mb/large_10mb) run
     # UNCHANGED — only env differs, the sanctioned parameterisation. start_clu also
     # carries the fixed harness maxEventLogSizeInBytes body-byte OOM guard (below), because
-    # the MB arms run here too, on a 1.0 GiB clustered
+    # the MB arms run here too, on a 0.9 GiB clustered
     # heap. The budget is identical on control and cluster, so it evicts symmetrically
     # and cannot bias the within-run clustered/control ratio item 13 measures.
     # The JGroups discovery string, and the guard that validates WHAT ACTUALLY GOES TO DNS.

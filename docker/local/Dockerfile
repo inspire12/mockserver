@@ -161,10 +161,10 @@ COPY --from=appcds-build /mockserver.jsa /
 # don't run MockServer as root
 USER nonroot
 
-# -XX:MaxRAMPercentage=50.0 caps the JVM heap at half the container memory limit so the in-memory
-# request/expectation rings size off a bounded heap. The other half is not slack: under load ZGC
-# grows to its full heap in memory the kernel cannot reclaim, and native JVM memory and kernel
-# socket buffers do not shrink with the heap, so 60% was OOM-killed at the 512 MiB floor. Only
+# -XX:MaxRAMPercentage=45.0 caps the JVM heap at 45% of the container memory limit so the in-memory
+# request/expectation rings size off a bounded heap. The rest is not slack: under load ZGC grows
+# to its full heap in memory the kernel cannot reclaim, and native JVM memory and kernel socket
+# buffers do not shrink with the heap, so 60% was OOM-killed and 50% peaked above 90% at 512 MiB. Only
 # applies when the user has NOT set an explicit heap; to change the cap set an explicit -Xmx (via JAVA_TOOL_OPTIONS) —
 # that disables MaxRAMPercentage. A different MaxRAMPercentage via JAVA_TOOL_OPTIONS does NOT take
 # effect: it is prepended before these args, so this entrypoint flag is applied last and wins.
@@ -180,7 +180,7 @@ USER nonroot
 # The AppCDS archive is trained under ZGC to match (collector-independent from JDK 22, so it still
 # maps under an override). JDK 26 ZGC is generational — no -XX:+ZGenerational (obsolete post-JDK 23).
 ENV JAVA_TOOL_OPTIONS="-XX:+UseZGC"
-ENTRYPOINT ["/usr/lib/jvm/temurin25-trimmed/bin/java", "-Dfile.encoding=UTF-8", "--enable-native-access=ALL-UNNAMED", "-XX:MaxRAMPercentage=50.0", "-XX:SharedArchiveFile=/mockserver.jsa", "-cp", "/mockserver.jar:/mockserver-deps.jar:/libs/*", "-Dmockserver.propertyFile=/config/mockserver.properties", "org.mockserver.cli.Main"]
+ENTRYPOINT ["/usr/lib/jvm/temurin25-trimmed/bin/java", "-Dfile.encoding=UTF-8", "--enable-native-access=ALL-UNNAMED", "-XX:MaxRAMPercentage=45.0", "-XX:SharedArchiveFile=/mockserver.jsa", "-cp", "/mockserver.jar:/mockserver-deps.jar:/libs/*", "-Dmockserver.propertyFile=/config/mockserver.properties", "org.mockserver.cli.Main"]
 
 ENV SERVER_PORT=1080
 

@@ -1917,6 +1917,13 @@ after start-up. Not recorded by the run, only inferred from the container limit 
 `MaxRAMPercentage`: the resolved max heap (1.0 GiB) and `maxLogEntries` (~128.5k). See
 [Run Provenance](#run-provenance) below for the gaps in what the soak artifact itself records.
 
+**No soak has run at the 45% image heap yet.** The standard image now sets
+`-XX:MaxRAMPercentage=45.0`, so the same `--memory=2g` container resolves a 922 MiB (0.9 GiB) heap
+and a default `maxLogEntries` of 115,456 (about 115.5k), against build 637's 1.0 GiB and ~128.5k.
+The ring fills sooner and holds fewer entries, so soak figures re-baseline from the first run on a
+45% image; build 637 stays a 50% reading. The clustered A/B nodes, also 2 GB containers, move the
+same way.
+
 `stress.js` passes `k6 inspect` in `perf-test-lint.sh` and is executed by no CI step. Published
 documentation that calls it part of how MockServer is tested is wrong: it is tooling for optional
 local use.

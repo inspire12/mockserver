@@ -145,13 +145,13 @@ COPY --from=aot-build /mockserver.aot /
 
 USER nonroot
 
-# -XX:MaxRAMPercentage=50.0 caps the JVM heap at half the container memory limit, as in the sibling
+# -XX:MaxRAMPercentage=45.0 caps the JVM heap at 45% of the container memory limit, as in the sibling
 # images: native JVM memory and kernel socket buffers need the rest (512 MiB is the supported floor).
 # -XX:AOTCache loads the baked cache; if the cache is incompatible (e.g.
 # different CPU arch) the JVM logs a warning and starts normally.
 # GC: kept on the JDK default (G1), unlike the sibling server images' -XX:+UseZGC — see the training
 # stage above. To trade start-up for ZGC's lower tail latency, pass -XX:+UseZGC via JAVA_TOOL_OPTIONS.
-ENTRYPOINT ["/usr/lib/jvm/temurin25-trimmed/bin/java", "-Dfile.encoding=UTF-8", "--enable-native-access=ALL-UNNAMED", "-XX:MaxRAMPercentage=50.0", "-XX:AOTCache=/mockserver.aot", "-cp", "/mockserver.jar:/mockserver-deps.jar:/libs/*", "-Dmockserver.propertyFile=/config/mockserver.properties", "org.mockserver.cli.Main"]
+ENTRYPOINT ["/usr/lib/jvm/temurin25-trimmed/bin/java", "-Dfile.encoding=UTF-8", "--enable-native-access=ALL-UNNAMED", "-XX:MaxRAMPercentage=45.0", "-XX:AOTCache=/mockserver.aot", "-cp", "/mockserver.jar:/mockserver-deps.jar:/libs/*", "-Dmockserver.propertyFile=/config/mockserver.properties", "org.mockserver.cli.Main"]
 
 ENV SERVER_PORT=1080
 

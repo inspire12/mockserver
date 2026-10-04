@@ -20,9 +20,8 @@ app:
   propertiesFileName: "mockserver.properties"
   readOnlyRootFilesystem: false
   # -- Extra JVM options, passed verbatim via the JAVA_TOOL_OPTIONS environment variable.
-  # Empty by default. The Docker image already caps the heap at 50% of the container memory
-  # limit (-XX:MaxRAMPercentage=50.0; 45% in the -graaljs image, whose JavaScript engine needs
-  # more non-heap memory), so the in-memory request/expectation rings size off a bounded heap.
+  # Empty by default. The Docker image already caps the heap at 45% of the container memory
+  # limit (-XX:MaxRAMPercentage=45.0), so the in-memory request/expectation rings size off a bounded heap.
   # The rest is needed outside the heap (metaspace, thread stacks, GC
   # bookkeeping, Netty off-heap buffers, kernel socket buffers); 512Mi is the smallest supported
   # resources.limits.memory below (768Mi for a clustered node with the Infinispan backend — see
@@ -318,8 +317,8 @@ podLabels: {}
 
 # -- Pod resource requests and limits, rendered verbatim into the container spec.
 # Empty by default (no requests/limits — the pod can consume unbounded node memory).
-# Setting a memory limit is strongly recommended: the JVM caps its heap at 50% of the
-# memory limit (-XX:MaxRAMPercentage=50.0 in the image; 45% in -graaljs), and MockServer's in-memory
+# Setting a memory limit is strongly recommended: the JVM caps its heap at 45% of the
+# memory limit (-XX:MaxRAMPercentage=45.0 in the image), and MockServer's in-memory
 # request/expectation rings size off that heap. The rest of the limit is needed outside the
 # heap, so do not go below 512Mi (768Mi for a clustered node with the Infinispan backend). Without a limit the JVM sizes off
 # total node memory and can be OOM-killed under load. Set app.jvmOptions to tune the heap.

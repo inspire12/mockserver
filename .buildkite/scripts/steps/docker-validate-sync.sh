@@ -58,12 +58,11 @@ for df in "${DOCKERFILES[@]}"; do
 
   # Every image that runs org.mockserver.cli.Main must cap the JVM heap so the in-memory
   # request/expectation rings size off a bounded heap, otherwise the container is liable to be
-  # OOM-SIGKILLed under load. The cap is 50%: under load ZGC grows to its full heap in unreclaimable
-  # memory and native JVM + kernel socket memory need the rest, so 60% was OOM-killed at 512 MiB.
-  # GraalJS is 45%: its larger non-heap footprint left too little headroom at 50%.
-  # Assert the cap so it cannot drift in one variant (the docs promise these exact values).
-  expected_pct="50.0"
-  [ "$df" = "docker/graaljs/Dockerfile" ] && expected_pct="45.0"
+  # OOM-SIGKILLed under load. The cap is 45%: under load ZGC grows to its full heap in unreclaimable
+  # memory and native JVM + kernel socket memory need the rest, so 60% was OOM-killed at 512 MiB and
+  # 50% peaked above the memory-floor test's 90% line on amd64 CI agents.
+  # Assert the cap so it cannot drift in one variant (the docs promise this exact value).
+  expected_pct="45.0"
   if grep -q 'org.mockserver.cli.Main' "$filepath"; then
     entrypoint_pcts="$(grep -oE '"-XX:MaxRAMPercentage=[0-9.]+"' "$filepath" || true)"
     if [ "$entrypoint_pcts" != "\"-XX:MaxRAMPercentage=${expected_pct}\"" ]; then

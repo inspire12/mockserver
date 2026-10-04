@@ -152,10 +152,10 @@ COPY --from=intermediate META-INF/native/libnetty_tcnative_linux_*.so /usr/lib/
 # run MockServer as root
 USER root
 
-# -XX:MaxRAMPercentage=50.0 caps the JVM heap at half the container memory limit so the in-memory
-# request/expectation rings size off a bounded heap. The other half is not slack: under load ZGC
-# grows to its full heap in memory the kernel cannot reclaim, and native JVM memory and kernel
-# socket buffers do not shrink with the heap, so 60% was OOM-killed at the 512 MiB floor. Only
+# -XX:MaxRAMPercentage=45.0 caps the JVM heap at 45% of the container memory limit so the in-memory
+# request/expectation rings size off a bounded heap. The rest is not slack: under load ZGC grows
+# to its full heap in memory the kernel cannot reclaim, and native JVM memory and kernel socket
+# buffers do not shrink with the heap, so 60% was OOM-killed and 50% peaked above 90% at 512 MiB. Only
 # applies when the user has NOT set an explicit heap; to change the cap set an explicit -Xmx (via JAVA_TOOL_OPTIONS) —
 # that disables MaxRAMPercentage. A different MaxRAMPercentage via JAVA_TOOL_OPTIONS does NOT take
 # effect: it is prepended before these args, so this entrypoint flag is applied last and wins.
@@ -166,7 +166,7 @@ USER root
 # Switch to G1 with -e JAVA_TOOL_OPTIONS=-XX:+UseG1GC; keep -XX:+UseZGC if you set it for -Xmx etc.
 # JDK 25 ZGC is generational — no -XX:+ZGenerational (obsolete post-JDK 23).
 ENV JAVA_TOOL_OPTIONS="-XX:+UseZGC"
-ENTRYPOINT ["java", "-Dfile.encoding=UTF-8", "--enable-native-access=ALL-UNNAMED", "-XX:MaxRAMPercentage=50.0", "-cp", "/mockserver-netty-jar-with-dependencies.jar:/libs/*", "-Dmockserver.propertyFile=/config/mockserver.properties", "org.mockserver.cli.Main"]
+ENTRYPOINT ["java", "-Dfile.encoding=UTF-8", "--enable-native-access=ALL-UNNAMED", "-XX:MaxRAMPercentage=45.0", "-cp", "/mockserver-netty-jar-with-dependencies.jar:/libs/*", "-Dmockserver.propertyFile=/config/mockserver.properties", "org.mockserver.cli.Main"]
 
 ENV SERVER_PORT=1080
 

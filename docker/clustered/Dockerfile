@@ -159,10 +159,10 @@ COPY libs/ /libs/
 # don't run MockServer as root
 USER nonroot
 
-# -XX:MaxRAMPercentage=50.0 caps the JVM heap at half the container memory limit so the in-memory
-# request/expectation rings size off a bounded heap. The other half is not slack: under load ZGC
-# grows to its full heap in memory the kernel cannot reclaim, and native JVM memory and kernel
-# socket buffers do not shrink with the heap, so 60% was OOM-killed at the 512 MiB floor. With the
+# -XX:MaxRAMPercentage=45.0 caps the JVM heap at 45% of the container memory limit so the in-memory
+# request/expectation rings size off a bounded heap. The rest is not slack: under load ZGC grows
+# to its full heap in memory the kernel cannot reclaim, and native JVM memory and kernel socket
+# buffers do not shrink with the heap, so 60% was OOM-killed and 50% peaked above 90% at 512 MiB. With the
 # Infinispan backend this image needs at least 768 MiB: at 512 MiB it thrashed even at 50%. Only
 # applies when the user has NOT set an explicit heap; to change the cap set an explicit -Xmx (via JAVA_TOOL_OPTIONS) —
 # that disables MaxRAMPercentage. A different MaxRAMPercentage via JAVA_TOOL_OPTIONS does NOT take
@@ -175,7 +175,7 @@ USER nonroot
 # required (valid on JDK 21; obsolete from JDK 23, so absent on the JDK 25/26 images). Switch to G1
 # with -e JAVA_TOOL_OPTIONS=-XX:+UseG1GC; keep both flags if you set JAVA_TOOL_OPTIONS for -Xmx etc.
 ENV JAVA_TOOL_OPTIONS="-XX:+UseZGC -XX:+ZGenerational"
-ENTRYPOINT ["java", "-Dfile.encoding=UTF-8", "--enable-native-access=ALL-UNNAMED", "-XX:MaxRAMPercentage=50.0", "-cp", "/mockserver.jar:/mockserver-deps.jar:/libs/*", "-Dmockserver.propertyFile=/config/mockserver.properties", "org.mockserver.cli.Main"]
+ENTRYPOINT ["java", "-Dfile.encoding=UTF-8", "--enable-native-access=ALL-UNNAMED", "-XX:MaxRAMPercentage=45.0", "-cp", "/mockserver.jar:/mockserver-deps.jar:/libs/*", "-Dmockserver.propertyFile=/config/mockserver.properties", "org.mockserver.cli.Main"]
 
 ENV SERVER_PORT=1080
 

@@ -224,8 +224,8 @@ USER nonroot
 # -XX:MaxRAMPercentage=45.0 caps the JVM heap at 45% of the container memory limit so the in-memory
 # request/expectation rings size off a bounded heap. The rest is not slack: under load ZGC grows to
 # its full heap in memory the kernel cannot reclaim, and native JVM memory (larger here than in the
-# other images, for GraalJS/Truffle) and kernel socket buffers do not shrink with the heap; the 50%
-# the other images use left GraalJS too little headroom at the 512 MiB floor. Only applies when the
+# other images, for GraalJS/Truffle) and kernel socket buffers do not shrink with the heap; 50% left
+# too little headroom at the 512 MiB floor. Only applies when the
 # user has NOT set an explicit heap; to change the cap set an explicit -Xmx (via JAVA_TOOL_OPTIONS) —
 # that disables MaxRAMPercentage. A different MaxRAMPercentage via JAVA_TOOL_OPTIONS does NOT take
 # effect: it is prepended before these args, so this entrypoint flag is applied last and wins.

@@ -93,7 +93,7 @@ The table below shows the computed defaults for different JVM heap configuration
 | 2 GB | 2,076,672 | 250,000 (capped) | 15,000 (capped) | 106,324,992 (101.4 MiB) | 177,209,344 (169.0 MiB) | 303,787,008 (289.7 MiB) | 177,209,344 (169.0 MiB) |
 | 4 GB | 4,173,824 | 250,000 (capped) | 15,000 (capped) | 213,699,584 (203.8 MiB) | 356,165,632 (339.7 MiB) | 610,570,240 (582.3 MiB) | 356,165,632 (339.7 MiB) |
 
-The Docker images size the heap at 50% of the container memory limit (`-XX:MaxRAMPercentage=50.0`, unless `-Xmx` is set), so a 512 MiB, 1 GiB, 2 GiB or 4 GiB container uses the 256 MB, 512 MB, 1 GB or 2 GB row — roughly **30,000 log entries** at the 512 MiB floor (768 MiB for a `-clustered` node with the Infinispan backend). The GraalJS image uses 45%, so its heap is 232 MiB, 462 MiB, 922 MiB or 1,844 MiB at those limits, giving `maxLogEntries` of 27,136, 56,576, 115,456 or 233,472 and an `INFO` `maxEventLogSizeInBytes` of 17.7, 36.8, 75.2 or 152.0 MiB. See [docker.md → Heap Cap](../infrastructure/docker.md#heap-cap).
+The Docker images size the heap at 45% of the container memory limit (`-XX:MaxRAMPercentage=45.0`, unless `-Xmx` is set), so a 512 MiB, 1 GiB, 2 GiB or 4 GiB container gets a 232 MiB, 462 MiB, 922 MiB or 1,844 MiB heap, giving `maxLogEntries` of 27,136, 56,576, 115,456 or 233,472 — roughly **27,000 log entries** at the 512 MiB floor (768 MiB for a `-clustered` node with the Infinispan backend) — and an `INFO` `maxEventLogSizeInBytes` of 17.7, 36.8, 75.2 or 152.0 MiB. See [docker.md → Heap Cap](../infrastructure/docker.md#heap-cap).
 
 #### Log entries per request — budget for the expectation count, not a constant
 
@@ -138,9 +138,8 @@ Network buffers live outside the stores above, in Netty's pooled allocator. All 
 **Whenever MockServer runs as its own process via the CLI (the jar, the Docker images, the forked Maven
 plugin and the launchers), Netty's direct
 memory is capped at a quarter of the maximum heap, at least 64 MiB and never more than the heap.** So the
-heap plus Netty's buffers can reach 1.25× the heap rather than 2×: at a 256 MiB heap (a 512 MiB container
-at the images' 50%) the cap is 64 MiB, at 512 MiB (1 GiB) it is 128 MiB; the `-graaljs` image's 45% heap
-gives 64 MiB and 115 MiB.
+heap plus Netty's buffers can reach 1.25× the heap rather than 2×: at a 232 MiB heap (a 512 MiB container
+at the images' 45%) the cap is 64 MiB, and at 462 MiB (1 GiB) it is 115 MiB.
 
 | Setting | Effect |
 |---------|--------|
@@ -363,9 +362,9 @@ workload that needs more is `-XX:MaxDirectMemorySize` or `-Dio.netty.maxDirectMe
 see [the evidence below](#direct-memory-evidence).
 
 **Pooled arena count.** Netty sizes its default number of direct arenas as `min(2 × cores,
-maxDirectMemory / 24 MiB)`, so a lower limit can mean fewer arenas: 2 at 64 MiB, 5 at 128 MiB, 10 at
-256 MiB. On one or two cores this changes nothing; on a 6-core, 2 GiB container (1 GiB heap, 256 MiB
-cap) it is 10 arenas rather than 12, still more than the 5 worker event loops that allocate most buffers.
+maxDirectMemory / 24 MiB)`, so a lower limit can mean fewer arenas: 2 at 64 MiB, 4 at 115 MiB, 9 at
+230 MiB. On one or two cores this changes nothing; on a 6-core, 2 GiB container (922 MiB heap, 230 MiB
+cap) it is 9 arenas rather than 12, still more than the 5 worker event loops that allocate most buffers.
 
 **Not covered.** Native memory that is not a Netty buffer: TLS state inside BoringSSL (`netty-tcnative`),
 thread stacks, and the JDK's own temporary direct buffers, which stay under the JVM's

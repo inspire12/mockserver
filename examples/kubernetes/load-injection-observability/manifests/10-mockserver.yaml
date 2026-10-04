@@ -62,9 +62,9 @@ spec:
               value: "/config/load-scenario.json"
             - name: MOCKSERVER_LOG_LEVEL
               value: "WARN"
-            # Heap sizing: the image already caps the JVM heap at 50% of the container
-            # memory limit (-XX:MaxRAMPercentage=50.0 in the ENTRYPOINT), so the 1Gi limit
-            # below yields a ~512Mi heap and leaves ~512Mi for off-heap/native overhead.
+            # Heap sizing: the image already caps the JVM heap at 45% of the container
+            # memory limit (-XX:MaxRAMPercentage=45.0 in the ENTRYPOINT), so the 1Gi limit
+            # below yields a ~462Mi heap and leaves the rest for off-heap/native overhead.
             # Do NOT try to change the cap via JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage set
             # there is a silent no-op, because the entrypoint applies its own value last and
             # wins. To pin an absolute heap instead, set an explicit -Xmx via JAVA_TOOL_OPTIONS
