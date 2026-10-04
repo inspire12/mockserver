@@ -1442,7 +1442,7 @@ ${PROVENANCE}${HW_NOTE}${PRECFG_NOTE}${MB_NOTE}${K6_NOTE}${INFO_NOTE}${ELS_NOTE}
 HEADER="Perf regression — \`${COMMIT:0:10}\` on \`${BRANCH}\` (baseline: ${BASE_COUNT} runs, median+MAD; budgets @ \`${BUDGETS_COMMIT:0:10}\`)"
 # Legend folded into every flagged annotation so a reader knows why the build did
 # (or did not) go red, and how a notify-only metric graduates to gating.
-LEGEND="_Gating metrics_ (JMH \`*.time_per_op\` / \`*.alloc_bytes_per_op\`, \`forward.error_rate\`) **fail the build** when flagged. _Notify-only_ metrics are reported just as loudly but do NOT fail the build — they graduate to gating once they have >=10 clean runs of history and a budget derived from them (see docs/plans/performance-programme.md item 1)."
+LEGEND="_Gating metrics_ (JMH \`*.time_per_op\` / \`*.alloc_bytes_per_op\`, \`forward.error_rate\`) **fail the build** when flagged. _Notify-only_ metrics are reported just as loudly but do NOT fail the build — they graduate to gating once they have >=10 clean runs of history and a budget derived from them (see docs/operations/performance-tuning.md -> \"Regression thresholds\")."
 
 # Exit non-zero ONLY when at least one GATING metric is flagged — that non-zero
 # exit is the regression notification (the pipeline goes red). A non-gating flag

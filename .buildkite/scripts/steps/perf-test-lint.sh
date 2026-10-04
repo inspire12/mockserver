@@ -81,7 +81,7 @@ bash "$REPO_ROOT/.buildkite/scripts/test/perf-run-ready-test.sh"
 echo "--- perf-test-run upstream alias checks (containers reached by alias, DNS-label guard, seed evidence)"
 bash "$REPO_ROOT/.buildkite/scripts/test/perf-upstream-alias-test.sh"
 
-echo "--- INFO-arm event-log budget checks (item 40: shipped default on the INFO SUT, info_* baseline key)"
+echo "--- INFO-arm event-log budget checks (shipped default on the INFO SUT, info_* baseline key)"
 bash "$REPO_ROOT/.buildkite/scripts/test/perf-info-budget-test.sh"
 
 echo "--- perf-xl dispatch checks (guard YAML with and without PERF_XL, PERF_RUN_ARM switch)"

@@ -371,7 +371,7 @@ def commafy: (. // 0 | floor | tostring) | gsub("(?<=\\d)(?=(\\d{3})+$)"; ",");
     # Documentary keys the page and reviewers rely on — EMITTED here so an
     # auto-refresh never silently drops what the seed data file carries.
     behaviours_status: (if ($postfix | not)
-      then "withheld: this run predates the regression.js tail fix (performance programme Finding 3, resolved 2026-09-16), so its per-behaviour p95/p99 are a client-side rig artefact, not server latency. Per-behaviour percentiles are published only from a post-fix run."
+      then "withheld: this run predates the regression.js tail fix (its settle-excluded measured window, resolved 2026-09-16; see docs/code/performance-measurement.md -> \"regression.js\"), so its per-behaviour p95/p99 are a client-side rig artefact, not server latency. Per-behaviour percentiles are published only from a post-fix run."
       elif (($beh_present | length) == 0)
       then "not measured this run (no behaviour arm carried a p95)"
       else "published from a post-fix regression.js run" end),
