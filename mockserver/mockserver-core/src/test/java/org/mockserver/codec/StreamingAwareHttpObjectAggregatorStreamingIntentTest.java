@@ -27,24 +27,24 @@ public class StreamingAwareHttpObjectAggregatorStreamingIntentTest {
 
     private static final byte[] STREAMING = "{\"model\":\"x\",\"stream\": true}".getBytes(StandardCharsets.UTF_8);
     private static final byte[] NOT_STREAMING = "{\"model\":\"x\",\"stream\": false}".getBytes(StandardCharsets.UTF_8);
+    private static final int MAX_DECODED = 10 * 1024 * 1024;
 
     @Test
     public void shouldFindStreamTrueInAGzipBody() throws IOException {
-        assertThat(expectsStreaming("gzip", gzip(STREAMING), 0), is(true));
-        assertThat(expectsStreaming("gzip", gzip(NOT_STREAMING), 0), is(false));
+        assertThat(expectsStreaming("gzip", gzip(STREAMING), MAX_DECODED), is(true));
+        assertThat(expectsStreaming("gzip", gzip(NOT_STREAMING), MAX_DECODED), is(false));
     }
 
     @Test
     public void shouldFindStreamTrueInARawSnappyBlockBody() {
-        assertThat(expectsStreaming("snappy", SnappyBlock.compress(STREAMING), 0), is(true));
+        assertThat(expectsStreaming("snappy", SnappyBlock.compress(STREAMING), MAX_DECODED), is(true));
     }
 
     @Test
     public void shouldFindStreamTrueAfterALongMessageHistory() throws IOException {
         byte[] body = withHistory(500_000);
 
-        assertThat(expectsStreaming("gzip", gzip(body), 0), is(true));
-        assertThat(expectsStreaming("gzip", gzip(body), 10 * 1024 * 1024), is(true));
+        assertThat(expectsStreaming("gzip", gzip(body), MAX_DECODED), is(true));
     }
 
     @Test
@@ -55,6 +55,15 @@ public class StreamingAwareHttpObjectAggregatorStreamingIntentTest {
     }
 
     @Test
+    public void shouldNotTreatALimitOfZeroOrLessAsNoLimit() throws IOException {
+        byte[] body = withHistory(500_000);
+
+        assertThat(expectsStreaming("gzip", gzip(body), 0), is(false));
+        assertThat(expectsStreaming("gzip", gzip(body), -1), is(false));
+        assertThat(expectsStreaming("snappy", SnappyBlock.compress(STREAMING), 0), is(false));
+    }
+
+    @Test
     public void shouldFindAMatchSplitBetweenTwoPieces() {
         // a coding that is not decompressed passes through in 1 KiB slices, so the match straddles a slice boundary
         byte[] body = new byte[2048];
@@ -62,12 +71,12 @@ public class StreamingAwareHttpObjectAggregatorStreamingIntentTest {
         byte[] match = "\"stream\": true".getBytes(StandardCharsets.UTF_8);
         System.arraycopy(match, 0, body, 1024 - 5, match.length);
 
-        assertThat(expectsStreaming("compress", body, 0), is(true));
+        assertThat(expectsStreaming("compress", body, MAX_DECODED), is(true));
     }
 
     @Test
     public void shouldNotSignalStreamingForACorruptBody() {
-        assertThat(expectsStreaming("gzip", "not gzip at all, \"stream\": true".getBytes(StandardCharsets.UTF_8), 0), is(false));
+        assertThat(expectsStreaming("gzip", "not gzip at all, \"stream\": true".getBytes(StandardCharsets.UTF_8), MAX_DECODED), is(false));
     }
 
     @Test
@@ -75,7 +84,7 @@ public class StreamingAwareHttpObjectAggregatorStreamingIntentTest {
         byte[] wire = gzip(STREAMING);
         FullHttpRequest request = request("gzip", wire);
         try {
-            assertThat(requestExpectsStreamingResponse(request, 0), is(true));
+            assertThat(requestExpectsStreamingResponse(request, MAX_DECODED), is(true));
 
             assertThat(request.content().refCnt(), is(1));
             assertThat(request.content().readerIndex(), is(0));

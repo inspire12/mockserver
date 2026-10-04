@@ -171,7 +171,7 @@ public class StreamingAwareHttpObjectAggregator extends CoalescingHttpObjectAggr
      * rather than a MockServer {@code HttpRequest}. Reading the body via {@link ByteBuf#toString(java.nio.charset.Charset)}
      * is non-destructive (it does not advance the reader index), so the relayed request body is unaffected.
      * A body with a {@code Content-Encoding} is scanned as it decompresses, in slices, without changing or keeping the
-     * request's bytes, and only up to {@code maxDecodedSize} decoded bytes (zero or less for no limit): the relay
+     * request's bytes, and only up to {@code maxDecodedSize} decoded bytes: the relay
      * forwards the body still compressed, so MockServer decodes it again when it receives it.
      *
      * @param request        the netty request head (and, for body inspection, the {@link FullHttpRequest})
@@ -207,7 +207,7 @@ public class StreamingAwareHttpObjectAggregator extends CoalescingHttpObjectAggr
 
     // A coding the decompressor does not decode passes through unchanged, and is scanned as it is, as before.
     private static boolean decodedBodyRequestsStreaming(List<String> contentEncodings, ByteBuf content, int maxDecodedSize) {
-        StreamTrueScanner scanner = new StreamTrueScanner(maxDecodedSize > 0 ? maxDecodedSize : Long.MAX_VALUE);
+        StreamTrueScanner scanner = new StreamTrueScanner(maxDecodedSize);
         EmbeddedChannel channel = new EmbeddedChannel(new MockServerHttpContentDecompressor(maxDecodedSize), scanner);
         NettyAllocator.pin(channel);
         try {

@@ -396,7 +396,8 @@ public final class Http3RequestBridge {
      * Keeps {@code composite} under {@code componentLimit} components when {@link #accumulateBody} alone does not,
      * which takes pieces alternating between small and 16 KiB or more. {@link CompositeByteBuf}'s own consolidation
      * copies the whole body each time; this copies only the components after the leading {@code merged} ones into one.
-     * The whole-body copy once half the limit is merged blocks is reachable only with no {@code maxRequestBodySize}.
+     * The whole-body copy once half the limit is merged blocks needs a component limit far smaller than the body
+     * bound it is derived from, which {@code maxRequestBodySize} cannot produce.
      *
      * @return how many leading components are now merged blocks, to pass back on the next call
      */

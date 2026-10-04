@@ -404,11 +404,13 @@ more than the same limit of decoded bytes not yet written to the client: past it
 | MockServer's own response on the CONNECT relay's loopback, HTTP/1.1 / HTTP/2 (`RelayConnectHandler`) | `BoundedZstdHttpContentDecompressor` / `BoundedZstdDecompressorFrameListener` | `maxRequestBodySize` |
 | Streamed response (`text/event-stream`, or a client that asked to stream) | the forward client's or the relay's, as above | bytes not yet written to the client: `maxResponseBodySize` (forward) or `maxRequestBodySize` (relay), then the stream is aborted |
 
-Both limits are read as at least 1 byte (`Configuration` and `ConfigurationProperties` clamp them). An
-aggregator refuses every body at a limit of 0 and cannot be built with a negative one, while the bounds
-on bodies that are not aggregated (`StreamingBody`, `DownstreamProxyRelayHandler`, the HTTP/3 request cap
-and its decompressor, `SnappyBlockOrFrameDecoder`, the relay's streaming scan) take zero or less to mean
-"no limit", so without the clamp `0` refused an aggregated body and left those unbounded.
+Both limits are read as at least 1 byte (`Configuration` and `ConfigurationProperties` clamp them), so
+every consumer sees the same positive limit. An aggregator refuses every body at a limit of 0 and cannot be
+built with a negative one; the bounds on bodies that are not aggregated (`DownstreamProxyRelayHandler`'s
+bounded form, the HTTP/3 request cap and its decompressor, `SnappyBlockOrFrameDecoder`) also refuse a
+non-empty body at 0, and the relay's streaming scan reads no more than the first decoded piece, so a caller
+that passes a raw value instead of the accessor cannot leave one unbounded. Only `StreamingBody` reads zero or less as "no bound", for bodies built
+without one.
 
 Each decoder passes its output on in pieces as it produces it, and the aggregator after it refuses the
 body once the decompressed size passes the limit: a 256 MiB zstd bomb (8 KiB on the wire) gets `413` over

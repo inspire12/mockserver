@@ -154,7 +154,7 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
 
             if (bidiHandler != null) {
                 // Enforce the cap on the bidi streaming path too.
-                if (maxBodySize > 0 && accumulatedBodySize + frameSize > maxBodySize) {
+                if (accumulatedBodySize + frameSize > maxBodySize) {
                     bodyExceeded = true;
                     if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
                         mockServerLogger.logEvent(
@@ -179,7 +179,7 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
             } else if (bodyAccumulator != null) {
                 // Enforce the maxRequestBodySize cap, mirroring the HTTP/1.1/HTTP/2
                 // path which uses HttpObjectAggregator.maxContentLength.
-                if (maxBodySize > 0 && accumulatedBodySize + frameSize > maxBodySize) {
+                if (accumulatedBodySize + frameSize > maxBodySize) {
                     bodyExceeded = true;
                     if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
                         mockServerLogger.logEvent(

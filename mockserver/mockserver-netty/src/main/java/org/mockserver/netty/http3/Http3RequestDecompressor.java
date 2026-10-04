@@ -52,7 +52,7 @@ final class Http3RequestDecompressor {
      * no {@code Content-Encoding}, or one {@link MockServerHttpContentDecompressor} does not decode (such as {@code identity},
      * a list of codings, or {@code br} without Brotli on the classpath).
      *
-     * @param maxBodySize the largest decompressed body accepted; zero or less for no limit
+     * @param maxBodySize the largest decompressed body accepted, normally {@code maxRequestBodySize}
      */
     static Http3RequestDecompressor forHeaders(List<Map.Entry<String, String>> headers, ByteBufAllocator alloc, int maxBodySize, int componentLimit) {
         DefaultHttpRequest nettyRequest = null;
@@ -167,7 +167,7 @@ final class Http3RequestDecompressor {
                 } else if (msg instanceof HttpContent) {
                     ByteBuf content = ((HttpContent) msg).content();
                     size += content.readableBytes();
-                    if (maxBodySize > 0 && size > maxBodySize) {
+                    if (size > maxBodySize) {
                         exceeded = true;
                         releaseBody();
                     } else if (body != null) {

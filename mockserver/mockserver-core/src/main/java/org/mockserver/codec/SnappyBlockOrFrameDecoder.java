@@ -27,10 +27,11 @@ public class SnappyBlockOrFrameDecoder extends ByteToMessageDecoder {
     private boolean failed;
 
     /**
-     * @param maxDecodedSize the largest decoded block accepted; zero or less for no limit beyond Snappy's own
+     * @param maxDecodedSize the largest decoded block accepted, normally {@code maxRequestBodySize}; zero accepts only
+     *                       an empty block, as an aggregator with a limit of zero accepts only an empty body
      */
     public SnappyBlockOrFrameDecoder(int maxDecodedSize) {
-        this.maxDecodedSize = maxDecodedSize > 0 ? maxDecodedSize : Integer.MAX_VALUE;
+        this.maxDecodedSize = maxDecodedSize;
     }
 
     /**

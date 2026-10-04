@@ -59,8 +59,7 @@ import static org.hamcrest.Matchers.is;
  *
  * <pre>configuration != null ? configuration.x() : ConfigurationProperties.x()</pre>
  *
- * <p>...unless that {@code Class#method} appears in {@link #ALLOWED_STATIC_ONLY_CALL_SITES} with a
- * mandatory reason string.
+ * <p>...unless that site appears in {@link #ALLOWED_STATIC_ONLY_CALL_SITES} with a mandatory reason string.
  *
  * <h2>Why per-call-site, and why descriptor-qualified</h2>
  * <p>Granularity is load-bearing in two directions:
@@ -73,8 +72,11 @@ import static org.hamcrest.Matchers.is;
  *       name + descriptor found two real violations that a name-only key hid
  *       ({@code MockServerLogger#writeToSystemOut} and {@code WasmRuntime#<init>}).</li>
  * </ul>
- * Detection is therefore descriptor-qualified; the allowlist is keyed by {@code Class#method}
- * (covering all overloads) so it stays readable and does not churn on signature changes.
+ * Detection is therefore descriptor-qualified. The allowlist is looked up by
+ * {@code Class#method(descriptor)return}, then by {@code Class#method}, which stays readable and does not churn on
+ * signature changes; a {@code Class#method} entry fails once it covers more than one overload that reads only the
+ * static store, so a new overload cannot inherit an entry's reason unreviewed while the licensed overload still
+ * reads only the static store.
  *
  * <h2>Where this guard runs, and why</h2>
  * <p>The guard scans compiled {@code .class} output in the {@code target/classes} of every module directory
@@ -179,7 +181,9 @@ public class ConfigurationCallSiteGuardTest {
     /**
      * Call sites permitted to read the static store WITHOUT an instance fallback, each with a
      * mandatory reason. Add an entry ONLY when no {@link Configuration} instance can exist at that
-     * point (bootstrap, static initialisation, CLI argument parsing before a server is built).
+     * point (bootstrap, static initialisation, CLI argument parsing before a server is built). Keyed by
+     * {@code Class#method}, or by {@code Class#method(descriptor)return} for each overload when more than one
+     * overload reads only the static store.
      *
      * <p>If a site merely does not HAVE a Configuration to hand but could be given one, that is an
      * instance-unreachable bug and belongs in a fix, not here.
@@ -203,9 +207,14 @@ public class ConfigurationCallSiteGuardTest {
         ALLOWED_STATIC_ONLY_CALL_SITES.put("org.mockserver.logging.MockServerLogger#writeToSystemOut",
             "legacy 2-arg overload retained for source compatibility; superseded by "
                 + "writeToSystemOut(Logger, LogEntry, Configuration), which logEvent calls whenever a Configuration is held");
-        ALLOWED_STATIC_ONLY_CALL_SITES.put("org.mockserver.wasm.WasmRuntime#<init>",
+        ALLOWED_STATIC_ONLY_CALL_SITES.put("org.mockserver.wasm.WasmRuntime#<init>([B)V",
             "legacy single-arg constructor retained for source compatibility; superseded by "
                 + "WasmRuntime(byte[], Configuration), which prefers the instance value");
+        ALLOWED_STATIC_ONLY_CALL_SITES.put("org.mockserver.wasm.WasmRuntime#<init>([BI)V",
+            "legacy constructor taking an explicit memory-page limit, retained for source compatibility; it reads "
+                + "the execution budget from the static store. No main code outside WasmRuntime's own single-argument "
+                + "constructor calls it: the server builds every "
+                + "runtime with WasmRuntime(byte[], Configuration), which prefers the instance value");
         ALLOWED_STATIC_ONLY_CALL_SITES.put("org.mockserver.closurecallback.websocketregistry.LocalCallbackRegistry#<clinit>",
             "static class-initializer default for a wholly static registry; the live instance value is pushed in "
                 + "by the HttpState constructor via setMaxWebSocketExpectations(configuration.maxWebSocketExpectations())");
@@ -396,12 +405,9 @@ public class ConfigurationCallSiteGuardTest {
         assertThat("guard must find configuration call sites — a scan that indexes nothing would pass vacuously",
             index.staticReads.size(), greaterThan(10));
 
-        List<String> violations = new ArrayList<>();
-        Set<String> observedKnownDefects = new TreeSet<>();
-        Set<String> observedAllowedSites = new TreeSet<>();
+        Map<String, List<String>> staticOnlySites = new TreeMap<>();
         for (Map.Entry<String, Set<String>> entry : index.staticReads.entrySet()) {
             String descriptorQualifiedMethod = entry.getKey();
-            String allowlistKey = descriptorQualifiedMethod.substring(0, descriptorQualifiedMethod.indexOf('('));
             Set<String> instanceReadsInSameMethod =
                 index.instanceReads.getOrDefault(descriptorQualifiedMethod, java.util.Collections.emptySet());
             List<String> unreachable = entry.getValue().stream()
@@ -409,35 +415,30 @@ public class ConfigurationCallSiteGuardTest {
                 .filter(name -> !instanceReadsInSameMethod.contains(name))
                 .sorted()
                 .collect(Collectors.toList());
-            if (unreachable.isEmpty()) {
-                continue;
+            if (!unreachable.isEmpty()) {
+                staticOnlySites.put(descriptorQualifiedMethod, unreachable);
             }
-            if (ALLOWED_STATIC_ONLY_CALL_SITES.containsKey(allowlistKey)) {
-                observedAllowedSites.add(allowlistKey);
-                continue;
-            }
-            if (KNOWN_INSTANCE_UNREACHABLE_DEFECTS.containsKey(allowlistKey)) {
-                observedKnownDefects.add(allowlistKey);
-                continue;
-            }
-            violations.add(descriptorQualifiedMethod + " reads only the static store for " + unreachable);
         }
+        StaticOnlyVerdict verdict = judgeStaticOnlySites(staticOnlySites, ALLOWED_STATIC_ONLY_CALL_SITES, KNOWN_INSTANCE_UNREACHABLE_DEFECTS);
+        List<String> violations = verdict.violations;
 
         // ratchet: a known defect that no longer violates has been FIXED — delete its entry so the fix
         // is locked in and can never silently regress
-        Set<String> staleKnownDefects = new TreeSet<>(KNOWN_INSTANCE_UNREACHABLE_DEFECTS.keySet());
-        staleKnownDefects.removeAll(observedKnownDefects);
         assertThat("these call sites are recorded in KNOWN_INSTANCE_UNREACHABLE_DEFECTS but no longer read the "
                 + "static store without an instance fallback — they appear to have been FIXED. Delete their "
-                + "entries so the guard starts enforcing them: " + staleKnownDefects,
-            staleKnownDefects, is(empty()));
+                + "entries so the guard starts enforcing them: " + verdict.staleKnownDefects,
+            verdict.staleKnownDefects, is(empty()));
 
-        Set<String> staleAllowedSites = new TreeSet<>(ALLOWED_STATIC_ONLY_CALL_SITES.keySet());
-        staleAllowedSites.removeAll(observedAllowedSites);
         assertThat("these ALLOWED_STATIC_ONLY_CALL_SITES entries name a method that no longer exists or no longer "
                 + "reads the static store without an instance fallback, so each is a standing licence for whatever "
-                + "next takes that name. Delete them, or re-key them to the new site: " + staleAllowedSites,
-            staleAllowedSites, is(empty()));
+                + "next takes that name. Delete them, or re-key them to the new site: " + verdict.staleAllowed,
+            verdict.staleAllowed, is(empty()));
+
+        assertThat("these ALLOWED_STATIC_ONLY_CALL_SITES entries are keyed by Class#method but cover more than one "
+                + "overload that reads only the static store, so a new overload would inherit the reason unreviewed. "
+                + "Key each overload by Class#method(descriptor)return, as reported here:\n  "
+                + String.join("\n  ", verdict.ambiguous) + "\n",
+            verdict.ambiguous, is(empty()));
 
         assertThat("Configuration values read from the static ConfigurationProperties store with no "
                 + "instance fallback — these are UNREACHABLE from PUT /mockserver/configuration even though "
@@ -446,6 +447,47 @@ public class ConfigurationCallSiteGuardTest {
                 + "ALLOWED_STATIC_ONLY_CALL_SITES, with a reason, if no Configuration instance can exist "
                 + "at that point:\n  " + String.join("\n  ", violations) + "\n",
             violations, is(empty()));
+    }
+
+    static final class StaticOnlyVerdict {
+        final List<String> violations = new ArrayList<>();
+        final Set<String> staleAllowed = new TreeSet<>();
+        final Set<String> staleKnownDefects = new TreeSet<>();
+        final List<String> ambiguous = new ArrayList<>();
+    }
+
+    /**
+     * Judges the sites that read the static store with no instance fallback ({@code Class#method(descriptor)return}
+     * to the properties so read). An allow-list entry is looked up by that key, then by {@code Class#method}; a
+     * {@code Class#method} entry that covers more than one such overload is ambiguous, and an entry that covers
+     * none is stale. Known defects are keyed by {@code Class#method}.
+     */
+    static StaticOnlyVerdict judgeStaticOnlySites(Map<String, List<String>> staticOnlySites, Map<String, String> allowList, Map<String, String> knownDefects) {
+        StaticOnlyVerdict verdict = new StaticOnlyVerdict();
+        Map<String, Set<String>> sitesByKey = new TreeMap<>();
+        Set<String> observedKnownDefects = new HashSet<>();
+        for (Map.Entry<String, List<String>> site : staticOnlySites.entrySet()) {
+            String method = site.getKey();
+            String classAndName = method.substring(0, method.indexOf('('));
+            String allowKey = allowList.containsKey(method) ? method : allowList.containsKey(classAndName) ? classAndName : null;
+            if (allowKey != null) {
+                sitesByKey.computeIfAbsent(allowKey, k -> new TreeSet<>()).add(method);
+            } else if (knownDefects.containsKey(classAndName)) {
+                observedKnownDefects.add(classAndName);
+            } else {
+                verdict.violations.add(method + " reads only the static store for " + site.getValue());
+            }
+        }
+        sitesByKey.forEach((key, sites) -> {
+            if (!key.contains("(") && sites.size() > 1) {
+                verdict.ambiguous.add(key + " covers " + sites);
+            }
+        });
+        verdict.staleAllowed.addAll(allowList.keySet());
+        verdict.staleAllowed.removeAll(sitesByKey.keySet());
+        verdict.staleKnownDefects.addAll(knownDefects.keySet());
+        verdict.staleKnownDefects.removeAll(observedKnownDefects);
+        return verdict;
     }
 
     /**
@@ -607,6 +649,40 @@ public class ConfigurationCallSiteGuardTest {
         expected.put(OverridingConfigurationFixture.class.getName(), java.util.Collections.singleton("tlsMutualAuthenticationRequired()Ljava/lang/Boolean;"));
         expected.put(HidingStoreFixture.class.getName(), java.util.Collections.singleton("controlPlaneOidcIssuer()Ljava/lang/String;"));
         assertThat(redeclaring.redeclared, is(expected));
+    }
+
+    @Test
+    public void shouldLookUpStaticOnlySitesByDescriptorThenMethodAndReportStaleAndAmbiguousEntries() {
+        Map<String, List<String>> sites = new TreeMap<>();
+        sites.put("a.Site#read()V", java.util.Collections.singletonList("x"));
+        sites.put("a.Overloaded#read()V", java.util.Collections.singletonList("x"));
+        sites.put("a.Overloaded#read(I)V", java.util.Collections.singletonList("x"));
+        sites.put("a.Keyed#<init>()V", java.util.Collections.singletonList("x"));
+        sites.put("a.Keyed#<init>(I)V", java.util.Collections.singletonList("x"));
+        sites.put("a.Defect#run()V", java.util.Collections.singletonList("x"));
+
+        Map<String, String> allowList = new TreeMap<>();
+        allowList.put("a.Site#read", "reason");
+        allowList.put("a.Overloaded#read", "reason");
+        allowList.put("a.Keyed#<init>()V", "reason");
+        allowList.put("a.Renamed#read", "reason");
+        allowList.put("a.Site#read(I)V", "reason");
+        Map<String, String> knownDefects = new TreeMap<>();
+        knownDefects.put("a.Defect#run", "defect");
+        knownDefects.put("a.Fixed#run", "defect");
+
+        StaticOnlyVerdict verdict = judgeStaticOnlySites(sites, allowList, knownDefects);
+
+        assertThat(verdict.violations, is(java.util.Collections.singletonList("a.Keyed#<init>(I)V reads only the static store for [x]")));
+        assertThat(verdict.ambiguous, is(java.util.Collections.singletonList("a.Overloaded#read covers [a.Overloaded#read()V, a.Overloaded#read(I)V]")));
+        assertThat(verdict.staleAllowed, is(new TreeSet<>(java.util.Arrays.asList("a.Renamed#read", "a.Site#read(I)V"))));
+        assertThat(verdict.staleKnownDefects, is(new TreeSet<>(java.util.Collections.singleton("a.Fixed#run"))));
+
+        allowList.put("a.Overloaded#read()V", "reason");
+        allowList.put("a.Overloaded#read(I)V", "reason");
+        StaticOnlyVerdict rekeyed = judgeStaticOnlySites(sites, allowList, knownDefects);
+        assertThat(rekeyed.ambiguous, is(empty()));
+        assertThat(rekeyed.staleAllowed, is(new TreeSet<>(java.util.Arrays.asList("a.Overloaded#read", "a.Renamed#read", "a.Site#read(I)V"))));
     }
 
     @Test

@@ -224,6 +224,34 @@ public class Http3MockServerHandlerTest {
     }
 
     @Test
+    public void shouldTreatAConfiguredRequestBodyLimitOfZeroOrLessAsOneByte() throws Exception {
+        for (int configured : new int[]{0, -1}) {
+            Configuration config = configuration().maxRequestBodySize(configured);
+            Http3MockServerHandler handler = new Http3MockServerHandler(
+                config, LOGGER, mock(HttpState.class), mock(HttpActionHandler.class), new Metrics(config)
+            );
+            ChannelHandlerContext ctx = mockChannelHandlerContextWithWrite();
+            DefaultHttp3HeadersFrame headersFrame = new DefaultHttp3HeadersFrame();
+            headersFrame.headers().method("POST");
+            headersFrame.headers().path("/upload");
+            headersFrame.headers().scheme("https");
+            handler.channelRead(ctx, headersFrame);
+            java.lang.reflect.Field exceededField = Http3MockServerHandler.class.getDeclaredField("bodyExceeded");
+            exceededField.setAccessible(true);
+
+            handler.channelRead(ctx, new DefaultHttp3DataFrame(Unpooled.wrappedBuffer(new byte[1])));
+            assertThat("limit " + configured + ": one byte is accepted", (Boolean) exceededField.get(handler), is(false));
+
+            handler.channelRead(ctx, new DefaultHttp3DataFrame(Unpooled.wrappedBuffer(new byte[1])));
+            assertThat("limit " + configured + ": a second byte is refused", (Boolean) exceededField.get(handler), is(true));
+            ArgumentCaptor<Object> captor = ArgumentCaptor.forClass(Object.class);
+            verify(ctx).write(captor.capture());
+            assertThat(((Http3HeadersFrame) captor.getValue()).headers().status().toString(), is("413"));
+            handler.handlerRemoved(ctx);
+        }
+    }
+
+    @Test
     public void shouldNotAccumulateAfterBodyExceeded() throws Exception {
         // given: a handler that has already rejected a body as too large
         Configuration config = configuration().maxRequestBodySize(50);

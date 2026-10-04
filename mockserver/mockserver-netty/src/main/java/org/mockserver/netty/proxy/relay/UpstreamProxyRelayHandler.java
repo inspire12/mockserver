@@ -44,8 +44,7 @@ public class UpstreamProxyRelayHandler extends SimpleChannelInboundHandler<FullH
     private final int maxRequestBodySize;
 
     /**
-     * @param maxRequestBodySize the most decoded bytes of a compressed request body scanned for a streaming request;
-     *                           zero or less for no limit
+     * @param maxRequestBodySize the most decoded bytes of a compressed request body scanned for a streaming request
      */
     public UpstreamProxyRelayHandler(MockServerLogger mockServerLogger, Channel upstreamChannel, Channel downstreamChannel, String host, int port, int maxRequestBodySize) {
         super(false);

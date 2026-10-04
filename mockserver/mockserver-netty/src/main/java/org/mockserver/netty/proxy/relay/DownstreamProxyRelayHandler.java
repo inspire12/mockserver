@@ -32,6 +32,7 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
 
     private final MockServerLogger mockServerLogger;
     private final Channel upstreamChannel;
+    private final boolean bounded;
     private final long maxUnwrittenStreamedBytes;
     private final long pauseReadsAboveBytes;
     private final AtomicLong unwrittenStreamedBytes = new AtomicLong();
@@ -45,21 +46,30 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
      */
     static final long PAUSE_READS_ABOVE_BYTES = 256 * 1024;
 
+    /**
+     * Relays with no bound on the streamed bytes not yet written to {@code upstreamChannel}.
+     */
     public DownstreamProxyRelayHandler(MockServerLogger mockServerLogger, Channel upstreamChannel) {
-        this(mockServerLogger, upstreamChannel, 0);
+        this(mockServerLogger, upstreamChannel, false, 0);
     }
 
     /**
      * @param maxUnwrittenStreamedBytes the most bytes of streamed (unaggregated) content relayed but not yet written to
-     *                                  {@code upstreamChannel}, past which both channels are closed; zero or less for no
-     *                                  bound. One read of a compressed response can decode to far more than any heap.
+     *                                  {@code upstreamChannel}, past which both channels are closed, normally
+     *                                  {@code maxRequestBodySize}; at zero or less the first streamed byte closes them.
+     *                                  One read of a compressed response can decode to far more than any heap.
      */
     public DownstreamProxyRelayHandler(MockServerLogger mockServerLogger, Channel upstreamChannel, long maxUnwrittenStreamedBytes) {
+        this(mockServerLogger, upstreamChannel, true, Math.max(0, maxUnwrittenStreamedBytes));
+    }
+
+    private DownstreamProxyRelayHandler(MockServerLogger mockServerLogger, Channel upstreamChannel, boolean bounded, long maxUnwrittenStreamedBytes) {
         super(false);
         this.upstreamChannel = upstreamChannel;
         this.mockServerLogger = mockServerLogger;
+        this.bounded = bounded;
         this.maxUnwrittenStreamedBytes = maxUnwrittenStreamedBytes;
-        this.pauseReadsAboveBytes = maxUnwrittenStreamedBytes > 0 ? Math.min(PAUSE_READS_ABOVE_BYTES, maxUnwrittenStreamedBytes / 2) : 0;
+        this.pauseReadsAboveBytes = Math.min(PAUSE_READS_ABOVE_BYTES, maxUnwrittenStreamedBytes / 2);
     }
 
     @Override
@@ -77,7 +87,7 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
         }
         // an aggregated message is already bounded by its aggregator
         final int streamedBytes = msg instanceof HttpContent && !(msg instanceof FullHttpMessage) ? ((HttpContent) msg).content().readableBytes() : 0;
-        final long unwritten = streamedBytes > 0 && maxUnwrittenStreamedBytes > 0 ? unwrittenStreamedBytes.addAndGet(streamedBytes) : 0;
+        final long unwritten = streamedBytes > 0 && bounded ? unwrittenStreamedBytes.addAndGet(streamedBytes) : 0;
         if (unwritten > maxUnwrittenStreamedBytes) {
             ReferenceCountUtil.release(msg);
             if (mockServerLogger.isEnabledForInstance(Level.WARN)) {

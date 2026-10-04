@@ -106,7 +106,7 @@ public class Http3BodyComponentLimitTest {
 
     @Test
     public void shouldStayUnderTheLimitOnceHalfOfItIsMergedBlocks() {
-        // only reachable at a real limit with no maxRequestBodySize, so shown with a limit of 8
+        // a limit derived from maxRequestBodySize never reaches this, so shown with a limit of 8
         CompositeByteBuf composite = new CompositeByteBuf(new CountingAllocator(), false, Integer.MAX_VALUE);
         try {
             byte[] body = accumulateWithLimit(composite, 8, 100 * Http3RequestBridge.BLOCK_BYTES, Http3RequestBridge.BLOCK_BYTES);

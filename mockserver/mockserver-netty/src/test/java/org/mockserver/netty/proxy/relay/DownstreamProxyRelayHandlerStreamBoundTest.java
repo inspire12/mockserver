@@ -7,6 +7,7 @@ import io.netty.channel.ChannelPromise;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.DefaultFullHttpResponse;
 import io.netty.handler.codec.http.DefaultHttpContent;
+import io.netty.handler.codec.http.DefaultHttpResponse;
 import io.netty.handler.codec.http.HttpContent;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpVersion;
@@ -121,6 +122,68 @@ public class DownstreamProxyRelayHandlerStreamBoundTest {
             assertThat(loopback.isOpen(), is(false));
             releaseEverything();
         }
+    }
+
+    @Test
+    public void shouldTreatAConfiguredRequestBodyLimitOfZeroOrLessAsOneByte() {
+        for (int configured : new int[]{0, -1}) {
+            proxyClient = new EmbeddedChannel(new ChannelOutboundHandlerAdapter() {
+                @Override
+                public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
+                    pendingMessages.add(msg);
+                }
+            });
+            loopback = new EmbeddedChannel(new DownstreamProxyRelayHandler(new MockServerLogger(), proxyClient, configuration().maxRequestBodySize(configured).maxRequestBodySize()));
+
+            loopback.writeInbound(piece(1));
+            assertThat("limit " + configured, proxyClient.isOpen(), is(true));
+            loopback.writeInbound(piece(1));
+            assertThat("limit " + configured, proxyClient.isOpen(), is(false));
+            releaseEverything();
+            pendingMessages.clear();
+        }
+    }
+
+    @Test
+    public void shouldCloseOnTheFirstStreamedByteAtABoundOfZeroOrLessButPassAHeadAndAnAggregatedResponse() {
+        for (long bound : new long[]{0, -1}) {
+            proxyClient = new EmbeddedChannel();
+            loopback = new EmbeddedChannel(new DownstreamProxyRelayHandler(new MockServerLogger(), proxyClient, bound));
+
+            loopback.writeInbound(new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK));
+            loopback.writeInbound(new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK, Unpooled.buffer(8).writeZero(8)));
+            assertThat("bound " + bound, proxyClient.isOpen(), is(true));
+            assertThat("bound " + bound, loopback.config().isAutoRead(), is(true));
+
+            HttpContent firstByte = piece(1);
+            loopback.writeInbound(firstByte);
+
+            assertThat("bound " + bound, firstByte.refCnt(), is(0));
+            assertThat("bound " + bound, proxyClient.isOpen(), is(false));
+            assertThat("bound " + bound, loopback.isOpen(), is(false));
+            releaseEverything();
+        }
+    }
+
+    @Test
+    public void shouldNotBoundTheRelayWithoutALimit() {
+        proxyClient = new EmbeddedChannel(new ChannelOutboundHandlerAdapter() {
+            @Override
+            public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
+                pendingMessages.add(msg);
+                pendingWrites.add(promise);
+            }
+        });
+        loopback = new EmbeddedChannel(new DownstreamProxyRelayHandler(new MockServerLogger(), proxyClient));
+
+        for (int i = 0; i < 1024; i++) {
+            loopback.writeInbound(piece(1024));
+        }
+
+        assertThat(proxyClient.isOpen(), is(true));
+        assertThat(loopback.isOpen(), is(true));
+        assertThat("reads are never paused", loopback.config().isAutoRead(), is(true));
+        assertThat(pendingMessages.size(), is(1024));
     }
 
     @Test

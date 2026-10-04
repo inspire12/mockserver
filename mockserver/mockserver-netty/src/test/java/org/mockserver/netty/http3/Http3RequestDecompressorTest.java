@@ -87,6 +87,13 @@ public class Http3RequestDecompressorTest {
     }
 
     @Test
+    public void shouldAcceptOnlyAnEmptyBodyAtALimitOfZero() {
+        assertThat(decompresses(new byte[0], 0), is(true));
+        assertThat(decompresses(new byte[1], 0), is(false));
+        assertThat(decompresses(new byte[1], -1), is(false));
+    }
+
+    @Test
     public void shouldNotDecompressWithoutAnEncodingHttp1Decodes() {
         assertThat(Http3RequestDecompressor.forHeaders(Collections.emptyList(), ByteBufAllocator.DEFAULT, MAX_BODY, 1024), nullValue());
         assertThat(decompressor("identity"), nullValue());
@@ -95,6 +102,18 @@ public class Http3RequestDecompressorTest {
         Http3RequestDecompressor gzip = decompressor("x-gzip");
         assertThat(gzip, notNullValue());
         gzip.release();
+    }
+
+    private static boolean decompresses(byte[] plain, int maxBody) {
+        List<Map.Entry<String, String>> headers = Collections.singletonList(new AbstractMap.SimpleImmutableEntry<>("content-encoding", "gzip"));
+        Http3RequestDecompressor decompressor = Http3RequestDecompressor.forHeaders(headers, ByteBufAllocator.DEFAULT, maxBody, 1024);
+        ByteBuf content = Unpooled.wrappedBuffer(gzip(plain));
+        try {
+            return decompressor.decompress(content) && decompressor.finish();
+        } finally {
+            decompressor.release();
+            content.release();
+        }
     }
 
     private static Http3RequestDecompressor decompressor(String contentEncoding) {

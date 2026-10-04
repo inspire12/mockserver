@@ -78,6 +78,16 @@ public class SnappyBlockOrFrameDecoderTest {
     }
 
     @Test
+    public void shouldDecodeOnlyAnEmptyBlockAtALimitOfZero() {
+        assertThat(decode(new byte[]{0x00}, 1, 0), is(new byte[0]));
+
+        DecompressionException rejected = assertThrows(DecompressionException.class, () -> decode(SnappyBlock.compress(new byte[]{'x'}), 1, 0));
+
+        assertThat(rejected.getMessage(), containsString("declares 1 decoded bytes, more than the limit of 0"));
+        assertThrows(DecompressionException.class, () -> decode(new byte[]{0x00}, 1, -1));
+    }
+
+    @Test
     public void shouldRejectATruncatedBlock() {
         byte[] block = SnappyBlock.compress(PLAIN);
 
