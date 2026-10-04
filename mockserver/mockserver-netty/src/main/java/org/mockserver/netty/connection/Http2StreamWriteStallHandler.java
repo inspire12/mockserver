@@ -34,7 +34,8 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
  * stream (or the connection window) does, and while the connection's socket is not writable: the flow controller then
  * writes nothing to any stream, and a socket the client is not taking is {@link WriteStallTimeoutHandler}'s to time,
  * which tolerates the gaps in which a slow reader's kernel frees its send buffer. The reset ({@code CANCEL}) closes the
- * stream's child channel, which ends its response incomplete and fails the writes still queued for it.
+ * stream's child channel, which ends its response incomplete and fails the writes still queued for it. When a stalled
+ * stream holds the connection window the others wait for, only it is reset (see {@code selectStalledStreams}).
  * <p>
  * Sits between {@link Http2FrameCodec} and {@code Http2MultiplexHandler}, the only place that sees stream window
  * updates, which the multiplex handler drops. A timer runs only while the connection has active streams.
@@ -128,16 +129,7 @@ public final class Http2StreamWriteStallHandler extends ChannelDuplexHandler imp
         // the connection's own channel: its socket is what the flow controller waits on to write an open-windowed stream;
         // a socket stall is left to WriteStallTimeoutHandler only where one is watching this connection
         boolean socketStallWatched = !ctx.channel().isWritable() && ctx.pipeline().get(WriteStallTimeoutHandler.class) != null;
-        for (Http2Stream stream : unmovedStreams) {
-            StreamWriteProgress progress = stream.getProperty(progressKey);
-            if (progress.window > 0 && (anyProgress || socketStallWatched)) {
-                // its own window is open, so it is queued behind streams the client is still taking, or behind a
-                // socket the client is not taking, which is WriteStallTimeoutHandler's to time
-                progress.lastProgressNanos = now;
-            } else if (now - progress.lastProgressNanos >= timeoutNanos) {
-                stalledStreamIds.add(stream.id());
-            }
-        }
+        selectStalledStreams(flowController.initialWindowSize(), connectionWindow, socketStallWatched);
         unmovedStreams.clear();
         for (int streamId : stalledStreamIds) {
             reset(streamId);
@@ -147,6 +139,60 @@ public final class Http2StreamWriteStallHandler extends ChannelDuplexHandler imp
             codecCtx.flush();
         }
         check = ctx.executor().schedule(this, checkIntervalMillis, MILLISECONDS);
+    }
+
+    /**
+     * Picks the unmoved streams to reset. While the connection window is closed, a reset that should release it (a
+     * closed-window stream, or those holding the most of it) gives each of the others one fresh period, and not
+     * another until it is refreshed for any other reason. See "A stalled stream holding the connection window" in
+     * docs/code/netty-pipeline.md.
+     */
+    private void selectStalledStreams(int initialWindow, int connectionWindow, boolean socketStallWatched) {
+        boolean openWindowsTimed = !anyProgress && !socketStallWatched;
+        long mostHeld = Long.MIN_VALUE;
+        for (Http2Stream stream : unmovedStreams) {
+            StreamWriteProgress progress = stream.getProperty(progressKey);
+            progress.resetting = false;
+            if (timedOut(progress, openWindowsTimed)) {
+                mostHeld = Math.max(mostHeld, held(progress, initialWindow));
+            }
+        }
+        boolean windowReleased = false;
+        for (Http2Stream stream : unmovedStreams) {
+            StreamWriteProgress progress = stream.getProperty(progressKey);
+            if (timedOut(progress, openWindowsTimed)) {
+                long held = held(progress, initialWindow);
+                // streams holding the same cannot be told apart, so all are reset and the stalled one is among them
+                if (progress.window <= 0 || held == mostHeld) {
+                    progress.resetting = true;
+                    stalledStreamIds.add(stream.id());
+                    // a stream sent nothing holds no connection window, so resetting one never extends another's time
+                    windowReleased |= connectionWindow <= 0 && held > 0;
+                }
+            }
+        }
+        for (Http2Stream stream : unmovedStreams) {
+            StreamWriteProgress progress = stream.getProperty(progressKey);
+            if (progress.window <= 0 || progress.resetting) {
+                continue;
+            }
+            if (!openWindowsTimed) {
+                progress.lastProgressNanos = now;
+            } else if (windowReleased && progress.lastProgressNanos != progress.releaseGrantedNanos) {
+                progress.lastProgressNanos = progress.releaseGrantedNanos = now;
+            } else if (now - progress.lastProgressNanos >= timeoutNanos) {
+                stalledStreamIds.add(stream.id());
+            }
+        }
+    }
+
+    private boolean timedOut(StreamWriteProgress progress, boolean openWindowsTimed) {
+        return now - progress.lastProgressNanos >= timeoutNanos && (progress.window <= 0 || openWindowsTimed);
+    }
+
+    // the stream's data sent beyond the window its client has granted on top of the initial window: what it holds unconsumed
+    private static long held(StreamWriteProgress progress, int initialWindow) {
+        return (long) initialWindow - progress.window;
     }
 
     private void checkStream(Http2Stream stream, Http2RemoteFlowController flowController) {
@@ -189,10 +235,14 @@ public final class Http2StreamWriteStallHandler extends ChannelDuplexHandler imp
         private long windowUpdates;
         private long windowUpdatesSeen;
         private long lastProgressNanos;
+        private boolean resetting;
+        // equal to lastProgressNanos while the stream's current period is the fresh one given for a reset
+        private long releaseGrantedNanos;
 
         private StreamWriteProgress(int window, long lastProgressNanos) {
             this.window = window;
             this.lastProgressNanos = lastProgressNanos;
+            this.releaseGrantedNanos = lastProgressNanos - 1;
         }
     }
 }

@@ -293,10 +293,12 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   size and, for a streamed response, up to `maxResponseBodySize` plus an open upstream connection. Now, when a
   response has had bytes waiting for its client for the timeout and the client has taken none of them, the
   response ends incomplete: an HTTP/1.1 connection (or the `CONNECT`/SOCKS tunnel it reads through) is closed,
-  an HTTP/2 or HTTP/3 stream is reset (other streams on the connection carry on), and a streamed response's
-  upstream connection is closed. A client that keeps taking some of the response at least once per timeout
-  period is not affected, nor is one waiting for a delayed or slow response, which has nothing waiting for it. Each stall is logged as a
-  `WARN` and counted by the new `mock_server_response_write_stalls_total` metric, labelled by `protocol`
+  an HTTP/2 or HTTP/3 stream is reset (other streams on the connection carry on; an HTTP/2 stream that was
+  waiting only for flow-control window the stalled stream held gets another timeout period to receive it once
+  the stalled stream is reset), and a streamed response's upstream connection is closed. A client that keeps
+  taking some of the response at least once per timeout period is not affected, nor is one waiting for a
+  delayed or slow response, which has nothing waiting for it. Each stall is logged as a `WARN` and counted
+  by the new `mock_server_response_write_stalls_total` metric, labelled by `protocol`
   (`http1_1`, `http2`, `http3`, `tunnel`, `websocket` or `other`) and `scope` (`connection` when the connection
   was closed, `stream` when one HTTP/2 or HTTP/3 stream was reset). An HTTP/2 client that stops reading the
   connection altogether has the connection closed, as an HTTP/1.1 client does. The value applies to
