@@ -297,10 +297,13 @@ This release delivers a sustained performance and memory programme alongside dat
   response ends incomplete: an HTTP/1.1 connection (or the `CONNECT`/SOCKS tunnel it reads through) is closed,
   an HTTP/2 or HTTP/3 stream is reset, including an HTTP/2 stream inside a `CONNECT`/SOCKS tunnel (other streams
   on the connection, and the tunnel, carry on; an HTTP/2 stream that was waiting only for flow-control window
-  the stalled stream held gets another timeout period to receive it once the stalled stream is reset), and a
+  the stalled stream held is not reset before it, and gets another timeout period to receive that window once
+  the stalled stream is reset), and a
   streamed response's upstream connection is closed. A client that keeps
   taking some of the response at least once per timeout period is not affected, nor is one waiting for a
-  delayed or slow response, which has nothing waiting for it. Each stall is logged as a `WARN` and counted
+  delayed or slow response, which has nothing waiting for it. An HTTP/2 client takes a stream's response
+  only when data is sent for it: `WINDOW_UPDATE` frames and `SETTINGS_INITIAL_WINDOW_SIZE` changes that let
+  no data be sent do not keep a stalled stream open. Each stall is logged as a `WARN` and counted
   by the new `mock_server_response_write_stalls_total` metric, labelled by `protocol`
   (`http1_1`, `http2`, `http3`, `tunnel`, `websocket` or `other`) and `scope` (`connection` when the connection
   was closed, `stream` when one HTTP/2 or HTTP/3 stream was reset). An HTTP/2 client that stops reading the

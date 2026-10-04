@@ -34,6 +34,7 @@ import io.netty.handler.codec.http.LastHttpContent;
 import io.netty.handler.codec.http2.DefaultHttp2Headers;
 import io.netty.handler.codec.http2.DefaultHttp2HeadersFrame;
 import io.netty.handler.codec.http2.DefaultHttp2PriorityFrame;
+import io.netty.handler.codec.http2.DefaultHttp2SettingsFrame;
 import io.netty.handler.codec.http2.DefaultHttp2WindowUpdateFrame;
 import io.netty.handler.codec.http2.Http2ChannelDuplexHandler;
 import io.netty.handler.codec.http2.Http2CodecUtil;
@@ -42,12 +43,14 @@ import io.netty.resolver.NoopAddressResolverGroup;
 import io.netty.handler.codec.http2.Http2FrameStream;
 import io.netty.handler.codec.http2.Http2DataFrame;
 import io.netty.handler.codec.http2.Http2Error;
+import io.netty.handler.codec.http2.Http2FrameCodec;
 import io.netty.handler.codec.http2.Http2FrameCodecBuilder;
 import io.netty.handler.codec.http2.Http2FrameTypes;
 import io.netty.handler.codec.http2.Http2GoAwayFrame;
 import io.netty.handler.codec.http2.Http2HeadersFrame;
 import io.netty.handler.codec.http2.Http2ResetFrame;
 import io.netty.handler.codec.http2.Http2Settings;
+import io.netty.handler.codec.http2.Http2SettingsAckFrame;
 import io.netty.handler.codec.http2.Http2StreamFrame;
 import io.netty.util.ReferenceCountUtil;
 import org.junit.AfterClass;
@@ -67,12 +70,16 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
@@ -99,7 +106,8 @@ import static org.mockserver.testing.tls.SSLSocketFactory.sslSocketFactory;
  * {@code responseWriteStallTimeoutMillis} ends a response whose client takes none of it for the timeout: an HTTP/1.1
  * connection (or the CONNECT tunnel it reads through) is closed, an HTTP/2 stream reset (or, when the client stops
  * reading its socket, the HTTP/2 connection closed), and a streamed response's upstream is closed; each cut is counted.
- * A client that keeps taking some of it at least once per timeout period gets its whole response, and a disabled
+ * A client that keeps taking some of it at least once per timeout period gets its whole response, a client that only
+ * moves an HTTP/2 stream's flow-control window while taking none of its data is reset all the same, and a disabled
  * timeout leaves a stalled client alone.
  * <p>
  * Responses are forwarded from an upstream: {@code /fixed} is a 16 MiB body with a {@code Content-Length}, so it is
@@ -511,6 +519,72 @@ public class ResponseWriteStallTimeoutIntegrationTest {
         }
     }
 
+    @Test
+    public void shouldResetAStalledHttp2StreamWhoseClientKeepsChangingItsInitialWindow() throws Exception {
+        long countedBefore = Metrics.getResponseWriteStallsCount(HTTP2_STREAM);
+        try (Http2Client client = Http2Client.open(mockServer)) {
+            Http2Client.Stream stream = client.request("/forward/fixed?test=http2-initial-window-changed");
+            awaitData(stream);
+            // each SETTINGS frame lowers every stream's send window by a byte, so the window differs at every check
+            // while no data leaves; the socket keeps being read, so the connection watcher sees nothing either
+            AtomicInteger initialWindow = new AtomicInteger(Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+            client.every(STALL_MILLIS / 12, () -> client.initialWindow(initialWindow.decrementAndGet()));
+            assertThat("the stream ended", stream.ended.await(CUT_WITHIN_MILLIS, TimeUnit.MILLISECONDS), is(true));
+            assertThat("the stream was reset", stream.resetErrorCode.get(), is(Http2Error.CANCEL.code()));
+            assertThat("MockServer applied the client's changes while the stream was stalled", client.settingsAcks.get(), greaterThan(6));
+            assertThat("the client was sent no more than its first window", stream.dataBytes.get(), is((long) Http2CodecUtil.DEFAULT_WINDOW_SIZE));
+            assertThat("the connection, whose socket kept being read, stayed open", client.channel.isActive(), is(true));
+        }
+        assertCounted(HTTP2_STREAM, countedBefore);
+    }
+
+    @Test
+    public void shouldResetAStalledHttp2StreamWhoseClientKeepsSendingItOneByteWindowUpdates() throws Exception {
+        long countedBefore = Metrics.getResponseWriteStallsCount(HTTP2_STREAM);
+        try (Http2Client client = Http2Client.open(mockServer)) {
+            Http2Client.Stream stream = client.request("/forward/fixed?test=http2-one-byte-window-updates");
+            awaitData(stream);
+            // the stream's first window's worth is also the whole connection window, which the client never returns,
+            // so the stream window these updates open lets nothing leave
+            AtomicInteger updates = new AtomicInteger();
+            client.every(STALL_MILLIS / 12, () -> {
+                client.windowUpdate(stream, 1);
+                updates.incrementAndGet();
+            });
+            assertThat("the stream ended", stream.ended.await(CUT_WITHIN_MILLIS, TimeUnit.MILLISECONDS), is(true));
+            assertThat("the stream was reset", stream.resetErrorCode.get(), is(Http2Error.CANCEL.code()));
+            assertThat("the client sent its updates while the stream was stalled", updates.get(), greaterThan(6));
+            assertThat("the client was sent no more than its first window", stream.dataBytes.get(), is((long) Http2CodecUtil.DEFAULT_WINDOW_SIZE));
+            assertThat("the connection, whose socket kept being read, stayed open", client.channel.isActive(), is(true));
+        }
+        assertCounted(HTTP2_STREAM, countedBefore);
+    }
+
+    @Test
+    public void shouldResetAStalledHttp2StreamWhoseClientOverflowsAnEarlierStreamsWindowWithItsInitialWindow() throws Exception {
+        try (Http2Client client = Http2Client.open(mockServer)) {
+            Http2Client.Stream holder = client.request("/forward/fixed?test=http2-overflow-holder");
+            awaitData(holder);
+            // nothing a reset stream held is returned, so the streams opened next are sent nothing throughout
+            client.discardConnectionWindowUpdates();
+            Http2Client.Stream overflowing = client.request("/forward/fixed?test=http2-overflow-overflowing");
+            client.onEventLoop(() -> client.windowUpdate(overflowing, Integer.MAX_VALUE - Http2CodecUtil.DEFAULT_WINDOW_SIZE));
+            Http2Client.Stream stalled = client.request("/forward/fixed?test=http2-overflow-stalled");
+            // Netty stops applying each rise at the stream it would overflow, so the stalled stream, opened after it,
+            // keeps its send window while the initial window moves
+            AtomicInteger initialWindow = new AtomicInteger(Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+            client.every(STALL_MILLIS / 3, () -> client.initialWindow(initialWindow.incrementAndGet()));
+            assertThat("the stalled stream ended", stalled.ended.await(CUT_WITHIN_MILLIS, TimeUnit.MILLISECONDS), is(true));
+            assertThat("the stalled stream was reset", stalled.resetErrorCode.get(), is(Http2Error.CANCEL.code()));
+            assertThat("the client was sent none of it", stalled.dataBytes.get(), is(0L));
+            // the overflow leaves the earlier stream open; it too has a response waiting and takes none of it
+            assertThat("the overflowing stream ended", overflowing.ended.await(CUT_WITHIN_MILLIS, TimeUnit.MILLISECONDS), is(true));
+            assertThat("the overflowing stream was reset as stalled", overflowing.resetErrorCode.get(), is(Http2Error.CANCEL.code()));
+            assertThat("MockServer took the client's rises while the stream was stalled", client.settingsAcks.get(), greaterThan(3));
+            assertThat("the connection, whose socket kept being read, stayed open", client.channel.isActive(), is(true));
+        }
+    }
+
     /**
      * Opens a stream that depends exclusively on {@code holder}, so it gets nothing while the holder has data to send,
      * and then takes the holder's data slowly for several timeouts, so the new stream's response waits all that time.
@@ -712,6 +786,8 @@ public class ResponseWriteStallTimeoutIntegrationTest {
         private final ReadGate readGate = new ReadGate();
         private final ConnectionWindowUpdateGate connectionWindowUpdateGate = new ConnectionWindowUpdateGate();
         private final AtomicBoolean goAwayReceived = new AtomicBoolean();
+        private final AtomicInteger settingsAcks = new AtomicInteger();
+        private final List<Future<?>> repeating = new CopyOnWriteArrayList<>();
         private Channel channel;
         private ChannelHandlerContext ctx;
 
@@ -903,6 +979,8 @@ public class ResponseWriteStallTimeoutIntegrationTest {
             try {
                 if (msg instanceof Http2GoAwayFrame) {
                     goAwayReceived.set(true);
+                } else if (msg instanceof Http2SettingsAckFrame) {
+                    settingsAcks.incrementAndGet();
                 }
                 Stream stream = msg instanceof Http2StreamFrame && ((Http2StreamFrame) msg).stream() != null ? streams.get(((Http2StreamFrame) msg).stream()) : null;
                 if (stream == null) {
@@ -932,6 +1010,28 @@ public class ResponseWriteStallTimeoutIntegrationTest {
             }
         }
 
+        void onEventLoop(Runnable send) throws Exception {
+            ctx.executor().submit(send).get(5, TimeUnit.SECONDS);
+        }
+
+        // runs on the client's event loop that often until the client is closed
+        void every(long millis, Runnable send) {
+            repeating.add(ctx.executor().scheduleAtFixedRate(send, millis, millis, TimeUnit.MILLISECONDS));
+        }
+
+        // SETTINGS_INITIAL_WINDOW_SIZE, which moves every stream's window and leaves the connection's as it is
+        void initialWindow(int bytes) {
+            ctx.writeAndFlush(new DefaultHttp2SettingsFrame(new Http2Settings().initialWindowSize(bytes)));
+        }
+
+        // written past the codec's flow controller, which would hold so small an update back
+        void windowUpdate(Stream stream, int bytes) {
+            Http2FrameCodec codec = channel.pipeline().get(Http2FrameCodec.class);
+            ChannelHandlerContext codecCtx = channel.pipeline().context(codec);
+            codec.encoder().frameWriter().writeWindowUpdate(codecCtx, stream.frameStream.id(), bytes, codecCtx.newPromise());
+            codecCtx.flush();
+        }
+
         void consumeReceived(Stream stream, int maxBytes) throws Exception {
             ctx.executor().submit(() -> consume(stream, maxBytes)).get(5, TimeUnit.SECONDS);
         }
@@ -959,6 +1059,7 @@ public class ResponseWriteStallTimeoutIntegrationTest {
 
         @Override
         public void close() {
+            repeating.forEach(task -> task.cancel(false));
             channel.close();
         }
     }
