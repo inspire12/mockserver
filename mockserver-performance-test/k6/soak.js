@@ -10,12 +10,14 @@
 //   k6 run -e K6_SOAK_DURATION=2h -e K6_SOAK_RATE=200 .../soak.js
 //
 // TWO failure signals (thresholds, i.e. the pass/fail gate):
-//   1. http_req_duration{op:match} p99 DRIFT — the data-plane hot path must stay
-//      under LIMITS.p99 for the WHOLE soak, not just cold. If an O(n) event-log
-//      eviction (issue #2329 class) or a slow leak degrades matching as the ring
-//      fills, this trips.
+//   1. http_req_duration{op:match} p95/p99 over the WHOLE soak — the data-plane hot
+//      path must stay under LIMITS for the whole run, not just cold.
 //   2. http_req_failed{op:match} error rate — connection/fd leaks surface as
 //      climbing data-plane errors over hours.
+//
+// DRIFT is measured, not gated: every request is tagged with the window it was sent
+// in (win:wNNN) and handleSummary emits each arm's per-window latency series, which
+// the soak step turns into drift figures (.buildkite/scripts/steps/lib/perf-soak-drift.jq).
 //
 // Item 10b — EVENT-LOG VERIFICATION COST AS THE LOG FILLS. `verify` and
 // `retrieveRecordedRequests` are issued at a LOW fixed rate throughout. Both
@@ -51,30 +53,36 @@ const SOAK = {
   // query type, ample for a p95/p99 against a long-full ring.
   verifyRate: num('K6_SOAK_VERIFY_RATE', 1),
   retrieveRate: num('K6_SOAK_RETRIEVE_RATE', 1),
-  // Early-vs-late drift windows for the match hot path. The p99 of the EARLY
-  // window vs the LATE window is the drift ratio reported in the result — the
-  // genuine "does latency grow with occupancy" measurement, distinct from the
-  // aggregate p99 gate. Default 5m; override to a few seconds for a short local
-  // proof run.
+  // Width of the consecutive windows the run is cut into (seconds for a local run).
   window: env('K6_SOAK_WINDOW', '5m'),
-  // Lead-in BEFORE the early window so the JVM/JIT cold-start cohort is excluded
-  // from the early baseline. Including warmup in "early" would inflate early p99
-  // and bias drift_ratio (late/early) DOWNWARD — tending to HIDE the occupancy
-  // drift the signal exists to expose. Default 2m (a 2h soak reaches steady state
-  // well within it); override LOW for a short local run.
-  lead: env('K6_SOAK_LEAD', '2m'),
+  // Windows starting before this are warm-up (JIT, connection ramp, the event log's
+  // first fill) and never a drift reference. Emitted for the step; not used for tagging.
+  warmup: env('K6_SOAK_WARMUP', '15m'),
+  // How many windows after the warm-up the caller's drift figures need (the soak step
+  // passes it). 0: not checked.
+  driftWindows: num('K6_SOAK_DRIFT_WINDOWS', 0),
   proto: env('PROTO', CONFIG.baseUrl.startsWith('https') ? 'https_h2' : 'http'),
   resultPath: env('K6_SOAK_RESULT_PATH', 'soak-result.json'),
 };
 
-// k6 duration string ("5m","90s","2h") -> seconds. Mirrors the config helpers'
-// intent; kept local so soak.js needs no new export from the owned config.js.
-function toSeconds(spec) {
-  const m = String(spec).match(/^(\d+(?:\.\d+)?)(ms|s|m|h|d)?$/);
-  if (!m) return 0;
-  const v = Number(m[1]);
-  const unit = m[2] || 's';
-  return { ms: v / 1000, s: v, m: v * 60, h: v * 3600, d: v * 86400 }[unit];
+// k6 duration string -> seconds: "90s", "5m", "2h", "500ms", "1.5h", and the compound
+// forms "1h30m" and "1d12h". Anything else throws, so a typo cannot become a 0 s window.
+// A bare number is refused too: k6 reads it as milliseconds.
+const UNIT_SECONDS = { ms: 0.001, s: 1, m: 60, h: 3600 };
+function toSeconds(name, spec) {
+  const text = String(spec).trim();
+  const m = text.match(/^(?:(\d+)d)?((?:\d+(?:\.\d+)?(?:ms|h|m|s))*)$/);
+  if (text === '' || !m) {
+    throw new Error(
+      `${name}=${spec} is not a duration this script can read: use d, h, m, s or ms with a number each, e.g. 2h, 90s, 1h30m`,
+    );
+  }
+  let seconds = Number(m[1] || 0) * 86400;
+  const part = /(\d+(?:\.\d+)?)(ms|h|m|s)/g;
+  for (let c = part.exec(m[2]); c !== null; c = part.exec(m[2])) {
+    seconds += Number(c[1]) * UNIT_SECONDS[c[2]];
+  }
+  return seconds;
 }
 
 // TRANSPORT errors on the match arm — a request that never completed an HTTP
@@ -87,29 +95,50 @@ function toSeconds(spec) {
 // .buildkite/scripts/steps/perf-test-soak.sh.
 const matchTransportErrors = new Counter('soak_match_transport_errors');
 
-const DURATION_SEC = toSeconds(LOAD.soakDuration);
-const WINDOW_SEC = toSeconds(SOAK.window);
-const LEAD_SEC = toSeconds(SOAK.lead);
-// The EARLY window is [LEAD, LEAD+WINDOW] — after the warmup lead-in, so the cold
-// JVM/JIT cohort is excluded from it. The LATE window is the last WINDOW_SEC of
-// the soak. Clamped to the run duration so a short run degrades sensibly (if the
-// lead-in exceeds the duration the early window is empty and drift_ratio is null,
-// rather than silently baselining warmup — override K6_SOAK_LEAD for short runs).
-const EARLY_START_SEC = Math.min(LEAD_SEC, DURATION_SEC);
-const EARLY_END_SEC = Math.min(LEAD_SEC + WINDOW_SEC, DURATION_SEC);
-const LATE_START_SEC = Math.max(EARLY_END_SEC, DURATION_SEC - WINDOW_SEC);
+const DURATION_SEC = toSeconds('K6_SOAK_DURATION', LOAD.soakDuration);
+const WINDOW_SEC = toSeconds('K6_SOAK_WINDOW', SOAK.window);
+const WARMUP_SEC = toSeconds('K6_SOAK_WARMUP', SOAK.warmup);
+// Whole windows only: a trailing remainder is folded into the last window. Each
+// window costs one sub-metric per arm, so "2h in 1s windows" is refused.
+const MAX_WINDOWS = 96;
+const WINDOW_COUNT = WINDOW_SEC > 0 ? Math.max(1, Math.floor(DURATION_SEC / WINDOW_SEC)) : 0;
+if (WINDOW_COUNT < 1 || WINDOW_COUNT > MAX_WINDOWS) {
+  throw new Error(
+    `K6_SOAK_WINDOW=${SOAK.window} cuts K6_SOAK_DURATION=${LOAD.soakDuration} into ${WINDOW_COUNT} windows; it must give 1 to ${MAX_WINDOWS}`,
+  );
+}
+// A run too short for its warm-up is refused here, not found out when it ends.
+const SETTLED_WINDOWS = Math.max(0, WINDOW_COUNT - Math.ceil(WARMUP_SEC / WINDOW_SEC));
+if (SETTLED_WINDOWS < SOAK.driftWindows) {
+  throw new Error(
+    `K6_SOAK_DURATION=${LOAD.soakDuration} has ${SETTLED_WINDOWS} window(s) of K6_SOAK_WINDOW=${SOAK.window} starting at or after K6_SOAK_WARMUP=${SOAK.warmup}; K6_SOAK_DRIFT_WINDOWS=${SOAK.driftWindows} are needed`,
+  );
+}
+const WINDOW_OPS = ['match', 'verify', 'retrieve'];
 
-// Tag a request with its drift window from the wall-clock elapsed time (robust
+function windowName(index) {
+  return `w${`00${index}`.slice(-3)}`;
+}
+
+// The window a request is sent in, from the wall-clock elapsed time (robust
 // regardless of which VU runs the iteration — same approach as regression.js
-// phaseTag). Used by the match, verify AND retrieve arms so each gets early/late
-// sub-percentiles from the SAME two windows. win:early|late materialise the
-// sub-percentiles; the warmup lead-in [0,LEAD) and the gap between the windows
-// carry win:mid and are counted ONLY in the aggregate, never in the drift ratio.
-function driftWindow() {
+// phaseTag). Requests still in flight after the run's duration (gracefulStop)
+// count towards the last window.
+function windowTag() {
   const elapsedSec = exec.instance.currentTestRunDuration / 1000;
-  if (elapsedSec >= LATE_START_SEC) return 'late';
-  if (elapsedSec >= EARLY_START_SEC && elapsedSec <= EARLY_END_SEC) return 'early';
-  return 'mid';
+  const index = Math.floor(elapsedSec / WINDOW_SEC);
+  return windowName(Math.min(WINDOW_COUNT - 1, Math.max(0, index)));
+}
+
+// One always-pass threshold per arm and window, to MATERIALISE its sub-metric.
+function windowThresholds() {
+  const thresholds = {};
+  for (const op of WINDOW_OPS) {
+    for (let i = 0; i < WINDOW_COUNT; i++) {
+      thresholds[`http_req_duration{op:${op},win:${windowName(i)}}`] = ['p(99)>=0'];
+    }
+  }
+  return thresholds;
 }
 
 // A verification body that ALWAYS matches (the /simple path is hit continuously
@@ -145,9 +174,9 @@ function retrieveLog(win) {
 
 export const options = {
   insecureSkipTLSVerify: CONFIG.insecureSkipTLSVerify,
-  // p(50)/p(99) are not in k6's default summary set — declare them so
-  // handleSummary can read real quantiles off the sub-metrics.
-  summaryTrendStats: ['avg', 'min', 'med', 'p(50)', 'p(90)', 'p(95)', 'p(99)', 'max'],
+  // p(50)/p(99) and count are not in k6's default summary set — declare them so
+  // handleSummary can read real quantiles and sample counts off the sub-metrics.
+  summaryTrendStats: ['avg', 'min', 'med', 'p(50)', 'p(90)', 'p(95)', 'p(99)', 'max', 'count'],
   scenarios: {
     // Steady data-plane matching for the whole soak (the p99-drift subject).
     match: {
@@ -191,10 +220,9 @@ export const options = {
     },
   },
   thresholds: {
-    // --- THE soak gate: data-plane drift + errors -------------------------------
-    // p99 of the match hot path over the WHOLE soak must stay under the bound (a
-    // drift upward as the ring fills trips this), and match errors must stay low
-    // (a connection/fd leak over hours trips this).
+    // --- THE soak gate: data-plane latency + errors ------------------------------
+    // p95/p99 of the match hot path over the WHOLE soak must stay under the bound,
+    // and match errors must stay low (a connection/fd leak over hours trips this).
     'http_req_duration{op:match}': [`p(99)<${LIMITS.p99}`, `p(95)<${LIMITS.p95}`],
     'http_req_failed{op:match}': [`rate<${LIMITS.errorRate}`],
     // Control-plane churn must not start erroring either.
@@ -211,17 +239,9 @@ export const options = {
     'http_reqs{op:verify}': ['count>=0'],
     'http_req_duration{op:retrieve}': ['p(50)>=0', 'p(95)>=0', 'p(99)>=0'],
     'http_reqs{op:retrieve}': ['count>=0'],
-    // Early-vs-late drift sub-percentiles (notify-only). The whole point of the
-    // soak is whether latency tracks event-log occupancy, so the verify/retrieve
-    // event-log SCANS get the same early/late treatment as the match hot path —
-    // otherwise they exist only as 2h aggregates and their occupancy drift is
-    // invisible.
-    'http_req_duration{op:match,win:early}': ['p(99)>=0'],
-    'http_req_duration{op:match,win:late}': ['p(99)>=0'],
-    'http_req_duration{op:verify,win:early}': ['p(99)>=0'],
-    'http_req_duration{op:verify,win:late}': ['p(99)>=0'],
-    'http_req_duration{op:retrieve,win:early}': ['p(99)>=0'],
-    'http_req_duration{op:retrieve,win:late}': ['p(99)>=0'],
+    // Per-window sub-metrics for all three arms (notify-only): the latency series
+    // the drift figures are derived from.
+    ...windowThresholds(),
     'http_reqs{op:match}': ['count>=0'],
     'http_req_failed{op:verify}': ['rate>=0'],
     'http_req_failed{op:retrieve}': ['rate>=0'],
@@ -236,7 +256,7 @@ export function setup() {
 }
 
 export function match() {
-  const res = getSimple({ win: driftWindow() });
+  const res = getSimple({ win: windowTag() });
   // Record ONLY genuine transport failures (error_code != 0 / status 0). A 404 is
   // a completed response (error_code 0) and is NOT counted here — it is already in
   // http_req_failed{op:match}. Keeping the two separate is what lets the soak step
@@ -251,11 +271,11 @@ export function create() {
 }
 
 export function verify() {
-  verifyLog(driftWindow());
+  verifyLog(windowTag());
 }
 
 export function retrieve() {
-  retrieveLog(driftWindow());
+  retrieveLog(windowTag());
 }
 
 export function teardown() {
@@ -292,69 +312,71 @@ export function handleSummary(data) {
     return m && m.values ? round(m.values.rate, 5) : null;
   };
 
-  // Early/late p99 + drift ratio for one arm. drift_ratio = late/early p99: ~1.0
-  // means no occupancy-driven drift (the ring bound holds); a growing ratio is the
-  // O(n) fingerprint. Null-safe so a short run with an empty early window (see the
-  // window clamps above) reports null rather than a spurious ratio.
-  const driftFor = (op) => {
-    const early = stat(`http_req_duration{op:${op},win:early}`, 'p(99)');
-    const late = stat(`http_req_duration{op:${op},win:late}`, 'p(99)');
-    const ratio = early && early > 0 && late !== null ? round(late / early, 4) : null;
-    return { early, late, ratio };
+  // One arm's latency per window, in run order. A window that carried no request
+  // reports null percentiles, never a zero that would read as a measurement.
+  const windowsFor = (op) => {
+    const series = [];
+    for (let i = 0; i < WINDOW_COUNT; i++) {
+      const key = `http_req_duration{op:${op},win:${windowName(i)}}`;
+      const samples = count(key);
+      const at = (s) => (samples > 0 ? stat(key, s) : null);
+      series.push({
+        index: i,
+        start_s: round(i * WINDOW_SEC, 3),
+        end_s: round(i === WINDOW_COUNT - 1 ? DURATION_SEC : (i + 1) * WINDOW_SEC, 3),
+        samples,
+        p50_ms: at('p(50)'),
+        p95_ms: at('p(95)'),
+        p99_ms: at('p(99)'),
+      });
+    }
+    return series;
   };
-
-  const matchDrift = driftFor('match');
-  const verifyDrift = driftFor('verify');
-  const retrieveDrift = driftFor('retrieve');
 
   const soak = {
     proto: SOAK.proto,
     duration_s: round(DURATION_SEC, 0),
-    lead_s: round(LEAD_SEC, 0),
-    early_window_start_s: round(EARLY_START_SEC, 0),
-    early_window_end_s: round(EARLY_END_SEC, 0),
-    late_window_start_s: round(LATE_START_SEC, 0),
+    window_s: round(WINDOW_SEC, 3),
+    warmup_s: round(WARMUP_SEC, 3),
+    window_count: WINDOW_COUNT,
+    // The rates and gates this script ran with (not what the step meant to pass in).
+    rates_rps: {
+      match: LOAD.soakRate,
+      create: LOAD.createRate,
+      verify: SOAK.verifyRate,
+      retrieve: SOAK.retrieveRate,
+    },
+    gates: { match_p95_ms: LIMITS.p95, match_p99_ms: LIMITS.p99 },
     match: {
       samples: count('http_reqs{op:match}'),
       p50_ms: stat('http_req_duration{op:match}', 'p(50)'),
       p95_ms: stat('http_req_duration{op:match}', 'p(95)'),
       p99_ms: stat('http_req_duration{op:match}', 'p(99)'),
-      p99_early_ms: matchDrift.early,
-      p99_late_ms: matchDrift.late,
-      // The DRIFT signal: late/early p99. ~1.0 means no occupancy-driven drift
-      // (the ring bound holds); a growing ratio is the O(n)-eviction fingerprint.
-      drift_ratio: matchDrift.ratio,
       error_rate: rate('http_req_failed{op:match}'),
       // TRANSPORT errors only (see the Counter's definition). error_rate above
       // counts completed non-2xx responses (404s); this counts requests that never
       // completed. The soak step reads BOTH to classify a high error_rate as
       // "SUT answering 404s" (this ~0) vs "SUT down" (this high).
       transport_errors: count('soak_match_transport_errors'),
+      windows: windowsFor('match'),
     },
-    // Item 10b — event-log query cost. Latency here is read AGAINST occupancy by
-    // pairing with the step's requests_received_count / heap samples. The
-    // early/late sub-percentiles + drift_ratio are the direct answer to the soak's
-    // central question — do the event-log SCANS slow as the log fills and stays
-    // full — so they mirror the match arm rather than being 2h aggregates only.
+    // Item 10b — event-log query cost, with the same per-window series as the
+    // match arm so the scans can be read against how long the log has been full.
     verify: {
       samples: count('http_reqs{op:verify}'),
       p50_ms: stat('http_req_duration{op:verify}', 'p(50)'),
       p95_ms: stat('http_req_duration{op:verify}', 'p(95)'),
       p99_ms: stat('http_req_duration{op:verify}', 'p(99)'),
-      p99_early_ms: verifyDrift.early,
-      p99_late_ms: verifyDrift.late,
-      drift_ratio: verifyDrift.ratio,
       error_rate: rate('http_req_failed{op:verify}'),
+      windows: windowsFor('verify'),
     },
     retrieve: {
       samples: count('http_reqs{op:retrieve}'),
       p50_ms: stat('http_req_duration{op:retrieve}', 'p(50)'),
       p95_ms: stat('http_req_duration{op:retrieve}', 'p(95)'),
       p99_ms: stat('http_req_duration{op:retrieve}', 'p(99)'),
-      p99_early_ms: retrieveDrift.early,
-      p99_late_ms: retrieveDrift.late,
-      drift_ratio: retrieveDrift.ratio,
       error_rate: rate('http_req_failed{op:retrieve}'),
+      windows: windowsFor('retrieve'),
     },
   };
 

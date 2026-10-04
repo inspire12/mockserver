@@ -1,0 +1,60 @@
+{
+  "soak_attempted": true,
+  "soak_ok": true,
+  "k6_exit": 0,
+  "branch": "master",
+  "commit": "38dadef60d3f5cf119ccabdbeea40e36285dc5b2",
+  "timestamp_utc": "2026-10-04T10:02:03Z",
+  "config": {
+    "image": "mockserver/mockserver:mockserver-snapshot",
+    "server_memory": "2g",
+    "min_received": 100000
+  },
+  "ring": {
+    "requests_received_total": 1521544,
+    "live_set_floor_bytes": 153092096,
+    "heap_start_bytes": 79691776,
+    "heap_end_bytes": 153092096,
+    "dropped_log_events": 0,
+    "threads_end": 49
+  },
+  "soak": {
+    "proto": "http",
+    "duration_s": 7200,
+    "lead_s": 120,
+    "early_window_start_s": 120,
+    "early_window_end_s": 420,
+    "late_window_start_s": 6900,
+    "match": {
+      "samples": 1440001,
+      "p50_ms": 0.378,
+      "p95_ms": 0.487,
+      "p99_ms": 3.115,
+      "p99_early_ms": 23.048,
+      "p99_late_ms": 0.596,
+      "drift_ratio": 0.0259,
+      "error_rate": 0,
+      "transport_errors": 0
+    },
+    "verify": {
+      "samples": 7201,
+      "p50_ms": 21.621,
+      "p95_ms": 28.085,
+      "p99_ms": 35.96,
+      "p99_early_ms": 32.916,
+      "p99_late_ms": 35.369,
+      "drift_ratio": 1.0745,
+      "error_rate": 0
+    },
+    "retrieve": {
+      "samples": 7201,
+      "p50_ms": 97.28,
+      "p95_ms": 109.614,
+      "p99_ms": 116.593,
+      "p99_early_ms": 115.291,
+      "p99_late_ms": 112.155,
+      "drift_ratio": 0.9728,
+      "error_rate": 0
+    }
+  }
+}

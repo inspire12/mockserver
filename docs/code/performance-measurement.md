@@ -28,7 +28,7 @@ regressions hide and stale claims get published.
 | `load.js` | p95 / p99 gate, ramping 50 -> 500 rps | Opt-in (manual / scheduled) | Yes — k6 thresholds |
 | `coverage.js` + an HTTPS `sweep.js` ladder | Paths nothing else drives: HTTPS connection churn, client-certificate (mTLS) traffic, HTTP/2 at load, JSONPath / XPath / JSON-schema matchers over 100 candidates, disk capture under proxy load, large proxied downloads | Daily (perf queue), inside `perf-test-run.sh` | No — notify-only, `provisional` budgets |
 | `stress.js` | Ramp past the knee | Lint only | Never executes in CI |
-| `soak.js` | Sustained load over hours | Weekly (Sunday 08:00 UTC schedule, perf queue) and on demand in any build whose message contains `[perf-soak]` | Yes, for that build — k6 thresholds and a result-presence check; never compared or baselined |
+| `soak.js` | Sustained load over hours | Weekly (Sunday 08:00 UTC schedule, perf queue) and on demand in any build whose message contains `[perf-soak]` | Yes, for that build — k6 thresholds, result-presence, provenance and server-health checks ([details](#soakjs--weekly-and-on-demand-and-stressjs--linted-only)); never compared or baselined |
 | `scripts/perf/bench_startup.py` | Launch-to-ready variant matrix | Never runs in CI | Never |
 | `inject` (`run-inject.sh`) | Load-injection ceiling | Opt-in | Never in daily pipeline |
 | Hardware matrix (`lib/perf-percore.sh` driving `rw-multi-k6-sweep.sh` per point, `PERF_SERVING_HW_MATRIX=true`) | Healthy ceiling per cores × container memory, for the public sizing table | Opt-in, manual build only; on `perf-xl` instead of `perf` when `PERF_XL=true` | No — notify-only; only a wholesale producer failure reds (presence gate in compare, or in the perf-xl step itself) |
@@ -1902,9 +1902,130 @@ and the load test out of that build. The Buildkite schedule "Weekly performance 
 bk build create -p mockserver-performance-test -b master -m "manual performance soak [perf-soak]"
 ```
 
-When it runs, a k6 threshold breach (data-plane p99 drift, error rate) or a missing or empty
-result reds that build; the result, `perf-soak.json`, is uploaded as its own artifact and is not
-fed to `perf-test-compare.sh`.
+When it runs, the build goes red on any of: a k6 threshold breach (match p95/p99, error rate,
+check rate); a missing or empty result; an image with no usable revision label; a server container
+that stops, or never answers, before the load starts; a configuration that cannot be read back from
+the running server; a server `java.lang.OutOfMemoryError`, server output that cannot be read, or a
+server container that is not running (or was OOM-killed) when the load ends; a missing GC log; an
+event log that the server's own counters do not show as filled; match-arm drift that cannot be
+computed; or a `perf-soak.json` that cannot be copied or uploaded. Drift itself is reported, not
+gated. The result, `perf-soak.json`, is uploaded as its own artifact with `perf-soak-samples.csv`,
+`perf-soak-server.log` (the server's stdout and stderr) and `perf-soak-gc-log.tgz`; none of it is
+fed to `perf-test-compare.sh`. A failure after the server container was created uploads that
+container's output, including one that stopped before it was ready, unless the container can no
+longer be inspected. When a completed soak fails only because `perf-soak.json` could not be copied
+or uploaded, the file keeps what was measured, with `soak_ok` false and a `failure_reason`.
+
+**Not yet run for real.** The provenance, drift and event-log checks below were written against
+build 637's artifacts and a local server, with `docker` and `curl` stubbed
+(`.buildkite/scripts/test/perf-soak-test.sh`). Their first real execution is the next weekly soak
+or a manual `[perf-soak]` build. What `soak.js` accepts and refuses when it starts is checked by
+`.buildkite/scripts/test/k6-soak-init-test.sh`, which `perf-test-lint.sh` runs in the k6 container
+through `k6 inspect`; so far it has run only against a local k6 1.7.1 binary.
+
+#### What a soak records
+
+`perf-test-soak.sh` reads these from the image and the running server, not from the variables it
+meant to set, and refuses to start the load if one is unreadable.
+
+| `perf-soak.json` field | Read from |
+|---|---|
+| `config.image_digest`, `config.image_id` | `docker image inspect` after pulling the tag; the server is started from that image id, so the tag cannot move between the inspection and the run |
+| `config.image_revision`, `config.harness_commit`, `config.revision_check` | the image's `org.opencontainers.image.revision` label, the commit the step is checked out at, and whether they are the same (`match` or `differs`) |
+| `config.image_revision_ancestor_of_harness` | `git merge-base --is-ancestor` in the step's checkout, never fetching: `true`, `false`, or `unknown` when the checkout is shallow or lacks the commits |
+| `config.log_level`, `config.max_log_entries`, `config.max_event_log_bytes` | `GET /mockserver/configuration` on the running server |
+| `config.heap_max_bytes` | `jvm_memory_max_bytes{area="heap"}` from the server's metrics |
+| `config.container_memory_limit_bytes` | `docker inspect` of the server container (`HostConfig.Memory`) |
+| `config.java_tool_options` | the server container's environment |
+| `config.requested`; `soak.rates_rps`, `soak.duration_s`, `soak.gates` | what the step asked k6 for; what `soak.js` ran with |
+| `event_log.*` | the server's `mock_server_event_log_*` gauges and `mock_server_evicted_log_entries_total`, at the last sample taken under load |
+| `server_state` | `docker inspect` when the load ends: status, `OOMKilled`, exit code |
+
+The revision rule follows the daily run's (`perf-test-run.sh`), without its grace period for an
+unlabelled image. The soak fails in seconds, before starting the server, when the image's revision label is absent or is not a
+40-character commit: such a run could not be tied to what it measured. An image built from another
+commit than the harness is measured and recorded as `differs`, and the annotation names both
+commits. That is the normal case, not a fault: the snapshot image is rebuilt only for commits that
+change the server, so after a docs-only or CI-only commit it trails `master`. Only `match` runs
+count towards tightening the gates (below).
+
+The soak's server is not started exactly as shipped: `JAVA_TOOL_OPTIONS` carries the image's own
+value plus `-XX:+ExitOnOutOfMemoryError` and a GC file log. At log level `ERROR` with system out
+disabled an `OutOfMemoryError` would otherwise leave no trace in the server's output.
+
+The out-of-memory check covers `java.lang.OutOfMemoryError` only: the step counts the lines of the
+server's output that name that class, and the container-state check sees a JVM that exited on one.
+Netty's `io.netty.util.internal.OutOfDirectMemoryError`, which Netty throws when its own
+direct-memory limit is reached, has a different name and is not counted. If `docker logs` fails,
+the step fails rather than count no lines in output it never read, and the failed `perf-soak.json`
+carries `server_log_read: false`.
+
+`event_log.filled` is true only when the server evicted entries, and `event_log.binding` is the
+bound (`count` or `bytes`) nearer its limit at the end of the load. The step used to infer "filled"
+from 100,000 requests received, sized off the entry limit alone. `ring.pre_teardown_heap_min_bytes`
+is the lowest of the last five 30-second used-heap samples before teardown. It was published as
+`live_set_floor_bytes` until it was renamed: it is a point on the GC saw-tooth, not a live-set
+floor (in build 637 it read 153,092,096 bytes while the run's lowest sample was 79,691,776). The
+GC log is where a post-collection heap figure comes from.
+
+#### Drift
+
+`soak.js` cuts the run into consecutive windows (`K6_SOAK_WINDOW`, 5 minutes: 24 for a 2-hour run),
+tags every request with its window, and emits each arm's per-window sample count, p50, p95 and p99
+as `soak.<arm>.windows`. It refuses to start on a duration, window or warm-up it cannot read
+(`15min`, or a bare number, which k6 reads as milliseconds), and the step tells it how many windows
+must start after the warm-up (`K6_SOAK_DRIFT_WINDOWS`, six), so a run too short for its drift
+figures fails when k6 starts, not when it ends. `lib/perf-soak-drift.jq` derives `drift.<arm>` from
+that series:
+
+| Field | Meaning |
+|---|---|
+| `warmup_windows` | windows starting before `K6_SOAK_WARMUP` (15 minutes); never used as a reference |
+| `reference_windows`, `late_windows` | the first three windows after the warm-up; the last three windows |
+| `p99.ratio`, `p50.ratio` | median of the late windows over the median of the reference windows |
+| `p99.ratio_worst`, `p50.ratio_worst` | the slowest late window over the quietest window before the late group |
+| `p99.reference_over_quietest` | reference median over that quietest window; near 1 when the reference had settled |
+
+The earlier diagnostic was one ratio, late-window p99 over the p99 of seconds 120 to 420. In build
+637 it read 0.0259 (0.596 ms over 23.048 ms): the early window was still slow, so a tenfold late
+degradation would have read 0.259 and passed for an improvement. `ratio_worst` exists for that
+case. A reference still inflated by warm-up lowers `ratio`, but it cannot lower `ratio_worst`
+unless every window before the late group is inflated, and it shows as a
+`reference_over_quietest` well above 1.
+
+The 15-minute warm-up is a starting value, not a measured one. `event_log.first_eviction_elapsed_s`
+records when the log first reached a bound, and the per-window series shows when latency settled;
+lengthen `K6_SOAK_WARMUP` if either lands inside the reference windows. `verify` and `retrieve`
+run at one request a second, so a window holds about 300 samples and their p99 moves on a single
+pause; read their p50.
+
+**What the early spike in build 637 was is not known, and its artifacts cannot say.** They hold
+one early and one late p99 per arm, no per-window latency, no GC log and no server output. What
+they do show: k6's progress lines report 211 to 213 completed iterations in every one of the 7,199
+seconds, never more than one active VU and no interrupted iteration, so there was no stall on the
+scale of a second; the 30-second heap samples trace the same saw-tooth in the first ten minutes as
+in every later window, and threads were flat at 49 from the second sample. The whole-run match p99
+of 3.115 ms means about 14,400 samples took at least that long, and at most 600 of them can lie in
+the last five minutes, so some 13,800 slow requests fell earlier. The artifact cannot place them:
+all in the first seven minutes they would be one in six of its requests, spread over the run about
+one in a hundred. The per-window series, GC log and server output answer this from the next run.
+
+#### Absolute gates
+
+The match arm's k6 gates are p95 < 150 ms and p99 < 200 ms (`K6_P95_MS`, `K6_P99_MS` in
+`perf-test-soak.sh`), set at about twice build 340's 62.644 / 96.051 ms. Build 637 observed 0.487 /
+3.115 ms, about 300 and 64 times below them, so they catch a collapse and nothing short of one.
+They are deliberately unchanged: one run is not a distribution, and thresholds here are chosen
+empirically ([performance-tuning.md](../operations/performance-tuning.md)). The rule for
+tightening them:
+
+- only from scheduled weekly runs on `master`, with `soak_ok` true, `config.revision_check`
+  `match` and the default `config.requested` values (a manual or overridden run does not count);
+- not before eight such runs exist, the same count the soak has always waited for before its
+  metrics may enter a baseline;
+- set each gate from the observed distribution of that metric across those runs (the per-run
+  `soak.match.p95_ms` and `p99_ms`), with headroom derived from its spread, and record the runs
+  used; a drift bound on `drift.match.p99.ratio_worst` is derived the same way and not before.
 
 **Build 637 (2026-10-04, the first scheduled weekly soak to actually run) found no leak at the
 50% image heap.** Standard image (`mockserver/mockserver:mockserver-snapshot`, revision
@@ -1913,9 +2034,9 @@ fed to `perf-test-compare.sh`.
 transport errors, 0 dropped log events (summary and all 240 samples), 1,521,544 requests
 received. Used heap by half-hour window, min/mean/max MiB: 76.0/441.6/902.0, 82.0/501.9/910.0,
 76.0/437.0/960.0, 130.0/500.7/880.0 — no growth trend across the 2 hours. Threads flat at 49
-after start-up. Not recorded by the run, only inferred from the container limit and
-`MaxRAMPercentage`: the resolved max heap (1.0 GiB) and `maxLogEntries` (~128.5k). See
-[Run Provenance](#run-provenance) below for the gaps in what the soak artifact itself records.
+after start-up. That run predates the provenance above, so these were not recorded, only inferred
+from the container limit and `MaxRAMPercentage`: the resolved max heap (1.0 GiB), `maxLogEntries`
+(~128.5k), the event-log byte budget, and which of the two bounded the log.
 
 **No soak has run at the 45% image heap yet.** The standard image now sets
 `-XX:MaxRAMPercentage=45.0`, so the same `--memory=2g` container resolves a 922 MiB (0.9 GiB) heap
