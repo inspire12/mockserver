@@ -26,7 +26,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 # --- arm-only mode (the perf-xl steps perf-test-guard.sh dispatches) ----------
 # PERF_RUN_ARM=rw_multik6|hw_matrix measures ONE opt-in arm on the provenance-checked SUT and skips
 # every other phase. The result keeps the full schema with the other blocks empty, is never
-# baseline-eligible, and is uploaded under a PERF_RUN_NAME prefix that compare never downloads.
+# baseline-eligible, and is uploaded under a PERF_RUN_NAME prefix that the daily compare never
+# downloads. The multi-k6 arm's own compare step reads its result by name (item 44).
 # Arms and workloads inherited from the build env are other measurements, so they are forced off.
 PERF_RUN_ARM="${PERF_RUN_ARM:-}"
 case "$PERF_RUN_ARM" in
@@ -45,7 +46,7 @@ if [ -n "$PERF_RUN_ARM" ]; then
   PERF_COVERAGE=false
   PERF_LAPTOP_PROFILE=false; PERF_LAPTOP_PARALLEL=false; PERF_LARGE_HEAP_PROFILE=false
   PERF_SERVING_PERCORE=false; PERF_SERVING_MULTIPROC=false; PERF_WORKLOAD=""; PERF_STEADY_RATE=""
-  echo "--- arm-only run: PERF_RUN_ARM=$PERF_RUN_ARM (artifacts prefixed ${PERF_RUN_NAME}-, never baselined)"
+  echo "--- arm-only run: PERF_RUN_ARM=$PERF_RUN_ARM (artifacts prefixed ${PERF_RUN_NAME}-, never in the daily baseline)"
 elif [ "${PERF_XL:-false}" = "true" ]; then
   # PERF_XL=true runs these two arms as their own perf-xl steps (perf-test-guard.sh), not here.
   PERF_SERVING_RW_MULTIK6=false; PERF_SERVING_HW_MATRIX=false
@@ -775,7 +776,7 @@ emit_invalid_result() {
     '{schema_version:3, commit:$commit, harness_commit:$harness_commit, branch:$branch,
       timestamp_utc:$ts, build_number:$build_number, build_url:$build_url,
       mockserver_image:$image,
-      aborted:"sut_died", baseline_eligible:false, validity:$validity}' \
+      aborted:"sut_died", baseline_eligible:false, baseline_ineligible_reasons:["sut_died"], validity:$validity}' \
     > "$REPO_ROOT/${ARTIFACT_PREFIX}perf-result.json" 2>/dev/null || true
   command -v buildkite-agent >/dev/null 2>&1 \
     && buildkite-agent artifact upload "${ARTIFACT_PREFIX}perf-result.json" >/dev/null 2>&1 || true
@@ -1788,33 +1789,37 @@ fi
 # OBSERVED JAVA_TOOL_OPTIONS actually carries tier-2 instrumentation — the safe
 # direction is to over-exclude, never to contaminate the baseline.
 BASELINE_ELIGIBLE="true"
+# Why the run is not eligible, one token per cause, recorded as .baseline_ineligible_reasons. Compare
+# persists a perf-xl arm-only result only when its sole reason is arm_only (item 44).
+INELIGIBLE_REASONS=""
+mark_ineligible() { BASELINE_ELIGIBLE="false"; INELIGIBLE_REASONS="${INELIGIBLE_REASONS} $1"; }
 OBSERVED_INSTRUMENTATION="$(grep -o 'StartFlightRecording\|NativeMemoryTracking\|Xlog:gc' <<<"$JAVA_TOOL_OPTS_VAL" | sort -u | paste -sd, - || true)"
 if [ "$PERF_JVM_DIAGNOSTICS" != "standard" ] || [ -n "$OBSERVED_INSTRUMENTATION" ]; then
-  BASELINE_ELIGIBLE="false"
+  mark_ineligible jvm_diagnostics
   echo "--- baseline eligibility: NOT eligible (PERF_JVM_DIAGNOSTICS=$PERF_JVM_DIAGNOSTICS${OBSERVED_INSTRUMENTATION:+, SUT JAVA_TOOL_OPTIONS carries $OBSERVED_INSTRUMENTATION}) — this run will be recorded but NOT persisted to the baseline"
 fi
 # Same reasoning for a TUNED server: a valid measurement, so green, but the baseline
 # series tracks the shipped default and a tuned point would raise its rolling median.
 if [ "$CONFIG_PROFILE" != "default" ]; then
-  BASELINE_ELIGIBLE="false"
+  mark_ineligible config_profile
   echo "--- baseline eligibility: NOT eligible (config_profile=$CONFIG_PROFILE, soBacklog=$SO_BACKLOG_VAL) — a tuned run is recorded but NOT persisted to the default-configuration baseline"
 fi
 # The opt-in remote-write arm (item 31) drives the SUT for several more minutes
 # between the published sweep and growth, so a run carrying it is a trial.
-if [ "${PERF_SERVING_RW_MULTIK6:-false}" = "true" ]; then
-  BASELINE_ELIGIBLE="false"
+if [ "${PERF_SERVING_RW_MULTIK6:-false}" = "true" ] && ! arm_only; then
+  mark_ineligible rw_multik6_in_run
   echo "--- baseline eligibility: NOT eligible (PERF_SERVING_RW_MULTIK6=true) — the remote-write multi-k6 trial adds load before growth"
 fi
 if [ "$K6_NUMA_NODE" = "same" ]; then
-  BASELINE_ELIGIBLE="false"
+  mark_ineligible k6_numa_same
   echo "--- baseline eligibility: NOT eligible (PERF_K6_NUMA_NODE=same) — k6 on the SUT's socket is the interference A/B, not the daily series"
 fi
 if arm_only; then
-  BASELINE_ELIGIBLE="false"
+  mark_ineligible arm_only
   echo "--- baseline eligibility: NOT eligible (PERF_RUN_ARM=$PERF_RUN_ARM) — an arm-only run measures one arm, not the daily series"
 fi
 if [ "$RIG_PROFILE" != "default" ]; then
-  BASELINE_ELIGIBLE="false"
+  mark_ineligible rig_profile
   echo "--- baseline eligibility: NOT eligible (rig_profile=$RIG_PROFILE, cpusets server=${SERVER_CPUS} upstream=${UPSTREAM_CPUS} k6=${K6_CPUS}) — a run on a non-default cpuset measures different hardware and is NOT persisted to the baseline"
 fi
 
@@ -2564,7 +2569,8 @@ fi
 # (scripts/rw-multi-k6-sweep.sh), against THIS SUT so both methods measure one server. On the
 # default ladder it runs its own, which continues past 64k; an explicit PERF_RW_RATES, else an
 # explicit K6_SWEEP_RATES (e.g. the allocation profile's short ladder), overrides that.
-# Notify-only, never published, excluded from validity; the harness exits 2 on its own gates.
+# Excluded from the daily run's validity; the harness exits 2 on its own gates. Published only
+# from the perf-xl arm-only step (item 44), never from inside this run.
 SERVING_RW_MULTIK6_JSON='{}'
 SERVING_RW_MULTIK6_ATTEMPTED=false
 if [ "${PERF_SERVING_RW_MULTIK6:-false}" = "true" ]; then
@@ -4272,7 +4278,7 @@ if [ "${PERF_SERVING_HW_MATRIX:-false}" = "true" ]; then
 fi
 # The matrix records its own eligibility (false when it put k6 on the SUT's socket); the run follows it.
 if jq -e '.baseline_eligible == false' <<<"$SERVING_HW_MATRIX_JSON" >/dev/null 2>&1; then
-  BASELINE_ELIGIBLE="false"
+  mark_ineligible hw_matrix_placement
   echo "--- baseline eligibility: NOT eligible (.serving_hw_matrix.baseline_eligible=false) — the hardware matrix marked its placement non-baseline"
 fi
 
@@ -4528,6 +4534,7 @@ jq -n \
   --argjson clu_cand "$CLU_CAND_BEHAVIOURS" \
   --argjson validity "$VALIDITY_JSON" \
   --argjson baseline_eligible "$BASELINE_ELIGIBLE" \
+  --argjson baseline_ineligible_reasons "$(jq -nc --arg r "$INELIGIBLE_REASONS" '$r | split(" ") | map(select(. != ""))')" \
   --argjson config "$CONFIG_JSON" \
   --argjson event_log_scaling "$EVENT_LOG_SCALING_JSON" \
   --argjson laptop "$LAPTOP_JSON" \
@@ -4678,6 +4685,7 @@ jq -n \
     # instrumentation overhead can never silently shift the baseline series. A run with
     # no baseline_eligible field (older producer) is treated as eligible, unchanged.
     baseline_eligible: $baseline_eligible,
+    baseline_ineligible_reasons: $baseline_ineligible_reasons,
     # Item 8 laptop startup/footprint profile (notify-only). `{}` when the profile
     # was disabled or its measurement failed; compare iterates head metrics, so an
     # empty object simply emits zero laptop.* metrics (no missing-budget trip). The
@@ -4712,8 +4720,8 @@ jq -n \
     # skip) apart from a disabled profile — the serving_percore / laptop split.
     serving_multiproc: $serving_multiproc,
     serving_multiproc_attempted: $serving_multiproc_attempted,
-    # item 31 — opt-in remote-write multi-k6 ladder; `{}` when disabled. Notify-only,
-    # never published, not read by compare (a trial of the method, not a metric).
+    # item 31 — opt-in remote-write multi-k6 ladder; `{}` when disabled. Compared and
+    # published only from the perf-xl arm-only result (item 44), never from a daily run.
     serving_rw_multik6: $serving_rw_multik6,
     serving_rw_multik6_attempted: $serving_rw_multik6_attempted,
     # Plan open question 5 — the INFO-log-level PUBLICATION arm. The two PUBLISHED

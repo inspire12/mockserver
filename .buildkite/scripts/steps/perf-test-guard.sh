@@ -55,8 +55,8 @@ YAML
 # --- OPT-IN: the perf-xl queue (one c6i.32xlarge, two NUMA nodes) -------------
 # PERF_XL=true runs the multi-k6 arm, and the hardware matrix when PERF_SERVING_HW_MATRIX=true, as
 # arm-only steps on perf-xl (perf-test-run.sh PERF_RUN_ARM); perf-test-run.sh then drops both arms from
-# the perf-run step. Their artifacts carry a perfxl- prefix that compare never downloads, so a perf-xl
-# result can neither enter the c5.12xlarge baseline nor reach the website.
+# the perf-run step. Their artifacts carry a perfxl- prefix that the daily compare never downloads, so a
+# perf-xl result never enters the c5.12xlarge baseline; the multi-k6 arm has its own persist and publish.
 PERF_XL_ON=false
 if [ "${PERF_XL:-}" = "true" ]; then
   PERF_XL_ON=true
@@ -93,6 +93,30 @@ perf_xl_yaml() {
           limit: 2
 YAML
   done
+  # Item 44: the page headline is published from the arm's result. Its own compare persists it to
+  # runs-perf-xl/ when it is a series member, and publish refreshes the page from there. Hard
+  # edges: an arm that failed (invalid) is never persisted, and a failed persist never publishes.
+  cat <<'YAML'
+  - label: ":bar_chart: perf-xl — persist the multi-k6 headline (item 44)"
+    key: "perfxl-rw-multik6-persist"
+    depends_on: "perfxl-rw-multik6"
+    command: ".buildkite/scripts/steps/perf-test-compare.sh"
+    env:
+      PERF_COMPARE_RESULT_ARTIFACT: "perfxl-rw-multik6-perf-result.json"
+    timeout_in_minutes: 10
+    agents:
+      queue: "perf"
+  - label: ":globe_with_meridians: perf-xl — publish the multi-k6 headline to the website (patch)"
+    key: "perfxl-rw-multik6-publish"
+    depends_on: "perfxl-rw-multik6-persist"
+    command: ".buildkite/scripts/steps/perf-website-publish.sh"
+    env:
+      PERF_PUBLISH_SOURCE: "rw_multik6"
+    timeout_in_minutes: 15
+    soft_fail: true
+    agents:
+      queue: "perf"
+YAML
 }
 
 maybe_dispatch_perf_xl() {

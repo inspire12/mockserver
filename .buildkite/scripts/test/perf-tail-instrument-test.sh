@@ -606,8 +606,13 @@ PERCORE_RUN="$(awk 'index($0, "run_point_multik6() {") == 1 {on = 1} on {print} 
 check "the hardware matrix keeps the whole-rung rule for its recorded p99-bounded ceiling" "yes" \
   "$(grep -qE '(^|[[:space:]])PERF_RW_HEADLINE_RULE=unmasked_p99([[:space:]]|$)' <<<"$PERCORE_RUN" && echo yes || echo no)"
 STEPS="$REPO_ROOT/.buildkite/scripts/steps"
-check "no compare, publish or run step reads .gc_masked (only the arm's own headline rule does)" "" \
-  "$(grep -l 'gc_masked' "$STEPS"/*.sh "$STEPS"/lib/*.jq "$STEPS"/lib/perf-percore.sh 2>/dev/null | tr '\n' ' ')"
+# Item 44: the masked figure reaches compare and publish only through the published-series path.
+# The run step, the daily transform and the hardware matrix still never read it.
+check "only the published-series path reads the run's .gc_masked block" \
+  "perf-test-compare.sh perf-rw-multik6-series.jq perf-website-figures-rw.jq " \
+  "$(grep -l '\.gc_masked' "$STEPS"/*.sh "$STEPS"/lib/*.jq "$STEPS"/lib/perf-percore.sh 2>/dev/null | sed 's|.*/||' | tr '\n' ' ')"
+check "  ... and compare reads only its quiet-second floor, for the baseline key" "gc_masked.min_quiet_s " \
+  "$(grep -o 'gc_masked\.[a-z_]*' "$STEPS/perf-test-compare.sh" | sort -u | tr '\n' ' ')"
 for bad_env in PERF_RW_GC_MASK_MIN_QUIET_S=0 PERF_RW_GC_MASK_MIN_QUIET_S=2.5 PERF_RW_GC_MASK_MIN_QUIET_S=some; do
   run_h PERF_RW_TEST_RESOLVE_ONLY=true PERF_RW_K6_GOMEMLIMIT=off "$bad_env"
   check "rejected at startup: $bad_env" "2" "$RC"

@@ -29,16 +29,23 @@ schema_faq:
   data file _data/perf_figures.json; the charts are rendered from the pipeline's
   JSON output by images/perf-charts/render_perf_charts.py.
 
-  Closing the loop (performance-programme item 19): the daily perf run writes a
-  dated, self-describing result to S3, and .buildkite/scripts/steps/perf-website-publish.sh
-  regenerates _data/perf_figures.json from the latest VALID run and OPENS A PR when
-  the committed figures are >30 days old or a headline metric has moved >10%. It
-  publishes only the healthy-ceiling knee curve (peak labelled degraded) and, from a
-  post-fix regression.js run, per-behaviour percentiles; it never publishes the
-  internal-only regression detectors (see the plan's publish-versus-gate section).
+  Closing the loop (performance-programme items 19 and 44): each perf run writes a dated,
+  self-describing result to S3, and .buildkite/scripts/steps/perf-website-publish.sh regenerates
+  _data/perf_figures.json from it and ATTACHES A PATCH to the build when the committed figures
+  are >30 days old or a headline metric has moved >10%. It never publishes the internal-only
+  regression detectors (see the plan's publish-versus-gate section).
 
-  GENERATED regions (rendered from _data/perf_figures.json — the auto-refresh PR
-  rewrites the data file, so do NOT hand-edit their numbers):
+  THE PAGE HAS TWO STATES, chosen by the data file (the "if rule" blocks below; Liquid is parsed even inside this comment):
+    * no .headline_rule: every figure is the daily single-load-generator run's (perf queue);
+    * .headline_rule present: the HEADLINE (top level: source, headline, headline_rule,
+      throughput_ladder) is the multi-load-generator run's (perf-xl queue, a manual
+      PERF_XL=true build), and .single_k6, the charts, the "Latency by action" table and the
+      hardware-size table stay the daily run's.
+  Only the publish step's patch moves the page from the first state to the second. Keep both
+  branches of each "if rule" block in step when editing either.
+
+  GENERATED regions (rendered from _data/perf_figures.json — a refresh patch rewrites the data
+  file, so do NOT hand-edit their numbers):
     * the itemprop headline, the "at a glance" throughput bullet, and the
       per-instance paragraph below (throughput numbers only);
     * the Measurement provenance block;
@@ -46,16 +53,22 @@ schema_faq:
     * the "Latency by action" table (shown only for a post-fix run);
     * the "Throughput by hardware size" table, chart and sizing notes (from a
       manual hardware-matrix run; "not yet measured" until one exists, and carried
-      forward unchanged by daily refreshes).
-  HUMAN-MAINTAINED regions the auto-refresh does NOT touch — reconcile these by
-  hand when a refresh PR moves a headline (the PR body lists them): the page
-  `description` and the JSON-LD `schema_faq` answers in the front matter (Jekyll
-  does not render Liquid in front matter, and Google surfaces the FAQ), and the
-  matcher-scaling figures (a separate JMH source, not in the daily result).
+      forward unchanged by other refreshes).
+  HUMAN-MAINTAINED regions a refresh does NOT touch — reconcile these by hand when a refresh
+  moves the headline or switches the page's state (the build annotation lists them): the page `description` and the JSON-LD
+  `schema_faq` answers in the front matter (Jekyll does not render Liquid in front matter, and
+  Google surfaces the FAQ), the performance line in /llms.txt, and the matcher-scaling figures
+  (a separate JMH source, not in the perf result).
 -->
 
 {% assign figures = site.data.perf_figures %}
+{% assign rule = figures.headline_rule %}
+{% if rule %}{% assign sk = figures.single_k6 %}{% else %}{% assign sk = figures %}{% endif %}
+{% if rule %}
+<p itemprop="headline">A single MockServer instance holds a sub-millisecond median and a 99th-percentile latency within {{ figures.headline.p99_max_ms | default: 10 }}&nbsp;ms up to a healthy ceiling of {% if figures.headline.lower_bound %}at least {% endif %}{{ figures.headline.healthy_ceiling_rps_display | default: "136,000" }} requests/sec on six CPU cores, and request matching stays flat &mdash; up to 177&times; faster than a linear scan &mdash; as you scale to thousands of expectations.</p>
+{% else %}
 <p itemprop="headline">A single MockServer instance holds sub-millisecond median latency up to a healthy ceiling of {% if figures.headline.lower_bound %}at least {% endif %}{{ figures.headline.healthy_ceiling_rps_display | default: "60,000" }} requests/sec on six CPU cores, and request matching stays flat &mdash; up to 177&times; faster than a linear scan &mdash; as you scale to thousands of expectations.</p>
+{% endif %}
 
 <table class="table-standard">
     <thead>
@@ -83,25 +96,45 @@ schema_faq:
 <p>MockServer is built for high throughput and low, <em>predictable</em> latency from a single instance. The figures below come from an automated performance suite that runs on a dedicated, core-pinned CI machine; every chart is regenerated from the measured data on each run, so what you see is reproducible rather than cherry-picked. Jump to <a href="#how_tested">how MockServer is performance tested</a> for the methodology, or run the suite yourself from <span class="inline_code">mockserver-performance-test/</span>.</p>
 
 <ul>
+{% if rule %}
+    <li><strong>Throughput &amp; latency:</strong> on six CPU cores a single instance holds a <strong>sub-millisecond median</strong>{% if figures.headline.sub_ms_p95_through_rps_display %} and a <strong>sub-millisecond client-observed p95</strong> all the way to <strong>{{ figures.headline.sub_ms_p95_through_rps_display }} requests/sec</strong>{% endif %}, and keeps its <strong>p99 within {{ figures.headline.p99_max_ms | default: 10 }}&nbsp;ms</strong> up to a <strong>healthy ceiling of {% if figures.headline.lower_bound %}at least{% else %}about{% endif %} {{ figures.headline.healthy_ceiling_rps_display | default: "136,000" }} requests/sec</strong> (median {{ figures.headline.healthy_ceiling_p50_ms }}&nbsp;ms, p95 {{ figures.headline.healthy_ceiling_p95_ms }}&nbsp;ms, p99 {{ figures.headline.healthy_ceiling_p99_ms }}&nbsp;ms). That p99 is read over the seconds in which the load generators were not pausing for their own garbage collection (<a href="#p99_columns">why</a>).{% if figures.headline.no_measured_overload %}{% if figures.headline.lower_bound %} Higher rates were not measured reliably, so this is a floor rather than the instance's limit{% else %} No higher rate was measured reliably{% endif %}{% elsif figures.headline.peak_offered_rps > figures.headline.healthy_ceiling_rps %} Offered {{ figures.headline.peak_offered_rps_display }} req/s it still served {{ figures.headline.peak_achieved_rps_display }}, but past the ceiling it no longer met every healthy criterion, so that is a point on the overload curve, not an operating target{% endif %} (see the <a href="#throughput_table">throughput vs latency</a> table).</li>
+{% else %}
     <li><strong>Throughput &amp; latency:</strong> on six CPU cores a single instance holds a <strong>sub-millisecond median</strong> and a <strong>sub-millisecond client-observed p95</strong> all the way to <strong>36,000 requests/sec</strong>, and serves every request it is offered up to a <strong>healthy ceiling of {% if figures.headline.lower_bound %}at least{% else %}about{% endif %} {{ figures.headline.healthy_ceiling_rps_display | default: "60,000" }} requests/sec</strong> (p95 about {{ figures.headline.healthy_ceiling_p95_ms | default: 22 | round }}&nbsp;ms).{% if figures.headline.no_measured_overload %}{% if figures.headline.lower_bound %} Higher rates were not measured reliably, so this is a floor rather than the instance's limit{% else %} No higher rate was measured reliably{% endif %}{% else %} Pushed past that it can still <em>achieve</em> around {{ figures.headline.peak_achieved_rps_display | default: "59,905" }} req/s with the median still sub-millisecond, but it no longer keeps up with the offered rate and tail latency grows, so that peak is a point on the overload curve, not an operating target{% endif %} (see the <a href="#chart_throughput">throughput vs latency</a> chart).</li>
+{% endif %}
     <li><strong>Scales with expectations:</strong> request matching cost stays <strong>nearly flat</strong> as the number of registered expectations grows &mdash; <strong>up to 177&times; faster than a naive linear scan at 5,000 expectations</strong> &mdash; thanks to MockServer's candidate-matching index (see the <a href="#chart_matching">matcher scaling</a> chart).</li>
     <li><strong>Protocol coverage:</strong> HTTP/1.1, HTTPS and HTTP/2 are all served with low overhead, measured side by side on every run (see <a href="#chart_protocols">latency by action</a>).</li>
 </ul>
 
 <h2>Performance at a glance</h2>
 
+{% if rule %}
+<p><strong>The charts in this section plot the daily run</strong>{% if sk.source.instance_type %} on a smaller machine ({{ sk.source.instance_type }}){% endif %}, driven by a single load generator. That load generator runs out{% if sk.headline.healthy_ceiling_rps_display %} at about {{ sk.headline.healthy_ceiling_rps_display }} requests/sec{% endif %}, well before a six-core MockServer does, so the charts show the shape of the curve at lower rates; the headline figures above come from the multi-generator run in the <a href="#throughput_table">throughput vs latency</a> table.</p>
+
+<a id="chart_throughput" class="anchor" href="#chart_throughput">&nbsp;</a>
+<p>As offered load increases, achieved throughput tracks it almost exactly while the median stays flat &mdash; right up to the highest rate this run's single load generator can deliver. That flat region is the headroom you can rely on; beyond it, latency rises predictably rather than collapsing.</p>
+<img class="ui_image" src="/images/perf_throughput_latency.png" alt="MockServer throughput vs latency in the single-load-generator run: latency stays flat as throughput increases, and achieved throughput tracks offered load">
+
+{% else %}
 <a id="chart_throughput" class="anchor" href="#chart_throughput">&nbsp;</a>
 <p>As offered load increases, achieved throughput tracks it almost exactly while latency percentiles stay flat &mdash; right up to the point the single instance saturates. That flat region is the headroom you can rely on; beyond it, latency rises predictably rather than collapsing.</p>
 <img class="ui_image" src="/images/perf_throughput_latency.png" alt="MockServer throughput vs latency: latency stays flat as throughput increases until the instance saturates, and achieved throughput tracks offered load">
 
+{% endif %}
 <a id="chart_matching" class="anchor" href="#chart_matching">&nbsp;</a>
 <p>Mock servers are often run with hundreds or thousands of expectations. MockServer keeps matching cheap at scale by narrowing each request to a small set of <em>candidate</em> expectations instead of testing every one. The difference grows with the number of expectations:</p>
 <img class="ui_image" src="/images/perf_matching_scaling.png" alt="Request matching time per request stays flat with MockServer's candidate index as the number of expectations grows, versus a steeply rising linear scan">
 
+{% if rule %}
+<a id="chart_percentiles" class="anchor" href="#chart_percentiles">&nbsp;</a>
+<p>At the highest rate that single load generator delivered cleanly &mdash; around {{ sk.headline.healthy_ceiling_rps_display | default: "60,000" }} requests/sec &mdash; the median stays sub-millisecond at <strong>{{ sk.headline.healthy_ceiling_p50_ms | default: "0.179" }}&nbsp;ms</strong> and the client-observed p95 is <strong>{{ sk.headline.healthy_ceiling_p95_ms | default: "21.893" }}&nbsp;ms</strong>. {% if figures.headline.sub_ms_p95_through_rps > sk.headline.healthy_ceiling_rps %}Most of that tail is the single load generator's own: driven by {{ figures.source.k6_processes | default: "several" }} load generators, the p95 stays under a millisecond to {{ figures.headline.sub_ms_p95_through_rps_display }} requests/sec (see the <a href="#throughput_table">table</a>). {% endif %}The p95 and p99 figures are client-observed end-to-end &mdash; see the note under that table for what they mean.</p>
+<img class="ui_image" src="/images/perf_latency_percentiles.png" alt="MockServer response latency distribution at the highest rate of the single-load-generator run, showing p50, p90, p95, p99 and p99.9">
+
+{% else %}
 <a id="chart_percentiles" class="anchor" href="#chart_percentiles">&nbsp;</a>
 <p>At the {% if figures.headline.lower_bound %}highest measured healthy rate{% else %}knee{% endif %} &mdash; {% if figures.headline.lower_bound %}{{ figures.headline.healthy_ceiling_rps_display }}{% else %}around {{ figures.headline.healthy_ceiling_rps_display | default: "60,000" }}{% endif %} requests/sec &mdash; the median stays sub-millisecond at <strong>{{ figures.headline.healthy_ceiling_p50_ms | default: "0.179" }}&nbsp;ms</strong> and the client-observed p95 is <strong>{{ figures.headline.healthy_ceiling_p95_ms | default: "21.893" }}&nbsp;ms</strong>. The p95 and p99 columns in the table below are client-observed end-to-end figures &mdash; they differ substantially from the server&rsquo;s own measurement; see the note under that table for what they mean.</p>
 <img class="ui_image" src="/images/perf_latency_percentiles.png" alt="MockServer response latency distribution at the throughput knee showing p50, p90, p95, p99 and p99.9">
 
+{% endif %}
 <a id="chart_protocols" class="anchor" href="#chart_protocols">&nbsp;</a>
 <p>The same actions measured over HTTP/1.1 and over HTTPS with HTTP/2 show that TLS and HTTP/2 add only a fraction of a millisecond &mdash; even a forwarded request or a large templated response stays within single-digit milliseconds:</p>
 <img class="ui_image" src="/images/perf_http_vs_h2.png" alt="Median latency by action (match, forward, template, large body) over HTTP/1.1 versus HTTPS with HTTP/2">
@@ -138,10 +171,30 @@ schema_faq:
         </ul>
     </li>
     <li><strong>Reproducible and core-pinned.</strong> Measurement runs on a dedicated CI machine with the server, upstream and load generator pinned to separate CPU cores so they do not steal cycles from each other &mdash; the single biggest factor in number quality. Every chart is regenerated from the pipeline's JSON output.</li>
+{% if rule %}
+    <li><strong>Enough load generators.</strong> One k6 process cannot drive a six-core MockServer to its limit{% if sk.headline.healthy_ceiling_rps_display %} &mdash; on its own it runs out at about {{ sk.headline.healthy_ceiling_rps_display }} requests/sec{% endif %}. The headline run therefore drives one MockServer from {{ figures.source.k6_processes | default: "four" }} k6 processes on the machine's other CPU socket and merges their measurements, so the ceiling it finds is MockServer's rather than the load generator's.</li>
+{% endif %}
     <li><strong>Automated regression detection.</strong> Each run is stored and compared against a rolling baseline using a robust median + MAD test, so a real slowdown is flagged without false alarms from run-to-run noise.</li>
 </ul>
 
 <a id="measurement_provenance" class="anchor" href="#measurement_provenance">&nbsp;</a>
+{% if rule %}
+{% if figures and figures.source %}
+{% assign prov = figures.source %}
+<p><strong>Measurement provenance for the headline figures on this page.</strong> Every number below is dated and tied to the run that produced it &mdash; a figure without that context is how these claims went stale before:</p>
+<table class="results">
+    <tbody>
+    <tr><td>measured</td><td>{{ prov.run_timestamp_utc }}{% if prov.build_number %} &middot; build&nbsp;#{{ prov.build_number }}{% endif %}{% if prov.commit %} &middot; commit&nbsp;{{ prov.commit }}{% endif %}</td></tr>
+    <tr><td>MockServer version</td><td>{{ prov.mockserver_version | default: "not recorded" }}</td></tr>
+    <tr><td>hardware</td><td>{% if prov.instance_type and prov.instance_type != "not recorded" %}AWS {{ prov.instance_type }}, {% endif %}server pinned to {% if prov.server_physical_cores %}{{ prov.server_physical_cores }} physical cores (CPUs {{ prov.server_cpus }}){% else %}{{ prov.server_cpus }}{% endif %}; {% if prov.k6_processes %}{{ prov.k6_processes }} k6 load generators{% if prov.k6_cpus_per_process %}, each pinned to {{ prov.k6_cpus_per_process }} CPUs{% endif %}{% if prov.placement == "numa_split" %} on the other CPU socket{% endif %}{% else %}load generator on separate cores{% endif %}</td></tr>
+    <tr><td>JVM / GC / heap</td><td>{% if prov.config_recorded %}JDK {{ prov.jdk }}, {{ prov.gc }}{% if prov.heap_max_mib %}, {{ prov.heap_max_mib }}&nbsp;MiB max heap{% endif %}{% if prov.jvm_diagnostics == "gc" %}, with the JVM writing a GC log to a file{% endif %}{% else %}<em>not recorded in this run's artefact</em> (predates the self-describing result schema){% endif %}</td></tr>
+    <tr><td>log level</td><td>{{ prov.log_level }}{% if prov.disable_system_out %}, system-out disabled{% endif %} &mdash; reduced below the shipped <span class="inline_code">INFO</span> default for measurement, so these are <strong>not</strong> default-configuration figures</td></tr>
+    {% if rule %}<tr><td>healthy ceiling rule</td><td>achieved within 5&thinsp;% of offered, no errors, median flat, and p99 within {{ rule.p99_max_ms }}&nbsp;ms over the seconds with no load-generator garbage collection (at least {{ rule.min_quiet_s }} such seconds per rate)</td></tr>{% endif %}
+    </tbody>
+</table>
+<p style="font-size:0.9em">{{ prov.note }}{% if sk.source %} The charts and the latency-by-action table come from the daily single-load-generator run: {{ sk.source.run_timestamp_utc }}{% if sk.source.build_number %} &middot; build&nbsp;#{{ sk.source.build_number }}{% endif %}{% if sk.source.instance_type %} &middot; {{ sk.source.instance_type }}{% endif %}{% if sk.source.heap_max_mib %} &middot; {{ sk.source.heap_max_mib }}&nbsp;MiB max heap{% endif %}.{% endif %}</p>
+{% endif %}
+{% else %}
 {% assign figures = site.data.perf_figures %}
 {% if figures and figures.source %}
 {% assign prov = figures.source %}
@@ -157,14 +210,48 @@ schema_faq:
 </table>
 <p style="font-size:0.9em">{{ prov.note }}</p>
 {% endif %}
+{% endif %}
 <p>Real-world throughput and latency depend on your hardware, core count, payload size, expectation complexity and JVM/configuration tuning &mdash; more CPU cores raise peak throughput, and reducing what the request log retains (<span class="inline_code">logLevel</span> or <span class="inline_code">maxLogEntries</span>) frees heap and cuts allocation on the matching path, while <span class="inline_code">disableSystemOut</span> and <span class="inline_code">disableLogging</span> only silence console output and change neither &mdash; so treat these as a solid, dated reference and benchmark your own workload.</p>
 
 <h2>Detailed results</h2>
 
+{% if rule %}
+<a id="throughput_table" class="anchor" href="#throughput_table">&nbsp;</a>
+<h3>Throughput vs latency</h3>
+<p>Offered request rate against achieved throughput and response-latency percentiles for a single instance matching a simple expectation. The <strong>healthy ceiling</strong> is the highest offered rate where the instance kept up (achieved within 5&thinsp;% of offered, with no errors), its median stayed flat <em>and</em> its p99 stayed within {{ figures.headline.p99_max_ms | default: 10 }}&nbsp;ms, at that rate and at every rate tested below it; rows past it are shaded &mdash; they are the overload curve, published for honesty rather than as an operating target.</p>
+{% else %}
 <h3>Throughput vs latency</h3>
 <p>Offered request rate against achieved throughput and response-latency percentiles for a single instance matching a simple expectation. The <strong>healthy ceiling</strong> is the highest offered rate where the instance kept up (achieved within 5&thinsp;% of offered) <em>and</em> latency stayed flat, at that rate and at every rate below it; rows past it are shaded &mdash; they are the overload curve, published for honesty rather than as an operating target.</p>
-{% assign figures = site.data.perf_figures %}
+{% endif %}
 {% if figures and figures.throughput_ladder %}
+{% if rule %}
+<table class="results">
+    <thead>
+    <tr><td>offered req/s</td><td>achieved req/s</td><td>p50</td><td>p95</td><td>p99</td><td>p99, generator GC left out</td><td>seconds counted</td><td>errors</td><td>state</td></tr>
+    </thead>
+    <tbody>
+    {% for rung in figures.throughput_ladder %}
+    <tr{% if rung.degraded %} style="opacity:0.6"{% endif %}>
+        <td>{{ rung.offered_display }}</td>
+        <td>{{ rung.achieved_display }}</td>
+        <td>{{ rung.p50_ms }}</td>
+        <td>{{ rung.p95_ms }}</td>
+        <td>{{ rung.p99_ms }}</td>
+        <td>{% if rung.p99_gc_masked_ms %}{{ rung.p99_gc_masked_ms }}{% else %}&mdash;{% endif %}</td>
+        <td>{% if rung.quiet_s %}{{ rung.quiet_s }} of {{ rung.measured_s }}{% else %}&mdash;{% endif %}</td>
+        <td>{{ rung.error_pct }}%</td>
+        <td>{% if rung.degraded %}past the ceiling{% else %}healthy{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% if figures.source.sweep_latency_settle_s > 0 %}<p>Each rate is held for a fixed step. The first {{ figures.source.sweep_latency_settle_s }}&nbsp;seconds after each step up are left out of the latency percentiles, because they capture the load generator starting up at the new rate rather than the server; throughput and errors still count the whole step.</p>{% else %}<p>These latency figures still include the first seconds after each step up in rate, while the load generator starts up at the new rate, so at moderate load the p95 and p99 overstate steady-state latency (see below).</p>{% endif %}
+<p>Latencies are in milliseconds. Achieved throughput tracks the offered rate up to the <strong>healthy ceiling of {% if figures.headline.lower_bound %}&ge;&nbsp;{% endif %}{{ figures.headline.healthy_ceiling_rps_display }}&nbsp;req/s</strong> (median {{ figures.headline.healthy_ceiling_p50_ms }}&nbsp;ms, p95 {{ figures.headline.healthy_ceiling_p95_ms }}&nbsp;ms, p99 {{ figures.headline.healthy_ceiling_p99_ms }}&nbsp;ms with load-generator garbage collection left out and {{ figures.headline.healthy_ceiling_p99_whole_rung_ms }}&nbsp;ms over the whole step, on {{ figures.headline.server_cores }} cores).{% if rule.first_failure and rule.first_failure.p99_gc_masked_ms %} The next rate tested, {{ rule.first_failure.offered_display }}&nbsp;req/s, is the first past the ceiling: its p99 was {{ rule.first_failure.p99_gc_masked_ms }}&nbsp;ms.{% endif %}{% unless figures.headline.no_measured_overload %}{% if figures.headline.peak_offered_rps > figures.headline.healthy_ceiling_rps %} The most the instance served at any rate tested was about {{ figures.headline.peak_achieved_rps_display }}&nbsp;req/s, at {{ figures.headline.peak_offered_rps_display }} offered &mdash; a point on the overload curve, not a rate to size a deployment for.{% endif %}{% endunless %} Provision against the healthy ceiling.{% if figures.headline.ladder_step_rps_display %} Rates near the ceiling are tested in steps of {{ figures.headline.ladder_step_rps_display }}&nbsp;req/s, so the ceiling is accurate to about one step and can land one step either way from run to run.{% endif %} (More CPU cores raise it; this run pins the server to {{ figures.headline.server_cores }}.){% if figures.headline.lower_bound %} <strong>This ceiling is a lower bound</strong> &mdash; {{ figures.headline.lower_bound_reason }}.{% endif %}</p>
+
+<a id="p99_columns" class="anchor" href="#p99_columns">&nbsp;</a>
+<p><strong>Why there are two p99 columns.</strong> The load generator, k6, is a Go program and pauses briefly for its own garbage collection. A request that completes around such a pause is timed late by the client even when MockServer answered on time, and at high rates those pauses, not MockServer, set the client-observed tail. The first p99 column counts every second of the step. The second leaves out each second in which any of the load generators was collecting, and the second after it; the &ldquo;seconds counted&rdquo; column says how many seconds remain. The {{ figures.headline.p99_max_ms | default: 10 }}&nbsp;ms bound reads the second column. It is still a client-observed figure and a sample of the step, not a measurement of MockServer free of every outside effect: MockServer still served the burst that follows each pause.</p>
+
+{% else %}
 <table class="results">
     <thead>
     <tr><td>offered req/s</td><td>achieved req/s</td><td>p50</td><td>p95</td><td>p99</td><td>errors</td><td>state</td></tr>
@@ -186,13 +273,22 @@ schema_faq:
 {% if figures.source.sweep_latency_settle_s > 0 %}<p>Each rate is held for a fixed step. The first {{ figures.source.sweep_latency_settle_s }}&nbsp;seconds after each step up are left out of the latency percentiles, because they capture the load generator starting up at the new rate rather than the server; throughput and errors still count the whole step.</p>{% else %}<p>These latency figures still include the first seconds after each step up in rate, while the load generator starts up at the new rate, so at moderate load the p95 and p99 overstate steady-state latency (see below).</p>{% endif %}
 <p>Latencies are in milliseconds. Achieved throughput tracks the offered rate up to the <strong>healthy ceiling of {% if figures.headline.lower_bound %}&ge;&nbsp;{% endif %}{{ figures.headline.healthy_ceiling_rps_display }}&nbsp;req/s</strong> (median {{ figures.headline.healthy_ceiling_p50_ms }}&nbsp;ms, p95 {{ figures.headline.healthy_ceiling_p95_ms }}&nbsp;ms on {{ figures.headline.server_cores }} cores).{% unless figures.headline.no_measured_overload %} Beyond it the instance is in overload: the highest throughput it ever <em>achieves</em> is about {{ figures.headline.peak_achieved_rps_display }}&nbsp;req/s, but by then the median has climbed to {{ figures.headline.peak_p50_ms }}&nbsp;ms &mdash; that peak is a point on the curve on its way down, not a rate to size a deployment for.{% endunless %} Provision against the healthy ceiling. (More CPU cores raise it; this run pins the server to {{ figures.headline.server_cores }}.){% if figures.headline.lower_bound %} <strong>This ceiling is a lower bound</strong> &mdash; {{ figures.headline.lower_bound_reason }}.{% endif %}</p>
 
+{% endif %}
 <p><strong>What the p95 and p99 figures mean.</strong> These are client-observed, end-to-end latencies &mdash; every millisecond between the client dispatching the request and receiving the first byte of the response.</p>
 
+{% if rule %}
+<p>When those first seconds are counted, the slower tail at moderate load comes from the load rig, not MockServer: a transient at the start of each rate step, while the load generator starts up at the new rate. In a separate test on the single-load-generator rig, held at a steady 24,000&nbsp;req/s, the client measured p99 0.343&nbsp;ms and p99.9 1.43&nbsp;ms, and none of the 7.25&nbsp;million requests took the server more than 5&nbsp;ms. {% if figures.source.sweep_latency_settle_s > 0 %}That start-of-step transient is left out of the table above.{% else %}The table above still includes that start-of-step transient.{% endif %}</p>
+{% else %}
 <p>When those first seconds are counted, the slower tail at moderate load comes from the load rig, not MockServer: a transient at the start of each rate step, while the load generator starts up at the new rate. Held at a steady 24,000&nbsp;req/s, the client measured p99 0.343&nbsp;ms and p99.9 1.43&nbsp;ms, and none of the 7.25&nbsp;million requests took the server more than 5&nbsp;ms. {% if figures.source.sweep_latency_settle_s > 0 %}That start-of-step transient is left out of the table above.{% else %}The table above still includes that start-of-step transient.{% endif %}</p>
+{% endif %}
 
 <p><strong>The recorded-request store is not application logging.</strong> The received-request and response entries it holds &mdash; the ones a <span class="inline_code">verify</span> reads &mdash; are stored whatever the log level, so lowering the level does not shrink them. It does drop the per-expectation match/did-not-match diagnostics, which are only produced at <span class="inline_code">INFO</span> or finer, so on a workload with many expectations a lower level still helps. It is the store behind request verification (<span class="inline_code">verify</span>), the <span class="inline_code">retrieveRecordedRequests</span> API, and the dashboard &mdash; it fills regardless of log level, and reaching for <span class="inline_code">disableLogging=true</span> when you see latency spikes will not help.</p>
 
+{% if rule %}
+<p><strong>This measurement uses a small heap.</strong> The server ran with a maximum heap of {% if figures.source.heap_max_mib %}{{ figures.source.heap_max_mib }}&nbsp;MiB{% else %}about 1&nbsp;GB{% endif %}, so its own garbage collection is exercised throughout. A deployment with a larger heap collects far less often.</p>
+{% else %}
 <p><strong>This measurement uses a deliberately constrained heap.</strong> The server ran with 1.2&nbsp;GB specifically to exercise garbage collection. A deployment with a larger heap collects far less often.</p>
+{% endif %}
 
 <p><strong>Levers for heap use:</strong></p>
 <ul>
@@ -209,7 +305,11 @@ schema_faq:
 <h3>Throughput by hardware size</h3>
 {% assign hw = site.data.perf_figures.hw_matrix %}
 {% if hw and hw.points and hw.points.size > 0 %}
+{% if rule %}
+<p>To help you choose a container size, the same test was run against single MockServer containers of different sizes, each limited to that many CPU cores and that much memory and using the Docker image's default memory settings (no <span class="inline_code">-Xmx</span>). {% assign hw_lower = hw.points | where: "lower_bound", true %}This is a separate run from the headline figures above{% if hw.source.instance_type and figures.source.instance_type and hw.source.instance_type != figures.source.instance_type %}, on a different machine ({{ hw.source.instance_type }} rather than {{ figures.source.instance_type }}){% endif %}, so its 6-core row can differ from them{% if hw_lower.size > 0 %}; its rows marked &ge; are lower bounds and can sit well below the headline{% endif %}.</p>
+{% else %}
 <p>To help you choose a container size, the same test was run against single MockServer containers of different sizes, each limited to that many CPU cores and that much memory and using the Docker image's default memory settings (no <span class="inline_code">-Xmx</span>). This is a separate run from the headline figures above, so its 6-core row can differ from them.</p>
+{% endif %}
 <p><strong>Healthy ceiling:</strong> the highest offered rate MockServer served at &ge;95% with no errors and median latency within 3&times; of its median at the lowest rates tested, at that rate and at every rate tested below it. Measured on {% if hw.source.instance_type %}an AWS {{ hw.source.instance_type }}{% else %}the performance test machine{% endif %}{% if hw.source.host_physical_cores %} ({{ hw.source.host_physical_cores }} physical cores){% endif %}; each size is a fresh container pinned to its own {% if hw.source.cpus_physically_verified %}physical {% endif %}CPU cores{% if hw.source.k6_processes %}; {{ hw.source.k6_processes }} k6 load generators run on {% if hw.source.k6_physical_cores %}{{ hw.source.k6_physical_cores }} {% endif %}other cores{% else %}; the load generator runs on other cores{% endif %}. Rows marked &ge; may have been limited by the load generator, by the highest rate tested, or by something other than MockServer's CPU &mdash; MockServer handled at least that much.</p>
 <p><strong>Per core</strong> is the healthy ceiling divided by the cores; <strong>vs 1 core</strong> compares it with the 1-core row, so 1.00 would be perfectly linear scaling. <strong>Peak</strong> is the most MockServer served on any rate the load generator could deliver cleanly, which can be above the healthy ceiling once latency has started to rise. The latency columns are measured at the healthy ceiling. Rates are tested in steps, so each ceiling is accurate to about one step.</p>
 <table class="results">
@@ -301,7 +401,11 @@ schema_faq:
 
 {% if figures.behaviours %}
 <h3>Latency by action</h3>
+{% if rule %}
+<p>Fixed-rate latency per behaviour &mdash; a simple match, a forwarded request, a templated response and a large body &mdash; over HTTP/1.1 and over HTTPS with HTTP/2, from the daily single-load-generator run{% if sk.source.build_number %} (build&nbsp;#{{ sk.source.build_number }}{% if sk.source.instance_type %}, {{ sk.source.instance_type }}{% endif %}){% endif %}:</p>
+{% else %}
 <p>Fixed-rate latency per behaviour &mdash; a simple match, a forwarded request, a templated response and a large body &mdash; over HTTP/1.1 and over HTTPS with HTTP/2, from the same run as the figures above:</p>
+{% endif %}
 <table class="results">
     <thead>
     <tr><td>action</td><td>protocol</td><td>p50</td><td>p95</td><td>p99</td></tr>
@@ -312,7 +416,11 @@ schema_faq:
     {% endfor %}
     </tbody>
 </table>
+{% if rule %}
+<p>Latencies are in milliseconds, measured at a fixed arrival rate on a six-core instance.</p>
+{% else %}
 <p>Latencies are in milliseconds, measured at a fixed arrival rate on the same six-core instance.</p>
+{% endif %}
 {% endif %}
 
 <h2>Tuning for your workload</h2>

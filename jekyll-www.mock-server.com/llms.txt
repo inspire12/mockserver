@@ -117,7 +117,7 @@
 - [AsyncAPI Broker Mocking](https://www.mock-server.com/mock_server/asyncapi_messaging.html): Mock Kafka and MQTT brokers using AsyncAPI 2.x/3.x specs — publish examples, subscribe to record messages, validate against JSON Schema, all via REST or Java API
 
 ## Optional
-- [Scalability & Latency](https://www.mock-server.com/mock_server/performance.html): MockServer serving-performance benchmarks — one instance serves 32,000+ requests/sec at sub-millisecond median latency with flat request matching as expectations scale, measured with k6 and JMH, plus tuning guidance
+- [Scalability & Latency](https://www.mock-server.com/mock_server/performance.html): MockServer serving-performance benchmarks — one instance serves 57,000+ requests/sec at sub-millisecond median latency with flat request matching as expectations scale, measured with k6 and JMH, plus tuning guidance
 - [Control Plane Auth](https://www.mock-server.com/mock_server/control_plane_authorisation.html): Secure the control plane API with mTLS or JWT authentication
 - [Response Templates](https://www.mock-server.com/mock_server/response_templates.html): Use Mustache or Velocity templates for dynamic responses
 - [Clearing & Resetting](https://www.mock-server.com/mock_server/clearing_and_resetting.html): Clear specific expectations/logs or reset all state

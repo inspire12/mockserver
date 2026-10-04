@@ -87,6 +87,9 @@ bash "$REPO_ROOT/.buildkite/scripts/test/perf-info-budget-test.sh"
 echo "--- perf-xl dispatch checks (guard YAML with and without PERF_XL, PERF_RUN_ARM switch)"
 bash "$REPO_ROOT/.buildkite/scripts/test/perf-xl-dispatch-test.sh"
 
+echo "--- perf-xl publish checks (item 44: series membership, compare persists only a member, publish per source, committed page data)"
+bash "$REPO_ROOT/.buildkite/scripts/test/perf-xl-publish-test.sh"
+
 echo "--- website publish persist-gate checks (publish only from a build whose compare persisted a run)"
 bash "$REPO_ROOT/.buildkite/scripts/test/perf-publish-persist-gate-test.sh"
 

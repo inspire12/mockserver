@@ -59,8 +59,10 @@ guard xl_all PERF_XL=true PERF_SERVING_HW_MATRIX=true PERF_SERVING_RW_MULTIK6=tr
 guard xl_one PERF_XL=1
 check "xl: two uploads" "2" "$(uploads xl)"
 check "xl: main upload identical to unset" "same" "$(cmp -s "$WORK/unset/upload-1.yml" "$WORK/xl/upload-1.yml" && echo same || echo differs)"
-check "xl: one perf-xl step (multi-k6 only)" "1" "$(grep -c '^  - label:' "$WORK/xl/upload-2.yml")"
-check "xl + both arms: two perf-xl steps" "2" "$(grep -c '^  - label:' "$WORK/xl_all/upload-2.yml")"
+check "xl: one perf-xl step (multi-k6 only)" "1" "$(grep -c 'queue: "perf-xl"' "$WORK/xl/upload-2.yml")"
+check "xl: plus the arm's persist and publish steps" "3" "$(grep -c '^  - label:' "$WORK/xl/upload-2.yml")"
+check "xl + both arms: two perf-xl steps" "2" "$(grep -c 'queue: "perf-xl"' "$WORK/xl_all/upload-2.yml")"
+check "xl + both arms: four steps in all" "4" "$(grep -c '^  - label:' "$WORK/xl_all/upload-2.yml")"
 check "xl + both arms: perf-run timeout stays 70" "70" "$(run_timeout xl_all)"
 check "PERF_XL=1 is not the opt-in (run.sh reads exactly true)" "1" "$(uploads xl_one)"
 check "PERF_XL=1 says it was not dispatched" "1" "$(grep -cF -- "--- :warning: PERF_XL='1' is not 'true'; perf-xl not dispatched" "$WORK/xl_one.log" || true)"
@@ -72,6 +74,16 @@ check "arms" "rw_multik6 hw_matrix" "$(awk -F'"' '/PERF_RUN_ARM:/ {print $2}' "$
 # A perf-xl artifact must never carry a name compare or publish downloads by exact match.
 names="$(awk -F'"' '/PERF_RUN_NAME:/{print $2}' "$XL")"
 check "every PERF_RUN_NAME is perfxl- prefixed" "2" "$(grep -c '^perfxl-' <<<"$names")"
+# Item 44: the multi-k6 arm's result is persisted by its own compare and published from runs-perf-xl/.
+step_of() { awk -v k="key: \"$2\"" '/^  - label:/{if (f) exit; buf=""} {buf=buf $0 "\n"} index($0, k){f=1} END{if (f) printf "%s", buf}' "$1"; }
+persist="$(step_of "$XL" perfxl-rw-multik6-persist)"; publish="$(step_of "$XL" perfxl-rw-multik6-publish)"
+check "persist: hard edge on the arm" "1" "$(grep -c 'depends_on: "perfxl-rw-multik6"$' <<<"$persist" || true)"
+check "persist: compare reads the arm's own result" "1" \
+  "$(grep -c 'PERF_COMPARE_RESULT_ARTIFACT: "perfxl-rw-multik6-perf-result.json"' <<<"$persist" || true)"
+check "persist: on the perf queue (the S3 grant), never soft_fail" "1|0" \
+  "$(grep -c 'queue: "perf"$' <<<"$persist" || true)|$(grep -c soft_fail <<<"$persist" || true)"
+check "publish: hard edge on persist, soft_fail, multi-k6 source" "1|1|1" \
+  "$(grep -c 'depends_on: "perfxl-rw-multik6-persist"' <<<"$publish" || true)|$(grep -c 'soft_fail: true' <<<"$publish" || true)|$(grep -c 'PERF_PUBLISH_SOURCE: "rw_multik6"' <<<"$publish" || true)"
 check "perf-xl keys do not collide with the main steps" "" \
   "$(comm -12 <(awk -F'"' '/key:/{print $2}' "$WORK/xl_all/upload-1.yml" | sort) <(awk -F'"' '/key:/{print $2}' "$XL" | sort))"
 

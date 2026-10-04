@@ -11,6 +11,8 @@ set -euo pipefail
 # Flow:
 #   1. gather this run's result.json (+ perf-microbench.json) and merge them
 #   2. persist to s3://<bucket>/runs/<branch>/<iso>__<sha>.json   (history; runs-<queue>/ off the perf queue)
+#      With PERF_COMPARE_RESULT_ARTIFACT naming a perf-xl multi-k6 arm result, the run is persisted to
+#      runs-perf-xl/ only when it is a member of the published series (lib/perf-rw-multik6-series.jq).
 #   3. pull the last N PRIOR runs; if < MIN_BASELINE, annotate "warming up"
 #   4. per metric: rolling baseline = median + MAD; flag a regression when the
 #      head value crosses max(median + 3·1.4826·MAD, percent-floor / abs-floor).
@@ -45,9 +47,15 @@ MIN_BASELINE="${PERF_MIN_BASELINE:-5}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/perf-compare.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
+# A PERF_XL build runs this step twice: for the daily result and for the multi-k6 arm's own. An
+# annotation replaces an earlier one with the same context, so each mode has its own contexts.
+ANNOTATE_CONTEXT=perf-regression; PERSISTED_KEY_CONTEXT=perf-persisted-key
+if [ "${PERF_COMPARE_RESULT_ARTIFACT:-perf-result.json}" != perf-result.json ]; then
+  ANNOTATE_CONTEXT=perf-regression-xl; PERSISTED_KEY_CONTEXT=perf-xl-persisted-key
+fi
 annotate() { # style, body
   if command -v buildkite-agent >/dev/null 2>&1; then
-    printf '%s\n' "$2" | buildkite-agent annotate --style "$1" --context perf-regression || true
+    printf '%s\n' "$2" | buildkite-agent annotate --style "$1" --context "$ANNOTATE_CONTEXT" || true
   fi
   printf '\n%s\n' "$2"
 }
@@ -127,6 +135,14 @@ fi
 
 # --- 1. gather this run's result ----------------------------------------------
 RESULT="$WORK/result.json"
+# The default is the daily run's result. The perf-xl multi-k6 arm's own compare step names its
+# arm-only result instead (item 44); the daily run's supplementary artifacts are never merged into it.
+RESULT_ARTIFACT="${PERF_COMPARE_RESULT_ARTIFACT:-perf-result.json}"
+if ! [[ "$RESULT_ARTIFACT" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.json$ ]]; then
+  annotate "error" ":no_entry: **Perf compare: unusable result artifact name** — \`PERF_COMPARE_RESULT_ARTIFACT\` is \`${RESULT_ARTIFACT}\`."
+  exit 1
+fi
+DEFAULT_RESULT=false; [ "$RESULT_ARTIFACT" = perf-result.json ] && DEFAULT_RESULT=true
 if command -v buildkite-agent >/dev/null 2>&1; then
   # FAIL CLOSED, like every other precondition in this script. A missing result is
   # the most fundamental failure there is — there is nothing to compare, nothing to
@@ -140,14 +156,14 @@ if command -v buildkite-agent >/dev/null 2>&1; then
   # the guarantee now rests on Buildkite's dependency semantics rather than on the
   # step never starting. So this path is made loud rather than left as a silent
   # green that only a correct reading of those semantics keeps unreachable.
-  if ! buildkite-agent artifact download perf-result.json "$WORK/"; then
-    annotate "error" ":no_entry: **Perf compare found NO RESULT to compare** — \`perf-result.json\` was not uploaded by this build.
+  if ! buildkite-agent artifact download "$RESULT_ARTIFACT" "$WORK/"; then
+    annotate "error" ":no_entry: **Perf compare found NO RESULT to compare** — \`${RESULT_ARTIFACT}\` was not uploaded by this build.
 
 The measurement step produced nothing, so there is no run to gate, baseline or publish. This fails the build deliberately (fail-closed): a missing result must never read as a passing comparison."
-    echo "ERROR: no perf-result.json artifact" >&2
+    echo "ERROR: no ${RESULT_ARTIFACT} artifact" >&2
     exit 1
   fi
-  cp "$WORK/perf-result.json" "$RESULT"
+  cp "$WORK/$RESULT_ARTIFACT" "$RESULT"
   buildkite-agent artifact download perf-microbench.json "$WORK/" 2>/dev/null || true
   buildkite-agent artifact download perf-microbench-extra.json "$WORK/" 2>/dev/null || true
   buildkite-agent artifact download perf-sweep.json "$WORK/" 2>/dev/null || true
@@ -162,6 +178,28 @@ else
   [ -f "$REPO_ROOT/perf-scaling.json" ] && cp "$REPO_ROOT/perf-scaling.json" "$WORK/perf-scaling.json" || true
   [ -f "$REPO_ROOT/perf-churn.json" ] && cp "$REPO_ROOT/perf-churn.json" "$WORK/perf-churn.json" || true
   [ -f "$REPO_ROOT/perf-h2-multiplex.json" ] && cp "$REPO_ROOT/perf-h2-multiplex.json" "$WORK/perf-h2-multiplex.json" || true
+fi
+# Arm mode: the perf-xl multi-k6 arm's result, named explicitly. A daily-named result that is an
+# arm-only one, or an arm artifact that is not the multi-k6 arm, fails closed rather than being
+# baselined against the wrong series.
+if ! RUN_ARM="$(jq -er '.run_arm // ""' "$RESULT" 2>/dev/null)"; then
+  annotate "error" ":no_entry: **Perf compare: \`${RESULT_ARTIFACT}\` is not readable JSON** — nothing was persisted or compared."
+  exit 1
+fi
+ARM_MODE=false
+if [ "$DEFAULT_RESULT" != true ] || [ -n "$RUN_ARM" ]; then
+  if [ "$DEFAULT_RESULT" = true ] || [ "$RUN_ARM" != rw_multik6 ]; then
+    annotate "error" ":no_entry: **Perf compare: result and artifact disagree — not persisted** — \`${RESULT_ARTIFACT}\` carries \`run_arm\` \`${RUN_ARM:-none}\`. Only the multi-k6 arm's own artifact may carry an arm-only result, and the daily \`perf-result.json\` may not."
+    exit 1
+  fi
+  ARM_MODE=true
+fi
+PERSISTED_META_KEY=perf-baseline-persisted-key
+[ "$ARM_MODE" = true ] && PERSISTED_META_KEY=perf-xl-persisted-key
+# An arm-only result stands alone: none of the daily run's supplementary artifacts is merged into it.
+if [ "$ARM_MODE" = true ]; then
+  rm -f "$WORK"/perf-microbench.json "$WORK"/perf-microbench-extra.json "$WORK"/perf-sweep.json \
+        "$WORK"/perf-scaling.json "$WORK"/perf-churn.json "$WORK"/perf-h2-multiplex.json
 fi
 # Merge micro-benchmark results into the run object if present.
 if [ -f "$WORK/perf-microbench.json" ]; then
@@ -294,6 +332,14 @@ fi
 # Deliberately NOT asserting the optional profiles (clustered_state / laptop /
 # streaming / serving_percore / forward on infra_error) — those legitimately emit
 # zero metrics on a skip and must not red here.
+if [ "$ARM_MODE" = true ]; then
+  # An arm-only result has no behaviours; its content is the arm's headline ceiling.
+  PLAUSIBILITY_PROBLEMS="$(jq -r '
+    (.serving_rw_multik6.headline.healthy_ceiling_rps // null) as $hc
+    | if ($hc | type) != "number" or $hc <= 0 or $hc > 100000000
+      then "serving_rw_multik6.headline.healthy_ceiling_rps is \($hc | tojson) (expected a number in 0 < rps <= 1e8)" else empty end' \
+    "$RESULT" 2>/dev/null || echo "result.json could not be read for plausibility checking")"
+else
 PLAUSIBILITY_PROBLEMS="$(jq -r '
   [ # 1. at least one behaviour arm with a plausible p95_ms (0 < p95 < 600000 ms).
     #    An empty/all-null .behaviours yields zero — the structurally-empty case.
@@ -310,6 +356,7 @@ PLAUSIBILITY_PROBLEMS="$(jq -r '
          and (((.forward_guard.error_rate | type) != "number") or .forward_guard.error_rate < 0 or .forward_guard.error_rate > 1)
       then "forward_guard.error_rate present but implausible: \((.forward_guard // {}).error_rate) (expected a number in [0,1])" else empty end )
   ] | .[]' "$RESULT" 2>/dev/null || echo "result.json could not be read for plausibility checking")"
+fi
 if [ -n "$PLAUSIBILITY_PROBLEMS" ]; then
   PLAUSIBILITY_LIST="$(printf '%s\n' "$PLAUSIBILITY_PROBLEMS" | sed 's/^/- /')"
   annotate "error" ":no_entry: **Perf run IMPLAUSIBLE — build FAILED, not baselined** — \`${COMMIT:0:10}\` on \`${BRANCH}\`
@@ -358,7 +405,39 @@ fi
 # run was triggered on purpose — so annotate and exit 0 (GREEN) WITHOUT persisting or
 # comparing. Placed AFTER the validity gate so an invalid deep run still reds; a run
 # with no baseline_eligible field (older producer) defaults to eligible, unchanged.
-ELIGIBLE="$(jq -r 'if has("baseline_eligible") then .baseline_eligible else true end' "$RESULT")"
+# An arm-only result is never baseline_eligible; the multi-k6 arm's is persisted when it is a member
+# of the published series instead (item 44). A trial, another rule or another rig is recorded, green.
+if [ "$ARM_MODE" = true ]; then
+  SERIES_JSON="$(jq -c -f "$SCRIPT_DIR/lib/perf-rw-multik6-series.jq" "$RESULT" 2>/dev/null)" || SERIES_JSON=""
+  if ! jq -es 'length == 1 and (.[0] | type) == "array"' <<<"$SERIES_JSON" >/dev/null 2>&1; then
+    annotate "error" ":no_entry: **Perf compare: the multi-k6 series check failed to run — not persisted** — \`lib/perf-rw-multik6-series.jq\` errored on \`${RESULT_ARTIFACT}\`."
+    exit 1
+  fi
+  # Membership is the empty array itself, not an empty rendering of it.
+  if ! jq -e '. == []' <<<"$SERIES_JSON" >/dev/null 2>&1; then
+    SERIES_UNMET="$(jq -r '.[] | tostring' <<<"$SERIES_JSON" 2>/dev/null || echo "(unreadable: ${SERIES_JSON})")"
+    annotate "info" ":microscope: **Multi-k6 arm recorded, not persisted — not a member of the published series** — \`${COMMIT:0:10}\` on \`${BRANCH}\`
+
+The published headline comes only from default, non-trial \`gc_masked_p99\` runs of the arm on \`perf-xl\`, so this run was **not persisted to \`${HISTORY_PREFIX}/${BRANCH}/\`** and cannot reach the website. Unmet:
+$(sed 's/^/- /' <<<"$SERIES_UNMET")
+
+Its numbers are in the \`${RESULT_ARTIFACT}\` artifact."
+    exit 0
+  fi
+  # The history holds only what the page may show: a member whose headline disagrees with its own
+  # rungs is a producer fault, so it fails here instead of being persisted and refused at publish.
+  RW_PROBLEMS_JSON="$(jq -c --arg now "" -f "$SCRIPT_DIR/lib/perf-website-figures-rw.jq" "$RESULT" 2>/dev/null | jq -c '.problems' 2>/dev/null)" || RW_PROBLEMS_JSON=""
+  if ! jq -es '. == [[]]' <<<"$RW_PROBLEMS_JSON" >/dev/null 2>&1; then
+    annotate "error" ":no_entry: **Multi-k6 result is not self-consistent — build FAILED, not persisted** — \`${COMMIT:0:10}\` on \`${BRANCH}\`
+
+\`lib/perf-website-figures-rw.jq\` could not restate the headline \`${RESULT_ARTIFACT}\` gives from its own rungs, so the run was **not persisted to \`${HISTORY_PREFIX}/${BRANCH}/\`**:
+$(jq -rs 'if length == 1 and (.[0] | type) == "array" and (.[0] | length) > 0 then .[0][] | "- \(.)" else error("no list") end' <<<"$RW_PROBLEMS_JSON" 2>/dev/null || echo "- the transform errored or returned no problems list")"
+    exit 1
+  fi
+  ELIGIBLE=true
+else
+  ELIGIBLE="$(jq -r 'if has("baseline_eligible") then .baseline_eligible else true end' "$RESULT")"
+fi
 if [ "$ELIGIBLE" != "true" ]; then
   DIAG_TIER="$(jq -r '.config.jvm_diagnostics // "?"' "$RESULT")"
   CFG_PROFILE="$(jq -r '.config.config_profile // "?"' "$RESULT")"
@@ -387,9 +466,9 @@ Writing this run to \`s3://${BUCKET}/${KEY}\` failed, so it was **not stored in 
 fi
 # This build's publish step refreshes the website only from a build that persisted a run (the key says which).
 if [ "$HAVE_AWS" = true ] && command -v buildkite-agent >/dev/null 2>&1; then
-  if ! buildkite-agent meta-data set perf-baseline-persisted-key "$KEY"; then
-    printf '%s\n' ":warning: **Perf run persisted, but the publish step was not told** — \`buildkite-agent meta-data set perf-baseline-persisted-key\` failed, so this build's website publish step will not refresh the figures from \`${KEY}\` (in a scheduled build it soft-fails)." \
-      | buildkite-agent annotate --style warning --context perf-persisted-key || true
+  if ! buildkite-agent meta-data set "$PERSISTED_META_KEY" "$KEY"; then
+    printf '%s\n' ":warning: **Perf run persisted, but the publish step was not told** — \`buildkite-agent meta-data set ${PERSISTED_META_KEY}\` failed, so this build's website publish step will not refresh the figures from \`${KEY}\` (in a scheduled build it soft-fails)." \
+      | buildkite-agent annotate --style warning --context "$PERSISTED_KEY_CONTEXT" || true
   fi
 fi
 
@@ -577,7 +656,23 @@ elif $HAVE_AWS; then
   # List, drop the just-uploaded current key, take the most recent N by name.
   # grep -vxF: exact whole-line fixed-string match (the key has dots — a plain
   # regex grep would treat them as wildcards and over-exclude).
+  if [ "$ARM_MODE" = true ]; then
+    # This step has just written $KEY, so a listing that fails or lacks it is an error, not an
+    # empty history. (The daily path below still reads a failed listing as no prior runs.)
+    if ! LS_OUT="$(aws s3 ls "s3://${BUCKET}/${HISTORY_PREFIX}/${BRANCH}/" --recursive 2>"$WORK/ls.err")" \
+       || ! awk -v k="$KEY" '$4 == k { found = 1 } END { exit !found }' <<<"$LS_OUT"; then
+      annotate "error" ":no_entry: **Multi-k6 history could not be listed — build FAILED** — \`${COMMIT:0:10}\` on \`${BRANCH}\`
+
+Listing \`s3://${BUCKET}/${HISTORY_PREFIX}/${BRANCH}/\` failed, or did not return \`${KEY}\`, which this step had just written. The run is persisted, but its baseline could not be read, so it was not compared and is not reported as warming up.
+\`\`\`
+$(head -c 600 "$WORK/ls.err" 2>/dev/null)
+\`\`\`"
+      exit 1
+    fi
+    mapfile -t KEYS < <(awk '{print $4}' <<<"$LS_OUT" | grep -vxF "$KEY" | sort | tail -n "$BASELINE_N")
+  else
   mapfile -t KEYS < <(aws s3 ls "s3://${BUCKET}/${HISTORY_PREFIX}/${BRANCH}/" --recursive 2>/dev/null | awk '{print $4}' | grep -vxF "$KEY" | sort | tail -n "$BASELINE_N")
+  fi
   for k in "${KEYS[@]:-}"; do
     [ -n "$k" ] || continue
     aws s3 cp "s3://${BUCKET}/${k}" "$BASE_DIR/$(basename "$k")" --only-show-errors 2>/dev/null || true
@@ -968,6 +1063,11 @@ def metrics:
   # continuously with the server ceiling. Non-gating (perf-budgets.json gating:false).
   # saturation_rps (the knee) is ladder-QUANTISED, so it is recorded but NOT budgeted here.
   ( {name:"rig_valid_peak_achieved_rps", value:(.rig_valid_peak_achieved_rps), bkey:"rig_valid_peak_achieved_rps"} ),
+  # item 44 — the published headline: the p99-bounded ceiling of the perf-xl multi-k6 arm, under the rule
+  # its .headline_rule names. Only an arm-only result carries one (a daily run leaves {}), so it
+  # compares against runs-perf-xl/ alone, keyed on that rule (latfam).
+  ( {name:"serving_rw_multik6.healthy_ceiling_rps", value:((.serving_rw_multik6 // {}).headline.healthy_ceiling_rps),
+     bkey:"serving_rw_multik6.healthy_ceiling_rps"} ),
   # G1 churn gate — the candidate-index churn/static ALLOCATION ratio at n=15,000, t=1
   # (indexMode=INDEX), emitted by run-g1-churn.sh via perf-test-microbench.sh under .churn.
   # A within-run STATIC-vs-CHURN A/B (the CandidateIndexBenchmark gold-standard shape): it
@@ -1004,6 +1104,7 @@ def latfam: if IN("serving_percore.*.healthy_ceiling_rps", "serving_percore.*.rp
                     "serving_multiproc_scales_with_procs") then "serving_multiproc"
             elif IN("serving_hw_matrix.*.healthy_ceiling_rps",
                     "serving_hw_matrix.*.healthy_ceiling_p50_ms") then "serving_hw_matrix"
+            elif . == "serving_rw_multik6.healthy_ceiling_rps" then "serving_rw_multik6"
             else null end;
 # The hardware matrix also keys on its load client (single k6 or multi-k6): the two measure
 # different ceilings, so they never share a baseline. A block without .client was single-k6.
@@ -1016,9 +1117,16 @@ def latk6rt($f): (first(.[$f].points[]?.measurement.k6_runtime | select(. != nul
   | "gogc=\($rt.gogc // "100"),graceful_stop=\($rt.graceful_stop // "30s"),gomemlimit="
     + (if $mem == "off" then "off" else ($rt.source.gomemlimit // "env") end)
     + (if $vuc == 2048 then "" else ",vu_ceiling=\($vuc)" end);
-def latfp($f): (.[$f].sweep.latency_settle_s // null) as $s
-  | if $f == "serving_hw_matrix" and $s != null then "\($s)|\(.[$f].client // "single")|\(latk6rt($f))" else $s end;
-def latpresent($f): (((.[$f] // {}).points // []) | length) > 0;
+# The multi-k6 headline also keys on the rule that set it and on the SUT diagnostics tier: a
+# GC-masked ceiling and a whole-rung one, two bounds, or a run with and without the SUT GC file
+# log are different measurements and never share a baseline.
+def latrw: (.serving_rw_multik6 // {}) as $r
+  | "\($r.sweep.latency_window.settle_s // null)|\($r.headline_rule.name // "unmasked_p99")|\($r.headline_rule.p99_max_ms // $r.headline.p99_max_ms // null)|\($r.gc_masked.min_quiet_s // null)|\(.config.jvm_diagnostics // "standard")";
+def latfp($f): if $f == "serving_rw_multik6" then latrw else
+  (.[$f].sweep.latency_settle_s // null) as $s
+  | if $f == "serving_hw_matrix" and $s != null then "\($s)|\(.[$f].client // "single")|\(latk6rt($f))" else $s end end;
+def latpresent($f): if $f == "serving_rw_multik6" then ((.serving_rw_multik6 // {}).headline.healthy_ceiling_rps != null)
+  else (((.[$f] // {}).points // []) | length) > 0 end;
 # INFO-arm event-log budget fingerprint. The INFO SUT ran with a harness-forced 256 MiB
 # budget until it was switched to the shipped default, which changes what info_* measure; info_*
 # metrics compare only against runs with the same method. A run without the field forced 256 MiB.
@@ -1122,7 +1230,7 @@ def mainelsmetric($m): ($m.bkey | startswith("behaviours.")) or $m.bkey == "rig_
 | bmapof($belshwruns) as $bmapElsHw
 | bmapof($bk6elshwruns) as $bmapK6ElsHw
 | ({serving_percore: latfp("serving_percore"), serving_multiproc: latfp("serving_multiproc"),
-    serving_hw_matrix: latfp("serving_hw_matrix")}) as $headlat
+    serving_hw_matrix: latfp("serving_hw_matrix"), serving_rw_multik6: latfp("serving_rw_multik6")}) as $headlat
 | ($headlat | with_entries(.key as $f | .value as $v | .value = {
     all: bmapof([ $ballruns[] | select(latfp($f) == $v) ]),
     hw: bmapof([ $bhwruns[] | select(latfp($f) == $v) ]),
@@ -1147,8 +1255,9 @@ def mainelsmetric($m): ($m.bkey | startswith("behaviours.")) or $m.bkey == "rig_
     baseline_main_els_comparable: ($belsruns | length),
     baseline_main_els_other: ([ $ballruns[] | select(mainelsfp != $headelsfp) ] | length),
     sweep_latency_reset: ([ $headmetrics[] | .bkey | latfam | select(. != null) ] | unique
-      | map({family: ., head_settle_s: $headlat[.], comparable: $bmapLat[.].comparable, other: $bmapLat[.].other,
-             head_window: ($headlat[.] | if type == "string" then (split("|") | "settle \(.[0])s, \(.[1]) client, k6 \(.[2] // "defaults")")
+      | map(. as $fam | {family: ., head_settle_s: $headlat[.], comparable: $bmapLat[.].comparable, other: $bmapLat[.].other,
+             head_window: ($headlat[.] | if $fam == "serving_rw_multik6" then (split("|") | "settle \(.[0])s, rule \(.[1]), p99 bound \(.[2]) ms, min quiet \(.[3]) s, SUT diagnostics \(.[4])")
+                                          elif type == "string" then (split("|") | "settle \(.[0])s, \(.[1]) client, k6 \(.[2] // "defaults")")
                                           else "settle \(. // "none")s" end)})
       | map(select(.other > 0))) } as $meta
 | if ($missing | length) > 0
@@ -1401,7 +1510,7 @@ fi
 CLU_NOTE=""
 CLU_ATTEMPTED_HEAD="$(jq -r 'if has("clustered_attempted") then (.clustered_attempted|tostring) else "absent" end' "$RESULT" 2>/dev/null || echo absent)"
 CLU_ROWS="$(printf '%s' "$RESULT_CMP" | jq '[.rows[]?.name | select(startswith("clustered_state."))] | length' 2>/dev/null || echo 0)"
-if [ "$CLU_ATTEMPTED_HEAD" = "false" ] && [ "${CLU_ROWS:-0}" -eq 0 ]; then
+if [ "$ARM_MODE" != true ] && [ "$CLU_ATTEMPTED_HEAD" = "false" ] && [ "${CLU_ROWS:-0}" -eq 0 ]; then
   # Consecutive recent skips: newest-first, count leading explicit `false` runs,
   # stopping at the first `true` (a real measurement) or absent (pre-feature run).
   # Makes a permanent silent skip visible as a growing number rather than a green.

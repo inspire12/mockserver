@@ -92,12 +92,16 @@ echo "--- 4. compare records the key only once it has persisted the run"
 PERSIST="$(awk '/^# --- 2\. persist this run to S3/ {p = 1} p' "$COMPARE")"
 ELIG_EXIT="$(awk '/Perf run recorded, not baselined/ { print NR; exit }' "$COMPARE")"
 CP_LINE="$(grep -n 'aws s3 cp "\$RESULT" "s3://\${BUCKET}/\${KEY}"' "$COMPARE" | cut -d: -f1)" || CP_LINE=""
-SET_LINE="$(grep -n 'buildkite-agent meta-data set perf-baseline-persisted-key "\$KEY"' "$COMPARE" | cut -d: -f1)" || SET_LINE=""
-check "compare sets perf-baseline-persisted-key to the persisted key, once" "1" "$(grep -cF 'buildkite-agent meta-data set perf-baseline-persisted-key "$KEY"' "$COMPARE" || true)"
+SET_TEXT='buildkite-agent meta-data set "$PERSISTED_META_KEY" "$KEY"'
+SET_LINE="$(grep -nF "$SET_TEXT" "$COMPARE" | cut -d: -f1)" || SET_LINE=""
+check "compare sets the persisted key's meta-data, once" "1" "$(grep -cF "$SET_TEXT" "$COMPARE" || true)"
+check "  ... as perf-baseline-persisted-key, and as perf-xl-persisted-key only for the multi-k6 arm's own result" "1|1" \
+  "$(grep -c '^PERSISTED_META_KEY=perf-baseline-persisted-key$' "$COMPARE" || true)|$(grep -c '^\[ "\$ARM_MODE" = true \] && PERSISTED_META_KEY=perf-xl-persisted-key$' "$COMPARE" || true)"
+check "  ... and nowhere else" "2" "$(grep -c 'PERSISTED_META_KEY=' "$COMPARE" || true)"
 check "  ... after the ineligible exit and the S3 write" "yes" \
   "$([ -n "$SET_LINE" ] && [ -n "$CP_LINE" ] && [ -n "$ELIG_EXIT" ] && [ "$SET_LINE" -gt "$CP_LINE" ] && [ "$SET_LINE" -gt "$ELIG_EXIT" ] && echo yes || echo no)"
 # One process, no `| head`: under pipefail an early-closing reader can fail the writer (SIGPIPE).
-GUARD_LINE="$(awk '/meta-data set perf-baseline-persisted-key/ { print prev; exit } { prev = $0 }' <<<"$PERSIST")"
+GUARD_LINE="$(awk -v t="$SET_TEXT" 'index($0, t) { print prev; exit } { prev = $0 }' <<<"$PERSIST")"
 check "  ... only when it wrote to S3 (not a PERF_BASELINE_DIR run)" "yes" \
   "$(grep -q 'if \[ "\$HAVE_AWS" = true \]' <<<"$GUARD_LINE" && echo yes || echo no)"
 

@@ -12,7 +12,7 @@ regressions hide and stale claims get published.
 | `regression.js` (HTTP + HTTPS/H2) | Per-behaviour latency percentiles and delivery ratio at 200 rps | Daily (perf queue) | No — notify-only |
 | `growth.js` | Latency slope as the event log fills | Daily (perf queue) | No — notify-only |
 | `sweep.js` | Throughput-vs-latency knee curve | Daily (perf queue) | No — notify-only |
-| `rw-multi-k6-sweep.sh` (`sweep.js` from N processes, merged in Prometheus) | The same knee curve without the single-k6 ceiling (item 31) | **Opt-in**: `PERF_SERVING_RW_MULTIK6=true` inside `perf-run` on `perf`, or its own arm-only step on `perf-xl` with `PERF_XL=true` ([where each arm runs](#which-queue-runs-which-arm)) | No — never published; exits 2 on its own accounting/skew/window/cross-check gates; the perf-xl step fails when the arm is not `valid` |
+| `rw-multi-k6-sweep.sh` (`sweep.js` from N processes, merged in Prometheus) | The same knee curve without the single-k6 ceiling (item 31) | **Opt-in**: `PERF_SERVING_RW_MULTIK6=true` inside `perf-run` on `perf`, or its own arm-only step on `perf-xl` with `PERF_XL=true` ([where each arm runs](#which-queue-runs-which-arm)) | No. Exits 2 on its own accounting/skew/window/cross-check gates; the perf-xl step fails when the arm is not `valid`. **Its perf-xl ceiling is what the page's headline is published from** (item 44): its own compare step persists a series member and its publish step refreshes the page ([the headline rule](#the-headline-rule-item-44)); inside `perf-run` on `perf` it is never published |
 | `forward.js` | Forward connection-pool regression guard | Daily (perf queue) | `forward.error_rate` only |
 | `proxy.js` | Proxy and TLS handshake latency | Daily (perf queue) | No — notify-only |
 | `proxy.js` forward + slow upstream | Unmatched-proxy in-flight concurrency cap (unit 21) | **Opt-in** (`PERF_WORKLOAD=forward`) | `workload_forward_served_via_upstream` validity check |
@@ -98,11 +98,14 @@ to the `perf-xl` queue (one c6i.32xlarge, two NUMA nodes), each as its own arm-o
 | multi-k6 arm (item 31) | inside `perf-run` when `PERF_SERVING_RW_MULTIK6=true` | step `perfxl-rw-multik6` on `perf-xl`, always |
 | hardware matrix (item 27) | inside `perf-run` when `PERF_SERVING_HW_MATRIX=true` | step `perfxl-hw-matrix` on `perf-xl`, when `PERF_SERVING_HW_MATRIX=true` |
 
-A perf-xl result is uploaded under a `perfxl-` prefix and is never compared, persisted or
-published, so it cannot enter the c5.12xlarge baseline or the website. As a second barrier,
+A perf-xl result is uploaded under a `perfxl-` prefix that the daily compare and publish steps
+never read, so it cannot enter the c5.12xlarge baseline. As a second barrier,
 `perf-test-compare.sh` keeps one S3 history per agent queue (`runs/` for `perf`, `runs-<queue>/`
 for any other), so even a result that did reach it could not enter or crowd the perf window. The step fails on its own
-when the arm measured nothing trustworthy. The wiring and the isolation argument are in
+when the arm measured nothing trustworthy. The multi-k6 arm has two more steps of its own,
+`perfxl-rw-multik6-persist` and `perfxl-rw-multik6-publish`, which make its ceiling the published
+headline ([the headline rule](#the-headline-rule-item-44)); the hardware matrix on perf-xl is
+still never compared, persisted or published. The wiring and the isolation argument are in
 [ci-cd.md](../infrastructure/ci-cd.md#the-perf-xl-steps-opt-in). In arm-only mode the multi-k6
 arm runs on a SUT that no regression or sweep load has warmed, so it gets a 60 s warm-up of its
 own (`PERF_RW_WARMUP_DURATION`, which stays overridable). Inside `perf-run` that warm-up is 0 s.
@@ -252,8 +255,10 @@ single-process ladder that tail is k6's, not MockServer's: in build 533, 0.9–2
 took k6 over 5 ms from 32k to 64k while MockServer's handler histogram had none over 5 ms, and
 the four-process ladder on the same SUT held p99 at 0.41 ms at 36k where the single process read
 18.8 ms. Bounding the single-process p99 would make the published figure the load generator's
-tail. The published headline moves to the multi-k6 arm, with this bound, only once that arm has
-proven stable ([performance programme](../plans/performance-programme.md) item 44).
+tail. The published headline therefore moves to the multi-k6 arm, with this bound: builds
+630–634 qualified the switch and the first published member run makes it
+([the headline rule](#the-headline-rule-item-44)). The single-process ladder stays p50-only and
+is then published under `.single_k6`.
 
 p99 per rung on the published single-process ladder (6-core SUT, 3 s settle, builds 495–533),
 the evidence behind the 10 ms figure:
@@ -931,9 +936,11 @@ run's result now carries `.gc_masked`: per rung, the request count, the share ov
 (and p99.9) of the requests pushed in seconds with no k6 process in or just after a GC cycle, the
 count of quiet and GC seconds, and the healthy ceiling the same first-failure rule gives on that
 p99. Under the arm's default headline rule (`gc_masked_p99`, below) that ceiling **is** the arm's
-`.headline`, and `.gc_masked.report_only` is `false`. It changes no validity check, compare metric
-or published figure, and no step script reads it. Under `unmasked_p99` (the hardware matrix) it is
-report-only, as it was for every run before the rule change.
+`.headline`, and `.gc_masked.report_only` is `false`. It changes no validity check. On `perf-xl`
+that headline is the one the publish step publishes, and only the published-series path reads the block:
+`lib/perf-rw-multik6-series.jq`, `lib/perf-website-figures-rw.jq` and, for its baseline key,
+compare (see [the headline rule](#the-headline-rule-item-44)). Under `unmasked_p99` (the hardware
+matrix) it is report-only, as it was for every run before the rule change.
 
 ```mermaid
 flowchart LR
@@ -1079,13 +1086,134 @@ of 9.55–9.70 ms, inside the bound by under 0.5 ms. The rule removes the client
 unresolved tail from 144k up, where the SUT's receive queue builds and one sample a second cannot
 attribute it.
 
-**Series.** Item 44 counts a `perf-xl` run only when `.serving_rw_multik6.headline_rule.name` is
-`gc_masked_p99`, `.headline_rule.p99_max_ms` is 10 and `.gc_masked.min_quiet_s` is 3, besides the
-existing conditions (shipped event-log budget, default ladder, derived VU ceiling, `GOGC` 1600 by
-default, `method.ab.trial` false). Setting `PERF_RW_P99_MAX_MS` or `PERF_RW_GC_MASK_MIN_QUIET_S`
-makes a run a trial (`.method.ab.p99_max_ms`, `.method.ab.gc_mask_min_quiet_s`). 626–628 do not count: their results
-were produced under the whole-rung rule and state none, even though their `.gc_masked` blocks would
-read 136k, 144k and 144k with (3) holding at each.
+**Series.** A `perf-xl` run of the arm is a member of the published series only when
+`lib/perf-rw-multik6-series.jq` returns no unmet criterion. It is the one statement of the
+series, shared by compare and publish:
+
+| Criterion | Reads |
+|---|---|
+| the arm, on `perf-xl`, valid | `run_arm` is `rw_multik6`, `agent.queue` is `perf-xl`, `validity.valid` and `.serving_rw_multik6.valid` are true |
+| not a trial run of the harness | `baseline_ineligible_reasons` is `["arm_only"]`, or that plus `jvm_diagnostics` when `config.jvm_diagnostics` is `gc` |
+| fresh image, shipped event-log budget | `config.image_stale` false, `config.event_log_budget.method` `shipped-default` |
+| not an A/B | `.method.ab.trial` false |
+| the rule | `.headline_rule.name` `gc_masked_p99`, `.headline_rule.p99_max_ms` 10, `.gc_masked.min_quiet_s` 3 |
+| default ladder, placement and k6 runtime | `.method.ladder` `{multi_socket, default}`, `.placement.baseline_eligible` true, `k6_runtime.source.vu_ceiling` `derived`, `k6_runtime.gogc` `"1600"` from `default` |
+| a headline | `.headline.healthy_ceiling_rps` is a positive number |
+
+`perf-test-run.sh` records why a run is not baseline-eligible as `baseline_ineligible_reasons`,
+one token per cause (`jvm_diagnostics`, `config_profile`, `rw_multik6_in_run`, `k6_numa_same`,
+`arm_only`, `rig_profile`, `hw_matrix_placement`, and `sut_died` on an abort). An arm-only run is
+never baseline-eligible, so the series reads the reasons instead: any cause beyond being arm-only
+makes the run a trial. Setting `PERF_RW_P99_MAX_MS` or `PERF_RW_GC_MASK_MIN_QUIET_S` also makes a
+run a trial (`.method.ab.p99_max_ms`, `.method.ab.gc_mask_min_quiet_s`). A result without the
+reasons field (a producer before this change) is not a member.
+
+The SUT's GC file log (`PERF_JVM_DIAGNOSTICS=gc`) is admitted because the five qualifying runs
+carried it; `deep` is not, nor is instrumentation observed at the `standard` tier. The two
+admitted tiers are different measurements, so they never share a baseline or a published figure
+silently: compare's fingerprint and publish's refresh trigger both carry the tier, and the page's
+provenance row says when the GC log was on.
+
+**The qualifying runs (630–634).** Harness `f5bd0a02e`, image `facdc8a96`, `GOGC` 1600 by default,
+`PERF_JVM_DIAGNOSTICS=gc`:
+
+| Build | Masked ceiling | Its masked p99 | Whole-rung ceiling | First masked failure above it | Quiet seconds there |
+|---|---|---|---|---|---|
+| 630 | 136k | 8.234 ms | 136k | 144k, 10.792 ms | 8 |
+| 631 | 136k | 7.686 ms | 128k | 144k, 13.244 ms | 8 |
+| 632 | 144k | 7.487 ms | 96k | 152k, 15.228 ms | 5 |
+| 633 | 144k | 9.963 ms | 128k | 152k, 10.990 ms | 8 |
+| 634 | 136k | 8.141 ms | 136k | 144k, 10.456 ms | 8 |
+
+All five are valid, none is a lower bound, every rung from 96k up had a masked figure (5–11 quiet
+seconds), and (3) holds in each. The switch criterion on the rung is met in the form the owner
+accepted on these runs: at least 4 of the 5 ceilings fall on one rung or two adjacent rungs (here
+all five: 136k three times, 144k twice), and the ceiling to publish is the lower of the two, 136k.
+It first read "one rung in at least 4 of 5", which these runs would not have met. 626–628 do
+not count: their results were produced under the whole-rung rule and state none, even though their
+`.gc_masked` blocks would read 136k, 144k and 144k with (3) holding at each.
+
+**A streak qualifies the switch; one member run publishes.** Membership is a property of a single
+run, and neither compare nor publish counts earlier members. These five results predate
+`baseline_ineligible_reasons`, so none is a member as recorded and publish refuses each of them.
+The headline is not seeded from them with the field added by hand. The first fresh member run
+publishes it: one `PERF_XL=true` build with `PERF_JVM_DIAGNOSTICS=gc`, like-for-like with the
+streak ([the switch](#publishing-a-runs-figures-manual-step)).
+
+**From the arm to the page.**
+
+```mermaid
+flowchart LR
+  arm["perfxl-rw-multik6
+perf-xl"] --> persist["perfxl-rw-multik6-persist
+perf-test-compare.sh, perf"]
+  persist -->|"series member"| s3["S3 history\nruns-perf-xl/"]
+  persist -->|"not a member"| skip["info annotation
+exit 0, nothing persisted"]
+  s3 --> pub["perfxl-rw-multik6-publish
+perf-website-publish.sh, perf"]
+  pub -->|"member, self-consistent, drifted"| patch["patch artifact
+perf_figures.json only"]
+```
+
+- **Persist** is `perf-test-compare.sh` with `PERF_COMPARE_RESULT_ARTIFACT` naming the arm's
+  result. It merges none of the daily run's supplementary artifacts, fails when the artifact name
+  and `run_arm` disagree (an arm-only result under `perf-result.json`, or anything but the
+  multi-k6 arm under the arm's name), checks plausibility on the headline ceiling, and persists
+  only a member. A non-member exits 0 with the unmet criteria listed. A member whose headline
+  disagrees with its own rungs (the transform's problems list below is not empty, or the
+  transform errors) fails the step and is not persisted, so the history holds only runs the page
+  could show. It records the key as the build meta-data
+  `perf-xl-persisted-key`. Because the step has just written the run, a history listing that
+  fails or lacks it fails the step; it is not read as an empty history. (The daily compare still
+  reads a failed listing as no prior runs and reports "warming up".) The one metric it compares is
+  `serving_rw_multik6.healthy_ceiling_rps` (budget: down, 15%, `hw`, notify-only), against
+  `runs-perf-xl/` runs with the same fingerprint: settle, rule, bound, quiet-second floor and SUT
+  diagnostics tier.
+- **Publish** is `perf-website-publish.sh` with `PERF_PUBLISH_SOURCE=rw_multik6`. It reads
+  `runs-perf-xl/<branch>/`, runs the series check again, and builds the headline with
+  `lib/perf-website-figures-rw.jq`. That transform restates the run's own `.headline` and
+  recomputes no ceiling. Its ladder holds only rungs the run judged rig-valid, each with the
+  whole-rung `p99_ms` and the masked `p99_gc_masked_ms`. It lists every way the result disagrees
+  with itself (the headline is not the `.gc_masked` ceiling, the ceiling rung is not rig-valid,
+  its masked p99 is missing or over the bound, the masked figure was report-only), and publish
+  refuses unless that list is empty.
+- **The first failure is published only when the page's sentence about it is true.** The page
+  says "the next rate tested is the first past the ceiling" and quotes its masked p99. The run
+  picks its first failure over every rung, counted or not, so the transform publishes
+  `.headline_rule.first_failure` only when it is the next counted rung above the ceiling and has
+  a masked figure. Otherwise it is null and the page leaves the sentence out; the run is still
+  persisted and published. That covers a lower bound (every rung above the ceiling
+  client-limited), an excluded rung between the ceiling and the next counted one, a next rung
+  that held the bound but was unhealthy for another reason, and a next rung with no masked
+  figure.
+- **The stamp.** The multi-k6 headline carries `.source.published_from`: the S3 key, the build
+  that published it, whether it was a dry run, and the series result.
+  `lib/perf-website-figures-check.jq` requires that stamp of any page data with a
+  `.headline_rule`: written in the build that measured the run, not a dry run, from that run's
+  own `runs-perf-xl/` object, with no unmet series criterion, agreeing with its own ladder and
+  bound, and with the single-k6 run's figures under `.single_k6`. Page data without a
+  `.headline_rule` must hold nothing of the arm's: a stamp, or a source whose client is the
+  multi-k6 arm, is refused there, so deleting the rule from a switched file does not pass.
+  Publish refuses to build on a committed file that fails it, from either source, and
+  refuses to write one, so outside a build the multi-k6 source writes nothing. The lint runs the
+  same check on the committed file, and a file the check cannot read (missing, not JSON, more
+  than one document) fails it. It checks the stamp and the file against itself; it cannot show
+  that the S3 object was unedited.
+- **Hard edges.** Publish depends on persist and persist on the arm, so a failed arm is never
+  persisted and a failed persist never publishes.
+- **Names apart from the daily steps.** A `PERF_XL=true` build also runs the daily compare and
+  publish, and a Buildkite annotation replaces an earlier one with the same context. The arm's
+  steps annotate under `perf-regression-xl`, `perf-xl-persisted-key` and
+  `perf-website-publish-rw`, and upload `website-headline-multi-k6-<UTC-timestamp>.patch` and
+  `perf_figures-multi-k6.json`; the daily steps keep `perf-regression`, `perf-persisted-key`,
+  `perf-website-publish`, `website-figures-<UTC-timestamp>.patch` and `perf_figures.json`.
+- **The rung is a manual check.** Publish does not gate on which rung the run read. Its
+  annotation and the patch's commit message say which rung is expected, which is the adjacent
+  one, and which of the two (or neither) the run read.
+
+`.buildkite/scripts/test/perf-xl-publish-test.sh` covers the series, both steps, the page-data
+layout before and after the switch, and the check on fixtures.
 
 ### `forward.js` — forward connection-pool guard
 
@@ -2070,10 +2198,26 @@ history collected under different settings.
 
 The `performance.html` page on the docs site renders from a committed data file
 (`jekyll-www.mock-server.com/_data/perf_figures.json`) plus committed chart data and PNGs.
-`perf-test-compare.sh` writes each run to S3; the daily run's tail step
-`perf-website-publish.sh` regenerates that data file from the latest valid run and, when it
-has drifted, emits the refresh as a build artifact — but nothing applies it automatically (see
+`perf-test-compare.sh` writes each run to S3; `perf-website-publish.sh` regenerates that data
+file from the run its build persisted and, when it has drifted, emits the refresh as a build
+artifact — but nothing applies it automatically (see
 [Publishing a run's figures](#publishing-a-runs-figures-manual-step) below).
+
+Two runs feed the file, and each rewrites only its own part (`lib/perf-website-assemble.jq`):
+
+| Part of `perf_figures.json` | Source | Publish step |
+|---|---|---|
+| `source`, `headline`, `headline_rule`, `throughput_ladder` (the page headline and its table) | the multi-k6 arm on `perf-xl`, `runs-perf-xl/<branch>/` | `perfxl-rw-multik6-publish` (`PERF_PUBLISH_SOURCE=rw_multik6`), only in a `PERF_XL=true` build |
+| `single_k6` (`source`, `headline`, `throughput_ladder`), `behaviours`, `hw_matrix`, and the chart data and PNGs | the daily run on `perf`, `runs/<branch>/` | the daily tail step (`single_k6`, the default) |
+
+The page has two states. A file with no `headline_rule` holds only the single-k6 figures, at the
+top level, and `performance.html` renders them as its headline; that is what is committed today.
+The first multi-k6 publish moves them under `single_k6` and the page renders the multi-k6
+headline, its two p99 columns and its rule; from then on a daily refresh cannot replace the
+headline. The template branches on `headline_rule`, so only a publish patch changes the state. Each source's age, move and lower-bound checks read only its own committed
+part, so the multi-k6 headline is never held against the single-k6 ceiling or the reverse.
+`PERF_XL` is not on the daily schedule, so the headline refreshes only when someone runs a
+`PERF_XL=true` build; the daily run keeps refreshing the rest.
 
 Before publishing any figure:
 - State the version, date, core count, heap, GC, and log level. A figure without these is not a figure.
@@ -2085,19 +2229,21 @@ Before publishing any figure:
   from `sweep.js` is the top of an overload curve. The healthy operating ceiling is a lower
   number; publish both, labelled distinctly.
 
-**Current certified knee (build 420, 2026-09-24, `3dbed98ae`, `c5.12xlarge`, 6 physical cores
-isolated, G1 with a 1.2 GB heap, JDK 17.0.20.1+1, `MOCKSERVER_LOG_LEVEL=ERROR`, `MOCKSERVER_DISABLE_SYSTEM_OUT=true`):**
-`healthy_ceiling_rps` **41,000** (achieved 39,033, p50 0.196 ms); `peak_achieved_rps` **43,671**
-(at 48,000 offered, server in overload). Previous published figures for reference (build 64,
-2026-06-24, pre-8.0.0, instance type not recorded): 32,000 healthy ceiling at p50 0.194 ms,
-36,323 peak — both predating the 8.0.0 HTTP/2 multiplex change, and taken before the 2026-09-22
-hardware change, so the load generator was sharing the server's physical cores.
+**Currently published (build 464, 2026-09-27, `efdc5227b2`, `c5.12xlarge`, 6 cores, single k6,
+ZGC with a 1,230 MiB heap, JDK 25.0.4.1+1, `MOCKSERVER_LOG_LEVEL=ERROR`,
+`MOCKSERVER_DISABLE_SYSTEM_OUT=true`):** `healthy_ceiling_rps` **60,000** (achieved 57,149.3, p50
+0.179 ms, p95 21.893 ms); `peak_achieved_rps` **59,905.8** at 64,000 offered. This ceiling is the
+single load generator's, not MockServer's (item 31). The multi-k6 headline is not published yet:
+builds 630–634 read 136k–144k under the masked rule (above), and the first published member run
+will replace this paragraph's figures.
 
 ### Publishing a run's figures (manual step)
 
 The daily perf pipeline's tail step `perf-website-publish.sh` (`perf` queue, `soft_fail`,
 non-gating) regenerates `perf_figures.json` and the charts from the run its own build persisted,
-when that run is still the newest in S3 (below). The
+when that run is still the newest in S3 (below). A `PERF_XL=true` build runs it a second time
+for the headline (`PERF_PUBLISH_SOURCE=rw_multik6`); that run reads `runs-perf-xl/<branch>/` and
+the `perf-xl-persisted-key` meta-data, and its patch rewrites `perf_figures.json` alone. The
 perf queue holds **only** the S3 perf-results grant — no git or gh credentials — so it cannot
 push or open a PR. When the committed figures have drifted (older than `PUBLISH_MAX_AGE_DAYS`,
 default 30, or a headline metric moved more than `PUBLISH_MOVE_PCT`, default 10%) it commits the
@@ -2136,7 +2282,10 @@ To publish a run's figures:
    — `config_profile` is `default` and `baseline_eligible` is `true`. Only baseline-eligible,
    default-profile runs are persisted to `s3://<bucket>/runs/<branch>/` at all
    (`perf-test-compare.sh` refuses to persist a tuned or instrumented run), so this is a
-   confirmation, not a search.
+   confirmation, not a search. For a headline patch the run is a multi-k6 arm result instead:
+   `baseline_eligible` is `false` by design, and what to confirm is that
+   `lib/perf-rw-multik6-series.jq` returns `[]` for it and that the annotation's ceiling and p99
+   match `.serving_rw_multik6.headline`.
 3. **Apply it and open the PR** (the annotation prints these commands):
    ```
    git fetch origin master
@@ -2149,7 +2298,26 @@ To publish a run's figures:
    patch carries no `perf_hw_matrix.png`, or the page omits the chart). Before merging,
    reconcile the hand-authored numbers it does **not** touch in `mock_server/performance.html`:
    the front-matter `description`, the JSON-LD `schema_faq` answers, and matcher-scaling figures
-   (a separate JMH source, expected to differ).
+   (a separate JMH source, expected to differ). When the headline moved, also update the
+   performance line in `jekyll-www.mock-server.com/llms.txt`.
+
+   A `PERF_XL=true` build can attach two patches, one per source
+   (`website-figures-…` and `website-headline-multi-k6-…`). Each rewrites the whole of
+   `_data/perf_figures.json` from the same commit, so the second does not apply after the first:
+   apply one, and regenerate the other from a later build.
+
+**The switch to the multi-k6 headline** is one such patch, from the first member run:
+
+1. Run one `PERF_XL=true` `[perf-run]` build with `PERF_JVM_DIAGNOSTICS=gc`. `runs-perf-xl/` starts
+   empty, so its persist step reports the baseline as warming up; that does not stop the publish
+   step, which emits the patch because nothing from the arm is committed yet.
+2. Check the patch's ceiling against the streak before applying it; the publish annotation and
+   the patch's commit message state the same check. 136k is the rung to publish. 144k is the
+   adjacent rung, and the accepted criterion publishes the lower of the two, so applying it is a
+   decision. Any other rung means 630–634 no longer describe the current image: do not apply it.
+3. Apply it, and in the same change update the page `description`, the two `schema_faq` answers
+   and the `llms.txt` line, which still state the single-k6 figures, and add a short past-tense
+   changelog entry for the new headline.
 
 ## Placement
 

@@ -567,18 +567,22 @@ elig() { # env... -> BASELINE_ELIGIBLE after the real eligibility block
     bash -c "set -euo pipefail; arm_only() { [ -n \"\$PERF_RUN_ARM\" ]; }
 $NODEMODE
 $ELIG
-echo \"\$BASELINE_ELIGIBLE\"" 2>/dev/null | tail -1
+echo \"\$BASELINE_ELIGIBLE\${ELIG_SHOW_REASONS:+\$INELIGIBLE_REASONS}\"" 2>/dev/null | tail -1
 }
 check "eligibility: default k6 placement stays eligible" "true|true" "$(elig)|$(elig PERF_K6_NUMA_NODE=other)"
 check "eligibility: PERF_K6_NUMA_NODE=same is not eligible" "false" "$(elig PERF_K6_NUMA_NODE=same)"
-hwm_elig() { # serving_hw_matrix block -> BASELINE_ELIGIBLE after the real matrix-eligibility block
-  env -i PATH="$PATH" SERVING_HW_MATRIX_JSON="$1" BASELINE_ELIGIBLE=true bash -c "set -euo pipefail
+check "eligibility: each cause is recorded as a reason, in order (item 44 reads them)" "true|false k6_numa_same|false arm_only|false jvm_diagnostics arm_only|false jvm_diagnostics" \
+  "$(elig ELIG_SHOW_REASONS=1)|$(elig ELIG_SHOW_REASONS=1 PERF_K6_NUMA_NODE=same)|$(elig ELIG_SHOW_REASONS=1 PERF_RUN_ARM=rw_multik6 PERF_SERVING_RW_MULTIK6=true)|$(elig ELIG_SHOW_REASONS=1 PERF_RUN_ARM=rw_multik6 PERF_SERVING_RW_MULTIK6=true PERF_JVM_DIAGNOSTICS=gc)|$(elig ELIG_SHOW_REASONS=1 PERF_JVM_DIAGNOSTICS=deep)"
+MARK_INELIGIBLE="$(grep '^mark_ineligible() {' "$RUN")" # the real recorder, defined above the block
+hwm_elig() { # serving_hw_matrix block -> BASELINE_ELIGIBLE and the reasons after the real matrix-eligibility block
+  env -i PATH="$PATH" SERVING_HW_MATRIX_JSON="$1" BASELINE_ELIGIBLE=true INELIGIBLE_REASONS="" bash -c "set -euo pipefail
+$MARK_INELIGIBLE
 $HWMELIG
-echo \"\$BASELINE_ELIGIBLE\"" 2>/dev/null | tail -1
+echo \"\$BASELINE_ELIGIBLE\$INELIGIBLE_REASONS\"" 2>/dev/null | tail -1
 }
 check "matrix block: not run, eligible, error, or null keeps the run eligible" "true|true|true|true" \
   "$(hwm_elig '{}')|$(hwm_elig '{"baseline_eligible":true}')|$(hwm_elig '{"error":"x"}')|$(hwm_elig '{"baseline_eligible":null}')"
-check "matrix block: baseline_eligible false makes the run ineligible" "false" "$(hwm_elig '{"points":[],"baseline_eligible":false}')"
+check "matrix block: baseline_eligible false makes the run ineligible, and records why" "false hw_matrix_placement" "$(hwm_elig '{"points":[],"baseline_eligible":false}')"
 line_of() { grep -nE -- "$1" "$RUN" | head -1 | cut -d: -f1; }
 L_HWM="$(line_of '^  SERVING_HW_MATRIX_JSON="[$][(]percore_block')"; L_VETO="$(line_of '^# The matrix records its own eligibility')"
 L_OUT="$(line_of '--argjson baseline_eligible "[$]BASELINE_ELIGIBLE"')"

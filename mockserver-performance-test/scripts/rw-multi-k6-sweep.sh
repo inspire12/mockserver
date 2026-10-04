@@ -6,8 +6,9 @@ LAST_ERR=""
 trap 'LAST_ERR="exit $? at line $LINENO: $BASH_COMMAND"; echo ":x: rw-multi-k6: failed ($LAST_ERR)" >&2' ERR
 
 # rw-multi-k6-sweep.sh [out.json] — the sweep.js ladder from N independent k6 processes
-# started at one instant, merged in Prometheus (native histograms). Opt-in, never published;
-# see docs/code/performance-measurement.md (item 31) for design, env knobs and degrade tests.
+# started at one instant, merged in Prometheus (native histograms). Opt-in; its perf-xl
+# ceiling is what the page headline switches to (item 44). Design, env knobs and degrade tests:
+# docs/code/performance-measurement.md (item 31).
 # Invariants: every gate is fail-closed (a failed check -> "valid": false, exit 2), and the
 # healthy ceiling and rig validity come from the shared libs, never a copy of their rules.
 

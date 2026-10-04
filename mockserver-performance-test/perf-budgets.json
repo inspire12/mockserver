@@ -590,6 +590,14 @@
       "0/1 series is coarse and it is notify-only for that reason too."
     ],
     "serving_multiproc_aggregate_healthy_ceiling_rps": { "dir": "down", "min_pct": 0.25, "floor": null, "hw": true },
-    "serving_multiproc_scales_with_procs":             { "dir": "down", "min_pct": 0.25, "floor": null }
+    "serving_multiproc_scales_with_procs":             { "dir": "down", "min_pct": 0.25, "floor": null },
+    "_comment_serving_rw_multik6": [
+      "Item 44 (the published headline). The perf-xl multi-k6 arm's p99-bounded ceiling",
+      "(.serving_rw_multik6.headline, GC-masked under the gc_masked_p99 rule). Only the arm's own",
+      "compare step (PERF_COMPARE_RESULT_ARTIFACT) sees one, so it compares against runs-perf-xl/",
+      "alone, keyed on the latency window and the headline rule (latfam). NON-GATING: the ceiling",
+      "is ladder-quantised (8k steps there), and min_pct 0.15 sits beyond a one-rung move."
+    ],
+    "serving_rw_multik6.healthy_ceiling_rps": { "dir": "down", "min_pct": 0.15, "floor": null, "hw": true }
   }
 }
