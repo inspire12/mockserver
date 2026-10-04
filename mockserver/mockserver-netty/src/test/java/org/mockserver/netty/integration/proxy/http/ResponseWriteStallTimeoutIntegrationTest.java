@@ -37,11 +37,14 @@ import io.netty.handler.codec.http2.DefaultHttp2PriorityFrame;
 import io.netty.handler.codec.http2.DefaultHttp2WindowUpdateFrame;
 import io.netty.handler.codec.http2.Http2ChannelDuplexHandler;
 import io.netty.handler.codec.http2.Http2CodecUtil;
+import io.netty.handler.proxy.HttpProxyHandler;
+import io.netty.resolver.NoopAddressResolverGroup;
 import io.netty.handler.codec.http2.Http2FrameStream;
 import io.netty.handler.codec.http2.Http2DataFrame;
 import io.netty.handler.codec.http2.Http2Error;
 import io.netty.handler.codec.http2.Http2FrameCodecBuilder;
 import io.netty.handler.codec.http2.Http2FrameTypes;
+import io.netty.handler.codec.http2.Http2GoAwayFrame;
 import io.netty.handler.codec.http2.Http2HeadersFrame;
 import io.netty.handler.codec.http2.Http2ResetFrame;
 import io.netty.handler.codec.http2.Http2Settings;
@@ -100,10 +103,11 @@ import static org.mockserver.testing.tls.SSLSocketFactory.sslSocketFactory;
  * timeout leaves a stalled client alone.
  * <p>
  * Responses are forwarded from an upstream: {@code /fixed} is a 16 MiB body with a {@code Content-Length}, so it is
- * aggregated; {@code /big} is 16 MiB of server-sent events in one write, so it is streamed; {@code /trickle} is about
- * 100 KB of events and then nothing, with the upstream left open. Each is far more than the socket buffers between
- * MockServer and a client with a 32 KiB receive buffer, apart from {@code /trickle}, which is meant for an HTTP/2 client
- * that grants no flow-control window.
+ * aggregated; {@code /small} is its first 1 MiB, which the relay's HTTP/2 loopback can aggregate; {@code /big} is 16 MiB
+ * of server-sent events in one write, so it is streamed; {@code /trickle} is about 100 KB of events and then nothing,
+ * with the upstream left open. Each is far more than the socket buffers between MockServer and a client with a 32 KiB
+ * receive buffer, apart from {@code /trickle} and {@code /small}, which are meant for an HTTP/2 client that grants a
+ * stream no more flow-control window.
  * <p>
  * The progressing HTTP/1.1 reader pauses for a third of the timeout between reads of up to 1 MiB: a socket shows a
  * slow reader's progress to its writer only in bursts, once a share of the kernel's buffers is free, so reading a
@@ -119,6 +123,7 @@ public class ResponseWriteStallTimeoutIntegrationTest {
     private static final int SLOW_SOCKET_READ_BYTES = 8 * 1024;
     private static final long SLOW_SOCKET_READ_PAUSE_MILLIS = 200;
     private static final String TERMINATING_CHUNK = "0\r\n\r\n";
+    private static final int SMALL_BODY_BYTES = 1024 * 1024;
     private static final Map<String, Channel> UPSTREAM_CHANNELS = new ConcurrentHashMap<>();
 
     private static byte[] fixedBody;
@@ -319,6 +324,42 @@ public class ResponseWriteStallTimeoutIntegrationTest {
         }
     }
 
+    // ---- HTTP/2 inside a CONNECT tunnel ----
+
+    @Test
+    public void shouldResetAStalledHttp2StreamInsideAConnectTunnelWhileAnotherStreamProgresses() throws Exception {
+        // the relay terminates the client's HTTP/2 itself and its loopback is exempt, so the client-facing leg cuts the stream
+        long countedBefore = Metrics.getResponseWriteStallsCount(HTTP2_STREAM);
+        try (Http2Client client = Http2Client.openThroughTunnel(mockServer)) {
+            Http2Client.Stream stalled = client.request("/forward/small?test=tunnel-http2-stalled");
+            Http2Client.Stream progressing = client.request("/forward/small?test=tunnel-http2-progressing");
+            // taken in small steps, well inside the timeout, so a loaded host cannot starve it into a stall of its own,
+            // and slowly enough that it is still in progress when the stalled stream is cut
+            consumeSlowly(client, progressing, READ_PAUSE_MILLIS / 10, 8 * 1024);
+            boolean stalledEnded = stalled.ended.await(CUT_WITHIN_MILLIS, TimeUnit.MILLISECONDS);
+            assertThat("the stalled stream ended (tunnel active: " + client.channel.isActive() + ", GOAWAY: " + client.goAwayReceived.get() + ")", stalledEnded, is(true));
+            assertThat("the stalled stream was reset", stalled.resetErrorCode.get(), is(Http2Error.CANCEL.code()));
+            assertThat("the progressing stream is still in progress, not reset with " + progressing.resetErrorCode.get(), progressing.ended.getCount(), is(1L));
+            client.consumeAll(progressing);
+            assertComplete(progressing, SMALL_BODY_BYTES);
+            // the reset fails the stalled stream's queued data, which must end only that stream, not the tunnel
+            assertTunnelOpen(client);
+            Http2Client.Stream after = client.request("/forward/small?test=tunnel-http2-after-the-cut");
+            client.consumeAll(after);
+            assertComplete(after, SMALL_BODY_BYTES);
+            assertTunnelOpen(client);
+            String logged = mockServerClient.retrieveLogMessages(null);
+            assertThat("the reset stream's failed write was not logged as a failure", logged, not(containsString("exception while returning writing")));
+            assertThat(logged, not(containsString("Stream closed before write could take place")));
+        }
+        assertCounted(HTTP2_STREAM, countedBefore);
+    }
+
+    private static void assertTunnelOpen(Http2Client client) {
+        assertThat("no GOAWAY was received", client.goAwayReceived.get(), is(false));
+        assertThat("the tunnel, whose socket kept being read, stayed open", client.channel.isActive(), is(true));
+    }
+
     // ---- HTTP/2 ----
 
     @Test
@@ -486,10 +527,14 @@ public class ResponseWriteStallTimeoutIntegrationTest {
 
     // the client sends a WINDOW_UPDATE for what it has received about once a second, so the stream gets more window that often
     private static void consumeSlowly(Http2Client client, Http2Client.Stream stream) throws Exception {
+        consumeSlowly(client, stream, READ_PAUSE_MILLIS, Integer.MAX_VALUE);
+    }
+
+    private static void consumeSlowly(Http2Client client, Http2Client.Stream stream, long pauseMillis, int maxBytes) throws Exception {
         long started = System.nanoTime();
         while (TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) < SLOW_PHASE_MILLIS) {
-            TimeUnit.MILLISECONDS.sleep(READ_PAUSE_MILLIS);
-            client.consumeReceived(stream);
+            TimeUnit.MILLISECONDS.sleep(pauseMillis);
+            client.consumeReceived(stream, maxBytes);
         }
     }
 
@@ -501,10 +546,14 @@ public class ResponseWriteStallTimeoutIntegrationTest {
     }
 
     private static void assertCompleteWithFixedBody(Http2Client.Stream stream) throws InterruptedException {
+        assertComplete(stream, fixedBody.length);
+    }
+
+    private static void assertComplete(Http2Client.Stream stream, int bodyBytes) throws InterruptedException {
         assertThat("the stream ended", stream.ended.await(30, TimeUnit.SECONDS), is(true));
         assertThat(stream.resetErrorCode.get(), is(nullValue()));
         assertThat(stream.endStream.get(), is(true));
-        assertThat(stream.dataBytes.get(), is((long) fixedBody.length));
+        assertThat(stream.dataBytes.get(), is((long) bodyBytes));
     }
 
     // ---- harness ----
@@ -553,7 +602,7 @@ public class ResponseWriteStallTimeoutIntegrationTest {
 
     // asking for an event stream makes MockServer stream the response, so only the event-stream paths ask for one
     private static String accept(String uri) {
-        return uri.startsWith("/forward/fixed") ? "application/octet-stream" : "text/event-stream";
+        return uri.startsWith("/forward/fixed") || uri.startsWith("/forward/small") ? "application/octet-stream" : "text/event-stream";
     }
 
     private static Channel awaitUpstream(String uri) throws InterruptedException {
@@ -662,6 +711,7 @@ public class ResponseWriteStallTimeoutIntegrationTest {
         private final Map<Http2FrameStream, Stream> streams = new ConcurrentHashMap<>();
         private final ReadGate readGate = new ReadGate();
         private final ConnectionWindowUpdateGate connectionWindowUpdateGate = new ConnectionWindowUpdateGate();
+        private final AtomicBoolean goAwayReceived = new AtomicBoolean();
         private Channel channel;
         private ChannelHandlerContext ctx;
 
@@ -700,11 +750,25 @@ public class ResponseWriteStallTimeoutIntegrationTest {
             return open(server, codec, connectionWindowIncrement, receiveBufferSize, 0);
         }
 
+        /**
+         * Speaks cleartext HTTP/2 through a CONNECT tunnel, which MockServer's relay terminates, granting the connection
+         * close to the largest window so one stream's unconsumed data cannot hold back another.
+         */
+        static Http2Client openThroughTunnel(MockServer server) throws Exception {
+            return open(server, Http2FrameCodecBuilder.forClient(), Http2CodecUtil.MAX_INITIAL_WINDOW_SIZE - Http2CodecUtil.DEFAULT_WINDOW_SIZE, 0, 0, true);
+        }
+
         private static Http2Client open(MockServer server, Http2FrameCodecBuilder codec, int connectionWindowIncrement, int receiveBufferSize, int readBytes) throws Exception {
+            return open(server, codec, connectionWindowIncrement, receiveBufferSize, readBytes, false);
+        }
+
+        private static Http2Client open(MockServer server, Http2FrameCodecBuilder codec, int connectionWindowIncrement, int receiveBufferSize, int readBytes, boolean throughTunnel) throws Exception {
             Http2Client client = new Http2Client();
             Bootstrap bootstrap = new Bootstrap()
                 .group(clientGroup)
-                .channel(NioSocketChannel.class);
+                .channel(NioSocketChannel.class)
+                // the tunnel's target is handed to the CONNECT proxy, not resolved here
+                .resolver(NoopAddressResolverGroup.INSTANCE);
             if (receiveBufferSize > 0) {
                 bootstrap.option(ChannelOption.SO_RCVBUF, receiveBufferSize);
             }
@@ -715,10 +779,14 @@ public class ResponseWriteStallTimeoutIntegrationTest {
                 .handler(new ChannelInitializer<SocketChannel>() {
                     @Override
                     protected void initChannel(SocketChannel ch) {
-                        ch.pipeline().addLast(client.connectionWindowUpdateGate, client.readGate, codec.build(), client);
+                        ch.pipeline().addLast(client.connectionWindowUpdateGate, client.readGate);
+                        if (throughTunnel) {
+                            ch.pipeline().addLast(new HttpProxyHandler(new InetSocketAddress("127.0.0.1", server.getLocalPort())));
+                        }
+                        ch.pipeline().addLast(codec.build(), client);
                     }
                 })
-                .connect("127.0.0.1", server.getLocalPort()).sync().channel();
+                .connect(throughTunnel ? InetSocketAddress.createUnresolved("127.0.0.1", upstreamPort) : new InetSocketAddress("127.0.0.1", server.getLocalPort())).sync().channel();
             if (connectionWindowIncrement > 0) {
                 client.channel.writeAndFlush(new DefaultHttp2WindowUpdateFrame(connectionWindowIncrement)).sync();
             }
@@ -833,6 +901,9 @@ public class ResponseWriteStallTimeoutIntegrationTest {
         @Override
         public void channelRead(ChannelHandlerContext ctx, Object msg) {
             try {
+                if (msg instanceof Http2GoAwayFrame) {
+                    goAwayReceived.set(true);
+                }
                 Stream stream = msg instanceof Http2StreamFrame && ((Http2StreamFrame) msg).stream() != null ? streams.get(((Http2StreamFrame) msg).stream()) : null;
                 if (stream == null) {
                     return;
@@ -861,8 +932,8 @@ public class ResponseWriteStallTimeoutIntegrationTest {
             }
         }
 
-        void consumeReceived(Stream stream) throws Exception {
-            ctx.executor().submit(() -> consume(stream)).get(5, TimeUnit.SECONDS);
+        void consumeReceived(Stream stream, int maxBytes) throws Exception {
+            ctx.executor().submit(() -> consume(stream, maxBytes)).get(5, TimeUnit.SECONDS);
         }
 
         void consumeAll(Stream... toConsume) throws Exception {
@@ -875,9 +946,14 @@ public class ResponseWriteStallTimeoutIntegrationTest {
         }
 
         private void consume(Stream stream) {
+            consume(stream, Integer.MAX_VALUE);
+        }
+
+        private void consume(Stream stream, int maxBytes) {
             if (stream.unconsumedBytes > 0 && stream.ended.getCount() > 0) {
-                ctx.writeAndFlush(new DefaultHttp2WindowUpdateFrame(stream.unconsumedBytes).stream(stream.frameStream));
-                stream.unconsumedBytes = 0;
+                int consumed = Math.min(stream.unconsumedBytes, maxBytes);
+                ctx.writeAndFlush(new DefaultHttp2WindowUpdateFrame(consumed).stream(stream.frameStream));
+                stream.unconsumedBytes -= consumed;
             }
         }
 
@@ -888,7 +964,8 @@ public class ResponseWriteStallTimeoutIntegrationTest {
     }
 
     /**
-     * {@code /fixed}: the fixed body with a {@code Content-Length}; {@code /big}: every event 16 times in one write,
+     * {@code /fixed}: the fixed body with a {@code Content-Length}; {@code /small}: its first 1 MiB, likewise;
+     * {@code /big}: every event 16 times in one write,
      * then the end of the stream; {@code /trickle}: about 100 KB of events, then nothing, with the connection left open.
      */
     @ChannelHandler.Sharable
@@ -897,10 +974,11 @@ public class ResponseWriteStallTimeoutIntegrationTest {
         protected void channelRead0(ChannelHandlerContext ctx, FullHttpRequest request) {
             String uri = request.uri();
             UPSTREAM_CHANNELS.put(uri, ctx.channel());
-            if (uri.startsWith("/forward/fixed")) {
-                DefaultFullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK, Unpooled.wrappedBuffer(fixedBody));
+            if (uri.startsWith("/forward/fixed") || uri.startsWith("/forward/small")) {
+                int length = uri.startsWith("/forward/small") ? SMALL_BODY_BYTES : fixedBody.length;
+                DefaultFullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK, Unpooled.wrappedBuffer(fixedBody, 0, length));
                 response.headers().set(HttpHeaderNames.CONTENT_TYPE, "application/octet-stream");
-                HttpUtil.setContentLength(response, fixedBody.length);
+                HttpUtil.setContentLength(response, length);
                 ctx.writeAndFlush(response);
                 return;
             }

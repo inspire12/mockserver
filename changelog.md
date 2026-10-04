@@ -293,9 +293,10 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   size and, for a streamed response, up to `maxResponseBodySize` plus an open upstream connection. Now, when a
   response has had bytes waiting for its client for the timeout and the client has taken none of them, the
   response ends incomplete: an HTTP/1.1 connection (or the `CONNECT`/SOCKS tunnel it reads through) is closed,
-  an HTTP/2 or HTTP/3 stream is reset (other streams on the connection carry on; an HTTP/2 stream that was
-  waiting only for flow-control window the stalled stream held gets another timeout period to receive it once
-  the stalled stream is reset), and a streamed response's upstream connection is closed. A client that keeps
+  an HTTP/2 or HTTP/3 stream is reset, including an HTTP/2 stream inside a `CONNECT`/SOCKS tunnel (other streams
+  on the connection, and the tunnel, carry on; an HTTP/2 stream that was waiting only for flow-control window
+  the stalled stream held gets another timeout period to receive it once the stalled stream is reset), and a
+  streamed response's upstream connection is closed. A client that keeps
   taking some of the response at least once per timeout period is not affected, nor is one waiting for a
   delayed or slow response, which has nothing waiting for it. Each stall is logged as a `WARN` and counted
   by the new `mock_server_response_write_stalls_total` metric, labelled by `protocol`
@@ -663,6 +664,17 @@ The latency and healthy-ceiling figures above, Before and After, were measured w
   did not process is refused at once with `REFUSED_STREAM`, rather than when MockServer's side of the tunnel
   closes. Over HTTP/1.1 such a response now gets a `502` rather than a closed connection, unless a streamed
   response has already started, in which case the connection is still closed before the response ends.
+- **A `CONNECT` or SOCKS tunnel whose client can no longer be written to now stops at the first failed write,
+  with one log entry.** When a write to the tunnel's client failed, MockServer closed the client's side but
+  kept reading the response from its own side of the tunnel and tried to write every remaining piece, logging
+  an `ERROR` for each.
+  A client connection that stayed open while refusing writes, for example one whose TLS session was closing,
+  turned one failed tunnel into thousands of `ERROR` entries and up to about 40 seconds of a busy network
+  thread. MockServer now stops relaying at the first failure, logs only that failure and closes both sides of
+  the tunnel. A side that speaks HTTP/2 and still has requests in progress is sent a `GOAWAY` and can stay
+  connected, carrying nothing, for up to 30 seconds before it is closed. A write that fails because one
+  HTTP/2 stream has gone, because the client cancelled it or because `responseWriteStallTimeoutMillis` reset
+  it, ends only that stream: the tunnel and its other requests carry on.
 - **MockServer now stops working on an HTTP/2 request that a `CONNECT` or SOCKS tunnel rejects after passing
   it on.** If the tunnel rejected a request it had already passed to MockServer, for example because the client
   sent more of it after its end, the client was told at once but MockServer was not: it carried on preparing a

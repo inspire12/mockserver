@@ -470,7 +470,7 @@ Counts responses cut by `responseWriteStallTimeoutMillis` because their client t
 
 | Metric Name | Type | Labels | Description |
 |-------------|------|--------|-------------|
-| `mock_server_response_write_stalls_total` | Counter | `protocol`, `scope` | One per cut. `scope="connection"`: `WriteStallTimeoutHandler` closed the connection, and `protocol` is read from its pipeline at that moment (`tunnel` for a CONNECT/SOCKS proxy client, then `http2`, `websocket`, `http1_1`, or `other` for a connection whose protocol is not yet known or is not HTTP). `scope="stream"`: one stream was reset, `protocol="http2"` by `Http2StreamWriteStallHandler` or `protocol="http3"` by `Http3StreamWriteStallHandler`. |
+| `mock_server_response_write_stalls_total` | Counter | `protocol`, `scope` | One per cut. `scope="connection"`: `WriteStallTimeoutHandler` closed the connection, and `protocol` is read from its pipeline at that moment (`tunnel` for a CONNECT/SOCKS proxy client, then `http2`, `websocket`, `http1_1`, or `other` for a connection whose protocol is not yet known or is not HTTP). `scope="stream"`: one stream was reset, `protocol="http2"` by `Http2StreamWriteStallHandler` (a stream inside an HTTP/2 CONNECT/SOCKS tunnel included) or `protocol="http3"` by `Http3StreamWriteStallHandler`. |
 
 The seven label pairs are the values of `Metrics.ResponseWriteStall`, all exported at 0 from the first scrape. Incremented through `Metrics.incrementResponseWriteStalls(ResponseWriteStall)`, a no-op until metrics are enabled. Not mirrored to OTLP.
 

@@ -3,9 +3,12 @@ package org.mockserver.netty.connection;
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.http2.Http2Connection;
+import io.netty.handler.codec.http2.Http2ConnectionHandler;
 import io.netty.handler.codec.http2.Http2Error;
 import io.netty.handler.codec.http2.Http2Exception;
 import io.netty.handler.codec.http2.Http2FrameCodec;
+import io.netty.handler.codec.http2.Http2FrameListener;
+import io.netty.handler.codec.http2.Http2FrameListenerDecorator;
 import io.netty.handler.codec.http2.Http2FrameStream;
 import io.netty.handler.codec.http2.Http2RemoteFlowController;
 import io.netty.handler.codec.http2.Http2Stream;
@@ -37,8 +40,11 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
  * stream's child channel, which ends its response incomplete and fails the writes still queued for it. When a stalled
  * stream holds the connection window the others wait for, only it is reset (see {@code selectStalledStreams}).
  * <p>
- * Sits between {@link Http2FrameCodec} and {@code Http2MultiplexHandler}, the only place that sees stream window
- * updates, which the multiplex handler drops. A timer runs only while the connection has active streams.
+ * Sits after the connection's {@link Http2ConnectionHandler}. With an {@link Http2FrameCodec} it goes before
+ * {@code Http2MultiplexHandler}, the only place that sees stream window updates as frames, which the multiplex handler
+ * drops; a connection handler that turns frames into messages itself (the CONNECT relay's client-facing
+ * {@code HttpToHttp2ConnectionHandler}) passes no window update down the pipeline, so its frame listener must be
+ * wrapped with {@link #frameListener}. A timer runs only while the connection has active streams.
  */
 public final class Http2StreamWriteStallHandler extends ChannelDuplexHandler implements Runnable {
 
@@ -50,7 +56,7 @@ public final class Http2StreamWriteStallHandler extends ChannelDuplexHandler imp
     private final List<Integer> stalledStreamIds = new ArrayList<>();
     private ChannelHandlerContext ctx;
     private ChannelHandlerContext codecCtx;
-    private Http2FrameCodec codec;
+    private Http2ConnectionHandler codec;
     private Http2Connection connection;
     private Http2Connection.PropertyKey progressKey;
     private ScheduledFuture<?> check;
@@ -68,11 +74,11 @@ public final class Http2StreamWriteStallHandler extends ChannelDuplexHandler imp
     @Override
     public void handlerAdded(ChannelHandlerContext ctx) {
         this.ctx = ctx;
-        this.codecCtx = ctx.pipeline().context(Http2FrameCodec.class);
+        this.codecCtx = ctx.pipeline().context(Http2ConnectionHandler.class);
         if (codecCtx == null) {
-            throw new IllegalStateException(Http2StreamWriteStallHandler.class.getSimpleName() + " must be added after an " + Http2FrameCodec.class.getSimpleName());
+            throw new IllegalStateException(Http2StreamWriteStallHandler.class.getSimpleName() + " must be added after an " + Http2ConnectionHandler.class.getSimpleName());
         }
-        this.codec = (Http2FrameCodec) codecCtx.handler();
+        this.codec = (Http2ConnectionHandler) codecCtx.handler();
         this.connection = codec.connection();
         this.progressKey = connection.newKey();
         this.lastConnectionWindow = connection.remote().flowController().windowSize(connection.connectionStream());
@@ -86,17 +92,36 @@ public final class Http2StreamWriteStallHandler extends ChannelDuplexHandler imp
         }
     }
 
+    /**
+     * Wraps the frame listener of a connection handler that passes no window update down the pipeline as a frame.
+     */
+    public Http2FrameListener frameListener(Http2FrameListener delegate) {
+        return new Http2FrameListenerDecorator(delegate) {
+            @Override
+            public void onWindowUpdateRead(ChannelHandlerContext ctx, int streamId, int windowSizeIncrement) throws Http2Exception {
+                windowUpdateRead(streamId);
+                super.onWindowUpdateRead(ctx, streamId, windowSizeIncrement);
+            }
+        };
+    }
+
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
         if (msg instanceof Http2WindowUpdateFrame) {
             Http2FrameStream frameStream = ((Http2WindowUpdateFrame) msg).stream();
-            Http2Stream stream = frameStream != null ? connection.stream(frameStream.id()) : null;
-            StreamWriteProgress progress = stream != null ? stream.getProperty(progressKey) : null;
-            if (progress != null) {
-                progress.windowUpdates++;
+            if (frameStream != null) {
+                windowUpdateRead(frameStream.id());
             }
         }
         ctx.fireChannelRead(msg);
+    }
+
+    private void windowUpdateRead(int streamId) {
+        Http2Stream stream = connection != null ? connection.stream(streamId) : null;
+        StreamWriteProgress progress = stream != null ? stream.getProperty(progressKey) : null;
+        if (progress != null) {
+            progress.windowUpdates++;
+        }
     }
 
     @Override

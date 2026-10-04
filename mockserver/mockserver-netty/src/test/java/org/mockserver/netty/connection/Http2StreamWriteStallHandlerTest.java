@@ -7,6 +7,11 @@ import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.codec.http.DefaultFullHttpResponse;
+import io.netty.handler.codec.http.FullHttpRequest;
+import io.netty.handler.codec.http.HttpResponseStatus;
+import io.netty.handler.codec.http.HttpVersion;
+import io.netty.handler.codec.http2.DefaultHttp2Connection;
 import io.netty.handler.codec.http2.DefaultHttp2DataFrame;
 import io.netty.handler.codec.http2.DefaultHttp2Headers;
 import io.netty.handler.codec.http2.DefaultHttp2HeadersFrame;
@@ -14,6 +19,7 @@ import io.netty.handler.codec.http2.DefaultHttp2SettingsFrame;
 import io.netty.handler.codec.http2.DefaultHttp2WindowUpdateFrame;
 import io.netty.handler.codec.http2.Http2ChannelDuplexHandler;
 import io.netty.handler.codec.http2.Http2CodecUtil;
+import io.netty.handler.codec.http2.Http2Connection;
 import io.netty.handler.codec.http2.Http2DataFrame;
 import io.netty.handler.codec.http2.Http2Error;
 import io.netty.handler.codec.http2.Http2Exception;
@@ -25,6 +31,9 @@ import io.netty.handler.codec.http2.Http2HeadersFrame;
 import io.netty.handler.codec.http2.Http2ResetFrame;
 import io.netty.handler.codec.http2.Http2Settings;
 import io.netty.handler.codec.http2.Http2StreamFrame;
+import io.netty.handler.codec.http2.HttpConversionUtil;
+import io.netty.handler.codec.http2.HttpToHttp2ConnectionHandlerBuilder;
+import io.netty.handler.codec.http2.InboundHttp2ToHttpAdapterBuilder;
 import io.netty.util.ReferenceCountUtil;
 import org.junit.After;
 import org.junit.Assume;
@@ -59,6 +68,7 @@ public class Http2StreamWriteStallHandlerTest {
     private static final String STAGED_RESPONSE_PATH = "/staged";
     private static final int STAGED_FIRST_BYTES = 40_000;
     private static final int SOCKET_WRITABILITY = 1;
+    private static final int SMALL_WINDOW = 1024;
 
     private EmbeddedChannel server;
     private EmbeddedChannel client;
@@ -579,6 +589,42 @@ public class Http2StreamWriteStallHandlerTest {
         assertThat(granted.resetErrorCode, is(Http2Error.CANCEL.code()));
     }
 
+    @Test
+    public void shouldCountWindowUpdatesFromTheFrameListenerOfAConnectionHandlerThatPassesNoFrames() throws Exception {
+        // the CONNECT relay's client-facing leg: frames become HTTP messages inside the handler, so only the frame
+        // listener sees a WINDOW_UPDATE; the stream's window is spent at once each time, so it never visibly changes
+        Http2Connection connection = new DefaultHttp2Connection(true);
+        Http2StreamWriteStallHandler stallHandler = new Http2StreamWriteStallHandler(TIMEOUT_MILLIS, null);
+        socket = new Socket();
+        server = new EmbeddedChannel(
+            socket,
+            new HttpToHttp2ConnectionHandlerBuilder()
+                .connection(connection)
+                .frameListener(stallHandler.frameListener(new InboundHttp2ToHttpAdapterBuilder(connection).maxContentLength(1024 * 1024).build()))
+                .build(),
+            stallHandler,
+            new HttpResponder()
+        );
+        clientCodec = Http2FrameCodecBuilder.forClient().initialSettings(Http2Settings.defaultSettings().initialWindowSize(SMALL_WINDOW)).build();
+        clientHandler = new Client(clientCodec);
+        client = new EmbeddedChannel(clientCodec, clientHandler);
+        client.flush();
+        exchange();
+
+        ClientStream stream = clientHandler.request("/");
+        long started = System.nanoTime();
+        while (TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) < 4 * TIMEOUT_MILLIS) {
+            waitThrough(WriteStallTimeoutHandler.checkIntervalMillis(TIMEOUT_MILLIS));
+            clientHandler.consumeReceived(stream);
+            exchange();
+        }
+
+        assertThat("the stream was not reset", stream.resetErrorCode, is(nullValue()));
+        assertThat("the response is still in progress", stream.endStream, is(false));
+        assertThat("the client took more than its first window", stream.dataBytes > SMALL_WINDOW, is(true));
+        assertThat(Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP2_STREAM), is(0L));
+    }
+
     private void connect(int clientInitialWindowSize) {
         connect(clientInitialWindowSize, true);
     }
@@ -759,6 +805,25 @@ public class Http2StreamWriteStallHandlerTest {
         }
     }
 
+    /**
+     * Answers every request, as HTTP messages, with a body the size of a few frames.
+     */
+    private static final class HttpResponder extends ChannelInboundHandlerAdapter {
+        @Override
+        public void channelRead(ChannelHandlerContext ctx, Object msg) {
+            try {
+                if (msg instanceof FullHttpRequest) {
+                    DefaultFullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK, Unpooled.wrappedBuffer(new byte[RESPONSE_BYTES]));
+                    String streamId = HttpConversionUtil.ExtensionHeaderNames.STREAM_ID.text().toString();
+                    response.headers().set(streamId, ((FullHttpRequest) msg).headers().get(streamId));
+                    ctx.writeAndFlush(response);
+                }
+            } finally {
+                ReferenceCountUtil.release(msg);
+            }
+        }
+    }
+
     private static final class ClientStream {
         private Http2FrameStream frameStream;
         private int consumeLimit;
@@ -817,6 +882,15 @@ public class Http2StreamWriteStallHandlerTest {
         void grantWindow(ClientStream stream, int bytes) throws Http2Exception {
             codec.connection().local().flowController().incrementWindowSize(codec.connection().stream(stream.frameStream.id()), bytes);
             ctx.flush();
+        }
+
+        // returns window for everything the stream has received and not yet returned window for
+        void consumeReceived(ClientStream stream) {
+            int unconsumed = stream.dataBytes - stream.consumed;
+            if (unconsumed > 0) {
+                stream.consumed += unconsumed;
+                ctx.writeAndFlush(new DefaultHttp2WindowUpdateFrame(unconsumed).stream(stream.frameStream));
+            }
         }
 
         @Override

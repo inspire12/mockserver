@@ -4,7 +4,10 @@ import io.netty.buffer.Unpooled;
 import io.netty.channel.*;
 import io.netty.handler.codec.http.FullHttpMessage;
 import io.netty.handler.codec.http.HttpContent;
+import io.netty.handler.codec.http.HttpMessage;
 import io.netty.handler.codec.http.HttpObject;
+import io.netty.handler.codec.http2.Http2CodecUtil;
+import io.netty.handler.codec.http2.Http2Exception;
 import io.netty.util.ReferenceCountUtil;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.log.model.SensitiveLogValue;
@@ -17,6 +20,7 @@ import java.nio.channels.ClosedChannelException;
 import java.nio.channels.ClosedSelectorException;
 import java.util.concurrent.atomic.AtomicLong;
 
+import static io.netty.handler.codec.http2.HttpConversionUtil.ExtensionHeaderNames.STREAM_ID;
 import static org.mockserver.exception.ExceptionHandling.closeOnFlush;
 import static org.mockserver.exception.ExceptionHandling.DIRECT_MEMORY_LIMIT_REACHED;
 import static org.mockserver.exception.ExceptionHandling.directMemoryLimitReached;
@@ -31,8 +35,8 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
     private final long maxUnwrittenStreamedBytes;
     private final long pauseReadsAboveBytes;
     private final AtomicLong unwrittenStreamedBytes = new AtomicLong();
-    private boolean streamAborted;
-    // confined to the loopback's event loop, which the proxy client's channel shares
+    // both confined to the loopback's event loop, which the proxy client's channel shares
+    private boolean relayEnded;
     private boolean readsPaused;
 
     /**
@@ -66,8 +70,8 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
 
     @Override
     public void channelRead0(final ChannelHandlerContext ctx, final HttpObject msg) {
-        if (streamAborted) {
-            // the rest of the read that passed the bound is still decoded, and dropped here
+        if (relayEnded) {
+            // the rest of the read that ended the relay is still decoded, and dropped here
             ReferenceCountUtil.release(msg);
             return;
         }
@@ -75,7 +79,6 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
         final int streamedBytes = msg instanceof HttpContent && !(msg instanceof FullHttpMessage) ? ((HttpContent) msg).content().readableBytes() : 0;
         final long unwritten = streamedBytes > 0 && maxUnwrittenStreamedBytes > 0 ? unwrittenStreamedBytes.addAndGet(streamedBytes) : 0;
         if (unwritten > maxUnwrittenStreamedBytes) {
-            streamAborted = true;
             ReferenceCountUtil.release(msg);
             if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
                 mockServerLogger.logEvent(
@@ -86,14 +89,15 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
                 );
             }
             // no terminating chunk is written, so the client sees an incomplete response
-            upstreamChannel.close();
-            ctx.close();
+            endRelay(ctx);
             return;
         }
         if (unwritten > pauseReadsAboveBytes && !readsPaused) {
             readsPaused = true;
             ChannelReadPause.pause(ctx.channel());
         }
+        // read before the write, which releases the message
+        final Integer clientStreamId = msg instanceof HttpMessage ? ((HttpMessage) msg).headers().getInt(STREAM_ID.text()) : null;
         upstreamChannel.writeAndFlush(msg).addListener((ChannelFutureListener) future -> {
             if (unwritten > 0 && unwrittenStreamedBytes.addAndGet(-streamedBytes) <= pauseReadsAboveBytes / 2 && readsPaused) {
                 readsPaused = false;
@@ -101,16 +105,48 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
             }
             if (future.isSuccess()) {
                 // while paused, reads resume only when the backlog has drained (resume above)
-                if (!readsPaused) {
+                if (!readsPaused && !relayEnded) {
                     ctx.read();
                 }
-            } else {
-                if (isNotSocketClosedException(future.cause())) {
+            } else if (clientStreamId != null && isStreamFailure(future.cause()) && upstreamChannel.isActive()) {
+                // only that HTTP/2 stream is gone (reset by its client or by the stream write-stall watcher), so the
+                // tunnel carries on with the others
+                if (mockServerLogger.isEnabledForInstance(Level.DEBUG)) {
+                    mockServerLogger.logEvent(
+                        new LogEntry()
+                            .setLogLevel(Level.DEBUG)
+                            .setMessageFormat("response on stream {} to {} was not relayed because the stream had closed: {}")
+                            .setArguments(clientStreamId, upstreamChannel.remoteAddress(), String.valueOf(future.cause().getMessage()))
+                    );
+                }
+                if (!readsPaused && !relayEnded) {
+                    ctx.read();
+                }
+            } else if (!relayEnded) {
+                // every write already queued behind this one fails the same way, so only the first is logged; a client
+                // connection that has closed is not a failure worth an error (its streams' writes fail with it)
+                if (upstreamChannel.isActive() && isNotSocketClosedException(future.cause())) {
                     mockServerLogger.logEvent(writeFailure(msg, future.cause()));
                 }
-                future.channel().close();
+                endRelay(ctx);
             }
         });
+    }
+
+    /**
+     * Closes both legs and stops reading the loopback. Closing the proxy client's channel is not enough: one that stays
+     * open while refusing writes (a TLS engine closed with its {@code close_notify} queued behind unread bytes) never
+     * fires the {@code channelInactive} that closes the loopback, which would keep reading and relaying into it.
+     * <p>
+     * The loopback is closed through its pipeline, so an HTTP/2 loopback with streams still open sends a {@code GOAWAY}
+     * and stays connected, reading nothing, until Netty's graceful-shutdown timeout (30 s) closes it.
+     */
+    private void endRelay(ChannelHandlerContext ctx) {
+        relayEnded = true;
+        // never released: a loopback closing through its own TLS handler can still read until that close completes
+        ChannelReadPause.pause(ctx.channel());
+        upstreamChannel.close();
+        ctx.close();
     }
 
     /**
@@ -135,6 +171,10 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
             logEntry.setArguments(SensitiveLogValue.of(text));
         }
         return logEntry;
+    }
+
+    private static boolean isStreamFailure(Throwable cause) {
+        return Http2CodecUtil.getEmbeddedHttp2Exception(cause) instanceof Http2Exception.StreamException;
     }
 
     private boolean isNotSocketClosedException(Throwable cause) {

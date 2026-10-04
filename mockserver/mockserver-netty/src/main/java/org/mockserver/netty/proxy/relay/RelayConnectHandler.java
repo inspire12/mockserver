@@ -28,7 +28,9 @@ import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.LoggingHandler;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.Protocol;
+import org.mockserver.netty.connection.Http2StreamWriteStallHandler;
 import org.mockserver.netty.connection.InboundConnectionActivity;
+import org.mockserver.netty.connection.WriteStallTimeoutHandler;
 import org.mockserver.netty.unification.PortUnificationHandler;
 import org.slf4j.event.Level;
 
@@ -397,15 +399,27 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
         // as it does any request, so an unchanged forward sends the client's bytes and raw-block snappy is decoded.
         if (http2EnabledDownstream) {
             final Http2Connection connection = new DefaultHttp2Connection(true);
+            Http2FrameListener frameListener = pipelineToMockServer.get(LoopbackHttp2StreamErrorHandler.class).proxyClientFrameListener(
+                connection,
+                ExpectContinueInboundHttp2ToHttpAdapter.forConnection(connection, configuration.maxRequestBodySize())
+            );
+            // the loopback is exempt from write-stall watching, so a stream the client stops taking is cut on this leg
+            final long writeStallTimeoutMillis = configuration.responseWriteStallTimeoutMillis();
+            final Http2StreamWriteStallHandler streamWriteStallHandler = writeStallTimeoutMillis > 0 && !WriteStallTimeoutHandler.isExempt(proxyClientCtx.channel())
+                ? new Http2StreamWriteStallHandler(writeStallTimeoutMillis, mockServerLogger)
+                : null;
+            if (streamWriteStallHandler != null) {
+                frameListener = streamWriteStallHandler.frameListener(frameListener);
+            }
             final HttpToHttp2ConnectionHandlerBuilder http2ConnectionHandlerBuilder = new HttpToHttp2ConnectionHandlerBuilder()
-                .frameListener(pipelineToMockServer.get(LoopbackHttp2StreamErrorHandler.class).proxyClientFrameListener(
-                    connection,
-                    ExpectContinueInboundHttp2ToHttpAdapter.forConnection(connection, configuration.maxRequestBodySize())
-                ));
+                .frameListener(frameListener);
             if (mockServerLogger.isEnabledForInstance(TRACE)) {
                 http2ConnectionHandlerBuilder.frameLogger(new Http2FrameLogger(LogLevel.TRACE, RelayConnectHandler.class.getName()));
             }
             pipelineToProxyClient.addLast(http2ConnectionHandlerBuilder.connection(connection).build());
+            if (streamWriteStallHandler != null) {
+                pipelineToProxyClient.addLast(streamWriteStallHandler);
+            }
         } else {
             HttpChunkLineLimiter chunkLineLimiter = new HttpChunkLineLimiter(mockServerLogger);
             pipelineToProxyClient.addLast(chunkLineLimiter.beforeCodec());
