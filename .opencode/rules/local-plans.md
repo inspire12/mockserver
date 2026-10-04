@@ -33,7 +33,7 @@ docs/plans/sre-chaos-features.local.md
 
 # Committed, shared plan — plain .md
 docs/plans/mockserver-llm-mocking.md
-docs/plans/security-defaults.md
+docs/plans/later/security-defaults.md
 ```
 
 When a local plan is ready to become an authoritative, shared design doc,
