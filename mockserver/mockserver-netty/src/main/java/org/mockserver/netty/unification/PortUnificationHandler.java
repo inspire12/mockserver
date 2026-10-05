@@ -41,6 +41,7 @@ import org.mockserver.netty.connection.HttpExchangeTracker;
 import org.mockserver.netty.connection.HttpTransportTimer;
 import org.mockserver.netty.connection.InboundConnectionActivity;
 import org.mockserver.netty.connection.WriteStallTimeoutHandler;
+import org.mockserver.netty.proxy.relay.LoopbackExchangeEndedHandler;
 import org.mockserver.netty.proxy.relay.RelayLoopbackAddresses;
 import org.mockserver.netty.mcp.McpStreamableHttpHandler;
 import org.mockserver.netty.grpc.GrpcToHttpRequestHandler;
@@ -491,6 +492,10 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
             addLastIfNotPresent(pipeline, chunkLineLimiter.afterCodec());
             if (InboundConnectionActivity.isTracked(ctx.channel())) {
                 addLastIfNotPresent(pipeline, HttpExchangeTracker.INSTANCE);
+            }
+            if (RelayLoopbackAddresses.isRelayLoopback(ctx.channel())) {
+                // the tunnel's client leg is the one timed, and must hear of an exchange abandoned here
+                addLastIfNotPresent(pipeline, LoopbackExchangeEndedHandler.INSTANCE);
             }
             if (Boolean.TRUE.equals(configuration.metricsEnabled())) {
                 addLastIfNotPresent(pipeline, new HttpTransportTimer());

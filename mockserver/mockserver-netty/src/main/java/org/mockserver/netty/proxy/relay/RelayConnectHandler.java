@@ -83,7 +83,7 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
 
                 @Override
                 public void channelActive(final ChannelHandlerContext mockServerCtx) {
-                    RelayLoopbackAddresses.register(mockServerCtx.channel());
+                    RelayLoopbackAddresses.register(mockServerCtx.channel(), proxyClientCtx.channel());
                     String hostForMessage = host.contains(":") ? "[" + host + "]" : host;
                     if (isSslEnabledUpstream(proxyClientCtx.channel())) {
                         mockServerCtx.writeAndFlush(Unpooled.copiedBuffer((PROXIED_SECURE + hostForMessage + ":" + port).getBytes(StandardCharsets.UTF_8)));
@@ -321,8 +321,8 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
 
     /**
      * One-shot probe for the SOCKS relay, mirroring Netty's {@code OptionalSslHandler}: it classifies the
-     * first tunnelled bytes and provisions the loopback accordingly, then removes itself so the buffered
-     * bytes flow on to the handler it installed. A SOCKS client sends nothing until it has received the SOCKS
+     * first tunnelled bytes and provisions the loopback accordingly, then hands the buffered bytes to the
+     * handler it installed and removes itself. A SOCKS client sends nothing until it has received the SOCKS
      * success reply, so this - not the destination port - is the earliest trustworthy signal of the tunnelled
      * protocol (issue #2685). Three outcomes:
      * <ul>
@@ -356,8 +356,7 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
             ChannelPipeline pipelineToMockServer = mockServerCtx.channel().pipeline();
             if (SslHandler.isEncrypted(in)) {
                 // the client is speaking TLS: terminate it and read its ALPN. terminateClientTlsThenConfigure
-                // adds the SslHandler after this decoder; removing this decoder forwards the buffered
-                // ClientHello to it (ByteToMessageDecoder hands its unread cumulation to the next handler).
+                // adds the SslHandler after this decoder, which hands it the buffered ClientHello below.
                 enableSslUpstreamAndDownstream(ctx.channel());
                 terminateClientTlsThenConfigure(pipelineToMockServer, pipelineToProxyClient, mockServerCtx, ctx);
             } else {
@@ -375,9 +374,13 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
                 if (stillPossibleH2c && in.readableBytes() < H2C_PREFACE_LENGTH) {
                     return;
                 }
-                // the codecs are added after this decoder; removing it forwards the buffered request bytes.
+                // the codecs are added after this decoder, which hands them the buffered request bytes below.
                 configurePipelines(pipelineToMockServer, pipelineToProxyClient, mockServerCtx, ctx, stillPossibleH2c);
             }
+            // Handed on here, not left for handlerRemoved, which follows them with a channelReadComplete in the middle
+            // of the socket's read. The tunnel's HTTP/2 handler flushes on that, and a flush to a client that has
+            // already gone fails and closes the channel with the rest of its request still unread.
+            out.add(in.readRetainedSlice(in.readableBytes()));
             pipelineToProxyClient.remove(this);
         }
     }

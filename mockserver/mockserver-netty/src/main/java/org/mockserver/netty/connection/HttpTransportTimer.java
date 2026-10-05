@@ -42,7 +42,7 @@ public final class HttpTransportTimer extends ChannelDuplexHandler {
 
     @Override
     public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
-        if (evt == HttpExchangeEndedEvent.INSTANCE && size > 0) {
+        if (evt instanceof HttpExchangeEndedEvent && size > 0) {
             dequeue();
         }
         ctx.fireUserEventTriggered(evt);

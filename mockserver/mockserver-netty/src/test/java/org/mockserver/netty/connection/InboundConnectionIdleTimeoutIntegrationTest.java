@@ -414,17 +414,92 @@ public class InboundConnectionIdleTimeoutIntegrationTest {
     }
 
     @Test
-    public void shouldNotCloseConnectTunnelWhileItsRequestIsNeverAnswered() throws Exception {
+    public void shouldCloseBothLegsOfAConnectTunnelOnceIdleAfterItsRequestIsAbandoned() throws Exception {
+        closesBothLegsOfATunnelOnceIdleAfterItsRequestIsAbandoned(this::openConnectTunnel);
+    }
+
+    @Test
+    public void shouldCloseBothLegsOfASocksTunnelOnceIdleAfterItsRequestIsAbandoned() throws Exception {
+        closesBothLegsOfATunnelOnceIdleAfterItsRequestIsAbandoned(socket -> {
+            openSocks5Tunnel(socket);
+            // the reply's bound address is the name "127.0.0.1" with its length, where an IPv4 address has four bytes
+            readBytes(socket.getInputStream(), 1 + "127.0.0.1".length() - 4);
+        });
+    }
+
+    private void closesBothLegsOfATunnelOnceIdleAfterItsRequestIsAbandoned(TunnelOpener tunnelOpener) throws Exception {
         startServer(IDLE_MILLIS);
-        // answered with nothing, and the connection left open
+        // answered with nothing, and the connection left open: MockServer has abandoned the exchange, as on a direct connection
         mockServerClient.when(request().withPath("/held")).error(error());
         try (Socket socket = new Socket("localhost", port)) {
             socket.setSoTimeout(10_000);
-            openConnectTunnel(socket);
+            tunnelOpener.open(socket);
+            long beforeRequest = System.nanoTime();
             send(socket, "GET /held HTTP/1.1\r\nHost: localhost:" + port + "\r\n\r\n");
 
-            assertStillOpenAfter(socket, WAIT_MILLIS);
+            assertThat(socket.getInputStream().read(), is(-1));
+
+            assertThat(millisSince(beforeRequest), greaterThanOrEqualTo(IDLE_MILLIS - 50));
+            awaitNoInboundConnections("the tunnel's loopback leg closes with it");
         }
+    }
+
+    @Test
+    public void shouldCloseBothLegsOfAConnectTunnelOnceIdleAfterAFinalInformationalResponse() throws Exception {
+        startServer(IDLE_MILLIS);
+        // the tunnel's own codec takes any 1xx but 101 for an interim response, and goes on waiting for a final one
+        mockServerClient.when(request().withPath("/processing")).respond(response().withStatusCode(102));
+        try (Socket socket = new Socket("localhost", port)) {
+            socket.setSoTimeout(10_000);
+            openConnectTunnel(socket);
+            long beforeRequest = System.nanoTime();
+            send(socket, "GET /processing HTTP/1.1\r\nHost: localhost:" + port + "\r\n\r\n");
+            assertThat(readHead(socket.getInputStream()), containsString("102"));
+
+            assertThat(socket.getInputStream().read(), is(-1));
+
+            assertThat(millisSince(beforeRequest), greaterThanOrEqualTo(IDLE_MILLIS - 50));
+            awaitNoInboundConnections("the tunnel's loopback leg closes with it");
+        }
+    }
+
+    @Test
+    public void shouldNotCloseConnectTunnelWhileAResponseIsDelayedBehindAnAbandonedRequest() throws Exception {
+        startServer(IDLE_MILLIS);
+        mockServerClient.when(request().withPath("/held")).error(error());
+        mockServerClient.when(request().withPath("/slow")).respond(response().withBody("slow but sure").withDelay(TimeUnit.MILLISECONDS, WAIT_MILLIS));
+        try (Socket socket = new Socket("localhost", port)) {
+            socket.setSoTimeout(10_000);
+            openConnectTunnel(socket);
+            // pipelined, so both exchanges are in progress when the first is abandoned: only that one has ended
+            send(socket, "GET /held HTTP/1.1\r\nHost: localhost:" + port + "\r\n\r\nGET /slow HTTP/1.1\r\nHost: localhost:" + port + "\r\n\r\n");
+
+            assertThat(readHead(socket.getInputStream()), containsString("200"));
+            assertThat(new String(readBytes(socket.getInputStream(), "slow but sure".length()), StandardCharsets.UTF_8), is("slow but sure"));
+        }
+    }
+
+    @Test
+    public void shouldNotCloseConnectTunnelWhileAResponseIsDelayedBehindARawBytesResponse() throws Exception {
+        startServer(IDLE_MILLIS);
+        mockServerClient.when(request().withPath("/raw")).error(error()
+            .withResponseBytes("HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nraw".getBytes(StandardCharsets.UTF_8)));
+        mockServerClient.when(request().withPath("/slow")).respond(response().withBody("slow but sure").withDelay(TimeUnit.MILLISECONDS, WAIT_MILLIS));
+        try (Socket socket = new Socket("localhost", port)) {
+            socket.setSoTimeout(10_000);
+            openConnectTunnel(socket);
+            // pipelined: the relay reads the raw bytes as the first response and ends that exchange once, on relaying it
+            send(socket, "GET /raw HTTP/1.1\r\nHost: localhost:" + port + "\r\n\r\nGET /slow HTTP/1.1\r\nHost: localhost:" + port + "\r\n\r\n");
+
+            assertThat(readHead(socket.getInputStream()), containsString("200"));
+            assertThat(new String(readBytes(socket.getInputStream(), "raw".length()), StandardCharsets.UTF_8), is("raw"));
+            assertThat(readHead(socket.getInputStream()), containsString("200"));
+            assertThat(new String(readBytes(socket.getInputStream(), "slow but sure".length()), StandardCharsets.UTF_8), is("slow but sure"));
+        }
+    }
+
+    private interface TunnelOpener {
+        void open(Socket socket) throws IOException;
     }
 
     @Test

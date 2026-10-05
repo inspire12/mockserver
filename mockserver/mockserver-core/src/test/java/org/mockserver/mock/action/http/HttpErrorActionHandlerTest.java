@@ -30,6 +30,7 @@ import java.util.concurrent.TimeUnit;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.mockito.Mockito.*;
@@ -67,7 +68,7 @@ public class HttpErrorActionHandlerTest {
         assertThat(written.toString(StandardCharsets.UTF_8), is("some_bytes"));
         written.release();
         assertThat("the handlers after the codec never see a response, so they are told the exchange ended",
-            seenAfterCodec, contains((Object) HttpExchangeEndedEvent.INSTANCE));
+            seenAfterCodec, contains((Object) HttpExchangeEndedEvent.RAW_RESPONSE_WRITTEN));
         assertThat(channel.isOpen(), is(true));
         channel.finishAndReleaseAll();
     }
@@ -99,7 +100,7 @@ public class HttpErrorActionHandlerTest {
 
         // then
         assertThat(channel.isOpen(), is(false));
-        assertThat(seenAfterCodec, not(hasItem(HttpExchangeEndedEvent.INSTANCE)));
+        assertThat(seenAfterCodec, not(hasItem(instanceOf(HttpExchangeEndedEvent.class))));
         channel.finishAndReleaseAll();
     }
 
@@ -116,7 +117,7 @@ public class HttpErrorActionHandlerTest {
         // then
         assertThat("the exchange is still in progress while its bytes are being written", seenAfterCodec.isEmpty(), is(true));
         heldWrites.release();
-        assertThat(seenAfterCodec, contains((Object) HttpExchangeEndedEvent.INSTANCE));
+        assertThat(seenAfterCodec, contains((Object) HttpExchangeEndedEvent.RAW_RESPONSE_WRITTEN));
         channel.finishAndReleaseAll();
     }
 
@@ -159,7 +160,7 @@ public class HttpErrorActionHandlerTest {
                             @Override
                             public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
                                 // anything that runs as the write completes, such as reading the client's next request
-                                promise.addListener(future -> endedWhenWriteCompleted.complete(seenAfterCodec.contains(HttpExchangeEndedEvent.INSTANCE)));
+                                promise.addListener(future -> endedWhenWriteCompleted.complete(seenAfterCodec.contains(HttpExchangeEndedEvent.RAW_RESPONSE_WRITTEN)));
                                 ctx.write(msg, promise);
                             }
                         }, new HttpServerCodec(), recorder(seenAfterCodec));

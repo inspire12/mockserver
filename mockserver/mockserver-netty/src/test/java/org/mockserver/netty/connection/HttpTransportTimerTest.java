@@ -159,6 +159,19 @@ public class HttpTransportTimerTest {
     }
 
     @Test
+    public void shouldTimeTheNextKeepAliveRequestFromItsOwnStartAfterARawBytesResponse() throws InterruptedException {
+        readRequest();
+        Thread.sleep(GAP_MILLIS);
+        channel.pipeline().fireUserEventTriggered(HttpExchangeEndedEvent.RAW_RESPONSE_WRITTEN);
+
+        readRequest();
+        writeAndFlush(response(HttpResponseStatus.OK));
+
+        assertThat(count(TRANSPORT), is(1L));
+        assertThat("timed from its own request, not the raw-bytes one before it", countOver(TRANSPORT, UNDER_GAP_SECONDS), is(0L));
+    }
+
+    @Test
     public void shouldEndOnlyTheOldestPipelinedExchangeOnAnExchangeEndedEvent() throws InterruptedException {
         readRequest();
         Thread.sleep(GAP_MILLIS);

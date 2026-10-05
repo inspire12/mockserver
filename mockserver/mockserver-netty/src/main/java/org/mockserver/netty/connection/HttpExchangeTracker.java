@@ -47,7 +47,7 @@ public final class HttpExchangeTracker extends ChannelDuplexHandler {
 
     @Override
     public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
-        if (evt == HttpExchangeEndedEvent.INSTANCE) {
+        if (evt instanceof HttpExchangeEndedEvent) {
             InboundConnectionActivity activity = InboundConnectionActivity.of(ctx.channel());
             if (activity != null) {
                 activity.httpExchangeCompleted();

@@ -238,7 +238,7 @@ public final class HttpChunkLineLimiter {
 
         @Override
         public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
-            if (evt == HttpExchangeEndedEvent.INSTANCE) {
+            if (evt instanceof HttpExchangeEndedEvent) {
                 responseEnded();
             }
             if (evt instanceof HttpExpectationFailedEvent) {

@@ -16,9 +16,10 @@ import org.mockserver.responsewriter.HttpExchangeEndedEvent;
  * resets the request stream (HTTP/2 RST_STREAM, written here; HTTP/3 RESET_STREAM, handled by the
  * HTTP/3 response writer seam in mockserver-netty), and/or drops the connection.
  * <p>
- * On HTTP/1.1 it fires {@link HttpExchangeEndedEvent} when raw bytes are written, as their write completes
- * and before any stream error or drop is applied, and when nothing at all is written and the connection
- * stays open. A stream error or drop with no raw bytes fires nothing: the connection's state closes with it.
+ * On HTTP/1.1 it fires {@link HttpExchangeEndedEvent#RAW_RESPONSE_WRITTEN} when raw bytes are written, as their
+ * write completes and before any stream error or drop is applied, and {@link HttpExchangeEndedEvent#INSTANCE} when
+ * nothing at all is written and the connection stays open. A stream error or drop with no raw bytes fires nothing:
+ * the connection's state closes with it.
  *
  * @author jamesdbloom
  */
@@ -38,7 +39,7 @@ public class HttpErrorActionHandler {
                 // stream error or drop on it keeps the bytes ahead of the close without blocking the caller.
                 ChannelPromise written = httpCodecContext.newPromise();
                 written.addListener(future -> {
-                    httpCodecContext.fireUserEventTriggered(HttpExchangeEndedEvent.INSTANCE);
+                    httpCodecContext.fireUserEventTriggered(HttpExchangeEndedEvent.RAW_RESPONSE_WRITTEN);
                     resetStreamOrDropConnection(httpError, request, ctx);
                 });
                 httpCodecContext.writeAndFlush(Unpooled.wrappedBuffer(httpError.getResponseBytes()), written);

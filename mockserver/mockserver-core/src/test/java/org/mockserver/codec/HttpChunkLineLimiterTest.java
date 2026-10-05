@@ -232,12 +232,21 @@ public class HttpChunkLineLimiterTest {
 
     @Test
     public void shouldRespondWhenEarlierExchangesOnTheConnectionHaveEnded() {
+        shouldRespondWhenEarlierExchangesHaveEnded(HttpExchangeEndedEvent.INSTANCE);
+    }
+
+    @Test
+    public void shouldRespondWhenAnEarlierExchangeOnTheConnectionWasAnsweredWithRawBytes() {
+        shouldRespondWhenEarlierExchangesHaveEnded(HttpExchangeEndedEvent.RAW_RESPONSE_WRITTEN);
+    }
+
+    private void shouldRespondWhenEarlierExchangesHaveEnded(HttpExchangeEndedEvent secondExchangeEnded) {
         EmbeddedChannel channel = limited();
-        // one answered through the codec, one answered with raw bytes (announced by the event), then 100 Continue
+        // one answered through the codec, one ended outside it (announced by the event), then 100 Continue
         channel.writeInbound(buffer("GET /first HTTP/1.1\r\nHost: localhost\r\n\r\n"));
         respondOk(channel);
         channel.writeInbound(buffer("GET /second HTTP/1.1\r\nHost: localhost\r\n\r\n"));
-        HttpExchangeEndedEvent.fire(channel.pipeline().lastContext());
+        channel.pipeline().context(HttpServerCodec.class).fireUserEventTriggered(secondExchangeEnded);
         channel.writeInbound(buffer(CHUNKED_HEAD + "5;name="));
         channel.writeOutbound(new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.CONTINUE));
         assertThat(response(channel), startsWith("HTTP/1.1 100 Continue\r\n"));

@@ -3,17 +3,18 @@ package org.mockserver.netty.proxy.relay;
 import io.netty.channel.Channel;
 
 import java.net.SocketAddress;
-import java.util.Set;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * The local addresses of the loopback connections {@link RelayConnectHandler} opens to MockServer, so the accepting
- * side can tell its own relay's loopback leg from a client that merely sends the same {@code PROXIED_} preamble. Each
- * address is held only while its connection is open.
+ * The local addresses of the loopback connections {@link RelayConnectHandler} opens to MockServer, each with the proxy
+ * client's channel of its tunnel, so the accepting side can tell its own relay's loopback leg from a client that merely
+ * sends the same {@code PROXIED_} preamble, and can reach the tunnel's other leg. Each address is held only while its
+ * connection is open.
  */
 public final class RelayLoopbackAddresses {
 
-    private static final Set<SocketAddress> LOCAL_ADDRESSES = ConcurrentHashMap.newKeySet();
+    private static final Map<SocketAddress, Channel> PROXY_CLIENTS = new ConcurrentHashMap<>();
 
     private RelayLoopbackAddresses() {
     }
@@ -21,10 +22,10 @@ public final class RelayLoopbackAddresses {
     /**
      * Must be called once the loopback is connected and before it sends its preamble.
      */
-    static void register(Channel loopback) {
+    static void register(Channel loopback, Channel proxyClient) {
         SocketAddress localAddress = loopback.localAddress();
-        if (localAddress != null && LOCAL_ADDRESSES.add(localAddress)) {
-            loopback.closeFuture().addListener(future -> LOCAL_ADDRESSES.remove(localAddress));
+        if (localAddress != null && PROXY_CLIENTS.putIfAbsent(localAddress, proxyClient) == null) {
+            loopback.closeFuture().addListener(future -> PROXY_CLIENTS.remove(localAddress));
         }
     }
 
@@ -32,7 +33,15 @@ public final class RelayLoopbackAddresses {
      * @return whether an accepted connection is the loopback leg of one of this JVM's relays
      */
     public static boolean isRelayLoopback(Channel accepted) {
+        return proxyClientOf(accepted) != null;
+    }
+
+    /**
+     * @return the proxy client's channel of the tunnel whose loopback leg an accepted connection is, or null if it is
+     * not one of this JVM's relays' loopback legs
+     */
+    static Channel proxyClientOf(Channel accepted) {
         SocketAddress remoteAddress = accepted.remoteAddress();
-        return remoteAddress != null && LOCAL_ADDRESSES.contains(remoteAddress);
+        return remoteAddress != null ? PROXY_CLIENTS.get(remoteAddress) : null;
     }
 }
