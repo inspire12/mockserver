@@ -335,9 +335,11 @@ if [ -f "$JARPREP_SCRIPT" ]; then
   # statement before the fail would all leave the refusal unbound.
   refusal="$(grep -v '^[[:space:]]*#' "$JARPREP_SCRIPT" | grep -v '^[[:space:]]*$' | awk -v want="if unzip -Z1 \"\$JAR\" 'shaded_package/com/sun/jna/Native.class' >/dev/null 2>&1; then" '
     state == 1 { state = ($1 == "fail") ? 2 : -1; next }
-    state == 2 { print ($1 == "fi" ? "bound" : "unbound"); exit }
+    state == 2 { result = ($1 == "fi" ? "bound" : "unbound"); state = 3; next }
+    state == 3 { next }
     { line = $0; sub(/^[[:space:]]+/, "", line) }
-    line == want { state = 1 }')"
+    line == want { state = 1 }
+    END { if (result != "") print result }')"
   if [ "$refusal" != "bound" ]; then
     echo "FAIL: docker/jarprep/mockserver-jarprep.sh must refuse a jar with relocated JNA (if unzip -Z1 \"\$JAR\" 'shaded_package/com/sun/jna/Native.class' ...; then followed by fail)"
     errors=$((errors + 1))
