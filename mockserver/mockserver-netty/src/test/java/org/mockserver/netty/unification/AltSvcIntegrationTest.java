@@ -17,6 +17,7 @@ import static org.hamcrest.Matchers.*;
 import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
+import static org.mockserver.netty.http3.Http3TestServer.startWithHttp3;
 
 /**
  * Integration tests for Alt-Svc header advertisement on the TCP response path.
@@ -49,10 +50,9 @@ public class AltSvcIntegrationTest {
         // alone, but setting http3Port now REQUIRES the QUIC native (start-up fails without it), so
         // these tests carry the same availability guard as the HTTP/3 suite.
         Configuration config = configuration()
-            .http3Port(8443)
             .http3AltSvcMaxAge(3600L);
 
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
         int tcpPort = mockServer.getLocalPort();
 
         client = new MockServerClient("127.0.0.1", tcpPort);
@@ -73,7 +73,7 @@ public class AltSvcIntegrationTest {
                 httpResponse.getFirstHeader("alt-svc"), is(notNullValue()));
             assertThat("alt-svc header value should advertise h3",
                 httpResponse.getFirstHeader("alt-svc").getValue(),
-                is("h3=\":8443\"; ma=3600"));
+                is("h3=\":" + mockServer.getHttp3Port() + "\"; ma=3600"));
         }
     }
 
@@ -110,10 +110,9 @@ public class AltSvcIntegrationTest {
         requireQuicNative();
         // given - MockServer with http3Port set but advertisement explicitly disabled
         Configuration config = configuration()
-            .http3Port(8443)
             .http3AdvertiseAltSvc(false);
 
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
         int tcpPort = mockServer.getLocalPort();
 
         client = new MockServerClient("127.0.0.1", tcpPort);
@@ -140,10 +139,9 @@ public class AltSvcIntegrationTest {
         requireQuicNative();
         // given - MockServer with http3Port set AND an expectation that explicitly sets alt-svc
         Configuration config = configuration()
-            .http3Port(8443)
             .http3AltSvcMaxAge(86400L);
 
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
         int tcpPort = mockServer.getLocalPort();
 
         client = new MockServerClient("127.0.0.1", tcpPort);
@@ -173,10 +171,9 @@ public class AltSvcIntegrationTest {
     public void shouldUseDefaultMaxAgeWhenNotExplicitlyConfigured() throws Exception {
         requireQuicNative();
         // given - MockServer with http3Port set, using default max-age (86400)
-        Configuration config = configuration()
-            .http3Port(443);
+        Configuration config = configuration();
 
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
         int tcpPort = mockServer.getLocalPort();
 
         client = new MockServerClient("127.0.0.1", tcpPort);
@@ -195,7 +192,7 @@ public class AltSvcIntegrationTest {
             assertThat("status should be 200", httpResponse.getStatusLine().getStatusCode(), is(200));
             assertThat("alt-svc should use default max-age of 86400",
                 httpResponse.getFirstHeader("alt-svc").getValue(),
-                is("h3=\":443\"; ma=86400"));
+                is("h3=\":" + mockServer.getHttp3Port() + "\"; ma=86400"));
         }
     }
 

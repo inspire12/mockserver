@@ -4,6 +4,7 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.junit.After;
 import org.junit.AfterClass;
+import org.junit.Assume;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.mockserver.client.MockServerClient;
@@ -12,6 +13,8 @@ import org.mockserver.configuration.ConfigurationProperties;
 import org.mockserver.echo.http.EchoServer;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpResponse;
+import org.mockserver.netty.http3.Http3Server;
+import org.mockserver.netty.http3.Http3StartupException;
 import org.mockserver.netty.integration.proxy.http.HttpProxyChainedIntegrationTest;
 import org.mockserver.scheduler.Scheduler;
 import org.mockserver.socket.PortFactory;
@@ -21,7 +24,11 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.io.UnsupportedEncodingException;
+import java.net.BindException;
+import java.net.InetSocketAddress;
 import java.net.ServerSocket;
+import java.net.StandardProtocolFamily;
+import java.nio.channels.DatagramChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -30,6 +37,8 @@ import java.util.function.IntFunction;
 import static io.netty.handler.codec.http.HttpHeaderNames.HOST;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.core.Is.is;
 import static org.hamcrest.core.IsNull.nullValue;
 import static org.junit.Assert.assertTrue;
@@ -401,6 +410,74 @@ public class MainTest {
 
         // then — usage errors are exit code 0 (unchanged documented behaviour)
         assertThat("Main.lastExitCode after a usage/validation error", Main.lastExitCode, is(0));
+    }
+
+    @Test
+    public void shouldExitNonZeroWhenTheHttp3PortCannotBeBound() throws IOException {
+        Assume.assumeTrue("native QUIC not available on this platform", Http3Server.isQuicAvailable());
+        Main.lastStartedPorts = null;
+        try (DatagramChannel otherApplication = DatagramChannel.open(StandardProtocolFamily.INET)) {
+            otherApplication.bind(new InetSocketAddress("0.0.0.0", 0));
+            ConfigurationProperties.http3Port(((InetSocketAddress) otherApplication.getLocalAddress()).getPort());
+
+            Main.main("-serverPort", "0");
+
+            assertThat("Main.lastExitCode when HTTP/3 could not start", Main.lastExitCode, is(1));
+            assertThat("nothing reports as started", Main.getLastStartedPorts(), is(nullValue()));
+        } finally {
+            ConfigurationProperties.http3Port(0);
+        }
+    }
+
+    // its cause is an IllegalArgumentException, which the run command takes for a usage error and exits 0
+    @Test
+    public void shouldExitNonZeroWhenTheHttp3PortIsNotAPort() {
+        Assume.assumeTrue("native QUIC not available on this platform", Http3Server.isQuicAvailable());
+        Main.lastStartedPorts = null;
+        try {
+            ConfigurationProperties.http3Port(70000);
+
+            Main.main("-serverPort", "0");
+
+            assertThat("Main.lastExitCode when HTTP/3 could not start", Main.lastExitCode, is(1));
+            assertThat("nothing reports as started", Main.getLastStartedPorts(), is(nullValue()));
+        } finally {
+            ConfigurationProperties.http3Port(0);
+        }
+    }
+
+    @Test
+    public void shouldPrintTheMessageAloneWhenTheHttp3PortCannotBeBound() {
+        Http3StartupException portHeld = new Http3StartupException(8443, new BindException("Address already in use"));
+
+        String printed = printedToSystemErr(() -> Main.logStartupFailure(new RuntimeException("wrapped by the caller", portHeld), true));
+
+        assertThat(printed, containsString("HTTP/3 is enabled (http3Port=8443) but UDP port 8443 could not be bound, so MockServer cannot start:"
+            + " free the port if another application holds it, choose a different http3Port, or remove http3Port to run without HTTP/3 (underlying error: BindException: Address already in use)"));
+        assertThat("the fix must not be buried in a stack trace", printed, not(containsString("\tat ")));
+    }
+
+    @Test
+    public void shouldPrintTheStackTraceOfAnyOtherHttp3StartFailure() {
+        Http3StartupException unexplained = new Http3StartupException(8443, new IllegalStateException("could not build the TLS context"));
+
+        String printed = printedToSystemErr(() -> Main.logStartupFailure(unexplained, true));
+
+        assertThat(printed, containsString("exception while starting: HTTP/3 is enabled (http3Port=8443) but its server could not start on UDP port 8443, so MockServer cannot start:"
+            + " fix the underlying error or remove http3Port to run without HTTP/3 (underlying error: IllegalStateException: could not build the TLS context)"));
+        assertThat(printed, containsString("\tat "));
+    }
+
+    private static String printedToSystemErr(Runnable action) {
+        PrintStream original = System.err;
+        ByteArrayOutputStream captured = new ByteArrayOutputStream();
+        try {
+            System.setErr(new PrintStream(captured, true, StandardCharsets.UTF_8));
+            action.run();
+        } finally {
+            System.setErr(original);
+        }
+        return captured.toString(StandardCharsets.UTF_8);
     }
 
 }

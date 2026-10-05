@@ -12,6 +12,11 @@ import org.mockserver.version.Version;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.net.BindException;
+import java.net.InetSocketAddress;
+import java.net.StandardProtocolFamily;
+import java.nio.channels.DatagramChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
@@ -28,13 +33,13 @@ import static org.mockserver.netty.http3.Http3TestServer.startWithHttp3;
 /**
  * Boots the real assembly jars in a forked JVM with {@code http3Port} set. The DEFAULT jar carries no
  * QUIC native, which is exactly the state a user who has not opted into HTTP/3 is in, so it must refuse
- * to start and print the fixes without a stack trace; the {@code -http3} classifier must serve HTTP/3.
+ * to start and print the fixes without a stack trace; the {@code -http3} classifier must serve HTTP/3,
+ * and refuse to start when it cannot bind the port.
  */
 public class Http3NativeStartupIntegrationTest {
 
     private static final long TIMEOUT_SECONDS = 60;
     private static final Pattern HTTP3_STARTED = Pattern.compile("HTTP/3 \\(QUIC\\) server started on UDP port:\\s*(\\d+)");
-    private static final Pattern HTTP3_OUTCOME = Pattern.compile(HTTP3_STARTED.pattern() + "|HTTP/3 disabled");
 
     @Rule
     public TemporaryFolder temporaryFolder = new TemporaryFolder();
@@ -95,6 +100,25 @@ public class Http3NativeStartupIntegrationTest {
     }
 
     @Test
+    public void shouldRefuseToStartAndNameThePortWhenTheHttp3PortCannotBeBound() throws Exception {
+        File output = temporaryFolder.newFile("http3-jar-port-held.log");
+        try (DatagramChannel otherApplication = DatagramChannel.open(StandardProtocolFamily.INET)) {
+            otherApplication.bind(new InetSocketAddress("0.0.0.0", 0));
+            int udpPort = ((InetSocketAddress) otherApplication.getLocalAddress()).getPort();
+            Process process = start(assemblyJar("jar-with-dependencies-http3"), output, udpPort);
+            try {
+                String log = awaitExit(process, output);
+                assertThat(log, containsString(portCouldNotBeBound(udpPort)
+                    + ", so MockServer cannot start: free the port if another application holds it, choose a different http3Port, or remove http3Port to run without HTTP/3 (underlying error: BindException: "));
+                assertThat(log, not(containsString("HTTP/3 (QUIC) server started")));
+                assertNoStackFramesButOneCauseLine(log);
+            } finally {
+                process.destroyForcibly();
+            }
+        }
+    }
+
+    @Test
     public void shouldServeHttp3FromTheHttp3Classifier() throws Exception {
         File output = temporaryFolder.newFile("http3-jar.log");
         File jar = assemblyJar("jar-with-dependencies-http3");
@@ -106,17 +130,18 @@ public class Http3NativeStartupIntegrationTest {
         }
     }
 
-    // returns once the server has logged whether HTTP/3 started; a server that says neither fails the test
+    // returns once the server has logged that HTTP/3 started; a server that exited because it could not bind the port is
+    // reported as the starter expects, and a server that did neither fails the test
     private static Process startAndAwaitHttp3Outcome(File jar, File output, int udpPort) {
         Process process = null;
         String log = "";
         try {
             process = start(jar, output, udpPort);
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(TIMEOUT_SECONDS);
-            while (System.nanoTime() < deadline && process.isAlive() && !HTTP3_OUTCOME.matcher(log = read(output)).find()) {
+            while (System.nanoTime() < deadline && process.isAlive() && !HTTP3_STARTED.matcher(log = read(output)).find()) {
                 Thread.sleep(250);
             }
-            if (HTTP3_OUTCOME.matcher(log = read(output)).find()) {
+            if (HTTP3_STARTED.matcher(log = read(output)).find()) {
                 return process;
             }
         } catch (IOException | InterruptedException e) {
@@ -125,7 +150,14 @@ public class Http3NativeStartupIntegrationTest {
         if (process != null) {
             stop(process);
         }
-        throw new AssertionError("the server did not report whether HTTP/3 started on UDP port " + udpPort + ":\n" + log);
+        if (log.contains(portCouldNotBeBound(udpPort))) {
+            throw new UncheckedIOException(new BindException(log));
+        }
+        throw new AssertionError("the server did not report that HTTP/3 started on UDP port " + udpPort + ":\n" + log);
+    }
+
+    private static String portCouldNotBeBound(int udpPort) {
+        return "HTTP/3 is enabled (http3Port=" + udpPort + ") but UDP port " + udpPort + " could not be bound";
     }
 
     private static int http3PortStartedIn(File output) {

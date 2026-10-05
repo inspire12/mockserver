@@ -18,6 +18,7 @@ import org.mockserver.netty.connection.InboundConnectionLimiter;
 import org.mockserver.netty.dns.DnsRequestHandler;
 import org.mockserver.netty.http3.Http3NativeUnavailableException;
 import org.mockserver.netty.http3.Http3Server;
+import org.mockserver.netty.http3.Http3StartupException;
 import org.mockserver.proxyconfiguration.ProxyConfiguration;
 import org.mockserver.socket.NettyAllocator;
 import org.mockserver.socket.NettyTransport;
@@ -253,7 +254,8 @@ public class MockServer extends LifeCycle {
         }
 
         // start HTTP/3 (QUIC) server when configured (http3Port > 0). Availability was already
-        // established at the top of this method, before any port was bound.
+        // established at the top of this method, before any port was bound; a start that fails
+        // stops this server and throws.
         Integer http3Port = configuration.http3Port();
         if (http3Port != null && http3Port > 0) {
             startHttp3Server(configuration, initializer.getActionHandler(), http3Port, this.mcpSessionManager);
@@ -391,11 +393,11 @@ public class MockServer extends LifeCycle {
     }
 
     /**
-     * Callers MUST have passed {@link #requireQuicNative(int)} first. This used to log a warning and
-     * return when the native was missing, silently leaving the configured HTTP/3 port unserved; that
-     * check now lives in {@code requireQuicNative}, which fails start-up instead. The assertion keeps
-     * the ordering machine-enforced rather than comment-enforced, so a future second call site cannot
-     * quietly reinstate the silent-disable behaviour.
+     * Callers MUST have passed {@link #requireQuicNative(int)} first; the assertion keeps that ordering
+     * machine-enforced, so a second call site cannot start a server that silently lacks HTTP/3.
+     * <p>
+     * Any failure to start refuses start-up, as a TCP port that cannot be bound does: the constructor
+     * throws, so the caller gets no reference to stop, and everything already started is stopped here.
      */
     private void startHttp3Server(Configuration configuration, HttpActionHandler actionHandler, int http3Port, org.mockserver.netty.mcp.McpSessionManager mcpSessionMgr) {
         if (!Http3Server.isQuicAvailable()) {
@@ -415,16 +417,12 @@ public class MockServer extends LifeCycle {
                 );
             }
         } catch (Throwable throwable) {
-            if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
-                mockServerLogger.logEvent(
-                    new LogEntry()
-                        .setType(SERVER_CONFIGURATION)
-                        .setLogLevel(Level.WARN)
-                        .setMessageFormat("exception starting HTTP/3 server on port {} - HTTP/3 disabled")
-                        .setArguments(http3Port)
-                        .setThrowable(throwable)
-                );
+            stop();
+            // after stop(), which an interrupted thread would not wait for
+            if (throwable instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
             }
+            throw new Http3StartupException(http3Port, throwable);
         }
     }
 

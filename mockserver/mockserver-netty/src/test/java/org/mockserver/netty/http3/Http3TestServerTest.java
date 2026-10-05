@@ -6,6 +6,7 @@ import org.mockserver.configuration.Configuration;
 import org.mockserver.netty.MockServer;
 import org.mockserver.testing.socket.TestPortFactory;
 
+import java.io.UncheckedIOException;
 import java.net.BindException;
 import java.net.InetSocketAddress;
 import java.net.StandardProtocolFamily;
@@ -16,9 +17,9 @@ import java.util.function.IntSupplier;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
-import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.sameInstance;
@@ -76,13 +77,24 @@ public class Http3TestServerTest {
             // one Configuration for every attempt, as startWithHttp3(Configuration) uses it
             Configuration configuration = configuration();
 
-            MockServer server = startWithHttp3(candidates(asked, taken), udpPort -> start(configuration.http3Port(udpPort)), MockServer::getHttp3Port, MockServer::stop);
+            List<RuntimeException> refusals = new ArrayList<>();
+
+            MockServer server = startWithHttp3(candidates(asked, taken), udpPort -> {
+                try {
+                    return start(configuration.http3Port(udpPort));
+                } catch (RuntimeException refused) {
+                    refusals.add(refused);
+                    throw refused;
+                }
+            }, MockServer::getHttp3Port, MockServer::stop);
 
             assertThat("the held port, then one more", asked, hasSize(2));
             assertThat("HTTP/3 must have started on the second candidate", server.getHttp3Port(), is(asked.get(1)));
             assertThat("on a port no other socket holds", server.getHttp3Port(), not(taken));
             assertThat(configuration.http3Port(), is(server.getHttp3Port()));
-            assertThat("the server that did not get its port was stopped", started.get(0).isRunning(), is(false));
+            assertThat("the server refused the held port rather than starting without HTTP/3", refusals, contains(instanceOf(Http3StartupException.class)));
+            assertThat(((Http3StartupException) refusals.get(0)).isPortUnavailable(), is(true));
+            assertThat("only the server that got its port was started", started, contains(server));
         }
     }
 
@@ -107,27 +119,66 @@ public class Http3TestServerTest {
             () -> startWithHttp3(candidates(asked), udpPort -> start(configuration()), MockServer::getHttp3Port, MockServer::stop));
 
         assertThat("no second candidate", asked, hasSize(1));
-        assertThat(failure.getMessage(), containsString("HTTP/3 must have started: UDP port " + asked.get(0) + " is free"));
+        assertThat(failure.getMessage(), is("HTTP/3 must have started on UDP port " + asked.get(0) + ", but the server started without HTTP/3"));
         assertThat("the server without HTTP/3 was stopped", started.get(0).isRunning(), is(false));
     }
 
     @Test
-    public void aPortReleasedWhileTheServerIsStoppedMustStillCountAsHeld() throws Exception {
+    public void aServerWithoutHttp3MustFailAtOnceEvenWhenItsPortIsHeld() throws Exception {
         try (DatagramChannel holder = heldUdpPort()) {
             int taken = port(holder);
             List<Integer> asked = new ArrayList<>();
 
-            // the "server" is the port it serves HTTP/3 on: none on the held port, and stopping it takes long enough for the holder to go
-            int served = startWithHttp3(candidates(asked, taken), udpPort -> udpPort == taken ? -1 : udpPort, Integer::intValue, stopped -> close(holder));
+            // a server that cannot bind its HTTP/3 port refuses to start, so one that started without HTTP/3 was never asked for it
+            AssertionError failure = assertThrows(AssertionError.class,
+                () -> startWithHttp3(candidates(asked, taken), udpPort -> start(configuration()), MockServer::getHttp3Port, MockServer::stop));
 
-            assertThat("the held port, then one more", asked, hasSize(2));
-            assertThat(served, is(asked.get(1)));
-            assertThat(holder.isOpen(), is(false));
+            assertThat("no second candidate", asked, contains(taken));
+            assertThat(failure.getMessage(), is("HTTP/3 must have started on UDP port " + taken + ", but the server started without HTTP/3"));
+            assertThat("the server without HTTP/3 was stopped", started.get(0).isRunning(), is(false));
         }
     }
 
     @Test
-    public void aServerOnAnotherPortMustFailSayingThePortIsFreeNow() {
+    public void aServerRefusedAHeldPortMustBeStartedOnTheNextCandidate() throws Exception {
+        try (DatagramChannel holder = heldUdpPort()) {
+            int taken = port(holder);
+            List<Integer> asked = new ArrayList<>();
+
+            // the "server" is the port it serves HTTP/3 on, and refuses the held port as a forked server reports it
+            int served = startWithHttp3(candidates(asked, taken), udpPort -> {
+                if (udpPort == taken) {
+                    throw new UncheckedIOException(new BindException("refused UDP port " + udpPort));
+                }
+                return udpPort;
+            }, Integer::intValue, stopped -> {
+                throw new AssertionError("a server that started on its port must not be stopped");
+            });
+
+            assertThat("the held port, then one more", asked, hasSize(2));
+            assertThat(served, is(asked.get(1)));
+        }
+    }
+
+    @Test
+    public void aServerRefusedAPortThatIsFreeMustFailAtOnceWithTheRefusalAsTheCause() {
+        List<Integer> asked = new ArrayList<>();
+        UncheckedIOException refusal = new UncheckedIOException(new BindException("refused a free port"));
+
+        AssertionError failure = assertThrows(AssertionError.class,
+            () -> startWithHttp3(candidates(asked), udpPort -> {
+                throw refusal;
+            }, Integer::intValue, stopped -> {
+                throw new AssertionError("nothing started, so nothing to stop");
+            }));
+
+        assertThat("no second candidate", asked, hasSize(1));
+        assertThat(failure.getMessage(), is("HTTP/3 must have started: UDP port " + asked.get(0) + " is free"));
+        assertThat(failure.getCause(), is(sameInstance(refusal)));
+    }
+
+    @Test
+    public void aServerOnAnotherPortMustFailAtOnceNamingBothPorts() {
         List<Integer> asked = new ArrayList<>();
         List<Integer> stopped = new ArrayList<>();
 
@@ -136,15 +187,22 @@ public class Http3TestServerTest {
 
         assertThat("no second candidate", asked, hasSize(1));
         assertThat(stopped, contains(asked.get(0) + 1));
-        assertThat(failure.getMessage(), containsString("HTTP/3 must have started on UDP port " + asked.get(0) + ", not " + (asked.get(0) + 1)
-            + ": the port is free now (HTTP/3 did not start, or the socket that held the port has gone)"));
+        assertThat(failure.getMessage(), is("HTTP/3 must have started on UDP port " + asked.get(0) + ", but the server started with HTTP/3 on UDP port " + (asked.get(0) + 1)));
     }
 
-    private static void close(DatagramChannel channel) {
-        try {
-            channel.close();
-        } catch (java.io.IOException e) {
-            throw new AssertionError(e);
+    @Test
+    public void aServerOnAnotherPortMustFailAtOnceEvenWhenItsPortIsHeld() throws Exception {
+        try (DatagramChannel holder = heldUdpPort()) {
+            int taken = port(holder);
+            List<Integer> asked = new ArrayList<>();
+            List<Integer> stopped = new ArrayList<>();
+
+            AssertionError failure = assertThrows(AssertionError.class,
+                () -> startWithHttp3(candidates(asked, taken), udpPort -> udpPort + 1, Integer::intValue, stopped::add));
+
+            assertThat("no second candidate", asked, contains(taken));
+            assertThat(stopped, contains(taken + 1));
+            assertThat(failure.getMessage(), is("HTTP/3 must have started on UDP port " + taken + ", but the server started with HTTP/3 on UDP port " + (taken + 1)));
         }
     }
 
@@ -174,11 +232,14 @@ public class Http3TestServerTest {
             List<Integer> asked = new ArrayList<>();
 
             AssertionError failure = assertThrows(AssertionError.class,
-                () -> startWithHttp3(candidates(asked, taken), udpPort -> start(configuration()), MockServer::getHttp3Port, MockServer::stop));
+                () -> startWithHttp3(candidates(asked, taken), udpPort -> {
+                    throw new UncheckedIOException(new BindException("refused UDP port " + udpPort));
+                }, Integer::intValue, stopped -> {
+                    throw new AssertionError("nothing started, so nothing to stop");
+                }));
 
             assertThat(asked, contains(taken[0], taken[1], taken[2], taken[3], taken[4]));
             assertThat(failure.getMessage(), is("HTTP/3 must have started, but another socket held each of the UDP ports " + asked));
-            assertThat("every server that did not get its port was stopped", started.stream().filter(MockServer::isRunning).count(), is(0L));
         } finally {
             for (DatagramChannel holder : holders) {
                 holder.close();

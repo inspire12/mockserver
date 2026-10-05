@@ -207,6 +207,45 @@ silent misconfiguration once the natives moved to their own classifier: the user
 got a server that never listened on it. `startHttp3Server` asserts the check ran, so a future second
 call site cannot reinstate the silent-disable behaviour. See *Getting the QUIC native library*.
 
+**Any other failed HTTP/3 start refuses start-up too.** `MockServer.startHttp3Server` runs after the TCP
+ports are bound. If `Http3Server.start` throws for any reason, it calls `stop()` and throws
+`Http3StartupException`, so the constructor fails as it does for a TCP port that cannot be bound
+(`RuntimeException("Exception while binding MockServer to port N", cause)`). `stop()` closes the TCP
+listeners, the DNS channel and the boss and worker event loops and waits for them; `Http3Server.start`
+shuts down its own event loop when it fails, without waiting, so that one thread ends about 2 s later
+(Netty's default quiet period). The caller gets no reference, so nothing may be left for it to stop.
+The catch is for `Throwable`: an `Error` from the start (a native that will not link) refuses and stops
+as well. When the cause is an `InterruptedException` the interrupt flag is set again, after `stop()`,
+because an interrupted thread does not wait for `stop()`. The held port is most often another
+MockServer given the same `http3Port`; before, the first served HTTP/3 and the rest served TCP only.
+
+| Failure | Message (one line, the cause kept as `getCause()`) | CLI output |
+|---|---|---|
+| The UDP port cannot be bound (a `BindException` in the cause chain: the port is held, the macOS IPv4 probe refused it, or the process may not bind it, since the JDK maps `EACCES` to `BindException: Permission denied`) | `HTTP/3 is enabled (http3Port=N) but UDP port N could not be bound, so MockServer cannot start: free the port if another application holds it, choose a different http3Port, or remove http3Port to run without HTTP/3 (underlying error: BindException: ...)` | The message alone, exit status 1 |
+| Anything else (the TLS context for QUIC cannot be built, a port above 65535, a transport parameter the codec rejects) | `HTTP/3 is enabled (http3Port=N) but its server could not start on UDP port N, so MockServer cannot start: fix the underlying error or remove http3Port to run without HTTP/3 (underlying error: <root cause simple name>: <first message line>)` | `exception while starting:` with the stack trace, exit status 1 |
+
+`Http3StartupException` extends `RuntimeException` and nothing narrower, whatever its cause:
+`Main.RunCommand` treats an `IllegalArgumentException` as a usage error and exits 0, which an
+out-of-range `http3Port` would otherwise reach. `MockServer` does not log the failure itself (the TCP
+path logs it at ERROR and the CLI then logs it again); the exception is the report, and the CLI prints
+it once. Embedded callers get the exception from `new MockServer(...)`,
+`ClientAndServer.startClientAndServer(...)`, `MockServerRule`, `MockServerExtension` and the Spring
+`MockServerPropertyCustomizer`, none of which catch it. An `http3Port` of 0 or below still means
+HTTP/3 is off, so there is no ephemeral HTTP/3 port to fail on.
+
+This replaced a path that logged `exception starting HTTP/3 server on port N - HTTP/3 disabled` at
+WARN and kept serving TCP with `getHttp3Port()` returning -1. `Http3StartFailureTest` covers both
+rows (a port held on IPv4, a port held by a dual-stack socket so that the bind itself fails on every
+platform, a port above 65535, an unparsable mTLS trust chain, an `Error` and an interrupt) and
+`ClientAndServer`. `Permission denied` is not exercised: macOS lets any process bind a low port. On the
+starting thread, as soon as the constructor has thrown, it checks that the stop is complete (not merely
+begun), that the TCP port refuses connections and that the UDP port can be bound again. It runs each start in a thread group of its own and then
+waits until no thread of that group is alive, bar the JDK `HttpClient` selector thread every
+`HttpState` creates for cluster fan-in, which outlives a normal `stop()` as well.
+`MainTest` covers the exit status and the CLI output; `Http3NativeStartupIntegrationTest` runs the real
+`-http3` jar against a held port. A test that needs HTTP/3 must not configure a fixed `http3Port`
+(`AltSvcIntegrationTest` used 8443 and 443): a port it cannot bind now fails the test.
+
 The bound HTTP/3 port is accessible via `MockServer.getHttp3Port()`.
 
 **Stop releases the port before it returns.** A Netty NIO channel's socket is closed only when its event
@@ -344,12 +383,16 @@ and 0.15% of dual-stack port probes were affected, with or without CPU load, whi
 about one HTTP/3 test failing per full `mockserver-netty` run. Linux never hands out such a port.
 
 `http3Port` cannot ask for an ephemeral port, so a candidate can be taken between being found and
-being bound. `startWithHttp3` starts the server on a candidate and checks it serves HTTP/3 on that
-port. If it does not, the server is stopped and the next candidate is tried only when a bind probe
-shows the port is held by another socket (at most five candidates); HTTP/3 not starting on a port
-that is free, or the start throwing, fails the test at once. It has forms for a `Configuration`, for a
-function that builds the `MockServer`, for a bare `Http3Server`, and for a server that is not an
-in-process `MockServer` (the forked jar of `Http3NativeStartupIntegrationTest`).
+being bound, and the server then refuses to start. `startWithHttp3` starts the server on a candidate.
+A start that throws with a `BindException` in its cause chain is repeated on the next candidate only
+when a bind probe shows the port is held by another socket (at most five candidates). A start refused
+on a port the probe finds free fails the test at once with the refusal as its cause, as does any other
+exception, and a server that started without HTTP/3 on its candidate is stopped and fails the test. The
+probe runs after the refusing server has released what it bound, so a port whose holder went away in
+between is reported as free. It has forms for a `Configuration`, for a function that builds the
+`MockServer`, for a bare `Http3Server`, and for a server that is not an in-process `MockServer` (the
+forked jar of `Http3NativeStartupIntegrationTest`, which throws an `UncheckedIOException` wrapping a
+`BindException` when the process exits with the port-could-not-be-bound line).
 
 The server guards against the same quirk (`Ipv4UdpPortProbe`, the UDP counterpart of the TCP
 listeners' `LoopbackShadowProbe`). On macOS a dual-stack wildcard bind succeeds on a port another
@@ -364,8 +407,8 @@ refused port free when `start` throws: refusing after Netty had bound left the s
 event loop deregistered it, so the caller could not rebind the port for up to about 200 ms. The probe has to come first: on both macOS and Linux an IPv4 bind fails once the same process's
 own dual-stack socket holds the port, so a probe after the bind cannot tell MockServer's socket from
 another application's. Port 0 is bound as before, without the probe: `MockServer` starts HTTP/3 only
-for an `http3Port` above 0, and tests take their port through `Http3TestServer.startWithHttp3`. `MockServer` logs a failed HTTP/3 start as a warning and keeps serving TCP, so a refused
-`http3Port` disables HTTP/3 rather than failing start-up. `Http3ServerIpv4PortConflictTest` covers it, rebinding a refused port 25 times in one JVM.
+for an `http3Port` above 0, and tests take their port through `Http3TestServer.startWithHttp3`. A refused
+`http3Port` fails `MockServer` start-up (see *Lifecycle Integration*). `Http3ServerIpv4PortConflictTest` covers the probe, rebinding a refused port 25 times in one JVM.
 
 ### Test QUIC client writes (flush every awaited write)
 
@@ -404,7 +447,8 @@ declarations are needed -- they resolve automatically.
 - Request recording for verification via the standard event log
 - MockServer TLS certificate reuse (same key/cert as HTTPS)
 - Lifecycle integration: start/stop with MockServer
-- Fail-fast startup with an actionable message when the native QUIC library is absent
+- Fail-fast startup with an actionable message when the native QUIC library is absent, and when the
+  HTTP/3 server cannot start on `http3Port` (the UDP port is held, or any other failure)
 - Metrics: HTTP/3 requests counted in `REQUESTS_RECEIVED_COUNT`
 - **Streaming/SSE responses**: `StreamingBody` (SSE, chunked proxy forwarding,
   LLM streaming) responses are fully supported over HTTP/3. Each chunk is sent

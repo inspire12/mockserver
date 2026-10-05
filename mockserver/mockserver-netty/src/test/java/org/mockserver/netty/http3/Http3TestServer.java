@@ -1,5 +1,6 @@
 package org.mockserver.netty.http3;
 
+import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.netty.MockServer;
 import org.mockserver.testing.socket.TestPortFactory;
@@ -23,9 +24,10 @@ import static org.hamcrest.Matchers.is;
  * Starts the server a test needs with HTTP/3 on a UDP port it really holds.
  *
  * <p>MockServer binds the HTTP/3 port itself and {@code http3Port} cannot ask for an ephemeral one, so a
- * candidate port can be taken between being found and being bound. A start that did not get its candidate is
- * repeated on the next candidate only when that port is seen to be held by another socket; HTTP/3 failing to
- * start on a port that is free fails the test at once, as does any other failure to start.
+ * candidate port can be taken between being found and being bound, and the server then refuses to start. A
+ * start that fails with a {@link BindException} in its cause chain is repeated on the next candidate only when
+ * that port is seen to be held by another socket. A start refused on a port that is free, any other failure to
+ * start, and a server that started without HTTP/3 on its candidate each fail the test at once.
  */
 public final class Http3TestServer {
 
@@ -54,10 +56,11 @@ public final class Http3TestServer {
     /**
      * For a server that is not an in-process MockServer.
      *
-     * @param start          starts a server configured with the {@code http3Port} it is given
-     * @param boundHttp3Port the UDP port the started server serves HTTP/3 on, or -1 if it serves none (and so holds
-     *                       no UDP socket)
-     * @param stop           stops a server that did not get its port, releasing whatever it bound
+     * @param start          starts a server configured with the {@code http3Port} it is given; a server that
+     *                       refuses to start because it could not bind that port throws an exception with a
+     *                       {@link BindException} in its cause chain, having released whatever it bound
+     * @param boundHttp3Port the UDP port the started server serves HTTP/3 on, or -1 if it serves none
+     * @param stop           stops a server that started without HTTP/3 on the port it was given
      */
     public static <T> T startWithHttp3(IntFunction<T> start, ToIntFunction<T> boundHttp3Port, Consumer<T> stop) {
         return startWithHttp3(TestPortFactory::findFreeUdpPort, start, boundHttp3Port, stop);
@@ -67,22 +70,24 @@ public final class Http3TestServer {
         List<Integer> held = new ArrayList<>();
         for (int attempt = 0; attempt < UDP_PORT_CANDIDATES; attempt++) {
             int udpPort = candidateUdpPorts.getAsInt();
-            T candidate = start.apply(udpPort);
+            T candidate;
+            try {
+                candidate = start.apply(udpPort);
+            } catch (RuntimeException refused) {
+                if (ExceptionUtils.indexOfType(refused, BindException.class) < 0) {
+                    throw refused;
+                }
+                requireHeldByAnotherSocket(udpPort, refused);
+                held.add(udpPort);
+                continue;
+            }
             int bound = boundHttp3Port.applyAsInt(candidate);
-            if (bound == udpPort) {
-                return candidate;
-            }
-            // without HTTP/3 the server holds no UDP socket, so the port is probed while the socket that took it is still there
-            if (bound == NO_HTTP3) {
-                boolean heldByAnotherSocket = isHeldByAnotherSocket(udpPort);
+            if (bound != udpPort) {
                 stop.accept(candidate);
-                assertThat("HTTP/3 must have started: UDP port " + udpPort + " is free", heldByAnotherSocket, is(true));
-            } else {
-                stop.accept(candidate);
-                assertThat("HTTP/3 must have started on UDP port " + udpPort + ", not " + bound + ": the port is free now (HTTP/3 did not start, or the socket that held the port has gone)",
-                    isHeldByAnotherSocket(udpPort), is(true));
+                throw new AssertionError("HTTP/3 must have started on UDP port " + udpPort + ", but the server started "
+                    + (bound == NO_HTTP3 ? "without HTTP/3" : "with HTTP/3 on UDP port " + bound));
             }
-            held.add(udpPort);
+            return candidate;
         }
         throw new AssertionError("HTTP/3 must have started, but another socket held each of the UDP ports " + held);
     }
@@ -102,13 +107,18 @@ public final class Http3TestServer {
                 assertThat("the HTTP/3 server must bind the UDP port it was given", server.start(udpPort), is(udpPort));
                 return udpPort;
             } catch (BindException refused) {
-                if (!isHeldByAnotherSocket(udpPort)) {
-                    throw new AssertionError("HTTP/3 must have started: UDP port " + udpPort + " is free", refused);
-                }
+                requireHeldByAnotherSocket(udpPort, refused);
                 held.add(udpPort);
             }
         }
         throw new AssertionError("HTTP/3 must have started, but another socket held each of the UDP ports " + held);
+    }
+
+    // the server has already released what it bound, so a port that is free now was refused while free or has just been released
+    private static void requireHeldByAnotherSocket(int udpPort, Exception refused) {
+        if (!isHeldByAnotherSocket(udpPort)) {
+            throw new AssertionError("HTTP/3 must have started: UDP port " + udpPort + " is free", refused);
+        }
     }
 
     // held on IPv4, where MockServer refuses the port, or not bindable at all

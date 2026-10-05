@@ -10,6 +10,7 @@ import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.netty.MockServer;
 import org.mockserver.netty.http3.Http3NativeUnavailableException;
+import org.mockserver.netty.http3.Http3StartupException;
 import org.mockserver.socket.NettyDirectMemoryLimit;
 import org.mockserver.version.Version;
 import picocli.CommandLine;
@@ -224,22 +225,22 @@ public class Main {
     }
 
     /**
-     * A missing HTTP/3 native is a configuration problem whose fixes the message already spells out, so
-     * print just that message: a stack trace (and Netty's nested UnsatisfiedLinkErrors) buries the fix.
+     * A missing HTTP/3 native and an HTTP/3 port that cannot be bound are configuration problems whose fixes
+     * the message already spells out, so print just that message: a stack trace buries the fix.
      */
     static void logStartupFailure(Throwable throwable, boolean disableSystemOut) {
-        Http3NativeUnavailableException http3NativeUnavailable = ExceptionUtils.throwableOfType(throwable, Http3NativeUnavailableException.class);
-        if (http3NativeUnavailable != null) {
+        String http3Failure = http3FailureItsMessageExplains(throwable);
+        if (http3Failure != null) {
             MOCK_SERVER_LOGGER.logEvent(
                 new LogEntry()
                     .setType(SERVER_CONFIGURATION)
                     .setLogLevel(ERROR)
                     // a bare "{}" format renders nothing, and the message must not be the format (it may contain "{}")
                     .setMessageFormat("HTTP/3 start-up failed:{}")
-                    .setArguments(http3NativeUnavailable.getMessage())
+                    .setArguments(http3Failure)
             );
             if (disableSystemOut) {
-                System.err.println(http3NativeUnavailable.getMessage());
+                System.err.println(http3Failure);
             }
             return;
         }
@@ -253,6 +254,15 @@ public class Main {
         if (disableSystemOut) {
             new RuntimeException("exception while starting: " + throwable.getMessage()).printStackTrace(System.err);
         }
+    }
+
+    private static String http3FailureItsMessageExplains(Throwable throwable) {
+        Http3NativeUnavailableException nativeUnavailable = ExceptionUtils.throwableOfType(throwable, Http3NativeUnavailableException.class);
+        if (nativeUnavailable != null) {
+            return nativeUnavailable.getMessage();
+        }
+        Http3StartupException startFailed = ExceptionUtils.throwableOfType(throwable, Http3StartupException.class);
+        return startFailed != null && startFailed.isPortUnavailable() ? startFailed.getMessage() : null;
     }
 
     /**
