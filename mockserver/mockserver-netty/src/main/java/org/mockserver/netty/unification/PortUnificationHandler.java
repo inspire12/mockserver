@@ -470,6 +470,8 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
                 sslEnabled, clientCertificates
             )
         ));
+        // last: it takes whatever the multiplex handler does not hand to a stream
+        addLastIfNotPresent(pipeline, new Http2ConnectionExceptionHandler(mockServerLogger));
     }
 
     private void switchToHttp(ChannelHandlerContext ctx, ByteBuf msg) {

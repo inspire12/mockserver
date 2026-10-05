@@ -549,7 +549,7 @@ The defaults are well above what common servers and load balancers accept (four 
 | HTTP/2 in a CONNECT or SOCKS tunnel | `Http2RequestHeaderLimit.tunnelServerHandler` (`RelayConnectHandler`) | `SETTINGS_MAX_HEADER_LIST_SIZE` | as on a direct connection |
 | HTTP/3 | `SETTINGS_MAX_FIELD_SECTION_SIZE` (`Http3Server`) | `SETTINGS_MAX_FIELD_SECTION_SIZE` | connection closed with `H3_EXCESSIVE_LOAD`; Netty's HTTP/3 codec answers no `431` (accepted difference — see [decisions/http3-header-limit-closes-connection.md](decisions/http3-header-limit-closes-connection.md)) |
 
-Over HTTP/2 a header block (the HPACK-encoded bytes, across its `HEADERS` and `CONTINUATION` frames) of more than the limit plus a quarter is a connection error: `GOAWAY(PROTOCOL_ERROR)` and the connection closed, as Netty stops reading the block and the HPACK state is lost. Over HTTP/3 a `HEADERS` frame longer than the limit is refused from its length, before it is read. None of these reach a handler, so `Http2RequestHeaderLimit` builds the HTTP/2 codecs with `onError` overridden (and otherwise as Netty's own server builders do, including the zero graceful-shutdown timeout `Http2FrameCodecBuilder.forServer()` sets, which `Http2RequestHeaderLimitTest` checks), and `Http3MockServerHandler.exceptionCaught` recognises Netty's `H3_EXCESSIVE_LOAD`: each refusal logs one `WARN` entry and the request is never dispatched. On a direct HTTP/2 connection Netty also passes a connection error down the pipeline, where its own logger reports it with a stack trace, as it does every inbound HTTP/2 connection error.
+Over HTTP/2 a header block (the HPACK-encoded bytes, across its `HEADERS` and `CONTINUATION` frames) of more than the limit plus a quarter is a connection error: `GOAWAY(PROTOCOL_ERROR)` and the connection closed, as Netty stops reading the block and the HPACK state is lost. Over HTTP/3 a `HEADERS` frame longer than the limit is refused from its length, before it is read. None of these reach a handler, so `Http2RequestHeaderLimit` builds the HTTP/2 codecs with `onError` overridden (and otherwise as Netty's own server builders do, including the zero graceful-shutdown timeout `Http2FrameCodecBuilder.forServer()` sets, which `Http2RequestHeaderLimitTest` checks), and `Http3MockServerHandler.exceptionCaught` recognises Netty's `H3_EXCESSIVE_LOAD`: each refusal logs one `WARN` entry and the request is never dispatched. On a direct HTTP/2 connection Netty also passes a connection error down the pipeline, where `Http2ConnectionExceptionHandler` leaves this one to that entry (see [Exceptions on the connection](#exceptions-on-the-connection)).
 
 **A request's trailers are limited as its headers are**, and the request is never dispatched. What the client is sent differs, because Netty's codecs differ:
 
@@ -602,9 +602,36 @@ graph LR
     FC --> MUX[Http2MultiplexHandler]
     MUX -->|"per-stream child channel"| CHILD["Http2MultiplexChildInitializer
 (see per-stream child pipeline below)"]
+    MUX --> EXC["Http2ConnectionExceptionHandler
+(last: logs what no stream is given)"]
 ```
 
 The stream-id mis-routing problems that affected the old shared-connection pipeline (issues #2419, #2667) are structurally impossible here: each stream is its own `Http2StreamChannel` child, so outbound writes never cross to another stream. The per-stream child pipeline is described in the [HTTP/2 Per-Stream Child Pipeline](#http2-per-stream-child-pipeline) section below.
+
+##### Exceptions on the connection
+
+`Http2ConnectionExceptionHandler` is the last handler of this pipeline, on `h2` and `h2c` alike, and logs each exception that reaches it once in MockServer's log. Without it they reach the end of Netty's pipeline, which logs every one at `WARN` with a stack trace through Netty's own logger (`An exceptionCaught() event was fired, and it reached at the tail of the pipeline`), whatever the cause.
+
+Two things arrive there. `Http2FrameCodec` fires an inbound connection error down the pipeline before it sends the `GOAWAY` and closes, and passes on anything a handler ahead of it or the transport raised, such as the `Connection reset` of a client that drops the connection. `Http2MultiplexHandler` hands a stream's error to that stream's child pipeline and passes on everything else.
+
+| What reached it | Logged |
+|-----------------|--------|
+| Netty's direct memory limit, anywhere in the cause chain | `ERROR`, the message the other handlers use for it; the connection is closed |
+| A request refused for its header size (`Http2RequestHeaderLimit.isRefusal`) | nothing: `Http2RequestHeaderLimit` logged it at `WARN` where Netty raised it |
+| Any other HTTP/2 connection error | `WARN`, the client's address, the error code and the cause |
+| An SSL or decoder fault (`isSslOrDecoderFault`) | `WARN`, the exception's class and its message cut to 256 characters, no stack trace; the connection is closed |
+| A connection its client closed or reset (not `connectionClosedException`) | `DEBUG`, the client's address and the exception's message; no stack trace |
+| Anything else | `ERROR` and the cause; the connection is left as it is |
+
+**What it closes.** Nothing for an HTTP/2 connection error: that is fired here *before* Netty's codec writes the `GOAWAY` and closes, so closing the channel from the handler would lose the `GOAWAY`. Nothing for a reset connection, which the transport closes. It closes the connection itself for an SSL or decoder fault and for the direct memory limit, whatever the log level, as every other MockServer handler does for them. (From reading Netty, not from a test: when the direct memory limit arrives inside a connection error of the codec, the handler's close passes back through the codec, which sends `GOAWAY(NO_ERROR)` and then closes, in place of the `GOAWAY` for the error.) For an SSL or decoder fault it has to close: Netty's JDK TLS handler (the one in use wherever Netty's OpenSSL native library is not loaded, as with the shaded jar, which ships none) neither closes a connection whose handshake is done when bytes arrive that are not a TLS record, nor stops reading it, so every later read raises the fault again. Its message is a hex dump of all the bytes read (`not an SSL/TLS record: …`), which is why the entry carries a cut message and no stack trace. An exception in the last row leaves the connection open, as reaching the end of Netty's pipeline did.
+
+It must stay last: ahead of `Http2MultiplexHandler` it would take the stream errors that handler routes, and the streams would never be reset. `Http2ConnectionExceptionHandlerTest` checks the order, each row of the table and, with Netty's JDK TLS handler, that the first bytes that are not TLS close the connection; `Http2ConnectionErrorLoggingIntegrationTest` checks over a socket, on `h2` and `h2c`, that nothing reaches Netty's logger, that the `GOAWAY` is still sent and that a stream error still resets only its stream.
+
+**Cost.** One handler object and its pipeline context for each direct HTTP/2 connection, about 80 bytes going by the two classes' fields (counted, not measured), allocated when the connection switches to HTTP/2. Nothing per request or per frame: it overrides only `exceptionCaught`, so Netty's pipeline skips it for every other event. It holds no state and could be shared between connections, but that would save only the handler object and need a holder that outlives the connection.
+
+**Log volume.** One entry for each exception. Every row of the table but the last ends the connection (the codec after a connection error, the transport after a failed read, the handler itself for an SSL or decoder fault or the direct memory limit), so those give a client at most one entry for each connection it opens. The entry for a closed or reset connection is at `DEBUG`, below the default level, with no stack trace; the one for an SSL or decoder fault is cut to 256 characters of the exception's message; a connection error is logged at `WARN` with its stack trace (the longest message Netty was found to give one is about 1 KB, for an HTTP/1.x request where the preface belongs). Two things are outside that bound. An exception in the last row is logged at `ERROR` with its stack trace every time it is raised, and the connection stays open; no way for a client to raise one is known. And `Http2MultiplexHandler` also fires an SSL fault into every stream open at the time, whose own handlers log it as they log any exception (with the stack trace, so with Netty's whole message): those entries are the child pipeline's, one or more for each open stream.
+
+The client leg of a CONNECT or SOCKS tunnel needs no such handler: its `HttpToHttp2ConnectionHandler` does not fire connection errors down the pipeline, and the relay handlers after it handle what the transport raises. The tunnel's loopback leg is a direct connection and has it.
 
 #### gRPC Pipeline (over HTTP/2)
 
@@ -1685,6 +1712,7 @@ The `isSslOrDecoderFault` predicate is wired into the `exceptionCaught` handler 
 - `CallbackWebSocketServerHandler` (WebSocket callback channel)
 - `McpStreamableHttpHandler` (MCP streaming)
 - `DashboardWebSocketHandler` (dashboard WebSocket)
+- `Http2ConnectionExceptionHandler` (the end of a direct HTTP/2 connection's pipeline; it logs a benign close at `DEBUG` rather than staying silent, see [Exceptions on the connection](#exceptions-on-the-connection))
 
 This means genuine SSL negotiation failures (e.g., client sends plain HTTP to a TLS port, or a non-TLS client probes a TLS port) surface at WARN and are visible in logs, while normal connection teardowns remain silent. `ExceptionHandling.isSslOrDecoderFault` mirrors the predicate already in `connectionClosedException` but as a positive match so callers can route specifically to WARN rather than silently drop.
 
@@ -1726,6 +1754,7 @@ flowchart LR
 | `NettyAllocator` | `mockserver-core/.../socket/NettyAllocator.java` | The single pooled `ByteBufAllocator` every channel uses; `pin(channel)` for channels no bootstrap option reaches |
 | `MockServerUnificationInitializer` | `mockserver-netty/.../netty/MockServerUnificationInitializer.java` | Replaces self with `PortUnificationHandler` |
 | `PortUnificationHandler` | `mockserver-netty/.../netty/unification/PortUnificationHandler.java` | Protocol detection and pipeline assembly |
+| `Http2ConnectionExceptionHandler` | `mockserver-netty/.../netty/unification/Http2ConnectionExceptionHandler.java` | Last handler of a direct HTTP/2 connection's pipeline; logs the exceptions that reach it, each once and at a level that fits its cause |
 | `Http2MultiplexChildInitializer` | `mockserver-netty/.../netty/unification/Http2MultiplexChildInitializer.java` | Per-stream child initializer for the HTTP/2 multiplex pipeline; installs `ConnectionScopeHandler`, `Http2StreamTransportTimer` when metrics are enabled, optionally `GrpcBidiRouterHandler`, and the re-aggregating chain for every HTTP/2 stream |
 | `HttpRequestHandler` | `mockserver-netty/.../netty/HttpRequestHandler.java` | Main request dispatcher |
 | `NettyResponseWriter` | `mockserver-netty/.../netty/responsewriter/NettyResponseWriter.java` | Writes responses to Netty channels |

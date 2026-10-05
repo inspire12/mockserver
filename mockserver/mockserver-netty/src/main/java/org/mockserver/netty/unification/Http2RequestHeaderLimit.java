@@ -168,6 +168,14 @@ public final class Http2RequestHeaderLimit {
         return ctx.handler() instanceof Http2ConnectionHandler && ((Http2ConnectionHandler) ctx.handler()).connection().streamMayHaveExisted(streamId);
     }
 
+    /**
+     * @return whether the failure is a request refused for its header size, which {@link #logRefusal} reports where
+     * Netty raises it, so whatever sees the failure afterwards has nothing to add
+     */
+    static boolean isRefusal(Http2Exception failure) {
+        return isHeaderListOverLimit(failure) || isHeaderBlockTooLarge(failure);
+    }
+
     private static boolean isHeaderBlockTooLarge(Http2Exception failure) {
         return failure != null
             && !Http2Exception.isStreamError(failure)

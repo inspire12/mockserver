@@ -281,6 +281,38 @@ public final class Http2TestClient implements AutoCloseable {
     }
 
     /**
+     * @return the address MockServer sees this connection come from
+     */
+    public InetSocketAddress localAddress() {
+        return (InetSocketAddress) connection.localAddress();
+    }
+
+    /**
+     * Closes the connection with a TCP reset: no GOAWAY and no TLS close_notify is sent first.
+     */
+    public void resetConnection() throws Exception {
+        connection.config().setOption(ChannelOption.SO_LINGER, 0);
+        // the transport's own close, which the HTTP/2 codec and the TLS handler do not see
+        connection.eventLoop().submit(() -> connection.unsafe().close(connection.voidPromise())).get(WAIT_SECONDS, TimeUnit.SECONDS);
+        assertThat(closedWithin(WAIT_SECONDS), is(true));
+    }
+
+    /**
+     * Sends bytes as they are, beneath the HTTP/2 codec: a frame the codec would not write.
+     */
+    public void sendRaw(byte[] bytes) throws Exception {
+        connection.pipeline().context(Http2FrameCodec.class).writeAndFlush(Unpooled.wrappedBuffer(bytes)).get(WAIT_SECONDS, TimeUnit.SECONDS);
+    }
+
+    /**
+     * Sends bytes as they are beneath the TLS handler, where the server expects a TLS record, without waiting to
+     * learn whether a server that may already have closed the connection took them.
+     */
+    public void sendBeneathTls(byte[] bytes) throws Exception {
+        connection.pipeline().context(SslHandler.class).writeAndFlush(Unpooled.wrappedBuffer(bytes)).await(WAIT_SECONDS, TimeUnit.SECONDS);
+    }
+
+    /**
      * Sends a request's headers on a new stream, with END_STREAM unless a request body is to follow. A stream left
      * open is how a reset sent after the response is observed: one for a stream both sides have ended is ignored.
      */
@@ -384,6 +416,7 @@ public final class Http2TestClient implements AutoCloseable {
             streamsNotReading.add(stream);
         }
         stream.writeAndFlush(new DefaultHttp2HeadersFrame(headers, endStream)).sync();
+        exchange.streamId = stream.stream().id();
         return exchange;
     }
 
@@ -405,6 +438,11 @@ public final class Http2TestClient implements AutoCloseable {
         private final CompletableFuture<Integer> status = new CompletableFuture<>();
         private final CompletableFuture<String> body = new CompletableFuture<>();
         private final CompletableFuture<Long> reset = new CompletableFuture<>();
+        private volatile int streamId;
+
+        public int streamId() {
+            return streamId;
+        }
 
         /**
          * @return the value of a response header, or null if the response has none of that name

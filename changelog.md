@@ -452,6 +452,18 @@ This release delivers a sustained performance and memory programme alongside dat
 
 ### Fixed
 
+- **A client that drops or breaks an HTTP/2 connection no longer makes MockServer print a Netty
+  warning with a stack trace.** On an HTTP/2 connection made straight to MockServer, over TLS or
+  cleartext, a client that reset the connection or sent an invalid frame produced `An
+  exceptionCaught() event was fired, and it reached at the tail of the pipeline` with a full stack
+  trace on the console, through Netty's logger and so missing from MockServer's own log and
+  dashboard. Each is now one entry in MockServer's log: a connection its client closed or reset at
+  `DEBUG` with no stack trace, an HTTP/2 connection error at `WARN` with the client's address, the
+  error code and the cause, an SSL or decoder fault at `WARN`, and anything unexpected at `ERROR`.
+  A connection error still closes the connection with its `GOAWAY`. A TLS connection that is sent
+  bytes that are not TLS is now closed on the first of them: where Netty's OpenSSL native library
+  is not loaded it stayed open and logged a warning, with a hex dump of the bytes, for every read
+  that followed.
 - **A small HTTP/2 request sent through a SOCKS proxy tunnel by a client that disconnects straight away is no longer lost.** A client using cleartext HTTP/2 with prior knowledge (`h2c`) that sent a whole request with a body the moment the tunnel opened, and closed its connection as soon as it had written it, was not recorded, matched or forwarded. This affected a request small enough to send without waiting for MockServer, under HTTP/2's initial window of 65,535 bytes. MockServer answered the client's HTTP/2 preface while most of the request was still waiting to be read; the client had gone, so that answer failed, and the failure closed the connection with the request unread. Such a request is now received, as it is on a direct connection. Requests over TLS, HTTP/1.1 requests, and requests from a client that waits for its response were not affected.
 - **An HTTP forward to an upstream that refuses the connection, or whose host name cannot be resolved, now always fails with that reason.** Occasionally the request failed instead with `Channel handler removed before valid response has been received`, which hid why the upstream could not be reached from the log and from anything acting on the forward's error. It happened when the failed connection was cleaned up before MockServer had started listening for the connect result. The Java client sends its requests the same way, so a `MockServerClient` call to a server that is not listening gets the same fix. Binary (non-HTTP) forwards are not changed.
 - **A load scenario keeps its final status when it is stopped just as it finishes or just as it starts.** A stop request arriving at the moment the run completed, was aborted by a threshold, was being stopped by another request, or was still being started could leave the scenario with no status at all: it was listed as `LOADED` with no results, and its report returned `404`, as if it had never run.
