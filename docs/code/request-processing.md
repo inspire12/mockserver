@@ -1376,16 +1376,18 @@ When any list parameter is active the response adds `X-Total-Count` (total after
 
 ## Binary Mock Processing
 
-When `BinaryRequestProxyingHandler` receives raw bytes on a channel, it first checks for a matching expectation via `HttpState.firstMatchingExpectation(BinaryRequestDefinition)`. If a match is found with a `BinaryResponse` action, the handler writes the response bytes directly to the channel. If no match is found and the channel is in proxy mode (remote address configured), the bytes are forwarded to the upstream server as before. Forwarding without waiting for a response calls `NettyHttpClient`'s 5-argument `sendRequest` overload directly, which bypasses a subclass's override of the 4-argument overload — accepted and documented, see [decisions/binary-proxying-nowait-sendrequest-override.md](decisions/binary-proxying-nowait-sendrequest-override.md).
+When `BinaryRequestProxyingHandler` receives raw bytes on a channel that is in proxy mode (a remote address is set on it), the bytes are forwarded to the upstream server. Otherwise it looks for a matching expectation via `HttpState.firstMatchingExpectation(BinaryRequestDefinition)`. If a match is found with a `BinaryResponse` action, the handler writes the response bytes directly to the channel; a response with no data, or an empty array, is for a message that has no reply, so nothing is written and the connection stays open (the two mean the same: an empty array is not serialised, so `binaryResponse(new byte[0])` sent by the Java client is stored with null data, while raw JSON with `"binaryData": ""` is stored as an empty array; either is retrieved without `binaryData`). If no match is found, the "unknown message format" text is written and the channel closed. What one read loop delivers is one message: see [One Read Loop Is One Message](netty-pipeline.md#one-read-loop-is-one-message). Forwarding without waiting for a response calls `NettyHttpClient`'s 5-argument `sendRequest` overload directly, which bypasses a subclass's override of the 4-argument overload — accepted and documented, see [decisions/binary-proxying-nowait-sendrequest-override.md](decisions/binary-proxying-nowait-sendrequest-override.md).
 
 ```mermaid
 flowchart TD
-    RAW([Raw bytes arrive]) --> BRD["Create BinaryRequestDefinition\nfrom byte content"]
-    BRD --> MATCH["HttpState.firstMatchingExpectation()"]
-    MATCH -->|Match with BinaryResponse| WRITE["Write binaryData\nto channel"]
-    MATCH -->|No match| PROXY{"Remote address\nconfigured?"}
+    RAW(["One read loop's bytes,\njoined by BinaryMessageGatherer"]) --> PROXY{"Remote address\nconfigured?"}
     PROXY -->|Yes| FWD["Forward via\nNettyHttpClient"]
-    PROXY -->|No| CLOSE["Close channel"]
+    PROXY -->|No| BRD["Create BinaryRequestDefinition\nfrom byte content"]
+    BRD --> MATCH["HttpState.firstMatchingExpectation()"]
+    MATCH -->|Match with BinaryResponse| DATA{"binaryData\nnull or empty?"}
+    DATA -->|No| WRITE["Write binaryData\nto channel"]
+    DATA -->|Yes| NOTHING["Write nothing,\nkeep the connection open"]
+    MATCH -->|No match| CLOSE["Write 'unknown message format',\nclose channel"]
 ```
 
 ## DNS Mock Processing

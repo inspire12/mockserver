@@ -72,6 +72,7 @@ This coverage runs against the **unshaded** module classpath, so it cannot see a
 | AUTO_READ | true | Automatic read on new channels |
 | Server channel handler | `InboundConnectionLimiter` | Counts open connections and enforces `maxInboundConnections` — see [Inbound Connection Bounds](#inbound-connection-bounds) |
 | ALLOCATOR | `NettyAllocator.ALLOCATOR` (`PooledByteBufAllocator.DEFAULT`) | One pooled allocator for every channel — see [ByteBuf Allocator](#bytebuf-allocator) |
+| Receive buffer allocator | `BinaryAwareRecvByteBufAllocator` wrapping the channel's own, set per accepted connection in `MockServerUnificationInitializer.handlerAdded` (not a `childOption`: it holds per-connection state) | Netty's adaptive sizing until the connection is found to be binary, 64 KiB per read after that — see [Binary Protocol Handling](#binary-protocol-handling) |
 | WRITE_BUFFER_WATER_MARK | 8KB low / 32KB high, on accepted connections (`childOption`) | When a connection's outbound buffer passes 32 KB it reports itself unwritable until it drains below 8 KB. The mark bounds nothing by itself; it matters only to code that reads writability — see [Outbound Buffering and Backpressure](#outbound-buffering-and-backpressure). Before `MockServer.CONNECTION_WRITE_BUFFER_WATER_MARK` was set with `childOption` it was set with `option`, which applies to the listening socket (which never writes), so accepted connections had Netty's 32 KB / 64 KB default |
 
 ### Port Binding and Loopback Reachability
@@ -290,8 +291,8 @@ BinaryRequestProxyingHandler"]
 - **The rule** is six bytes: content type 22 (handshake), version major 3 and minor 0 to 4, a record length of 1 to 16384, and handshake type 1 (ClientHello). It is deliberately narrower than first-bytes detection, which takes any record type for TLS: here a wrong guess breaks a working binary connection.
 - **After the upgrade** the handler removes itself, so decrypted reads are never looked at again: a short one is delivered at once, one that looks like HTTP or like another ClientHello is a binary message, and a second `SniHandler` cannot be stacked.
 - **A ClientHello split inside its first six bytes** is still recognised. Bytes that are only the start of the six are held with the same bounded wait as first bytes (1 second after the last byte, at once on close, not counted while reads are paused), then delivered as a binary message.
-- **What that costs**: a clear-text binary message of 1 to 5 bytes that is the start of the six (most plausibly a lone `0x16`) is delivered up to a second late, every time one is sent. It is still a message of its own: when the bytes that follow show it was not a handshake, the held bytes are delivered first and what followed as the next message (bytes held over several reads go together, as only where they end is remembered). Four bytes are not held when the first length byte is already above `0x40`, which no record length can have. The alternative, not holding, would fail the handshake of a client whose ClientHello arrives split that early; TLS stacks write it whole, so that is rarer still, but its cost is a broken connection rather than a delay.
-- **What is still misread**: a clear-text binary message of six bytes or more that begins exactly like a ClientHello is taken for one, and the connection then fails its handshake. A ClientHello that arrives in the same read as bytes before it is not recognised, because only the start of a read is examined; a client waits for the go-ahead before sending it, so it arrives alone.
+- **What that costs**: a clear-text binary message of 1 to 5 bytes that is the start of the six (most plausibly a lone `0x16`) is delivered up to a second late, every time one is sent. It is still a message of its own: when the bytes that follow show it was not a handshake, the held bytes are delivered first (with a `channelReadComplete`, so that the gatherer does not join them to what follows), and `decode` returns so that what followed is examined in its turn as the start of a read: delivered as the next message, held if it could itself become a handshake (`16` then `16 03`), or taken for the handshake it is (a lone `16`, then a whole ClientHello in the next read). Bytes held over several reads go together, as only where they end is remembered. Four bytes are not held when the first length byte is already above `0x40`, which no record length can have. The alternative, not holding, would fail the handshake of a client whose ClientHello arrives split that early; TLS stacks write it whole, so that is rarer still, but its cost is a broken connection rather than a delay.
+- **What is still misread**: a clear-text binary message of six bytes or more that begins exactly like a ClientHello is taken for one, and the connection then fails its handshake. A ClientHello that arrives in the same read as bytes before it is not recognised, because only the start of a read (or of what follows a held message) is examined; a client waits for the go-ahead before sending it, so it arrives alone. Held bytes and the bytes after them are first looked at together, so three held bytes `16 03 01` followed by a ClientHello read as one handshake record of a wrong length, and that handshake fails.
 - **Backpressure**: the forward queue's read pause (below) is a `ChannelReadPause` hold on the channel, not on a handler position, so it balances across the upgrade. A ClientHello sent while the client is held back is read, and the upgrade made, when reading resumes.
 - **`assumeAllRequestsAreHttp`**: nothing is binary under that setting, so there is no binary connection to upgrade.
 - **Proxying** is as it was in 8.0.0: MockServer terminates the client's TLS itself, and each decrypted message goes upstream on a connection of its own that MockServer opens with TLS straight away, while what was sent in the clear went upstream in the clear. A server that expects the plaintext request to upgrade on every connection is not served by this; replaying that preamble upstream is not built.
@@ -1873,19 +1874,106 @@ on a `dnsPort` of 0 the operating system can choose such a port.
 
 ## Binary Protocol Handling
 
-When no known protocol is detected, `BinaryRequestProxyingHandler` handles the raw bytes. The handler first checks for matching expectations via `HttpState.firstMatchingExpectation(BinaryRequestDefinition)`. If a match with a `BinaryResponse` action is found, the response bytes are written directly to the channel. Otherwise, in proxy mode (when a remote address is configured on the channel), raw bytes are forwarded via `NettyHttpClient.sendRequest(BinaryMessage, ...)`:
+When no known protocol is detected, `BinaryRequestProxyingHandler` handles the raw bytes. In proxy mode (a remote address is set on the channel) they are forwarded via `NettyHttpClient.sendRequest(BinaryMessage, ...)`:
 
 - **Waiting mode**: Blocks until upstream response arrives, writes it back
 - **Non-waiting mode**: Fire-and-forget with optional `BinaryProxyListener` callback. `BinaryProxyListener` (`o.m.model.BinaryProxyListener`) is a functional interface with `onProxy(BinaryMessage binaryRequest, CompletableFuture<BinaryMessage> binaryResponse, SocketAddress serverAddress, SocketAddress clientAddress)` invoked when binary data is proxied
 
-Each socket read is one binary message, however short (the one exception is bytes held as the possible start of a TLS handshake, see [In-band TLS upgrade](#in-band-tls-upgrade-on-a-binary-connection)), and each message is forwarded on an upstream connection of its own.
+Otherwise they are matched via `HttpState.firstMatchingExpectation(BinaryRequestDefinition)`. A match with a `BinaryResponse` writes its bytes to the channel; a `BinaryResponse` with no data, or an empty array, is a message with no reply: nothing is written, not even an empty buffer, and the connection stays open (null and empty mean the same, because an empty array is not serialised: `binaryResponse(new byte[0])` sent by the Java client arrives with null data, raw JSON with `"binaryData": ""` is stored as an empty array, and either is retrieved without `binaryData`). No match writes the "unknown message format" text and closes.
 
-**One read is one message, and a message is not always one read.** MockServer has no knowledge of any binary protocol's framing, so the read is the only boundary it has, and a message that reaches it in two reads is matched, or forwarded, as two messages. This is the limit that matters for mocking a protocol like PostgreSQL, and it is reached sooner than "a large message":
+What one read loop brings is one binary message, however short and up to 256 KiB (the one exception is bytes held as the possible start of a TLS handshake, see [In-band TLS upgrade](#in-band-tls-upgrade-on-a-binary-connection)), and each message is forwarded on an upstream connection of its own. Matching, forwarding, the `binaryProxyListener` and the event log all happen in `BinaryRequestProxyingHandler`, behind the gathering described next, so they see the same message.
 
-- **The read buffer follows the traffic.** MockServer does not set the receive buffer allocator, so each connection has Netty's adaptive one: it starts at 2,048 bytes, steps down after two consecutive smaller reads (to a floor of 64), and steps up after a read fills it. A message larger than the buffer's size at that moment is read in pieces within one read loop, and each piece is a message. So after a run of small messages a moderately larger one is split, in the clear and over TLS alike. Measured with a scratch probe (JDK client, macOS, load average about 19; `ShrinkProbe`, kept with the unit's hand-over files, not committed): on a fresh connection messages of 100 to 800 bytes were matched (800 bytes over an upgraded TLS 1.3 connection only 10 times in 20); after 5 five-byte exchanges an 800-byte message was matched 0 times in 20; after 20, a 422-byte one 0 in 20; after 60, a 100-byte one 0 in 20.
-- **TLS adds its own split.** `SniHandler` builds the TLS handler with `sslContext.newHandler(alloc)`, the OpenSSL engine in its non-JDK-compatible mode, which sizes its plaintext buffer from the bytes of the current socket read and, when a record does not fit, fires what it has; a record whose tail arrives in a later socket read is delivered as two reads. Measured in review: a first message of 1,200 bytes straight after the handshake was answered "unknown message format" on 150 of 150 upgraded connections and on 129 and 116 of 150 that started with TLS.
+### One Read Loop Is One Message
 
-Both are as in 8.0.0 (the same read loop, allocator and `SslHandler`; read, not run against that release). Not fixed here. A floor on a binary connection's receive buffer would stop the first; gathering the reads of one read cycle (to `channelReadComplete`) before treating them as a message would cover both, but it changes what a message is (two sent close together would become one); and neither is a real fix, which needs the protocol's own framing, which MockServer does not have.
+**Outcome:** MockServer has no knowledge of any binary protocol's framing. The nearest thing to a message boundary it has is the read loop, which ends when the socket has nothing more to give. On a binary connection, everything one read loop delivers is one message, up to 256 KiB. Two things make that so: the connection is read 64 KiB at a time (a small buffer no longer cuts a message), and the reads of one loop are joined (`BinaryMessageGatherer`). A message whose bytes arrive across two read loops is still two messages, and two messages that one loop reads are still one; only the protocol's framing could tell those apart.
+
+```mermaid
+flowchart TD
+    ACCEPT(["Connection accepted"]) --> INSTALL["MockServerUnificationInitializer wraps the
+channel's receive allocator in
+BinaryAwareRecvByteBufAllocator"]
+    INSTALL --> WHAT{"PortUnificationHandler:
+binary?"}
+    WHAT -->|"No: HTTP, TLS, SOCKS, HTTP/2"| SAME["Reads sized by Netty as before.
+No gatherer in the pipeline"]
+    WHAT -->|"Yes"| BIN["64 KiB per read from now on.
+BinaryMessageGatherer added in front of
+BinaryRequestProxyingHandler"]
+    BIN --> LOOP["Read loop: each read, or what
+TLS decrypts from it, is held"]
+    LOOP --> FULL{"256 KiB held?"}
+    FULL -->|"Yes"| OUT["One message"]
+    FULL -->|"No, loop ends"| OUT
+    OUT --> HANDLE["BinaryRequestProxyingHandler:
+match or forward, listener, event log"]
+```
+
+**What a message is, case by case.** `BinaryMessageBoundaryTest` drives the real pipeline read by read (it decides which bytes are waiting when a read loop starts, and runs Netty's own loop with the connection's buffer sizes), in the clear, over TLS from the start and over TLS turned on part way. Its observations before gathering are kept with the unit's hand-over files; these are the messages binary handling saw:
+
+| Case | Receive buffer only | With gathering |
+|------|---------------------|----------------|
+| One message in one read | 1 | 1 |
+| First message of 3,000 bytes, read before the connection is known to be binary | Clear: 2 (2,048 + 952). TLS from the start, OpenSSL engine: 2. TLS turned on part way: 1 | 1 |
+| Two messages waiting together | Clear: 1. TLS, OpenSSL engine: 1 (both records decrypted into one read). TLS, JDK engine: 2 (one per record) | 1 |
+| Two messages, the client waiting in between | 2 | 2 |
+| One message of 100,000 bytes, all waiting | Clear: 2. TLS, OpenSSL engine: 4. TLS, JDK engine: 7 (one per record) | 1 |
+| One message of 800 bytes, second half 50 ms later | Clear: 2. TLS, OpenSSL engine: 2 (419 + 381, both in the second loop). TLS, JDK engine: 1 | Clear: 2. TLS: 1 |
+| 1,572,864 bytes waiting: the read loop ends at Netty's limit of 16 reads | Clear: 24 of 64 KiB. TLS: 27 (OpenSSL) or 97 (JDK) | Clear: 6 of 256 KiB. TLS: 7, none over 256 KiB |
+
+Two cases in which messages that were separate become one are not in the table. **Two TLS records read in one loop with the JDK TLS engine** (no native library, as in the `mockserver-netty-no-dependencies` jar) were two messages and are now one, as they already were with the OpenSSL engine and in the clear. And in the clear, **a message that exactly fills the buffer it is read with** (a first message of 2,048 bytes, a later one of 65,536) and is followed without a wait was a message of its own, because what followed began the next read of the loop; the two are now one, like any two messages sent without a wait. After gathering the two engines give the same messages in every case.
+
+**How the reads are gathered.**
+
+- **The loop is Netty's.** `BinaryAwareRecvByteBufAllocator`'s handle sees the loop begin (`reset`) and end (`readComplete`), and `isReading(channel)` says which side of that the channel is on. The gatherer holds a `ByteBuf` that arrives inside a loop and passes on what it holds at `channelReadComplete`. One that arrives outside a loop (held bytes given up by `PortUnificationHandler`'s timer, a read `SslHandler` deferred) is a message as it is, so nothing waits for a loop end that is not coming.
+- **No copy to join.** The first piece is passed on as it is; from the second, pieces become components of a `CompositeByteBuf`. The handler copies the message out once, as it always has.
+- **Bounded.** A message holds at most `MAX_GATHERED_BYTES`, 256 KiB. At that size it is passed on at once, and what the loop brings next starts another message: nothing is dropped, and nothing grows past the bound. The bound is the forward queue's `MAX_WAITING_BYTES`, so one message never exceeds what that queue may hold, and a client that is ahead of the upstream is still stopped inside the loop (see [backpressure](#forwarding-without-waiting-for-a-response)).
+- **Netty's limit of 16 reads per loop** is therefore never what ends a message: 16 reads of 64 KiB are 1 MiB, four messages' worth. A message that spans read loops is left split. A hold after the loop to rejoin it was rejected: after a loop that ended on a short read (the usual end) there is no way to tell a message's tail in flight from a client waiting for its reply, so the hold would delay every exchange of a request/response protocol; and after a loop that ended at the read limit the bound has been reached anyway.
+- **Bytes held as a possible handshake** are passed on by `PortUnificationHandler` inside the loop that settles them, followed by a `channelReadComplete` of its own, so they stay a message apart from what settled them.
+- **A message read just before a ClientHello in the same loop** (possible only when the message exactly filled its read buffer) is ended the same way before the TLS handler is installed: it was sent in the clear, so it is answered in the clear, or forwarded upstream in the clear, before the handshake is answered. Left to the end of the loop its reply would be written after the ServerHello, through TLS.
+- **Nothing is lost or leaked** when the connection closes (what is held is passed on first, as a client that sends and closes expects) or the handler is removed (passed on to whatever is next; the pipeline's end releases it).
+- **Per connection.** The gatherer is not sharable and holds only its own connection's bytes.
+- **No property turns it off.** What it changes is described above; the boundaries it removes were never a protocol's (they depended on buffer sizes, on the TLS engine and on timing).
+
+**Why an allocator of its own, installed up front.** Netty asks the channel's `RecvByteBufAllocator` for its handle once, on the first read, and keeps it (`AbstractChannel.AbstractUnsafe.recvBufAllocHandle`), so replacing the allocator when a connection is found to be binary changes nothing. The epoll and kqueue channels also wrap that handle in their own (`EpollRecvByteAllocatorHandle`, a `DelegatingHandle` whose delegate is not reachable), so the handle cannot be told through `channel.unsafe()` either. `BinaryAwareRecvByteBufAllocator` is therefore one object per channel that holds the state itself: `install` wraps whatever allocator the channel has (keeping its `maxMessagesPerRead`), in `handlerAdded`, before the first read; `readWholeMessages` sets the flag from `switchToBinaryRequestProxying`. Its handle delegates every call to the original handle and overrides only `guess()` and `allocate()` once the flag is set. It is an `ExtendedHandle`, which the native transports require.
+
+**What it costs.** Until a connection is binary, nothing: the same buffers, read for read (`BinaryAwareRecvByteBufAllocatorTest` compares the two over the same read sequences, and `PortUnificationHandlerDetectionTest` / `ReadBufferSizeByProtocolTest` do so per protocol), and no gatherer. On a binary connection:
+
+| | Before | Now |
+|---|---|---|
+| Buffer per read | 64 to 65,536 bytes, following the traffic | 65,536 bytes, pooled direct (`NettyAllocator.ALLOCATOR`) |
+| Held during a read loop | One read at a time | The loop's reads so far, at most 256 KiB, until the loop ends or the bound is reached; nothing is held between loops |
+| Lifetime, in the clear | Until the read has been handled | Until the message has been handled. Bytes held as the possible start of a handshake keep their read buffer for up to the 1 second wait |
+| Lifetime, over TLS, OpenSSL engine (the default wherever netty-tcnative's native library loads) | Until decrypted, also when a record is incomplete: the engine takes the partial record into its own buffer | The same: nothing of the read buffer is kept |
+| Lifetime, over TLS, JDK engine | Until decrypted; kept as `SslHandler`'s cumulation while a record is incomplete | The same, so a connection stalled part way through a record keeps one 64 KiB buffer (2,048 bytes in the same probe before) for as long as it stalls |
+| Allocation | From the event loop's thread cache up to 32 KiB | 64 KiB is above `io.netty.allocator.maxCachedBufferCapacity` (32 KiB), so each read takes its buffer from the arena and returns it there |
+
+So the transient cost is at most 256 KiB of read buffers per binary connection that is being read at that moment (at most one per worker thread at a time), plus the copy the handler makes of the message. The retained cost is 64 KiB per clear connection holding a possible handshake start, for at most the one-second wait, and, only with the JDK TLS engine, per binary TLS connection that is part way through a record (probed with `RetainedProbe`, a scratch probe: by reading `ByteToMessageDecoder`'s cumulation on a live connection, under each engine). 64 KiB is Netty's own adaptive maximum, so no read is larger than one the connection could already have had. Both sizes are constants, not properties.
+
+**What real connections do.** Measured on one machine (JDK client, OpenSSL engine in MockServer, macOS loopback, load average 20 to 60, 30 connections per cell; scratch probes kept with the unit's hand-over files, not committed), counting connections on which the message was matched as one:
+
+| Case | Before | 64 KiB reads | 64 KiB reads and gathering |
+|------|-----------------|--------------|----------------------------|
+| After 60 five-byte exchanges, 100 to 16,000 bytes, in the clear / TLS turned on part way / TLS from the start | 0 of 150 each | 150 of 150 each | 150 of 150 each |
+| 1,200, 3,000 and 16,000 bytes straight after the handshake of TLS turned on part way (1.2 and 1.3) | 0 of 180 | 180 of 180 | 180 of 180 |
+| First message of a connection in the clear, 2,049 or 3,000 bytes | 0 of 60 | 0 of 60 | 60 of 60 |
+| First message of a connection that starts with TLS, 1,200 to 16,000 bytes (1.2 and 1.3) | 8 of 180 | 16 of 180 | 180 of 180 |
+| A TLS record written in two parts 50 ms apart (100 to 3,000 bytes, 1.2 and 1.3) | 0 of 180 | 0 of 180 | 180 of 180 |
+| In the clear, 65,537 and 100,000 bytes after one small exchange | 0 of 60 | 0 of 120 | 112 of 120 |
+| In the clear, 65,536 bytes after one small exchange | 0 of 30 | 49 of 60 | 55 of 60 |
+| In the clear, 65,536 and 65,537 bytes after 60 small exchanges | 0 of 60 | 7 of 120 | 18 of 120 |
+| In the clear, 200,000 bytes | 0 of 30 | 0 of 60 | 0 of 60 |
+| Over TLS, several records: 16,384 / 16,385 / 20,000 / 40,000 bytes after one small exchange (the JDK's TLS 1.3 client puts under 16,384 in a record) | 0 of 30 each | 55 / 52 / 17 / 0 of 60 | 53 / 49 / 14 / 0 of 60 |
+| In the clear, a message written in two parts 50 ms apart (100 to 3,000 bytes) | 0 of 90 | 0 of 90 | 0 of 90 |
+
+**What still splits or joins.**
+
+- **A message that arrives over time.** A read loop ends when the socket is empty, so a message whose later segments, or later TLS records, have not arrived yet is split there. On loopback that is a message of more than one loopback packet read by a server that is already awake (the last four timing-dependent rows above: gathering neither helps nor hurts them); across a network it can be any message larger than one segment (about 1,400 bytes). Not measured off loopback, or on Linux. A message over 256 KiB is always split.
+- **One TLS record is never split.** TLS gives nothing up until a record is whole. With the OpenSSL engine in its non-JDK-compatible mode (`sslContext.newHandler(alloc)` in `SniHandler`) a record whose tail arrived in a later socket read used to be delivered in two pieces, because the plaintext buffer is sized from the current read; both pieces come out in the same read loop, so gathering makes them one message.
+- **Messages sent without waiting** for a reply (a message that has no reply followed at once by the next, or a pipelined batch) are one message when one read loop reads them, wherever the read buffers happened to end. An expectation for them must hold the bytes of all of them.
+
+The real fix for both is the protocol's own framing, which MockServer does not have; it is open in the performance programme plan.
+
+### Forwarding Without Waiting for a Response
 
 - **Forwards**: a connection's messages wait in a per-connection queue (`ForwardQueue`, a channel attribute used only on that connection's event loop). The next message's upstream connection is opened only once the previous message has been connected and written, which `NettyHttpClient.sendRequest(BinaryMessage, ...)` reports through its `onRequestSent` callback. So a message can wait for the previous one's connect, up to `socketConnectionTimeoutInMillis`. Without this the connections are opened from different forward-client event loops and the upstream can accept them in either order. The queue is bounded by backpressure, below.
 - **Listener calls**: the listener is user code and may block on the response future, so it runs on the `Scheduler` local-callback pool (`scheduleLocalCallback`), never on the worker event loop, which would otherwise forward nothing more on that thread until the listener returned. One connection's messages are reported one at a time, in arrival order; a listener that throws closes the client connection, as it did when it ran on the event loop.
@@ -1898,7 +1986,7 @@ What this does and does not give:
 | Order across client connections | None: each connection has its own queue |
 | A forward fails (connect, write, or cannot be started) | The client connection is closed, as before; messages still queued behind it are not attempted, their responses fail, and one WARN reports how many |
 | The client closes after sending | Every message it sent is still forwarded |
-| Queue size | Bounded by not reading the client: at most 64 messages or 256 KiB waiting, plus what one socket read delivers |
+| Queue size | Bounded by not reading the client: at most 64 messages or 256 KiB waiting, plus the message that takes it past either (at most 256 KiB) and whatever else the read that completed that message held (under 64 KiB) |
 
 **Backpressure, not loss.** The queue only has to absorb what a client sends while one message is connected and written. A client that stays ahead of the upstream is slowed down instead of being held in heap:
 
@@ -1921,7 +2009,7 @@ and 128 KiB waiting?"}
 - **The limits** (`MAX_WAITING_MESSAGES`, `MAX_WAITING_BYTES`) count messages not yet started; the one in flight is not counted. Both are needed: bytes alone would let a client queue a great many tiny messages, each with its own bookkeeping, and messages alone would allow 64 reads of any size. Reading resumes at half of each, so a client held at the limit is not paused and resumed once per message.
 - **Why not pause whenever a forward is in flight**: that is the tightest bound, but while a connection is not read the client's writes run together in the socket buffers and are read back as fewer, larger messages. With a limit of zero that would happen to any two messages sent close together; with these limits it happens only to a client that would otherwise be held in memory.
 - **What the client sees**: its writes stop being accepted once the socket buffers fill, like any slow TCP peer. Nothing is dropped and order is kept.
-- **Overshoot**: auto-read is turned off from inside a read, so the read loop stops after the buffer in hand. One socket read can carry several messages when TLS is decrypting, which is the "plus what one socket read delivers".
+- **Overshoot**: auto-read is turned off from inside a read, when a gathered message takes the queue past a limit, so the read loop stops after the buffer in hand. `BinaryMessageGatherer` passes a message on as soon as it reaches 256 KiB instead of at the end of the loop for exactly this reason: a loop can bring 1 MiB, and the pause has to be able to stop it part way. What the buffer in hand held beyond that message is passed on when the loop ends, as one more message.
 - **Every path resumes**: the next message starting, a failed forward (which fails everything waiting, so the queue is empty), and the handler being removed (which also happens when the channel closes). A closed client's queued messages are still forwarded. Resuming never depends on reading the client, so the pause cannot deadlock with TLS. `SslHandler` asks for a read of its own only after one that delivered nothing, and a pause always begins inside a read that delivered a message; where the `ChannelReadPause` gate sits ahead of it (a connection that started with TLS) such a request would wait for the resume anyway.
 - **Not bounded here**: a message already written holds its upstream connection until the upstream answers or closes, as in 8.0.0; and listener calls for one connection are chained, so a listener slower than the client builds a backlog of its own.
 

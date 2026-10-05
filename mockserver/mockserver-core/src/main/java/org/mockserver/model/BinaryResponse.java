@@ -21,6 +21,12 @@ public class BinaryResponse extends Action<BinaryResponse> {
         return binaryData;
     }
 
+    /**
+     * The bytes written in reply to a matching binary message. With no data, or an empty array, the message has
+     * no reply: nothing is written and the connection stays open. The two mean the same, because an empty array
+     * is not serialised: set here and sent to MockServer it arrives as no data, and an expectation retrieved
+     * from MockServer never has one.
+     */
     public BinaryResponse withBinaryData(byte[] binaryData) {
         this.binaryData = binaryData;
         this.hashCode = 0;

@@ -352,6 +352,34 @@ This release delivers a sustained performance and memory programme alongside dat
   If you alert on this metric, expect much larger values and re-tune thresholds; a rate or increase
   over it is now a per-entry eviction rate, not an eviction-episode rate, so it is not comparable with
   a value recorded before this release.
+- **Behaviour change: on a binary (non-HTTP) connection a message is now everything MockServer reads
+  from the connection in one go, up to 256 KiB, not one network read.** MockServer does not know where
+  a binary protocol's messages begin and end, and took each read from the connection as one message.
+  The amount it read at a time followed the traffic, down to 64 bytes, so after a run of small messages
+  a larger one was read in pieces, and each piece was matched against binary expectations, or
+  forwarded, as a message of its own: after sixty 5-byte messages even a 100-byte message was, and over
+  TLS so was a 1,200-byte message sent straight after the handshake. A connection's first message was
+  cut at 2,048 bytes, and a TLS record that arrived in two parts was two messages. A connection found
+  to be binary is now read up to 64 KiB at a time, and whatever one pass of reading brings, however
+  many reads or TLS records, is joined into one message before it is matched, forwarded, given to a
+  `binaryProxyListener` or logged. So a session of many small messages followed by a larger one is
+  matched message by message, in the clear, over TLS, and after a switch to TLS part way through, and a
+  message of one TLS record (up to about 16 KiB) is always matched whole.
+  What changes for existing setups: messages that MockServer reads together are always one message.
+  That was already so with the default (OpenSSL) TLS engine, and in the clear unless the first of them
+  happened to end exactly where a read did (a first message of 2,048 bytes, or a later one of 65,536
+  bytes, followed by another without a wait: those were two messages and are now one). With the JDK
+  TLS engine, which the `mockserver-netty-no-dependencies` jar uses because it ships without the
+  native TLS library, two TLS records read together were two messages and are now one. In both cases
+  expectations that matched each of two messages a client sends without waiting must now match the
+  pair. A message that is followed at once by a TLS handshake is still answered, or forwarded, in the
+  clear before the handshake is. A forwarded message can now be up to 256 KiB where it was at most
+  64 KiB. There is no setting to turn this off.
+  HTTP, HTTPS, SOCKS and HTTP/2 connections are read exactly as before. Still matched in pieces: a
+  message that reaches MockServer over time (its later packets, or later TLS records, arrive after
+  MockServer has read the earlier ones; in the clear that includes a message the client writes in
+  several steps) and a message over 256 KiB. While a binary connection is being read MockServer holds
+  up to 256 KiB of it; nothing is held between reads.
 - **BREAKING: HTTP/3 (experimental) needs an opt-in jar or image, and a server that cannot serve it refuses to start, whether the native library is missing or the HTTP/3 port cannot be used.** The QUIC native binaries (~11 MB across five platforms) moved to a `jar-with-dependencies-http3` classifier, so the default standalone jar is **104 MB → 93 MB**. The QUIC *classes* are still bundled, so if you set `http3Port` without the native, MockServer now refuses to start and prints the exact fix for your version and platform plus the underlying error on one line, without a stack trace, instead of logging a warning and silently ignoring the port. **If you use HTTP/3**: standalone jar — run `mockserver-netty-<version>-jar-with-dependencies-http3.jar`; Maven or Gradle — `org.mock-server:mockserver-netty` already brings `io.netty:netty-codec-native-quic` for your platform, but `mockserver-netty-no-dependencies` cannot load it (its relocated Netty looks for a differently named library); Docker, Docker Compose or Kubernetes — use the new `mockserver/mockserver:<version>-http3` tag (see *Added*). **Docker users**: no published image has served HTTP/3 before — they run that relocated jar, so a container with `http3Port` set logged `native QUIC transport not available` and served TCP only; it now refuses to start until you switch to the `-http3` tag. Mounting `netty-codec-native-quic-<version>-linux-<arch>.jar` into `/libs` does not work in the published images, for the same reason. **If your HTTP/3 port was unavailable**: MockServer also refuses to start when it cannot start HTTP/3 on `http3Port` for any other reason, most often because that UDP port is already in use. It used to log the warning `exception starting HTTP/3 server on port ... - HTTP/3 disabled` and keep serving HTTP/1.1 and HTTP/2, so a deployment in that state looked healthy while serving no HTTP/3. The likeliest way to be in that state without knowing is **more than one MockServer started with the same `http3Port`**: two embedded servers in one JVM, test forks running in parallel that share one `mockserver.http3Port`, or several instances on one host started from the same properties file. The first served HTTP/3 and the others quietly served only HTTP/1.1 and HTTP/2; now every one but the first fails to start, so give each its own `http3Port` or set it only where HTTP/3 is needed. The HTTP and HTTPS listeners a refused server had already opened are closed again. From the command line and in Docker or Kubernetes the process exits with a non-zero status after printing one line that names the port and the cause, without a stack trace when the port could not be bound (`HTTP/3 is enabled (http3Port=8443) but UDP port 8443 could not be bound, so MockServer cannot start: free the port if another application holds it, choose a different http3Port, or remove http3Port to run without HTTP/3 (underlying error: BindException: Address already in use)`; a port the process is not allowed to bind gives the same line ending `BindException: Permission denied`). Embedded in a JVM (`ClientAndServer.startClientAndServer`, `new MockServer`, the JUnit 4 rule, the JUnit 5 extension, the Spring test listener) the start throws a `RuntimeException` with that message and the original error as its cause, as it does for a TCP port that is already in use. Any other failure to start HTTP/3, such as TLS settings from which no certificate chain for QUIC can be built or an `http3Port` above 65535, refuses start-up in the same way, names its cause, and on the command line is followed by a stack trace. **If you do not use HTTP/3 — the default — nothing changes except a smaller standalone jar.**
 - **BREAKING: MockServer refuses to start when DNS mocking is enabled and its DNS port cannot be used.** With `dnsEnabled=true`, a DNS server that could not start, nearly always because its `dnsPort` could not be bound, used to log the warning `exception binding DNS port - DNS mocking disabled` and MockServer carried on serving HTTP, so a deployment in that state looked healthy while answering no DNS queries. It now does not start, as it already does for an HTTP port that is in use and for an HTTP/3 port that cannot be used. **You are affected if you set `dnsEnabled=true` with a fixed `dnsPort`** that is unavailable where MockServer runs. The likeliest ways to be in that state without knowing: another resolver already uses the port (on `53`, the host's own resolver such as `systemd-resolved` or `dnsmasq`; `5353`, which our configuration page used as its example, is the mDNS port and is normally in use on macOS); the process may not bind a port below 1024 such as `53` (the message then ends `Permission denied`); or **more than one MockServer was started with the same `dnsPort`** — two embedded servers in one JVM, test forks running in parallel that share one `mockserver.dnsPort`, or several instances on one host started from the same properties file — where the first served DNS and the others quietly served none, and now every one but the first fails to start. To fix it, free the port, choose another `dnsPort`, leave `dnsPort` at its default of `0` (the operating system then chooses a free port, which `MockServer.getDnsPort()` returns; a DNS server that cannot start on a chosen port is refused as well, which should be rare), or set `dnsEnabled=false`. The HTTP and HTTPS listeners a refused server had already opened are closed again. From the command line and in Docker or Kubernetes the process exits with a non-zero status after printing one line that names the port and the cause, without a stack trace (`DNS mocking is enabled (dnsEnabled=true, dnsPort=5353) but UDP port 5353 could not be opened or bound, so MockServer cannot start: free the port if another application holds it, choose a different dnsPort (0 picks a free port, and a port below 1024 can need extra privileges), or set dnsEnabled=false to run without DNS mocking (underlying error: BindException: Address already in use)`). Embedded in a JVM (`ClientAndServer.startClientAndServer`, `new MockServer`, the JUnit 4 rule, the JUnit 5 extension, the Spring test listener) the start throws a `RuntimeException` with that message and the original error as its cause, as it does for an HTTP port that is already in use. A `dnsPort` that is not a port number, such as one above 65535, refuses start-up in the same way and on the command line is followed by a stack trace. The example port on the configuration page is now `5053`. **If you do not enable DNS mocking — the default — nothing changes.**
 - **Throughput no longer collapses past saturation.** Offered more than it could serve, MockServer used to serve *less* as load rose (26,020, then 23,463, then 19,517 req/s at 32,000, 48,000 and 64,000 offered in an earlier measurement); it now keeps serving close to the offered rate right up to a 59,905 req/s peak at 64,000 offered, with the median still under a millisecond. (The earlier 26,020 / 23,463 / 19,517 req/s figures are from a 2026-09-18 instrumented snapshot on the previous benchmark rig, not a measurement of 8.0.0.)
@@ -513,23 +541,30 @@ This release delivers a sustained performance and memory programme alongside dat
   them. A later message shorter than 5 bytes, or one that began like any TLS record, was taken for the
   start of a TLS handshake, and neither it nor anything after it was forwarded. Bytes that cannot be the
   start of HTTP, TLS, SOCKS or HTTP/2 are now treated as binary at once, and once a connection is binary
-  every later read is forwarded, or matched against binary expectations, as it is. A first message that
-  could still become one of those protocols (`GET` with nothing after it, for example) is held for up to
-  one second in case the rest follows, and is forwarded at once if the client closes.
+  everything read later is forwarded, or matched against binary expectations, as binary. A first
+  message that could still become one of those protocols (`GET` with nothing after it, for example) is
+  held for up to one second in case the rest follows, and is forwarded at once if the client closes.
 - **A protocol that switches to TLS part way through a connection, such as PostgreSQL after its
   `SSLRequest`, can now be mocked for the whole session.** With binary expectations MockServer already
   answered a TLS handshake that began after a binary message, but what it then decrypted went through the
   same faulty check: a message shorter than 8 bytes was held, and one shorter than 5 bytes ended the
   session. Now, when a TLS ClientHello begins on a binary connection, MockServer answers it as it would on
   a connection that starts with TLS (the same certificates, TLS protocols and client-certificate
-  requirement) and a short message it decrypts afterwards is matched and answered at once, not held. (A
-  message is still whatever one read delivers, as in 8.0.0: one that arrives in two reads, which happens
-  to a message larger than those before it on the connection, is matched as two.)
+  requirement) and a short message it decrypts afterwards is matched and answered at once, not held.
+  (What MockServer takes as one message is described under Changed.)
   Only a ClientHello is taken for a handshake (its first six bytes are checked), so a binary message that
   merely begins like another kind of TLS record stays a binary message; a message of one to five bytes
   that could be the start of a ClientHello is held for up to one second first. Proxying is unchanged:
   MockServer answers the handshake itself and forwards each decrypted message on a new TLS connection to
   the upstream.
+- **A binary expectation with an empty response no longer fails and closes the connection.**
+  `binaryResponse(new byte[0])` reaches MockServer as a response with no data, and when such an
+  expectation matched, MockServer threw a `NullPointerException` and closed the connection. A binary
+  response with no data, or with empty data, now means the message has no reply: MockServer writes
+  nothing and keeps the connection open, so a message that a real server does not answer can be mocked.
+  An empty `binaryData` is not serialised: the Java client sends such an expectation without it, and
+  an expectation retrieved from MockServer never has it, even one created from JSON with
+  `"binaryData": ""`.
 - **An HTTP request, or an HTTP/2 prior-knowledge connection, whose first bytes arrive a few at a time is now
   recognised.** A first read shorter than 5 bytes was taken for TLS whatever it contained, so a request
   that arrived one byte at a time was never answered, and an HTTP/2 connection preface split across reads

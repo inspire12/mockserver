@@ -17,7 +17,6 @@ import org.mockserver.mock.HttpState;
 import org.mockserver.model.BinaryMessage;
 import org.mockserver.model.BinaryProxyListener;
 import org.mockserver.model.BinaryRequestDefinition;
-import org.mockserver.model.BinaryResponse;
 import org.mockserver.scheduler.Scheduler;
 import org.mockserver.socket.ChannelReadPause;
 import org.mockserver.uuid.UUIDService;
@@ -96,18 +95,33 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
             binaryRequestDefinition.withLogCorrelationId(logCorrelationId);
             Expectation matchedExpectation = httpState.firstMatchingExpectation(binaryRequestDefinition);
             if (matchedExpectation != null && matchedExpectation.getBinaryResponse() != null) {
-                BinaryResponse binaryResponse = matchedExpectation.getBinaryResponse();
-                if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
-                    mockServerLogger.logEvent(
-                        new LogEntry()
-                            .setType(FORWARDED_REQUEST)
-                            .setLogLevel(Level.INFO)
-                            .setCorrelationId(logCorrelationId)
-                            .setMessageFormat("returning binary mock response:{}for binary request:{}")
-                            .setArguments(SensitiveLogValue.of(formatBytes(binaryResponse.getBinaryData())), SensitiveLogValue.of(formatBytes(binaryRequest.getBytes())))
-                    );
+                byte[] reply = matchedExpectation.getBinaryResponse().getBinaryData();
+                if (reply == null || reply.length == 0) {
+                    // a message that has no reply. Null and empty mean the same: an empty array is not serialised, so one
+                    // set through the Java client arrives as null, while raw JSON can still deliver it empty
+                    if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
+                        mockServerLogger.logEvent(
+                            new LogEntry()
+                                .setType(FORWARDED_REQUEST)
+                                .setLogLevel(Level.INFO)
+                                .setCorrelationId(logCorrelationId)
+                                .setMessageFormat("returning nothing, as the binary mock response is empty, for binary request:{}")
+                                .setArguments(SensitiveLogValue.of(formatBytes(binaryRequest.getBytes())))
+                        );
+                    }
+                } else {
+                    if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
+                        mockServerLogger.logEvent(
+                            new LogEntry()
+                                .setType(FORWARDED_REQUEST)
+                                .setLogLevel(Level.INFO)
+                                .setCorrelationId(logCorrelationId)
+                                .setMessageFormat("returning binary mock response:{}for binary request:{}")
+                                .setArguments(SensitiveLogValue.of(formatBytes(reply)), SensitiveLogValue.of(formatBytes(binaryRequest.getBytes())))
+                        );
+                    }
+                    ctx.writeAndFlush(Unpooled.copiedBuffer(reply));
                 }
-                ctx.writeAndFlush(Unpooled.copiedBuffer(binaryResponse.getBinaryData()));
             } else {
                 if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
                     mockServerLogger.logEvent(
@@ -278,8 +292,8 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
 
     /**
      * One client connection's messages waiting for the one being forwarded. Used only on that connection's event
-     * loop. Bounded by not reading the connection while it is full, so it can exceed its limits only by what
-     * one read delivers.
+     * loop. Bounded by not reading the connection while it is full, so it can exceed its limits only by the
+     * message that takes it past them and what was read with that message.
      */
     private static final class ForwardQueue {
         private final Deque<QueuedForward> waiting = new ArrayDeque<>();

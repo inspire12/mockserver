@@ -13,6 +13,7 @@ import org.mockserver.netty.mcp.McpSessionManager;
 import org.mockserver.netty.mcp.McpStreamableHttpHandler;
 import org.mockserver.netty.proxy.ProxyProtocolOriginalDestinationHandler;
 import org.mockserver.netty.proxy.TransparentProxyHandler;
+import org.mockserver.netty.unification.BinaryAwareRecvByteBufAllocator;
 import org.mockserver.netty.unification.PortUnificationHandler;
 import org.mockserver.socket.tls.NettySslContextFactory;
 
@@ -50,6 +51,8 @@ public class MockServerUnificationInitializer extends ChannelHandlerAdapter {
 
     @Override
     public void handlerAdded(ChannelHandlerContext ctx) {
+        // before the connection's first read, which is when Netty fixes how its read buffers are sized
+        BinaryAwareRecvByteBufAllocator.install(ctx.channel());
         long idleTimeoutMillis = configuration.inboundConnectionIdleTimeoutMillis();
         if (idleTimeoutMillis > 0) {
             ctx.pipeline().addFirst("inbound-idle", new InboundConnectionIdleHandler(idleTimeoutMillis, httpState.getMockServerLogger()));

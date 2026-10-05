@@ -34,6 +34,8 @@ import java.util.concurrent.TimeUnit;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.empty;
+import static org.hamcrest.Matchers.everyItem;
+import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
@@ -463,6 +465,57 @@ public class PortUnificationHandlerDetectionTest {
     }
 
     @Test
+    public void shouldTurnOnTlsWhenAHandshakeFollowsAHeldMessageInTheNextRead() {
+        // three held bytes are left out: followed by a handshake they read as the start of one themselves
+        for (int length : new int[]{1, 2, 4, 5}) {
+            byte[] held = Arrays.copyOfRange(CLIENT_HELLO_START, 0, length);
+            forwardedAsBinary.clear();
+            EmbeddedChannel channel = connection();
+            clientSends(channel, ascii("a first message\n"));
+
+            clientSends(channel, held);
+            clientSends(channel, CLIENT_HELLO_START);
+
+            assertThat("the " + length + " byte(s) held were a message, and the handshake is not one", forwardedAsBinary, contains(hex("a first message\n"), ByteBufUtil.hexDump(held)));
+            assertThat("after " + length + " held byte(s)", takenToBe(channel), is("TLS"));
+            assertThat("after " + length + " held byte(s)", tlsHandlers(channel), is(1L));
+        }
+    }
+
+    @Test
+    public void shouldHoldWhatFollowsAHeldMessageWhenItCouldBecomeAHandshakeItself() {
+        EmbeddedChannel channel = connection();
+        clientSends(channel, ascii("a first message\n"));
+
+        clientSends(channel, (byte) 22);
+        clientSends(channel, (byte) 22, (byte) 3);
+        assertThat("the byte held is delivered, and the two that settled it are held in their turn", forwardedAsBinary, contains(hex("a first message\n"), "16"));
+
+        channel.advanceTimeBy(PortUnificationHandler.UNDECIDED_PROTOCOL_WAIT_MILLIS - 1, TimeUnit.MILLISECONDS);
+        channel.runScheduledPendingTasks();
+        assertThat("for as long as any held bytes are", forwardedAsBinary, contains(hex("a first message\n"), "16"));
+
+        channel.advanceTimeBy(1, TimeUnit.MILLISECONDS);
+        channel.runScheduledPendingTasks();
+        assertThat(forwardedAsBinary, contains(hex("a first message\n"), "16", "1603"));
+        assertThat(takenToBe(channel), is("binary"));
+    }
+
+    @Test
+    public void shouldTurnOnTlsWhenTheRestOfAHandshakeFollowsBytesHeldAfterAHeldMessage() {
+        EmbeddedChannel channel = connection();
+        clientSends(channel, ascii("a first message\n"));
+
+        clientSends(channel, (byte) 22);
+        clientSends(channel, (byte) 22, (byte) 3);
+        clientSends(channel, Arrays.copyOfRange(CLIENT_HELLO_START, 2, CLIENT_HELLO_START.length));
+
+        assertThat(forwardedAsBinary, contains(hex("a first message\n"), "16"));
+        assertThat(takenToBe(channel), is("TLS"));
+        assertThat(tlsHandlers(channel), is(1L));
+    }
+
+    @Test
     public void shouldNotHoldALaterMessageWhoseRecordLengthIsAlreadyTooLong() {
         EmbeddedChannel channel = connection();
         clientSends(channel, ascii("a first message\n"));
@@ -499,6 +552,97 @@ public class PortUnificationHandlerDetectionTest {
         assertThat(takenToBe(channel), is("HTTP/1.1"));
         assertThat(tlsHandlers(channel), is(0L));
         assertThat(forwardedAsBinary, is(empty()));
+    }
+
+    // read loops every connection below is put through: small messages, larger ones, and more than one buffer holds
+    private static final int[] BYTES_WAITING = {5, 5, 5, 5, 5, 5, 5, 5, 100, 422, 800, 3000, 200_000, 5, 5, 5, 5, 1200};
+
+    /** How the connection's reads are sized from now on. */
+    private static List<String> readsFromNowOn(EmbeddedChannel channel) {
+        return BinaryAwareRecvByteBufAllocatorTest.readsOf(BinaryAwareRecvByteBufAllocatorTest.readHandle(channel), channel.config(), BYTES_WAITING);
+    }
+
+    /** How Netty sizes the same reads on a channel MockServer has not touched. */
+    private List<String> readsAsNettySizesThem() {
+        EmbeddedChannel untouched = new EmbeddedChannel();
+        channels.add(untouched);
+        return readsFromNowOn(untouched);
+    }
+
+    private static List<String> buffersOf(List<String> reads) {
+        List<String> buffers = new ArrayList<>(reads);
+        buffers.removeIf(read -> read.startsWith("end of loop"));
+        return buffers;
+    }
+
+    @Test
+    public void shouldSizeTheReadsOfAConnectionThatIsNotBinaryExactlyAsNettyDoes() {
+        List<String> asNettySizesThem = readsAsNettySizesThem();
+        assertThat("Netty's sizes do follow the traffic down", asNettySizesThem, hasItem("guess 512 buffer 512"));
+        String[] protocols = {"HTTP/1.1", "HTTP/1.1", "HTTP/2", "TLS", "TLS", "SOCKS4", "SOCKS5", "undecided", "undecided"};
+        byte[][] firstBytes = {HTTP_GET, HTTP_CONNECT, H2C_PREFACE, TLS_RECORD_HEADER, CLIENT_HELLO_START, SOCKS4_BIND, SOCKS5_GREETING, ascii("GE"), {22, 3}};
+        for (int i = 0; i < protocols.length; i++) {
+            EmbeddedChannel channel = connection();
+
+            clientSends(channel, firstBytes[i]);
+
+            String sent = ByteBufUtil.hexDump(firstBytes[i]);
+            assertThat(sent, takenToBe(channel), is(protocols[i]));
+            assertThat(sent + ", taken to be " + protocols[i], readsFromNowOn(channel), is(asNettySizesThem));
+        }
+
+        EmbeddedChannel tunnel = connection();
+        clientSends(tunnel, ascii("PROXIED_example.com:80"));
+        assertThat(replyTo(tunnel), is(hex("PROXIED_RESPONSE_PROXIED_example.com:80")));
+        clientSends(tunnel, HTTP_GET);
+        assertThat(takenToBe(tunnel), is("HTTP/1.1"));
+        assertThat("HTTP inside a tunnel", readsFromNowOn(tunnel), is(asNettySizesThem));
+        assertThat(forwardedAsBinary, is(empty()));
+    }
+
+    @Test
+    public void shouldSizeTheReadsOfUnknownBytesAsNettyDoesWhenAllRequestsAreAssumedToBeHttp() {
+        configuration.assumeAllRequestsAreHttp(true);
+        EmbeddedChannel channel = connection();
+
+        clientSends(channel, ascii("PROP"));
+
+        assertThat(takenToBe(channel), is("HTTP/1.1"));
+        assertThat(readsFromNowOn(channel), is(readsAsNettySizesThem()));
+    }
+
+    @Test
+    public void shouldGiveEveryReadOfABinaryConnection64KiB() {
+        EmbeddedChannel channel = connection();
+
+        clientSends(channel, ascii("a first message\n"));
+
+        assertThat(takenToBe(channel), is("binary"));
+        assertThat(buffersOf(readsFromNowOn(channel)), everyItem(is("guess 65536 buffer 65536")));
+    }
+
+    @Test
+    public void shouldGiveEveryReadOfAConnectionTakenToBeBinaryAfterAWait64KiB() {
+        EmbeddedChannel channel = connection();
+        clientSends(channel, ascii("GET"));
+        assertThat("while undecided", readsFromNowOn(channel).get(0), is("guess 2048 buffer 2048"));
+
+        channel.advanceTimeBy(PortUnificationHandler.UNDECIDED_PROTOCOL_WAIT_MILLIS, TimeUnit.MILLISECONDS);
+        channel.runScheduledPendingTasks();
+
+        assertThat(takenToBe(channel), is("binary"));
+        assertThat(buffersOf(readsFromNowOn(channel)), everyItem(is("guess 65536 buffer 65536")));
+    }
+
+    @Test
+    public void shouldStillGiveEveryRead64KiBAfterABinaryConnectionTurnsOnTls() {
+        EmbeddedChannel channel = connection();
+        clientSends(channel, ascii("a first message\n"));
+
+        clientSends(channel, CLIENT_HELLO_START);
+
+        assertThat(takenToBe(channel), is("TLS"));
+        assertThat(buffersOf(readsFromNowOn(channel)), everyItem(is("guess 65536 buffer 65536")));
     }
 
     @Test

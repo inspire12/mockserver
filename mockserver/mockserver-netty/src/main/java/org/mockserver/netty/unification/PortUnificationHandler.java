@@ -47,6 +47,7 @@ import org.mockserver.netty.proxy.relay.RelayLoopbackAddresses;
 import org.mockserver.netty.mcp.McpStreamableHttpHandler;
 import org.mockserver.netty.grpc.GrpcToHttpRequestHandler;
 import org.mockserver.netty.grpc.GrpcToHttpResponseHandler;
+import org.mockserver.netty.proxy.BinaryMessageGatherer;
 import org.mockserver.netty.proxy.BinaryRequestProxyingHandler;
 import org.mockserver.netty.proxy.socks.Socks4ProxyHandler;
 import org.mockserver.netty.proxy.socks.Socks5ProxyHandler;
@@ -271,14 +272,22 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
             if (!takeBytesReceivedAsTheyAre && startsTlsClientHello(msg)) {
                 // a protocol that turns TLS on part way through: what is decrypted from here on is binary
                 logStage(ctx, "adding TLS decoders to a binary connection");
+                // what this read loop brought before the handshake is a message sent in the clear: it is handled,
+                // and answered or forwarded in the clear, before TLS is turned on
+                ctx.fireChannelReadComplete();
                 enableTls(ctx, msg);
                 ctx.pipeline().remove(this);
             } else {
-                if (heldAsStartOfHandshake > 0 && heldAsStartOfHandshake < actualReadableBytes()) {
-                    // what was held turned out to be a message of its own, sent before the bytes that settled it
-                    ctx.fireChannelRead(msg.readBytes(heldAsStartOfHandshake));
-                }
+                int held = heldAsStartOfHandshake;
                 heldAsStartOfHandshake = 0;
+                if (held > 0 && held < actualReadableBytes()) {
+                    // what was held turned out to be a message of its own, sent before the bytes that settled it.
+                    // Those bytes are looked at next, as the start of a read: they may begin a handshake themselves
+                    ctx.fireChannelRead(msg.readBytes(held));
+                    // it arrived in an earlier read than what follows it, so it is not joined to that
+                    ctx.fireChannelReadComplete();
+                    return;
+                }
                 ctx.fireChannelRead(msg.readBytes(actualReadableBytes()));
             }
         } else if (takeBytesReceivedAsTheyAre) {
@@ -737,7 +746,11 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
     private void switchToBinaryRequestProxying(ChannelHandlerContext ctx, ByteBuf msg) {
         // a raw TCP protocol (a database, a broker) may legitimately stay silent for long periods
         InboundConnectionActivity.markLongLived(ctx.channel());
+        addLastIfNotPresent(ctx.pipeline(), new BinaryMessageGatherer());
         addLastIfNotPresent(ctx.pipeline(), new BinaryRequestProxyingHandler(configuration, httpState.getMockServerLogger(), httpState.getScheduler(), actionHandler.getHttpClient(), httpState));
+        // what a read loop brings is one message from here on, so no read may be cut short by a buffer sized
+        // for earlier ones
+        BinaryAwareRecvByteBufAllocator.readWholeMessages(ctx.channel());
         // a binary connection stays binary: detecting again would hold a short message for more bytes, or take
         // one that starts like another protocol for that protocol. Over TLS nothing is left to look for; in
         // the clear this handler stays for one thing, a TLS handshake beginning (see decode)
