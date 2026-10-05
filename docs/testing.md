@@ -610,7 +610,7 @@ The `scripts/buildkite_quick_build.sh` script runs the full build inside a `mock
 | Test output redirection | Enabled (`-DredirectTestOutputToFile=true`) |
 | Test log level | `INFO` (`-Dmockserver.testLogLevel=INFO`) |
 | Netty leak gate | On: `mockserver-netty`'s forks run the leak detector at `paranoid` and `check-netty-leaks` fails the build on a leaked buffer. `-Dmockserver.testArgLine` does not remove it (see [ByteBuf Leak Detection in Tests](code/netty-pipeline.md#bytebuf-leak-detection-in-tests)) |
-| Timeout | 60 minutes |
+| Timeout | 90 minutes |
 | Build artefacts | `**/*.log` files collected |
 
 All tests (unit + integration + Maven Invoker + Gradle integration) run in a **single monolithic Buildkite step**. There is no separation into different CI jobs for different test types.
