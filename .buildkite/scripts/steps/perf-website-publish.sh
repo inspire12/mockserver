@@ -116,10 +116,12 @@ KEEP_FRAC="${PUBLISH_KEEP_FRAC:-0.95}"
 BEH_FIX_DATE="${PUBLISH_REGRESSION_FIX_DATE:-2026-09-16}"
 REGION="${AWS_REGION:-eu-west-2}"
 
-# The rungs the multi-k6 switch was qualified on (docs/code/performance-measurement.md, "The
-# qualifying runs"): the ceiling to publish, and the adjacent rung that needs a decision.
-RW_EXPECTED_CEILING_RPS=136000
-RW_ADJACENT_CEILING_RPS=144000
+# The two rungs the qualifying runs read (docs/code/performance-measurement.md, "The published
+# run"): the published one, and the other, which would lower the headline and needs a decision.
+RW_EXPECTED_CEILING_RPS=144000
+RW_ADJACENT_CEILING_RPS=136000
+# The page counts the like-for-like runs per rung by hand, so every member run changes that count.
+RW_TALLY_NOTE="the \`ceiling_spread\` and \`ceiling_spread_detail\` sentences and the \`schema_faq\` answers in \`mock_server/performance.html\`, and the performance line in \`llms.txt\`, count the like-for-like runs behind the headline and the rates they read, so a later member run changes them even when it reads the same ceiling"
 RW_DATA_ARTIFACT="perf_figures-multi-k6.json"
 
 AWS_BIN="${PERF_PUBLISH_AWS_BIN:-aws}"
@@ -502,7 +504,11 @@ else
 fi
 
 if [ "$TRIGGER" != "yes" ]; then
-  annotate "info" ":white_check_mark: **Website perf figures are current — no patch emitted.** Committed figures are ${AGE_DAYS}d old (window ${MAX_AGE_DAYS}d) and the largest headline move is ${MAX_MOVE}% (window ${MOVE_PCT}%). Latest run \`${NEWEST_KEY}\` (healthy_ceiling ${HC}, peak ${PK}) agrees closely enough to leave the page as-is."
+  RW_TALLY=""
+  [ "$RW" = true ] && RW_TALLY="
+
+**Still reconcile by hand:** ${RW_TALLY_NOTE}. This run read ${HC} req/s."
+  annotate "info" ":white_check_mark: **Website perf figures are current — no patch emitted.** Committed figures are ${AGE_DAYS}d old (window ${MAX_AGE_DAYS}d) and the largest headline move is ${MAX_MOVE}% (window ${MOVE_PCT}%). Latest run \`${NEWEST_KEY}\` (healthy_ceiling ${HC}, peak ${PK}) agrees closely enough to leave the page as-is.${RW_TALLY}"
   echo "OK: no refresh needed (age=${AGE_DAYS}d, max_move=${MAX_MOVE}%)"
   exit 0
 fi
@@ -549,14 +555,14 @@ fi
 
 COMMIT_NOTE=""
 if [ "$RW" = true ]; then
-  # The switch criterion publishes the lower of two adjacent rungs. That is a manual check by
-  # whoever applies the patch, not a gate here, so the patch and the annotation both carry it.
+  # Which rung to publish is a manual check by whoever applies the patch, not a gate here, so
+  # the patch and the annotation both carry it.
   case "$HC" in
     "$RW_EXPECTED_CEILING_RPS") RW_RUNG_VERDICT="the expected rung" ;;
-    "$RW_ADJACENT_CEILING_RPS") RW_RUNG_VERDICT="the adjacent rung: get the owner's decision before applying" ;;
+    "$RW_ADJACENT_CEILING_RPS") RW_RUNG_VERDICT="the other rung the qualifying runs read: get the owner's decision before applying" ;;
     *) RW_RUNG_VERDICT="neither: do not apply" ;;
   esac
-  COMMIT_NOTE="Before applying: a ceiling of ${RW_EXPECTED_CEILING_RPS} req/s is expected; ${RW_ADJACENT_CEILING_RPS} is the adjacent rung and needs the owner's decision before applying; any other rung, do not apply. This run reads ${HC} (${RW_RUNG_VERDICT})."
+  COMMIT_NOTE="Before applying: a ceiling of ${RW_EXPECTED_CEILING_RPS} req/s is expected; ${RW_ADJACENT_CEILING_RPS} is the other rung the qualifying runs read and would lower the headline, so it needs the owner's decision before applying; any other rung, do not apply. This run reads ${HC} (${RW_RUNG_VERDICT})."
 fi
 
 if [ "$DRY_RUN" = "true" ]; then
@@ -705,9 +711,9 @@ git push -u origin ${WORK_BRANCH} && gh pr create --fill --base ${BRANCH}
 \`\`\`
 
 **A human must reconcile the hand-authored numbers this refresh does NOT touch.**
-The patch rewrites only \`_data/perf_figures.json\`. If the headline moved, update these to match before merging:
-  - the page \`description\` and the JSON-LD \`schema_faq\` answers in the front matter of \`mock_server/performance.html\`;
-  - the performance line in \`llms.txt\`."
+The patch rewrites only \`_data/perf_figures.json\`. Before merging:
+  - whatever the ceiling: ${RW_TALLY_NOTE};
+  - if the headline moved: the figures in the page \`description\`, in the JSON-LD \`schema_faq\` answers (both in the front matter of \`mock_server/performance.html\`) and in the performance line in \`llms.txt\`."
   echo "OK: patch emitted (${PATCH_NAME}); nothing pushed, no PR opened"
   exit 0
 fi

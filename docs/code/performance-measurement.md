@@ -255,10 +255,10 @@ single-process ladder that tail is k6's, not MockServer's: in build 533, 0.9–2
 took k6 over 5 ms from 32k to 64k while MockServer's handler histogram had none over 5 ms, and
 the four-process ladder on the same SUT held p99 at 0.41 ms at 36k where the single process read
 18.8 ms. Bounding the single-process p99 would make the published figure the load generator's
-tail. The published headline therefore moves to the multi-k6 arm, with this bound: builds
-630–634 qualified the switch and the first published member run makes it
+tail. The published headline is therefore the multi-k6 arm's, with this bound: builds
+630–634 qualified the switch and build 643, the first member run, made it
 ([the headline rule](#the-headline-rule-item-44)). The single-process ladder stays p50-only and
-is then published under `.single_k6`.
+is published under `.single_k6`.
 
 p99 per rung on the published single-process ladder (6-core SUT, 3 s settle, builds 495–533),
 the evidence behind the 10 ms figure:
@@ -1128,17 +1128,63 @@ provenance row says when the GC log was on.
 All five are valid, none is a lower bound, every rung from 96k up had a masked figure (5–11 quiet
 seconds), and (3) holds in each. The switch criterion on the rung is met in the form the owner
 accepted on these runs: at least 4 of the 5 ceilings fall on one rung or two adjacent rungs (here
-all five: 136k three times, 144k twice), and the ceiling to publish is the lower of the two, 136k.
-It first read "one rung in at least 4 of 5", which these runs would not have met. 626–628 do
-not count: their results were produced under the whole-rung rule and state none, even though their
-`.gc_masked` blocks would read 136k, 144k and 144k with (3) holding at each.
+all five: 136k three times, 144k twice), and the criterion named the lower of the two, 136k, as
+the ceiling to publish. It first read "one rung in at least 4 of 5", which these runs would not
+have met. 626–628 do not count: their results were produced under the whole-rung rule and state
+none, even though their `.gc_masked` blocks would read 136k, 144k and 144k with (3) holding at
+each.
 
 **A streak qualifies the switch; one member run publishes.** Membership is a property of a single
 run, and neither compare nor publish counts earlier members. These five results predate
 `baseline_ineligible_reasons`, so none is a member as recorded and publish refuses each of them.
 The headline is not seeded from them with the field added by hand. The first fresh member run
-publishes it: one `PERF_XL=true` build with `PERF_JVM_DIAGNOSTICS=gc`, like-for-like with the
-streak ([the switch](#publishing-a-runs-figures-manual-step)).
+published it: build 643, one `PERF_XL=true` build with `PERF_JVM_DIAGNOSTICS=gc`, like-for-like
+with the streak ([the switch](#publishing-a-runs-figures-manual-step)).
+
+**The published run (643) and the rung it read.** Build 643 (image `e8d0466ca3`, harness
+`33d29b2fc4`) is a series member, persisted as
+`runs-perf-xl/master/2026-10-05T00-05-42Z__e8d0466ca3.json`:
+
+| Build | Masked ceiling | Its masked p99 | Whole-rung ceiling | First masked failure above it | Quiet seconds there |
+|---|---|---|---|---|---|
+| 643 | 144k | 9.730 ms | 96k | 152k, 13.861 ms | 6 |
+
+The whole-rung p99 at its 144k rung is 44.946 ms. With 630–634 that makes six qualifying runs,
+three at 136k (630, 631, 634) and three at 144k (632, 633, 643). The criterion named the lower
+rung. The owner decided on 2026-10-05 to publish 643's 144k as read instead of rerunning for a
+136k reading, so the published figure is the upper of two adjacent rungs, inside the bound by
+0.27 ms in that run.
+
+**What the six runs support at 144k, and no more.** Read at the 144k rung of each run:
+
+| At 144k | Runs of six | Values |
+|---|---|---|
+| sub-millisecond median, no errors | 6 | |
+| masked p99 within 10 ms | 3 | 7.487, 9.963, 9.730 ms (632, 633, 643); 10.792, 13.244, 10.456 ms (630, 631, 634) |
+| whole-rung p99 within 10 ms | 0 | 35.6 to 49.3 ms |
+
+So the public claim is a sub-millisecond median at 144k, with the p99 inside the bound only when
+the load generators' GC seconds are left out, and in half the runs. The page says that wherever
+it states the figure: the description, the headline, the at-a-glance bullet, both FAQ answers
+and `llms.txt` qualify the p99, the table's caption and the bullet state the three-and-three
+split, and the page tells readers to provision against 136k while 144k is published. It also
+prints the whole-rung ceiling (96k in 643) from `headline_rule.unmasked_ceiling_rps_display`.
+No run read 152k, so the page says the ceiling can land one step lower, not either way.
+
+**The rung a later run is held against.** `perf-website-publish.sh` now names 144k as the
+expected rung (`RW_EXPECTED_CEILING_RPS`) and 136k (`RW_ADJACENT_CEILING_RPS`) as the other rung
+the qualifying runs read. A later patch reading 136k would lower the published headline, which
+is the owner's decision. Any other rung, 152k included, was read by none of the six: do not
+apply it. The two constants only word the annotation and the patch's commit message; nothing
+gates on them. The owner confirmed 144k as the expected rung, and this swap, on 2026-10-05.
+
+**The run tally is hand-counted.** The page's `ceiling_spread` and `ceiling_spread_detail`
+sentences, the two FAQ answers and the `llms.txt` line count the like-for-like runs and the rates
+they read. The two page sentences render only while the published ceiling is 136k or 144k; the
+FAQ answers and the `llms.txt` line are plain text and do not adapt. Every later member run
+changes the count, even one at the same ceiling that emits no patch, so the multi-k6 publish
+step asks for them to be reconciled in both its annotations: with the patch, and when the
+figures are current.
 
 **From the arm to the page.**
 
@@ -1209,8 +1255,8 @@ perf_figures.json only"]
   `perf_figures-multi-k6.json`; the daily steps keep `perf-regression`, `perf-persisted-key`,
   `perf-website-publish`, `website-figures-<UTC-timestamp>.patch` and `perf_figures.json`.
 - **The rung is a manual check.** Publish does not gate on which rung the run read. Its
-  annotation and the patch's commit message say which rung is expected, which is the adjacent
-  one, and which of the two (or neither) the run read.
+  annotation and the patch's commit message say which rung is expected, which is the other
+  rung the qualifying runs read, and which of the two (or neither) the run read.
 
 `.buildkite/scripts/test/perf-xl-publish-test.sh` covers the series, both steps, the page-data
 layout before and after the switch, and the check on fixtures.
@@ -2211,9 +2257,9 @@ Two runs feed the file, and each rewrites only its own part (`lib/perf-website-a
 | `single_k6` (`source`, `headline`, `throughput_ladder`), `behaviours`, `hw_matrix`, and the chart data and PNGs | the daily run on `perf`, `runs/<branch>/` | the daily tail step (`single_k6`, the default) |
 
 The page has two states. A file with no `headline_rule` holds only the single-k6 figures, at the
-top level, and `performance.html` renders them as its headline; that is what is committed today.
-The first multi-k6 publish moves them under `single_k6` and the page renders the multi-k6
-headline, its two p99 columns and its rule; from then on a daily refresh cannot replace the
+top level, and `performance.html` renders them as its headline. The first multi-k6 publish moved
+them under `single_k6`, and the page renders the multi-k6 headline, its two p99 columns and its
+rule; that is what is committed today (from build 643), and a daily refresh cannot replace the
 headline. The template branches on `headline_rule`, so only a publish patch changes the state. Each source's age, move and lower-bound checks read only its own committed
 part, so the multi-k6 headline is never held against the single-k6 ceiling or the reverse.
 `PERF_XL` is not on the daily schedule, so the headline refreshes only when someone runs a
@@ -2229,13 +2275,21 @@ Before publishing any figure:
   from `sweep.js` is the top of an overload curve. The healthy operating ceiling is a lower
   number; publish both, labelled distinctly.
 
-**Currently published (build 464, 2026-09-27, `efdc5227b2`, `c5.12xlarge`, 6 cores, single k6,
-ZGC with a 1,230 MiB heap, JDK 25.0.4.1+1, `MOCKSERVER_LOG_LEVEL=ERROR`,
-`MOCKSERVER_DISABLE_SYSTEM_OUT=true`):** `healthy_ceiling_rps` **60,000** (achieved 57,149.3, p50
-0.179 ms, p95 21.893 ms); `peak_achieved_rps` **59,905.8** at 64,000 offered. This ceiling is the
-single load generator's, not MockServer's (item 31). The multi-k6 headline is not published yet:
-builds 630–634 read 136k–144k under the masked rule (above), and the first published member run
-will replace this paragraph's figures.
+**Currently published, headline (build 643, 2026-10-05, image `e8d0466ca3`, harness
+`33d29b2fc4`, `perf-xl` `c6i.32xlarge`, 6 physical cores, four k6 processes of 16 CPUs each on
+the other socket, ZGC with a 922 MiB heap, JDK 25.0.4.1+1, `MOCKSERVER_LOG_LEVEL=ERROR`,
+`MOCKSERVER_DISABLE_SYSTEM_OUT=true`, SUT GC file log on):** `healthy_ceiling_rps` **144,000**
+under `gc_masked_p99` with the 10 ms bound (achieved 143,719.1, p50 0.108 ms, p95 7.309 ms, masked
+p99 9.73 ms, whole-rung p99 44.946 ms; whole-rung ceiling 96,000). The first failure is 152,000
+at a masked p99 of 13.861 ms, and `peak_achieved_rps` is **159,555.8** at 160,000 offered.
+144,000 is the upper of the two adjacent rungs the six qualifying runs read, three each
+([the published run](#the-headline-rule-item-44)).
+
+**Currently published, `single_k6` (build 464, 2026-09-27, `efdc5227b2`, `c5.12xlarge`, 6 cores,
+single k6, ZGC with a 1,230 MiB heap, same JDK and logging):** `healthy_ceiling_rps` **60,000**
+(achieved 57,149.3, p50 0.179 ms, p95 21.893 ms); `peak_achieved_rps` **59,905.8** at 64,000
+offered. This ceiling is the single load generator's, not MockServer's (item 31). The charts and
+the latency-by-action table still come from this run.
 
 ### Publishing a run's figures (manual step)
 
@@ -2299,25 +2353,32 @@ To publish a run's figures:
    reconcile the hand-authored numbers it does **not** touch in `mock_server/performance.html`:
    the front-matter `description`, the JSON-LD `schema_faq` answers, and matcher-scaling figures
    (a separate JMH source, expected to differ). When the headline moved, also update the
-   performance line in `jekyll-www.mock-server.com/llms.txt`.
+   performance line in `jekyll-www.mock-server.com/llms.txt`. The page's `ceiling_spread` and
+   `ceiling_spread_detail` sentences (how many like-for-like runs read which rate) are
+   hand-authored too; they render only while the published ceiling is 136k or 144k, say which
+   of the two it is, and need recounting after every member run.
 
    A `PERF_XL=true` build can attach two patches, one per source
    (`website-figures-…` and `website-headline-multi-k6-…`). Each rewrites the whole of
    `_data/perf_figures.json` from the same commit, so the second does not apply after the first:
    apply one, and regenerate the other from a later build.
 
-**The switch to the multi-k6 headline** is one such patch, from the first member run:
+**The switch to the multi-k6 headline** was one such patch, from the first member run (build
+643). `runs-perf-xl/` was empty, so its persist step reported the baseline as warming up, and
+publish emitted the patch because nothing from the arm was committed. The patch read 144k, the
+rung adjacent to the one the criterion named, so applying it was the owner's decision
+([the published run](#the-headline-rule-item-44)).
 
-1. Run one `PERF_XL=true` `[perf-run]` build with `PERF_JVM_DIAGNOSTICS=gc`. `runs-perf-xl/` starts
-   empty, so its persist step reports the baseline as warming up; that does not stop the publish
-   step, which emits the patch because nothing from the arm is committed yet.
-2. Check the patch's ceiling against the streak before applying it; the publish annotation and
-   the patch's commit message state the same check. 136k is the rung to publish. 144k is the
-   adjacent rung, and the accepted criterion publishes the lower of the two, so applying it is a
-   decision. Any other rung means 630–634 no longer describe the current image: do not apply it.
-3. Apply it, and in the same change update the page `description`, the two `schema_faq` answers
-   and the `llms.txt` line, which still state the single-k6 figures, and add a short past-tense
-   changelog entry for the new headline.
+**A later headline refresh** is the same kind of patch, from a `PERF_XL=true` `[perf-run]` build
+with `PERF_JVM_DIAGNOSTICS=gc`:
+
+1. Check the patch's ceiling before applying it; the publish annotation and the patch's commit
+   message state the same check. 144k is the rung expected. 136k is the other rung the
+   qualifying runs read, and applying it lowers the published figure, so it is a decision. Any
+   other rung means those runs no longer describe the current image: do not apply it.
+2. Apply it, and in the same change bring the page `description`, the two `schema_faq` answers,
+   the `ceiling_spread` sentences and the `llms.txt` line into line with it, and add a short
+   past-tense changelog entry if the published figure changed.
 
 ## Placement
 
