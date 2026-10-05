@@ -67,7 +67,7 @@ function record_result() {
     printFailureMessage "${TEST_CASE}: ${reason}"
     docker logs --tail 40 "${SUT}" 2>&1 || true
   fi
-  if [[ "${MEMORY_FLOOR_BLOCKING:-false}" == "true" ]]; then
+  if [[ "${MEMORY_FLOOR_BLOCKING:-true}" == "true" ]]; then
     logTestResult "${exit_code}" "${TEST_CASE}"
   else
     logTestResultNonBlocking "${exit_code}" "${TEST_CASE}" "${reason}"

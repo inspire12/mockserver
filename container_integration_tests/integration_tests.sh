@@ -829,10 +829,9 @@ function run_all_tests() {
       # HEALTHCHECK and non-root user assertions on the default image.
       test_healthcheck || true
       test_nonroot_user || true
-      # The shipped image must survive sustained load at the documented 512 MiB floor. Non-blocking
-      # until it has passed on real amd64 default-queue agents (docs/plans/performance-programme.md
-      # item 39); MEMORY_FLOOR_BLOCKING=true makes a failure red.
-      if [[ "${MEMORY_FLOOR_BLOCKING:-false}" == "true" ]]; then
+      # The shipped image must survive sustained load at the documented 512 MiB floor.
+      # MEMORY_FLOOR_BLOCKING=false turns a failure into a warning.
+      if [[ "${MEMORY_FLOOR_BLOCKING:-true}" == "true" ]]; then
         test "docker_memory_floor_512m"
       else
         test "docker_memory_floor_512m" non_blocking
