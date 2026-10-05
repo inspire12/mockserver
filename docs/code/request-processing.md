@@ -938,9 +938,10 @@ not logged until the next one.
 In synchronous (WAR/servlet) mode delays sleep on the request thread, nothing is queued and no bound applies.
 
 **Pausing reads.** Several handlers pause a connection's reads: pending WebSocket replies, a TCP chaos
-latency queue, a parked inbound breakpoint frame, WebSocket relay backpressure and the connection delay. They
-all go through `ChannelReadPause`, a per-channel hold count: auto-read turns off with the first hold and back
-on only when the last is released, so one holder finishing cannot resume reads another still needs paused.
+latency queue, a parked inbound breakpoint frame, WebSocket relay backpressure, the connection delay and the
+queue of binary messages waiting to be forwarded. They all go through `ChannelReadPause`, a per-channel hold
+count: auto-read turns off with the first hold and back on only when the last is released, so one holder
+finishing cannot resume reads another still needs paused.
 The first hold also installs a gate at the head of the pipeline that drops read requests while any hold
 remains. Without it, turning auto-read off did not stop reading: a decoder that saw no complete message, or
 the `HttpContentDecompressor` left in a WebSocket pipeline after the upgrade, calls `ctx.read()` after every

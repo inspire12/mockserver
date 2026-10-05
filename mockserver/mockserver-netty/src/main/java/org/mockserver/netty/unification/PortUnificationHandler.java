@@ -13,6 +13,7 @@ import io.netty.handler.codec.socksx.v5.Socks5ServerEncoder;
 import io.netty.handler.logging.LogLevel;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.util.AttributeKey;
+import io.netty.util.concurrent.ScheduledFuture;
 import org.apache.commons.lang3.StringUtils;
 import org.mockserver.codec.HttpChunkLineLimiter;
 import org.mockserver.codec.HttpObjectAggregators;
@@ -101,6 +102,24 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
      */
     public static final int HTTP2_MAX_CONCURRENT_STREAMS = 100;
 
+    /**
+     * How long first bytes that are only the start of a known protocol are held once the client falls silent,
+     * before they are taken for what they are. Bytes that cannot become a known protocol are never held.
+     */
+    static final long UNDECIDED_PROTOCOL_WAIT_MILLIS = 1000;
+    // the record content types SslHandler.isEncrypted accepts: change cipher spec (20) to heartbeat (24)
+    private static final int TLS_CONTENT_TYPE_FIRST = 20;
+    private static final int TLS_CONTENT_TYPE_LAST = 24;
+    private static final int TLS_RECORD_HEADER_LENGTH = 5;
+    // how a TLS handshake opens: a handshake record (22) of version 3.0 to 3.4, its length, then ClientHello (1)
+    private static final int TLS_CONTENT_TYPE_HANDSHAKE = 22;
+    private static final int TLS_VERSION_MAJOR = 3;
+    private static final int TLS_VERSION_MINOR_LAST = 4;
+    private static final int TLS_RECORD_LENGTH_MAX = 16384;
+    private static final int TLS_HANDSHAKE_TYPE_CLIENT_HELLO = 1;
+    private static final int TLS_CLIENT_HELLO_START_LENGTH = 6;
+    private static final String[] HTTP_METHODS = {"GET ", "POST ", "PUT ", "HEAD ", "OPTIONS ", "PATCH ", "DELETE ", "TRACE ", "CONNECT "};
+
     // public so the single AttributeKey instance is the shared source of truth -- ConnectionScopeHandler
     // references these directly to propagate connection-scoped state onto HTTP/2 stream child channels.
     // (HTTP_ENABLED stays private: it is only ever read here, never on a child stream.)
@@ -128,6 +147,12 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
     // Shared server-wide instance (null when MCP is disabled) owned by MockServerUnificationInitializer.
     private final McpStreamableHttpHandler mcpStreamableHttpHandler;
     private final MockServerHttpResponseToFullHttpResponse mockServerHttpResponseToFullHttpResponse;
+    private ScheduledFuture<?> undecidedProtocolWait;
+    private boolean takeBytesReceivedAsTheyAre;
+    // the connection is binary and in the clear: only a TLS handshake beginning on it is still looked for
+    private boolean binaryInTheClear;
+    // how many bytes are being held as the possible start of that handshake
+    private int heldAsStartOfHandshake;
 
     public PortUnificationHandler(Configuration configuration, LifeCycle server, HttpState httpState, HttpActionHandler actionHandler, NettySslContextFactory nettySslContextFactory, McpStreamableHttpHandler mcpStreamableHttpHandler) {
         this.configuration = configuration;
@@ -230,9 +255,35 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
     }
 
     @Override
+    protected void callDecode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) {
+        stopUndecidedProtocolWait();
+        super.callDecode(ctx, in, out);
+        // bytes are left over only when decode asked for more before it could tell what they are
+        if (!ctx.isRemoved() && in.isReadable()) {
+            startUndecidedProtocolWait(ctx);
+        }
+    }
+
+    @Override
     protected void decode(ChannelHandlerContext ctx, ByteBuf msg, List<Object> out) {
         ctx.channel().attr(NETTY_SSL_CONTEXT_FACTORY).set(nettySslContextFactory);
-        if (SocksDetector.isSocks4(msg, actualReadableBytes())) {
+        if (binaryInTheClear) {
+            if (!takeBytesReceivedAsTheyAre && startsTlsClientHello(msg)) {
+                // a protocol that turns TLS on part way through: what is decrypted from here on is binary
+                logStage(ctx, "adding TLS decoders to a binary connection");
+                enableTls(ctx, msg);
+                ctx.pipeline().remove(this);
+            } else {
+                if (heldAsStartOfHandshake > 0 && heldAsStartOfHandshake < actualReadableBytes()) {
+                    // what was held turned out to be a message of its own, sent before the bytes that settled it
+                    ctx.fireChannelRead(msg.readBytes(heldAsStartOfHandshake));
+                }
+                heldAsStartOfHandshake = 0;
+                ctx.fireChannelRead(msg.readBytes(actualReadableBytes()));
+            }
+        } else if (takeBytesReceivedAsTheyAre) {
+            switchToUnknownProtocol(ctx, msg);
+        } else if (SocksDetector.isSocks4(msg, actualReadableBytes())) {
             logStage(ctx, "adding SOCKS4 decoders");
             enableSocks4(ctx, msg);
         } else if (SocksDetector.isSocks5(msg, actualReadableBytes())) {
@@ -253,17 +304,118 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
         } else if (isProxyConnected(msg)) {
             logStage(ctx, "setting proxy connected");
             switchToProxyConnected(ctx, msg);
-        } else if (configuration.assumeAllRequestsAreHttp()) {
+        } else {
+            switchToUnknownProtocol(ctx, msg);
+        }
+
+        if (mockServerLogger.isEnabledForInstance(TRACE)) {
+            loggingHandler.addLoggingHandler(ctx);
+        }
+    }
+
+    private void switchToUnknownProtocol(ChannelHandlerContext ctx, ByteBuf msg) {
+        if (configuration.assumeAllRequestsAreHttp()) {
             logStage(ctx, "adding HTTP decoders");
             switchToHttp(ctx, msg);
         } else {
             logStage(ctx, "adding binary decoder");
             switchToBinaryRequestProxying(ctx, msg);
         }
+    }
 
-        if (mockServerLogger.isEnabledForInstance(TRACE)) {
-            loggingHandler.addLoggingHandler(ctx);
+    /**
+     * Whether the bytes received start with one of the tokens. Answers at once when they do, or can no longer
+     * come to; waits for more only while they are the start of one.
+     */
+    private boolean startsWithAny(ByteBuf msg, String... tokens) {
+        int longest = 0;
+        for (String token : tokens) {
+            longest = Math.max(longest, token.length());
         }
+        String received = msg.toString(msg.readerIndex(), Math.min(actualReadableBytes(), longest), StandardCharsets.US_ASCII);
+        boolean couldBecomeOne = false;
+        for (String token : tokens) {
+            if (received.startsWith(token)) {
+                return true;
+            }
+            couldBecomeOne |= token.startsWith(received);
+        }
+        if (couldBecomeOne) {
+            waitForMoreBytes(msg);
+        }
+        return false;
+    }
+
+    /**
+     * Whether the bytes received open a TLS handshake: a handshake record of a TLS version and a length a
+     * record can have, whose first byte says ClientHello. Answers at once when they do, or no longer can;
+     * waits for more only while they are the start of one.
+     */
+    private boolean startsTlsClientHello(ByteBuf msg) {
+        int start = msg.readerIndex();
+        int available = Math.min(actualReadableBytes(), TLS_CLIENT_HELLO_START_LENGTH);
+        boolean couldBeOne = msg.getUnsignedByte(start) == TLS_CONTENT_TYPE_HANDSHAKE
+            && (available < 2 || msg.getUnsignedByte(start + 1) == TLS_VERSION_MAJOR)
+            && (available < 3 || msg.getUnsignedByte(start + 2) <= TLS_VERSION_MINOR_LAST)
+            && (available < 4 || msg.getUnsignedByte(start + 3) <= TLS_RECORD_LENGTH_MAX >> 8)
+            && (available < 5 || (msg.getUnsignedShort(start + 3) >= 1 && msg.getUnsignedShort(start + 3) <= TLS_RECORD_LENGTH_MAX))
+            && (available < 6 || msg.getUnsignedByte(start + 5) == TLS_HANDSHAKE_TYPE_CLIENT_HELLO);
+        if (couldBeOne && available < TLS_CLIENT_HELLO_START_LENGTH) {
+            heldAsStartOfHandshake = available;
+            waitForMoreBytes(msg);
+        }
+        return couldBeOne;
+    }
+
+    private void waitForMoreBytes(ByteBuf msg) {
+        // reading past what has arrived is how a ReplayingDecoder asks to be called again with more
+        msg.getByte(msg.readerIndex() + actualReadableBytes());
+    }
+
+    private void startUndecidedProtocolWait(ChannelHandlerContext ctx) {
+        stopUndecidedProtocolWait();
+        undecidedProtocolWait = ctx.executor().schedule(() -> {
+            undecidedProtocolWait = null;
+            if (!ctx.channel().config().isAutoRead()) {
+                // the rest may have been sent and be waiting unread, so the silence says nothing yet
+                startUndecidedProtocolWait(ctx);
+                return;
+            }
+            takeBytesReceivedAsTheyAre = true;
+            try {
+                // an empty read runs detection again over the bytes already held
+                channelRead(ctx, Unpooled.EMPTY_BUFFER);
+                channelReadComplete(ctx);
+            } catch (Exception exception) {
+                exceptionCaught(ctx, exception);
+            } finally {
+                takeBytesReceivedAsTheyAre = false;
+            }
+        }, UNDECIDED_PROTOCOL_WAIT_MILLIS, java.util.concurrent.TimeUnit.MILLISECONDS);
+    }
+
+    private void stopUndecidedProtocolWait() {
+        if (undecidedProtocolWait != null) {
+            undecidedProtocolWait.cancel(false);
+            undecidedProtocolWait = null;
+        }
+    }
+
+    @Override
+    protected void decodeLast(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
+        // the client has closed, so the bytes being held are all there will be
+        takeBytesReceivedAsTheyAre = true;
+        try {
+            super.decodeLast(ctx, in, out);
+        } finally {
+            takeBytesReceivedAsTheyAre = false;
+        }
+    }
+
+    @Override
+    protected void handlerRemoved0(ChannelHandlerContext ctx) throws Exception {
+        stopUndecidedProtocolWait();
+        super.handlerRemoved0(ctx);
     }
 
     private void logStage(ChannelHandlerContext ctx, String message) {
@@ -311,6 +463,14 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
     }
 
     private boolean isTls(ByteBuf buf) {
+        // SslHandler.isEncrypted answers true for fewer bytes than a record header, whatever they are
+        short contentType = buf.getUnsignedByte(buf.readerIndex());
+        if (contentType < TLS_CONTENT_TYPE_FIRST || contentType > TLS_CONTENT_TYPE_LAST) {
+            return false;
+        }
+        if (actualReadableBytes() < TLS_RECORD_HEADER_LENGTH) {
+            waitForMoreBytes(buf);
+        }
         return SslHandler.isEncrypted(buf);
     }
 
@@ -324,16 +484,7 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
     }
 
     private boolean isHttp(ByteBuf msg) {
-        String method = msg.toString(msg.readerIndex(), 8, StandardCharsets.US_ASCII);
-        return method.startsWith("GET ") ||
-            method.startsWith("POST ") ||
-            method.startsWith("PUT ") ||
-            method.startsWith("HEAD ") ||
-            method.startsWith("OPTIONS ") ||
-            method.startsWith("PATCH ") ||
-            method.startsWith("DELETE ") ||
-            method.startsWith("TRACE ") ||
-            method.startsWith("CONNECT ");
+        return startsWithAny(msg, HTTP_METHODS);
     }
 
     // The HTTP/2 cleartext (h2c) connection preface, the fixed 24 bytes an h2c prior-knowledge client sends
@@ -343,11 +494,7 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
     public static final int H2C_PREFACE_LENGTH = H2C_PREFACE.length();
 
     private boolean isH2cPreface(ByteBuf msg) {
-        if (actualReadableBytes() < H2C_PREFACE_LENGTH) {
-            return false;
-        }
-        String prefix = msg.toString(msg.readerIndex(), H2C_PREFACE_LENGTH, StandardCharsets.US_ASCII);
-        return H2C_PREFACE.equals(prefix);
+        return startsWithAny(msg, H2C_PREFACE);
     }
 
     /**
@@ -556,7 +703,7 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
     }
 
     private boolean isProxyConnected(ByteBuf msg) {
-        return msg.toString(msg.readerIndex(), 8, StandardCharsets.US_ASCII).startsWith(PROXIED);
+        return startsWithAny(msg, PROXIED);
     }
 
     private void switchToProxyConnected(ChannelHandlerContext ctx, ByteBuf msg) {
@@ -591,6 +738,14 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
         // a raw TCP protocol (a database, a broker) may legitimately stay silent for long periods
         InboundConnectionActivity.markLongLived(ctx.channel());
         addLastIfNotPresent(ctx.pipeline(), new BinaryRequestProxyingHandler(configuration, httpState.getMockServerLogger(), httpState.getScheduler(), actionHandler.getHttpClient(), httpState));
+        // a binary connection stays binary: detecting again would hold a short message for more bytes, or take
+        // one that starts like another protocol for that protocol. Over TLS nothing is left to look for; in
+        // the clear this handler stays for one thing, a TLS handshake beginning (see decode)
+        if (ctx.pipeline().get(SslHandler.class) != null) {
+            ctx.pipeline().remove(this);
+        } else {
+            binaryInTheClear = true;
+        }
 
         // fire message back through pipeline
         ctx.fireChannelRead(msg.readBytes(actualReadableBytes()));

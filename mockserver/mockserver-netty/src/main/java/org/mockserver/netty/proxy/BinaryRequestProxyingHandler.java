@@ -19,6 +19,7 @@ import org.mockserver.model.BinaryProxyListener;
 import org.mockserver.model.BinaryRequestDefinition;
 import org.mockserver.model.BinaryResponse;
 import org.mockserver.scheduler.Scheduler;
+import org.mockserver.socket.ChannelReadPause;
 import org.mockserver.uuid.UUIDService;
 import org.slf4j.event.Level;
 
@@ -50,6 +51,13 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
 
     private static final AttributeKey<ForwardQueue> FORWARD_QUEUE = AttributeKey.valueOf("BINARY_FORWARD_QUEUE");
     private static final AttributeKey<CompletableFuture<Void>> PREVIOUS_LISTENER_CALL = AttributeKey.valueOf("PREVIOUS_BINARY_PROXY_LISTENER_CALL");
+    /**
+     * The client connection is not read while more than either of these wait to be forwarded, and is read again
+     * once no more than half of each do. The queue only has to absorb what a client sends while one message is
+     * connected and written; a client that stays ahead of that is slowed down rather than held in memory.
+     */
+    static final int MAX_WAITING_MESSAGES = 64;
+    static final int MAX_WAITING_BYTES = 256 * 1024;
 
     private final Configuration configuration;
     private final MockServerLogger mockServerLogger;
@@ -165,8 +173,30 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
         }
         QueuedForward forward = new QueuedForward(binaryRequest, remoteAddress, isSslEnabledUpstream(ctx.channel()));
         queue.waiting.add(forward);
+        queue.waitingBytes += binaryRequest.getBytes().length;
         startWaitingForwards(ctx, queue);
+        if (!queue.readsPaused && (queue.waiting.size() > MAX_WAITING_MESSAGES || queue.waitingBytes > MAX_WAITING_BYTES)) {
+            queue.readsPaused = true;
+            ChannelReadPause.pause(ctx.channel());
+        }
         return forward.response;
+    }
+
+    private static void resumeReadsOnceDrained(ChannelHandlerContext ctx, ForwardQueue queue) {
+        if (queue.readsPaused && queue.waiting.size() <= MAX_WAITING_MESSAGES / 2 && queue.waitingBytes <= MAX_WAITING_BYTES / 2) {
+            queue.readsPaused = false;
+            ChannelReadPause.resume(ctx.channel());
+        }
+    }
+
+    @Override
+    public void handlerRemoved(ChannelHandlerContext ctx) {
+        // nothing read from now on reaches this handler, so it has no reason left to hold reads back
+        ForwardQueue queue = ctx.channel().attr(FORWARD_QUEUE).get();
+        if (queue != null && queue.readsPaused) {
+            queue.readsPaused = false;
+            ChannelReadPause.resume(ctx.channel());
+        }
     }
 
     private void startWaitingForwards(ChannelHandlerContext ctx, ForwardQueue queue) {
@@ -180,6 +210,7 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
             InetSocketAddress remoteAddress = null;
             QueuedForward forward;
             while (!queue.inFlight && (forward = queue.waiting.poll()) != null) {
+                queue.waitingBytes -= forward.request.getBytes().length;
                 if (queue.failed) {
                     forward.response.completeExceptionally(new NotForwardedException());
                     remoteAddress = forward.remoteAddress;
@@ -198,6 +229,7 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
             }
         } finally {
             queue.starting = false;
+            resumeReadsOnceDrained(ctx, queue);
         }
     }
 
@@ -246,11 +278,13 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
 
     /**
      * One client connection's messages waiting for the one being forwarded. Used only on that connection's event
-     * loop. Unbounded: a client that sends faster than the upstream accepts connections is held here, where
-     * before it held one upstream connection per message.
+     * loop. Bounded by not reading the connection while it is full, so it can exceed its limits only by what
+     * one read delivers.
      */
     private static final class ForwardQueue {
         private final Deque<QueuedForward> waiting = new ArrayDeque<>();
+        private long waitingBytes;
+        private boolean readsPaused;
         private boolean inFlight;
         private boolean failed;
         private boolean starting;

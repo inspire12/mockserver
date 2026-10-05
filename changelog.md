@@ -458,6 +458,37 @@ This release delivers a sustained performance and memory programme alongside dat
 
 ### Fixed
 
+- **A short binary (non-HTTP) message is now forwarded as soon as it arrives, and a binary connection stays
+  binary.** MockServer worked out what a connection carried by waiting for its first 8 bytes, and did so
+  again on every later read of a connection it had already found to be binary. A message shorter than
+  that, whether the first or a later one, was held until more bytes arrived and then forwarded joined to
+  them. A later message shorter than 5 bytes, or one that began like any TLS record, was taken for the
+  start of a TLS handshake, and neither it nor anything after it was forwarded. Bytes that cannot be the
+  start of HTTP, TLS, SOCKS or HTTP/2 are now treated as binary at once, and once a connection is binary
+  every later read is forwarded, or matched against binary expectations, as it is. A first message that
+  could still become one of those protocols (`GET` with nothing after it, for example) is held for up to
+  one second in case the rest follows, and is forwarded at once if the client closes.
+- **A protocol that switches to TLS part way through a connection, such as PostgreSQL after its
+  `SSLRequest`, can now be mocked for the whole session.** With binary expectations MockServer already
+  answered a TLS handshake that began after a binary message, but what it then decrypted went through the
+  same faulty check: a message shorter than 8 bytes was held, and one shorter than 5 bytes ended the
+  session. Now, when a TLS ClientHello begins on a binary connection, MockServer answers it as it would on
+  a connection that starts with TLS (the same certificates, TLS protocols and client-certificate
+  requirement) and a short message it decrypts afterwards is matched and answered at once, not held. (A
+  message is still whatever one read delivers, as in 8.0.0: one that arrives in two reads, which happens
+  to a message larger than those before it on the connection, is matched as two.)
+  Only a ClientHello is taken for a handshake (its first six bytes are checked), so a binary message that
+  merely begins like another kind of TLS record stays a binary message; a message of one to five bytes
+  that could be the start of a ClientHello is held for up to one second first. Proxying is unchanged:
+  MockServer answers the handshake itself and forwards each decrypted message on a new TLS connection to
+  the upstream.
+- **An HTTP request, or an HTTP/2 prior-knowledge connection, whose first bytes arrive a few at a time is now
+  recognised.** A first read shorter than 5 bytes was taken for TLS whatever it contained, so a request
+  that arrived one byte at a time was never answered, and an HTTP/2 connection preface split across reads
+  could be treated as binary. MockServer now waits for the rest only while the bytes received could still be
+  the start of a protocol it knows, for up to one second after the last byte. A client that sends less than
+  its protocol's opening bytes and then pauses for longer than that is treated as binary, or as HTTP when
+  `assumeAllRequestsAreHttp` is set.
 - **A forwarded or proxied response with more than 8 KB of headers now passes through.** MockServer read an
   upstream's response headers up to 8 KB whatever `maxHeaderSize` was set to, so a response with a large
   `Set-Cookie`, `Content-Security-Policy` or token header did not survive being forwarded. Over HTTP/1.1 the client
@@ -522,8 +553,11 @@ This release delivers a sustained performance and memory programme alongside dat
   connection to the upstream server, and two messages sent in quick succession on one connection could
   reach the upstream in either order. A connection's messages are now sent one after another: the next
   is sent only once the previous one has been connected and written, so a slow connection to the
-  upstream delays the messages behind it. Messages waiting their turn are held in memory without a
-  limit, and nothing is ordered between different client connections. If a message cannot be forwarded
+  upstream delays the messages behind it. A client that sends faster than the upstream accepts is
+  slowed down rather than held in memory: once more than 64 messages or 256 KiB are waiting on a
+  connection, MockServer stops reading that connection until half of them have been sent, so nothing
+  is dropped and the order is kept (what the client sends meanwhile may arrive as fewer, larger
+  messages). Nothing is ordered between different client connections. If a message cannot be forwarded
   the client's connection is closed, as before, and the messages still waiting behind it are not sent
   (one warning reports how many).
 - **The internal connection behind an HTTP/2 CONNECT or SOCKS proxy tunnel is now closed as soon as its client disconnects, or as soon as a request that client had finished sending has been received.** When a client left with a request still unanswered, MockServer kept its own half of the tunnel open, and went on working on that request, until it was answered or for up to 30 seconds. A request the client had sent in full before it left is still received, recorded and matched, as it would be on a direct connection; only its response is no longer waited for.

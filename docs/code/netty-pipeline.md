@@ -211,7 +211,9 @@ Internal relay setup"]
 assumeAllRequestsAreHttp?"}
     ASSUME -->|Yes| SW_HTTP
     ASSUME -->|No| SW_BIN["switchToBinaryRequestProxying
-Raw binary handler"]
+Raw binary handler
+Only a TLS handshake
+is still looked for"]
 
     EN_TLS -->|Re-fire decrypted bytes| START
     EN_S4 -->|Re-fire bytes| START
@@ -223,6 +225,76 @@ Raw binary handler"]
 ```
 
 **Recursive detection**: When TLS or SOCKS is detected, the handler adds protocol-specific decoders, re-fires the bytes through the pipeline, and runs detection again on the decoded data. This enables arbitrary nesting (e.g., SOCKS5 → TLS → HTTP/2).
+
+### How Many Bytes Detection Needs
+
+Detection decides as soon as the bytes received settle the question, and holds them only while they could still become a known protocol. A connection decided to be binary stays binary: the only thing still looked for on it is a TLS handshake beginning (see [In-band TLS upgrade](#in-band-tls-upgrade-on-a-binary-connection)).
+
+```mermaid
+flowchart TD
+    READ(["Bytes arrive"]) --> KNOWN{"A known protocol's
+first bytes, complete?"}
+    KNOWN -->|Yes| SWITCH["Switch to that protocol"]
+    KNOWN -->|No| START{"The start of one?"}
+    START -->|No| UNKNOWN["Unknown: HTTP if
+assumeAllRequestsAreHttp,
+else binary"]
+    START -->|Yes| HOLD["Hold the bytes"]
+    HOLD -->|More bytes| KNOWN
+    HOLD -->|"Silent for 1 s,
+or the client closes"| UNKNOWN
+```
+
+| Protocol | Decided once | Held while |
+|----------|--------------|------------|
+| SOCKS4 | The whole request has arrived (`SocksDetector.isSocks4`) | Byte 0 is `0x04` and byte 1 has not arrived, or byte 1 is a CONNECT or BIND and the request is incomplete |
+| SOCKS5 | The whole greeting has arrived (`SocksDetector.isSocks5`) | Byte 0 is `0x05` and the greeting is incomplete |
+| TLS | 5 bytes, a record header (`SslHandler.isEncrypted`) | Byte 0 is a record content type (20 to 24) and fewer than 5 bytes have arrived |
+| h2c prior knowledge | The 24-byte preface | The bytes are the start of the preface |
+| HTTP/1.1 | A method and the space after it (`GET `, `CONNECT `, ...; 4 to 8 bytes) | The bytes are the start of a method |
+| Tunnel first message | `PROXIED_` (8 bytes) | The bytes are the start of `PROXIED_` |
+
+So a first byte of `0x01` is binary at once, and `GE` is held: `T ` may follow. `startsWithAny` is the one place the text protocols' rule lives.
+
+**The wait is bounded** (`UNDECIDED_PROTOCOL_WAIT_MILLIS`, 1 second, restarted by every further byte). Held bytes that are followed by silence are treated as unknown: binary, or HTTP under `assumeAllRequestsAreHttp`. The same happens at once when the client closes, since nothing more can arrive (`decodeLast`). The wait is not counted while the channel's reads are paused, because the rest may be sitting unread. Without the bound a binary client whose short first message happened to start like a known protocol would never have it forwarded.
+
+**The trade-off**: a client that sends fewer bytes than its protocol's opening needs and then pauses for more than a second is taken for binary. For HTTP that means a strict prefix of the method (`OPTION`, never `GET /`); for TLS, fewer than 5 bytes of the first record. Real clients write these in one piece. Such a client then sees what any binary client sees: its bytes forwarded upstream when MockServer is proxying, otherwise the "unknown message format" reply and a close.
+
+`SslHandler.isEncrypted` answers "not enough data" as `true`, so it is only asked once 5 bytes have arrived. Asked earlier it took any first read shorter than 5 bytes for TLS, including the first byte of a slowly sent HTTP request.
+
+**Once binary, always binary**: the full detection above never runs again on a binary connection. In 8.0.0 it ran on every read: a message shorter than 8 bytes was held for more, and one shorter than 5 bytes, or that began like any TLS record, was handed to a new `SniHandler`, after which nothing more was forwarded. After a TLS or SOCKS stage, or a tunnel's first message, the handler stays in its ordinary mode, because what follows still has to be detected.
+
+### In-band TLS Upgrade on a Binary Connection
+
+A protocol can open in the clear and turn TLS on part way through the same connection: a PostgreSQL client sends an 8-byte `SSLRequest`, is answered `S`, and starts a TLS handshake. MockServer supports this for binary connections. When a ClientHello begins on a binary connection that is not yet TLS, it answers as a TLS server, with the same certificates, protocols and client-certificate requirement as a connection that starts with TLS, and treats everything it decrypts from then on as binary.
+
+```mermaid
+flowchart TD
+    READ(["Read on a binary connection,
+not yet TLS"]) --> HELLO{"Starts
+16 03 0x, length 1 to 16384, 01?"}
+    HELLO -->|"Yes (6 bytes)"| TLS["enableTls: SniHandler at the head,
+replay the bytes,
+remove PortUnificationHandler"]
+    HELLO -->|"No"| MSG["Binary message, at once"]
+    HELLO -->|"Fewer than 6 bytes,
+all matching so far"| HOLD["Hold"]
+    HOLD -->|More bytes| HELLO
+    HOLD -->|"Silent for 1 s,
+or the client closes"| MSG
+    TLS --> DEC["Decrypted reads go straight to
+BinaryRequestProxyingHandler"]
+```
+
+- **Where**: `switchToBinaryRequestProxying` leaves `PortUnificationHandler` in the pipeline with `binaryInTheClear` set, unless the pipeline already has an `SslHandler` (a connection that started with TLS), in which case it is removed as before. In that mode `decode` does one thing: `startsTlsClientHello`.
+- **The rule** is six bytes: content type 22 (handshake), version major 3 and minor 0 to 4, a record length of 1 to 16384, and handshake type 1 (ClientHello). It is deliberately narrower than first-bytes detection, which takes any record type for TLS: here a wrong guess breaks a working binary connection.
+- **After the upgrade** the handler removes itself, so decrypted reads are never looked at again: a short one is delivered at once, one that looks like HTTP or like another ClientHello is a binary message, and a second `SniHandler` cannot be stacked.
+- **A ClientHello split inside its first six bytes** is still recognised. Bytes that are only the start of the six are held with the same bounded wait as first bytes (1 second after the last byte, at once on close, not counted while reads are paused), then delivered as a binary message.
+- **What that costs**: a clear-text binary message of 1 to 5 bytes that is the start of the six (most plausibly a lone `0x16`) is delivered up to a second late, every time one is sent. It is still a message of its own: when the bytes that follow show it was not a handshake, the held bytes are delivered first and what followed as the next message (bytes held over several reads go together, as only where they end is remembered). Four bytes are not held when the first length byte is already above `0x40`, which no record length can have. The alternative, not holding, would fail the handshake of a client whose ClientHello arrives split that early; TLS stacks write it whole, so that is rarer still, but its cost is a broken connection rather than a delay.
+- **What is still misread**: a clear-text binary message of six bytes or more that begins exactly like a ClientHello is taken for one, and the connection then fails its handshake. A ClientHello that arrives in the same read as bytes before it is not recognised, because only the start of a read is examined; a client waits for the go-ahead before sending it, so it arrives alone.
+- **Backpressure**: the forward queue's read pause (below) is a `ChannelReadPause` hold on the channel, not on a handler position, so it balances across the upgrade. A ClientHello sent while the client is held back is read, and the upgrade made, when reading resumes.
+- **`assumeAllRequestsAreHttp`**: nothing is binary under that setting, so there is no binary connection to upgrade.
+- **Proxying** is as it was in 8.0.0: MockServer terminates the client's TLS itself, and each decrypted message goes upstream on a connection of its own that MockServer opens with TLS straight away, while what was sent in the clear went upstream in the clear. A server that expects the plaintext request to upgrade on every connection is not served by this; replaying that preamble upstream is not built.
 
 ### Connection Delay
 
@@ -1669,9 +1741,16 @@ When no known protocol is detected, `BinaryRequestProxyingHandler` handles the r
 - **Waiting mode**: Blocks until upstream response arrives, writes it back
 - **Non-waiting mode**: Fire-and-forget with optional `BinaryProxyListener` callback. `BinaryProxyListener` (`o.m.model.BinaryProxyListener`) is a functional interface with `onProxy(BinaryMessage binaryRequest, CompletableFuture<BinaryMessage> binaryResponse, SocketAddress serverAddress, SocketAddress clientAddress)` invoked when binary data is proxied
 
-Each socket read is one binary message, and each message is forwarded on an upstream connection of its own. In non-waiting mode a client can send its next message before the previous one has been forwarded, so `BinaryRequestProxyingHandler` serialises two things per client connection:
+Each socket read is one binary message, however short (the one exception is bytes held as the possible start of a TLS handshake, see [In-band TLS upgrade](#in-band-tls-upgrade-on-a-binary-connection)), and each message is forwarded on an upstream connection of its own.
 
-- **Forwards**: a connection's messages wait in a per-connection queue (`ForwardQueue`, a channel attribute used only on that connection's event loop). The next message's upstream connection is opened only once the previous message has been connected and written, which `NettyHttpClient.sendRequest(BinaryMessage, ...)` reports through its `onRequestSent` callback. So a message can wait for the previous one's connect, up to `socketConnectionTimeoutInMillis`. Without this the connections are opened from different forward-client event loops and the upstream can accept them in either order.
+**One read is one message, and a message is not always one read.** MockServer has no knowledge of any binary protocol's framing, so the read is the only boundary it has, and a message that reaches it in two reads is matched, or forwarded, as two messages. This is the limit that matters for mocking a protocol like PostgreSQL, and it is reached sooner than "a large message":
+
+- **The read buffer follows the traffic.** MockServer does not set the receive buffer allocator, so each connection has Netty's adaptive one: it starts at 2,048 bytes, steps down after two consecutive smaller reads (to a floor of 64), and steps up after a read fills it. A message larger than the buffer's size at that moment is read in pieces within one read loop, and each piece is a message. So after a run of small messages a moderately larger one is split, in the clear and over TLS alike. Measured with a scratch probe (JDK client, macOS, load average about 19; `ShrinkProbe`, kept with the unit's hand-over files, not committed): on a fresh connection messages of 100 to 800 bytes were matched (800 bytes over an upgraded TLS 1.3 connection only 10 times in 20); after 5 five-byte exchanges an 800-byte message was matched 0 times in 20; after 20, a 422-byte one 0 in 20; after 60, a 100-byte one 0 in 20.
+- **TLS adds its own split.** `SniHandler` builds the TLS handler with `sslContext.newHandler(alloc)`, the OpenSSL engine in its non-JDK-compatible mode, which sizes its plaintext buffer from the bytes of the current socket read and, when a record does not fit, fires what it has; a record whose tail arrives in a later socket read is delivered as two reads. Measured in review: a first message of 1,200 bytes straight after the handshake was answered "unknown message format" on 150 of 150 upgraded connections and on 129 and 116 of 150 that started with TLS.
+
+Both are as in 8.0.0 (the same read loop, allocator and `SslHandler`; read, not run against that release). Not fixed here. A floor on a binary connection's receive buffer would stop the first; gathering the reads of one read cycle (to `channelReadComplete`) before treating them as a message would cover both, but it changes what a message is (two sent close together would become one); and neither is a real fix, which needs the protocol's own framing, which MockServer does not have.
+
+- **Forwards**: a connection's messages wait in a per-connection queue (`ForwardQueue`, a channel attribute used only on that connection's event loop). The next message's upstream connection is opened only once the previous message has been connected and written, which `NettyHttpClient.sendRequest(BinaryMessage, ...)` reports through its `onRequestSent` callback. So a message can wait for the previous one's connect, up to `socketConnectionTimeoutInMillis`. Without this the connections are opened from different forward-client event loops and the upstream can accept them in either order. The queue is bounded by backpressure, below.
 - **Listener calls**: the listener is user code and may block on the response future, so it runs on the `Scheduler` local-callback pool (`scheduleLocalCallback`), never on the worker event loop, which would otherwise forward nothing more on that thread until the listener returned. One connection's messages are reported one at a time, in arrival order; a listener that throws closes the client connection, as it did when it ran on the event loop.
 
 What this does and does not give:
@@ -1682,7 +1761,32 @@ What this does and does not give:
 | Order across client connections | None: each connection has its own queue |
 | A forward fails (connect, write, or cannot be started) | The client connection is closed, as before; messages still queued behind it are not attempted, their responses fail, and one WARN reports how many |
 | The client closes after sending | Every message it sent is still forwarded |
-| Queue size | Unbounded. A client that sends faster than the upstream accepts connections is held in memory here; before, it held one upstream connection per message |
+| Queue size | Bounded by not reading the client: at most 64 messages or 256 KiB waiting, plus what one socket read delivers |
+
+**Backpressure, not loss.** The queue only has to absorb what a client sends while one message is connected and written. A client that stays ahead of the upstream is slowed down instead of being held in heap:
+
+```mermaid
+flowchart LR
+    READ["Client message read"] --> ADD["Queue it, start it
+if nothing is in flight"]
+    ADD --> OVER{"More than 64 messages
+or 256 KiB waiting?"}
+    OVER -->|Yes| PAUSE["ChannelReadPause.pause
+client is not read"]
+    SENT["Previous message written,
+or a forward failed"] --> NEXT["Start the next,
+or fail all that wait"]
+    NEXT --> LOW{"At most 32 messages
+and 128 KiB waiting?"}
+    LOW -->|Yes| RESUME["ChannelReadPause.resume"]
+```
+
+- **The limits** (`MAX_WAITING_MESSAGES`, `MAX_WAITING_BYTES`) count messages not yet started; the one in flight is not counted. Both are needed: bytes alone would let a client queue a great many tiny messages, each with its own bookkeeping, and messages alone would allow 64 reads of any size. Reading resumes at half of each, so a client held at the limit is not paused and resumed once per message.
+- **Why not pause whenever a forward is in flight**: that is the tightest bound, but while a connection is not read the client's writes run together in the socket buffers and are read back as fewer, larger messages. With a limit of zero that would happen to any two messages sent close together; with these limits it happens only to a client that would otherwise be held in memory.
+- **What the client sees**: its writes stop being accepted once the socket buffers fill, like any slow TCP peer. Nothing is dropped and order is kept.
+- **Overshoot**: auto-read is turned off from inside a read, so the read loop stops after the buffer in hand. One socket read can carry several messages when TLS is decrypting, which is the "plus what one socket read delivers".
+- **Every path resumes**: the next message starting, a failed forward (which fails everything waiting, so the queue is empty), and the handler being removed (which also happens when the channel closes). A closed client's queued messages are still forwarded. Resuming never depends on reading the client, so the pause cannot deadlock with TLS. `SslHandler` asks for a read of its own only after one that delivered nothing, and a pause always begins inside a read that delivered a message; where the `ChannelReadPause` gate sits ahead of it (a connection that started with TLS) such a request would wait for the resume anyway.
+- **Not bounded here**: a message already written holds its upstream connection until the upstream answers or closes, as in 8.0.0; and listener calls for one connection are chained, so a listener slower than the client builds a backlog of its own.
 
 Waiting mode is unchanged: forwards are not queued and the listener is called from the scheduler once the response has arrived.
 
