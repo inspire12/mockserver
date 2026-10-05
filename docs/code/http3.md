@@ -710,7 +710,9 @@ bidi-streaming) work over HTTP/3, matching the TCP (HTTP/1.1 and HTTP/2) path.
   field's name and value plus 32 bytes) is limited to `maxHeaderSize` (default 256 KiB), which
   `Http3Server` advertises as `SETTINGS_MAX_FIELD_SECTION_SIZE`. Netty's HTTP/3 codec treats a larger
   one as a connection error, so the connection is closed with `H3_EXCESSIVE_LOAD` and no `431` is sent,
-  unlike HTTP/1.1 and HTTP/2; `Http3MockServerHandler` logs one `WARN` entry. A `HEADERS` frame longer
+  unlike HTTP/1.1 and HTTP/2; this difference is accepted and documented, not fixed — see
+  [decisions/http3-header-limit-closes-connection.md](decisions/http3-header-limit-closes-connection.md).
+  `Http3MockServerHandler` logs one `WARN` entry. A `HEADERS` frame longer
   than the limit is refused from its length, and a section that is small on the wire but decodes past
   the limit is refused as it is decoded, the codec no longer keeping fields once the limit is passed
   (`Http3HeaderSectionAllocationIntegrationTest` measures it). A request's trailer section is limited the

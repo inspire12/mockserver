@@ -1346,7 +1346,7 @@ When any list parameter is active the response adds `X-Total-Count` (total after
 
 ## Binary Mock Processing
 
-When `BinaryRequestProxyingHandler` receives raw bytes on a channel, it first checks for a matching expectation via `HttpState.firstMatchingExpectation(BinaryRequestDefinition)`. If a match is found with a `BinaryResponse` action, the handler writes the response bytes directly to the channel. If no match is found and the channel is in proxy mode (remote address configured), the bytes are forwarded to the upstream server as before.
+When `BinaryRequestProxyingHandler` receives raw bytes on a channel, it first checks for a matching expectation via `HttpState.firstMatchingExpectation(BinaryRequestDefinition)`. If a match is found with a `BinaryResponse` action, the handler writes the response bytes directly to the channel. If no match is found and the channel is in proxy mode (remote address configured), the bytes are forwarded to the upstream server as before. Forwarding without waiting for a response calls `NettyHttpClient`'s 5-argument `sendRequest` overload directly, which bypasses a subclass's override of the 4-argument overload — accepted and documented, see [decisions/binary-proxying-nowait-sendrequest-override.md](decisions/binary-proxying-nowait-sendrequest-override.md).
 
 ```mermaid
 flowchart TD
