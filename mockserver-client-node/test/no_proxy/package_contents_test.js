@@ -12,9 +12,10 @@ var REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 var packageContents = require(path.join(REPO_ROOT, 'mockserver-node', 'test', 'packageContents.js'));
 
 packageContents.registerTests(path.join(REPO_ROOT, 'mockserver-client-node'), {
-    // llm.d.ts declares `export default llm` while llm.js assigns the object to `module.exports`.
-    // It is right through the package's index, which re-exports it as `llm`, and wrong only for
-    // the deep import `mockserver-client/llm`. It is published, so changing it is a breaking
-    // change to the typings.
-    acceptedDefaultExports: ['llm.d.ts']
+    // mockServerClient.js also exports the three builders the index gets from their own modules,
+    // and three internals for this package's tests
+    acceptedUndeclaredExports: {
+        'mockServerClient.d.ts': ['llm', 'mcpMock', 'a2aMock',
+            'routeBreakpointMessage', 'extractBreakpointHeaders', 'NON_HTTP_RESPONSE_ACTION_KEYS']
+    }
 });

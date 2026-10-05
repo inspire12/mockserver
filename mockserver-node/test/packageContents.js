@@ -120,25 +120,80 @@ function isPacked(files, target, suffixes) {
   });
 }
 
-function eachMatch(pattern, text, visit) {
-  let match;
-  while ((match = pattern.exec(text)) !== null) {
-    visit(match);
+const NAME = '([A-Za-z_$][\\w$]*)';
+const DECLARATION = new RegExp('^(export\\s+)?(?:declare\\s+)?(?:abstract\\s+)?(function|const\\s+enum|const|let|var|class|enum|interface|type)\\s+' + NAME);
+const UNBALANCED = 'export in a file or namespace whose braces or brackets do not balance';
+// `import(` opens a type, not a statement
+const STATEMENT_START = /^[ \t]*(?:export|declare|import(?!\s*\()|function|const|let|var|class|enum|interface|type|namespace|module|abstract)\b/;
+
+/**
+ * The statements of `text` that are outside any braces. `head` is the statement with comments and
+ * the contents of its braces removed, `block` the contents of its first braces. A statement ends
+ * at a semicolon, or at a line break before a line that starts a declaration, import or export.
+ */
+function statementsOf(text) {
+  // comments are blanked, and so is punctuation in string literals, so that it can be counted
+  const source = text.replace(/'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|\/\*[\s\S]*?\*\/|\/\/.*$/gm, function (found) {
+    return found.replace(found[0] === '/' ? /[^\n]/g : /[{}()[\];]/g, ' ');
+  });
+  const statements = [];
+  let head = '';
+  let block;
+  let braces = 0;
+  let brackets = 0;
+  let opened = 0;
+
+  function end() {
+    if (head.trim()) {
+      statements.push({ head: head.trim(), block: block || '' });
+    }
+    head = '';
+    block = undefined;
   }
+
+  for (let i = 0; i < source.length; i++) {
+    const character = source[i];
+    if (character === '{') {
+      if (braces++ === 0) {
+        opened = i + 1;
+        head += '{';
+      }
+    } else if (character === '}') {
+      if (--braces === 0) {
+        block = block === undefined ? source.slice(opened, i) : block;
+        head += '}';
+      }
+    } else if (braces === 0) {
+      brackets += '(['.includes(character) ? 1 : (')]'.includes(character) ? -1 : 0);
+      if (character === ';' || (character === '\n' && brackets === 0 && STATEMENT_START.test(source.slice(i + 1, i + 80)))) {
+        end();
+      } else {
+        head += character;
+      }
+    }
+  }
+  end();
+  if (braces !== 0 || brackets !== 0) {
+    // what follows the imbalance was not split into statements: reported as an unread export
+    statements.push({ head: UNBALANCED, block: '' });
+  }
+  return statements;
 }
 
 /**
  * What a .d.ts exports, read from its text, not compiled. `kinds` maps each exported name,
  * 'default' included, to 'value', 'type' or 'unknown', following `export ... from` into the file
- * it names; with `export = name` the names are the functions and values of `declare namespace
- * name`. `unread` lists the export statements that are in none of the forms read here.
- * Members of interfaces and of object types are not read.
+ * named; with `export = name` the names are the members of every `declare namespace name` block. `unread` lists the export statements and namespace
+ * members that are in none of the forms read here, and those of a file reached by `export *`.
+ * Not read: members of interfaces and of object types, and any declarator after the first in
+ * `const a: A, b: B`. A `const enum` is a type: it leaves nothing behind at run time.
  */
 function describeTypings(file, visiting) {
-  const source = fs.readFileSync(file, 'utf8');
   const kinds = new Map();
   const local = new Map();
-  const unread = [];
+  const namespaces = new Map();
+  const unread = new Set();
+  const followed = new Map();
   const inProgress = (visiting || []).concat(file);
 
   function note(names, name, kind) {
@@ -148,86 +203,114 @@ function describeTypings(file, visiting) {
     }
   }
 
-  function exportsOf(specifier) {
-    const base = path.resolve(path.dirname(file), specifier);
-    const target = [base + '.d.ts', path.join(base, 'index.d.ts')].find(fs.existsSync);
-    if (!specifier.startsWith('.') || !target || inProgress.includes(target)) {
-      return undefined;
+  function follow(specifier) {
+    if (!followed.has(specifier)) {
+      const base = path.resolve(path.dirname(file), specifier);
+      const target = [base + '.d.ts', path.join(base, 'index.d.ts')].find(fs.existsSync);
+      const known = specifier.startsWith('.') && target && !inProgress.includes(target);
+      followed.set(specifier, known ? describeTypings(target, inProgress) : undefined);
     }
-    return describeTypings(target, inProgress).kinds;
+    return followed.get(specifier);
   }
 
-  eachMatch(/^(export\s+)?(?:declare\s+)?(function|const|let|var|class|enum|interface|type)\s+([A-Za-z_$][\w$]*)/gm, source, function (match) {
-    const kind = (match[2] === 'interface' || match[2] === 'type') ? 'type' : 'value';
-    note(local, match[3], kind);
-    if (match[1]) {
-      note(kinds, match[3], kind);
-    }
-  });
 
-  eachMatch(/^export\s+default\s+(.*)$/gm, source, function (match) {
-    const named = /^([A-Za-z_$][\w$]*)\s*;?\s*$/.exec(match[1]);
-    if (/^(?:abstract\s+)?(?:function|class)\b/.test(match[1])) {
-      note(kinds, 'default', 'value');
-    } else if (/^interface\b/.test(match[1])) {
-      note(kinds, 'default', 'type');
-    } else {
-      note(kinds, 'default', (named && local.get(named[1])) || 'unknown');
-    }
-  });
-
-  eachMatch(/^export\s+(type\s+)?\{([^}]*)\}(?:\s*from\s*(['"])([^'"]+)\3)?/gm, source, function (match) {
-    const origin = match[4] ? exportsOf(match[4]) : local;
-    match[2].split(',').map(function (specifier) {
-      return specifier.trim();
-    }).filter(Boolean).forEach(function (specifier) {
-      const parts = /^(type\s+)?([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?$/.exec(specifier);
-      if (!parts) {
-        unread.push('export { ' + specifier + ' }');
-      } else if (match[1] || parts[1]) {
-        note(kinds, parts[3] || parts[2], 'type');
-      } else {
-        note(kinds, parts[3] || parts[2], (origin && origin.get(parts[2])) || 'unknown');
+  function readDeclaration(statement, declared, exported) {
+    const declaration = DECLARATION.exec(statement.head);
+    if (declaration) {
+      const kind = /^(?:interface|type|const\s+enum)$/.test(declaration[2]) ? 'type' : 'value';
+      note(declared, declaration[3], kind);
+      if (declaration[1]) {
+        note(exported, declaration[3], kind);
       }
-    });
-  });
-
-  eachMatch(/^export\s*\*\s*from\s*(['"])([^'"]+)\1/gm, source, function (match) {
-    const origin = exportsOf(match[2]);
-    if (!origin) {
-      unread.push(match[0]);
-      return;
     }
-    origin.forEach(function (kind, name) {
-      if (name !== 'default') {
-        note(kinds, name, kind);
-      }
-    });
-  });
+    return Boolean(declaration);
+  }
 
-  const assigned = /^export\s*=\s*([A-Za-z_$][\w$]*)/m.exec(source);
-  if (assigned) {
-    const opening = new RegExp('^declare\\s+namespace\\s+' + assigned[1].replace(/\$/g, '\\$') + '\\s*\\{', 'm').exec(source);
+  const statements = statementsOf(fs.readFileSync(file, 'utf8'));
+
+  // declarations first: an export list or a default export may name one that is declared after it
+  const others = statements.filter(function (statement) {
+    const opening = new RegExp('^(?:declare\\s+)?namespace\\s+' + NAME + '\\s*\\{\\}$').exec(statement.head);
     if (opening) {
-      let end = opening.index + opening[0].length;
-      for (let depth = 1; depth > 0 && end < source.length; end++) {
-        depth += source[end] === '{' ? 1 : (source[end] === '}' ? -1 : 0);
-      }
-      eachMatch(/^\s*(?:export\s+)?(?:declare\s+)?(?:function|const|let|var|class|enum)\s+([A-Za-z_$][\w$]*)/gm,
-        source.slice(opening.index + opening[0].length, end), function (match) {
-          note(kinds, match[1], 'value');
-        });
+      namespaces.set(opening[1], (namespaces.get(opening[1]) || []).concat(statement.block));
     }
-  }
+    return !opening && !readDeclaration(statement, local, kinds);
+  });
 
-  const readForms = /^export\s+(?:(?:declare\s+)?(?:function|const|let|var|class|enum|interface|type)\s+[A-Za-z_$]|default\s|(?:type\s+)?\{|\*\s*from\b)|^export\s*=/;
-  eachMatch(/^export\b.*$/gm, source, function (match) {
-    if (!readForms.test(match[0])) {
-      unread.push(match[0]);
+  others.forEach(function (statement) {
+    const head = statement.head;
+    const byDefault = /^export\s+default\s+([\s\S]*)$/.exec(head);
+    const list = /^export\s+(type\s+)?\{\}(?:\s*from\s*(['"])([^'"]+)\2)?$/.exec(head);
+    const star = /^export\s*\*\s*from\s*(['"])([^'"]+)\1$/.exec(head);
+    const assignment = new RegExp('^export\\s*=\\s*' + NAME + '$').exec(head);
+
+    if (byDefault) {
+      const named = new RegExp('^' + NAME + '$').exec(byDefault[1]);
+      if (/^(?:abstract\s+)?(?:function|class)\b/.test(byDefault[1])) {
+        note(kinds, 'default', 'value');
+      } else if (/^interface\b/.test(byDefault[1])) {
+        note(kinds, 'default', 'type');
+      } else {
+        note(kinds, 'default', (named && local.get(named[1])) || 'unknown');
+      }
+    } else if (list) {
+      const origin = list[1] ? undefined : (list[3] ? (follow(list[3]) || {}).kinds : local);
+      statement.block.split(',').map(function (specifier) {
+        return specifier.trim();
+      }).filter(Boolean).forEach(function (specifier) {
+        const parts = new RegExp('^(type\\s+)?' + NAME + '(?:\\s+as\\s+' + NAME + ')?$').exec(specifier);
+        if (!parts) {
+          unread.add('export { ' + specifier + ' }');
+        } else if (list[1] || parts[1]) {
+          note(kinds, parts[3] || parts[2], 'type');
+        } else {
+          note(kinds, parts[3] || parts[2], (origin && origin.get(parts[2])) || 'unknown');
+        }
+      });
+    } else if (star) {
+      const origin = follow(star[2]);
+      if (!origin) {
+        unread.add(head);
+        return;
+      }
+      // every export of that file comes through, so what is unread in it is unread here
+      origin.unread.forEach(function (statement) {
+        unread.add(star[2] + ': ' + statement);
+      });
+      origin.kinds.forEach(function (kind, name) {
+        if (name !== 'default') {
+          note(kinds, name, kind);
+        }
+      });
+    } else if (assignment) {
+      const members = new Map();
+      (namespaces.get(assignment[1]) || []).forEach(function (block) {
+        statementsOf(block).forEach(function (member) {
+          // in a `declare namespace` every declaration is exported, with or without `export`
+          if (!readDeclaration(member, members, members)) {
+            unread.add('in namespace ' + assignment[1] + ': ' + member.head);
+          }
+        });
+      });
+      members.forEach(function (kind, name) {
+        note(kinds, name, kind);
+      });
+    } else if (/^export\b/.test(head)) {
+      unread.add(head);
     }
   });
 
-  return { kinds: kinds, unread: unread };
+  return { kinds: kinds, unread: Array.from(unread) };
+}
+
+/**
+ * The names a described .d.ts exports as functions or values, each of which the module beside it
+ * must export. A default export is left out: comparing it compares none of its members.
+ */
+function declaredValues(description) {
+  return Array.from(description.kinds.keys()).filter(function (name) {
+    return description.kinds.get(name) === 'value' && name !== 'default';
+  });
 }
 
 /** Each published .d.ts whose module is beside it in the tarball, with what that module exports. */
@@ -247,15 +330,17 @@ function typedModules(packageRoot) {
 }
 
 /**
- * Registers the checks for the package at `packageRoot` with node:test. Two options name the
- * .d.ts files a check is known not to hold for; each list must match what is found exactly, so an
- * entry that no longer applies fails as a new mismatch does.
+ * Registers the checks for the package at `packageRoot` with node:test. Three options name what a
+ * check is known not to hold for; each must match what is found exactly, so an entry that no
+ * longer applies fails as a new mismatch does.
  * `acceptedDefaultExports`: files declaring a default export their module does not have.
  * `acceptedUncheckedTypings`: files in which no exported function or value was found to compare.
+ * `acceptedUndeclaredExports`: by .d.ts file, the names its module exports and it does not declare.
  */
 function registerTests(packageRoot, options) {
   const acceptedDefaultExports = (options && options.acceptedDefaultExports) || [];
   const acceptedUncheckedTypings = (options && options.acceptedUncheckedTypings) || [];
+  const acceptedUndeclaredExports = (options && options.acceptedUndeclaredExports) || {};
   const manifest = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8'));
 
   test('every path package.json declares is in the published tarball', function () {
@@ -307,22 +392,21 @@ function registerTests(packageRoot, options) {
     const unchecked = [];
 
     typedModules(packageRoot).forEach(function (typed) {
-      let values = 0;
+      const values = declaredValues(typed.declared);
       typed.declared.unread.forEach(function (statement) {
-        problems.push(typed.typings + ': an export in a form this check does not read: ' + statement);
+        problems.push(typed.typings + ': an export or namespace member in a form this check does not read: ' + statement);
       });
       typed.declared.kinds.forEach(function (kind, name) {
         if (kind === 'unknown') {
           problems.push(typed.typings + ' exports ' + name + ', which could not be traced to a declaration');
-        } else if (kind === 'value') {
-          values++;
-          // whether a declared default export exists is the next test's subject
-          if (name !== 'default' && !(name in typed.exported)) {
-            problems.push(typed.typings + ' declares ' + name + ', which ' + typed.script + ' does not export');
-          }
         }
       });
-      if (values === 0) {
+      values.forEach(function (name) {
+        if (!(name in typed.exported)) {
+          problems.push(typed.typings + ' declares ' + name + ', which ' + typed.script + ' does not export');
+        }
+      });
+      if (values.length === 0) {
         unchecked.push(typed.typings);
       }
     });
@@ -330,6 +414,48 @@ function registerTests(packageRoot, options) {
     assert.deepStrictEqual(problems, []);
     assert.deepStrictEqual(unchecked.sort(), acceptedUncheckedTypings.slice().sort(),
       'the .d.ts files in which no exported function or value was found to compare (expected: the accepted ones)');
+  });
+
+  test('every name a published module exports is declared as a function or value by the .d.ts beside it', function () {
+    const undeclared = {};
+    const accepted = {};
+
+    typedModules(packageRoot).forEach(function (typed) {
+      const names = Object.keys(typed.exported).filter(function (name) {
+        return typed.declared.kinds.get(name) !== 'value';
+      }).sort();
+      if (names.length > 0) {
+        undeclared[typed.typings] = names;
+      }
+    });
+    Object.keys(acceptedUndeclaredExports).forEach(function (typings) {
+      accepted[typings] = acceptedUndeclaredExports[typings].slice().sort();
+    });
+
+    assert.deepStrictEqual(undeclared, accepted,
+      'the names a module exports that the .d.ts beside it does not declare (expected: the accepted ones)');
+  });
+
+  test('a published .d.ts with no module beside it declares types alone', function () {
+    // nothing is loaded when such a file is imported, so a function or value it declared could not exist
+    const files = packedFiles(packageRoot);
+    const problems = [];
+
+    Array.from(files).filter(function (typings) {
+      return typings.endsWith('.d.ts') && !files.has(typings.replace(/\.d\.ts$/, '.js'));
+    }).forEach(function (typings) {
+      const declared = describeTypings(path.join(packageRoot, typings));
+      declared.unread.forEach(function (statement) {
+        problems.push(typings + ': an export or namespace member in a form this check does not read: ' + statement);
+      });
+      declared.kinds.forEach(function (kind, name) {
+        if (kind !== 'type') {
+          problems.push(typings + ' declares ' + name + ' as a function or value, or in a way that could not be traced');
+        }
+      });
+    });
+
+    assert.deepStrictEqual(problems, []);
   });
 
   test('a published .d.ts declares a default export only when the module beside it has one', function () {
@@ -347,6 +473,8 @@ function registerTests(packageRoot, options) {
 }
 
 module.exports = {
+  declaredValues: declaredValues,
+  describeTypings: describeTypings,
   packedFiles: packedFiles,
   registerTests: registerTests
 };

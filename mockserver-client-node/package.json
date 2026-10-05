@@ -27,6 +27,7 @@
     "index.d.ts",
     "llm.js",
     "llm.d.ts",
+    "llmTypes.d.ts",
     "mcpMockBuilder.js",
     "mcpMockBuilder.d.ts",
     "a2aMockBuilder.js",

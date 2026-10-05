@@ -9,7 +9,7 @@
  */
 
 import {BinaryResponse, ChaosExperiment, DnsResponse, Expectation, ExpectationId, GenerateLoadScenarioFromOpenAPIRequest, GenerateLoadScenarioFromRecordingRequest, GrpcStreamResponse, HttpChaosProfile, HttpClassCallback, HttpError, HttpForward, HttpOverrideForwardedRequest, HttpRequest, HttpRequestAndHttpResponse, HttpResponse, HttpSseResponse, HttpTemplate, HttpWebSocketResponse, KeyToMultiValue, LoadScenario, LoadScenarioGenerationResult, LoadScenarioReport, LoadScenarioStatus, LoadScenarioEntry, LoadScenarioList, LoadScenarioRegistration, LoadScenarioStartResult, LoadScenarioStopResult, OpenAPIExpectation, RequestDefinition, SloCriteria, SloVerdict, Times, TimeToLive,} from './mockServer';
-import {Llm, LlmConversationBuilder, LlmFailoverBuilder, LlmMockBuilder} from './llm';
+import {Llm, LlmConversationBuilder, LlmFailoverBuilder, LlmMockBuilder} from './llmTypes';
 import {McpMockBuilder} from './mcpMockBuilder';
 import {A2aMockBuilder} from './a2aMockBuilder';
 

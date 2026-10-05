@@ -30,6 +30,10 @@ var mockServer = require('mockserver-client'),
 **Note:** this assumes you have an instance of MockServer running on port 1080.
 For more information on how to do so check [mockserver-node](https://www.npmjs.org/package/mockserver-node).
 
+The package includes TypeScript typings. It is a CommonJS module. From CommonJS, or TypeScript compiled to it, `import { mockServerClient, llm } from 'mockserver-client'` works with or without `esModuleInterop`. The LLM builders can also be imported on their own: `import llm = require('mockserver-client/llm')`, `import * as llm from 'mockserver-client/llm'`, or by name, `import { llmMock, completion } from 'mockserver-client/llm'`; `import llm from 'mockserver-client/llm'` needs `esModuleInterop`. That module has no `default` property.
+
+From an ES module (`.mjs`, `.mts`, or a package with `"type": "module"`) use the default import: `import mockServer from 'mockserver-client'`, or `import llm from 'mockserver-client/llm.js'` with the extension. Node cannot see the names this package's CommonJS modules export, so in an ES module a named import fails when the module loads and `import * as` gives an object without the members, although both type-check. Types are not affected: import them with `import type`.
+
 ## Setup Expectation
 
 A simple expectation can be set up as follows:

@@ -596,6 +596,12 @@ Terminal action methods:
 
 Full TypeScript definitions are in `mockServerClient.d.ts` and `mockServer.d.ts`. The `ForwardChainExpectation` interface and all request/response types are exported. The client ships type definitions as part of the package; no separate `@types/mockserver` package is needed.
 
+Each `.d.ts` declares the CommonJS module beside it as it is at run time. Every module of the package assigns an object of named members to `module.exports` and none has a `default` property, so each is declared with named exports and no default export. `llm.d.ts` exports the `Provider` and `Role` objects, the factories and the builder constructors by name, with `let`: the module is a plain object, and a test may replace a member (`llm.completion = stub`).
+
+The builder types are declared in `llmTypes.d.ts`, a types-only file with no module beside it. They cannot live in `llm.d.ts`, because there a name such as `Completion` is also the constructor `llm.js` exports, and `index.js` exports no `Completion`: `index.d.ts` exports the builder names from `llmTypes.d.ts`, as types alone, and declares `llm` as a value typed with the `Llm` interface and the constructors, written out, so that an augmentation of `Llm` shows on it. In `llm.d.ts` each builder name is the constructor and an interface that extends the one in `llmTypes.d.ts`. Factories and the builders' own methods return the `llmTypes.d.ts` interfaces, so those are the ones a module augmentation of `mockserver-client` or `mockserver-client/llmTypes` reaches.
+
+Two checks hold this in place. `test/no_proxy/package_contents_test.js` runs the launcher's `mockserver-node/test/packageContents.js` over the client: every function or value a published `.d.ts` exports must be a property of what its module exports, every name a module exports must be declared (the test lists the exceptions), a `.d.ts` with no module beside it must declare types alone, and a declared default export must exist. `test/llmImportForms.ts`, compiled by `npm run typecheck`, fails if `llm.d.ts` gains a `default`, if one of the pinned members stops being assignable, if a constructor stops being declared as one, if a builder name stops being an interface, if `Llm` has a member the module does not export by name, or if through the index a builder name becomes a value or `llm` a namespace.
+
 ## WebSocket Callback System
 
 For object/closure callbacks, a WebSocket connection between the client JVM and MockServer enables the callback to execute on the client side:

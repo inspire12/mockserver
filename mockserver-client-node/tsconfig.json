@@ -15,6 +15,7 @@
     "include": [
         "test/mockServerClient.ts",
         "test/expectationTypes.ts",
+        "test/llmImportForms.ts",
         "test/roundtrip_fidelity_types.ts"
     ]
 }
