@@ -70,6 +70,7 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -132,6 +133,7 @@ public class ResponseWriteStallTimeoutIntegrationTest {
     private static final long SLOW_SOCKET_READ_PAUSE_MILLIS = 200;
     private static final String TERMINATING_CHUNK = "0\r\n\r\n";
     private static final int SMALL_BODY_BYTES = 1024 * 1024;
+    private static final int LARGE_STREAM_WINDOW = 1024 * 1024;
     private static final Map<String, Channel> UPSTREAM_CHANNELS = new ConcurrentHashMap<>();
 
     private static byte[] fixedBody;
@@ -520,6 +522,43 @@ public class ResponseWriteStallTimeoutIntegrationTest {
     }
 
     @Test
+    public void shouldResetOnlyTheStalledHttp2StreamWhenItsClientLeavesMoreOfAConsumedStreamUnreturned() throws Exception {
+        long countedBefore = Metrics.getResponseWriteStallsCount(HTTP2_STREAM);
+        try (Http2Client client = Http2Client.open(mockServer)) {
+            // a stream window of 1 MiB over the connection window left at 65,535 bytes: Netty's codec returns a stream's
+            // window only once half of it is consumed, so a consumed stream can have far more unreturned than a stalled
+            // stream can hold of the connection window
+            client.onEventLoop(() -> client.initialWindow(LARGE_STREAM_WINDOW));
+            Http2Client.Stream sibling = client.request("/forward/fixed?test=http2-large-window-sibling");
+            // the client has returned the sibling's window once, and has since consumed twice what the connection window
+            // holds, with room left below the next return for all it can be sent before the connection window closes
+            long siblingUnreturned = 0;
+            for (long started = System.nanoTime(); ; ) {
+                client.consumeReceived(sibling, 16 * 1024);
+                long[] returnedAndUnreturned = client.windowReturned(sibling);
+                siblingUnreturned = returnedAndUnreturned[1];
+                if (returnedAndUnreturned[0] > 0 && siblingUnreturned >= 2 * Http2CodecUtil.DEFAULT_WINDOW_SIZE) {
+                    break;
+                }
+                assertThat("the sibling's client returned window for it in time", TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - started) < 30, is(true));
+                TimeUnit.MILLISECONDS.sleep(2);
+            }
+            assertThat("its next return is far off", siblingUnreturned < LARGE_STREAM_WINDOW / 2 - 4 * Http2CodecUtil.DEFAULT_WINDOW_SIZE, is(true));
+
+            // the client takes none of the holder's data, and all of the sibling's once the holder's response is waiting
+            Http2Client.Stream holder = client.request("/forward/fixed?test=http2-large-window-holder");
+            assertThat("the holder's response began", holder.responseStarted.await(30, TimeUnit.SECONDS), is(true));
+            client.consumeAll(sibling);
+
+            assertThat("the holder was reset", holder.ended.await(CUT_WITHIN_MILLIS, TimeUnit.MILLISECONDS), is(true));
+            assertThat(holder.resetErrorCode.get(), is(Http2Error.CANCEL.code()));
+            assertThat("the holder held no more than the connection window", holder.dataBytes.get() <= Http2CodecUtil.DEFAULT_WINDOW_SIZE, is(true));
+            assertCompleteWithFixedBody(sibling);
+        }
+        assertThat("only the holder was reset", Metrics.getResponseWriteStallsCount(HTTP2_STREAM), is(countedBefore + 1));
+    }
+
+    @Test
     public void shouldResetAStalledHttp2StreamWhoseClientKeepsChangingItsInitialWindow() throws Exception {
         long countedBefore = Metrics.getResponseWriteStallsCount(HTTP2_STREAM);
         try (Http2Client client = Http2Client.open(mockServer)) {
@@ -797,6 +836,7 @@ public class ResponseWriteStallTimeoutIntegrationTest {
             private final AtomicReference<Long> resetErrorCode = new AtomicReference<>();
             private final AtomicLong resetNanos = new AtomicLong();
             private final CountDownLatch ended = new CountDownLatch(1);
+            private final CountDownLatch responseStarted = new CountDownLatch(1);
             private Http2FrameStream frameStream;
             private int unconsumedBytes;
             private boolean consumeAll;
@@ -918,10 +958,21 @@ public class ResponseWriteStallTimeoutIntegrationTest {
         }
 
         /**
+         * The window the codec has returned for the stream, and what the client has consumed of it beyond that.
+         */
+        long[] windowReturned(Stream stream) throws Exception {
+            return ctx.executor().submit(() -> {
+                long returned = connectionWindowUpdateGate.streamWindowReturned.getOrDefault(stream.frameStream.id(), 0L);
+                return new long[]{returned, stream.dataBytes.get() - stream.unconsumedBytes - returned};
+            }).get(5, TimeUnit.SECONDS);
+        }
+
+        /**
          * Once discarding, drops every connection-level {@code WINDOW_UPDATE} the codec writes, each of which Netty's
-         * frame writer writes in a buffer of its own.
+         * frame writer writes in a buffer of its own. Adds up those it writes for each stream.
          */
         private static final class ConnectionWindowUpdateGate extends ChannelOutboundHandlerAdapter {
+            private final Map<Integer, Long> streamWindowReturned = new HashMap<>();
             private boolean discarding;
             private int discarded;
 
@@ -932,14 +983,21 @@ public class ResponseWriteStallTimeoutIntegrationTest {
                     ReferenceCountUtil.release(msg);
                     promise.trySuccess();
                 } else {
+                    if (msg instanceof ByteBuf && isWindowUpdate((ByteBuf) msg) && !isConnectionWindowUpdate((ByteBuf) msg)) {
+                        ByteBuf frame = (ByteBuf) msg;
+                        streamWindowReturned.merge(frame.getInt(frame.readerIndex() + 5), (long) frame.getInt(frame.readerIndex() + Http2CodecUtil.FRAME_HEADER_LENGTH), Long::sum);
+                    }
                     ctx.write(msg, promise);
                 }
             }
 
-            private static boolean isConnectionWindowUpdate(ByteBuf frame) {
+            private static boolean isWindowUpdate(ByteBuf frame) {
                 return frame.readableBytes() == Http2CodecUtil.FRAME_HEADER_LENGTH + 4
-                    && frame.getByte(frame.readerIndex() + 3) == Http2FrameTypes.WINDOW_UPDATE
-                    && frame.getInt(frame.readerIndex() + 5) == Http2CodecUtil.CONNECTION_STREAM_ID;
+                    && frame.getByte(frame.readerIndex() + 3) == Http2FrameTypes.WINDOW_UPDATE;
+            }
+
+            private static boolean isConnectionWindowUpdate(ByteBuf frame) {
+                return isWindowUpdate(frame) && frame.getInt(frame.readerIndex() + 5) == Http2CodecUtil.CONNECTION_STREAM_ID;
             }
         }
 
@@ -985,6 +1043,9 @@ public class ResponseWriteStallTimeoutIntegrationTest {
                 Stream stream = msg instanceof Http2StreamFrame && ((Http2StreamFrame) msg).stream() != null ? streams.get(((Http2StreamFrame) msg).stream()) : null;
                 if (stream == null) {
                     return;
+                }
+                if (msg instanceof Http2HeadersFrame) {
+                    stream.responseStarted.countDown();
                 }
                 if (msg instanceof Http2DataFrame) {
                     Http2DataFrame data = (Http2DataFrame) msg;

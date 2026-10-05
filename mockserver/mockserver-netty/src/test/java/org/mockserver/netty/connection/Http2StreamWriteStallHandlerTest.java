@@ -16,6 +16,7 @@ import io.netty.handler.codec.http2.DefaultHttp2Connection;
 import io.netty.handler.codec.http2.DefaultHttp2DataFrame;
 import io.netty.handler.codec.http2.DefaultHttp2Headers;
 import io.netty.handler.codec.http2.DefaultHttp2HeadersFrame;
+import io.netty.handler.codec.http2.DefaultHttp2LocalFlowController;
 import io.netty.handler.codec.http2.DefaultHttp2SettingsFrame;
 import io.netty.handler.codec.http2.DefaultHttp2WindowUpdateFrame;
 import io.netty.handler.codec.http2.Http2ChannelDuplexHandler;
@@ -60,6 +61,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.lessThan;
 import static org.hamcrest.Matchers.nullValue;
 import static org.mockserver.configuration.Configuration.configuration;
 
@@ -77,6 +79,8 @@ public class Http2StreamWriteStallHandlerTest {
     private static final String STAGED_RESPONSE_PATH = "/staged";
     private static final int STAGED_FIRST_BYTES = 40_000;
     private static final String TRAILERS_ONLY_PATH = "/trailers";
+    private static final String PARTS_RESPONSE_PATH = "/parts";
+    private static final int[] PARTS_BYTES = {66_000, 10_000, 150_000};
     private static final int ON_TIME_ATTEMPTS = 5;
     private static final int SOCKET_WRITABILITY = 1;
     private static final int SMALL_WINDOW = 1024;
@@ -97,6 +101,7 @@ public class Http2StreamWriteStallHandlerTest {
     private long lastCheckBeganNanos;
     private boolean dropConnectionWindowUpdates;
     private int droppedConnectionWindowUpdates;
+    private final Map<Integer, Integer> smallestReturns = new HashMap<>();
 
     @Before
     public void enableMetrics() {
@@ -307,7 +312,8 @@ public class Http2StreamWriteStallHandlerTest {
     @Test
     public void shouldResetEveryStreamHoldingTheMostOfTheConnectionWindowWhenTheyHoldTheSame() throws Exception {
         // a stream window above the connection window lets a client leave as much of a stream it consumes unreturned as
-        // a stalled stream holds; the two cannot be told apart, and resetting both is what surely releases the window
+        // a stalled stream holds; its client has returned window for neither, so the two cannot be told apart, and
+        // resetting both is what surely releases the window
         connect(Http2CodecUtil.DEFAULT_WINDOW_SIZE);
         clientHandler.initialStreamWindow(80_000);
         exchange();
@@ -320,6 +326,7 @@ public class Http2StreamWriteStallHandlerTest {
         ClientStream holder = opened[0];
         assertThat(serverWindow(0), is(0));
         assertThat("a consumed sibling holds as much as the holder", held(second), is(held(holder)));
+        assertThat("its client has returned no window for it yet", smallestReturn(second), is(0));
         assertThat("the other sibling holds less", held(first) < held(holder), is(true));
 
         waitUntilStallsCounted(1);
@@ -333,10 +340,47 @@ public class Http2StreamWriteStallHandlerTest {
     }
 
     @Test
-    public void shouldResetTheStalledStreamOnePeriodAfterAConsumedSiblingThatHoldsMoreOfTheConnectionWindow() throws Exception {
-        // with a stream window above the connection window the server cannot tell which of the two its client is reading
+    public void shouldResetOnlyTheStalledStreamWhenAConsumedSiblingHoldsMoreOfTheConnectionWindow() throws Exception {
         connect(Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+        resetsOnlyTheStalledStreamWhenAConsumedSiblingHoldsMoreOfTheConnectionWindow();
+    }
+
+    @Test
+    public void shouldResetOnlyTheStalledStreamInsideATunnelWhenAConsumedSiblingHoldsMoreOfTheConnectionWindow() throws Exception {
+        connectThroughRelayHandler(Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+        resetsOnlyTheStalledStreamWhenAConsumedSiblingHoldsMoreOfTheConnectionWindow();
+    }
+
+    private void resetsOnlyTheStalledStreamWhenAConsumedSiblingHoldsMoreOfTheConnectionWindow() throws Exception {
+        // a stream window above the connection window: the client leaves more of the stream it consumes unreturned than
+        // the stalled stream holds, but less than it has returned for it at once, and has returned none for the holder
         clientHandler.initialStreamWindow(100_000);
+        exchange();
+        ClientStream sibling = clientHandler.request(LARGE_RESPONSE_PATH, Integer.MAX_VALUE);
+        ClientStream[] opened = new ClientStream[1];
+        sibling.onFirstData = () -> opened[0] = clientHandler.request(LARGE_RESPONSE_PATH);
+        exchange();
+        ClientStream holder = opened[0];
+        assertThat(serverWindow(0), is(0));
+        assertThat("the consumed sibling holds more than the holder", held(sibling), is(greaterThan(held(holder))));
+        assertThat("less than its client has returned for it at once", held(sibling), is(lessThan(smallestReturn(sibling))));
+        assertThat("its client has returned nothing for the holder", smallestReturn(holder), is(0));
+
+        waitUntilStallsCounted(1);
+
+        assertThat("the stalled stream was reset", holder.resetErrorCode, is(Http2Error.CANCEL.code()));
+        assertThat("the sibling its client is consuming was not", sibling.resetErrorCode, is(nullValue()));
+        assertThat(sibling.dataBytes, is(LARGE_RESPONSE_BYTES));
+        assertThat(sibling.endStream, is(true));
+        assertThat(Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP2_STREAM), is(1L));
+    }
+
+    @Test
+    public void shouldResetAConsumedSiblingThatHoldsMoreFirstWhenItsClientHasReturnedNoWindowForIt() throws Exception {
+        // with a stream window so far above the connection window that the consumed stream has not yet had window
+        // returned, the server cannot tell which of the two its client is reading
+        connect(Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+        clientHandler.initialStreamWindow(200_000);
         exchange();
 
         ClientStream sibling = clientHandler.request(LARGE_RESPONSE_PATH, Integer.MAX_VALUE);
@@ -346,6 +390,7 @@ public class Http2StreamWriteStallHandlerTest {
         ClientStream holder = opened[0];
         assertThat(serverWindow(0), is(0));
         assertThat("the consumed sibling holds more than the holder", held(sibling), is(greaterThan(held(holder))));
+        assertThat("its client has returned no window for either", smallestReturn(sibling) + smallestReturn(holder), is(0));
 
         waitUntilStallsCounted(1);
         assertThat("the sibling was reset first", sibling.resetErrorCode, is(Http2Error.CANCEL.code()));
@@ -355,6 +400,523 @@ public class Http2StreamWriteStallHandlerTest {
         assertThat("the stalled stream, which released nothing, was reset too", holder.resetErrorCode, is(Http2Error.CANCEL.code()));
         long apartMillis = TimeUnit.NANOSECONDS.toMillis(holder.resetNanos - sibling.resetNanos);
         assertThat("one period later (" + apartMillis + " ms apart)", apartMillis >= TIMEOUT_MILLIS / 2, is(true));
+    }
+
+    @Test
+    public void shouldResetAConsumedSiblingFirstWhenNoneOfSeveralStalledStreamsHoldsHalfTheConnectionWindow() throws Exception {
+        // three stalled streams share what one would hold, so each holds less than the consumed sibling has unreturned,
+        // and no more than a stream being consumed may have unreturned before its first return: nothing marks them
+        connect(Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+        ClientStream sibling = clientHandler.request(LARGE_RESPONSE_PATH, Integer.MAX_VALUE);
+        ClientStream[] holders = new ClientStream[3];
+        sibling.onFirstData = () -> {
+            for (int i = 0; i < holders.length; i++) {
+                holders[i] = clientHandler.request(LARGE_RESPONSE_PATH);
+            }
+        };
+        exchange();
+        assertThat(serverWindow(0), is(0));
+        int heldByHolders = 0;
+        for (ClientStream holder : holders) {
+            assertThat("the consumed sibling holds more than each stalled stream", held(sibling), is(greaterThan(held(holder))));
+            assertThat("each stalled stream holds less than half the connection window", 2 * held(holder), is(lessThan(Http2CodecUtil.DEFAULT_WINDOW_SIZE)));
+            heldByHolders += held(holder);
+        }
+        assertThat("together they hold more than half of it", 2 * heldByHolders, is(greaterThan(Http2CodecUtil.DEFAULT_WINDOW_SIZE)));
+        assertThat("the sibling holds less than its client has returned for it at once", held(sibling), is(lessThan(smallestReturn(sibling))));
+
+        waitUntilStallsCounted(1);
+        assertThat("the sibling was reset first", sibling.resetErrorCode, is(Http2Error.CANCEL.code()));
+        assertThat(Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP2_STREAM), is(1L));
+
+        waitUntilStallsCounted(2);
+        for (ClientStream holder : holders) {
+            assertThat("the stalled streams, which released nothing, were reset a period later", holder.resetErrorCode, is(Http2Error.CANCEL.code()));
+        }
+        assertThat(Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP2_STREAM), is(4L));
+    }
+
+    @Test
+    public void shouldResetEachStalledStreamInTurnWhenTheOneHoldingTheConnectionWindowHoldsMoreThanHalfOfIt() throws Exception {
+        // two stalled streams at a stream window above the connection window: the first holds more than half the
+        // connection window, the second opens behind it and takes the window the first one's reset releases
+        connect(Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+        clientHandler.initialStreamWindow(100_000);
+        exchange();
+        ClientStream sibling = clientHandler.request(LARGE_RESPONSE_PATH, Integer.MAX_VALUE);
+        ClientStream[] holders = new ClientStream[2];
+        sibling.onFirstData = () -> holders[0] = clientHandler.request(LARGE_RESPONSE_PATH);
+        sibling.reachingDataBytes = 80_000;
+        sibling.onReachingDataBytes = () -> holders[1] = clientHandler.request(LARGE_RESPONSE_PATH);
+        exchange();
+        assertThat(serverWindow(0), is(0));
+        assertThat("the consumed sibling holds more than either stalled stream", held(sibling), is(greaterThan(Math.max(held(holders[0]), held(holders[1])))));
+        assertThat("less than its client has returned for it at once", held(sibling), is(lessThan(smallestReturn(sibling))));
+        assertThat("the first stalled stream holds more than half the connection window", 2 * held(holders[0]), is(greaterThan(Http2CodecUtil.DEFAULT_WINDOW_SIZE)));
+
+        waitUntilStallsCounted(1);
+        assertThat("the first stalled stream was reset", holders[0].resetErrorCode, is(Http2Error.CANCEL.code()));
+        assertThat("the sibling its client is consuming was not", sibling.resetErrorCode, is(nullValue()));
+        assertThat("the second stalled stream took the window that released", 2 * held(holders[1]), is(greaterThan(Http2CodecUtil.DEFAULT_WINDOW_SIZE)));
+
+        waitUntilStallsCounted(2);
+        assertThat("the second stalled stream was reset in its turn", holders[1].resetErrorCode, is(Http2Error.CANCEL.code()));
+        assertThat(sibling.resetErrorCode, is(nullValue()));
+        assertThat(sibling.dataBytes, is(LARGE_RESPONSE_BYTES));
+        assertThat(sibling.endStream, is(true));
+        assertThat(Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP2_STREAM), is(2L));
+    }
+
+    @Test
+    public void shouldNotPassOverAStalledStreamForAConsumedStreamOneByteShortOfItsFirstReturn() throws Exception {
+        // default windows. The stalled stream's client took all it had of it in one go and then stopped; one of the
+        // streams its client is consuming has had no window returned and has half a window less one byte unreturned,
+        // the most a stream being consumed can have: exactly not more than half of what the connection has out
+        connect(Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+        clientHandler.request("/", Integer.MAX_VALUE);
+        exchange();
+        ClientStream stalled = clientHandler.request(LARGE_RESPONSE_PATH);
+        exchange();
+        ClientStream[] consumed = new ClientStream[3];
+        for (int i = 0; i < consumed.length; i++) {
+            consumed[i] = clientHandler.request(LARGE_RESPONSE_PATH, Integer.MAX_VALUE);
+        }
+        exchange();
+        clientHandler.consumeReceived(stalled);
+        exchange();
+        assertThat(serverWindow(0), is(0));
+        assertThat("the stalled stream holds less than its client has returned for it at once", held(stalled), is(lessThan(smallestReturn(stalled))));
+        int mostWithNothingReturned = 0;
+        for (ClientStream stream : consumed) {
+            if (smallestReturn(stream) == 0) {
+                mostWithNothingReturned = Math.max(mostWithNothingReturned, held(stream));
+            }
+        }
+        assertThat("a consumed stream with nothing returned has half the connection window less one byte unreturned", mostWithNothingReturned, is(Http2CodecUtil.DEFAULT_WINDOW_SIZE / 2));
+
+        waitUntilStallsCounted(1);
+
+        assertThat("the stalled stream was reset", stalled.resetErrorCode, is(Http2Error.CANCEL.code()));
+        for (ClientStream stream : consumed) {
+            assertThat("no stream its client is consuming was", stream.resetErrorCode, is(nullValue()));
+            assertThat(stream.dataBytes, is(LARGE_RESPONSE_BYTES));
+            assertThat(stream.endStream, is(true));
+        }
+        assertThat(Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP2_STREAM), is(1L));
+    }
+
+    @Test
+    public void shouldResetOnlyTheStalledStreamWhenSeveralConsumedStreamsHaveHadNoWindowReturnedYet() throws Exception {
+        // default windows. The stalled stream's client took a whole window of it in one go and then stopped, so it holds
+        // less than was returned for it at once; two of the streams its client is consuming have had no window returned
+        // yet, and together have more than half the connection window unreturned
+        connect(Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+        ClientStream stalled = clientHandler.request(PARTS_RESPONSE_PATH);
+        exchange();
+        clientHandler.consumeReceived(stalled);
+        exchange();
+        responder.writeRests.get(0).run();
+        exchange();
+        ClientStream[] consumed = new ClientStream[3];
+        for (int i = 0; i < consumed.length; i++) {
+            consumed[i] = clientHandler.request(LARGE_RESPONSE_PATH, Integer.MAX_VALUE);
+        }
+        consumed[0].onFirstData = () -> responder.writeRests.get(1).run();
+        exchange();
+        assertThat(serverWindow(0), is(0));
+        assertThat("the stalled stream holds less than its client has returned for it at once", held(stalled), is(lessThan(smallestReturn(stalled))));
+        int withNothingReturned = 0;
+        int heldWithNothingReturned = 0;
+        for (ClientStream stream : consumed) {
+            assertThat("the stalled stream holds more than each consumed stream", held(stalled), is(greaterThan(held(stream))));
+            if (smallestReturn(stream) == 0) {
+                withNothingReturned++;
+                heldWithNothingReturned += held(stream);
+            }
+        }
+        assertThat("two consumed streams have had no window returned", withNothingReturned, is(2));
+        assertThat("together they have more than half the connection window unreturned", 2 * heldWithNothingReturned, is(greaterThan(Http2CodecUtil.DEFAULT_WINDOW_SIZE)));
+
+        waitUntilStallsCounted(1);
+
+        assertThat("the stalled stream was reset", stalled.resetErrorCode, is(Http2Error.CANCEL.code()));
+        for (ClientStream stream : consumed) {
+            assertThat("no stream its client is consuming was", stream.resetErrorCode, is(nullValue()));
+            assertThat(stream.dataBytes, is(LARGE_RESPONSE_BYTES));
+            assertThat(stream.endStream, is(true));
+        }
+        assertThat(Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP2_STREAM), is(1L));
+    }
+
+    @Test
+    public void shouldResetAConsumedStreamWithNoWindowReturnedBeforeAStreamThatStalledHoldingLessThanItsClientReturnedForIt() throws Exception {
+        // a known limit, at a stream window above the connection window: the stalled stream's client consumed it for a
+        // while, so what it holds is less than was returned for it at once, and the stream being consumed has more than
+        // half the connection window unreturned and none returned yet, which is what a stalled stream looks like
+        connect(Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+        clientHandler.initialStreamWindow(200_000);
+        exchange();
+        ClientStream stalled = clientHandler.request(LARGE_RESPONSE_PATH, 140_000);
+        ClientStream[] opened = new ClientStream[1];
+        stalled.reachingDataBytes = 110_000;
+        stalled.onReachingDataBytes = () -> opened[0] = clientHandler.request(LARGE_RESPONSE_PATH, Integer.MAX_VALUE);
+        exchange();
+        ClientStream consumed = opened[0];
+        assertThat(serverWindow(0), is(0));
+        assertThat("the stalled stream holds less than its client has returned for it at once", held(stalled), is(lessThan(smallestReturn(stalled))));
+        assertThat("and more than the consumed stream", held(stalled), is(greaterThan(held(consumed))));
+        assertThat("which has had no window returned", smallestReturn(consumed), is(0));
+        assertThat("and has more than half the connection window unreturned", 2 * held(consumed), is(greaterThan(Http2CodecUtil.DEFAULT_WINDOW_SIZE)));
+
+        waitUntilStallsCounted(1);
+        assertThat("the consumed stream was reset first", consumed.resetErrorCode, is(Http2Error.CANCEL.code()));
+        assertThat(Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP2_STREAM), is(1L));
+
+        waitUntilStallsCounted(2);
+        assertThat("the stalled stream was reset a period later", stalled.resetErrorCode, is(Http2Error.CANCEL.code()));
+        long apartMillis = TimeUnit.NANOSECONDS.toMillis(stalled.resetNanos - consumed.resetNanos);
+        assertThat("one period later (" + apartMillis + " ms apart)", apartMillis >= TIMEOUT_MILLIS / 2, is(true));
+    }
+
+    @Test
+    public void shouldResetAStalledStreamItsClientGrantedWindowBeyondTheInitialWindow() throws Exception {
+        connect(Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+        resetsAStalledStreamItsClientGrantedWindowBeyondTheInitialWindow();
+    }
+
+    @Test
+    public void shouldResetAStalledStreamInsideATunnelItsClientGrantedWindowBeyondTheInitialWindow() throws Exception {
+        connectThroughRelayHandler(Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+        resetsAStalledStreamItsClientGrantedWindowBeyondTheInitialWindow();
+    }
+
+    private void resetsAStalledStreamItsClientGrantedWindowBeyondTheInitialWindow() throws Exception {
+        // the grant reaches the server before any of the holder's data can leave, so it returns nothing; the holder's
+        // send window then stays above the initial window however much of the connection window it holds
+        ClientStream sibling = clientHandler.request(LARGE_RESPONSE_PATH, Integer.MAX_VALUE);
+        ClientStream[] opened = new ClientStream[1];
+        sibling.onFirstData = () -> {
+            opened[0] = clientHandler.request(LARGE_RESPONSE_PATH);
+            grantWindow(opened[0], 4 * Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+        };
+        exchange();
+        ClientStream holder = opened[0];
+        assertThat(serverWindow(0), is(0));
+        assertThat("the holder was sent half the connection window", holder.dataBytes, is(greaterThan(Http2CodecUtil.DEFAULT_WINDOW_SIZE / 2)));
+        assertThat("its send window is above the initial window", serverWindow(holder.frameStream.id()), is(greaterThan(serverInitialWindow())));
+        assertThat("the consumed sibling's is below it", serverWindow(sibling.frameStream.id()), is(lessThan(serverInitialWindow())));
+
+        waitUntilStallsCounted(1);
+
+        assertThat("the stalled stream was reset", holder.resetErrorCode, is(Http2Error.CANCEL.code()));
+        assertThat("the sibling its client is consuming was not", sibling.resetErrorCode, is(nullValue()));
+        assertThat(sibling.dataBytes, is(LARGE_RESPONSE_BYTES));
+        assertThat(sibling.endStream, is(true));
+        assertThat(Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP2_STREAM), is(1L));
+    }
+
+    @Test
+    public void shouldNotCountWindowGrantedBeyondWhatAStreamWasSentAsReturned() throws Exception {
+        connect(Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+        clientHandler.initialStreamWindow(300_000);
+        exchange();
+        ClientStream granted = clientHandler.request(LARGE_RESPONSE_PATH);
+        clientHandler.sendEveryGrant(granted);
+        clientHandler.sendEveryConnectionGrant();
+        exchange();
+        // three times what the stream has been sent: only what it was sent can be a return, the least returned for it
+        // at once is that and not the grant, and the rest returns nothing of the data sent after it
+        clientHandler.grantWindow(granted, 3 * granted.dataBytes);
+        clientHandler.grantConnectionWindow(Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+        exchange();
+        ClientStream other = clientHandler.request(LARGE_RESPONSE_PATH);
+        exchange();
+        clientHandler.grantConnectionWindow(70_000);
+        exchange();
+        dropConnectionWindowUpdates = true;
+        assertThat(serverWindow(0), is(0));
+        assertThat("the granted stream's send window is above the initial window", serverWindow(granted.frameStream.id()), is(greaterThan(serverInitialWindow())));
+        int sentSinceTheGrant = granted.dataBytes - Http2CodecUtil.DEFAULT_WINDOW_SIZE;
+        assertThat("it was sent more since the grant than the other stream was sent at all", sentSinceTheGrant, is(greaterThan(other.dataBytes)));
+        assertThat("and more than the grant could return, though less than the grant", sentSinceTheGrant > Http2CodecUtil.DEFAULT_WINDOW_SIZE && sentSinceTheGrant < smallestReturn(granted), is(true));
+        assertThat("the other holds more than half the connection window", 2 * other.dataBytes, is(greaterThan(Http2CodecUtil.DEFAULT_WINDOW_SIZE)));
+
+        waitUntilStallsCounted(1);
+
+        assertThat("the stream holding the most was reset", granted.resetErrorCode, is(Http2Error.CANCEL.code()));
+        assertThat("the other was given a fresh period", other.resetErrorCode, is(nullValue()));
+        assertThat(Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP2_STREAM), is(1L));
+    }
+
+    @Test
+    public void shouldResetOnlyTheStalledStreamWhenItsClientReturnsAConsumedSiblingsWindowLate() throws Exception {
+        connect(Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+        resetsOnlyTheStalledStreamWhenItsClientReturnsAConsumedSiblingsWindowLate();
+    }
+
+    @Test
+    public void shouldResetOnlyTheStalledStreamInsideATunnelWhenItsClientReturnsAConsumedSiblingsWindowLate() throws Exception {
+        connectThroughRelayHandler(Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+        resetsOnlyTheStalledStreamWhenItsClientReturnsAConsumedSiblingsWindowLate();
+    }
+
+    private void resetsOnlyTheStalledStreamWhenItsClientReturnsAConsumedSiblingsWindowLate() throws Exception {
+        // the stream and connection windows are the same size; the client leaves more than half the consumed stream's
+        // window unreturned, which is more than the stalled stream holds
+        ClientStream sibling = clientHandler.request(LARGE_RESPONSE_PATH, Integer.MAX_VALUE);
+        clientHandler.returnWindowLate(sibling);
+        ClientStream[] opened = new ClientStream[1];
+        sibling.reachingDataBytes = 104_000;
+        sibling.onReachingDataBytes = () -> opened[0] = clientHandler.request(LARGE_RESPONSE_PATH);
+        exchange();
+        ClientStream holder = opened[0];
+        assertThat(serverWindow(0), is(0));
+        assertThat("the consumed sibling holds more than half its window", held(sibling), is(greaterThan(Http2CodecUtil.DEFAULT_WINDOW_SIZE / 2)));
+        assertThat("which is more than the holder", held(sibling), is(greaterThan(held(holder))));
+        assertThat("and less than its client has returned for it at once", held(sibling), is(lessThan(smallestReturn(sibling))));
+
+        waitUntilStallsCounted(1);
+
+        assertThat("the stalled stream was reset", holder.resetErrorCode, is(Http2Error.CANCEL.code()));
+        assertThat("the sibling its client is consuming was not", sibling.resetErrorCode, is(nullValue()));
+        assertThat(sibling.dataBytes, is(LARGE_RESPONSE_BYTES));
+        assertThat(sibling.endStream, is(true));
+        assertThat(Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP2_STREAM), is(1L));
+    }
+
+    @Test
+    public void shouldResetTheStreamHoldingTheMostWhenTheOthersHoldTooLittleToHaveClosedTheConnectionWindow() throws Exception {
+        ClientStream[] streams = twoStreamsOfAClientThatConsumesNeither(30_000);
+        ClientStream most = streams[0];
+        ClientStream other = streams[1];
+        // the client returns most of the first stream's window at once, so what it still holds is less than that
+        clientHandler.grantWindow(most, 100_000);
+        exchange();
+        assertThat(serverWindow(0), is(0));
+        assertThat("it holds less than its client has returned for it at once", held(most), is(lessThan(smallestReturn(most))));
+        assertThat("and more than the other", held(most), is(greaterThan(held(other))));
+        assertThat("which holds less than half the connection window", 2 * held(other), is(lessThan(Http2CodecUtil.DEFAULT_WINDOW_SIZE)));
+
+        waitUntilStallsCounted(1);
+
+        assertThat("the stream holding the most was reset", most.resetErrorCode, is(Http2Error.CANCEL.code()));
+        assertThat("the other was given a fresh period", other.resetErrorCode, is(nullValue()));
+        assertThat(Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP2_STREAM), is(1L));
+    }
+
+    @Test
+    public void shouldMeasureTheOthersAgainstAConnectionWindowItsClientHasEnlarged() throws Exception {
+        // the client doubles the connection window before any data is sent, so twice as much must be out to close it
+        connect(Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+        clientHandler.initialStreamWindow(300_000);
+        clientHandler.sendEveryConnectionGrant();
+        clientHandler.grantConnectionWindow(Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+        exchange();
+        ClientStream most = clientHandler.request(LARGE_RESPONSE_PATH);
+        clientHandler.sendEveryGrant(most);
+        exchange();
+        assertThat(most.dataBytes, is(2 * Http2CodecUtil.DEFAULT_WINDOW_SIZE));
+        ClientStream other = clientHandler.request(LARGE_RESPONSE_PATH);
+        exchange();
+        clientHandler.grantConnectionWindow(80_000);
+        exchange();
+        dropConnectionWindowUpdates = true;
+        clientHandler.grantWindow(most, 100_000);
+        exchange();
+        assertThat(serverWindow(0), is(0));
+        assertThat("the first stream holds less than its client has returned for it at once", held(most), is(lessThan(smallestReturn(most))));
+        assertThat("and more than the other", held(most), is(greaterThan(held(other))));
+        assertThat("which holds more than half the initial connection window", 2 * held(other), is(greaterThan(Http2CodecUtil.DEFAULT_WINDOW_SIZE)));
+        assertThat("and less than half the enlarged one", held(other), is(lessThan(Http2CodecUtil.DEFAULT_WINDOW_SIZE)));
+
+        waitUntilStallsCounted(1);
+
+        assertThat("the stream holding the most was reset", most.resetErrorCode, is(Http2Error.CANCEL.code()));
+        assertThat("the other was given a fresh period", other.resetErrorCode, is(nullValue()));
+        assertThat(Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP2_STREAM), is(1L));
+    }
+
+    @Test
+    public void shouldResetAStreamPassedOverOnePeriodLaterWhateverWindowItsClientSendsForIt() throws Exception {
+        ClientStream[] streams = twoStreamsOfAClientThatConsumesNeither(70_000);
+        ClientStream passedOver = streams[0];
+        ClientStream other = streams[1];
+        // the client returns all of the first stream's window but as much as the other holds
+        clientHandler.grantWindow(passedOver, held(passedOver) - held(other));
+        exchange();
+        assertThat(serverWindow(0), is(0));
+        assertThat("the two hold the same", held(passedOver), is(held(other)));
+        assertThat("the first less than its client has returned for it at once", held(passedOver), is(lessThan(smallestReturn(passedOver))));
+        assertThat("the other more than half the connection window", 2 * held(other), is(greaterThan(Http2CodecUtil.DEFAULT_WINDOW_SIZE)));
+
+        runChecksUntilStallsCounted(1);
+        assertThat("the stream with nothing returned was reset", other.resetErrorCode, is(Http2Error.CANCEL.code()));
+        assertThat("the other was passed over", passedOver.resetErrorCode, is(nullValue()));
+        assertThat(Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP2_STREAM), is(1L));
+
+        // its client takes none of its data, and sends it window before every check
+        int checks = 0;
+        while (Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP2_STREAM) < 2) {
+            assertThat("the stream passed over was reset in time", checks < CHECKS, is(true));
+            runChecks(1, () -> clientHandler.windowUpdate(passedOver, 1));
+            checks++;
+        }
+        assertThat(passedOver.resetErrorCode, is(Http2Error.CANCEL.code()));
+        assertThat("one timeout after the reset it was passed over for", checks, is(CHECKS_PER_TIMEOUT));
+    }
+
+    @Test
+    public void shouldGiveAStreamPassedOverNoSecondFreshPeriodWhenOtherStreamsAreResetInTurn() throws Exception {
+        // a client that takes nothing: three streams hold more than half the connection window each, a different amount
+        // each, and the first holds less than its client has returned for it at once
+        connect(Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+        clientHandler.initialStreamWindow(300_000);
+        exchange();
+        ClientStream passedOver = clientHandler.request(LARGE_RESPONSE_PATH);
+        clientHandler.sendEveryGrant(passedOver);
+        clientHandler.sendEveryConnectionGrant();
+        exchange();
+        ClientStream[] others = new ClientStream[3];
+        for (int i = 0; i < others.length; i++) {
+            others[i] = clientHandler.request(LARGE_RESPONSE_PATH);
+            exchange();
+            clientHandler.grantConnectionWindow((i + 2) * 40_000);
+            exchange();
+        }
+        dropConnectionWindowUpdates = true;
+        clientHandler.grantWindow(passedOver, passedOver.dataBytes - 10_000);
+        exchange();
+        assertThat(serverWindow(0), is(0));
+        assertThat("the first stream holds less than its client has returned for it at once", held(passedOver), is(lessThan(smallestReturn(passedOver))));
+        for (int i = 0; i < others.length; i++) {
+            assertThat("each other holds more than half the connection window", 2 * held(others[i]), is(greaterThan(Http2CodecUtil.DEFAULT_WINDOW_SIZE)));
+            assertThat("and less than the one opened before it", i == 0 || held(others[i]) < held(others[i - 1]), is(true));
+        }
+
+        runChecksUntilStallsCounted(1);
+        assertThat("the stream holding the most, of those with nothing returned, was reset alone", others[0].resetErrorCode, is(Http2Error.CANCEL.code()));
+        assertThat(Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP2_STREAM), is(1L));
+
+        // the next of them is picked a period later, and the stream passed over before is not passed over again
+        runChecks(CHECKS_PER_TIMEOUT, () -> { });
+        assertThat("every stream was reset one timeout after the first", Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP2_STREAM), is(4L));
+        assertThat(passedOver.resetErrorCode, is(Http2Error.CANCEL.code()));
+    }
+
+    @Test
+    public void shouldResetAStreamWhoseOwnWindowIsClosedThoughItHoldsLessThanItsClientReturnedForIt() throws Exception {
+        ClientStream[] streams = twoStreamsOfAClientThatConsumesNeither(70_000);
+        ClientStream closed = streams[0];
+        ClientStream other = streams[1];
+        clientHandler.grantWindow(closed, held(closed) - 10_000);
+        exchange();
+        // the client then takes back every stream's window, so each waits for its own window and not for the other
+        clientHandler.initialStreamWindow(0);
+        exchange();
+        assertThat(serverWindow(0), is(0));
+        assertThat("the first stream's own window is closed", serverWindow(closed.frameStream.id()), is(lessThan(0)));
+        assertThat("it holds less than its client has returned for it at once", held(closed), is(lessThan(smallestReturn(closed))));
+        assertThat("the other holds more than half the connection window", 2 * held(other), is(greaterThan(Http2CodecUtil.DEFAULT_WINDOW_SIZE)));
+
+        waitUntilStallsCounted(1);
+
+        assertThat("both were reset in the same check", Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP2_STREAM), is(2L));
+        assertThat(closed.resetErrorCode, is(Http2Error.CANCEL.code()));
+        assertThat(other.resetErrorCode, is(Http2Error.CANCEL.code()));
+    }
+
+    @Test
+    public void shouldNotPassOverAStreamForOneHoldingExactlyHalfOfWhatTheConnectionHasOut() throws Exception {
+        connect(Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+        clientHandler.initialStreamWindow(300_000);
+        exchange();
+        ClientStream half = clientHandler.request(LARGE_RESPONSE_PATH);
+        clientHandler.sendEveryConnectionGrant();
+        exchange();
+        assertThat(half.dataBytes, is(Http2CodecUtil.DEFAULT_WINDOW_SIZE));
+        // served before the first stream, so the first is sent no more
+        ClientStream most = clientHandler.request(LARGE_RESPONSE_PATH);
+        clientHandler.sendEveryGrant(most);
+        clientHandler.dependOn(half, most);
+        exchange();
+        // twice the connection window at once: only what was out can be a return, so twice as much is out afterwards
+        clientHandler.grantConnectionWindow(2 * Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+        exchange();
+        clientHandler.grantConnectionWindow(60_000);
+        exchange();
+        dropConnectionWindowUpdates = true;
+        clientHandler.grantWindow(most, 110_000);
+        exchange();
+        assertThat(serverWindow(0), is(0));
+        assertThat("the first stream was sent a connection window's worth and nothing since", half.dataBytes, is(Http2CodecUtil.DEFAULT_WINDOW_SIZE));
+        assertThat("the connection has twice that out", most.dataBytes, is(2 * Http2CodecUtil.DEFAULT_WINDOW_SIZE + 60_000));
+        assertThat("no window has been returned for the first stream", smallestReturn(half), is(0));
+        assertThat("the second holds less than its client has returned for it at once", held(most), is(lessThan(smallestReturn(most))));
+        assertThat("and more than the first", held(most), is(greaterThan(held(half))));
+
+        waitUntilStallsCounted(1);
+
+        assertThat("the stream holding the most was reset", most.resetErrorCode, is(Http2Error.CANCEL.code()));
+        assertThat("the other was given a fresh period", half.resetErrorCode, is(nullValue()));
+        assertThat(Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP2_STREAM), is(1L));
+    }
+
+    @Test
+    public void shouldNotPassOverAStreamHoldingAsMuchAsTheLeastItsClientHasReturnedForItAtOnce() throws Exception {
+        ClientStream[] streams = twoStreamsOfAClientThatConsumesNeither(70_000);
+        ClientStream most = streams[0];
+        ClientStream other = streams[1];
+        // a large return, and then one of exactly what the stream is left holding
+        int left = 40_000;
+        clientHandler.grantWindow(most, held(most) - 2 * left);
+        exchange();
+        clientHandler.grantWindow(most, left);
+        exchange();
+        assertThat(serverWindow(0), is(0));
+        assertThat("it holds as much as the least its client has returned for it at once", held(most), is(smallestReturn(most)));
+        assertThat("and more than the other", held(most), is(greaterThan(held(other))));
+        assertThat("which holds more than half the connection window", 2 * held(other), is(greaterThan(Http2CodecUtil.DEFAULT_WINDOW_SIZE)));
+
+        waitUntilStallsCounted(1);
+
+        assertThat("the stream holding the most was reset", most.resetErrorCode, is(Http2Error.CANCEL.code()));
+        assertThat("the other was given a fresh period", other.resetErrorCode, is(nullValue()));
+        assertThat(Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP2_STREAM), is(1L));
+    }
+
+    @Test
+    public void shouldKeepWhatAStreamsClientHasReturnedForItWhenItThenGrantsItWindowWithNothingUnreturned() throws Exception {
+        connect(Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+        clientHandler.initialStreamWindow(300_000);
+        exchange();
+        ClientStream passedOver = clientHandler.request(LARGE_RESPONSE_PATH);
+        clientHandler.sendEveryGrant(passedOver);
+        clientHandler.sendEveryConnectionGrant();
+        exchange();
+        // the client returns all the stream was sent, and then grants it a little more, which returns nothing
+        clientHandler.grantWindow(passedOver, passedOver.dataBytes);
+        exchange();
+        clientHandler.grantWindow(passedOver, 5_000);
+        exchange();
+        assertThat(held(passedOver), is(-5_000));
+        clientHandler.grantConnectionWindow(10_000);
+        exchange();
+        ClientStream other = clientHandler.request(LARGE_RESPONSE_PATH);
+        exchange();
+        clientHandler.grantConnectionWindow(70_000);
+        exchange();
+        dropConnectionWindowUpdates = true;
+        assertThat(serverWindow(0), is(0));
+        int sentSinceItsReturn = passedOver.dataBytes - Http2CodecUtil.DEFAULT_WINDOW_SIZE;
+        assertThat("the first stream holds more than the other", sentSinceItsReturn, is(greaterThan(other.dataBytes)));
+        assertThat("and more than the grant", sentSinceItsReturn, is(greaterThan(smallestReturn(passedOver))));
+        assertThat("the other more than half the connection window", 2 * other.dataBytes, is(greaterThan(Http2CodecUtil.DEFAULT_WINDOW_SIZE)));
+
+        waitUntilStallsCounted(1);
+
+        assertThat("the stream with nothing returned was reset", other.resetErrorCode, is(Http2Error.CANCEL.code()));
+        assertThat("the stream holding less than its client returned for it at once was passed over", passedOver.resetErrorCode, is(nullValue()));
+        assertThat(Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP2_STREAM), is(1L));
     }
 
     @Test
@@ -622,6 +1184,30 @@ public class Http2StreamWriteStallHandlerTest {
         exchange();
         assertThat(ungranted.resetErrorCode, is(Http2Error.CANCEL.code()));
         assertThat(granted.resetErrorCode, is(Http2Error.CANCEL.code()));
+    }
+
+    @Test
+    public void shouldResetAHolderAtItsOwnTimeoutWhenAStreamSentNothingIsResetTheCheckBefore() throws Exception {
+        connect(0);
+        // granted no window, so sent nothing; a check sees it before the holder opens, so it times out one check sooner
+        ClientStream sentNothing = clientHandler.request("/");
+        exchange();
+        runChecks(1, () -> { });
+        ClientStream holder = clientHandler.request(LARGE_RESPONSE_PATH);
+        clientHandler.grantWindow(holder, 2 * Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+        exchange();
+        assertThat("the holder took the whole connection window", holder.dataBytes, is(Http2CodecUtil.DEFAULT_WINDOW_SIZE));
+        assertThat(serverWindow(0), is(0));
+        assertThat("its own window is open", serverWindow(holder.frameStream.id()), is(greaterThan(0)));
+        assertThat(sentNothing.dataBytes, is(0));
+
+        runChecksUntilStallsCounted(1);
+        assertThat("the stream sent nothing was reset alone", sentNothing.resetErrorCode, is(Http2Error.CANCEL.code()));
+        assertThat(Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP2_STREAM), is(1L));
+
+        runChecks(1, () -> { });
+        assertThat("the holder was reset at its own timeout, a check later, with no fresh period for that reset", holder.resetErrorCode, is(Http2Error.CANCEL.code()));
+        assertThat(Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP2_STREAM), is(2L));
     }
 
     @Test
@@ -1248,6 +1834,37 @@ public class Http2StreamWriteStallHandlerTest {
         connect(clientInitialWindowSize, true);
     }
 
+    /**
+     * Two streams of a client that consumes neither and sends only the window the test tells it to, with stream
+     * windows that stay open: the first is sent two connection windows' worth before the second opens, and the
+     * connection window granted after that is shared between them.
+     */
+    private ClientStream[] twoStreamsOfAClientThatConsumesNeither(int grantedAfterTheSecondOpens) throws Http2Exception {
+        connect(Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+        clientHandler.initialStreamWindow(300_000);
+        exchange();
+        ClientStream first = clientHandler.request(LARGE_RESPONSE_PATH);
+        clientHandler.sendEveryGrant(first);
+        clientHandler.sendEveryConnectionGrant();
+        exchange();
+        clientHandler.grantConnectionWindow(Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+        exchange();
+        ClientStream second = clientHandler.request(LARGE_RESPONSE_PATH);
+        exchange();
+        clientHandler.grantConnectionWindow(grantedAfterTheSecondOpens);
+        exchange();
+        dropConnectionWindowUpdates = true;
+        return new ClientStream[]{first, second};
+    }
+
+    private void grantWindow(ClientStream stream, int bytes) {
+        try {
+            clientHandler.grantWindow(stream, bytes);
+        } catch (Http2Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
     private void connect(int clientInitialWindowSize, boolean connectionWatcher) {
         Http2FrameCodec serverCodec = Http2FrameCodecBuilder.forServer().build();
         serverConnection = serverCodec.connection();
@@ -1279,6 +1896,7 @@ public class Http2StreamWriteStallHandlerTest {
     }
 
     private void connectClient(int clientInitialWindowSize) {
+        smallestReturns.clear();
         clientCodec = Http2FrameCodecBuilder.forClient().initialSettings(Http2Settings.defaultSettings().initialWindowSize(clientInitialWindowSize)).build();
         clientHandler = new Client(clientCodec);
         client = new EmbeddedChannel(clientCodec, clientHandler);
@@ -1358,6 +1976,11 @@ public class Http2StreamWriteStallHandlerTest {
         return serverInitialWindow() - serverWindow(stream.frameStream.id());
     }
 
+    // the least window the client has sent for the stream in one WINDOW_UPDATE, 0 if it has sent none
+    private int smallestReturn(ClientStream stream) {
+        return smallestReturns.getOrDefault(stream.frameStream.id(), 0);
+    }
+
     private void waitUntilStallsCounted(long count) throws InterruptedException {
         long started = System.nanoTime();
         while (Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP2_STREAM) < count) {
@@ -1388,6 +2011,10 @@ public class Http2StreamWriteStallHandlerTest {
                 ReferenceCountUtil.release(msg);
                 continue;
             }
+            if (from == client && isWindowUpdate(msg) && !isConnectionWindowUpdate(msg)) {
+                ByteBuf frame = (ByteBuf) msg;
+                smallestReturns.merge(frame.getInt(frame.readerIndex() + 5), frame.getInt(frame.readerIndex() + Http2CodecUtil.FRAME_HEADER_LENGTH), Math::min);
+            }
             to.writeInbound(msg);
             moved = true;
         }
@@ -1396,12 +2023,16 @@ public class Http2StreamWriteStallHandlerTest {
     }
 
     // Netty's frame writer writes each WINDOW_UPDATE frame in a buffer of its own
-    private static boolean isConnectionWindowUpdate(Object msg) {
+    private static boolean isWindowUpdate(Object msg) {
         if (!(msg instanceof ByteBuf) || ((ByteBuf) msg).readableBytes() != Http2CodecUtil.FRAME_HEADER_LENGTH + 4) {
             return false;
         }
         ByteBuf frame = (ByteBuf) msg;
-        return frame.getByte(frame.readerIndex() + 3) == Http2FrameTypes.WINDOW_UPDATE && frame.getInt(frame.readerIndex() + 5) == Http2CodecUtil.CONNECTION_STREAM_ID;
+        return frame.getByte(frame.readerIndex() + 3) == Http2FrameTypes.WINDOW_UPDATE;
+    }
+
+    private static boolean isConnectionWindowUpdate(Object msg) {
+        return isWindowUpdate(msg) && ((ByteBuf) msg).getInt(((ByteBuf) msg).readerIndex() + 5) == Http2CodecUtil.CONNECTION_STREAM_ID;
     }
 
     /**
@@ -1461,8 +2092,9 @@ public class Http2StreamWriteStallHandlerTest {
 
     /**
      * Answers every request with a body the size of a few frames, or of a few windows for {@link #LARGE_RESPONSE_PATH}.
-     * For {@link #STAGED_RESPONSE_PATH} it writes the first part, and the rest only when {@code writeRest} is run. For
-     * {@link #TRAILERS_ONLY_PATH} it writes an empty DATA frame and trailers.
+     * For {@link #STAGED_RESPONSE_PATH} it writes the first part, and the rest only when {@code writeRest} is run; for
+     * {@link #PARTS_RESPONSE_PATH} the first of three parts, and each of the others when its {@code writeRests} entry
+     * is run. For {@link #TRAILERS_ONLY_PATH} it writes an empty DATA frame and trailers.
      */
     private static final class Responder extends ChannelInboundHandlerAdapter {
         private final List<Runnable> writeRests = new ArrayList<>();
@@ -1500,6 +2132,13 @@ public class Http2StreamWriteStallHandlerTest {
                         ctx.writeAndFlush(new DefaultHttp2DataFrame(Unpooled.wrappedBuffer(new byte[STAGED_FIRST_BYTES]), false).stream(request.stream()));
                         writeRest = () -> ctx.writeAndFlush(new DefaultHttp2DataFrame(Unpooled.wrappedBuffer(new byte[RESPONSE_BYTES]), true).stream(request.stream()));
                         writeRests.add(writeRest);
+                        return;
+                    }
+                    if (PARTS_RESPONSE_PATH.contentEquals(request.headers().path())) {
+                        ctx.write(new DefaultHttp2HeadersFrame(new DefaultHttp2Headers().status("200")).stream(request.stream()));
+                        ctx.writeAndFlush(new DefaultHttp2DataFrame(Unpooled.wrappedBuffer(new byte[PARTS_BYTES[0]]), false).stream(request.stream()));
+                        writeRests.add(() -> ctx.writeAndFlush(new DefaultHttp2DataFrame(Unpooled.wrappedBuffer(new byte[PARTS_BYTES[1]]), false).stream(request.stream())));
+                        writeRests.add(() -> ctx.writeAndFlush(new DefaultHttp2DataFrame(Unpooled.wrappedBuffer(new byte[PARTS_BYTES[2]]), true).stream(request.stream())));
                         return;
                     }
                     if (TRAILERS_ONLY_PATH.contentEquals(request.headers().path())) {
@@ -1551,6 +2190,8 @@ public class Http2StreamWriteStallHandlerTest {
         private int consumeLimit;
         private int consumed;
         private Runnable onFirstData;
+        private int reachingDataBytes;
+        private Runnable onReachingDataBytes;
         private Runnable onReset;
         private long resetNanos;
         private Long resetErrorCode;
@@ -1622,6 +2263,20 @@ public class Http2StreamWriteStallHandlerTest {
             ctx.flush();
         }
 
+        // the stream's window is returned once seven tenths of it are consumed, where Netty's codec returns it at half
+        void returnWindowLate(ClientStream stream) throws Http2Exception {
+            ((DefaultHttp2LocalFlowController) codec.connection().local().flowController()).windowUpdateRatio(codec.connection().stream(stream.frameStream.id()), 0.3f);
+        }
+
+        // Netty's codec holds back a grant that leaves the window less than half used; at this ratio it sends them all
+        void sendEveryGrant(ClientStream stream) throws Http2Exception {
+            ((DefaultHttp2LocalFlowController) codec.connection().local().flowController()).windowUpdateRatio(codec.connection().stream(stream.frameStream.id()), 0.99f);
+        }
+
+        void sendEveryConnectionGrant() throws Http2Exception {
+            ((DefaultHttp2LocalFlowController) codec.connection().local().flowController()).windowUpdateRatio(codec.connection().connectionStream(), 0.99f);
+        }
+
         void grantConnectionWindow(int bytes) throws Http2Exception {
             codec.connection().local().flowController().incrementWindowSize(codec.connection().connectionStream(), bytes);
             ctx.flush();
@@ -1651,6 +2306,11 @@ public class Http2StreamWriteStallHandlerTest {
                     if (stream.onFirstData != null) {
                         Runnable opened = stream.onFirstData;
                         stream.onFirstData = null;
+                        opened.run();
+                    }
+                    if (stream.onReachingDataBytes != null && stream.dataBytes >= stream.reachingDataBytes) {
+                        Runnable opened = stream.onReachingDataBytes;
+                        stream.onReachingDataBytes = null;
                         opened.run();
                     }
                     int consume = Math.min(data.initialFlowControlledBytes(), stream.consumeLimit - stream.consumed);

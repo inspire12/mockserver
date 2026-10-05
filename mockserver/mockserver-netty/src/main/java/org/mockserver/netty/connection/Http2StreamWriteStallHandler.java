@@ -2,6 +2,7 @@ package org.mockserver.netty.connection;
 
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.handler.codec.http2.Http2CodecUtil;
 import io.netty.handler.codec.http2.Http2Connection;
 import io.netty.handler.codec.http2.Http2ConnectionHandler;
 import io.netty.handler.codec.http2.Http2Error;
@@ -26,8 +27,10 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
  * {@link WriteStallTimeoutHandler} covers a connection whose socket stalls.
  * <p>
  * A stream progresses only when the flow controller writes some of its data, which {@link WrittenBytesFlowController}
- * counts as it leaves. What else spares a stream whose own window is open, and which stream is reset when one holds
- * the connection window the others wait for, is in "Response Write-Stall Timeout" in docs/code/netty-pipeline.md.
+ * counts as it leaves. The window a client returns for a stream never counts as progress: it only tells which of the
+ * streams already timed out is reset first. What else spares a stream whose own window is open, and which stream is
+ * reset when one holds the connection window the others wait for, is in "Response Write-Stall Timeout" in
+ * docs/code/netty-pipeline.md.
  * <p>
  * Sits anywhere after the connection's {@link Http2ConnectionHandler}, whose remote flow controller it wraps. A timer
  * runs only while the connection has active streams.
@@ -45,11 +48,12 @@ public final class Http2StreamWriteStallHandler extends ChannelDuplexHandler imp
     private Http2ConnectionHandler codec;
     private Http2Connection connection;
     private Http2Connection.PropertyKey progressKey;
-    private Http2Connection.PropertyKey writtenKey;
+    private Http2Connection.PropertyKey sentKey;
     private ScheduledFuture<?> check;
     private long now;
     private long connectionWritten;
     private long lastConnectionWritten;
+    private long connectionUnreturned;
     private boolean anyProgress;
     private boolean holderWaiting;
 
@@ -70,8 +74,18 @@ public final class Http2StreamWriteStallHandler extends ChannelDuplexHandler imp
         this.codec = (Http2ConnectionHandler) codecCtx.handler();
         this.connection = codec.connection();
         this.progressKey = connection.newKey();
-        this.writtenKey = connection.newKey();
-        connection.remote().flowController(new WrittenBytesFlowController(connection.remote().flowController(), this::written));
+        this.sentKey = connection.newKey();
+        connection.remote().flowController(new WrittenBytesFlowController(connection.remote().flowController(), new WrittenBytesFlowController.Observer() {
+            @Override
+            public void written(Http2Stream stream, int bytes) {
+                Http2StreamWriteStallHandler.this.written(stream, bytes);
+            }
+
+            @Override
+            public void windowIncremented(Http2Stream stream, int bytes) {
+                windowReturned(stream, bytes);
+            }
+        }));
     }
 
     @Override
@@ -83,12 +97,30 @@ public final class Http2StreamWriteStallHandler extends ChannelDuplexHandler imp
     }
 
     private void written(Http2Stream stream, int bytes) {
-        long[] written = stream.getProperty(writtenKey);
-        if (written == null) {
-            stream.setProperty(writtenKey, written = new long[1]);
+        StreamData sent = stream.getProperty(sentKey);
+        if (sent == null) {
+            stream.setProperty(sentKey, sent = new StreamData());
         }
-        written[0] += bytes;
+        sent.written += bytes;
+        sent.unreturned += bytes;
         connectionWritten += bytes;
+        connectionUnreturned += bytes;
+    }
+
+    // window granted beyond the data sent returns nothing, so a grant cannot hide what a stream holds
+    private void windowReturned(Http2Stream stream, int bytes) {
+        if (stream.id() == Http2CodecUtil.CONNECTION_STREAM_ID) {
+            connectionUnreturned -= Math.min(bytes, connectionUnreturned);
+            return;
+        }
+        StreamData sent = stream.getProperty(sentKey);
+        long returned = sent != null ? Math.min(bytes, sent.unreturned) : 0;
+        if (returned > 0) {
+            sent.unreturned -= returned;
+            if (sent.smallestReturn == 0 || returned < sent.smallestReturn) {
+                sent.smallestReturn = returned;
+            }
+        }
     }
 
     @Override
@@ -122,7 +154,7 @@ public final class Http2StreamWriteStallHandler extends ChannelDuplexHandler imp
         // the connection's own channel: its socket is what the flow controller waits on to write an open-windowed stream;
         // a socket stall is left to WriteStallTimeoutHandler only where one is watching this connection
         boolean socketStallWatched = !ctx.channel().isWritable() && ctx.pipeline().get(WriteStallTimeoutHandler.class) != null;
-        selectStalledStreams(flowController.initialWindowSize(), flowController.windowSize(connection.connectionStream()), socketStallWatched);
+        selectStalledStreams(flowController.windowSize(connection.connectionStream()), socketStallWatched);
         unmovedStreams.clear();
         for (int streamId : stalledStreamIds) {
             reset(streamId);
@@ -137,30 +169,40 @@ public final class Http2StreamWriteStallHandler extends ChannelDuplexHandler imp
     /**
      * Picks the unmoved streams to reset. While the connection window is closed, a reset that should release it (a
      * closed-window stream, or those holding the most of it) gives each of the others one fresh period, and not
-     * another until it is refreshed for any other reason. See "A stalled stream holding the connection window" in
-     * docs/code/netty-pipeline.md.
+     * another until it is refreshed for any other reason. A stream holding less than its client has returned for it
+     * at once is passed over when another, with no such history, holds more than half of what the connection has
+     * out. See "A stalled stream holding the connection window" in docs/code/netty-pipeline.md.
      */
-    private void selectStalledStreams(int initialWindow, int connectionWindow, boolean socketStallWatched) {
+    private void selectStalledStreams(int connectionWindow, boolean socketStallWatched) {
         boolean openWindowsRefreshed = anyProgress || socketStallWatched;
         // a stream waiting for a closed connection window is not reset before the streams that may hold it time out
         boolean openWindowsTimed = !openWindowsRefreshed && !(connectionWindow <= 0 && holderWaiting);
         long mostHeld = Long.MIN_VALUE;
+        long mostHeldUnexplained = Long.MIN_VALUE;
         for (Http2Stream stream : unmovedStreams) {
             StreamWriteProgress progress = stream.getProperty(progressKey);
             progress.resetting = false;
-            mostHeld = Math.max(mostHeld, held(progress, initialWindow));
+            mostHeld = Math.max(mostHeld, progress.held);
+            if (!progress.explained) {
+                mostHeldUnexplained = Math.max(mostHeldUnexplained, progress.held);
+            }
+        }
+        // one stream alone, not several together: a stream being consumed can have up to half a window unreturned
+        // before its first return, so only more than half of what the connection has out marks a stream as stalled
+        boolean passOverExplained = mostHeldUnexplained > connectionUnreturned / 2;
+        if (passOverExplained) {
+            mostHeld = mostHeldUnexplained;
         }
         boolean windowReleased = false;
         for (Http2Stream stream : unmovedStreams) {
             StreamWriteProgress progress = stream.getProperty(progressKey);
             if (timedOut(progress, openWindowsTimed)) {
-                long held = held(progress, initialWindow);
                 // streams holding the same cannot be told apart, so all are reset and the stalled one is among them
-                if (progress.window <= 0 || held == mostHeld) {
+                if (progress.window <= 0 || (progress.held == mostHeld && !(passOverExplained && progress.explained))) {
                     progress.resetting = true;
                     stalledStreamIds.add(stream.id());
                     // a stream sent nothing holds no connection window, so resetting one never extends another's time
-                    windowReleased |= connectionWindow <= 0 && held > 0;
+                    windowReleased |= connectionWindow <= 0 && progress.held > 0;
                 }
             }
         }
@@ -183,11 +225,6 @@ public final class Http2StreamWriteStallHandler extends ChannelDuplexHandler imp
         return now - progress.lastProgressNanos >= timeoutNanos && (progress.window <= 0 || openWindowsTimed);
     }
 
-    // the stream's data sent beyond the window its client has granted on top of the initial window: what it holds unconsumed
-    private static long held(StreamWriteProgress progress, int initialWindow) {
-        return (long) initialWindow - progress.window;
-    }
-
     private void checkStream(Http2Stream stream, Http2RemoteFlowController flowController) {
         StreamWriteProgress progress = stream.getProperty(progressKey);
         // a stream already reset stays active until its RST_STREAM is written, which a stalled socket delays
@@ -198,8 +235,8 @@ public final class Http2StreamWriteStallHandler extends ChannelDuplexHandler imp
             return;
         }
         int window = flowController.windowSize(stream);
-        long[] writtenBytes = stream.getProperty(writtenKey);
-        long written = writtenBytes != null ? writtenBytes[0] : 0;
+        StreamData sent = stream.getProperty(sentKey);
+        long written = sent != null ? sent.written : 0;
         if (progress == null) {
             stream.setProperty(progressKey, new StreamWriteProgress(window, written, now));
             holderWaiting |= written > 0;
@@ -208,6 +245,8 @@ public final class Http2StreamWriteStallHandler extends ChannelDuplexHandler imp
         boolean moved = written != progress.written;
         progress.window = window;
         progress.written = written;
+        progress.held = sent != null ? sent.unreturned : 0;
+        progress.explained = sent != null && sent.unreturned < sent.smallestReturn;
         if (moved) {
             progress.lastProgressNanos = now;
         } else {
@@ -230,9 +269,21 @@ public final class Http2StreamWriteStallHandler extends ChannelDuplexHandler imp
         codec.resetStream(codecCtx, streamId, Http2Error.CANCEL.code(), codecCtx.newPromise());
     }
 
+    // kept from the first data written for a stream
+    private static final class StreamData {
+        private long written;
+        // written, less the window its client has since returned for it: the most of it the client can be holding
+        private long unreturned;
+        // the least its client has returned for it at once, 0 until it returns any
+        private long smallestReturn;
+    }
+
     private static final class StreamWriteProgress {
         private int window;
         private long written;
+        private long held;
+        // holds less than its client has left unreturned on it before returning, as a stream being consumed does
+        private boolean explained;
         private long lastProgressNanos;
         private boolean resetting;
         // equal to lastProgressNanos while the stream's current period is the fresh one given for a reset

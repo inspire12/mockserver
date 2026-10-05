@@ -8,11 +8,16 @@ import io.netty.handler.codec.http2.Http2Stream;
 /**
  * Reports the flow-controlled bytes (DATA payload and padding) its delegate writes for each stream. They are read off
  * the queued frame as it is written, so no frame a client sends can change the count.
+ * <p>
+ * Also reports each window increment a client's {@code WINDOW_UPDATE} applies: the connection's decoder hands every
+ * one to the remote flow controller, whichever connection handler it belongs to.
  */
 final class WrittenBytesFlowController implements Http2RemoteFlowController {
 
     interface Observer {
         void written(Http2Stream stream, int bytes);
+
+        void windowIncremented(Http2Stream stream, int bytes);
     }
 
     private final Http2RemoteFlowController delegate;
@@ -100,6 +105,7 @@ final class WrittenBytesFlowController implements Http2RemoteFlowController {
     @Override
     public void incrementWindowSize(Http2Stream stream, int delta) throws Http2Exception {
         delegate.incrementWindowSize(stream, delta);
+        observer.windowIncremented(stream, delta);
     }
 
     @Override
