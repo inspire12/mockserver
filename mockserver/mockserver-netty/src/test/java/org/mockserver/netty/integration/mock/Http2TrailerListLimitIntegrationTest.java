@@ -186,8 +186,8 @@ public class Http2TrailerListLimitIntegrationTest {
     }
 
     /**
-     * A direct connection streams the events as MockServer writes them. A tunnel over HTTP/2 hands a response on
-     * when it has all of it, so there the client has seen no response yet while MockServer is streaming one.
+     * The events reach the client as MockServer writes them, through a tunnel as on a direct connection, so the
+     * response has started on every route and the stream is only reset.
      */
     @Test
     public void shouldResetAStreamSentAHeaderBlockOverTheLimitWhileItsResponseIsStreamed() throws Exception {
@@ -200,22 +200,13 @@ public class Http2TrailerListLimitIntegrationTest {
         try (Http2TestClient client = connect()) {
             Http2TestClient.Exchange streamed = client.send(pseudoHeaders(HttpMethod.GET, "/sse"), true);
             Http2TestClient.Exchange other = client.send(pseudoHeaders(HttpMethod.GET, "/sse"), true);
-            if (route.tunnel) {
-                assertThat("both being streamed to the tunnel", recordedWithin("/sse", 2, 15), is(true));
-            } else {
-                assertThat(streamed.status(), is(200));
-                assertThat(streamed.receivedWithin("tick_1;", 15), is(true));
-                assertThat(other.receivedWithin("tick_1;", 15), is(true));
-            }
+            assertThat(streamed.status(), is(200));
+            assertThat(streamed.receivedWithin("tick_1;", 15), is(true));
+            assertThat(other.receivedWithin("tick_1;", 15), is(true));
 
             streamed.headersWhateverTheStreamState(trailersOfSize(LIMIT + 1));
 
-            if (route.tunnel) {
-                // rests on a known defect, the tunnel holding a streamed response until it is whole: change with its fix
-                assertThat(streamed.status(), is(431));
-            } else {
-                assertThat(streamed.resetErrorCode(), is(Http2Error.PROTOCOL_ERROR.code()));
-            }
+            assertThat(streamed.resetErrorCode(), is(Http2Error.PROTOCOL_ERROR.code()));
             String streamedWhenReset = streamed.received();
             assertThat("cut short", streamedWhenReset.contains(lastEvent), is(false));
             // the rest of the other stream's events take long enough for MockServer to try to write to the reset one
@@ -262,17 +253,6 @@ public class Http2TrailerListLimitIntegrationTest {
             assertThat(refused.resetErrorCode(), is(Http2Error.PROTOCOL_ERROR.code()));
             assertThrows("no response on a direct connection", ExecutionException.class, refused::status);
         }
-    }
-
-    private static boolean recordedWithin(String path, int requests, long seconds) throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(seconds);
-        while (mockServerClient.retrieveRecordedRequests(request().withPath(path)).length < requests) {
-            if (System.nanoTime() > deadline) {
-                return false;
-            }
-            Thread.sleep(20);
-        }
-        return true;
     }
 
     private Http2TestClient connect() throws Exception {

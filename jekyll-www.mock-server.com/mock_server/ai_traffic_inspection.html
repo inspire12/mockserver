@@ -531,6 +531,8 @@ curl -X PUT "http://localhost:1080/mockserver/retrieve?type=REQUEST_RESPONSES&am
 
 <p>The streaming relay applies to HTTP/1.1 and HTTP/2 proxied responses (enable HTTP/2 relay with <code class="code inline">-Dmockserver.forwardProxyHttp2Upgrade=true</code>). Streaming is detected from the response <code class="code inline">Content-Type: text/event-stream</code> header; when the upstream omits this header, MockServer also infers streaming from the client's request intent — an <code class="code inline">Accept: text/event-stream</code> request header or a <code class="code inline">"stream": true</code> field in the request body. Ordinary chunked responses (without any streaming signal) are aggregated normally. Non-streaming responses are handled identically to before — this feature adds no overhead for ordinary JSON responses.</p>
 
+<p>It also applies whichever HTTP version your agent speaks to MockServer through the proxy. An agent that negotiates HTTP/2 through <code class="code inline">HTTPS_PROXY</code> or a SOCKS proxy, as many LLM SDKs and CLIs do, is sent each chunk as it arrives, just as an HTTP/1.1 client is.</p>
+
 <p>Relevant configuration properties:</p>
 
 <ul>

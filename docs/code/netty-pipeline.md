@@ -502,7 +502,7 @@ Exercised only with Netty's quiche client, on macOS. Chrome, ngtcp2 and quic-go 
 
 **Why the timeout must sit well above a few seconds.** A slow reader's progress reaches the writer in bursts. On macOS NIO a reader taking a few KB at a time can show no progress for 4–20 s, because the kernel holds megabytes between the two ends and wakes a writer only once a share of them is free (an extra write attempt each check showed nothing more, so there is none); on Linux epoll `lastDataSent` removes that gap. The 60 s default leaves room for both.
 
-**Relay loopback exemption.** MockServer's own CONNECT/SOCKS loopback leg is read by `DownstreamProxyRelayHandler` only as fast as the relay's proxy client takes what it is sent (reads pause above 256 KiB unwritten), so its silences are MockServer's own backpressure. `RelayConnectHandler` registers the loopback's local address in `RelayLoopbackAddresses` before it writes the `PROXIED_` preamble; `switchToProxyConnected` removes the connection handler when the accepted connection's remote address is one of them (a client merely sending the preamble is not exempted), and `switchToHttp2Multiplex` then skips the stream handler. The proxy client's own connection is watched, and tearing it down closes the loopback. A stalled HTTP/2 stream inside a tunnel whose client keeps reading the connection is cut on the client-facing leg: `RelayConnectHandler` adds an `Http2StreamWriteStallHandler` after that leg's `HttpToHttp2ConnectionHandler` (when the timeout is `> 0`), which resets the client's stream with `CANCEL`, and the relay then cancels the loopback stream if it is still open (see [Relay failure signalling](#relay-failure-signalling)). The loopback's stream watcher could not see such a stall even without the exemption: the relay's loopback adapter returns each stream's flow-control window as it reads and hands the response on whole, so the loopback stream completes while the response waits in the client-facing flow controller. On macOS NIO the exemption is reasoned, not demonstrated: there the loopback leg shows progress at about the same granularity as the proxy-client leg (a 40 KiB/s tunnel reader against a 9 s timeout left both legs at most ~6 s quiet, with the exemption removed), so no reader rate was found that trips the loopback without tripping the client leg first, and no test goes red without it on macOS. On Linux epoll it is expected to be load-bearing: the proxy-client leg shows progress through `tcpInfo` `lastDataSent`, while a loopback the relay has paused sends nothing until about 128 KiB of the backlog drains.
+**Relay loopback exemption.** MockServer's own CONNECT/SOCKS loopback leg is read by `DownstreamProxyRelayHandler` only as fast as the relay's proxy client takes what it is sent (reads pause above 256 KiB unwritten), so its silences are MockServer's own backpressure. `RelayConnectHandler` registers the loopback's local address in `RelayLoopbackAddresses` before it writes the `PROXIED_` preamble; `switchToProxyConnected` removes the connection handler when the accepted connection's remote address is one of them (a client merely sending the preamble is not exempted), and `switchToHttp2Multiplex` then skips the stream handler. The proxy client's own connection is watched, and tearing it down closes the loopback. A stalled HTTP/2 stream inside a tunnel whose client keeps reading the connection is cut on the client-facing leg: `RelayConnectHandler` adds an `Http2StreamWriteStallHandler` after that leg's `HttpToHttp2ConnectionHandler` (when the timeout is `> 0`), which resets the client's stream with `CANCEL`, and the relay then cancels the loopback stream if it is still open (see [Relay failure signalling](#relay-failure-signalling)). For a response the relay holds whole, the loopback's stream watcher could not see such a stall even without the exemption: the relay's loopback adapter returns each stream's flow-control window as it reads, so the loopback stream completes while the response waits in the client-facing flow controller. For a streamed response the exemption is what keeps the two legs from both acting: the relay returns the loopback stream's window only as the client takes the response, so a client that takes none stalls the loopback stream too, and the client-facing watcher alone decides when it is cut. On macOS NIO the exemption is reasoned, not demonstrated: there the loopback leg shows progress at about the same granularity as the proxy-client leg (a 40 KiB/s tunnel reader against a 9 s timeout left both legs at most ~6 s quiet, with the exemption removed), so no reader rate was found that trips the loopback without tripping the client leg first, and no test goes red without it on macOS. On Linux epoll it is expected to be load-bearing: the proxy-client leg shows progress through `tcpInfo` `lastDataSent`, while a loopback the relay has paused sends nothing until about 128 KiB of the backlog drains.
 
 **Not covered:** outbound forward/proxy connections (MockServer as the client) and a client that keeps an HTTP/1.1 request upload stalled (nothing is being written to it).
 
@@ -844,7 +844,7 @@ SOCKS5 is multi-phase: initial handshake → optional password auth → CONNECT 
 ## Outbound Buffering and Backpressure
 
 **A slow reader holds at most about 64 KB of its response in MockServer's outbound buffer, on HTTP/1.1
-and HTTP/2, but not through a CONNECT or SOCKS tunnel.** Netty's write-buffer water mark does not limit memory on its own: a write always lands in
+and HTTP/2. Through a CONNECT or SOCKS tunnel that holds for a streamed response only: any other is held whole.** Netty's write-buffer water mark does not limit memory on its own: a write always lands in
 the channel's outbound buffer, and the mark only changes what `isWritable()` reports. So the bound comes
 from the code that waits for writability, and each protocol has its own:
 
@@ -854,7 +854,7 @@ from the code that waits for writability, and each protocol has its own:
 | HTTP/2 response | Netty's `DefaultHttp2RemoteFlowController` writes at most `max(bytesBeforeUnwritable(), 32 KB)` of DATA per pass, and nothing while the connection is unwritable | About 64 KB by Netty's design (not measured here); the rest of the body waits in the flow controller as slices of the original buffer |
 | WebSocket proxy passthrough | `FrameRelayHandler` turns the peer's `autoRead` off while the channel it writes to is unwritable | What one read of the peer brought in |
 | Streaming forward (`StreamingResponseRelayHandler`) | Reads the upstream again only once the decoded bytes not yet written have drained to min(64 KiB, `maxResponseBodySize` / 4); past `maxResponseBodySize` the stream is aborted | The watermark plus one upstream read, decoded |
-| CONNECT / SOCKS tunnel | The relay aggregates each response from the loopback server before writing it to the client. In an HTTP/1.1 tunnel a streamed one is relayed piece by piece, its loopback reads stopped above min(256 KiB, `maxRequestBodySize` / 2) unwritten until the backlog halves, and the stream aborted above `maxRequestBodySize`. In an HTTP/2 tunnel a streamed response is aggregated like any other and reaches the client only when it is complete: a known defect (`InboundHttp2ToHttpAdapter` in `RelayConnectHandler.configureHttp2LoopbackPipeline`), so server-sent events and LLM tokens do not arrive incrementally there | The whole response; in an HTTP/1.1 tunnel a streamed one, about 256 KiB plus one read |
+| CONNECT / SOCKS tunnel | The relay aggregates each response from the loopback server before writing it to the client, except a streamed one, which it relays piece by piece. In an HTTP/1.1 tunnel the loopback's reads are stopped above min(256 KiB, `maxRequestBodySize` / 2) unwritten until the backlog halves, and the stream is aborted above `maxRequestBodySize`. In an HTTP/2 tunnel each DATA frame is handed on as it is read and its bytes are returned to the loopback stream's flow-control window only once written to the client, so MockServer may send one window (65,535 bytes) more than the client has taken (see [HTTP/2 loopback: streamed responses](#http2-loopback-streamed-responses)) | The whole response, up to `maxRequestBodySize`; a streamed one, about 256 KiB plus one read in an HTTP/1.1 tunnel and one flow-control window per stream in an HTTP/2 tunnel |
 
 **Why the body, and why direct memory.** An HTTP/1.1 response body is a heap buffer (usually the
 expectation's own bytes). The NIO and epoll transports copy a heap buffer into a direct buffer when it is
@@ -1236,8 +1236,9 @@ Internal Channel"]
 ### Relay write failure
 
 When a write to the proxy client fails because the connection has failed, `DownstreamProxyRelayHandler` ends the relay at the
-first failure: it logs that failure once (`exception while returning writing`, or nothing once the proxy client's connection has closed), stops reading the loopback
-with a `ChannelReadPause` hold it never releases, closes both legs, and releases whatever the loopback still delivers.
+first failure: it logs that failure once (`exception while returning writing`, or nothing once the proxy client's connection has closed or its client has closed its TLS session, `SslClosedEngineException`), stops reading the loopback
+with a `ChannelReadPause` hold it never releases, closes both legs, and releases whatever the loopback still delivers,
+response by response and, for a response relayed as it is streamed, part by part.
 Every write already queued behind the failed one fails the same way and is not logged. Exceeding the streamed-bytes
 bound (`maxRequestBodySize` of unwritten streamed content) ends the relay the same way.
 
@@ -1247,8 +1248,8 @@ still ends, and everything the loopback delivers from then on is released unwrit
 that request has been written (see [Relay close](#relay-close)).
 
 A failure of one HTTP/2 stream does not end the relay. When the response carries the client's stream id
-(`x-http2-stream-id`, read before the write), the failure is an HTTP/2 stream error, and the proxy client's connection
-is still active, only that stream is gone: its client reset it, or `Http2StreamWriteStallHandler` reset it with its
+(`x-http2-stream-id`, read before the write, or the stream id of a part of a streamed response), the failure is an
+HTTP/2 stream error, and the proxy client's connection is still active, only that stream is gone: its client reset it, or `Http2StreamWriteStallHandler` reset it with its
 response still queued in the flow controller (`Stream closed before write could take place`). The relay logs it at
 `DEBUG` and carries on reading the loopback for the other streams. Ending the relay there would answer a single
 stream cut, or a client cancelling one download, with a `GOAWAY` and the loss of the whole tunnel.
@@ -1368,15 +1369,97 @@ in either order: the remapper is the only one that reads a message.
 | Direction | What it does |
 |---|---|
 | Request written to the loopback | Gives it the next loopback stream id (the last one created plus 2, or 1), records the pair, and rewrites `x-http2-stream-id`. A second message on the same client stream reuses the pair only while the loopback stream's local side is still open, which the relay's own requests never leave it: each is written whole. Otherwise it is dropped and released, with a WARN. The relay's client-facing adapter hands each request on once (see [HTTP/2 `Expect` on the relay](#http2-expect-on-the-relay)), so this is a guard: a second HEADERS frame on a half-closed loopback stream would close the whole loopback, and one after that loopback stream has closed would have MockServer answer the request twice. To tell the second case from a new stream, the client's stream carries the mark that it was paired, so the mark goes when that stream does. A priority dependency (`x-http2-stream-dependency-id`) is translated, or dropped if it names no open stream or the stream itself |
-| Response read from the loopback | Rewrites `x-http2-stream-id` back to the client's id, and marks the client's stream answered when the response is a whole final (not `1xx`) one. A response with no pair, which only a server push could produce (MockServer does not push), is dropped and released. So is a response, `1xx` included, whose client stream has ended: writing it would fail, and a failed write closes the client's connection |
+| Response read from the loopback | Rewrites `x-http2-stream-id` back to the client's id, and marks the client's stream answered when the response is a whole final (not `1xx`) one. A part of a streamed response (`StreamedHttp2ResponsePart`) carries its stream id itself and is mapped the same way; the stream is answered when the part that ends it is handed on. A response with no pair, which only a server push could produce (MockServer does not push), is dropped and released. So is a response, `1xx` included, whose client stream has ended: writing it would fail, and a failed write closes the client's connection |
 | Loopback stream removed | Forgets the pair, so a long-lived tunnel holds one entry per open stream. A request whose stream was never opened (the write failed first) is forgotten at once, and its client stream marked as not relayed |
 
 Nothing else crosses the legs with a stream id. Each leg's `Http2ConnectionHandler` does its own flow control
-(`WINDOW_UPDATE`), and PRIORITY frames and SETTINGS are not relayed. A GOAWAY is not translated either: when the
+(`WINDOW_UPDATE`); for a streamed response the loopback's is driven by the client leg's writes (see
+[HTTP/2 loopback: streamed responses](#http2-loopback-streamed-responses)). PRIORITY frames and SETTINGS are not relayed. A GOAWAY is not translated either: when the
 loopback receives one, or closes, the client is sent a GOAWAY of its own, built from the client connection's ids
 (see [Relay loopback connection loss](#relay-loopback-connection-loss-http2)). Server push is not relayed
 either. The loopback never opens a stream of its own:
 the remapper's ids are the only ones it uses.
+
+### HTTP/2 loopback: streamed responses
+
+**Outcome:** a client that speaks HTTP/2 through a CONNECT or SOCKS tunnel is sent a streamed response (server-sent
+events, a streamed forward, a gRPC stream) as MockServer writes it: the headers when they are written, each DATA frame
+as it arrives, the trailers and the end of the stream at the end. Before, the loopback's `InboundHttp2ToHttpAdapter`
+held every response until it was whole, so events and LLM tokens reached such a client only when the stream ended. A
+response of declared length is still held whole, as before.
+
+```mermaid
+flowchart LR
+    MS["MockServer\n(loopback server side)"] -->|"HEADERS, DATA, trailers"| ST["LoopbackHttp2ResponseStreamer"]
+    ST -->|"declared length, a content coding,\nor ended by its headers"| AG["BoundedZstdDecompressorFrameListener\nInboundHttp2ToHttpAdapter\n(whole response)"]
+    ST -->|"undeclared length"| PT["StreamedHttp2ResponsePart\nper frame"]
+    AG --> RM["LoopbackHttp2StreamIdRemapper"]
+    PT --> RM
+    RM --> DR["DownstreamProxyRelayHandler"]
+    DR -->|"whole response"| H2["client leg\nHttpToHttp2ConnectionHandler"]
+    DR -->|"part"| WR["StreamedHttp2ResponseWriter"]
+    WR -->|"encoder, on the part's stream"| H2
+    H2 -.->|"written: return the bytes\nto the loopback stream's window"| ST
+```
+
+| A response on the loopback | Relayed |
+|---|---|
+| Final headers that do not end the stream and carry neither `content-length` nor `content-encoding` | frame by frame, as read |
+| Final headers with `content-length`, or that end the stream (`204`, `304`, any response with no body) | whole, by `InboundHttp2ToHttpAdapter`, as before |
+| Final headers with `content-encoding` | decoded and whole, as before |
+| A `1xx` | whole, as before, which ends the client's stream (MockServer ends no loopback stream with a `1xx` it mocks; see *Tunnels and the idle timeout*) |
+
+**Why the length decides.** MockServer writes a response it produces as it goes without `content-length`, and one
+it has whole with it, unless the expectation says otherwise (a chunk size, trailers, `suppressContentLengthHeader`);
+those few are relayed frame by frame too, which costs nothing since their frames arrive together. So the rule needs
+no content type and no knowledge of the request, covers every streamed response MockServer can write (the HTTP/1.1
+loopback's rule, `text/event-stream` or a request that asked for a stream, would miss a gRPC stream), and leaves
+every response of declared length exactly as it was, limit and all.
+
+**Why a content coding is held whole.** The relay decodes a response that has a `content-encoding`, as it always
+has. Flow control counts the bytes MockServer sent, and a few kilobytes of a compressed body can decode to megabytes
+inside one read, so only the aggregator's `maxRequestBodySize` bounds what a decoded response comes to. A decoded
+stream would have needed a bound of its own and a second failure mode (a response refused part way, after its
+headers had gone). It is not needed for a stream MockServer forwards: its forward client decodes the upstream's
+response (`BoundedZstdHttpContentDecompressor` in both forward pipelines) and removes `content-encoding` from every
+streamed head (`StreamingResponseRelayHandler`), so what reaches the loopback has no content coding. `LoopbackHttp2ResponseStreamer` therefore goes before the decompressing listener, and a
+streamed response never reaches it.
+
+**Why parts, and a writer of their own.** The client leg's `HttpToHttp2ConnectionHandler` writes HTTP content to the
+stream of the last headers it wrote, so the pieces of two responses could not interleave through it. A part carries
+its stream id and is written by `StreamedHttp2ResponseWriter` straight through the client connection's encoder. The
+parts still travel the loopback's pipeline, so the rules that govern whole responses govern them unchanged: the
+remapper's stream ids and its dropping of a part whose client stream has ended, the relay's end (every later part is
+released unwritten), and a failed write that is one stream's alone. Relaying frames from the frame listener to the
+client's encoder directly would have needed each of those rules a second time. The writer refuses a part its stream
+can no longer take (the stream gone, reset, already ended, or a second header block of the same kind) with a stream
+error: handed to the encoder, each of those is an error of the whole connection, answered with a `GOAWAY`.
+
+**Flow control and what the relay holds.** A DATA frame's bytes are returned to the loopback stream's window only
+when the client leg has written them (the write's promise completes when they reach the socket, after the client's
+own window has let them go). A client that takes a stream slowly therefore stops MockServer writing that stream
+after one window, which in turn stops MockServer reading the upstream of a forwarded stream. The bytes held for a
+stream are held against the loopback's connection window too, and at Netty's default that is the size of one
+stream's window, so `RelayConnectHandler` raises it to the largest HTTP/2 allows as soon as the loopback's handler
+is added: one stream the client is not taking then stops no other. Each stream still holds at most its own window,
+and a tunnel has at most 100 streams (`PortUnificationHandler.HTTP2_MAX_CONCURRENT_STREAMS`).
+
+| Held by the relay | Bound |
+|---|---|
+| A streamed response, per stream | one loopback flow-control window (65,535 bytes of DATA payload), enforced by the loopback's own flow control: MockServer may send no more until some of it is written. A part is a retained slice of the buffer it was read into, so a small frame keeps its whole read buffer until it is written: the memory held can be more than the payload counted |
+| Any other response, per stream | `maxRequestBodySize`, as before: the held response was never unbounded, `InboundHttp2ToHttpAdapter` resets its stream past that |
+
+**Ends.** The stream is answered when the part that ends it has been handed on, so the existing handlers end a
+streamed response as they end any other: a client's `RST_STREAM` resets the loopback stream and MockServer stops
+producing (a forwarded stream's upstream is closed, as on a direct connection); MockServer's reset is relayed with
+its code after the parts already sent; a loopback that closes resets the stream `INTERNAL_ERROR`; a client stream
+`Http2StreamWriteStallHandler` resets is cancelled on the loopback. Request trailers over `maxHeaderSize` sent while
+a response is being streamed now reset the stream `PROTOCOL_ERROR`, as on a direct connection: the `431` a tunnel
+answered there existed only because no response had yet reached the client (`Http2TrailerListLimitIntegrationTest`).
+
+**What remains.** A streamed response that declares `content-length`, or that has a `content-encoding`, is still
+held whole. MockServer writes neither today unless a mocked stream's expectation sets the header itself: a forwarded
+stream reaches the loopback with neither, whatever its upstream sent. Nothing here ran on Linux.
 
 ### HTTP/2 `Expect` on the relay
 
@@ -1410,7 +1493,7 @@ graceful-shutdown timeout for streams that could no longer be answered.
 |---|---|
 | The connection closes (MockServer stopping, a TCP reset, a connection error) | a `GOAWAY`, then each open stream ended as below, then the connection closed once no stream is left |
 | — a stream on which no request has been relayed | `REFUSED_STREAM`: MockServer never saw it, so a retry is safe |
-| — a stream whose request was relayed but whose final response was not | `INTERNAL_ERROR`: MockServer may have acted on it |
+| — a stream whose request was relayed but whose final response was not, or not all of it (a streamed response cut part way) | `INTERNAL_ERROR`: MockServer may have acted on it |
 | — a stream whose whole final response was relayed but is still queued behind the client's flow-control window | nothing: the response is written out in full |
 | MockServer sends a `GOAWAY` | a `GOAWAY` (`NO_ERROR`, last stream id = the client's last stream), so new requests go to a new connection; a stream already open on the loopback above the `GOAWAY`'s last stream id is reset `REFUSED_STREAM` at once by `LoopbackHttp2StreamErrorHandler` (see [Relay failure signalling](#relay-failure-signalling)) |
 | One request cannot be written to the loopback because of that stream (a stream error) | that stream reset: `REFUSED_STREAM` when Netty refused to open the loopback stream (above a received `GOAWAY`'s last stream id, or past MockServer's concurrent-stream limit), otherwise `INTERNAL_ERROR`; the loopback and the other streams carry on |
@@ -1512,7 +1595,9 @@ HTTP/2 loopback one sits after its `HttpToHttp2ConnectionHandler`, and listens t
 The HTTP/2 handler answers the client from the loopback connection's `onStreamClosed`, and resets the client
 stream `LoopbackHttp2StreamIdRemapper` pairs with the loopback stream, so the other streams on both connections
 carry on. A stream counts as answered, and is not reset, once the remapper has marked the client's stream with a
-whole final response; that is the same mark `LoopbackHttp2ConnectionCloseHandler` reads. A `GOAWAY` from MockServer
+whole final response, or with the part that ends a streamed one; that is the same mark
+`LoopbackHttp2ConnectionCloseHandler` reads. A streamed response cut short on the loopback is therefore reset on the
+client's stream after the headers and data already relayed, as a direct connection's is. A `GOAWAY` from MockServer
 closes every loopback stream above its last stream id, including one opened before the `GOAWAY` arrived, and each
 of those is refused at once rather than left until the loopback connection closes (RFC 9113 section 6.8). The
 handler takes a peer reset from the frame listener rather than from `InboundHttp2ToHttpAdapter`, which reports one
@@ -1894,6 +1979,9 @@ flowchart LR
 | `UpstreamProxyRelayHandler` | `mockserver-netty/.../netty/proxy/relay/UpstreamProxyRelayHandler.java` | Client → MockServer relay |
 | `DownstreamProxyRelayHandler` | `mockserver-netty/.../netty/proxy/relay/DownstreamProxyRelayHandler.java` | MockServer → client relay |
 | `LoopbackHttp2ConnectionCloseHandler` | `mockserver-netty/.../netty/proxy/relay/LoopbackHttp2ConnectionCloseHandler.java` | Answers the client's HTTP/2 streams when the loopback connection closes or receives a GOAWAY |
+| `LoopbackHttp2ResponseStreamer` | `mockserver-netty/.../netty/proxy/relay/LoopbackHttp2ResponseStreamer.java` | Relays a response of undeclared length through the HTTP/2 loopback frame by frame, returning its bytes to the loopback's flow control as the client takes them |
+| `StreamedHttp2ResponsePart` | `mockserver-netty/.../netty/proxy/relay/StreamedHttp2ResponsePart.java` | One frame of a streamed response on its way from the loopback to the proxy client, with its stream id |
+| `StreamedHttp2ResponseWriter` | `mockserver-netty/.../netty/proxy/relay/StreamedHttp2ResponseWriter.java` | Writes each part to the proxy client's HTTP/2 connection on the stream it names |
 | `ExpectContinueInboundHttp2ToHttpAdapter` | `mockserver-netty/.../netty/proxy/relay/ExpectContinueInboundHttp2ToHttpAdapter.java` | Hands each relayed HTTP/2 request on once, whole, answering `Expect` itself (`100`, `413` or `417`) |
 | `BinaryRequestProxyingHandler` | `mockserver-netty/.../netty/proxy/BinaryRequestProxyingHandler.java` | Raw binary proxying |
 | `SocksDetector` | `mockserver-netty/.../netty/proxy/socks/SocksDetector.java` | SOCKS4/5 protocol detection |

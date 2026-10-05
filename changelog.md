@@ -476,6 +476,19 @@ This release delivers a sustained performance and memory programme alongside dat
   (`mockserver.ReadinessResponse`). The binary-bundle helpers (`ensureBinary`, `runBinary`,
   `resolvePlatform` and the others) are typed in `downloadBinary.d.ts`, for
   `require('mockserver-node/downloadBinary')`, the module that exports them.
+- **A client that uses HTTP/2 through MockServer as an HTTP `CONNECT` or SOCKS proxy now receives a
+  streamed response as it is produced.** Server-sent events, streamed LLM completions and gRPC server
+  streams reached such a client only once the whole response had ended: nothing arrived until then,
+  not even the response headers. An LLM SDK or CLI behind `HTTPS_PROXY` that negotiated HTTP/2
+  therefore showed no tokens until the completion finished, and a client with a response timeout
+  shorter than the stream could give up before any of it arrived. Each event is now relayed as MockServer writes or forwards
+  it, as it already was for an HTTP/1.1 client through the proxy and for a client connected
+  directly. A client that reads such a stream slowly now slows it at its source, without holding up
+  the other requests on the same connection; before, MockServer collected the stream and failed it
+  once it passed `maxRequestBodySize`. One header changes with this: a response that has no
+  `Content-Length` no longer has one added on its way through such a tunnel, so it now carries the
+  same headers as on a direct connection. This affected 8.0.0. Responses that declare a
+  `Content-Length`, and compressed responses, are relayed as before.
 - **A short binary (non-HTTP) message is now forwarded as soon as it arrives, and a binary connection stays
   binary.** MockServer worked out what a connection carried by waiting for its first 8 bytes, and did so
   again on every later read of a connection it had already found to be binary. A message shorter than

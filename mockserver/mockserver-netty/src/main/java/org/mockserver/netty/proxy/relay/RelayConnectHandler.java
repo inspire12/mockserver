@@ -423,6 +423,7 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
                 : null;
             // the client's requests are limited here, as on a direct connection
             pipelineToProxyClient.addLast(Http2RequestHeaderLimit.tunnelServerHandler(configuration, mockServerLogger, connection, frameListener, frameLogger));
+            pipelineToProxyClient.addLast(new StreamedHttp2ResponseWriter());
             // the loopback is exempt from write-stall watching, so a stream the client stops taking is cut on this leg
             final long writeStallTimeoutMillis = configuration.responseWriteStallTimeoutMillis();
             if (writeStallTimeoutMillis > 0 && !WriteStallTimeoutHandler.isExempt(proxyClientCtx.channel())) {
@@ -457,8 +458,10 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
         final Http2Connection connection = new DefaultHttp2Connection(false);
         final LoopbackHttp2StreamIdRemapper streamIdRemapper = new LoopbackHttp2StreamIdRemapper(mockServerLogger, connection, proxyClientCtx.channel());
         final LoopbackHttp2StreamErrorHandler streamErrorHandler = new LoopbackHttp2StreamErrorHandler(mockServerLogger, connection, streamIdRemapper, proxyClientCtx.channel());
+        // a response of undeclared length is relayed as MockServer writes it, any other once it is whole
+        final LoopbackHttp2ResponseStreamer responseStreamer = new LoopbackHttp2ResponseStreamer(connection);
         final HttpToHttp2ConnectionHandlerBuilder http2ConnectionHandlerBuilder = new HttpToHttp2ConnectionHandlerBuilder()
-            .frameListener(streamErrorHandler.frameListener(
+            .frameListener(streamErrorHandler.frameListener(responseStreamer.relaying(
                 new BoundedZstdDecompressorFrameListener(
                     connection,
                     new InboundHttp2ToHttpAdapterBuilder(connection)
@@ -467,7 +470,7 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
                         .validateHttpHeaders(false)
                         .build()
                 )
-            ))
+            )))
             .connection(connection)
             // reads only responses MockServer itself wrote, so no limit on their headers, as on the HTTP/1.1 loopback
             .initialSettings(Http2RequestHeaderLimit.relayLoopbackSettings())
@@ -475,7 +478,9 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
         if (mockServerLogger.isEnabledForInstance(TRACE)) {
             http2ConnectionHandlerBuilder.frameLogger(new Http2FrameLogger(LogLevel.TRACE, RelayConnectHandler.class.getName()));
         }
-        pipelineToMockServer.addLast(http2ConnectionHandlerBuilder.build());
+        final HttpToHttp2ConnectionHandler http2ConnectionHandler = http2ConnectionHandlerBuilder.build();
+        pipelineToMockServer.addLast(http2ConnectionHandler);
+        responseStreamer.widenConnectionWindow(pipelineToMockServer.context(http2ConnectionHandler));
         pipelineToMockServer.addLast(streamErrorHandler);
         pipelineToMockServer.addLast(streamIdRemapper);
         pipelineToMockServer.addLast(new LoopbackHttp2ConnectionCloseHandler(mockServerLogger, connection, proxyClientCtx.channel(), streamIdRemapper));

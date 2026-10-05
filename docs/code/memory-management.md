@@ -340,7 +340,7 @@ itself buffers for a chunk-size line is bounded separately: see [Chunk-size line
 
 Two places still copy as they grow:
 the relay's HTTP/2 legs, where Netty's `InboundHttp2ToHttpAdapter` writes DATA frames into one growing
-buffer, and `ByteToMessageDecoder` cumulation, which stays small because the HTTP decoder consumes it as it reads.
+buffer (requests, and responses of declared length: a streamed response is relayed frame by frame and never held), and `ByteToMessageDecoder` cumulation, which stays small because the HTTP decoder consumes it as it reads.
 
 **What happens at the cap.** An allocation that would pass it throws `OutOfDirectMemoryError`, and the
 connection that made the allocation is closed. That is whichever connection needed a buffer next, not

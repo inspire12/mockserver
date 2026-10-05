@@ -122,6 +122,14 @@ public final class Http2TestClient implements AutoCloseable {
      * HTTP/2 through MockServer's CONNECT proxy: CONNECT over HTTP/1.1, then TLS with ALPN {@code h2}.
      */
     public static Http2TestClient throughConnect(EventLoopGroup group, int port, String targetHost, int targetPort) throws Exception {
+        return throughConnect(group, port, targetHost, targetPort, true);
+    }
+
+    /**
+     * HTTP/2 through MockServer's CONNECT proxy: CONNECT over HTTP/1.1, then TLS with ALPN {@code h2}, or cleartext
+     * with prior knowledge.
+     */
+    public static Http2TestClient throughConnect(EventLoopGroup group, int port, String targetHost, int targetPort, boolean tls) throws Exception {
         CompletableFuture<Integer> connectStatus = new CompletableFuture<>();
         Channel channel = new Bootstrap()
             .group(group)
@@ -148,7 +156,12 @@ public final class Http2TestClient implements AutoCloseable {
         connectRequest.headers().set(HttpHeaderNames.HOST, target);
         channel.writeAndFlush(connectRequest);
         assertThat(connectStatus.get(WAIT_SECONDS, TimeUnit.SECONDS), is(200));
-        return overTls(channel, targetHost, targetPort);
+        if (tls) {
+            return overTls(channel, targetHost, targetPort);
+        }
+        Http2TestClient client = new Http2TestClient(channel);
+        client.addHttp2Handlers();
+        return client;
     }
 
     /**
@@ -357,16 +370,24 @@ public final class Http2TestClient implements AutoCloseable {
                                 exchange.interimStatus.complete(Integer.parseInt(status.toString()));
                             } else if (status != null) {
                                 readsStopped = readOnlyTheResponseHeaders;
+                                exchange.headersAtNanos = System.nanoTime();
                                 exchange.headers.complete(headersFrame.headers());
                                 exchange.status.complete(Integer.parseInt(status.toString()));
+                            } else {
+                                exchange.trailers.complete(headersFrame.headers());
                             }
                             if (headersFrame.isEndStream()) {
+                                exchange.endAtNanos = System.nanoTime();
                                 exchange.body.complete(exchange.received());
                             }
                         } else if (msg instanceof Http2DataFrame) {
                             Http2DataFrame data = (Http2DataFrame) msg;
+                            if (exchange.firstDataAtNanos == 0 && data.content().isReadable()) {
+                                exchange.firstDataAtNanos = System.nanoTime();
+                            }
                             exchange.received(ByteBufUtil.getBytes(data.content()));
                             if (data.isEndStream()) {
+                                exchange.endAtNanos = System.nanoTime();
                                 exchange.body.complete(exchange.received());
                             }
                         } else if (msg instanceof Http2ResetFrame) {
@@ -391,6 +412,7 @@ public final class Http2TestClient implements AutoCloseable {
                     exchange.headers.completeExceptionally(closed);
                     exchange.status.completeExceptionally(closed);
                     exchange.body.completeExceptionally(closed);
+                    exchange.trailers.completeExceptionally(closed);
                     exchange.reset.completeExceptionally(closed);
                 }
 
@@ -408,10 +430,12 @@ public final class Http2TestClient implements AutoCloseable {
                     exchange.headers.completeExceptionally(reset);
                     exchange.status.completeExceptionally(reset);
                     exchange.body.completeExceptionally(reset);
+                    exchange.trailers.completeExceptionally(reset);
                 }
             })
             .open().sync().getNow();
         exchange.stream = stream;
+        exchange.sentAtNanos = System.nanoTime();
         if (readOnlyTheResponseHeaders) {
             streamsNotReading.add(stream);
         }
@@ -438,6 +462,11 @@ public final class Http2TestClient implements AutoCloseable {
         private final CompletableFuture<Integer> status = new CompletableFuture<>();
         private final CompletableFuture<String> body = new CompletableFuture<>();
         private final CompletableFuture<Long> reset = new CompletableFuture<>();
+        private final CompletableFuture<Http2Headers> trailers = new CompletableFuture<>();
+        private volatile long sentAtNanos;
+        private volatile long headersAtNanos;
+        private volatile long firstDataAtNanos;
+        private volatile long endAtNanos;
         private volatile int streamId;
 
         public int streamId() {
@@ -506,6 +535,94 @@ public final class Http2TestClient implements AutoCloseable {
 
         public boolean isReset() {
             return reset.isDone() && !reset.isCompletedExceptionally();
+        }
+
+        /**
+         * @return whether the response has ended: its last frame has arrived
+         */
+        public boolean isComplete() {
+            return body.isDone() && !body.isCompletedExceptionally();
+        }
+
+        /**
+         * @return the value of a response trailer, or null if the trailers have none of that name
+         */
+        public String trailer(String name) throws Exception {
+            CharSequence value = trailers.get(WAIT_SECONDS, TimeUnit.SECONDS).get(name);
+            return value != null ? value.toString() : null;
+        }
+
+        /**
+         * @return the milliseconds from the request's headers being sent to the response's headers arriving
+         */
+        public long millisToHeaders() throws Exception {
+            status();
+            return TimeUnit.NANOSECONDS.toMillis(headersAtNanos - sentAtNanos);
+        }
+
+        /**
+         * @return the milliseconds from the request's headers being sent to the first byte of the response body
+         * arriving, waiting for it if it has not yet
+         */
+        public long millisToFirstData() throws Exception {
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_SECONDS);
+            while (firstDataAtNanos == 0) {
+                assertThat("response data within " + WAIT_SECONDS + "s", System.nanoTime() < deadline, is(true));
+                Thread.sleep(5);
+            }
+            return TimeUnit.NANOSECONDS.toMillis(firstDataAtNanos - sentAtNanos);
+        }
+
+        /**
+         * @return the milliseconds between the first byte of the response body arriving and the response ending,
+         * waiting for its end
+         */
+        public long millisFromFirstDataToEnd() throws Exception {
+            body();
+            return TimeUnit.NANOSECONDS.toMillis(endAtNanos - firstDataAtNanos);
+        }
+
+        /**
+         * @return the response body received so far, as bytes
+         */
+        public byte[] receivedByteArray() {
+            synchronized (received) {
+                return received.toByteArray();
+            }
+        }
+
+        /**
+         * Sends a DATA frame of the request body.
+         */
+        public Exchange data(byte[] body, boolean endStream) throws Exception {
+            stream.writeAndFlush(new DefaultHttp2DataFrame(Unpooled.wrappedBuffer(body), endStream)).sync();
+            return this;
+        }
+
+        /**
+         * Takes the next frame that has arrived on a stream opened with
+         * {@link Http2TestClient#sendReadingOnlyTheResponseHeaders}, and gives its window back.
+         */
+        public Exchange readOneFrame() {
+            stream.read();
+            return this;
+        }
+
+        /**
+         * Reads the rest of a stream opened with {@link Http2TestClient#sendReadingOnlyTheResponseHeaders} as it arrives.
+         */
+        public Exchange readTheRest() {
+            stream.config().setAutoRead(true);
+            return this;
+        }
+
+        /**
+         * @return the number of bytes of the response body received so far
+         */
+        public int receivedBytes() {
+            synchronized (received) {
+                return received.size();
+            }
         }
 
         /**

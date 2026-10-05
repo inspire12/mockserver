@@ -31,7 +31,8 @@ import static io.netty.handler.codec.http2.HttpConversionUtil.ExtensionHeaderNam
  * <p>
  * Each pair is forgotten when its loopback stream is removed, so a long-lived tunnel holds one entry per open stream.
  * A loopback response with no pair (only a server push could have one) is dropped, as is one whose client stream has
- * ended. Flow control and PRIORITY frames are not relayed between the legs, and a GOAWAY is not translated:
+ * ended. A response relayed as it is streamed arrives in parts ({@link StreamedHttp2ResponsePart}), each mapped alike.
+ * Flow control and PRIORITY frames are not relayed between the legs, and a GOAWAY is not translated:
  * {@link LoopbackHttp2ConnectionCloseHandler} sends the client one of its own, from the client connection's ids. A
  * priority dependency on a request is translated, or dropped when it names no open stream. Sits after the loopback's
  * {@code Http2ConnectionHandler}; one per loopback. It reads and marks the proxy client connection's streams
@@ -110,7 +111,8 @@ public class LoopbackHttp2StreamIdRemapper extends ChannelDuplexHandler {
 
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
-        Integer loopbackId = msg instanceof HttpMessage ? ((HttpMessage) msg).headers().getInt(STREAM_ID.text()) : null;
+        StreamedHttp2ResponsePart part = msg instanceof StreamedHttp2ResponsePart ? (StreamedHttp2ResponsePart) msg : null;
+        Integer loopbackId = part != null ? Integer.valueOf(part.streamId()) : msg instanceof HttpMessage ? ((HttpMessage) msg).headers().getInt(STREAM_ID.text()) : null;
         if (loopbackId != null) {
             Integer clientId = clientIdByLoopbackId.get(loopbackId);
             if (clientId == null) {
@@ -131,12 +133,20 @@ public class LoopbackHttp2StreamIdRemapper extends ChannelDuplexHandler {
                 ReferenceCountUtil.release(msg);
                 return;
             }
-            HttpHeaders headers = ((HttpMessage) msg).headers();
-            headers.setInt(STREAM_ID.text(), clientId);
-            translateDependency(headers, clientIdByLoopbackId, clientId);
-            // a 1xx is handed on as soon as it arrives; only a final response is the whole answer
-            if (clientStream != null && msg instanceof FullHttpResponse && ((FullHttpResponse) msg).status().codeClass() != HttpStatusClass.INFORMATIONAL) {
-                clientStream.setProperty(answeredKey, Boolean.TRUE);
+            if (part != null) {
+                part.streamId(clientId);
+                // a streamed response is the whole answer once the part that ends it has been handed on
+                if (clientStream != null && part.endOfStream()) {
+                    clientStream.setProperty(answeredKey, Boolean.TRUE);
+                }
+            } else {
+                HttpHeaders headers = ((HttpMessage) msg).headers();
+                headers.setInt(STREAM_ID.text(), clientId);
+                translateDependency(headers, clientIdByLoopbackId, clientId);
+                // a 1xx is handed on as soon as it arrives; only a final response is the whole answer
+                if (clientStream != null && msg instanceof FullHttpResponse && ((FullHttpResponse) msg).status().codeClass() != HttpStatusClass.INFORMATIONAL) {
+                    clientStream.setProperty(answeredKey, Boolean.TRUE);
+                }
             }
         }
         ctx.fireChannelRead(msg);

@@ -8,6 +8,7 @@ import io.netty.handler.codec.http.HttpMessage;
 import io.netty.handler.codec.http.HttpObject;
 import io.netty.handler.codec.http2.Http2CodecUtil;
 import io.netty.handler.codec.http2.Http2Exception;
+import io.netty.handler.ssl.SslClosedEngineException;
 import io.netty.util.ReferenceCountUtil;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.log.model.SensitiveLogValue;
@@ -107,7 +108,8 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
             ChannelReadPause.pause(ctx.channel());
         }
         // read before the write, which releases the message
-        final Integer clientStreamId = msg instanceof HttpMessage ? ((HttpMessage) msg).headers().getInt(STREAM_ID.text()) : null;
+        final Integer clientStreamId = msg instanceof StreamedHttp2ResponsePart ? Integer.valueOf(((StreamedHttp2ResponsePart) msg).streamId())
+            : msg instanceof HttpMessage ? ((HttpMessage) msg).headers().getInt(STREAM_ID.text()) : null;
         upstreamChannel.writeAndFlush(msg).addListener((ChannelFutureListener) future -> {
             if (unwritten > 0 && unwrittenStreamedBytes.addAndGet(-streamedBytes) <= pauseReadsAboveBytes / 2 && readsPaused) {
                 readsPaused = false;
@@ -194,7 +196,8 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
     }
 
     private boolean isNotSocketClosedException(Throwable cause) {
-        return !(cause instanceof ClosedChannelException || cause instanceof ClosedSelectorException);
+        // a client that has closed its TLS session has gone, though its socket may be open a moment longer
+        return !(cause instanceof ClosedChannelException || cause instanceof ClosedSelectorException || cause instanceof SslClosedEngineException);
     }
 
     @Override
