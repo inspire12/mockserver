@@ -1,6 +1,7 @@
 package org.mockserver.netty.connection;
 
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.handler.ssl.SslHandshakeCompletionEvent;
 import io.netty.handler.timeout.IdleStateEvent;
 import io.netty.handler.timeout.IdleStateHandler;
 import org.mockserver.log.model.LogEntry;
@@ -17,8 +18,10 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
  * <p>
  * Installed first in the pipeline when the connection is accepted. TLS and SOCKS handlers added later
  * by protocol detection sit in front of it, so it observes decrypted application traffic rather than raw
- * socket bytes; TLS set-up itself is covered by the busy check. The idle event is consumed here rather
- * than fired down the pipeline, so no other handler that reacts to {@link IdleStateEvent} can act on it.
+ * socket bytes. A TLS handshake's records therefore never reach it: the handshake is covered by the busy
+ * check while it runs, and its completion restarts the idle period, so the client has a whole period to
+ * send its first request. The idle event is consumed here rather than fired down the pipeline, so no
+ * other handler that reacts to {@link IdleStateEvent} can act on it.
  */
 public final class InboundConnectionIdleHandler extends IdleStateHandler {
 
@@ -33,6 +36,14 @@ public final class InboundConnectionIdleHandler extends IdleStateHandler {
     public void handlerAdded(ChannelHandlerContext ctx) throws Exception {
         ctx.channel().attr(InboundConnectionActivity.ACTIVITY).setIfAbsent(new InboundConnectionActivity());
         super.handlerAdded(ctx);
+    }
+
+    @Override
+    public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
+        if (evt instanceof SslHandshakeCompletionEvent && ((SslHandshakeCompletionEvent) evt).isSuccess()) {
+            resetReadTimeout();
+        }
+        super.userEventTriggered(ctx, evt);
     }
 
     @Override

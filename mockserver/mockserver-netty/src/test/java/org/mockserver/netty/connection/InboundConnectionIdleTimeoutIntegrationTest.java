@@ -7,19 +7,25 @@ import org.mockserver.metrics.Metrics;
 import org.mockserver.netty.MockServer;
 import org.mockserver.netty.MockServerCaTrustTestSupport;
 
+import javax.net.ssl.SSLEngine;
+import javax.net.ssl.SSLEngineResult;
 import java.io.ByteArrayOutputStream;
+import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.ProxySelector;
 import java.net.Socket;
+import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpResponse;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -44,7 +50,8 @@ import static org.mockserver.stop.Stop.stopQuietly;
  * response with long gaps, an open HTTP/2 stream, a WebSocket, a paused breakpoint - outlives it. A
  * CONNECT or SOCKS tunnel is treated the same way: both of its legs are closed once it has carried
  * nothing for the timeout with no exchange in progress, and a tunnel with one in progress outlives it.
- * Each "stays open" case waits for at least three times the timeout.
+ * Each "stays open" case waits for at least three times the timeout. Every "not before the timeout" bound
+ * is measured from a time taken before the connection's last activity, so a slow client cannot shorten it.
  */
 public class InboundConnectionIdleTimeoutIntegrationTest {
 
@@ -77,15 +84,15 @@ public class InboundConnectionIdleTimeoutIntegrationTest {
     public void shouldCloseConnectionThatNeverSendsAnything() throws Exception {
         startServer(IDLE_MILLIS);
         long idleClosedBefore = Metrics.getInboundConnectionsIdleClosedCount();
+        long beforeConnecting = System.nanoTime();
         try (Socket socket = new Socket("localhost", port)) {
             socket.setSoTimeout(10_000);
-            long start = System.nanoTime();
+            long connected = System.nanoTime();
 
             assertThat(socket.getInputStream().read(), is(-1));
 
-            long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
-            assertThat(elapsedMillis, greaterThanOrEqualTo(IDLE_MILLIS - 50));
-            assertThat(elapsedMillis, lessThan(IDLE_MILLIS + 5_000));
+            assertThat(millisSince(beforeConnecting), greaterThanOrEqualTo(IDLE_MILLIS - 50));
+            assertThat(millisSince(connected), lessThan(IDLE_MILLIS + 5_000));
         }
         assertThat(Metrics.getInboundConnectionsIdleClosedCount() - idleClosedBefore, greaterThanOrEqualTo(1L));
     }
@@ -99,11 +106,11 @@ public class InboundConnectionIdleTimeoutIntegrationTest {
 
             String firstResponse = exchange(socket, "/simple");
             assertThat(firstResponse, containsString("200"));
+            long beforeLastExchange = System.nanoTime();
             assertThat("keep-alive is honoured while the client is active", exchange(socket, "/simple"), containsString("simple"));
-            long answered = System.nanoTime();
 
             assertThat(socket.getInputStream().read(), is(-1));
-            assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - answered), greaterThanOrEqualTo(IDLE_MILLIS - 50));
+            assertThat(millisSince(beforeLastExchange), greaterThanOrEqualTo(IDLE_MILLIS - 50));
         }
     }
 
@@ -115,11 +122,88 @@ public class InboundConnectionIdleTimeoutIntegrationTest {
         try (Socket socket = new Socket("localhost", port)) {
             socket.setSoTimeout(5_000);
 
+            long beforeExchange = System.nanoTime();
             assertThat(exchange(socket, "/raw"), containsString("raw"));
-            long answered = System.nanoTime();
 
             assertThat("the raw-bytes exchange no longer keeps the connection busy forever", socket.getInputStream().read(), is(-1));
-            assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - answered), greaterThanOrEqualTo(IDLE_MILLIS - 50));
+            assertThat(millisSince(beforeExchange), greaterThanOrEqualTo(IDLE_MILLIS - 50));
+        }
+    }
+
+    @Test
+    public void shouldGiveAConnectionAFullPeriodAfterItsTlsHandshakeCompletes() throws Exception {
+        long idleMillis = 1_000;
+        startServer(idleMillis);
+        long idleClosedBefore = Metrics.getInboundConnectionsIdleClosedCount();
+        try (Socket socket = new Socket("localhost", port)) {
+            socket.setSoTimeout(10_000);
+            PausableTlsHandshake handshake = new PausableTlsHandshake(socket);
+            long[] beforeLastFlight = new long[1];
+
+            // the client answers the server's flight one and a half periods after its ClientHello
+            handshake.complete(() -> {
+                sleepUntil(handshake.clientHelloSent + TimeUnit.MILLISECONDS.toNanos(idleMillis + idleMillis / 2));
+                beforeLastFlight[0] = System.nanoTime();
+            });
+
+            readUntilClosed(socket);
+
+            assertThat("the server cannot complete the handshake before the client's last flight, and the period starts when it does",
+                millisSince(beforeLastFlight[0]), greaterThanOrEqualTo(idleMillis - 50));
+        }
+        assertThat(Metrics.getInboundConnectionsIdleClosedCount() - idleClosedBefore, greaterThanOrEqualTo(1L));
+    }
+
+    @Test
+    public void shouldCloseConnectionWhoseTlsClientHelloNeverCompletes() throws Exception {
+        startServer(IDLE_MILLIS);
+        byte[] clientHello = PausableTlsHandshake.clientHello();
+        long beforeConnecting = System.nanoTime();
+        try (Socket socket = new Socket("localhost", port)) {
+            OutputStream output = socket.getOutputStream();
+            // enough to be recognised as TLS, then a byte at a time, each well inside the timeout
+            output.write(clientHello, 0, 16);
+            output.flush();
+            // half of the 10 seconds after which Netty gives up on a ClientHello by itself
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            int sent = 16;
+            boolean closed = false;
+            // an interval the timeout is not a multiple of, so no byte is aimed at the moment of the close
+            socket.setSoTimeout((int) (3 * IDLE_MILLIS / 16));
+            while (!closed && sent < clientHello.length - 1 && System.nanoTime() < deadline) {
+                try {
+                    closed = socket.getInputStream().read() == -1;
+                } catch (SocketTimeoutException stillOpen) {
+                    closed = !trickle(output, clientHello[sent++]);
+                } catch (SocketException reset) {
+                    // a byte that crossed the close is answered with a reset: the close, seen another way
+                    closed = true;
+                }
+            }
+
+            assertThat("closed while the ClientHello was still arriving, " + sent + " of " + clientHello.length + " bytes sent", closed, is(true));
+            assertThat(millisSince(beforeConnecting), greaterThanOrEqualTo(IDLE_MILLIS - 50));
+        }
+    }
+
+    @Test
+    public void shouldLeaveAStalledTlsHandshakeToItsOwnTimeout() throws Exception {
+        long handshakeTimeoutMillis = 4 * IDLE_MILLIS;
+        mockServer = new MockServer(configuration()
+            .inboundConnectionIdleTimeoutMillis(IDLE_MILLIS)
+            .socketConnectionTimeoutInMillis(handshakeTimeoutMillis)
+            .startupWarmup(false), 0);
+        port = mockServer.getLocalPort();
+        try (Socket socket = new Socket("localhost", port)) {
+            socket.setSoTimeout(10_000);
+            long beforeClientHello = System.nanoTime();
+            socket.getOutputStream().write(PausableTlsHandshake.clientHello());
+            socket.getOutputStream().flush();
+
+            // the server's flight, then the close once the handshake times out
+            readUntilClosed(socket);
+
+            assertThat("the idle timeout leaves a handshake in progress alone", millisSince(beforeClientHello), greaterThanOrEqualTo(handshakeTimeoutMillis - 50));
         }
     }
 
@@ -247,7 +331,7 @@ public class InboundConnectionIdleTimeoutIntegrationTest {
 
             assertThat(socket.getInputStream().read(), is(-1));
 
-            assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - beforeLastExchange), greaterThanOrEqualTo(IDLE_MILLIS - 50));
+            assertThat(millisSince(beforeLastExchange), greaterThanOrEqualTo(IDLE_MILLIS - 50));
             awaitNoInboundConnections("the tunnel's loopback leg closes with it");
         }
         assertThat(Metrics.getInboundConnectionsIdleClosedCount() - idleClosedBefore, greaterThanOrEqualTo(1L));
@@ -264,7 +348,7 @@ public class InboundConnectionIdleTimeoutIntegrationTest {
 
             assertThat(socket.getInputStream().read(), is(-1));
 
-            assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - beforeOpening), greaterThanOrEqualTo(IDLE_MILLIS - 50));
+            assertThat(millisSince(beforeOpening), greaterThanOrEqualTo(IDLE_MILLIS - 50));
             awaitNoInboundConnections("the tunnel's loopback leg closes with it");
         }
     }
@@ -281,7 +365,7 @@ public class InboundConnectionIdleTimeoutIntegrationTest {
 
             assertThat(socket.getInputStream().read(), is(-1));
 
-            assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - beforeLastExchange), greaterThanOrEqualTo(IDLE_MILLIS - 50));
+            assertThat(millisSince(beforeLastExchange), greaterThanOrEqualTo(IDLE_MILLIS - 50));
             awaitNoInboundConnections("the tunnel's loopback leg closes with it");
         }
     }
@@ -416,7 +500,7 @@ public class InboundConnectionIdleTimeoutIntegrationTest {
                 Thread.sleep(idleMillis / 5);
             }
 
-            assertThat("the head took longer than the timeout to arrive", TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started), greaterThanOrEqualTo(2 * idleMillis));
+            assertThat("the head took longer than the timeout to arrive", millisSince(started), greaterThanOrEqualTo(2 * idleMillis));
             String head = readHead(socket.getInputStream());
             assertThat(head, containsString("200"));
             assertThat(new String(readBytes(socket.getInputStream(), "tunnelled".length()), StandardCharsets.UTF_8), is("tunnelled"));
@@ -490,6 +574,35 @@ public class InboundConnectionIdleTimeoutIntegrationTest {
         assertThat(reason, mockServer.getInboundConnectionCount(), is(0));
     }
 
+    /**
+     * @return false if the connection had already been closed
+     */
+    private static boolean trickle(OutputStream output, byte next) throws IOException {
+        try {
+            output.write(next);
+            output.flush();
+            return true;
+        } catch (SocketException closed) {
+            return false;
+        }
+    }
+
+    private static long millisSince(long nanoTime) {
+        return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - nanoTime);
+    }
+
+    private static void sleepUntil(long nanoTime) {
+        long remaining;
+        while ((remaining = nanoTime - System.nanoTime()) > 0) {
+            try {
+                TimeUnit.NANOSECONDS.sleep(remaining);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(e);
+            }
+        }
+    }
+
     private static void send(Socket socket, String request) throws IOException {
         OutputStream output = socket.getOutputStream();
         output.write(request.getBytes(StandardCharsets.UTF_8));
@@ -554,6 +667,86 @@ public class InboundConnectionIdleTimeoutIntegrationTest {
             fail("expected the connection to stay open and silent, but read " + read);
         } catch (SocketTimeoutException expected) {
             // still open
+        }
+    }
+
+    /**
+     * A TLS client handshake over a blocking socket that the test can hold up: once the server's flight has
+     * arrived, {@code beforeLastFlight} runs before the client sends the flight that lets the server finish.
+     */
+    private static final class PausableTlsHandshake {
+
+        private static final ByteBuffer NOTHING = ByteBuffer.allocate(0);
+
+        private final Socket socket;
+        private final SSLEngine engine;
+        private long clientHelloSent;
+
+        private PausableTlsHandshake(Socket socket) throws Exception {
+            this.socket = socket;
+            this.engine = clientEngine();
+        }
+
+        private static SSLEngine clientEngine() throws Exception {
+            SSLEngine engine = MockServerCaTrustTestSupport.caTrustingSslContext().createSSLEngine("localhost", 0);
+            engine.setUseClientMode(true);
+            return engine;
+        }
+
+        private static byte[] clientHello() throws Exception {
+            SSLEngine engine = clientEngine();
+            ByteBuffer flight = ByteBuffer.allocate(engine.getSession().getPacketBufferSize());
+            engine.wrap(NOTHING, flight);
+            return Arrays.copyOf(flight.array(), flight.position());
+        }
+
+        private void complete(Runnable beforeLastFlight) throws Exception {
+            ByteBuffer outgoing = ByteBuffer.allocate(engine.getSession().getPacketBufferSize());
+            ByteBuffer incoming = ByteBuffer.allocate(engine.getSession().getPacketBufferSize());
+            ByteBuffer plain = ByteBuffer.allocate(engine.getSession().getApplicationBufferSize());
+            boolean heardFromServer = false;
+            boolean paused = false;
+            engine.beginHandshake();
+            while (true) {
+                switch (engine.getHandshakeStatus()) {
+                    case NEED_WRAP:
+                        if (heardFromServer && !paused) {
+                            paused = true;
+                            beforeLastFlight.run();
+                        }
+                        outgoing.clear();
+                        engine.wrap(NOTHING, outgoing);
+                        socket.getOutputStream().write(outgoing.array(), 0, outgoing.position());
+                        socket.getOutputStream().flush();
+                        if (!heardFromServer) {
+                            clientHelloSent = System.nanoTime();
+                        }
+                        break;
+                    case NEED_UNWRAP:
+                        incoming.flip();
+                        SSLEngineResult result = engine.unwrap(incoming, plain);
+                        incoming.compact();
+                        if (result.getStatus() == SSLEngineResult.Status.BUFFER_UNDERFLOW) {
+                            int count = socket.getInputStream().read(incoming.array(), incoming.position(), incoming.remaining());
+                            if (count == -1) {
+                                throw new EOFException("connection closed during the TLS handshake");
+                            }
+                            incoming.position(incoming.position() + count);
+                        } else {
+                            heardFromServer = true;
+                        }
+                        break;
+                    case NEED_TASK:
+                        Runnable task;
+                        while ((task = engine.getDelegatedTask()) != null) {
+                            task.run();
+                        }
+                        break;
+                    default:
+                        assertThat("the client's last flight was held up", paused, is(true));
+                        return;
+                }
+            }
         }
     }
 }

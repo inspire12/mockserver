@@ -2,6 +2,8 @@ package org.mockserver.netty.connection;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.DefaultFullHttpResponse;
 import io.netty.handler.codec.http.DefaultHttpContent;
@@ -15,20 +17,31 @@ import io.netty.handler.codec.http2.DefaultHttp2HeadersEncoder;
 import io.netty.handler.codec.http2.Http2CodecUtil;
 import io.netty.handler.codec.http2.Http2FrameCodecBuilder;
 import io.netty.handler.codec.http2.Http2Headers;
+import io.netty.handler.ssl.SniCompletionEvent;
+import io.netty.handler.ssl.SslCloseCompletionEvent;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslHandler;
+import io.netty.handler.ssl.SslHandshakeCompletionEvent;
+import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.netty.util.ReferenceCountUtil;
 import org.junit.After;
 import org.junit.Test;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.responsewriter.HttpExchangeEndedEvent;
+import org.mockserver.socket.tls.NettySslContextFactory;
 import org.mockserver.socket.tls.SniHandler;
+
+import javax.net.ssl.SSLException;
+import java.util.ArrayList;
+import java.util.List;
 
 import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.core.Is.is;
 import static org.hamcrest.core.IsNull.nullValue;
+import static org.mockserver.configuration.Configuration.configuration;
 
 /**
  * Drives {@link InboundConnectionIdleHandler} and {@link HttpExchangeTracker} on an {@link EmbeddedChannel}
@@ -39,11 +52,15 @@ public class InboundConnectionIdleHandlerTest {
     private static final long IDLE_MILLIS = 1_000;
 
     private EmbeddedChannel channel;
+    private EmbeddedChannel tlsClient;
 
     @After
     public void closeChannel() {
         if (channel != null) {
             channel.finishAndReleaseAll();
+        }
+        if (tlsClient != null) {
+            tlsClient.finishAndReleaseAll();
         }
     }
 
@@ -53,6 +70,37 @@ public class InboundConnectionIdleHandlerTest {
         channel.pipeline().addLast(new InboundConnectionIdleHandler(IDLE_MILLIS, new MockServerLogger()));
         channel.pipeline().addLast(HttpExchangeTracker.INSTANCE);
         return channel;
+    }
+
+    /**
+     * A connection as port unification leaves a direct TLS one: the TLS handler ahead of the idle handler, so
+     * the handshake's records never reach it. The client's ClientHello is waiting to be delivered.
+     */
+    private SslHandler tlsConnection() throws Exception {
+        httpConnection();
+        SslHandler serverTls = new NettySslContextFactory(configuration(), new MockServerLogger(), true).createServerSslContext().newHandler(channel.alloc());
+        // switched off so only the idle handler acts
+        serverTls.setHandshakeTimeoutMillis(0);
+        channel.pipeline().addFirst(serverTls);
+        tlsClient = new EmbeddedChannel(SslContextBuilder.forClient().trustManager(InsecureTrustManagerFactory.INSTANCE).build().newHandler(channel.alloc()));
+        return serverTls;
+    }
+
+    private static boolean deliver(EmbeddedChannel from, EmbeddedChannel to) {
+        boolean delivered = false;
+        Object bytes;
+        while ((bytes = from.readOutbound()) != null) {
+            to.writeInbound(bytes);
+            delivered = true;
+        }
+        return delivered;
+    }
+
+    private void completeHandshake() {
+        boolean delivered;
+        do {
+            delivered = deliver(channel, tlsClient) | deliver(tlsClient, channel);
+        } while (delivered);
     }
 
     private void idleFor(long millis) {
@@ -209,6 +257,93 @@ public class InboundConnectionIdleHandlerTest {
         idleFor(IDLE_MILLIS * 10);
 
         assertThat(channel.isOpen(), is(true));
+    }
+
+    @Test
+    public void shouldGiveAFullPeriodOnceATlsHandshakeLongerThanTheTimeoutCompletes() throws Exception {
+        SslHandler serverTls = tlsConnection();
+        deliver(tlsClient, channel);
+        idleFor(IDLE_MILLIS);
+        assertThat("the handshake is still in progress", channel.isOpen(), is(true));
+        idleFor(IDLE_MILLIS / 2);
+
+        completeHandshake();
+        assertThat(serverTls.handshakeFuture().isSuccess(), is(true));
+
+        idleFor(IDLE_MILLIS - 1);
+        assertThat("the client has a whole period after its handshake to send its first request", channel.isOpen(), is(true));
+
+        idleFor(1);
+        assertThat(channel.isOpen(), is(false));
+    }
+
+    @Test
+    public void shouldGiveAFullPeriodOnceATlsHandshakeShorterThanTheTimeoutCompletes() throws Exception {
+        SslHandler serverTls = tlsConnection();
+        deliver(tlsClient, channel);
+        idleFor(IDLE_MILLIS / 2);
+
+        completeHandshake();
+        assertThat(serverTls.handshakeFuture().isSuccess(), is(true));
+
+        idleFor(IDLE_MILLIS - 1);
+        assertThat("the period is counted from the end of the handshake, not from the accept", channel.isOpen(), is(true));
+
+        idleFor(1);
+        assertThat(channel.isOpen(), is(false));
+    }
+
+    @Test
+    public void shouldNotRestartThePeriodWhenATlsHandshakeFails() {
+        httpConnection();
+        idleFor(IDLE_MILLIS / 2);
+
+        channel.pipeline().fireUserEventTriggered(new SslHandshakeCompletionEvent(new SSLException("handshake failed")));
+
+        idleFor(IDLE_MILLIS / 2);
+        assertThat("a failed handshake buys the connection no extra time", channel.isOpen(), is(false));
+    }
+
+    @Test
+    public void shouldNotRestartThePeriodWhenTlsIsClosed() {
+        httpConnection();
+        idleFor(IDLE_MILLIS / 2);
+
+        channel.pipeline().fireUserEventTriggered(SslCloseCompletionEvent.SUCCESS);
+
+        idleFor(IDLE_MILLIS / 2 - 1);
+        assertThat(channel.isOpen(), is(true));
+        idleFor(1);
+        assertThat("a close_notify buys the connection no extra time", channel.isOpen(), is(false));
+    }
+
+    @Test
+    public void shouldNotRestartThePeriodWhenTheServerNameIsRead() {
+        httpConnection();
+        idleFor(IDLE_MILLIS / 2);
+
+        channel.pipeline().fireUserEventTriggered(new SniCompletionEvent("localhost"));
+
+        idleFor(IDLE_MILLIS / 2 - 1);
+        assertThat(channel.isOpen(), is(true));
+        idleFor(1);
+        assertThat("only the handshake's completion restarts the period", channel.isOpen(), is(false));
+    }
+
+    @Test
+    public void shouldPassTheHandshakeCompletionOnToLaterHandlers() {
+        httpConnection();
+        List<Object> seen = new ArrayList<>();
+        channel.pipeline().addLast(new ChannelInboundHandlerAdapter() {
+            @Override
+            public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
+                seen.add(evt);
+            }
+        });
+
+        channel.pipeline().fireUserEventTriggered(SslHandshakeCompletionEvent.SUCCESS);
+
+        assertThat(seen, contains((Object) SslHandshakeCompletionEvent.SUCCESS));
     }
 
     @Test
