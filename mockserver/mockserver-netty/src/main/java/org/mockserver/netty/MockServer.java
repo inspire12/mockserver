@@ -3,6 +3,7 @@ package org.mockserver.netty;
 import com.google.common.collect.ImmutableList;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
+import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.WriteBufferWaterMark;
@@ -16,6 +17,7 @@ import org.mockserver.log.model.LogEntry;
 import org.mockserver.mock.action.http.HttpActionHandler;
 import org.mockserver.netty.connection.InboundConnectionLimiter;
 import org.mockserver.netty.dns.DnsRequestHandler;
+import org.mockserver.netty.dns.DnsStartupException;
 import org.mockserver.netty.http3.Http3NativeUnavailableException;
 import org.mockserver.netty.http3.Http3Server;
 import org.mockserver.netty.http3.Http3StartupException;
@@ -238,19 +240,7 @@ public class MockServer extends LifeCycle {
         }
 
         if (Boolean.TRUE.equals(configuration.dnsEnabled())) {
-            try {
-                bindDnsPort(configuration);
-            } catch (Throwable throwable) {
-                if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
-                    mockServerLogger.logEvent(
-                        new LogEntry()
-                            .setType(SERVER_CONFIGURATION)
-                            .setLogLevel(Level.WARN)
-                            .setMessageFormat("exception binding DNS port - DNS mocking disabled")
-                            .setThrowable(throwable)
-                    );
-                }
-            }
+            startDnsServer(configuration);
         }
 
         // start HTTP/3 (QUIC) server when configured (http3Port > 0). Availability was already
@@ -329,8 +319,26 @@ public class MockServer extends LifeCycle {
         return this;
     }
 
-    private void bindDnsPort(Configuration configuration) {
+    /**
+     * Any failure to start refuses start-up, as a TCP port that cannot be bound does: the constructor
+     * throws, so the caller gets no reference to stop, and everything already started is stopped here.
+     */
+    private void startDnsServer(Configuration configuration) {
         int dnsPort = configuration.dnsPort() != null ? configuration.dnsPort() : 0;
+        try {
+            bindDnsPort(dnsPort);
+        } catch (Throwable throwable) {
+            // stop() does not wait on an interrupted thread
+            boolean interrupted = Thread.interrupted();
+            stop();
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+            throw throwable instanceof DnsStartupException ? (DnsStartupException) throwable : DnsStartupException.serverCouldNotStart(dnsPort, throwable);
+        }
+    }
+
+    private void bindDnsPort(int dnsPort) {
         DnsRequestHandler dnsHandler = new DnsRequestHandler(mockServerLogger, httpState);
         Bootstrap dnsBootstrap = new Bootstrap()
             .group(workerGroup)
@@ -345,7 +353,12 @@ public class MockServer extends LifeCycle {
                         .addLast(dnsHandler);
                 }
             });
-        dnsChannel = dnsBootstrap.bind(dnsPort).syncUninterruptibly().channel();
+        ChannelFuture bind = dnsBootstrap.bind(dnsPort).awaitUninterruptibly();
+        if (!bind.isSuccess()) {
+            // also fails when the channel cannot be created or registered; with port 0 there is no port to free
+            throw dnsPort > 0 ? DnsStartupException.portCouldNotBeOpenedOrBound(dnsPort, bind.cause()) : DnsStartupException.serverCouldNotStart(dnsPort, bind.cause());
+        }
+        dnsChannel = bind.channel();
         int boundPort = ((InetSocketAddress) dnsChannel.localAddress()).getPort();
         if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
             mockServerLogger.logEvent(

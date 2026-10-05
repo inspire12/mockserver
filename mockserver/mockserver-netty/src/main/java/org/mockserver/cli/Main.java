@@ -9,6 +9,7 @@ import org.mockserver.configuration.IntegerStringListParser;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.netty.MockServer;
+import org.mockserver.netty.dns.DnsStartupException;
 import org.mockserver.netty.http3.Http3NativeUnavailableException;
 import org.mockserver.netty.http3.Http3StartupException;
 import org.mockserver.socket.NettyDirectMemoryLimit;
@@ -225,23 +226,18 @@ public class Main {
     }
 
     /**
-     * A missing HTTP/3 native and an HTTP/3 port that cannot be bound are configuration problems whose fixes
-     * the message already spells out, so print just that message: a stack trace buries the fix.
+     * A missing HTTP/3 native, and an HTTP/3 or DNS port that cannot be used, are configuration problems whose
+     * fixes the message already spells out, so print just that message: a stack trace buries the fix.
      */
     static void logStartupFailure(Throwable throwable, boolean disableSystemOut) {
         String http3Failure = http3FailureItsMessageExplains(throwable);
         if (http3Failure != null) {
-            MOCK_SERVER_LOGGER.logEvent(
-                new LogEntry()
-                    .setType(SERVER_CONFIGURATION)
-                    .setLogLevel(ERROR)
-                    // a bare "{}" format renders nothing, and the message must not be the format (it may contain "{}")
-                    .setMessageFormat("HTTP/3 start-up failed:{}")
-                    .setArguments(http3Failure)
-            );
-            if (disableSystemOut) {
-                System.err.println(http3Failure);
-            }
+            logFailureItsMessageExplains(new LogEntry().setMessageFormat("HTTP/3 start-up failed:{}"), http3Failure, disableSystemOut);
+            return;
+        }
+        String dnsFailure = dnsFailureItsMessageExplains(throwable);
+        if (dnsFailure != null) {
+            logFailureItsMessageExplains(new LogEntry().setMessageFormat("DNS start-up failed:{}"), dnsFailure, disableSystemOut);
             return;
         }
         MOCK_SERVER_LOGGER.logEvent(
@@ -256,12 +252,25 @@ public class Main {
         }
     }
 
+    // a bare "{}" format renders nothing, and the message must not be the format (it may contain "{}")
+    private static void logFailureItsMessageExplains(LogEntry withItsFormat, String message, boolean disableSystemOut) {
+        MOCK_SERVER_LOGGER.logEvent(withItsFormat.setType(SERVER_CONFIGURATION).setLogLevel(ERROR).setArguments(message));
+        if (disableSystemOut) {
+            System.err.println(message);
+        }
+    }
+
     private static String http3FailureItsMessageExplains(Throwable throwable) {
         Http3NativeUnavailableException nativeUnavailable = ExceptionUtils.throwableOfType(throwable, Http3NativeUnavailableException.class);
         if (nativeUnavailable != null) {
             return nativeUnavailable.getMessage();
         }
         Http3StartupException startFailed = ExceptionUtils.throwableOfType(throwable, Http3StartupException.class);
+        return startFailed != null && startFailed.isPortUnavailable() ? startFailed.getMessage() : null;
+    }
+
+    private static String dnsFailureItsMessageExplains(Throwable throwable) {
+        DnsStartupException startFailed = ExceptionUtils.throwableOfType(throwable, DnsStartupException.class);
         return startFailed != null && startFailed.isPortUnavailable() ? startFailed.getMessage() : null;
     }
 

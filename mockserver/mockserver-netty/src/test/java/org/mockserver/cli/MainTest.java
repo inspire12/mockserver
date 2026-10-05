@@ -13,6 +13,7 @@ import org.mockserver.configuration.ConfigurationProperties;
 import org.mockserver.echo.http.EchoServer;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpResponse;
+import org.mockserver.netty.dns.DnsStartupException;
 import org.mockserver.netty.http3.Http3Server;
 import org.mockserver.netty.http3.Http3StartupException;
 import org.mockserver.netty.integration.proxy.http.HttpProxyChainedIntegrationTest;
@@ -465,6 +466,72 @@ public class MainTest {
 
         assertThat(printed, containsString("exception while starting: HTTP/3 is enabled (http3Port=8443) but its server could not start on UDP port 8443, so MockServer cannot start:"
             + " fix the underlying error or remove http3Port to run without HTTP/3 (underlying error: IllegalStateException: could not build the TLS context)"));
+        assertThat(printed, containsString("\tat "));
+    }
+
+    @Test
+    public void shouldExitNonZeroWhenTheDnsPortCannotBeBound() throws IOException {
+        Main.lastStartedPorts = null;
+        try (DatagramChannel otherApplication = DatagramChannel.open(StandardProtocolFamily.INET)) {
+            otherApplication.bind(new InetSocketAddress("127.0.0.1", 0));
+            ConfigurationProperties.dnsEnabled(true);
+            ConfigurationProperties.dnsPort(((InetSocketAddress) otherApplication.getLocalAddress()).getPort());
+
+            Main.main("-serverPort", "0");
+
+            assertThat("Main.lastExitCode when DNS could not start", Main.lastExitCode, is(1));
+            assertThat("nothing reports as started", Main.getLastStartedPorts(), is(nullValue()));
+        } finally {
+            dnsOffAndStopAnythingStarted();
+        }
+    }
+
+    // its cause is an IllegalArgumentException, which the run command takes for a usage error and exits 0
+    @Test
+    public void shouldExitNonZeroWhenTheDnsPortIsNotAPort() {
+        Main.lastStartedPorts = null;
+        try {
+            ConfigurationProperties.dnsEnabled(true);
+            ConfigurationProperties.dnsPort(70000);
+
+            Main.main("-serverPort", "0");
+
+            assertThat("Main.lastExitCode when DNS could not start", Main.lastExitCode, is(1));
+            assertThat("nothing reports as started", Main.getLastStartedPorts(), is(nullValue()));
+        } finally {
+            dnsOffAndStopAnythingStarted();
+        }
+    }
+
+    private static void dnsOffAndStopAnythingStarted() {
+        ConfigurationProperties.dnsEnabled(false);
+        ConfigurationProperties.dnsPort(0);
+        List<Integer> started = Main.getLastStartedPorts();
+        if (started != null && !started.isEmpty()) {
+            stopQuietly(new MockServerClient("127.0.0.1", started.get(0)));
+        }
+    }
+
+    @Test
+    public void shouldPrintTheMessageAloneWhenTheDnsPortCannotBeBound() {
+        DnsStartupException portHeld = DnsStartupException.portCouldNotBeOpenedOrBound(5353, new BindException("Address already in use"));
+
+        String printed = printedToSystemErr(() -> Main.logStartupFailure(new RuntimeException("wrapped by the caller", portHeld), true));
+
+        assertThat(printed, containsString("DNS mocking is enabled (dnsEnabled=true, dnsPort=5353) but UDP port 5353 could not be opened or bound, so MockServer cannot start:"
+            + " free the port if another application holds it, choose a different dnsPort (0 picks a free port, and a port below 1024 can need extra privileges),"
+            + " or set dnsEnabled=false to run without DNS mocking (underlying error: BindException: Address already in use)"));
+        assertThat("the fix must not be buried in a stack trace", printed, not(containsString("\tat ")));
+    }
+
+    @Test
+    public void shouldPrintTheStackTraceOfAnyOtherDnsStartFailure() {
+        DnsStartupException unexplained = DnsStartupException.serverCouldNotStart(5353, new IllegalStateException("the event loop is shut down"));
+
+        String printed = printedToSystemErr(() -> Main.logStartupFailure(unexplained, true));
+
+        assertThat(printed, containsString("exception while starting: DNS mocking is enabled (dnsEnabled=true, dnsPort=5353) but its server could not start on UDP port 5353, so MockServer cannot start:"
+            + " fix the underlying error or set dnsEnabled=false to run without DNS mocking (underlying error: IllegalStateException: the event loop is shut down)"));
         assertThat(printed, containsString("\tat "));
     }
 

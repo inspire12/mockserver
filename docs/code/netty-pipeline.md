@@ -1802,11 +1802,14 @@ fall through to their normal handlers.
 
 ## DNS UDP Server
 
-When `dnsEnabled=true`, `MockServer.bindDnsPort()` creates a separate Netty `Bootstrap` with `NioDatagramChannel` for UDP DNS:
+When `dnsEnabled=true`, `MockServer.bindDnsPort()` creates a separate Netty `Bootstrap` for UDP DNS, on the
+datagram channel of the transport in use (`EpollDatagramChannel` on Linux by default, `NioDatagramChannel`
+elsewhere). A DNS server that cannot be started refuses start-up (see
+[Start-up refusal](#dns-start-up-refusal) below).
 
 ```mermaid
 graph LR
-    UDP["NioDatagramChannel\n(UDP)"] --> DEC["DatagramDnsQueryDecoder"]
+    UDP["DatagramChannel\n(UDP, epoll or NIO)"] --> DEC["DatagramDnsQueryDecoder"]
     DEC --> ENC["DatagramDnsResponseEncoder"]
     ENC --> HANDLER["DnsRequestHandler"]
 ```
@@ -1818,6 +1821,55 @@ graph LR
 | DnsRequestHandler | `o.m.netty.dns` | Matches DNS queries against expectations via `HttpState`, returns `DnsResponse` records |
 
 The DNS channel uses the same `workerGroup` as the TCP server. It is managed separately from TCP `serverChannelFutures` — closed explicitly in `MockServer.stopAsync()`.
+
+### DNS start-up refusal
+
+With `dnsEnabled=true`, a DNS server that cannot be started on `dnsPort` refuses start-up, as a TCP port
+that cannot be bound and an HTTP/3 server that cannot start do (see
+[http3.md](http3.md#lifecycle-integration)). `MockServer.startDnsServer` runs after the TCP ports are
+bound and before HTTP/3 is started. On any failure it calls `stop()`, which closes the TCP listeners and
+the boss and worker event loops and waits for them, and throws `DnsStartupException`
+(`org.mockserver.netty.dns`) from the constructor, so the caller gets no reference and nothing is left for
+it to stop. `stop()` does not wait on an interrupted thread, so the interrupt flag is cleared for the stop
+and set again after it.
+
+| Failure | Message (one line, the cause kept as `getCause()`) | CLI output |
+|---|---|---|
+| The channel for an explicit `dnsPort` could not be created, registered or bound (usually the bind: the port is held, or the process may not bind it) | `DNS mocking is enabled (dnsEnabled=true, dnsPort=N) but UDP port N could not be opened or bound, so MockServer cannot start: free the port if another application holds it, choose a different dnsPort (0 picks a free port, and a port below 1024 can need extra privileges), or set dnsEnabled=false to run without DNS mocking (underlying error: ...)` | The message alone, exit status 1 |
+| Anything else (a `dnsPort` that is not a port, a failed bind of port 0, an `Error`) | `DNS mocking is enabled (dnsEnabled=true, dnsPort=N) but its server could not start on UDP port N, so MockServer cannot start: fix the underlying error or set dnsEnabled=false to run without DNS mocking (underlying error: <root cause simple name>: <first message line>)` | `exception while starting:` with the stack trace, exit status 1 |
+
+Which row applies is decided by where the start failed (the future of `Bootstrap.bind` for an explicit
+port), not by the type of the cause, because the two transports report a failed bind differently: NIO
+with a `java.net.BindException` (`Address already in use`, or `Permission denied` for `EACCES`), epoll
+with Netty's own `Errors.NativeIoException`, an `IOException` whose message is
+`bind(..) failed with error(-98): Address already in use`. That future also fails when the channel
+cannot be created or registered (no file descriptor left, an event loop that is shutting down), and the
+two are not told apart: the message says `opened or bound` and keeps the root cause, and the advice to
+free the port does not apply to those.
+`DnsStartupException.isPortUnavailable()` is true for the first row; `Main.logStartupFailure` reads it.
+The exception extends `RuntimeException` and nothing narrower, whatever its cause: `Main.RunCommand`
+treats an `IllegalArgumentException` as a usage error and exits 0, which an out-of-range `dnsPort` would
+otherwise reach. `MockServer` does not log the failure itself; the exception is the report. Embedded
+callers get it from `new MockServer(...)`, `ClientAndServer.startClientAndServer(...)`, `MockServerRule`,
+`MockServerExtension` and the Spring `MockServerPropertyCustomizer`, none of which catch it.
+
+A `dnsPort` of 0 asks the operating system for a port; `MockServer.getDnsPort()` returns the bound port,
+or -1 when DNS is off. `ClientAndServer` has no accessor for it.
+
+This replaced a path that logged `exception binding DNS port - DNS mocking disabled` at WARN and kept
+serving TCP with `getDnsPort()` returning -1. `DnsStartFailureTest` covers a port held by another
+socket, the port of another MockServer, a port above 65535, an interrupted start, `ClientAndServer`, a
+chosen port (which must answer a query) and DNS switched off. It runs each refused start in a thread
+group of its own and checks, as soon as the constructor has thrown, that the stop is complete and the TCP
+port refuses connections, then that no thread of the group is left alive. `MainTest` covers the exit
+status and the CLI output, and `DnsStartupRefusalIntegrationTest` runs the real jar against a held port
+on the platform's default transport. `Permission denied` is covered only as a message: macOS lets any
+process bind a low port on every address, and so does a container whose
+`net.ipv4.ip_unprivileged_port_start` is 0.
+
+Not guarded: on macOS a dual-stack bind succeeds on a port another socket holds on `0.0.0.0`, which then
+receives the queries sent to `127.0.0.1`. HTTP/3 probes for this (`Ipv4UdpPortProbe`); DNS does not, and
+on a `dnsPort` of 0 the operating system can choose such a port.
 
 ## Binary Protocol Handling
 

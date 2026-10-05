@@ -5,6 +5,7 @@
 <button id="button_configuration_dns_enabled" class="accordion title"><strong>Enable DNS Mocking</strong></button>
 <div class="panel title">
     <p>Enable or disable the DNS mock server. When enabled, MockServer starts a UDP DNS server that matches incoming DNS queries against expectations. DNS expectations use <span class="inline_code">DnsRequestDefinition</span> for matching and <span class="inline_code">DnsResponse</span> for responses. Supported record types: A, AAAA, CNAME, MX, SRV, TXT, PTR.</p>
+    <p>If DNS mocking is enabled and MockServer cannot open its <a href="#button_configuration_dns_port">DNS port</a>, MockServer <strong>does not start</strong>. Earlier versions logged the warning <span class="inline_code">exception binding DNS port - DNS mocking disabled</span> and started without DNS, so a deployment in that state looked healthy while answering no DNS queries.</p>
     <p>Type: <span class="keyword">boolean</span> Default: <span class="this_value">false</span></p>
     <p>Java Code:</p>
     <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.dnsEnabled(boolean enable)</code></pre>
@@ -20,7 +21,22 @@
 
 <button id="button_configuration_dns_port" class="accordion title"><strong>DNS Port</strong></button>
 <div class="panel title">
-    <p>The UDP port for the DNS mock server. Set to <span class="inline_code">0</span> to let the operating system assign an ephemeral port. Use <span class="inline_code">MockServer.getDnsPort()</span> to retrieve the actual bound port at runtime.</p>
+    <p>The UDP port for the DNS mock server. Set to <span class="inline_code">0</span> to let the operating system assign an ephemeral port. Use <span class="inline_code">MockServer.getDnsPort()</span> to retrieve the actual bound port at runtime; the port is also logged at start-up (<span class="inline_code">DNS mock server started on port: ...</span>).</p>
+    <p>This setting is only used when <a href="#button_configuration_dns_enabled">DNS mocking is enabled</a>. If MockServer cannot open the port, it <strong>does not start</strong>: it closes the HTTP and HTTPS ports it had already opened and reports one line naming the port and the cause, for example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">DNS mocking is enabled (dnsEnabled=true, dnsPort=5353) but UDP port 5353 could not be opened or bound, so MockServer cannot start: free the port if another application holds it, choose a different dnsPort (0 picks a free port, and a port below 1024 can need extra privileges), or set dnsEnabled=false to run without DNS mocking (underlying error: BindException: Address already in use)</code></pre>
+    <p>The text after <span class="inline_code">underlying error:</span> is the error as the platform reports it, so its exact wording varies between operating systems; look in it for <span class="inline_code">Address already in use</span> or <span class="inline_code">Permission denied</span>.</p>
+    <p>The usual causes are:</p>
+    <ul>
+        <li><strong>Another application is using the port.</strong> On port <span class="inline_code">53</span> that is often the host's own resolver (for example <span class="inline_code">systemd-resolved</span> or <span class="inline_code">dnsmasq</span>); port <span class="inline_code">5353</span> belongs to mDNS and is normally already in use on macOS, and on Linux hosts that run Avahi.</li>
+        <li><strong>Another MockServer was started with the same <span class="inline_code">dnsPort</span></strong>: two embedded servers in one JVM, test forks running in parallel that share one <span class="inline_code">mockserver.dnsPort</span> system property or properties file, or several instances on one host started from the same configuration. Earlier versions let the first one serve DNS while the others quietly served none; now every one but the first fails to start. Give each instance its own port, or use <span class="inline_code">0</span>.</li>
+        <li><strong>The process is not allowed to use the port</strong> (the underlying error is <span class="inline_code">Permission denied</span>): on Linux a port below 1024, such as <span class="inline_code">53</span>, usually needs root or the <span class="inline_code">CAP_NET_BIND_SERVICE</span> capability. Choose a port of 1024 or above, or grant the permission.</li>
+    </ul>
+    <p>What you see depends on how you run MockServer:</p>
+    <ul>
+        <li><strong>Command line, Docker and Helm</strong> &mdash; the process exits with a non-zero status after printing that line, so a container stops (and under Kubernetes restarts and reports <span class="inline_code">CrashLoopBackOff</span>) instead of running without DNS. Read the container log for the line. A <span class="inline_code">dnsPort</span> that is not a port number (for example above 65535) fails in the same way; the line then reads <span class="inline_code">its server could not start on UDP port ...</span> and is followed by a stack trace.</li>
+        <li><strong>Embedded in a JVM</strong> (<span class="inline_code">ClientAndServer.startClientAndServer(...)</span>, <span class="inline_code">new MockServer(...)</span>, the JUnit 4 rule, the JUnit 5 extension and the Spring test listener) &mdash; the start throws a <span class="inline_code">RuntimeException</span> (<span class="inline_code">org.mockserver.netty.dns.DnsStartupException</span>) carrying that message and the original error as its cause, as an HTTP port that is already in use does.</li>
+    </ul>
+    <p>To run without DNS mocking, set <span class="inline_code">dnsEnabled</span> to <span class="inline_code">false</span> (the default).</p>
     <p>Type: <span class="keyword">integer</span> Default: <span class="this_value">0</span></p>
     <p>Java Code:</p>
     <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.dnsPort(int port)</code></pre>
@@ -31,7 +47,7 @@
     <p>Property File:</p>
     <pre class="code" style="padding: 2px;"><code class="code">mockserver.dnsPort=...</code></pre>
     <p>Example:</p>
-    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.dnsPort="5353"</code></pre>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.dnsPort="5053"</code></pre>
 </div>
 
 <button id="button_configuration_dns_response_limits" class="accordion title"><strong>DNS Response Size and Record Limits</strong></button>
