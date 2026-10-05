@@ -45,6 +45,8 @@ lastmod: 2019-11-10T08:00:00+01:00
 
 <p>Instead of a request matcher you can send an <strong>expectation id</strong> &mdash; the body <span class="inline_code">{"id": "..."}</span>, or the <span class="inline_code">...ById</span> client methods &mdash; just as you can when <a href="/mock_server/clearing_and_resetting.html">clearing</a> or <a href="/mock_server/verification.html">verifying</a>. For <span class="inline_code">ACTIVE_EXPECTATIONS</span> that returns only the expectation with that id; for the other types it returns the entries matching that expectation&apos;s request. An id that does not exist is rejected with <span class="inline_code">400 No expectation found with id ...</span>.</p>
 
+<p>A retrieve builds its whole response in memory, and the response is much larger than the request and response bodies it reports: a body is written several times in each log entry, and bytes that are not printable text take six characters each. If the response is more than MockServer can build &mdash; with a 1 GB heap, a log holding a few tens of megabytes of binary bodies can be enough &mdash; MockServer answers <span class="inline_code">500</span> with a message starting <span class="inline_code">the retrieve response is too large to build in memory</span>. To retrieve less, send a request matcher that matches fewer requests, <a href="/mock_server/clearing_and_resetting.html">clear</a> the log, or keep less in it with <a href="/mock_server/configuration_properties.html"><span class="inline_code">maxLogEntries</span>, <span class="inline_code">maxEventLogSizeInBytes</span> or <span class="inline_code">maxLoggedBodyBytes</span></a>; or give MockServer a larger heap.</p>
+
 <table class="table-scroll">
     <thead>
         <tr>

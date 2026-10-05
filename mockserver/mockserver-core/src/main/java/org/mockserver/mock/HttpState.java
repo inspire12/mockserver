@@ -2050,6 +2050,25 @@ public class HttpState {
                     throw new IllegalArgumentException("\"" + request.getFirstQueryStringParameter("format") + "\" is not a valid value for \"format\" parameter, only the following values are supported " + Arrays.stream(Format.values()).map(input -> input.name().toLowerCase()).collect(Collectors.toList()));
                 }
                 throw iae;
+            } catch (OutOfMemoryError oome) {
+                // The whole response is built in memory, so a heap too small for it, or a response past
+                // the size of one array, surfaces here. Left to propagate, an Error is answered by none
+                // of the frontends: over Netty the caller's connection is closed with no response.
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.ERROR)
+                        .setCorrelationId(logCorrelationId)
+                        .setMessageFormat("retrieve response too large to build in memory for request:{}error:{}")
+                        .setArguments(request, oome.getMessage())
+                        .setThrowable(oome)
+                );
+                return response()
+                    .withStatusCode(INTERNAL_SERVER_ERROR.code())
+                    .withBody(
+                        "the retrieve response is too large to build in memory (" + oome + "); to retrieve less send a request matcher that matches fewer requests, " +
+                            "clear the log, or keep less in it (maxLogEntries, maxEventLogSizeInBytes, maxLoggedBodyBytes); or give MockServer more memory",
+                        MediaType.PLAIN_TEXT_UTF_8
+                    );
             }
         } else {
             return response().withStatusCode(200);

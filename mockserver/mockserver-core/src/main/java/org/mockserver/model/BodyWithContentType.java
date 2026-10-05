@@ -49,6 +49,15 @@ public abstract class BodyWithContentType<T> extends Body<T> {
         return new String(rawBytes, determineCharacterSet(contentType, DEFAULT_TEXT_HTTP_CHARACTER_SET));
     }
 
+    /**
+     * Encode the String view to raw body bytes, in the charset {@link #decodeRawBytes} reads them back
+     * in. The single place the text bodies' {@code String -> byte[]} conversion lives.
+     */
+    @JsonIgnore
+    byte[] encodeToRawBytes(String value) {
+        return BodyTextEncoder.encode(value, determineCharacterSet(contentType, DEFAULT_TEXT_HTTP_CHARACTER_SET));
+    }
+
     @Override
     public String getContentType() {
         return (contentType != null ? contentType.toString() : null);

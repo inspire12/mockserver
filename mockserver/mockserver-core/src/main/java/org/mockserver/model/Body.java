@@ -55,7 +55,7 @@ public abstract class Body<T> extends Not {
 
     @JsonIgnore
     public byte[] getRawBytes() {
-        return toString().getBytes(UTF_8);
+        return BodyTextEncoder.encode(toString(), UTF_8);
     }
 
     /**

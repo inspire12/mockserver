@@ -458,6 +458,20 @@ This release delivers a sustained performance and memory programme alongside dat
 
 ### Fixed
 
+- **Retrieving a very large log no longer answers `400` with a bare negative number.** `PUT
+  /mockserver/retrieve` builds its whole response in memory, and the response is much larger than
+  the bodies it reports: a body is written several times in each log entry, and each byte that is
+  not printable text takes six characters. On Java 17, once the response passed about 716 million
+  characters (a log holding a few tens of megabytes of binary request bodies was enough), the JDK
+  miscalculated the size of the array to encode it into and the caller received `400` with a body
+  such as `-1984874578`. MockServer now measures such a response and encodes it exactly, so it is
+  returned when the heap can hold it. When the response cannot be built, because the heap is too
+  small or the response is over the 2 GB one array holds, MockServer answers `500` with a message
+  starting `the retrieve response is too large to build in memory` that says how to retrieve less
+  (a request matcher that matches fewer requests, clearing the log, or `maxLogEntries`,
+  `maxEventLogSizeInBytes` and `maxLoggedBodyBytes`); before, the connection was closed with no
+  response. This applies to every retrieve `type` and `format`. The same miscalculation affected
+  string, JSON, XML and file bodies of more than 716 million characters, and is fixed there too.
 - **The `mockserver-node` npm package now includes its TypeScript typings.** Its `package.json`
   names `index.d.ts` as the package's typings, but the list of files to publish left that file
   out, so it was never in the package: the published 8.0.0 package holds no `.d.ts` file, and

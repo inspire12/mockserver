@@ -211,6 +211,23 @@ Static predicates filter log entries for different retrieval operations:
 
 `MockServerEventLog.retrieveUnmatchedRequests(limit, Consumer<List<LogEntry>>)` retrieves the most recent `NO_MATCH_RESPONSE` log entries (requests that matched no expectation). It drains the disruptor first to ensure all pending events are processed, then iterates the event log in reverse order (most recent first) to return up to `limit` entries (capped at 100). This is used by `HttpState.explainUnmatched()` and the MCP `explain_unmatched_requests` tool to provide post-hoc mismatch diagnostics without requiring users to reconstruct the failing request.
 
+### Retrieve Response Size
+
+**A retrieve builds its whole response in memory, and answers `500` with an explanation when it cannot.** `HttpState.retrieve()` serialises the matching entries to one `String`, encodes that to one `byte[]` and hands it to the response writer; nothing is streamed or bounded in advance. Two limits follow:
+
+| Limit | What hits it |
+|-------|--------------|
+| The heap | While the response is built the JVM holds the serialiser's buffers, the `String` (two bytes a character once it holds any character outside Latin-1) and the encoded bytes, on top of the log itself |
+| One array | A `byte[]` holds at most `Integer.MAX_VALUE - 8` bytes (about 2 GB) and a UTF-16 `String` about a billion characters, whatever the heap |
+
+Either way the JVM throws `OutOfMemoryError` (one exception, found by reading and not reproduced: past `Integer.MAX_VALUE` characters Jackson's own buffer throws `IllegalStateException` first, which the serializer rethrows as a `RuntimeException`; that is not caught here and is still answered `400` by the frontends' catch-all). `retrieve()` catches the `OutOfMemoryError`, logs it at `ERROR` and answers `500` with a plain-text body that starts `the retrieve response is too large to build in memory`, names the error, and says how to retrieve less: a request matcher that matches fewer requests, clearing the log, keeping less in it (`maxLogEntries`, `maxEventLogSizeInBytes`, `maxLoggedBodyBytes`), or more heap. Every `type` and `format` returns through `retrieve()`, on every frontend (Netty, HTTP/3, the two servlets), so one catch covers them all. Without it an `Error` passes each frontend's `catch (Exception)`; `HttpRequestHandler` (HTTP/1.1 and HTTP/2) then closes the connection with no response.
+
+The response is much larger than the bodies it reports. A request body appears in an entry's `httpRequest`, in its `arguments` and in its rendered `message`, and a byte that is not printable is written as a six-character JSON escape: a `RECEIVED_REQUEST` entry whose body is zero bytes costs about 19 characters of `LOG_ENTRIES` response for each body byte.
+
+**Encoding long text (`BodyTextEncoder`).** `String.getBytes(charset)` sizes a working array as the text's length times the charset's largest bytes-per-character, in an `int`. On Java 17 a UTF-8 encode of a `String` held as UTF-16 asks for `length * 3` bytes, which is negative past 715,827,882 characters: a `NegativeArraySizeException` whose message is that negative size, although the encoded text would fit. (A `LOG_ENTRIES` retrieve of a large log used to answer exactly that, as `400` with a bare negative number, through the frontends' catch-all.) Every place that encodes a body's text therefore goes through `BodyTextEncoder`: the text bodies (`StringBody`, `JsonBody`, `XmlBody`, `FileBody`), `Body.getRawBytes()` for the bodies that keep no bytes of their own, `HttpRequest.getBodyAsJsonOrXmlString()` and the wire encode in `BodyDecoderEncoder`. Text short enough for the JDK's estimate goes to `getBytes` unchanged; longer text is measured with a `CharsetEncoder` and encoded into an array of exactly that size, giving the same bytes without the worst-case working array; text whose encoding is larger than one array throws `OutOfMemoryError` with the sizes in its message, the error the JDK raises for an array it cannot allocate.
+
+The measured path differs observably from the JDK's only past 715 million characters, which takes gigabytes of heap. So `BodyTextEncoderTest` reaches it by lowering the two limits, `BodyTextEncoderUseTest` replaces the encoder to prove each of those places calls it, and `HttpStateRetrieveOutOfMemoryTest` raises the error from a recorded body rather than by exhausting the heap.
+
 ## Verification
 
 ### Request Count Verification

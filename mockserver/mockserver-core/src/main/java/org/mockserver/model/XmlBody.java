@@ -6,8 +6,6 @@ import java.nio.charset.Charset;
 import java.util.Arrays;
 import java.util.Objects;
 
-import static org.mockserver.model.MediaType.DEFAULT_TEXT_HTTP_CHARACTER_SET;
-
 /**
  * @author jamesdbloom
  */
@@ -38,7 +36,7 @@ public class XmlBody extends BodyWithContentType<String> {
         this.xml = xml;
 
         if (rawBytes == null && xml != null) {
-            this.rawBytes = xml.getBytes(determineCharacterSet(contentType, DEFAULT_TEXT_HTTP_CHARACTER_SET));
+            this.rawBytes = encodeToRawBytes(xml);
         } else {
             this.rawBytes = rawBytes;
         }

@@ -93,7 +93,7 @@ public class BodyDecoderEncoder {
                 if (materialised != null && declaredCharset != null && declaredCharset.equals(wireCharset)) {
                     return materialised;
                 }
-                return ((String) value).getBytes(wireCharset);
+                return BodyTextEncoder.encode((String) value, wireCharset);
             } else {
                 return body.getRawBytes();
             }

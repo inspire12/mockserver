@@ -11,8 +11,6 @@ import java.nio.charset.Charset;
 import java.util.Arrays;
 import java.util.Objects;
 
-import static org.mockserver.model.MediaType.DEFAULT_TEXT_HTTP_CHARACTER_SET;
-
 /**
  * @author jamesdbloom
  */
@@ -54,7 +52,7 @@ public class JsonBody extends BodyWithContentType<String> {
         this.matchNumbersAsStrings = matchNumbersAsStrings;
 
         if (rawBytes == null && json != null) {
-            this.rawBytes = json.getBytes(determineCharacterSet(contentType, DEFAULT_TEXT_HTTP_CHARACTER_SET));
+            this.rawBytes = encodeToRawBytes(json);
         } else {
             this.rawBytes = rawBytes;
         }

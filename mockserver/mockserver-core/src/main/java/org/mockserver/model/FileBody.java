@@ -5,8 +5,6 @@ import org.mockserver.file.FileReader;
 
 import java.util.Objects;
 
-import static org.mockserver.model.MediaType.DEFAULT_TEXT_HTTP_CHARACTER_SET;
-
 public class FileBody extends BodyWithContentType<String> {
     private int hashCode;
     private final String filePath;
@@ -63,7 +61,7 @@ public class FileBody extends BodyWithContentType<String> {
     public byte[] getRawBytes() {
         try {
             String content = FileReader.readFileFromClassPathOrPath(filePath);
-            return content.getBytes(determineCharacterSet(contentType, DEFAULT_TEXT_HTTP_CHARACTER_SET));
+            return encodeToRawBytes(content);
         } catch (Throwable t) {
             return new byte[0];
         }

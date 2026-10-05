@@ -275,6 +275,12 @@ paths:
                 description: List of recorded log messages
         '400':
           description: incorrect request format
+        '500':
+          description: the response is too large to build in memory; the body says why and how to retrieve less
+          content:
+            text/plain:
+              schema:
+                type: string
       requestBody:
         content:
           application/json:

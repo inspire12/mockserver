@@ -1225,7 +1225,7 @@ public class HttpRequest extends RequestDefinition implements HttpMessage<HttpRe
             if (body instanceof StringBody) {
                 // if it should be json (and it has been validated i.e. control plane request)
                 // assume the Content-Type header was forgotten so should be parsed as json
-                return new String(body.toString().getBytes(MediaType.parse(getFirstHeader(CONTENT_TYPE.toString())).getCharsetOrDefault()), StandardCharsets.UTF_8);
+                return new String(BodyTextEncoder.encode(body.toString(), MediaType.parse(getFirstHeader(CONTENT_TYPE.toString())).getCharsetOrDefault()), StandardCharsets.UTF_8);
             } else {
                 return getBodyAsText();
             }

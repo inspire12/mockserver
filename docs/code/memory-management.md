@@ -1103,6 +1103,10 @@ entries = (available_heap_MB * 1024) / per_entry_KB
 http_requests_retained = entries / entries_per_request
 ```
 
+**Step 4: Leave room to read the log back**
+
+A `retrieve` builds its whole response in memory, and the response is several times the size of the bodies it reports (see [Retrieve Response Size](event-system.md#retrieve-response-size)). A log that fits the heap can still be too large to retrieve in one call: MockServer then answers `500` with `the retrieve response is too large to build in memory`. Retrieve with a request matcher, or cap what each entry keeps with `maxLoggedBodyBytes`, rather than sizing the heap for a whole-log retrieve.
+
 ### Examples
 
 **Docker container, 256 MB heap, small API mocking:**
