@@ -4,16 +4,29 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPipeline;
 import io.netty.handler.ssl.ApplicationProtocolNames;
 import io.netty.handler.ssl.ApplicationProtocolNegotiationHandler;
+import org.mockserver.log.model.LogEntry;
+import org.mockserver.logging.MockServerLogger;
+import org.slf4j.event.Level;
 
+import java.net.ConnectException;
 import java.util.function.Consumer;
+
+import static org.mockserver.exception.ExceptionHandling.DIRECT_MEMORY_LIMIT_REACHED;
+import static org.mockserver.exception.ExceptionHandling.boundedFault;
+import static org.mockserver.exception.ExceptionHandling.connectionClosedException;
+import static org.mockserver.exception.ExceptionHandling.directMemoryLimitReached;
+import static org.mockserver.exception.ExceptionHandling.isSslOrDecoderFault;
+import static org.mockserver.httpclient.NettyHttpClient.REMOTE_SOCKET;
 
 public class HttpOrHttp2Initializer extends ApplicationProtocolNegotiationHandler {
 
+    private final MockServerLogger mockServerLogger;
     private final Consumer<ChannelPipeline> http2Initializer;
     private final Consumer<ChannelPipeline> http1Initializer;
 
-    protected HttpOrHttp2Initializer(Consumer<ChannelPipeline> http1Initializer, Consumer<ChannelPipeline> http2Initializer) {
+    protected HttpOrHttp2Initializer(MockServerLogger mockServerLogger, Consumer<ChannelPipeline> http1Initializer, Consumer<ChannelPipeline> http2Initializer) {
         super("");
+        this.mockServerLogger = mockServerLogger;
         this.http2Initializer = http2Initializer;
         this.http1Initializer = http1Initializer;
     }
@@ -29,5 +42,52 @@ public class HttpOrHttp2Initializer extends ApplicationProtocolNegotiationHandle
         } else {
             http1Initializer.accept(pipeline);
         }
+    }
+
+    /**
+     * Until the protocol is negotiated this is the last handler of the pipeline. It logs what stopped the connection
+     * being set up once and closes the connection, where Netty's handler logs it through its own logger at
+     * {@code WARN} with a stack trace and, unless it is a failed TLS handshake, passes it on to be logged again.
+     */
+    @Override
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+        if (ForwardHeaderLimit.isAlreadyLogged(ctx.channel(), cause)) {
+            // logged as the refusal that failed the forward
+        } else if (directMemoryLimitReached(cause)) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.ERROR)
+                    .setMessageFormat(DIRECT_MEMORY_LIMIT_REACHED + ctx.channel() + " - " + cause.getMessage())
+            );
+        } else if (isSslOrDecoderFault(cause)) {
+            // the forward fails only as a closed connection, so this entry is where the reason is
+            if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.WARN)
+                        .setMessageFormat("TLS could not be set up on connection to:{}")
+                        .setArguments(ctx.channel().attr(REMOTE_SOCKET).get())
+                        .setThrowable(boundedFault(cause))
+                );
+            }
+        } else if (cause instanceof ConnectException || !connectionClosedException(cause)) {
+            // the forward was failed with this cause, and is logged where it fails
+            if (mockServerLogger.isEnabledForInstance(Level.DEBUG)) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.DEBUG)
+                        .setMessageFormat("connection to:{}failed or was closed before TLS was set up:{}")
+                        .setArguments(ctx.channel().attr(REMOTE_SOCKET).get(), cause.getMessage())
+                );
+            }
+        } else {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.ERROR)
+                    .setMessageFormat("exception caught before TLS was set up on connection to upstream " + ctx.channel())
+                    .setThrowable(cause)
+            );
+        }
+        ctx.close();
     }
 }

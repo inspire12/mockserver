@@ -168,6 +168,8 @@ public class Http3Server {
             }
 
             AtomicInteger connectionCounter = this.activeHttp3Connections;
+            // stateless, so one serves every connection; the legacy echo mode has no logger of its own
+            Http3ExceptionHandler exceptionHandler = Http3ExceptionHandler.forConnection(mockServerLogger != null ? mockServerLogger : new MockServerLogger(Http3Server.class));
 
             ChannelHandler codec = Http3.newQuicServerCodecBuilder()
                 .sslContext(sslContext)
@@ -219,6 +221,8 @@ public class Http3Server {
                             },
                             null, null, settingsFrame, disableQpackDynamicTable
                         ));
+                        // last: it takes what Netty's handler passes on, and sees each stream the client opens
+                        ch.pipeline().addLast(exceptionHandler);
                     }
                 })
                 .build();

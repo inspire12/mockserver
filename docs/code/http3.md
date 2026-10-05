@@ -92,6 +92,7 @@ has zero impact on the existing TCP/HTTP server.
 | `Http3RequestDecompressor` | `mockserver-netty` | Decompresses one `Content-Encoding` request body with the same `MockServerHttpContentDecompressor` HTTP/1.1 and HTTP/2 install, bounded by `maxRequestBodySize` on the decompressed size |
 | `Http3ResponseWriter` | `mockserver-netty` | ResponseWriter subclass that serialises HttpResponse as HTTP/3 frames |
 | `Http3StreamWriteStallHandler` / `Http3ConnectionWriteStallWatcher` | `mockserver-netty` | First in each request stream's pipeline when `responseWriteStallTimeoutMillis` is above 0: passes every write to QUIC in parts of at most 32 KiB, so a slow reader's progress shows whichever writer made the write, and resets a stream whose client takes none of its data for the timeout. One watcher per QUIC connection times its streams together, by the timeout its first watched stream read (see [netty-pipeline.md](netty-pipeline.md#response-write-stall-timeout)) |
+| `Http3ExceptionHandler` | `mockserver-netty` | Last handler of each QUIC connection's pipeline, after Netty's `Http3ServerConnectionHandler`, and of each control or QPACK stream a client opens: logs an exception that reaches it once in MockServer's log (see [Exceptions on a connection](#exceptions-on-a-connection)) |
 | `Http3ConnectUdpHandler` | `mockserver-netty` | CONNECT-UDP (MASQUE, RFC 9298) relay; intercepts extended CONNECT requests with `:protocol=connect-udp` when `http3ConnectUdpEnabled=true`; opens a UDP channel to the target authority and relays datagrams bidirectionally. Destination-restricted by `http3ConnectUdpAllowedTargets` (allowlist) and `forwardProxyBlockPrivateNetworks` (SSRF block) |
 | `SourceAddressQuicTokenHandler` | `mockserver-netty` | Source-address-validating QUIC retry token handler (HMAC-SHA256 over client IP + dcid); replaces Netty's forgeable `InsecureQuicTokenHandler` to mitigate address-spoofing / amplification |
 | `GrpcHttp3Adapter` | `mockserver-netty` | Pure helper: detects gRPC content-type, decodes gRPC framing to JSON (reusing `GrpcFrameCodec` + `GrpcProtoDescriptorStore`), builds H3 HEADERS/DATA frames for gRPC responses with correct trailing HEADERS framing |
@@ -136,6 +137,35 @@ sequenceDiagram
     end
     W->>C: Http3HeadersFrame + Http3DataFrame
 ```
+
+### Exceptions on a connection
+
+**An exception on an HTTP/3 connection, or on one of the streams Netty's codec keeps for itself, is logged once in MockServer's log.** Netty's `Http3ServerConnectionHandler` handles no exception, so whatever QUIC fires on a connection used to reach the end of Netty's pipeline, which logs it at `WARN` with a stack trace through Netty's own logger. The same held for a client's control stream and QPACK streams, whose pipelines hold only Netty's handlers.
+
+```mermaid
+graph LR
+    CONN["Http3ServerConnectionHandler"] --> EXC["Http3ExceptionHandler\n(last on the connection)"]
+    EXC -->|"each stream the client opens"| REG["end of pipeline:\nNetty registers the stream"]
+    EXC -.->|"adds itself to a\nunidirectional stream"| UNI["control or QPACK stream:\nNetty's codec, Http3ExceptionHandler"]
+```
+
+| What reached it | Logged |
+|-----------------|--------|
+| Netty's direct memory limit | `ERROR`, the message the other handlers use; the channel is closed |
+| An `Http3Exception` (a connection error Netty's codec fires before it closes the connection with the error code) | `WARN`, the client's address, the error code and the cause |
+| An `SSLException` (a failed handshake, such as a client that offers no ALPN protocol MockServer serves) | `ERROR`, as `PortUnificationHandler` logs a failed handshake over TCP; the client's address and the bounded message, no stack trace (Netty builds the exception from an error code) |
+| An SSL or decoder fault (`isSslOrDecoderFault`), such as a frame Netty's codec throws on | `WARN`, the client's address, the exception's class and its bounded message; no stack trace. Tested ahead of the next row, whose check is also `false` for every decoder fault |
+| A stream its client reset (`QuicStreamResetException`), a closed channel, a reset connection | `DEBUG`, the client's address and the message |
+| Any other `QuicException` (a QUIC transport error) | `WARN`, the client's address and the bounded message |
+| Anything else | `ERROR` and the cause |
+
+It closes nothing except for the direct memory limit: Netty closes the connection for a failed handshake, a QUIC error and an HTTP/3 connection error, and a stream its client reset is no reason to. A frame the codec throws on closed nothing before this handler existed and closes nothing now (the test's connection carries on and is still served), so a client can cause one `WARN` for each such frame, where it caused one Netty warning with a stack trace.
+
+**Streams.** The handler sees each stream a client opens as it passes to the end of the connection's pipeline, where Netty registers it, and adds a second instance to a unidirectional one. It leaves a request stream alone: `Http3MockServerHandler` is the last handler there and takes every exception, and anything added at that point would sit ahead of it. On the control stream the instance ends up between Netty's frame codec and its control-stream handler, which is enough for what the codec fires (a frame type the stream may not carry, for example). Both instances are stateless and shared by every connection of the server, so the cost is one pipeline context a connection and one for each unidirectional stream, of which a client may open three.
+
+**Not covered.** The streams MockServer's side opens (its own control and QPACK streams), which Netty creates without passing them down the connection's pipeline; the UDP listener's own pipeline, which holds only the QUIC codec (the codec catches a packet it cannot process and logs it through Netty's logger at `DEBUG`); and the legacy echo mode's request streams. `Http3ConnectUdpHandler` logs a CONNECT-UDP stream's exception through SLF4J directly.
+
+`Http3ConnectionErrorLoggingIntegrationTest` checks, with a QUIC client that has no HTTP/3 codec, that nothing reaches Netty's logger for a handshake that offers another ALPN protocol, a frame type reserved for HTTP/2 on the control stream (the connection is still closed with `H3_FRAME_UNEXPECTED`), a `SETTINGS` frame whose `ENABLE_CONNECT_PROTOCOL` is 2, which Netty's codec throws on (the connection carries on), and a reset unidirectional stream (the connection carries on). `Http3ExceptionHandlerTest` checks each row.
 
 ### Streaming Response Path
 

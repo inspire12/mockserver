@@ -129,7 +129,7 @@ public class HttpClientInitializer extends ChannelInitializer<SocketChannel> {
             configureBinaryPipeline(pipeline);
         } else if (secure) {
             // use ALPN to determine http1 or http2
-            pipeline.addLast(new HttpOrHttp2Initializer(this::configureHttp1Pipeline, this::configureHttp2Pipeline));
+            pipeline.addLast(new HttpOrHttp2Initializer(mockServerLogger, this::configureHttp1Pipeline, this::configureHttp2Pipeline));
         } else {
             // default to http1 without TLS
             configureHttp1Pipeline(pipeline);
@@ -271,6 +271,8 @@ public class HttpClientInitializer extends ChannelInitializer<SocketChannel> {
         // Intercepts the MockServer request written to the parent channel and dispatches it on a new stream.
         pipeline.addLast(new Http2ForwardRequestDispatchHandler(childInitializer));
         pipeline.addLast(new ForwardHeaderLimit.Http2Connection(mockServerLogger, maxHeaderSize));
+        // last: it takes every exception the header limit's handler passes on
+        pipeline.addLast(new Http2ForwardConnectionExceptionHandler(mockServerLogger));
 
         // ALPN already proved HTTP/2; the frame codec consumes SETTINGS, so complete immediately.
         recordForwardUpstreamProtocol(pipeline, "http2");

@@ -1,4 +1,4 @@
-package org.mockserver.netty.unification;
+package org.mockserver.httpclient;
 
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
@@ -13,29 +13,30 @@ import static org.mockserver.exception.ExceptionHandling.boundedFaultMessage;
 import static org.mockserver.exception.ExceptionHandling.connectionClosedException;
 import static org.mockserver.exception.ExceptionHandling.directMemoryLimitReached;
 import static org.mockserver.exception.ExceptionHandling.isSslOrDecoderFault;
-import static org.mockserver.exception.ExceptionHandling.sniDescription;
+import static org.mockserver.httpclient.NettyHttpClient.REMOTE_SOCKET;
 
 /**
- * The last handler of a direct HTTP/2 connection's pipeline. It logs each exception that reaches the end of that
- * pipeline once, at the level its cause calls for, where Netty would log every one at {@code WARN} with a stack trace
- * through its own logger.
+ * The last handler of the pipeline of an HTTP/2 connection to an upstream. It logs each exception that reaches the
+ * end of that pipeline once, at the level its cause calls for, where Netty would log every one at {@code WARN} with a
+ * stack trace through its own logger. A forward in flight is failed by the handlers before this one.
  * <p>
- * It must stay last: {@code Http2MultiplexHandler}, before it, hands a stream's errors to that stream. It does not
- * close the connection for an HTTP/2 connection error, which Netty's codec fires here before it sends the
- * {@code GOAWAY} and closes: closing here would lose the {@code GOAWAY}.
+ * It does not close the connection for an HTTP/2 connection error, which Netty's codec fires here before it sends
+ * the {@code GOAWAY} and closes: closing here would lose the {@code GOAWAY}.
  */
-public class Http2ConnectionExceptionHandler extends ChannelInboundHandlerAdapter {
+final class Http2ForwardConnectionExceptionHandler extends ChannelInboundHandlerAdapter {
 
     private final MockServerLogger mockServerLogger;
 
-    public Http2ConnectionExceptionHandler(MockServerLogger mockServerLogger) {
+    Http2ForwardConnectionExceptionHandler(MockServerLogger mockServerLogger) {
         this.mockServerLogger = mockServerLogger;
     }
 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
         Http2Exception connectionError = Http2CodecUtil.getEmbeddedHttp2Exception(cause);
-        if (directMemoryLimitReached(cause)) {
+        if (ForwardHeaderLimit.isAlreadyLogged(ctx.channel(), cause)) {
+            // logged as the refusal that failed the forward
+        } else if (directMemoryLimitReached(cause)) {
             mockServerLogger.logEvent(
                 new LogEntry()
                     .setLogLevel(Level.ERROR)
@@ -43,24 +44,22 @@ public class Http2ConnectionExceptionHandler extends ChannelInboundHandlerAdapte
             );
             ctx.close();
         } else if (connectionError != null) {
-            // a request refused for its header size was logged where it was refused
-            if (!Http2RequestHeaderLimit.isRefusal(connectionError) && mockServerLogger.isEnabledForInstance(Level.WARN)) {
+            // no throwable: the message says what the upstream sent, and the stack trace only where Netty read it
+            if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
                 mockServerLogger.logEvent(
                     new LogEntry()
                         .setLogLevel(Level.WARN)
-                        .setMessageFormat("closing HTTP/2 connection from:{}for connection error:{}")
-                        .setArguments(ctx.channel().remoteAddress(), connectionError.error())
-                        .setThrowable(cause)
+                        .setMessageFormat("closing HTTP/2 connection to:{}for connection error:{}:{}")
+                        .setArguments(ctx.channel().attr(REMOTE_SOCKET).get(), connectionError.error(), boundedFaultMessage(connectionError))
                 );
             }
         } else if (isSslOrDecoderFault(cause)) {
             if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
-                // no throwable: its message is not bounded, as the one logged here is
                 mockServerLogger.logEvent(
                     new LogEntry()
                         .setLogLevel(Level.WARN)
-                        .setMessageFormat("closing HTTP/2 connection " + ctx.channel() + sniDescription(ctx.channel()) + " for SSL or decoder fault " + cause.getClass().getName() + ":{}")
-                        .setArguments(boundedFaultMessage(cause))
+                        .setMessageFormat("closing HTTP/2 connection to:{}for SSL or decoder fault " + cause.getClass().getName() + ":{}")
+                        .setArguments(ctx.channel().attr(REMOTE_SOCKET).get(), boundedFaultMessage(cause))
                 );
             }
             // Netty's JDK TLS handler leaves the connection open after such bytes and reports every read that follows
@@ -70,15 +69,15 @@ public class Http2ConnectionExceptionHandler extends ChannelInboundHandlerAdapte
             mockServerLogger.logEvent(
                 new LogEntry()
                     .setLogLevel(Level.ERROR)
-                    .setMessageFormat("exception caught on HTTP/2 connection " + ctx.channel())
+                    .setMessageFormat("exception caught on HTTP/2 connection to upstream " + ctx.channel())
                     .setThrowable(cause)
             );
         } else if (mockServerLogger.isEnabledForInstance(Level.DEBUG)) {
             mockServerLogger.logEvent(
                 new LogEntry()
                     .setLogLevel(Level.DEBUG)
-                    .setMessageFormat("HTTP/2 connection from:{}closed by its client:{}")
-                    .setArguments(ctx.channel().remoteAddress(), cause.getMessage())
+                    .setMessageFormat("HTTP/2 connection to:{}closed by the upstream:{}")
+                    .setArguments(ctx.channel().attr(REMOTE_SOCKET).get(), cause.getMessage())
             );
         }
     }

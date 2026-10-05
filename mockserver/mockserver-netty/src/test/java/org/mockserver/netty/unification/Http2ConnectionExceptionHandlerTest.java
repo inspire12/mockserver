@@ -29,6 +29,7 @@ import io.netty.handler.ssl.util.SelfSignedCertificate;
 import io.netty.util.internal.OutOfDirectMemoryError;
 import org.junit.Test;
 import org.mockserver.configuration.Configuration;
+import org.mockserver.exception.ExceptionHandling;
 import org.mockserver.lifecycle.LifeCycle;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
@@ -176,8 +177,9 @@ public class Http2ConnectionExceptionHandlerTest {
             assertThat(reason, logged.get(0).getMessageFormat(), startsWith("closing HTTP/2 connection "));
             assertThat(reason, logged.get(0).getMessageFormat(), endsWith(" for SSL or decoder fault " + cause.getClass().getName() + ":{}"));
             String message = (String) logged.get(0).getArguments()[0];
-            assertThat(reason, message.length(), lessThanOrEqualTo(Http2ConnectionExceptionHandler.MAX_FAULT_MESSAGE_LENGTH));
-            assertThat(reason, cause.getMessage(), startsWith(message.replaceAll("\\.\\.\\.$", "")));
+            assertThat(reason, message.length(), lessThanOrEqualTo(ExceptionHandling.MAX_FAULT_MESSAGE_LENGTH));
+            // the bytes themselves are left out: they are the client's, and no redaction would know a credential in them
+            assertThat(reason, message, is(cause == notTls ? "io.netty.handler.ssl.NotSslRecordException: not an SSL/TLS record: 60000 bytes" : cause.getMessage()));
             assertThat("the stack trace would carry the whole message", logged.get(0).getThrowable(), is(nullValue()));
             assertThat(reason, logged.get(0).getMessage(configuration()).length(), lessThan(1024));
             assertThat("passed on to the end of the pipeline", reachedTheEndOfThePipeline(channel), is(nullValue()));

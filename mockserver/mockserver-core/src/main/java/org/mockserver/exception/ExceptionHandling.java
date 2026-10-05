@@ -8,9 +8,11 @@ import io.netty.handler.ssl.NotSslRecordException;
 import io.netty.handler.ssl.SslClosedEngineException;
 import io.netty.util.internal.OutOfDirectMemoryError;
 import io.netty.util.internal.PlatformDependent;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.mockserver.httpclient.SocketConnectionException;
 import org.mockserver.log.model.LogEntry;
+import org.mockserver.log.model.RedactedThrowable;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.socket.tls.SniHandler;
 
@@ -26,7 +28,9 @@ import java.security.cert.CertPathValidatorException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -258,6 +262,79 @@ public class ExceptionHandling {
     public static String causeDescription(Throwable throwable) {
         String message = throwable.getMessage();
         return throwable.getClass().getSimpleName() + (message == null || message.isEmpty() ? "" : ": " + message);
+    }
+
+    /**
+     * The most of a fault's message that a log entry carries.
+     */
+    public static final int MAX_FAULT_MESSAGE_LENGTH = 256;
+
+    /**
+     * What Netty's message for bytes that are not a TLS record says before its hex dump of every byte read.
+     */
+    private static final String NOT_A_TLS_RECORD = "not an SSL/TLS record: ";
+
+    /**
+     * A fault's message as a log entry may carry it: at most {@link #MAX_FAULT_MESSAGE_LENGTH} characters, and with
+     * the count of the bytes in place of Netty's hex dump of them. The dump is whatever the peer sent, as long as
+     * the read was, and no redaction would recognise a credential in it. A message this method returned is returned
+     * as it is.
+     */
+    public static String boundedFaultMessage(Throwable fault) {
+        return boundedFaultMessage(fault.getMessage());
+    }
+
+    private static String boundedFaultMessage(String message) {
+        if (message == null) {
+            return null;
+        }
+        int dump = message.indexOf(NOT_A_TLS_RECORD);
+        if (dump >= 0 && isHexDump(message, dump + NOT_A_TLS_RECORD.length())) {
+            dump += NOT_A_TLS_RECORD.length();
+            message = message.substring(0, dump) + (message.length() - dump) / 2 + " bytes";
+        }
+        return StringUtils.abbreviate(message, MAX_FAULT_MESSAGE_LENGTH);
+    }
+
+    /**
+     * Whether the rest of the message is what {@code ByteBufUtil.hexDump} writes: two lower-case hex digits a byte.
+     */
+    private static boolean isHexDump(String message, int from) {
+        for (int i = from; i < message.length(); i++) {
+            if (Character.digit(message.charAt(i), 16) < 0 || Character.isUpperCase(message.charAt(i))) {
+                return false;
+            }
+        }
+        return message.length() > from && (message.length() - from) % 2 == 0;
+    }
+
+    /**
+     * The throwable to attach to a fault's log entry: {@code fault} itself, unless a message of it, of a cause or of
+     * a suppressed throwable is not what {@link #boundedFaultMessage(Throwable)} gives, in which case a copy with
+     * those messages, each after the name of its class, and the same stack traces. Such a copy is returned as it is.
+     */
+    public static Throwable boundedFault(Throwable fault) {
+        return hasUnboundedMessage(fault, Collections.newSetFromMap(new IdentityHashMap<>()))
+            ? RedactedThrowable.of(fault, ExceptionHandling::boundedFaultMessage)
+            : fault;
+    }
+
+    private static boolean hasUnboundedMessage(Throwable throwable, Set<Throwable> visited) {
+        // visited by identity: a cause or suppressed graph can be cyclic
+        if (throwable == null || !visited.add(throwable)) {
+            return false;
+        }
+        // a copy's message leads with a class name, which is no part of what was bounded
+        String message = throwable instanceof RedactedThrowable ? ((RedactedThrowable) throwable).getRewrittenMessage() : throwable.getMessage();
+        if (message != null && !message.equals(boundedFaultMessage(message))) {
+            return true;
+        }
+        for (Throwable suppressed : throwable.getSuppressed()) {
+            if (hasUnboundedMessage(suppressed, visited)) {
+                return true;
+            }
+        }
+        return hasUnboundedMessage(throwable.getCause(), visited);
     }
 
     private static final List<Class<? extends Exception>> SSL_HANDSHAKE_FAILURE_CLASSES = Arrays.asList(SSLException.class, SSLHandshakeException.class, CertPathValidatorException.class, SignatureException.class);

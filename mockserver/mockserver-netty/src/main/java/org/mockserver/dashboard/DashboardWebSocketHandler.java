@@ -59,6 +59,7 @@ import static io.netty.handler.codec.http.HttpHeaderNames.CONTENT_LENGTH;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
+import static org.mockserver.exception.ExceptionHandling.boundedFault;
 import static org.mockserver.exception.ExceptionHandling.connectionClosedException;
 import static org.mockserver.exception.ExceptionHandling.DIRECT_MEMORY_LIMIT_REACHED;
 import static org.mockserver.exception.ExceptionHandling.directMemoryLimitReached;
@@ -888,7 +889,7 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
                     new LogEntry()
                         .setLogLevel(Level.WARN)
                         .setMessageFormat("web socket server caught SSL or decoder fault" + sniDescription(ctx.channel()))
-                        .setThrowable(cause)
+                        .setThrowable(boundedFault(cause))
                 );
             }
         }

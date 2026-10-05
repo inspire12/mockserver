@@ -28,6 +28,7 @@ import java.security.cert.Certificate;
 import java.util.Map;
 import java.util.concurrent.RejectedExecutionException;
 
+import static org.mockserver.exception.ExceptionHandling.boundedFault;
 import static org.mockserver.exception.ExceptionHandling.connectionClosedException;
 import static org.mockserver.exception.ExceptionHandling.DIRECT_MEMORY_LIMIT_REACHED;
 import static org.mockserver.exception.ExceptionHandling.directMemoryLimitReached;
@@ -123,7 +124,7 @@ public class McpStreamableHttpHandler extends ChannelInboundHandlerAdapter {
                     new LogEntry()
                         .setLogLevel(Level.WARN)
                         .setMessageFormat("SSL or decoder fault caught by MCP handler" + sniDescription(ctx.channel()))
-                        .setThrowable(cause)
+                        .setThrowable(boundedFault(cause))
                 );
             }
         }

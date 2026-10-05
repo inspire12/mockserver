@@ -26,6 +26,7 @@ import org.slf4j.event.Level;
 
 import static com.google.common.net.HttpHeaders.HOST;
 import static org.mockserver.closurecallback.websocketclient.WebSocketClient.CLIENT_REGISTRATION_ID_HEADER;
+import static org.mockserver.exception.ExceptionHandling.boundedFault;
 import static org.mockserver.exception.ExceptionHandling.connectionClosedException;
 import static org.mockserver.exception.ExceptionHandling.DIRECT_MEMORY_LIMIT_REACHED;
 import static org.mockserver.exception.ExceptionHandling.directMemoryLimitReached;
@@ -199,7 +200,7 @@ public class CallbackWebSocketServerHandler extends ChannelInboundHandlerAdapter
                     new LogEntry()
                         .setLogLevel(Level.WARN)
                         .setMessageFormat("web socket server caught SSL or decoder fault" + sniDescription(ctx.channel()))
-                        .setThrowable(cause)
+                        .setThrowable(boundedFault(cause))
                 );
             }
         }

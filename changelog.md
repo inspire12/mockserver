@@ -537,6 +537,21 @@ This release delivers a sustained performance and memory programme alongside dat
   disables inbound header-*name* validation on that path (Netty folds both under one flag); outbound
   names and HTTP/2-forbidden connection-specific headers (`Connection`, `Transfer-Encoding`) remain
   validated.
+- **Some warnings about a connection its peer closed or reset are now `DEBUG` entries.** They used
+  to be printed by Netty at `WARN` with a stack trace, outside MockServer's log; they are now
+  entries in MockServer's log at the level each cause calls for (see the first two fixes below),
+  so they no longer appear at the default `INFO` level:
+  - an upstream that resets while TLS is being set up, and a proxy that refuses the `CONNECT`: the
+    forward that failed is still logged at `ERROR` with the cause, and the client is still
+    answered `502`;
+  - an upstream that resets an HTTP/2 connection with a forward in flight: the failed forward is
+    still logged at `ERROR`;
+  - an upstream that resets an HTTP/2 connection that is idle in the pool: the `DEBUG` entry is
+    now the only one, and the next forward opens a new connection;
+  - an HTTP/3 client that resets a control, QPACK or other unidirectional stream it opened, or a
+    QUIC channel that is already closed.
+
+  Set `logLevel` to `DEBUG` to see them.
 
 ### Removed
 
@@ -1218,6 +1233,39 @@ This release delivers a sustained performance and memory programme alongside dat
   failed write at `WARN` with a stack trace, on direct connections and through CONNECT tunnels, over HTTP/1.1 and
   HTTP/2. Such a departure now ends the response quietly and is logged only at `DEBUG`, naming the cause, without a
   stack trace; any other write failure is still a `WARN` with its cause.
+- **A broken HTTP/3 connection no longer makes MockServer print a Netty warning with a stack
+  trace.** A QUIC client that offered no protocol MockServer serves, that sent a frame the HTTP/3
+  control stream may not carry or one that cannot be decoded, or that reset a unidirectional
+  stream it had opened produced `An exceptionCaught() event was fired, and it reached at the tail
+  of the pipeline` with a full stack trace on the console, through Netty's logger and so missing
+  from MockServer's own log and dashboard. Each is now one entry in MockServer's log: a failed TLS
+  handshake at `ERROR` with the client's address and the reason, as over TCP; an HTTP/3 connection
+  error at `WARN` with the client's address, the error code and the cause; a frame that cannot be
+  decoded and a QUIC error at `WARN`; a stream or connection its client closed or reset at `DEBUG`;
+  and anything unexpected at `ERROR`. The connection meets the same end as before.
+- **An upstream that breaks the connection a request is forwarded on no longer makes MockServer
+  print Netty warnings with stack traces, and the reason is now in MockServer's log.** Forwarding
+  over HTTPS, an upstream that reset an HTTP/2 connection (with a request in flight, or while it
+  was idle), that sent an invalid HTTP/2 frame, that failed the TLS handshake or reset during it,
+  and a proxy that refused the `CONNECT` each produced one or two warnings through Netty's own
+  loggers (`reached at the tail of the pipeline`, `TLS handshake failed`, `Failed to select the
+  application-level protocol`). For a failed TLS handshake and an HTTP/2 connection error that
+  warning was the only place the reason appeared: the forward itself failed with `Channel handler
+  removed before valid response has been received`. Each is now one entry in MockServer's log. A
+  failed handshake is logged at `WARN` with its cause (an untrusted upstream certificate, for
+  example), an HTTP/2 connection error at `WARN` with the upstream's address, the error code and
+  the message, and a reset or a refused tunnel at `DEBUG`. The client is answered `502` as before,
+  and an HTTP/2 connection error still sends its `GOAWAY`.
+- **A log entry for bytes that are not TLS no longer contains a hex dump of those bytes.** Where
+  Netty's OpenSSL native library is not loaded, a connection that sent something other than a TLS
+  record after its handshake was logged with every byte it had sent, in hex: as long as the read
+  was, and in a form `redactSecretsInLog` could not match a credential in. The entry now says how
+  many bytes there were (`not an SSL/TLS record: 2000 bytes`) and keeps its stack trace, and the
+  message of each exception in it is cut to 256 characters. This covers a connection once its
+  requests are being served, the callback WebSocket, dashboard, MCP and SOCKS handlers, a direct
+  HTTP/2 connection (which showed the start of the dump) and a connection to an upstream. An entry
+  logged while a connection's protocol is still being detected, by the tunnel relays, or for a
+  failed forward can still contain the dump.
 
 ## [8.0.0] - 2026-09-15
 

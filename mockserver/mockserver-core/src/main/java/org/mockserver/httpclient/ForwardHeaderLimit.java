@@ -153,8 +153,9 @@ final class ForwardHeaderLimit {
     }
 
     /**
-     * Last on an HTTP/2 connection: a header block of more than the limit plus a quarter is a connection error, which
-     * Netty reports here before it sends GOAWAY and closes the connection. Any other exception is passed on.
+     * On an HTTP/2 connection, after the multiplex handler: a header block of more than the limit plus a quarter is a
+     * connection error, which Netty reports here before it sends GOAWAY and closes the connection. Any other
+     * exception is passed on to {@link Http2ForwardConnectionExceptionHandler}.
      */
     static final class Http2Connection extends ChannelInboundHandlerAdapter {
 

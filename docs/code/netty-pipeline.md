@@ -675,6 +675,34 @@ An upstream HTTP/2 connection carries one forward at a time (`HttpForwardConnect
 
 **Before.** With the 8,192-byte limit an HTTP/1.1 response with larger headers was relayed as `200` with the headers read up to that point, the rest and the body missing, and its connection went back to the pool with the decoder discarding everything, so the next forward on it timed out. Over HTTP/2 the forward failed with `502` and nothing in MockServer's log said why: a header block over 10,240 bytes closed the connection and the exception reached the end of the pipeline (on master, where pooled HTTP/2 connections and the stale-connection retry are newer than 8.0.0, an idempotent request on a pooled connection was also sent a second time). Through an upstream proxy whose `CONNECT` response had larger headers, the forward waited out the proxy connect timeout.
 
+##### Exceptions on a connection to an upstream
+
+**Every pipeline the forward client builds ends with a MockServer handler, so an exception on a connection to an upstream is logged once in MockServer's log.** Without one it reaches the end of Netty's pipeline, which logs it at `WARN` with a stack trace through Netty's own logger, and while TLS is being set up Netty's `ApplicationProtocolNegotiationHandler` logs it through its own logger as well.
+
+| Stage | Pipeline ends with | Was logged by Netty |
+|-------|--------------------|---------------------|
+| Until ALPN has chosen the protocol (every `https` forward) | `HttpOrHttp2Initializer`, which overrides `exceptionCaught` | `TLS handshake failed:` for a failed handshake; `Failed to select the application-level protocol:` and then the end of the pipeline for anything else, such as a proxy that refuses the `CONNECT` or an upstream that resets |
+| HTTP/2 connection | `Http2ForwardConnectionExceptionHandler`, after `ForwardHeaderLimit.Http2Connection` | the end of the pipeline: an upstream's reset, with or without a forward in flight, and every HTTP/2 connection error |
+| HTTP/1.1, binary, and each HTTP/2 stream | `HttpClientHandler` | nothing |
+
+| What reached it | `HttpOrHttp2Initializer` | `Http2ForwardConnectionExceptionHandler` |
+|-----------------|--------------------------|------------------------------------------|
+| A refusal `ForwardHeaderLimit` logged (`isAlreadyLogged`) | nothing | nothing |
+| Netty's direct memory limit | `ERROR`, the message the other handlers use | the same; the connection is closed |
+| An HTTP/2 connection error | does not arise | `WARN`, the upstream's address, the error code and the message; no stack trace |
+| An SSL or decoder fault (`isSslOrDecoderFault`) | `WARN` `TLS could not be set up on connection to: ...` with the cause attached through `boundedFault` | `WARN`, the exception's class and its bounded message, no stack trace; the connection is closed |
+| A `ConnectException` (a proxy that refuses the tunnel) | `DEBUG`, the upstream's address and the message | as a reset, if it could arise |
+| A connection the upstream closed or reset | `DEBUG`, the same entry | `DEBUG`, the upstream's address and the message |
+| Anything else | `ERROR` and the cause | `ERROR` and the cause; the connection is left as it is |
+
+`HttpOrHttp2Initializer` closes the connection in every case, as Netty's handler did, and passes nothing on.
+
+**Why the levels differ from the request's own entry.** A forward in flight is failed by the handlers ahead of these (`HttpClientConnectionErrorHandler`, and on a stream `HttpClientHandler`), and `HttpActionHandler` logs that failure with its cause. A reset with a forward in flight and a refused tunnel reach the forward as the cause itself, so the connection's entry is `DEBUG` and has no stack trace. A pooled connection its upstream resets while it is idle has no forward to fail, and the `DEBUG` entry is then all that is logged: an upstream dropping an idle connection is routine, and the next forward opens a new one. A failed TLS handshake and an HTTP/2 connection error do not: the forward fails with `Channel handler removed before valid response has been received`, so the connection's `WARN` entry is the only place the reason is named, which is why the handshake's entry keeps the cause and its chain (an untrusted certificate is several causes deep).
+
+**What the HTTP/2 handler closes.** Nothing for a connection error, which Netty's codec fires before it writes the `GOAWAY` and closes; nothing for a reset. It closes for an SSL or decoder fault, because Netty's JDK TLS handler leaves such a connection open and reports every later read, and an idle pooled connection has no stream to close it.
+
+`ForwardConnectionErrorLoggingIntegrationTest` checks over sockets that nothing reaches Netty's two loggers and that the client is still answered `502`: an HTTP/2 upstream that resets with a forward in flight and while idle in the pool, one that sends a frame on stream 0 (the `GOAWAY` still goes out), one that sends bytes that are not TLS, an upstream that answers the handshake with other bytes or with a reset, and a proxy that answers `CONNECT` with `407`. `Http2ForwardConnectionExceptionHandlerTest` and `HttpOrHttp2InitializerTest` check each row.
+
 ##### Undecodable requests
 
 **An HTTP/1.1 request the codec cannot decode is answered and the connection closed; it is never dispatched.** On any decoding error (a request line or header section over its limit, an invalid header such as a non-numeric `Content-Length`, an invalid chunk size or chunk extension) Netty's decoder passes the request on with a failed decoder result (a synthetic `GET /bad-request` if the request line itself failed, otherwise the request as far as it was read, or a failed last content when the body broke) and discards the rest of the connection's input. `HttpChunkLineLimiter`'s handler after the codec drops that object and rejects the request the same way it rejects a long chunk-size line:
@@ -717,7 +745,7 @@ Two things arrive there. `Http2FrameCodec` fires an inbound connection error dow
 | Netty's direct memory limit, anywhere in the cause chain | `ERROR`, the message the other handlers use for it; the connection is closed |
 | A request refused for its header size (`Http2RequestHeaderLimit.isRefusal`) | nothing: `Http2RequestHeaderLimit` logged it at `WARN` where Netty raised it |
 | Any other HTTP/2 connection error | `WARN`, the client's address, the error code and the cause |
-| An SSL or decoder fault (`isSslOrDecoderFault`) | `WARN`, the exception's class and its message cut to 256 characters, no stack trace; the connection is closed |
+| An SSL or decoder fault (`isSslOrDecoderFault`) | `WARN`, the exception's class and its message as `boundedFaultMessage` gives it (see [SSL and Decoder Fault Logging](#ssl-and-decoder-fault-logging)), no stack trace; the connection is closed |
 | A connection its client closed or reset (not `connectionClosedException`) | `DEBUG`, the client's address and the exception's message; no stack trace |
 | Anything else | `ERROR` and the cause; the connection is left as it is |
 
@@ -2155,8 +2183,35 @@ The `isSslOrDecoderFault` predicate is wired into the `exceptionCaught` handler 
 - `McpStreamableHttpHandler` (MCP streaming)
 - `DashboardWebSocketHandler` (dashboard WebSocket)
 - `Http2ConnectionExceptionHandler` (the end of a direct HTTP/2 connection's pipeline; it logs a benign close at `DEBUG` rather than staying silent, see [Exceptions on the connection](#exceptions-on-the-connection))
+- `Http2ForwardConnectionExceptionHandler` and `HttpOrHttp2Initializer` (the ends of the forward client's HTTP/2 and pre-ALPN pipelines, see [Exceptions on a connection to an upstream](#exceptions-on-a-connection-to-an-upstream))
+- `Http3ExceptionHandler` (the end of an HTTP/3 connection's pipeline, see [http3.md](http3.md#exceptions-on-a-connection))
+
+**Ask about the fault before the close.** `connectionClosedException` is `false` for every `DecoderException` and for every throwable caused by an `SSLException`, exactly as it is for a reset, so a handler that logs what is left over as a peer's close must test `isSslOrDecoderFault` before it gets there, or a decoder fault is logged as a client's reset. The four that log a close (`Http2ConnectionExceptionHandler`, `Http2ForwardConnectionExceptionHandler`, `HttpOrHttp2Initializer`, `Http3ExceptionHandler`) do, and each has a unit test that fires a bare `DecoderException` at it.
 
 This means genuine SSL negotiation failures (e.g., client sends plain HTTP to a TLS port, or a non-TLS client probes a TLS port) surface at WARN and are visible in logs, while normal connection teardowns remain silent. `ExceptionHandling.isSslOrDecoderFault` mirrors the predicate already in `connectionClosedException` but as a positive match so callers can route specifically to WARN rather than silently drop.
+
+### What an entry carries of the fault
+
+**In the handlers that use the helpers below, a fault's entry does not carry the bytes a peer sent, and the message of each exception in it is cut to 256 characters.** Netty's JDK TLS handler, the one in use without the OpenSSL native, reports bytes that are not a TLS record as `NotSslRecordException: not an SSL/TLS record: <hex>`: a hex dump of every byte read, two characters a byte, with no limit, repeated in the message of the `DecoderException` that wraps it. Attached to an entry it is in the log, the event log and the dashboard once for each of those messages, and it is the peer's own bytes in a form `redactSecretsInLog` cannot match a credential against.
+
+`ExceptionHandling` has the two helpers:
+
+| Helper | Gives |
+|--------|-------|
+| `boundedFaultMessage(Throwable)` | the message cut to `MAX_FAULT_MESSAGE_LENGTH` (256), with the dump replaced by its size: `not an SSL/TLS record: 2000 bytes` |
+| `boundedFault(Throwable)` | the throwable itself when every message of it, its causes and its suppressed throwables is already that; otherwise a `RedactedThrowable` copy with those messages and the original stack traces. A copy's own message is the class name of what was thrown and then the bounded message, so it can be some 40 characters over 256 |
+
+Both give back what they are given when it is already bounded: only a run of hex digits after `not an SSL/TLS record: ` is taken for a dump, and a copy is recognised as one.
+
+**Cut before redaction.** `redactSecretsInLog` scrubs a throwable when its entry is rendered, by matching the exact values of the credentials in the requests the entry attaches, so it sees a message that has already been cut. These entries attach no request, so there is nothing to match. An entry that does attach one (a failed forward's, if the helpers are extended to it) could keep the first part of a credential that straddles character 256; there the values have to be scrubbed before the message is cut.
+
+A handler that attaches the fault passes it through `boundedFault`, so the stack trace is kept: a decoder wraps whatever a handler's own `decode` throws, and that stack trace is how such a bug is found. A handler that logs the message alone uses `boundedFaultMessage`.
+
+| Uses the helpers | Not yet (the entry can still carry the dump) |
+|------------------|----------------------------------------------|
+| `HttpRequestHandler`, `CallbackWebSocketServerHandler`, `DashboardWebSocketHandler`, `McpStreamableHttpHandler`, `SocksProxyHandler`, `Http2ConnectionExceptionHandler`, `Http2ForwardConnectionExceptionHandler`, `HttpOrHttp2Initializer`, `Http3ExceptionHandler` | `PortUnificationHandler`, `BinaryRequestProxyingHandler`, `RelayConnectHandler`, `UpstreamProxyRelayHandler`, `DownstreamProxyRelayHandler`; and `HttpActionHandler`, which logs a failed forward with its cause |
+
+`SslFaultLogEntryBoundTest` fires a 60,000-byte dump at each of the first five and checks the entry.
 
 ## ByteBuf Leak Detection in Tests
 
@@ -2209,6 +2264,9 @@ flowchart LR
 | `PortUnificationHandler` | `mockserver-netty/.../netty/unification/PortUnificationHandler.java` | Protocol detection and pipeline assembly |
 | `Http2ConnectionExceptionHandler` | `mockserver-netty/.../netty/unification/Http2ConnectionExceptionHandler.java` | Last handler of a direct HTTP/2 connection's pipeline; logs the exceptions that reach it, each once and at a level that fits its cause |
 | `Http2StreamFaults` | `mockserver-netty/.../netty/unification/Http2StreamFaults.java` | Logs an HTTP/2 stream that ends before its request does, once: a client's cancel or a closed connection at `INFO`, a stream's own error at `WARN`; direct connections and tunnels |
+| `Http2ForwardConnectionExceptionHandler` | `mockserver-core/.../httpclient/Http2ForwardConnectionExceptionHandler.java` | Last handler of the pipeline of an HTTP/2 connection to an upstream; logs the exceptions that reach it, each once |
+| `HttpOrHttp2Initializer` | `mockserver-core/.../httpclient/HttpOrHttp2Initializer.java` | Builds the forward client's HTTP/1.1 or HTTP/2 pipeline once ALPN has chosen; until then the last handler, which logs what stops TLS being set up and closes the connection |
+| `Http3ExceptionHandler` | `mockserver-netty/.../netty/http3/Http3ExceptionHandler.java` | Last handler of an HTTP/3 connection's pipeline and of each control or QPACK stream a client opens; logs the exceptions that reach it, each once (see [http3.md](http3.md#exceptions-on-a-connection)) |
 | `Http2MultiplexChildInitializer` | `mockserver-netty/.../netty/unification/Http2MultiplexChildInitializer.java` | Per-stream child initializer for the HTTP/2 multiplex pipeline; installs `ConnectionScopeHandler`, `Http2StreamTransportTimer` when metrics are enabled, optionally `GrpcBidiRouterHandler`, and the re-aggregating chain for every HTTP/2 stream |
 | `HttpRequestHandler` | `mockserver-netty/.../netty/HttpRequestHandler.java` | Main request dispatcher |
 | `NettyResponseWriter` | `mockserver-netty/.../netty/responsewriter/NettyResponseWriter.java` | Writes responses to Netty channels |
