@@ -42,7 +42,7 @@ public class ProtocolDetectionIntegrationTest {
     }
 
     private Socket clientOfMockServerForwardingTo(Upstream upstream) throws IOException {
-        mockServer = new MockServer(Configuration.configuration().forwardBinaryRequestsWithoutWaitingForResponse(true), upstream.port(), "127.0.0.1", 0);
+        mockServer = new MockServer(Configuration.configuration().forwardBinaryRequestsUseSingleConnection(false).forwardBinaryRequestsWithoutWaitingForResponse(true), upstream.port(), "127.0.0.1", 0);
         Socket client = new Socket("127.0.0.1", mockServer.getLocalPort());
         client.setTcpNoDelay(true);
         return client;

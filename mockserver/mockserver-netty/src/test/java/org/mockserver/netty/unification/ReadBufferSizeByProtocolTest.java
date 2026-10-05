@@ -6,6 +6,7 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOption;
+import io.netty.channel.EventLoop;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.RecvByteBufAllocator;
 import io.netty.channel.nio.NioEventLoopGroup;
@@ -37,6 +38,7 @@ import javax.net.ssl.SSLSocket;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -72,7 +74,9 @@ public class ReadBufferSizeByProtocolTest {
 
     private static HttpState httpState;
 
-    private final Configuration configuration = configuration().http2Enabled(true).assumeAllRequestsAreHttp(false);
+    // each message on a connection of its own, to an upstream mocked here; the relay has its own case below
+    private final Configuration configuration = configuration().http2Enabled(true).assumeAllRequestsAreHttp(false).forwardBinaryRequestsUseSingleConnection(false);
+    private final NettyHttpClient httpClient = mock(NettyHttpClient.class);
     private final AtomicReference<Channel> connection = new AtomicReference<>();
     private final List<Socket> sockets = new ArrayList<>();
     private MockServerUnificationInitializer initializer;
@@ -91,7 +95,6 @@ public class ReadBufferSizeByProtocolTest {
 
     @Before
     public void startServer() throws Exception {
-        NettyHttpClient httpClient = mock(NettyHttpClient.class);
         when(httpClient.sendRequest(any(BinaryMessage.class), anyBoolean(), any(InetSocketAddress.class), any()))
             .thenAnswer(invocation -> new CompletableFuture<BinaryMessage>());
         HttpActionHandler actionHandler = mock(HttpActionHandler.class);
@@ -208,6 +211,27 @@ public class ReadBufferSizeByProtocolTest {
         reads.removeIf(read -> read.startsWith("end of loop"));
 
         assertThat(reads, everyItem(is("guess 65536 buffer 65536")));
+    }
+
+    @Test
+    public void shouldGiveEveryReadOfABinaryConnection64KiBWhenItIsRelayedOnOneUpstreamConnection() throws Exception {
+        configuration.forwardBinaryRequestsUseSingleConnection(true);
+        try (ServerSocket upstream = new ServerSocket(0, 1, InetAddress.getByAddress(new byte[]{127, 0, 0, 1}))) {
+            InetSocketAddress upstreamAddress = new InetSocketAddress(InetAddress.getByAddress(new byte[]{127, 0, 0, 1}), upstream.getLocalPort());
+            NettyHttpClient direct = new NettyHttpClient(configuration, new MockServerLogger(), (EventLoopGroup) null, null, false);
+            when(httpClient.connectBinaryRelay(any(EventLoop.class), any(InetSocketAddress.class), any(ChannelHandler.class)))
+                .thenAnswer(invocation -> direct.connectBinaryRelay(invocation.getArgument(0), upstreamAddress, invocation.getArgument(2)));
+            Socket socket = connect();
+            send(socket, BINARY_MESSAGE);
+            awaitHandler(BinaryRequestProxyingHandler.class);
+            upstream.setSoTimeout(20_000);
+            try (Socket relayed = upstream.accept()) {
+                relayed.setSoTimeout(20_000);
+                assertThat("the message went on the one upstream connection", relayed.getInputStream().readNBytes(BINARY_MESSAGE.length), is(BINARY_MESSAGE));
+
+                assertEveryReadIsGiven64KiB();
+            }
+        }
     }
 
     @Test

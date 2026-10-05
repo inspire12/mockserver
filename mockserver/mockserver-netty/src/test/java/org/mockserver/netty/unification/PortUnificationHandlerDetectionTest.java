@@ -3,6 +3,8 @@ package org.mockserver.netty.unification;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
+import io.netty.channel.ChannelHandler;
+import io.netty.channel.EventLoop;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http2.Http2FrameCodec;
@@ -63,7 +65,7 @@ public class PortUnificationHandlerDetectionTest {
     private static final byte[] CLIENT_HELLO_START = {22, 3, 1, 0, 100, 1, 0, 0, 96, 3, 3};
 
     // set on the instance, so that a test changing the shared defaults in parallel cannot change what is detected
-    private final Configuration configuration = configuration().http2Enabled(true).assumeAllRequestsAreHttp(false);
+    private final Configuration configuration = configuration().http2Enabled(true).assumeAllRequestsAreHttp(false).forwardBinaryRequestsUseSingleConnection(false);
     private final NettyHttpClient httpClient = mock(NettyHttpClient.class);
     private final List<String> forwardedAsBinary = new ArrayList<>();
     private final List<EmbeddedChannel> channels = new ArrayList<>();
@@ -537,6 +539,34 @@ public class PortUnificationHandlerDetectionTest {
         channel.close();
 
         assertThat(forwardedAsBinary, contains(hex("a first message\n"), "160301"));
+    }
+
+    /** As above, with the connection relayed on one upstream connection: that is ended only after the held bytes. */
+    @Test
+    public void shouldRelayAHeldLaterMessageBeforeEndingTheUpstreamConnectionWhenTheClientCloses() {
+        configuration.forwardBinaryRequestsUseSingleConnection(true);
+        List<EmbeddedChannel> upstreams = new ArrayList<>();
+        when(httpClient.connectBinaryRelay(any(EventLoop.class), any(InetSocketAddress.class), any(ChannelHandler.class))).thenAnswer(invocation -> {
+            EmbeddedChannel upstream = new EmbeddedChannel(invocation.<ChannelHandler>getArgument(2));
+            upstreams.add(upstream);
+            return upstream.newSucceededFuture();
+        });
+        EmbeddedChannel channel = connection();
+        clientSends(channel, ascii("a first message\n"));
+
+        clientSends(channel, (byte) 22, (byte) 3, (byte) 1);
+        channel.close();
+
+        assertThat("one upstream connection", upstreams.size(), is(1));
+        StringBuilder relayed = new StringBuilder();
+        for (ByteBuf write; (write = upstreams.get(0).readOutbound()) != null; ) {
+            relayed.append(ByteBufUtil.hexDump(write));
+            write.release();
+        }
+        assertThat(relayed.toString(), is(hex("a first message\n") + "160301"));
+        assertThat("and then it is ended", upstreams.get(0).isOpen(), is(false));
+        assertThat("nothing went the per-message way", forwardedAsBinary, is(empty()));
+        upstreams.get(0).finishAndReleaseAll();
     }
 
     @Test

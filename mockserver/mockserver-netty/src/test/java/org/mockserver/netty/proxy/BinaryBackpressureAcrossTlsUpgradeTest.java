@@ -65,7 +65,7 @@ public class BinaryBackpressureAcrossTlsUpgradeTest {
 
     private static HttpState httpState;
 
-    private final Configuration configuration = configuration().forwardBinaryRequestsWithoutWaitingForResponse(true);
+    private final Configuration configuration = configuration().forwardBinaryRequestsUseSingleConnection(false).forwardBinaryRequestsWithoutWaitingForResponse(true);
     private final NettyHttpClient httpClient = mock(NettyHttpClient.class);
     private final List<Integer> forwarded = new CopyOnWriteArrayList<>();
     private final List<Boolean> forwardedOverTls = new CopyOnWriteArrayList<>();

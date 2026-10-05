@@ -64,7 +64,7 @@ import static org.mockserver.netty.proxy.BinaryRequestProxyingHandler.MAX_WAITIN
  */
 public class BinaryRequestProxyingHandlerBackpressureTest {
 
-    private final Configuration configuration = configuration().forwardBinaryRequestsWithoutWaitingForResponse(true);
+    private final Configuration configuration = configuration().forwardBinaryRequestsUseSingleConnection(false).forwardBinaryRequestsWithoutWaitingForResponse(true);
     private final NettyHttpClient httpClient = mock(NettyHttpClient.class);
     private final List<Integer> forwardsStarted = new CopyOnWriteArrayList<>();
     private final List<Consumer<Throwable>> requestSent = new CopyOnWriteArrayList<>();
@@ -329,7 +329,7 @@ public class BinaryRequestProxyingHandlerBackpressureTest {
 
     @Test
     public void shouldNotHoldBackAClientWhenWaitingForEachResponse() {
-        Configuration waiting = configuration().forwardBinaryRequestsWithoutWaitingForResponse(false);
+        Configuration waiting = configuration().forwardBinaryRequestsUseSingleConnection(false).forwardBinaryRequestsWithoutWaitingForResponse(false);
         when(httpClient.sendRequest(any(BinaryMessage.class), anyBoolean(), any(InetSocketAddress.class), any()))
             .thenAnswer(invocation -> {
                 forwardsStarted.add(sequenceNumber(invocation.<BinaryMessage>getArgument(0).getBytes()));

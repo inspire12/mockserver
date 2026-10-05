@@ -77,6 +77,7 @@ public class ConfigurationDTO implements DTO<Configuration> {
     private Boolean assumeAllRequestsAreHttp;
 
     private Boolean forwardBinaryRequestsWithoutWaitingForResponse;
+    private Boolean forwardBinaryRequestsUseSingleConnection;
 
     private Boolean enableCORSForAPI;
     private Boolean enableCORSForAllResponses;
@@ -358,6 +359,7 @@ public class ConfigurationDTO implements DTO<Configuration> {
     public ConfigurationDTO() {
     }
 
+    @SuppressWarnings("deprecation")
     public ConfigurationDTO(Configuration configuration) {
         if (configuration != null) {
             Level level = configuration.logLevel();
@@ -427,6 +429,7 @@ public class ConfigurationDTO implements DTO<Configuration> {
             this.assumeAllRequestsAreHttp = configuration.assumeAllRequestsAreHttp();
 
             this.forwardBinaryRequestsWithoutWaitingForResponse = configuration.forwardBinaryRequestsWithoutWaitingForResponse();
+            this.forwardBinaryRequestsUseSingleConnection = configuration.forwardBinaryRequestsUseSingleConnection();
 
             this.enableCORSForAPI = configuration.enableCORSForAPI();
             this.enableCORSForAllResponses = configuration.enableCORSForAllResponses();
@@ -794,6 +797,7 @@ public class ConfigurationDTO implements DTO<Configuration> {
     }
 
     @Override
+    @SuppressWarnings("deprecation")
     public Configuration buildObject() {
         validateFields();
         Configuration configuration = Configuration.configuration();
@@ -862,6 +866,7 @@ public class ConfigurationDTO implements DTO<Configuration> {
         configuration.assumeAllRequestsAreHttp(assumeAllRequestsAreHttp);
 
         configuration.forwardBinaryRequestsWithoutWaitingForResponse(forwardBinaryRequestsWithoutWaitingForResponse);
+        configuration.forwardBinaryRequestsUseSingleConnection(forwardBinaryRequestsUseSingleConnection);
 
         configuration.enableCORSForAPI(enableCORSForAPI);
         configuration.enableCORSForAllResponses(enableCORSForAllResponses);
@@ -1270,6 +1275,7 @@ public class ConfigurationDTO implements DTO<Configuration> {
         AtomicConfigurationUpdate.apply(target, () -> applyFieldsTo(target));
     }
 
+    @SuppressWarnings("deprecation")
     private void applyFieldsTo(Configuration target) {
         validateFields();
         if (logLevel != null) {
@@ -1439,6 +1445,9 @@ public class ConfigurationDTO implements DTO<Configuration> {
         }
         if (forwardBinaryRequestsWithoutWaitingForResponse != null) {
             target.forwardBinaryRequestsWithoutWaitingForResponse(forwardBinaryRequestsWithoutWaitingForResponse);
+        }
+        if (forwardBinaryRequestsUseSingleConnection != null) {
+            target.forwardBinaryRequestsUseSingleConnection(forwardBinaryRequestsUseSingleConnection);
         }
         if (enableCORSForAPI != null) {
             target.enableCORSForAPI(enableCORSForAPI);
@@ -2782,6 +2791,15 @@ public class ConfigurationDTO implements DTO<Configuration> {
 
     public ConfigurationDTO setForwardBinaryRequestsWithoutWaitingForResponse(Boolean forwardBinaryRequestsWithoutWaitingForResponse) {
         this.forwardBinaryRequestsWithoutWaitingForResponse = forwardBinaryRequestsWithoutWaitingForResponse;
+        return this;
+    }
+
+    public Boolean getForwardBinaryRequestsUseSingleConnection() {
+        return forwardBinaryRequestsUseSingleConnection;
+    }
+
+    public ConfigurationDTO setForwardBinaryRequestsUseSingleConnection(Boolean forwardBinaryRequestsUseSingleConnection) {
+        this.forwardBinaryRequestsUseSingleConnection = forwardBinaryRequestsUseSingleConnection;
         return this;
     }
 

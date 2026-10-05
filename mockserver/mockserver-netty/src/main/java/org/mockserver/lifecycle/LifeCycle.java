@@ -767,6 +767,7 @@ public abstract class LifeCycle implements Stoppable {
     protected void startedServer(List<Integer> ports) {
         final String message = "started on port" + (ports.size() == 1 ? ": " + ports.get(0) : "s: " + ports);
         setPort(ports);
+        logSettingsOverriddenByAnother();
         if (mockServerLogger != null && mockServerLogger.isEnabledForInstance(INFO)) {
             mockServerLogger.logEvent(
                 new LogEntry()
@@ -777,6 +778,24 @@ public abstract class LifeCycle implements Stoppable {
         }
         logProxySetup(ports);
         startupWarmup(ports);
+    }
+
+    /**
+     * Says so at start-up when a setting has been turned on that another setting leaves with little or nothing to do.
+     */
+    @SuppressWarnings("deprecation")
+    private void logSettingsOverriddenByAnother() {
+        if (configuration != null
+            && Boolean.TRUE.equals(configuration.forwardBinaryRequestsUseSingleConnection())
+            && Boolean.TRUE.equals(configuration.forwardBinaryRequestsWithoutWaitingForResponse())
+            && mockServerLogger != null && mockServerLogger.isEnabledForInstance(INFO)) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setType(SERVER_CONFIGURATION)
+                    .setLogLevel(INFO)
+                    .setMessageFormat("forwardBinaryRequestsWithoutWaitingForResponse is set but has no effect on a binary connection that is given one upstream connection, which forwardBinaryRequestsUseSingleConnection (on by default) gives every binary connection except one whose client uses TLS, or all of them when an upstream proxy is configured; it is deprecated and applies only to those, or to all with forwardBinaryRequestsUseSingleConnection set to false")
+            );
+        }
     }
 
     /**

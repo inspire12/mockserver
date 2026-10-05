@@ -7,10 +7,14 @@ import org.mockserver.configuration.Configuration;
 import org.mockserver.configuration.ConfigurationProperties;
 
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.nullValue;
+import static org.hamcrest.Matchers.sameInstance;
 import static org.junit.Assert.assertThrows;
 
 /**
@@ -177,5 +181,47 @@ public class InetAddressValidatorTest {
     @Test
     public void shouldTreatNullInetAddressAsNoOp() {
         InetAddressValidator.validateForwardTarget(enabled, (InetAddress) null);
+    }
+
+    @Test
+    public void shouldBlockALoopbackSocketAddressWhenEnabled() {
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+            () -> InetAddressValidator.validateForwardTarget(enabled, new InetSocketAddress("127.0.0.1", 5432)));
+        assertThat(ex.getMessage(), containsString("loopback"));
+    }
+
+    @Test
+    public void shouldBlockASocketAddressWhoseNameResolvesToABlockedAddress() {
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+            () -> InetAddressValidator.validateForwardTarget(enabled, InetSocketAddress.createUnresolved("localhost", 5432)));
+        assertThat(ex.getMessage(), containsString("loopback"));
+    }
+
+    @Test
+    public void shouldRejectASocketAddressWhoseNameDoesNotResolveWhenEnabled() {
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+            () -> InetAddressValidator.validateForwardTarget(enabled, InetSocketAddress.createUnresolved("no-such-host-for-mockserver-ssrf.invalid", 5432)));
+        assertThat(ex.getMessage(), containsString("could not be resolved"));
+    }
+
+    @Test
+    public void shouldReturnTheResolvedAddressItCheckedSoThatItIsTheOneConnectedTo() {
+        InetSocketAddress target = InetSocketAddress.createUnresolved("8.8.8.8", 5432);
+
+        InetSocketAddress toConnectTo = InetAddressValidator.validateForwardTarget(enabled, target);
+
+        assertThat(toConnectTo.isUnresolved(), is(false));
+        assertThat(toConnectTo.getAddress().getHostAddress(), is("8.8.8.8"));
+        assertThat(toConnectTo.getPort(), is(5432));
+    }
+
+    @Test
+    public void shouldReturnASocketAddressAsItWasGivenWhenDisabled() {
+        InetSocketAddress loopback = new InetSocketAddress("127.0.0.1", 5432);
+        InetSocketAddress unresolved = InetSocketAddress.createUnresolved("no-such-host-for-mockserver-ssrf.invalid", 5432);
+
+        assertThat(InetAddressValidator.validateForwardTarget(disabled, loopback), is(sameInstance(loopback)));
+        assertThat("and no name is looked up", InetAddressValidator.validateForwardTarget(disabled, unresolved), is(sameInstance(unresolved)));
+        assertThat(InetAddressValidator.validateForwardTarget(enabled, (InetSocketAddress) null), is(nullValue()));
     }
 }

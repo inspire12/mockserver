@@ -1065,6 +1065,16 @@ When no matching expectation is found and the host header does not match MockSer
 - Default: true
 - Environment variable: MOCKSERVER_ATTEMPT_TO_PROXY_IF_NO_MATCHING_EXPECTATION
 
+**forwardBinaryRequestsUseSingleConnection**
+A proxied binary (non-HTTP) connection is given one upstream connection for its life, and bytes are relayed both ways as they arrive. New default in 9.0.0 (breaking): set to false to forward each message on an upstream connection of its own, as in 8.0.0. A connection whose client uses TLS, and every connection when an upstream proxy is configured, is forwarded one message per connection regardless.
+- Default: true
+- Environment variable: MOCKSERVER_FORWARD_BINARY_REQUESTS_USE_SINGLE_CONNECTION
+
+**forwardBinaryRequestsWithoutWaitingForResponse**
+Deprecated, and applies only when forwardBinaryRequestsUseSingleConnection is false (or to a connection that setting forwards one message at a time: client TLS, or an upstream proxy). Then, if true, each binary message is forwarded without waiting for the upstream's response. Has no effect on a connection with a single upstream connection. To be removed in the next major release.
+- Default: false
+- Environment variable: MOCKSERVER_FORWARD_BINARY_REQUESTS_WITHOUT_WAITING_FOR_RESPONSE
+
 **forwardHttpProxy**
 Use HTTP proxy for all outbound/forwarded requests.
 - Default: null
@@ -2492,6 +2502,8 @@ Or by expectation IDs:
 | MOCKSERVER_PERSIST_EXPECTATIONS | mockserver.persistExpectations | false |
 | MOCKSERVER_PERSISTED_EXPECTATIONS_PATH | mockserver.persistedExpectationsPath | persistedExpectations.json |
 | MOCKSERVER_ATTEMPT_TO_PROXY_IF_NO_MATCHING_EXPECTATION | mockserver.attemptToProxyIfNoMatchingExpectation | true |
+| MOCKSERVER_FORWARD_BINARY_REQUESTS_USE_SINGLE_CONNECTION | mockserver.forwardBinaryRequestsUseSingleConnection | true |
+| MOCKSERVER_FORWARD_BINARY_REQUESTS_WITHOUT_WAITING_FOR_RESPONSE (deprecated; only when forwardBinaryRequestsUseSingleConnection is false) | mockserver.forwardBinaryRequestsWithoutWaitingForResponse | false |
 | MOCKSERVER_FORWARD_HTTP_PROXY | mockserver.forwardHttpProxy | null |
 | MOCKSERVER_FORWARD_HTTPS_PROXY | mockserver.forwardHttpsProxy | null |
 | MOCKSERVER_FORWARD_SOCKS_PROXY | mockserver.forwardSocksProxy | null |

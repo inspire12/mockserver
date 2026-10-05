@@ -6,8 +6,11 @@ import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
+import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelOption;
+import io.netty.channel.EventLoop;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.WriteBufferWaterMark;
 import io.netty.handler.timeout.ReadTimeoutHandler;
@@ -20,6 +23,7 @@ import org.mockserver.log.model.SensitiveLogValue;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.metrics.Metrics;
 import org.mockserver.model.*;
+import org.mockserver.proxyconfiguration.InetAddressValidator;
 import org.mockserver.proxyconfiguration.NoProxyHostsUtils;
 import org.mockserver.proxyconfiguration.ProxyConfiguration;
 import org.mockserver.socket.NettyAllocator;
@@ -561,6 +565,7 @@ public class NettyHttpClient {
      *                      connection, or with the cause when it could not be connected or written; may be
      *                      {@code null}
      */
+    @SuppressWarnings("deprecation")
     public CompletableFuture<BinaryMessage> sendRequest(final BinaryMessage binaryRequest, final boolean isSecure, InetSocketAddress remoteAddress, Long connectionTimeoutMillis, final Consumer<Throwable> onRequestSent) throws SocketConnectionException {
         final EventLoopGroup eventLoopGroup = eventLoopGroup();
         if (!eventLoopGroup.isShuttingDown()) {
@@ -634,6 +639,50 @@ public class NettyHttpClient {
         } else {
             throw new IllegalStateException("Request sent after client has been stopped - the event loop has been shutdown so it is not possible to send a request");
         }
+    }
+
+    /**
+     * Whether an upstream proxy is configured. A binary connection is then forwarded one message at a time, by
+     * {@link #sendRequest(BinaryMessage, boolean, InetSocketAddress, Long, Consumer)}: {@link #connectBinaryRelay}
+     * only connects directly.
+     */
+    public boolean forwardsThroughProxy() {
+        return !proxyConfigurations.isEmpty();
+    }
+
+    /**
+     * Opens the upstream connection of a binary connection that keeps one for its life. It is registered on the
+     * given event loop, the client connection's, so both legs run on one thread. Only direct connections are made.
+     *
+     * @param handler the upstream connection's only handler
+     * @return the connect, whose channel is the upstream connection
+     * @throws IllegalStateException    if an upstream proxy is configured: a direct connection would go around it
+     * @throws IllegalArgumentException if forwardProxyBlockPrivateNetworks blocks the target
+     */
+    public ChannelFuture connectBinaryRelay(EventLoop eventLoop, InetSocketAddress remoteAddress, ChannelHandler handler) {
+        if (forwardsThroughProxy()) {
+            throw new IllegalStateException("an upstream proxy is configured (forwardHttpProxy, forwardHttpsProxy or forwardSocksProxy), and a binary connection that keeps one upstream connection is only made directly");
+        }
+        InetSocketAddress target = InetAddressValidator.validateForwardTarget(configuration, remoteAddress);
+        Long connectionTimeoutMillis = configuration.socketConnectionTimeoutInMillis();
+        Bootstrap relayBootstrap = new Bootstrap()
+            .group(eventLoop)
+            .channel(NettyTransport.socketChannelClassFor(eventLoop))
+            .option(ChannelOption.AUTO_READ, true)
+            .option(ChannelOption.ALLOCATOR, NettyAllocator.ALLOCATOR)
+            .option(ChannelOption.WRITE_BUFFER_WATER_MARK, new WriteBufferWaterMark(8 * 1024, 32 * 1024))
+            .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, connectionTimeoutMillis != null ? (int) Math.min(connectionTimeoutMillis, Integer.MAX_VALUE) : null)
+            .handler(handler);
+        applyForwardSocketKeepAlive(
+            relayBootstrap,
+            eventLoop,
+            Boolean.TRUE.equals(configuration.forwardSocketKeepAlive()),
+            configuration.forwardSocketKeepAliveIdleSeconds(),
+            configuration.forwardSocketKeepAliveIntervalSeconds(),
+            configuration.forwardSocketKeepAliveCount(),
+            mockServerLogger
+        );
+        return relayBootstrap.connect(target);
     }
 
     private static void reportRequestSent(Consumer<Throwable> onRequestSent, Throwable failure) {

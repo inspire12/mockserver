@@ -2083,6 +2083,40 @@ public class ConfigurationTest {
     }
 
     @Test
+    public void shouldSetAndGetForwardBinaryRequestsUseSingleConnection() {
+        boolean original = ConfigurationProperties.forwardBinaryRequestsUseSingleConnection();
+        try {
+            // then - default value
+            assertThat(configuration.forwardBinaryRequestsUseSingleConnection(), equalTo(true));
+
+            // when - system property setter
+            ConfigurationProperties.forwardBinaryRequestsUseSingleConnection(false);
+
+            // then - system property getter
+            assertThat(ConfigurationProperties.forwardBinaryRequestsUseSingleConnection(), equalTo(false));
+            assertThat(System.getProperty("mockserver.forwardBinaryRequestsUseSingleConnection"), equalTo("false"));
+            assertThat(configuration.forwardBinaryRequestsUseSingleConnection(), equalTo(false));
+            ConfigurationProperties.forwardBinaryRequestsUseSingleConnection(original);
+
+            // when - setter
+            configuration.forwardBinaryRequestsUseSingleConnection(false);
+
+            // then - getter
+            assertThat(configuration.forwardBinaryRequestsUseSingleConnection(), equalTo(false));
+
+            // then - carried by the configuration the REST API reads and writes, alone
+            Configuration roundTripped = new org.mockserver.serialization.model.ConfigurationDTO(configuration).buildObject();
+            assertThat(roundTripped.forwardBinaryRequestsUseSingleConnection(), equalTo(false));
+            Configuration updated = new Configuration().forwardBinaryRequestsWithoutWaitingForResponse(true);
+            new org.mockserver.serialization.model.ConfigurationDTO().setForwardBinaryRequestsUseSingleConnection(false).applyTo(updated);
+            assertThat(updated.forwardBinaryRequestsUseSingleConnection(), equalTo(false));
+            assertThat("the other binary setting is a separate one", updated.forwardBinaryRequestsWithoutWaitingForResponse(), equalTo(true));
+        } finally {
+            ConfigurationProperties.forwardBinaryRequestsUseSingleConnection(original);
+        }
+    }
+
+    @Test
     public void shouldSetAndGetEnableCORSForAPI() {
         boolean original = ConfigurationProperties.enableCORSForAPI();
         try {

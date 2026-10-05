@@ -296,6 +296,7 @@ BinaryRequestProxyingHandler"]
 - **Backpressure**: the forward queue's read pause (below) is a `ChannelReadPause` hold on the channel, not on a handler position, so it balances across the upgrade. A ClientHello sent while the client is held back is read, and the upgrade made, when reading resumes.
 - **`assumeAllRequestsAreHttp`**: nothing is binary under that setting, so there is no binary connection to upgrade.
 - **Proxying** is as it was in 8.0.0: MockServer terminates the client's TLS itself, and each decrypted message goes upstream on a connection of its own that MockServer opens with TLS straight away, while what was sent in the clear went upstream in the clear. A server that expects the plaintext request to upgrade on every connection is not served by this; replaying that preamble upstream is not built.
+- **With `forwardBinaryRequestsUseSingleConnection`** (the default) what is sent before the upgrade goes on the connection's one upstream connection, which is in the clear. When the client turns TLS on, that connection is ended and the decrypted messages are forwarded as just described, one per TLS connection (see [One upstream connection](#one-upstream-connection-for-a-binary-connection)). Starting MockServer's own TLS handshake with the upstream on the kept connection, at the moment the client starts its handshake, is what remains to make such a protocol proxyable.
 
 ### Connection Delay
 
@@ -2130,6 +2131,83 @@ and 128 KiB waiting?"}
 - **Not bounded here**: a message already written holds its upstream connection until the upstream answers or closes, as in 8.0.0; and listener calls for one connection are chained, so a listener slower than the client builds a backlog of its own.
 
 Waiting mode is unchanged: forwards are not queued and the listener is called from the scheduler once the response has arrived.
+
+### One Upstream Connection for a Binary Connection
+
+With `forwardBinaryRequestsUseSingleConnection`, **on by default since 9.0.0**, a binary connection that has an upstream target gets **one upstream connection for its life**, and bytes are relayed both ways as they arrive, in the clear. It is what a stateful protocol needs: a session's messages on one connection, and whatever the server sends, asked for or not. Everything above this heading (the forward queue, waiting and non-waiting modes, `forwardBinaryRequestsWithoutWaitingForResponse`, which is deprecated) describes forwarding one message per upstream connection, which now happens only when the setting is `false` or for a connection the relay hands back (below). Relaying a protocol that upgrades to TLS on the same connection is the next step and is not built.
+
+```mermaid
+flowchart TD
+    MSG(["Binary message read,
+target set"]) --> ON{"forwardBinaryRequests
+UseSingleConnection?"}
+    ON -->|"false"| PER["One upstream connection
+for this message (as 8.0.0)"]
+    ON -->|"true (default)"| WHY{"Upstream proxy configured,
+or client leg is TLS?"}
+    WHY -->|"Yes"| DEBUG["DEBUG once for the connection"] --> PER
+    WHY -->|"No"| RELAY["BinaryRelay: written to the
+connection's one upstream connection"]
+    RELAY --> BACK["Every upstream read
+written back to the client"]
+```
+
+| Part | Where | What it does |
+|------|-------|--------------|
+| The branch | `BinaryRequestProxyingHandler.sendMessage`, first statement | Setting on and `BinaryRelay.forward(...)` returns true: done. Otherwise the per-message code below it runs unchanged. `channelWritabilityChanged` and `channelInactive` pass the client's writability and close to the relay |
+| `BinaryRelay` | `netty/proxy/relay`, one per client connection, in a channel attribute | The upstream channel, the messages held until it is connected, the holds on each connection's reads, the listener calls outstanding, the close wiring, and whether the connection is forwarded per message instead |
+| `BinaryRelay.forwardedPerMessageBecause` | One small method | The policy: the reasons a connection is not relayed. Returns the reason logged, or null |
+| `BinaryRelayUpstreamHandler` | The upstream channel's only handler | Hands each read to the relay, flushes the client at the end of a read cycle, reports writability, closes on an exception |
+| `NettyHttpClient.connectBinaryRelay` | `mockserver-core` | The connect: the binary forward's socket options, on the event loop it is given. Throws rather than connect around an upstream proxy or to a blocked target |
+
+Both connections are on the **client connection's event loop** (as in `RelayConnectHandler`), so the relay's state has one thread and no locks. Only the listener runs elsewhere, on the `Scheduler` local-callback pool.
+
+**The target** is the channel attribute `REMOTE_SOCKET`, as for per-message forwarding, taken when the first message arrives: port forwarding, a PROXY protocol header, or the transparent proxy's original destination. A CONNECT or SOCKS tunnel never reaches this handler with binary bytes (its client leg is given HTTP codecs), in either mode.
+
+**Connections handed back to per-message forwarding.** The single upstream connection is made directly and is not encrypted, so two kinds of connection are forwarded exactly as with the setting `false`, with one DEBUG entry per connection saying why:
+
+| Connection | Why | What happens |
+|------------|-----|--------------|
+| Any, when an upstream proxy is configured (`NettyHttpClient.forwardsThroughProxy()`) | A direct connection would go around the operator's egress path | Each message through `NettyHttpClient.sendRequest`, as in 8.0.0 (with an HTTP proxy, clear binary goes to the proxy's address as if it were the target; an HTTPS proxy is used, by CONNECT, only for a TLS connection; a SOCKS proxy for every connection) |
+| One whose client leg is TLS from the start (`isSslEnabledUpstream`) | What a client sent over TLS must not leave MockServer unencrypted | Each decrypted message on a connection of its own that MockServer opens with TLS, as in 8.0.0 |
+| One that turns TLS on part way through | The same | Relayed on its one upstream connection until then. At the first decrypted message that connection is ended (once what was sent in the clear is flushed, `RelayLegClose.afterFlush`) without closing the client, anything it still sends is dropped, and decrypted messages go per message with TLS, as in 8.0.0. A server that expects the upgrade on the same connection is still not served |
+
+| Observer | What it sees on a relayed connection |
+|----------|--------------|
+| Event log, client to upstream | `RECEIVED_REQUEST` per read, as before |
+| Event log, upstream to client | One `FORWARDED_REQUEST` entry per upstream read, with the correlation id of the latest client message. "for forwarded binary request" is left out for a read that follows no message, or follows one already answered |
+| `binaryProxyListener.onProxy` | Once per client message, at once, off the event loop, one at a time and in arrival order. The response future completes with the first upstream read after that message was written; with `null` when the next client message arrives first or the upstream connection closes; exceptionally when the message could not be connected or written |
+| Upstream bytes that answer no message | Relayed and logged, not reported to the listener (`onProxy` has no shape for them) |
+| Binary expectations | Not consulted, as for any connection with a target |
+| `forwardBinaryRequestsWithoutWaitingForResponse` | No effect. `LifeCycle.startedServer` logs one INFO entry at start-up when it is on while this setting is on |
+| A `NettyHttpClient` subclass overriding `sendRequest(BinaryMessage, ...)` | Not called: the relay connects through `connectBinaryRelay` |
+
+| Concern | Rule |
+|---------|------|
+| Before the connect completes | The client is not read; what one read delivered is held and written, in order, once connected |
+| Client faster than upstream | One `ChannelReadPause` hold on the client while the upstream channel is not writable |
+| Upstream faster than client | One hold on the upstream while the client channel is not writable |
+| Listener slower than client | Calls not yet returned are counted; above 64 the client is not read, until 32 remain |
+| Message size | What `BinaryMessageGatherer` joins from one read loop, at most 256 KiB, is one write to the upstream and one listener call; the 64 KiB read floor (`BinaryAwareRecvByteBufAllocator`) applies as for per-message forwarding |
+| Memory for one connection | One gathered message (at most 256 KiB) from the client and one read from the upstream in flight, each channel's write buffer, and the messages of at most 64 listener calls plus one read. No message queue: `ForwardQueue` is not created |
+| Holds stay balanced | Each reason is one flag in the relay, given up when the reason ends, when either connection closes and when the connection is handed back to per-message forwarding, so `ChannelReadPause`'s count composes with other holders |
+| Client closes | Driven by the handler's `channelInactive`, not the close future, which completes before `PortUnificationHandler.decodeLast` and `BinaryMessageGatherer.channelInactive` hand over bytes they still hold. What is queued for the upstream is flushed, then `RelayLegClose.afterFlush`: end of output, and a wait of up to 5 seconds for the upstream to close. A client that closes before the connect completes still has its messages delivered |
+| Upstream closes | `closeOnFlush` on the client: what the upstream sent is delivered first. Not an error, and no WARN |
+| Upstream fault | Both closed. An SSL or decoder fault: WARN with the cause. A reset by the upstream: WARN with its message (8.0.0 logged one too). Anything else: ERROR with the stack trace, as `connectionClosedException` classifies it (the scheme of `Http2ConnectionExceptionHandler`) |
+| Listener order across a hand-back | The relay and the per-message forwarder chain listener calls through one channel attribute (`BinaryRequestProxyingHandler.PREVIOUS_LISTENER_CALL`), so a connection handed back keeps its calls in order. Waiting mode calls its listener when each response arrives, outside that chain, as in 8.0.0 |
+| No upstream connection opened (`connectBinaryRelay` returned none) | WARN, the client is closed |
+| Half-close | Not kept on either leg: a FIN is a close. Upstream bytes still in flight after the client's FIN are not relayed |
+| Connect failure or timeout (`socketConnectionTimeoutInMillis`) | WARN naming the target; the client is closed (`Bootstrap` closes the failed channel, and that close closes the client); the message held fails its response future |
+| Stalled upstream | A timer runs while the upstream is not writable. If it took none of the bytes waiting for it for `responseWriteStallTimeoutMillis`, WARN and both are closed. Without it a stalled upstream would hold a client that is never timed out (it is marked long-lived) |
+| Stalled client | The existing `WriteStallTimeoutHandler` closes the client connection, which closes the upstream |
+| Idle | No read timeout on the upstream leg: a database session may sit idle. TCP keep-alive as for other forwards (`forwardSocketKeepAlive`) |
+| `forwardProxyBlockPrivateNetworks` | `InetAddressValidator.validateForwardTarget(Configuration, InetSocketAddress)` runs before the connect and returns the address to connect to, so the address checked is the one connected to. A blocked target: WARN, the client is closed. Per-message binary forwarding does not make this check, so with that setting on, a binary target it blocks worked in 8.0.0 and is refused now |
+| The setting changed while a connection is open | It is read for each message. Turned off, later messages are forwarded one per connection while the relay's upstream connection stays open until either end closes |
+| Server stop | The upstream channels are on the worker group and close with it |
+
+**What a relayed connection does differently from 8.0.0** (the reason the default is a BREAKING change): the upstream sees one connection per client connection, held for the client connection's life; there is no time limit on an answer (per message, `maxFutureTimeoutInMillis` closed the client), and no idle bound either, by choice: a database session may sit idle, and TCP keep-alive finds a dead upstream; the event log has one `FORWARDED_REQUEST` per upstream read rather than per message; every upstream byte is relayed, not just the first read of each per-message connection; the upstream closing closes the client (per message, the client stayed open after an answered message and its next message opened a new upstream connection); the listener is called at once rather than once the response has arrived, and its response can be `null`; an upstream that closes without answering is not an error (waiting mode raised one and closed the client with a WARN); the upstream connection is opened on the client connection's worker event loop, not the forward client's; `forwardProxyBlockPrivateNetworks` applies.
+
+**Not supported**: the in-band TLS upgrade of the upstream leg; relaying through an upstream SOCKS5 or HTTP CONNECT proxy; protocols in which the server speaks first (a connection is not known to be binary until the client sends); mixing binary expectations with the relay.
 
 ## SOCKS Protocol Detection
 

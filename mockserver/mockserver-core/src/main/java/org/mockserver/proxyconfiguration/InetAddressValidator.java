@@ -4,6 +4,7 @@ import org.mockserver.configuration.Configuration;
 import org.mockserver.configuration.ConfigurationProperties;
 
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
 
 import static org.apache.commons.lang3.StringUtils.isBlank;
@@ -73,6 +74,27 @@ public final class InetAddressValidator {
             return;
         }
         rejectIfBlocked(address.getHostAddress(), address);
+    }
+
+    /**
+     * Validate a socket target and return the address to connect to. When the check is on a name not yet resolved
+     * is resolved once, here, and the result returned, so the address checked is the address connected to. When it
+     * is off the target is returned as it was given.
+     *
+     * @param configuration MockServer configuration (may be null to fall back to global properties)
+     * @param target        the target (null is treated as nothing to check)
+     * @return the address to connect to
+     */
+    public static InetSocketAddress validateForwardTarget(Configuration configuration, InetSocketAddress target) {
+        if (target == null || !isEnabled(configuration)) {
+            return target;
+        }
+        InetSocketAddress resolved = target.isUnresolved() ? new InetSocketAddress(target.getHostString(), target.getPort()) : target;
+        if (resolved.isUnresolved()) {
+            throw new IllegalArgumentException("Forward target host \"" + target.getHostString() + "\" could not be resolved");
+        }
+        rejectIfBlocked(target.getHostString(), resolved.getAddress());
+        return resolved;
     }
 
     private static boolean isEnabled(Configuration configuration) {

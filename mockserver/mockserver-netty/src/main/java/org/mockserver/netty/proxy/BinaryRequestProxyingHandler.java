@@ -17,6 +17,7 @@ import org.mockserver.mock.HttpState;
 import org.mockserver.model.BinaryMessage;
 import org.mockserver.model.BinaryProxyListener;
 import org.mockserver.model.BinaryRequestDefinition;
+import org.mockserver.netty.proxy.relay.BinaryRelay;
 import org.mockserver.scheduler.Scheduler;
 import org.mockserver.socket.ChannelReadPause;
 import org.mockserver.uuid.UUIDService;
@@ -49,7 +50,7 @@ import static org.mockserver.netty.unification.PortUnificationHandler.isSslEnabl
 public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<ByteBuf> {
 
     private static final AttributeKey<ForwardQueue> FORWARD_QUEUE = AttributeKey.valueOf("BINARY_FORWARD_QUEUE");
-    private static final AttributeKey<CompletableFuture<Void>> PREVIOUS_LISTENER_CALL = AttributeKey.valueOf("PREVIOUS_BINARY_PROXY_LISTENER_CALL");
+    public static final AttributeKey<CompletableFuture<Void>> PREVIOUS_LISTENER_CALL = AttributeKey.valueOf("PREVIOUS_BINARY_PROXY_LISTENER_CALL");
     /**
      * The client connection is not read while more than either of these wait to be forwarded, and is read again
      * once no more than half of each do. The queue only has to absorb what a client sends while one message is
@@ -158,6 +159,10 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
     }
 
     private void sendMessage(ChannelHandlerContext ctx, BinaryMessage binaryRequest, String logCorrelationId, InetSocketAddress remoteAddress) {
+        if (configuration.forwardBinaryRequestsUseSingleConnection()
+            && BinaryRelay.forward(ctx, binaryRequest, logCorrelationId, remoteAddress, configuration, mockServerLogger, scheduler, httpClient, binaryExchangeCallback)) {
+            return;
+        }
         if (configuration.forwardBinaryRequestsWithoutWaitingForResponse()) {
             processNotWaitingForResponse(ctx, binaryRequest, logCorrelationId, remoteAddress, sendInArrivalOrder(ctx, binaryRequest, remoteAddress));
         } else {
@@ -425,6 +430,18 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
         // flow-control flush (Http2ConnectionHandler.channelReadComplete -> writePendingBytes),
         // stalling any h2 response larger than the peer's initial window - so propagate the event
         ctx.fireChannelReadComplete();
+    }
+
+    @Override
+    public void channelInactive(ChannelHandlerContext ctx) {
+        BinaryRelay.clientInactive(ctx.channel());
+        ctx.fireChannelInactive();
+    }
+
+    @Override
+    public void channelWritabilityChanged(ChannelHandlerContext ctx) {
+        BinaryRelay.clientWritabilityChanged(ctx.channel());
+        ctx.fireChannelWritabilityChanged();
     }
 
     @Override

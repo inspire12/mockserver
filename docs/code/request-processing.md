@@ -938,8 +938,9 @@ not logged until the next one.
 In synchronous (WAR/servlet) mode delays sleep on the request thread, nothing is queued and no bound applies.
 
 **Pausing reads.** Several handlers pause a connection's reads: pending WebSocket replies, a TCP chaos
-latency queue, a parked inbound breakpoint frame, WebSocket relay backpressure, the connection delay and the
-queue of binary messages waiting to be forwarded. They all go through `ChannelReadPause`, a per-channel hold
+latency queue, a parked inbound breakpoint frame, WebSocket relay backpressure, the connection delay, the
+queue of binary messages waiting to be forwarded and a binary relay's two connections (each while the other
+cannot take more). They all go through `ChannelReadPause`, a per-channel hold
 count: auto-read turns off with the first hold and back on only when the last is released, so one holder
 finishing cannot resume reads another still needs paused.
 The first hold also installs a gate at the head of the pipeline that drops read requests while any hold
@@ -1389,6 +1390,8 @@ flowchart TD
     DATA -->|Yes| NOTHING["Write nothing,\nkeep the connection open"]
     MATCH -->|No match| CLOSE["Write 'unknown message format',\nclose channel"]
 ```
+
+**Forwarding has two modes.** By default (`forwardBinaryRequestsUseSingleConnection`, on since 9.0.0) the connection's first message opens one upstream connection that is kept for the connection's life (`BinaryRelay`, connected by `NettyHttpClient.connectBinaryRelay`), every message is written to it, and whatever the upstream sends is written back as it arrives. With the setting `false`, and for a connection the relay cannot carry (its client uses TLS, or an upstream proxy is configured), each message is forwarded on an upstream connection of its own (`NettyHttpClient.sendRequest(BinaryMessage, ...)`), as in 8.0.0; `forwardBinaryRequestsWithoutWaitingForResponse`, deprecated, applies only there. The mode is chosen by the first statement of `BinaryRequestProxyingHandler.sendMessage`; see [netty-pipeline.md](netty-pipeline.md#one-upstream-connection-for-a-binary-connection) for the relay's backpressure, close and hand-back rules.
 
 ## DNS Mock Processing
 

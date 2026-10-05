@@ -269,6 +269,7 @@ public class ConfigurationProperties {
 
     // non http proxying
     private static final String MOCKSERVER_FORWARD_BINARY_REQUESTS_WITHOUT_WAITING_FOR_RESPONSE = "mockserver.forwardBinaryRequestsWithoutWaitingForResponse";
+    private static final String MOCKSERVER_FORWARD_BINARY_REQUESTS_USE_SINGLE_CONNECTION = "mockserver.forwardBinaryRequestsUseSingleConnection";
 
     // streaming proxy
     private static final String MOCKSERVER_STREAMING_RESPONSES_ENABLED = "mockserver.streamingResponsesEnabled";
@@ -4218,19 +4219,50 @@ public class ConfigurationProperties {
     }
 
     /**
-     * If true the BinaryRequestProxyingHandler.binaryExchangeCallback is called before a response is received from the
-     * remote host. This enables the proxying of messages without a response.
+     * Applies only when forwardBinaryRequestsUseSingleConnection is false, or to a connection that falls back to
+     * forwarding each message on a connection of its own. Then, if true, the
+     * BinaryRequestProxyingHandler.binaryExchangeCallback is called before a response is received from the remote
+     * host, which enables the proxying of messages without a response.
      * <p>
      * The default is false
      *
      * @param forwardBinaryRequestsAsynchronously target value
+     * @deprecated only the per-message binary forwarder reads this, and it is to be removed with that forwarder in
+     * the next major release; forwardBinaryRequestsUseSingleConnection, the default, waits for no response
      */
+    @Deprecated
     public static void forwardBinaryRequestsWithoutWaitingForResponse(boolean forwardBinaryRequestsAsynchronously) {
         setProperty(MOCKSERVER_FORWARD_BINARY_REQUESTS_WITHOUT_WAITING_FOR_RESPONSE, "" + forwardBinaryRequestsAsynchronously);
     }
 
+    /**
+     * Applies only when forwardBinaryRequestsUseSingleConnection is false, or to a connection that falls back to
+     * forwarding each message on a connection of its own.
+     *
+     * @deprecated only the per-message binary forwarder reads this, and it is to be removed with that forwarder in
+     * the next major release; forwardBinaryRequestsUseSingleConnection, the default, waits for no response
+     */
+    @Deprecated
     public static boolean forwardBinaryRequestsWithoutWaitingForResponse() {
         return Boolean.parseBoolean(readPropertyHierarchically(PROPERTIES, MOCKSERVER_FORWARD_BINARY_REQUESTS_WITHOUT_WAITING_FOR_RESPONSE, "MOCKSERVER_FORWARD_BINARY_REQUESTS_WITHOUT_WAITING_FOR_RESPONSE", "false"));
+    }
+
+    /**
+     * If true (the default) a proxied binary (non-HTTP) connection is given one upstream connection for its life,
+     * and bytes are relayed both ways as they arrive. forwardBinaryRequestsWithoutWaitingForResponse then has no
+     * effect. If false each message is forwarded on an upstream connection of its own, as in 8.0.0; a connection
+     * whose client uses TLS, or any connection when an upstream proxy is configured, is forwarded that way too.
+     * <p>
+     * The default is true
+     *
+     * @param forwardBinaryRequestsUseSingleConnection target value
+     */
+    public static void forwardBinaryRequestsUseSingleConnection(boolean forwardBinaryRequestsUseSingleConnection) {
+        setProperty(MOCKSERVER_FORWARD_BINARY_REQUESTS_USE_SINGLE_CONNECTION, "" + forwardBinaryRequestsUseSingleConnection);
+    }
+
+    public static boolean forwardBinaryRequestsUseSingleConnection() {
+        return Boolean.parseBoolean(readPropertyHierarchically(PROPERTIES, MOCKSERVER_FORWARD_BINARY_REQUESTS_USE_SINGLE_CONNECTION, "MOCKSERVER_FORWARD_BINARY_REQUESTS_USE_SINGLE_CONNECTION", "true"));
     }
 
     // CORS

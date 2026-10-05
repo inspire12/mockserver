@@ -6,13 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-This release delivers a sustained performance and memory programme alongside data-integrity fixes under load. The headline numbers, from the single-load-generator benchmark on the same six-core rig (builds 420 and 464): the healthy ceiling rises from 39,033 to 57,149 req/s and the peak from 43,671 to 59,905 req/s, with p95 at 32,000 req/s falling from 56.6 ms to 0.44 ms on the new ZGC default in the Docker images; event-log retained heap at 20,000 entries falls from 429 MB to 61 MB; Docker image download shrinks ~23%; and instance shutdown drops from ~107 ms to near zero. Three BREAKING changes affect only users of HTTP/3, of DNS mocking, or of the TypeScript typings of the Node client's `mockserver-client/llm` path — see the `BREAKING` entries in *Changed*.
+This release delivers a sustained performance and memory programme alongside data-integrity fixes under load. The headline numbers, from the single-load-generator benchmark on the same six-core rig (builds 420 and 464): the healthy ceiling rises from 39,033 to 57,149 req/s and the peak from 43,671 to 59,905 req/s, with p95 at 32,000 req/s falling from 56.6 ms to 0.44 ms on the new ZGC default in the Docker images; event-log retained heap at 20,000 entries falls from 429 MB to 61 MB; Docker image download shrinks ~23%; and instance shutdown drops from ~107 ms to near zero. Four BREAKING changes affect only users of HTTP/3, of DNS mocking, of the TypeScript typings of the Node client's `mockserver-client/llm` path, or of binary (non-HTTP) proxying — see the `BREAKING` entries in *Changed*.
 
 **BREAKING** — if you set `http3Port`, HTTP/3's native library now ships separately: use the `jar-with-dependencies-http3` jar, or in containers the new `mockserver/mockserver:<version>-http3` image (Helm: `image.variant=http3`). A server configured for HTTP/3 without it now refuses to start with a message naming the exact fix, where it used to log a warning and ignore the port — which is what every published Docker image did, because none of them could load the native. It also refuses to start when the HTTP/3 port itself cannot be used, for example because another application holds that UDP port, where it used to log a warning and serve only HTTP/1.1 and HTTP/2. If you do not use HTTP/3 — the default — nothing changes except a smaller standalone jar.
 
 **BREAKING** — if you set `dnsEnabled=true`, MockServer now refuses to start when it cannot start its DNS server, where it used to log a warning and run without DNS. In practice that means a fixed `dnsPort` it cannot use: another application holds it, another MockServer was given the same port, or the process may not bind it. With `dnsPort` left at `0` the operating system chooses a free port, so a refusal is unlikely, but a DNS server that cannot start there is refused too. If you do not enable DNS mocking — the default — nothing changes.
 
 **BREAKING** — for TypeScript users of the Node client's deep import `mockserver-client/llm`: its typings no longer declare a default export; everything imported from `mockserver-client` itself type-checks as in 8.0.0. See *Changed*.
+
+**BREAKING** — if you proxy a binary (non-HTTP) protocol through MockServer, a client's connection now gets one upstream connection for its whole life instead of a new one for every message (`forwardBinaryRequestsUseSingleConnection`, on by default). The upstream therefore sees one connection per client connection, held open as long as the client's is, everything it sends reaches the client, when it closes its connection the client's is closed too, and a client whose upstream never answers is no longer cut off after `maxFutureTimeout`. Set `forwardBinaryRequestsUseSingleConnection=false` to get the 8.0.0 behaviour back exactly. A connection whose client uses TLS, and every binary connection when an upstream proxy is configured, is still forwarded as in 8.0.0. `forwardBinaryRequestsWithoutWaitingForResponse` is deprecated and applies only when the new setting is `false`. If you do not proxy binary protocols nothing changes.
 
 | Metric | Before | After |
 |--------|--------|-------|
@@ -440,6 +442,44 @@ This release delivers a sustained performance and memory programme alongside dat
   though both type-check; that was already so for `mockserver-client` itself. The `TurnBuilder`
   constructor, which the module has always exported beside the other builder constructors, is
   now declared as well.
+- **BREAKING: a proxied binary (non-HTTP) connection now keeps one upstream connection for its
+  whole life (`forwardBinaryRequestsUseSingleConnection`, on by default); set it to `false` for the
+  8.0.0 behaviour.** Until now each message a client sent was forwarded on an upstream connection
+  of its own, which no stateful protocol survives: a database server expects a client to log in
+  and then send its queries on the same connection. Now the connection's first message opens one
+  upstream connection, every later message is written to it, and whatever the upstream sends is
+  passed back as it arrives. What changes for an existing binary proxy:
+  the upstream sees one connection per client connection, not one per message, and each client
+  connection holds its upstream connection open for its whole life;
+  everything the upstream sends reaches the client, where before only the first bytes received on
+  each per-message connection did;
+  when the upstream closes its connection the client's connection is closed (after what the
+  upstream sent is delivered), where before it stayed open and the next message opened a new
+  upstream connection, and an upstream that closes without answering is no longer an error;
+  when the client closes, what it had sent is delivered before the upstream connection is closed;
+  there is no time limit on the upstream answering: a client whose upstream never answers stays
+  connected until one side closes, where before it was closed after `maxFutureTimeout` (TCP
+  keep-alive, `forwardSocketKeepAlive`, still detects an upstream that has gone);
+  the event log has one "returning binary response" entry for each read from the upstream,
+  including reads that answer no message, where before it had one for each message;
+  a `binaryProxyListener` is called as soon as each message is read (in order, on a thread of its
+  own) rather than once the response has arrived, and its response is the first bytes the upstream
+  sends after that message, or `null` if the next message or a close comes first;
+  a slow client or upstream slows the other side down instead of being buffered, and an upstream
+  that takes none of the bytes waiting for it for `responseWriteStallTimeoutMillis` is closed with
+  its client;
+  `forwardProxyBlockPrivateNetworks`, if you have turned it on, now applies to the upstream address
+  of a binary connection, which is closed with a warning if blocked.
+  Two kinds of connection are still forwarded exactly as in 8.0.0, one message per upstream
+  connection, because the single connection is made directly and is not encrypted: a connection
+  whose client uses TLS (so a protocol that upgrades to TLS part way through, such as PostgreSQL
+  with `sslmode=require`, still cannot be proxied), and every binary connection when an upstream
+  proxy is configured (`forwardHttpProxy`, `forwardHttpsProxy`, `forwardSocksProxy`). MockServer
+  says why once per connection at `DEBUG`.
+  `forwardBinaryRequestsWithoutWaitingForResponse` is **deprecated**: it applies only when
+  `forwardBinaryRequestsUseSingleConnection` is `false` (or to the two kinds of connection above),
+  has no effect otherwise, and will be removed with per-message forwarding in the next major
+  release. MockServer logs one line at start-up when it is set while the new setting is on.
 - **Throughput no longer collapses past saturation.** Offered more than it could serve, MockServer used to serve *less* as load rose (26,020, then 23,463, then 19,517 req/s at 32,000, 48,000 and 64,000 offered in an earlier measurement); it now keeps serving close to the offered rate right up to a 59,905 req/s peak at 64,000 offered, with the median still under a millisecond. (The earlier 26,020 / 23,463 / 19,517 req/s figures are from a 2026-09-18 instrumented snapshot on the previous benchmark rig, not a measurement of 8.0.0.)
 - **Docker images download about 38 MB less.** Measured compressed download on linux/arm64 (linux/amd64 saves 37.7 MB): the standard image 166.5 → 128.5 MB (−23%), `-aot` 164.8 → 126.8 MB (−23%), `-graaljs` 196.1 → 158.2 MB (−19%) and `-clustered` 238.8 → 200.9 MB (−16%); `-http3` is built on the standard image and gets the same saving. Each image now carries only the native libraries its own architecture can load (Netty's, and zstd-jni's, snappy's, JNA's and lz4-java's, where zstd-jni alone shipped 18 platform builds), and stores the jar uncompressed so the image layer compresses it properly. The jar is also split into MockServer's own classes (10.9 MB compressed) and its dependencies (45.7 MB), on separate layers. When a release changes no dependency, the dependency layer is byte-identical and Docker reuses it, so an upgrade re-downloads about 84 MB less (calculated from measured layer sizes: about 68 MB instead of 152 MB for the standard image, 66 instead of 150 for `-aot`, 41 instead of 124 for `-graaljs` and 93 instead of 176 for `-clustered`); a release that bumps any dependency, as most do, re-downloads the dependency layer. Which native libraries load is unchanged, the start-up archive (AppCDS, or the AOT cache on `-aot`) still loads, and the build fails if a kept native library is for the wrong architecture or a required one is missing. Unpacked on disk each image is about 117 MB larger, because the jar is stored uncompressed. **If you override the image's `ENTRYPOINT` or copy the jar out of the image:** `/mockserver-netty-jar-with-dependencies.jar` is now `/mockserver.jar` plus `/mockserver-deps.jar`, so use `-cp /mockserver.jar:/mockserver-deps.jar:/libs/*`. `java -jar /mockserver.jar` still runs (its manifest names `mockserver-deps.jar`), but without the start-up archive, so it starts more slowly.
 - **Distroless Docker images now bundle a newer Java runtime.** Five variants (root, root-snapshot, snapshot, GraalJS, webhook) move from `gcr.io/distroless/java17` to `gcr.io/distroless/java25` (Temurin 25 LTS). The `-clustered` image moves to `gcr.io/distroless/java21` — Infinispan 14 calls an API removed in Java 24. The standard and local images already ran JDK 26; the experimental AOT image already ran JDK 25; neither changes. The embedded library is still compiled to the **Java 17** bytecode floor; running the JAR on your own Java 17+ JVM is unaffected. Java 25 prints one benign startup warning about Netty's native-library load.

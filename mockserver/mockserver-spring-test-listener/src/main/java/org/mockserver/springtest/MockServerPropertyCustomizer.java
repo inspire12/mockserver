@@ -104,6 +104,7 @@ public class MockServerPropertyCustomizer implements ContextCustomizer {
         return config;
     }
 
+    @SuppressWarnings("deprecation")
     private static void applyProperty(Configuration config, String key, String value) {
         switch (key) {
             // --- String properties ---
@@ -266,6 +267,9 @@ public class MockServerPropertyCustomizer implements ContextCustomizer {
                 break;
             case "forwardBinaryRequestsWithoutWaitingForResponse":
                 config.forwardBinaryRequestsWithoutWaitingForResponse(parseStrictBoolean(value, key));
+                break;
+            case "forwardBinaryRequestsUseSingleConnection":
+                config.forwardBinaryRequestsUseSingleConnection(parseStrictBoolean(value, key));
                 break;
             case "enableCORSForAPI":
                 config.enableCORSForAPI(parseStrictBoolean(value, key));

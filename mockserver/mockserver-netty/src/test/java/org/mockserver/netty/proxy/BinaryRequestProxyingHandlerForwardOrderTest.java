@@ -60,7 +60,7 @@ import static org.mockserver.model.BinaryMessage.bytes;
 public class BinaryRequestProxyingHandlerForwardOrderTest {
 
     // the socket timeout bounds how long the inline scheduler waits for a response that is never relayed
-    private final Configuration configuration = configuration().forwardBinaryRequestsWithoutWaitingForResponse(true).maxSocketTimeoutInMillis(2_000L);
+    private final Configuration configuration = configuration().forwardBinaryRequestsUseSingleConnection(false).forwardBinaryRequestsWithoutWaitingForResponse(true).maxSocketTimeoutInMillis(2_000L);
     private final NettyHttpClient httpClient = mock(NettyHttpClient.class);
     private final MockServerLogger mockServerLogger = mock(MockServerLogger.class);
     private final List<String> forwardsStarted = new CopyOnWriteArrayList<>();

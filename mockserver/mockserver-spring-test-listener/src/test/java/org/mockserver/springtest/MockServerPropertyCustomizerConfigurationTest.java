@@ -50,6 +50,14 @@ public class MockServerPropertyCustomizerConfigurationTest {
     }
 
     @Test
+    public void shouldApplyForwardBinaryRequestsUseSingleConnection() {
+        Configuration config = MockServerPropertyCustomizer.buildConfiguration(
+            Collections.singletonList("mockserver.forwardBinaryRequestsUseSingleConnection=false")
+        );
+        assertThat(config.forwardBinaryRequestsUseSingleConnection(), is(false));
+    }
+
+    @Test
     public void shouldApplyIntegerProperties() {
         Configuration config = MockServerPropertyCustomizer.buildConfiguration(
             Arrays.asList(

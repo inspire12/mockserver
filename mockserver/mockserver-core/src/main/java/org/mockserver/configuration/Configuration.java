@@ -225,6 +225,7 @@ public class Configuration {
 
     // non http proxying
     private volatile Boolean forwardBinaryRequestsWithoutWaitingForResponse;
+    private volatile Boolean forwardBinaryRequestsUseSingleConnection;
     private volatile BinaryProxyListener binaryProxyListener;
 
     // CORS
@@ -3281,6 +3282,14 @@ public class Configuration {
         return this;
     }
 
+    /**
+     * Applies only when forwardBinaryRequestsUseSingleConnection is false, or to a connection that falls back to
+     * forwarding each message on a connection of its own.
+     *
+     * @deprecated only the per-message binary forwarder reads this, and it is to be removed with that forwarder in
+     * the next major release; forwardBinaryRequestsUseSingleConnection, the default, waits for no response
+     */
+    @Deprecated
     public Boolean forwardBinaryRequestsWithoutWaitingForResponse() {
         if (forwardBinaryRequestsWithoutWaitingForResponse == null) {
             return ConfigurationProperties.forwardBinaryRequestsWithoutWaitingForResponse();
@@ -3289,15 +3298,41 @@ public class Configuration {
     }
 
     /**
-     * If true the BinaryProxyListener is called before a response is received from the
-     * remote host. This enables the proxying of messages without a response.
+     * Applies only when forwardBinaryRequestsUseSingleConnection is false, or to a connection that falls back to
+     * forwarding each message on a connection of its own. Then, if true, the BinaryProxyListener is called before
+     * a response is received from the remote host, which enables the proxying of messages without a response.
      * <p>
      * The default is false
      *
      * @param forwardBinaryRequestsWithoutWaitingForResponse target value
+     * @deprecated only the per-message binary forwarder reads this, and it is to be removed with that forwarder in
+     * the next major release; forwardBinaryRequestsUseSingleConnection, the default, waits for no response
      */
+    @Deprecated
     public Configuration forwardBinaryRequestsWithoutWaitingForResponse(Boolean forwardBinaryRequestsWithoutWaitingForResponse) {
         this.forwardBinaryRequestsWithoutWaitingForResponse = forwardBinaryRequestsWithoutWaitingForResponse;
+        return this;
+    }
+
+    public Boolean forwardBinaryRequestsUseSingleConnection() {
+        if (forwardBinaryRequestsUseSingleConnection == null) {
+            return ConfigurationProperties.forwardBinaryRequestsUseSingleConnection();
+        }
+        return forwardBinaryRequestsUseSingleConnection;
+    }
+
+    /**
+     * If true (the default) a proxied binary (non-HTTP) connection is given one upstream connection for its life,
+     * and bytes are relayed both ways as they arrive. forwardBinaryRequestsWithoutWaitingForResponse then has no
+     * effect. If false each message is forwarded on an upstream connection of its own, as in 8.0.0; a connection
+     * whose client uses TLS, or any connection when an upstream proxy is configured, is forwarded that way too.
+     * <p>
+     * The default is true
+     *
+     * @param forwardBinaryRequestsUseSingleConnection target value
+     */
+    public Configuration forwardBinaryRequestsUseSingleConnection(Boolean forwardBinaryRequestsUseSingleConnection) {
+        this.forwardBinaryRequestsUseSingleConnection = forwardBinaryRequestsUseSingleConnection;
         return this;
     }
 
