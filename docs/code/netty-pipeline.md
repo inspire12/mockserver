@@ -1932,7 +1932,7 @@ This means genuine SSL negotiation failures (e.g., client sends plain HTTP to a 
 
 ## ByteBuf Leak Detection in Tests
 
-**`mockserver-netty`'s test JVMs run Netty's leak detector at `paranoid` and fail the build if any `ByteBuf` is allocated and never released.** The whole serving/proxy hot path is reference-counted `ByteBuf`s; an unreleased buffer is a slow production memory leak and a double-release is corruption under load — neither is visible to a functional assertion or a throughput benchmark. Netty's default level (`simple`) samples ~1% of allocations, which is useless as a gate.
+**`mockserver-netty`'s test JVMs run Netty's leak detector at `paranoid` and fail the build if any `ByteBuf` is allocated and never released, in a local Maven run and in CI alike.** The whole serving/proxy hot path is reference-counted `ByteBuf`s; an unreleased buffer is a slow production memory leak and a double-release is corruption under load — neither is visible to a functional assertion or a throughput benchmark. Netty's default level (`simple`) samples ~1% of allocations, which is useless as a gate.
 
 ```mermaid
 flowchart LR
@@ -1943,7 +1943,7 @@ flowchart LR
 
 | Piece | Location | Role |
 |-------|----------|------|
-| `paranoid` + custom detector | `mockserver-netty/pom.xml` → `${mockserver.testArgLine}` (appended to both surefire and failsafe argLine via the parent pom's reserved hook, so it never touches the jacoco `@{argLine}` token) | Track every allocation; route leaks to the recorder |
+| `paranoid` + custom detector | `mockserver-netty/pom.xml` → `${mockserver.leakArgLine}`, which the parent pom appends to every surefire and failsafe `argLine` after the jacoco `@{argLine}` token and before `${mockserver.testArgLine}` | Track every allocation; route leaks to the recorder |
 | `FailOnLeakResourceLeakDetector` | `mockserver-testing/.../test/FailOnLeakResourceLeakDetector.java` | Counts + records each leak, still logs via `super`, writes one file per leak under `${mockserver.leakReportDir}`, and registers a JVM shutdown hook that GCs + polls so late leaks surface before the fork exits |
 | `check-netty-leaks` / `clean-netty-leaks` | `mockserver-netty/pom.xml` (maven-antrun-plugin) | Empties the report dir before tests (`process-test-classes`); fails the build at `verify` if any leak file is non-empty, unless `-Dmockserver.failOnNettyLeak=false` |
 
@@ -1951,11 +1951,17 @@ flowchart LR
 
 **What it cannot catch.** Netty reports a leak only once the leaked object has been GC-collected *and* a later `track()` polls the reference queue. A buffer leaked so late that it is never collected before the JVM exits, or reported on a background thread after the shutdown-hook flush, will not reach the file — only Netty's ERROR `LEAK:` log remains for that tail case.
 
+**Why the flags have their own property.** `mockserver.testArgLine` is the hook for the command line: CI passes its ring-buffer caps through it and a developer passes a [test port band](../operations/build-system.md#local-development-keep-tests-off-the-os-ephemeral-port-range). A `-D` on the command line replaces a pom value outright, so while the detector flags lived in that same property (from `a1158a104` until they moved to `mockserver.leakArgLine`), every build that passed `-Dmockserver.testArgLine=...` ran without the detector and `check-netty-leaks` passed having checked nothing. That included CI, whose build command has passed it since before the detector was added: only a plain local `./mvnw verify` was gated. No module may set `mockserver.testArgLine` for that reason. It still has the last word on the fork's command line, so `-Dmockserver.testArgLine=-Dio.netty.leakDetection.level=disabled` lowers the level for an on-demand measurement run of one class.
+
+**A fork without the detector fails its tests.** `check-netty-leaks` reads files, so by itself it cannot tell "no leak" from "no detector". Two checks cover that: `NettyLeakDetectorInstalledTest` in the unit-test fork and `NettyBufferLeaks` (below) in the integration-test fork both fail unless the detector Netty loaded is `FailOnLeakResourceLeakDetector` and the level is `paranoid`. They read what Netty is using, not the system property. Not covered: the one-class `dashboard-charset-fork-test` fork, where nothing asserts on the detector. Both checks also fail in an IDE run that does not pass the flags, by design, because a silent skip there is what let CI run unchecked; the failure message gives the VM options to add (`-Dio.netty.leakDetection.level=paranoid -Dio.netty.customResourceLeakDetector=org.mockserver.test.FailOnLeakResourceLeakDetector`).
+
 **A class can check itself.** `NettyBufferLeaks.assertNoneSince` (test sources) collects, allocates and compares the detector's count, so a class that calls it from `@AfterClass` fails on a leak from its own scenarios without depending on when the collector next runs. It reports every leak recorded in the fork since the class started, which can include one an earlier class caused. `Http2TrailerListLimitIntegrationTest` and `Http3TrailerSectionLimitIntegrationTest` use it.
 
 **One class turns tracking off.** `Http3HeaderSectionAllocationIntegrationTest` measures heap allocation on a real QUIC connection, where tracking's stack trace for every byte read would be all it measured. It sets the level to `DISABLED` in `@BeforeClass` and restores it in `@AfterClass`; failsafe runs one class at a time in one fork, so no other class runs untracked. Buffers that class allocates are not checked, and `Http3HeaderListLimitIntegrationTest` runs the same refusal with tracking on.
 
-**Cost.** Measured on `mockserver-netty`'s unit phase: `paranoid` adds ~10% (207 s → 228 s), which is cheap enough for every run. Extending the same three-line property block to other pipeline-driving modules (`mockserver-core`, `mockserver-integration-testing`) is a follow-up, gated on triaging the pre-existing leaks the detector already surfaces (predominantly `EmbeddedChannel` tests that never call `finishAndReleaseAll()`).
+**Cost.** One comparison on a developer Mac, a full `clean verify` of `mockserver-core` and `mockserver-netty` with and without the detector: `paranoid` took `mockserver-netty`'s unit phase from 325 s to 501 s and its integration phase from 1,248 s to 1,322 s, about four minutes of test time (Maven's time for the module went from 33:17 to 35:52). Tracking records a stack trace for every access to every buffer, so the cost sits in the few classes that push thousands of small frames or chunks: `Http2StreamPeakHeldTest` (19.5 s → 137.5 s) and `Http1TinyChunksIntegrationTest` (3 s → 37 s) are 150 s of it. The figures are indicative only: `mockserver-core`'s tests, which ran without the detector both times, differed by 20% between the two runs.
+
+**Other modules are not gated.** Only `mockserver-netty` sets `mockserver.leakArgLine` and has the `check-netty-leaks` step. `mockserver-core` drives `EmbeddedChannel` pipelines in its own tests without the detector; a run with it switched on from the command line records leaks from test code that never drains its channel, which have to be cleared before that module can be gated.
 
 ## Class Reference
 

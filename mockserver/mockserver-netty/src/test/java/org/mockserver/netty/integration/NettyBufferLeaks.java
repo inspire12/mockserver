@@ -1,10 +1,13 @@
 package org.mockserver.netty.integration;
 
+import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.util.ResourceLeakDetector;
+import io.netty.util.ResourceLeakDetectorFactory;
 import org.mockserver.test.FailOnLeakResourceLeakDetector;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
 
 /**
@@ -14,7 +17,7 @@ import static org.hamcrest.Matchers.is;
  */
 public final class NettyBufferLeaks {
 
-    private static final int NOT_TRACKED = -1;
+    static final String VM_OPTIONS = "-Dio.netty.leakDetection.level=paranoid -Dio.netty.customResourceLeakDetector=" + FailOnLeakResourceLeakDetector.CLASS_NAME;
 
     private NettyBufferLeaks() {
     }
@@ -23,17 +26,11 @@ public final class NettyBufferLeaks {
      * @return the number of leaks recorded so far, to pass to {@link #assertNoneSince(int)}
      */
     public static int recorded() {
-        if (!detectorInstalled()) {
-            return NOT_TRACKED;
-        }
         assertEveryBufferIsTracked();
         return FailOnLeakResourceLeakDetector.leakCount();
     }
 
     public static void assertNoneSince(int recordedBefore) throws InterruptedException {
-        if (recordedBefore == NOT_TRACKED || !detectorInstalled()) {
-            return;
-        }
         assertEveryBufferIsTracked();
         for (int i = 0; i < 5; i++) {
             System.gc();
@@ -45,17 +42,14 @@ public final class NettyBufferLeaks {
     }
 
     /**
-     * A build that replaces {@code mockserver.testArgLine} on its command line runs without the detector, and there
-     * is then nothing to check.
+     * Without the detector no leak is counted, and below {@code paranoid} one could go unrecorded: either way the
+     * check would pass having checked nothing, so it fails instead. Maven installs both in every fork of this module.
      */
-    private static boolean detectorInstalled() {
-        return FailOnLeakResourceLeakDetector.CLASS_NAME.equals(System.getProperty("io.netty.customResourceLeakDetector"));
-    }
-
-    /**
-     * Below {@code paranoid} a leak could go unrecorded and the check pass.
-     */
-    private static void assertEveryBufferIsTracked() {
-        assertThat("every buffer is tracked", ResourceLeakDetector.getLevel(), is(ResourceLeakDetector.Level.PARANOID));
+    static void assertEveryBufferIsTracked() {
+        assertThat("this JVM does not have the build's Netty leak detector, so a leaked buffer would go unnoticed. "
+                + "Maven installs it (mockserver.leakArgLine in mockserver-netty/pom.xml); to run from an IDE add the VM options: " + VM_OPTIONS,
+            ResourceLeakDetectorFactory.instance().newResourceLeakDetector(ByteBuf.class), instanceOf(FailOnLeakResourceLeakDetector.class));
+        assertThat("every buffer is tracked (Netty leak detection level; the build sets paranoid)",
+            ResourceLeakDetector.getLevel(), is(ResourceLeakDetector.Level.PARANOID));
     }
 }

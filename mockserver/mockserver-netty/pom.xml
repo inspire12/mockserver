@@ -21,12 +21,12 @@
              `paranoid` tracks EVERY allocation (rather than the ~1% `simple` default), the
              custom detector records each leak to a file under target/, and the antrun
              `check-netty-leaks` execution below FAILS the build if any leak was recorded
-             (unless -Dmockserver.failOnNettyLeak=false). This value is appended to the
-             surefire AND failsafe argLine via the parent pom's reserved
-             ${mockserver.testArgLine} hook, so it does NOT touch the jacoco @{argLine}
-             late-binding token. -->
+             (unless -Dmockserver.failOnNettyLeak=false). The parent pom appends this value
+             to the surefire AND failsafe argLine after the jacoco @{argLine} late-binding
+             token. It is NOT ${mockserver.testArgLine}: that one is set on the command line
+             (CI does), which would replace these flags and leave the gate checking nothing. -->
         <mockserver.leakReportDir>${project.build.directory}/netty-leaks</mockserver.leakReportDir>
-        <mockserver.testArgLine>-Dio.netty.leakDetection.level=paranoid -Dio.netty.customResourceLeakDetector=org.mockserver.test.FailOnLeakResourceLeakDetector -Dmockserver.leakReportDir=${mockserver.leakReportDir}</mockserver.testArgLine>
+        <mockserver.leakArgLine>-Dio.netty.leakDetection.level=paranoid -Dio.netty.customResourceLeakDetector=org.mockserver.test.FailOnLeakResourceLeakDetector -Dmockserver.leakReportDir=${mockserver.leakReportDir}</mockserver.leakArgLine>
         <!-- Set to false to downgrade a detected leak from a build failure to a warning
              (e.g. while pre-existing leaks are being triaged). Detection/logging/recording
              stay on regardless. -->
@@ -344,7 +344,7 @@
                                  an inherited file.encoding=UTF-8 would win and silently disable the
                                  guard. On Java 17 this forces Charset.defaultCharset() to ISO-8859-1;
                                  on any JVM that ignores the override (JEP 400) the test skips itself. -->
-                            <argLine>@{argLine} -Dfile.encoding=ISO-8859-1 -Dsun.jnu.encoding=ISO-8859-1 -Duser.language=en -Duser.country=GB -Dmockserver.testOutput=${mockserver.testOutput} ${mockserver.testArgLine}</argLine>
+                            <argLine>@{argLine} -Dfile.encoding=ISO-8859-1 -Dsun.jnu.encoding=ISO-8859-1 -Duser.language=en -Duser.country=GB -Dmockserver.testOutput=${mockserver.testOutput} ${mockserver.leakArgLine} ${mockserver.testArgLine}</argLine>
                             <!-- never fail the build if this is the only execution targeted (e.g. a
                                  developer running -Dtest pointed elsewhere) -->
                             <failIfNoTests>false</failIfNoTests>
@@ -353,7 +353,7 @@
                 </executions>
             </plugin>
             <!-- ByteBuf leak gate. The custom detector (org.mockserver.test.FailOnLeakResourceLeakDetector,
-                 installed via ${mockserver.testArgLine}) writes one file per leak to
+                 installed via ${mockserver.leakArgLine}) writes one file per leak to
                  ${mockserver.leakReportDir}. This plugin (a) empties that directory before the tests run,
                  and (b) after the whole lifecycle FAILS the build if any leak was recorded. A file-based
                  gate is used deliberately: throwing from a JUnit RunListener does NOT fail surefire (the

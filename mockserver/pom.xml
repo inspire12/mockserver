@@ -73,7 +73,13 @@
         <skipShade>false</skipShade>
         <mockserver.testOutput>verbose</mockserver.testOutput>
         <mockserver.testLogLevel>ERROR</mockserver.testLogLevel>
+        <!-- Appended to every surefire/failsafe fork. Reserved for the command line (CI's ring-buffer
+             caps, a developer's port band): no module may set it, because a -D on the command line
+             replaces a pom value outright. -->
         <mockserver.testArgLine/>
+        <!-- A module's own Netty leak-detector flags (set in mockserver-netty), kept apart from
+             mockserver.testArgLine so that passing that one cannot remove the detector. -->
+        <mockserver.leakArgLine/>
         <!-- Empty default so the surefire/failsafe @{argLine} token always resolves. jacoco's
              prepare-agent prepends its agent to it; without this default, invoking surefire:test or
              failsafe:integration-test directly (no prepare-agent) passes a literal @{argLine} to the
@@ -1681,7 +1687,7 @@
                              ring buffers tiny in tests; production sizing is unaffected. -->
                         <mockserver.maxLogEntries>1000</mockserver.maxLogEntries>
                     </systemPropertyVariables>
-                    <argLine>@{argLine} -Duser.language=en -Duser.country=GB -Dmockserver.testOutput=${mockserver.testOutput} ${mockserver.testArgLine}</argLine>
+                    <argLine>@{argLine} -Duser.language=en -Duser.country=GB -Dmockserver.testOutput=${mockserver.testOutput} ${mockserver.leakArgLine} ${mockserver.testArgLine}</argLine>
                     <disableXmlReport>${disableXmlReport}</disableXmlReport>
                     <redirectTestOutputToFile>${redirectTestOutputToFile}</redirectTestOutputToFile>
                     <properties>
@@ -1711,7 +1717,7 @@
                              to avoid OutOfMemoryError from oversized disruptor pre-allocation. -->
                         <mockserver.maxLogEntries>1000</mockserver.maxLogEntries>
                     </systemPropertyVariables>
-                    <argLine>@{argLine} -Duser.language=en -Duser.country=GB -Dmockserver.testOutput=${mockserver.testOutput} ${mockserver.testArgLine}</argLine>
+                    <argLine>@{argLine} -Duser.language=en -Duser.country=GB -Dmockserver.testOutput=${mockserver.testOutput} ${mockserver.leakArgLine} ${mockserver.testArgLine}</argLine>
                     <failIfNoTests>${mockserver.failIfNoIntegrationTests}</failIfNoTests>
                     <disableXmlReport>${disableXmlReport}</disableXmlReport>
                     <redirectTestOutputToFile>${redirectTestOutputToFile}</redirectTestOutputToFile>

@@ -474,7 +474,7 @@ Supports three output modes controlled by `-Dmockserver.testOutput`:
         </systemPropertyVariables>
         <argLine>@{argLine} -Duser.language=en -Duser.country=GB
                  -Dmockserver.testOutput=${mockserver.testOutput}
-                 ${mockserver.testArgLine}</argLine>
+                 ${mockserver.leakArgLine} ${mockserver.testArgLine}</argLine>
         <disableXmlReport>${disableXmlReport}</disableXmlReport>
         <redirectTestOutputToFile>${redirectTestOutputToFile}</redirectTestOutputToFile>
         <properties>
@@ -506,7 +506,7 @@ Supports three output modes controlled by `-Dmockserver.testOutput`:
         </systemPropertyVariables>
         <argLine>@{argLine} -Duser.language=en -Duser.country=GB
                  -Dmockserver.testOutput=${mockserver.testOutput}
-                 ${mockserver.testArgLine}</argLine>
+                 ${mockserver.leakArgLine} ${mockserver.testArgLine}</argLine>
         <disableXmlReport>${disableXmlReport}</disableXmlReport>
         <redirectTestOutputToFile>${redirectTestOutputToFile}</redirectTestOutputToFile>
         <properties>
@@ -609,6 +609,7 @@ The `scripts/buildkite_quick_build.sh` script runs the full build inside a `mock
 | XML reports | Enabled (`-DdisableXmlReport=false`) |
 | Test output redirection | Enabled (`-DredirectTestOutputToFile=true`) |
 | Test log level | `INFO` (`-Dmockserver.testLogLevel=INFO`) |
+| Netty leak gate | On: `mockserver-netty`'s forks run the leak detector at `paranoid` and `check-netty-leaks` fails the build on a leaked buffer. `-Dmockserver.testArgLine` does not remove it (see [ByteBuf Leak Detection in Tests](code/netty-pipeline.md#bytebuf-leak-detection-in-tests)) |
 | Timeout | 60 minutes |
 | Build artefacts | `**/*.log` files collected |
 
