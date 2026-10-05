@@ -60,6 +60,8 @@ To start or stop the MockServer from any Node.js code you need to import this mo
 var mockserver = require('mockserver-node');
 ```
 
+The package includes TypeScript typings, which use Node's own types and so need `@types/node` in the project. It is a CommonJS module, so in TypeScript import it with `import mockserver = require('mockserver-node')`, or with `import mockserver from 'mockserver-node'` when `esModuleInterop` is on. The option types are `mockserver.StartServerOptions` and `mockserver.StopServerOptions`.
+
 Then you can use either the `start_mockserver` or `stop_mockserver` functions as follows:
 
 ```js

@@ -33,8 +33,10 @@
     "LICENSE.md",
     "tasks",
     "index.js",
+    "index.d.ts",
     "downloadJar.js",
     "downloadBinary.js",
+    "downloadBinary.d.ts",
     "bin",
     "mockserver-netty-8.0.0-jar-with-dependencies.jar"
   ],

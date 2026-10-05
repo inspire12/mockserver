@@ -22,6 +22,8 @@ module.exports = function (grunt) {
                 'bin/mockserver.js',
                 'test/downloadBinary_test.js',
                 'test/downloadJar_test.js',
+                'test/packageContents.js',
+                'test/packageContents_test.js',
                 'test/grunt/started/*_test.js',
                 'test/grunt/stopped/*_test.js',
                 'test/grunt/failure/*_test.js'

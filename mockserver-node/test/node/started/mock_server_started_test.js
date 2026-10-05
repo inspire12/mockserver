@@ -28,7 +28,11 @@ test('should allow expectation to be set up', async function () {
     var port = 1081;
 
     try {
-        await mockserver.start_mockserver({serverPort: port});
+        var started = Object(await mockserver.start_mockserver({serverPort: port}));
+        assert.deepStrictEqual(
+            {keys: Object.keys(started).sort(), statusCode: typeof started.statusCode, body: typeof started.body},
+            {keys: ['body', 'statusCode'], statusCode: 'number', body: 'string'},
+            "resolves with the answer to the readiness check, as index.d.ts declares");
         var response = await sendRequest("PUT", "localhost", port, "/expectation", {
             'httpRequest': {
                 'path': '/somePath'

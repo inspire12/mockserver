@@ -458,6 +458,24 @@ This release delivers a sustained performance and memory programme alongside dat
 
 ### Fixed
 
+- **The `mockserver-node` npm package now includes its TypeScript typings.** Its `package.json`
+  names `index.d.ts` as the package's typings, but the list of files to publish left that file
+  out, so it was never in the package: the published 8.0.0 package holds no `.d.ts` file, and
+  neither do 7.5.0, 6.0.0 and 5.15.0. A TypeScript project that imported `mockserver-node` got no
+  types for `start_mockserver`, `stop_mockserver` or their options, and with `noImplicitAny` (part
+  of `strict`) did not compile: "Could not find a declaration file for module 'mockserver-node'".
+  The typings are now published, and describe the package as the CommonJS module it is. They use
+  Node's own types, so the project needs `@types/node`.
+  `import mockserver = require('mockserver-node')` and `import * as mockserver from
+  'mockserver-node'` work with or without `esModuleInterop`; `import mockserver from
+  'mockserver-node'` works with `esModuleInterop` on, and is a compile error without it; `require`
+  in type-checked JavaScript is typed as well. The option and exit-status types are
+  `mockserver.StartServerOptions`, `mockserver.StopServerOptions` and `mockserver.MockServerExit`,
+  and can also be imported by name. The promise from `start_mockserver` is typed with what it
+  resolves with, the status code and body of MockServer's first answer
+  (`mockserver.ReadinessResponse`). The binary-bundle helpers (`ensureBinary`, `runBinary`,
+  `resolvePlatform` and the others) are typed in `downloadBinary.d.ts`, for
+  `require('mockserver-node/downloadBinary')`, the module that exports them.
 - **A short binary (non-HTTP) message is now forwarded as soon as it arrives, and a binary connection stays
   binary.** MockServer worked out what a connection carried by waiting for its first 8 bytes, and did so
   again on every later read of a connection it had already found to be binary. A message shorter than
