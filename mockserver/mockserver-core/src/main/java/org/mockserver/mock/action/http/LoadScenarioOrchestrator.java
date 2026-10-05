@@ -49,6 +49,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.function.LongSupplier;
 
@@ -191,20 +192,27 @@ public class LoadScenarioOrchestrator {
         lastRun = running;
         lastRunName = scenario.getName();
 
-        // Replace any existing active run for this name: stop it and evict its series so series
-        // accumulation stays bounded to one run per (scenario,run_id).
-        RunningScenario previous = runs.put(scenario.getName(), running);
+        // Register the run and clear the name's retained terminal status in one atomic step, so the
+        // status a terminate publishes for THIS run (it can only follow the registration) is never the
+        // one cleared here.
+        String name = scenario.getName();
+        AtomicReference<RunningScenario> replaced = new AtomicReference<>();
+        AtomicReference<LoadScenarioStatus> retained = new AtomicReference<>();
+        runs.compute(name, (key, registered) -> {
+            replaced.set(registered);
+            retained.set(terminalStatuses.remove(name));
+            return running;
+        });
+        // Stop the run this one replaced, and evict the series of whichever run last held the name, so
+        // series accumulation stays bounded to one run per (scenario,run_id).
+        RunningScenario previous = replaced.get();
         if (previous != null) {
             previous.stopped.set(true);
             Metrics.evictLoadRun(previous.runId);
-            terminalStatuses.remove(scenario.getName());
-        } else {
-            // No active run for this name, but a prior run may have completed/stopped and its series
-            // retained; evict it now that a new run for the same name starts (bounds to <=1 prior run).
-            LoadScenarioStatus prior = terminalStatuses.remove(scenario.getName());
-            if (prior != null && prior.runId != null && !prior.runId.equals(running.runId)) {
-                Metrics.evictLoadRun(prior.runId);
-            }
+        }
+        LoadScenarioStatus prior = retained.get();
+        if (prior != null && prior.runId != null && !prior.runId.equals(running.runId)) {
+            Metrics.evictLoadRun(prior.runId);
         }
 
         installGaugeReaders();
@@ -239,7 +247,7 @@ public class LoadScenarioOrchestrator {
 
     /** Stop a specific scenario's active run by name. Idempotent; no-op if not active. */
     public void stop(String name) {
-        // Peek (don't remove) — terminate() performs the gap-free CAS de-registration itself, so a
+        // Peek (don't remove) — terminate() performs the gap-free de-registration itself, so a
         // status poll never sees the run absent from both the active and terminal maps.
         RunningScenario run = runs.get(name);
         if (run != null) {
@@ -360,27 +368,31 @@ public class LoadScenarioOrchestrator {
     }
 
     /**
-     * Transition a run to a terminal state with no observable status gap: publish its terminal status
-     * BEFORE de-registering it from {@link #runs}, so a concurrent {@link #statusFor(String)} (which
-     * reads {@code runs} first, then {@code terminalStatuses}) never sees a window where the name is
-     * absent from both maps. The de-registration is a CAS ({@code runs.remove(name, run)}): only the
-     * winner records the terminal status and clears gauges; a loser (a run already replaced by a
-     * concurrent re-trigger) retracts the status it speculatively wrote. Returns {@code true} iff this
-     * call won the CAS. The run's durable metric series are RETAINED (scrapeable) until the scenario is
-     * next triggered or removed from the registry.
+     * Transition a run to a terminal state with no observable status gap. The terminal status is
+     * published and the run de-registered from {@link #runs} in one atomic step per scenario name, and
+     * only by the call that finds the run still registered: a concurrent {@link #statusFor(String)}
+     * (which reads {@code runs} first, then {@code terminalStatuses}) never sees the name absent from
+     * both maps, and a call that lost (to another terminate of the same run, or to a re-trigger that
+     * replaced it) writes nothing. Returns {@code true} iff this call de-registered the run. The run's
+     * durable metric series are RETAINED (scrapeable) until the scenario is next triggered or removed
+     * from the registry.
      */
     private boolean terminate(RunningScenario run, LoadScenarioState terminalState) {
         run.stopped.set(true);
         String name = run.scenario.getName();
         LoadScenarioStatus status = run.snapshot(terminalState, clock.getAsLong());
-        // Publish first: while the run is still in `runs`, statusFor() returns its live snapshot (runs
-        // is checked before terminalStatuses), so this terminal record is shadowed until the CAS below
-        // removes the run — closing the window where the name was in neither map.
-        terminalStatuses.put(name, status);
-        if (!runs.remove(name, run)) {
-            // A concurrent re-trigger already replaced this run under the same name; retract our
-            // speculative terminal so it cannot mask the newer run's state.
-            terminalStatuses.remove(name, status);
+        AtomicBoolean deregistered = new AtomicBoolean();
+        // The status is published inside the remapping function, so it is visible before the run
+        // leaves `runs`; a loser must never publish, or retracting it could delete the winner's status.
+        runs.computeIfPresent(name, (key, registered) -> {
+            if (registered != run) {
+                return registered;
+            }
+            terminalStatuses.put(name, status);
+            deregistered.set(true);
+            return null;
+        });
+        if (!deregistered.get()) {
             return false;
         }
         if (runs.isEmpty()) {
@@ -594,8 +606,8 @@ public class LoadScenarioOrchestrator {
     private void completeInternal(RunningScenario run) {
         // Final threshold evaluation so a normally-completed run carries PASS (all satisfied) or FAIL
         // (any breached); a run with no thresholds keeps its null verdict. terminate() then performs
-        // the atomic, gap-free de-registration (CAS on runs.remove): a concurrent re-trigger that has
-        // already replaced this run simply loses the CAS and the terminal record is retracted.
+        // the atomic, gap-free de-registration: a run that a concurrent re-trigger has already
+        // replaced is no longer registered, so it publishes no terminal record.
         run.evaluateThresholds(clock.getAsLong());
         terminate(run, LoadScenarioState.COMPLETED);
     }

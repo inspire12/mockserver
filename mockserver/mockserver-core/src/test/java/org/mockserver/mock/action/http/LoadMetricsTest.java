@@ -28,6 +28,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -615,6 +616,64 @@ public class LoadMetricsTest {
         assertThat("run A series evicted once run B started",
             runIdPresentOnLoadRequests(runIdA), is(false));
         assertThat("run B series present", runIdPresentOnLoadRequests(runIdB), is(true));
+    }
+
+    /** Answers the first request and leaves every later one unanswered, so a run records one result and stays active. */
+    private static final class AnswersOnlyFirstSender implements Function<org.mockserver.model.HttpRequest, CompletableFuture<org.mockserver.model.HttpResponse>> {
+        final ConcurrentLinkedQueue<CompletableFuture<org.mockserver.model.HttpResponse>> unanswered = new ConcurrentLinkedQueue<>();
+        final AtomicInteger sent = new AtomicInteger();
+
+        @Override
+        public CompletableFuture<org.mockserver.model.HttpResponse> apply(org.mockserver.model.HttpRequest httpRequest) {
+            if (sent.getAndIncrement() == 0) {
+                return CompletableFuture.completedFuture(response().withStatusCode(200));
+            }
+            CompletableFuture<org.mockserver.model.HttpResponse> never = new CompletableFuture<>();
+            unanswered.add(never);
+            return never;
+        }
+
+        boolean awaitSecondRequest() throws InterruptedException {
+            long deadline = System.currentTimeMillis() + 5_000L;
+            while (unanswered.isEmpty() && System.currentTimeMillis() < deadline) {
+                Thread.sleep(5);
+            }
+            return !unanswered.isEmpty();
+        }
+    }
+
+    @Test
+    public void retriggeringAnActiveNameStopsTheReplacedRunAndEvictsItsSeries() throws Exception {
+        enableMetrics(null);
+        LoadScenario scenario = new LoadScenario()
+            .withName("retrigger-load")
+            .withProfile(LoadProfile.constant(1, 60_000L))
+            .withSteps(new LoadStep().withRequest(request().withPath("/api").withHeader("Host", "target")));
+
+        // given - run A is active, has recorded one result and is waiting on its second request
+        AnswersOnlyFirstSender senderA = new AnswersOnlyFirstSender();
+        assertThat(orchestrator.start(scenario, senderA), is(nullValue()));
+        String runIdA = orchestrator.getStatus().runId;
+        assertThat(senderA.awaitSecondRequest(), is(true));
+        assertThat(orchestrator.getStatus().state, is(org.mockserver.load.LoadScenarioState.RUNNING));
+        assertThat("run A series present while it is active", runIdPresentOnLoadRequests(runIdA), is(true));
+
+        // when - the same name is triggered again
+        AnswersOnlyFirstSender senderB = new AnswersOnlyFirstSender();
+        assertThat(orchestrator.start(scenario, senderB), is(nullValue()));
+        String runIdB = orchestrator.getStatus().runId;
+        assertThat(senderB.awaitSecondRequest(), is(true));
+
+        // then - run A's series are gone and run B's exist
+        assertThat(runIdB, is(not(runIdA)));
+        assertThat("run A series evicted when it was replaced", runIdPresentOnLoadRequests(runIdA), is(false));
+        assertThat("run B series present", runIdPresentOnLoadRequests(runIdB), is(true));
+
+        // and - run A's outstanding response neither restarts it nor brings its series back
+        int sentByRunA = senderA.sent.get();
+        senderA.unanswered.forEach(pending -> pending.complete(response().withStatusCode(200)));
+        assertThat("the replaced run sends nothing more", senderA.sent.get(), is(sentByRunA));
+        assertThat("the replaced run records nothing more", runIdPresentOnLoadRequests(runIdA), is(false));
     }
 
     /** True if any {@code mock_server_load_requests} datapoint carries the given {@code run_id} label. */

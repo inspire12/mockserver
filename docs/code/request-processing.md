@@ -987,6 +987,35 @@ sequenceDiagram
     MS->>C: Response (with hop-by-hop headers stripped)
 ```
 
+### How a Failed Connect Is Reported
+
+An HTTP request sent through `NettyHttpClient.connectFresh` (every HTTP forward, and the Java client)
+whose connect attempt fails (`Connection refused: …`, `connection timed out after … ms`,
+`UnknownHostException`) fails with that reason, and not with the generic `Channel handler removed
+before valid response has been received` that the failed channel's teardown produces. The generic
+exception is still what a channel reports when it is the channel itself that failed: the table below.
+
+`connectFresh` gives each new channel its own future as the `RESPONSE_FUTURE` attribute the client
+handlers complete, and relays it to the request's future only from the connect listener's success
+branch. A channel that failed to connect is closed and its handlers removed all the same, which
+completes that channel future with the generic `SocketConnectionException`. Netty can finish that
+teardown before the calling thread has attached its listener to the connect future, so if the handlers
+completed the request's future directly the teardown would sometimes be reported in place of the cause.
+
+| Case | What the request fails with |
+|---|---|
+| Connect refused, timed out, or host unresolvable | the connect cause |
+| The channel's pipeline could not be built (for example the client TLS context cannot be created from `forwardProxyPrivateKey` / `forwardProxyCertificateChain`) | the generic `Channel handler removed…` |
+| The pipeline failed before the connection error handler was added | `ClosedChannelException` |
+| TLS handshake fails on a connected channel | the generic `Channel handler removed…` |
+| Binary forward (`sendRequest(BinaryMessage, …)`) | not gated: the connect cause or the teardown, whichever completes first |
+
+The pipeline rows are the reverse order: the channel is closed while it is being initialised, and the
+connect then fails on the closed channel with a `ClosedChannelException`. That exception says nothing
+about why, so when the channel has already reported its own outcome the request takes that instead.
+The generic exception is what the forward action classifies as a connection failure (a 502 "failed to
+connect", logged at TRACE); the real initialisation or handshake error is only in Netty's own WARN log.
+
 ### Streaming Forward Path
 
 When the upstream response is a streaming response, and `streamingResponsesEnabled` is `true` (default), MockServer relays chunks incrementally rather than buffering the entire body. A response is treated as streaming when **either** its `Content-Type` is `text/event-stream` **or** the forwarded request declared streaming intent (`Accept: text/event-stream`, or a JSON body with `"stream": true`) — the latter (`EXPECT_STREAMING_RESPONSE`) covers content-type-less streaming backends such as the OpenAI Codex endpoint, and is threaded onto the HTTP/1.1 forward, HTTP/2 forward (parent → per-stream child), and transparent CONNECT-relay loopback paths alike (see [netty-pipeline.md](netty-pipeline.md#streamingawarehttpobjectaggregator)). Ordinary chunked responses without either signal are aggregated normally.

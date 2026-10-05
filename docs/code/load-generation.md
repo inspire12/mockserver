@@ -62,6 +62,17 @@ Re-triggering an already-active name **replaces** that run (and evicts its prior
 per-run series accumulation bounded). `recordResult` only writes durable series while the run is still
 the registry's active run for its name, so a draining/replaced run cannot resurrect evicted series.
 
+A run can be ended from more than one thread at once: the scheduler's tick (stages elapsed,
+`maxRequests` reached, a threshold abort) and any request thread calling stop, reset or delete. The
+first to end it wins. It publishes the run's terminal status and removes the run from the active map
+in one atomic step on the scenario name (`runs.computeIfPresent`), so a status query never finds the
+name in neither map, and a caller that finds the run already gone, or replaced by a re-trigger, writes
+nothing. The terminal state is therefore the winner's: a stop that lands as the run completes leaves
+it `COMPLETED` or `STOPPED`, whichever got there first, and never without a status. A trigger does the
+mirror image in one step on the same name (`runs.compute`): it registers the new run and clears the
+name's retained terminal status together, so a stop that lands while the trigger is still returning
+publishes a status the trigger can no longer clear.
+
 The `loadGenerationMaxConcurrentScenarios` cap (default 10) bounds how many scenarios may be active
 (`PENDING` + `RUNNING`) at once; a trigger that would exceed it is rejected. The existing per-scenario
 caps (max VUs/rate/stages/duration/steps) still apply to each scenario.

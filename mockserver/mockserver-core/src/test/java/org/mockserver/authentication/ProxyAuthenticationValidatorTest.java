@@ -1,5 +1,6 @@
 package org.mockserver.authentication;
 
+import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.handler.codec.base64.Base64;
 import org.junit.Test;
@@ -212,8 +213,14 @@ public class ProxyAuthenticationValidatorTest {
     }
 
     private static String encode(String value) {
-        return Base64.encode(Unpooled.copiedBuffer(value, StandardCharsets.UTF_8), false)
-            .toString(StandardCharsets.US_ASCII);
+        ByteBuf raw = Unpooled.copiedBuffer(value, StandardCharsets.UTF_8);
+        ByteBuf encoded = Base64.encode(raw, false);
+        try {
+            return encoded.toString(StandardCharsets.US_ASCII);
+        } finally {
+            raw.release();
+            encoded.release();
+        }
     }
 
     private static String swapCase(String value) {

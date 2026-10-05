@@ -32,6 +32,7 @@ import java.io.IOException;
 import java.net.ConnectException;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
+import java.nio.channels.ClosedChannelException;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -348,6 +349,10 @@ public class NettyHttpClient {
     private void connectFresh(HttpRequest httpRequest, InetSocketAddress remoteAddress, Long connectionTimeoutMillis, boolean disableStreaming, boolean secure, Protocol httpProtocol, String poolKey, CompletableFuture<Message> responseFuture, AtomicLong firstByteMillis, AtomicLong connectionEstablishedMillis, CompletableFuture<HttpResponse> httpResponseFuture) {
         final HttpClientInitializer clientInitializer = new HttpClientInitializer(proxyConfigurations, mockServerLogger, forwardProxyClient, nettySslContextFactory, httpProtocol, configuration);
         final EventLoopGroup eventLoopGroup = eventLoopGroup();
+        // What the channel's handlers complete. It only becomes the request's outcome once the connection
+        // is established: a channel that failed to connect is torn down too, and that teardown must not
+        // be reported in place of the reason the connection failed.
+        final CompletableFuture<Message> channelResponseFuture = new CompletableFuture<>();
         Bootstrap bootstrap = new Bootstrap()
             .group(eventLoopGroup)
             .channel(NettyTransport.socketChannelClassFor(eventLoopGroup))
@@ -357,7 +362,7 @@ public class NettyHttpClient {
             .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, connectionTimeoutMillis != null ? (int) Math.min(connectionTimeoutMillis, Integer.MAX_VALUE) : null)
             .attr(SECURE, secure)
             .attr(REMOTE_SOCKET, remoteAddress)
-            .attr(RESPONSE_FUTURE, responseFuture)
+            .attr(RESPONSE_FUTURE, channelResponseFuture)
             .attr(ERROR_IF_CHANNEL_CLOSED_WITHOUT_RESPONSE, true)
             .attr(FIRST_BYTE_MILLIS, firstByteMillis)
             .handler(clientInitializer);
@@ -378,6 +383,7 @@ public class NettyHttpClient {
             .addListener((ChannelFutureListener) future -> {
                 if (future.isSuccess()) {
                     connectionEstablishedMillis.set(System.currentTimeMillis());
+                    relay(channelResponseFuture, responseFuture);
                     clientInitializer.whenComplete((protocol, throwable) -> {
                         if (throwable != null) {
                             httpResponseFuture.completeExceptionally(throwable);
@@ -390,10 +396,24 @@ public class NettyHttpClient {
                             future.channel().writeAndFlush(httpRequest);
                         }
                     });
+                } else if (future.cause() instanceof ClosedChannelException && channelResponseFuture.isCompletedExceptionally()) {
+                    // The reverse order: the channel was closed first (its pipeline could not be built) and
+                    // the connect then failed on the closed channel, so the channel's outcome is the cause.
+                    relay(channelResponseFuture, responseFuture);
                 } else {
                     httpResponseFuture.completeExceptionally(future.cause());
                 }
             });
+    }
+
+    private static void relay(CompletableFuture<Message> channelResponseFuture, CompletableFuture<Message> responseFuture) {
+        channelResponseFuture.whenComplete((message, throwable) -> {
+            if (throwable != null) {
+                responseFuture.completeExceptionally(throwable);
+            } else {
+                responseFuture.complete(message);
+            }
+        });
     }
 
     /**
@@ -525,6 +545,13 @@ public class NettyHttpClient {
         }
     }
 
+    /**
+     * A subclass that overrides only this overload is not called when binary requests are forwarded without
+     * waiting for a response ({@code forwardBinaryRequestsWithoutWaitingForResponse}):
+     * {@code BinaryRequestProxyingHandler} then calls
+     * {@link #sendRequest(BinaryMessage, boolean, InetSocketAddress, Long, Consumer)} directly, so override that
+     * overload, to which this one delegates, to intercept every binary send.
+     */
     public CompletableFuture<BinaryMessage> sendRequest(final BinaryMessage binaryRequest, final boolean isSecure, InetSocketAddress remoteAddress, Long connectionTimeoutMillis) throws SocketConnectionException {
         return sendRequest(binaryRequest, isSecure, remoteAddress, connectionTimeoutMillis, null);
     }

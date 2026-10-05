@@ -452,6 +452,8 @@ This release delivers a sustained performance and memory programme alongside dat
 
 ### Fixed
 
+- **An HTTP forward to an upstream that refuses the connection, or whose host name cannot be resolved, now always fails with that reason.** Occasionally the request failed instead with `Channel handler removed before valid response has been received`, which hid why the upstream could not be reached from the log and from anything acting on the forward's error. It happened when the failed connection was cleaned up before MockServer had started listening for the connect result. The Java client sends its requests the same way, so a `MockServerClient` call to a server that is not listening gets the same fix. Binary (non-HTTP) forwards are not changed.
+- **A load scenario keeps its final status when it is stopped just as it finishes or just as it starts.** A stop request arriving at the moment the run completed, was aborted by a threshold, was being stopped by another request, or was still being started could leave the scenario with no status at all: it was listed as `LOADED` with no results, and its report returned `404`, as if it had never run.
 - **An HTTP/3 request whose trailers are larger than the header limit is no longer matched.** The
   connection was closed with `H3_EXCESSIVE_LOAD`, but MockServer still recorded the request and
   matched it against expectations as if it had arrived whole, with no connection left to answer on.

@@ -19,14 +19,17 @@ import java.util.Collections;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
+import java.util.function.LongSupplier;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
+import static org.mockito.Mockito.mock;
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
 
@@ -1245,6 +1248,220 @@ public class LoadScenarioOrchestratorTest {
         assertThat(status.state, is(org.mockserver.load.LoadScenarioState.COMPLETED));
         assertThat("a completed run carries a final verdict", status.verdict, is("PASS"));
         assertThat(status.thresholdResults, hasSize(1));
+    }
+
+    /**
+     * Parks one chosen thread the first time it reaches this point, until released, so a test can hold
+     * that thread at a known place inside the orchestrator while another thread acts.
+     */
+    private static final class ParkPoint {
+        private final CountDownLatch parked = new CountDownLatch(1);
+        private final CountDownLatch release = new CountDownLatch(1);
+        private volatile Thread threadToPark;
+
+        boolean isForCurrentThread() {
+            return Thread.currentThread() == threadToPark && parked.getCount() > 0;
+        }
+
+        void park() {
+            parked.countDown();
+            try {
+                if (!release.await(10, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("the parked thread was never released");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(e);
+            }
+        }
+
+        /** Starts {@code action} on a new thread and returns once that thread is parked here. */
+        Thread startAndPark(Runnable action) throws InterruptedException {
+            Thread thread = new Thread(action, "test-parked-thread");
+            thread.setDaemon(true);
+            threadToPark = thread;
+            thread.start();
+            assertThat("the thread reached its park point", parked.await(10, TimeUnit.SECONDS), is(true));
+            return thread;
+        }
+
+        void releaseAndJoin(Thread thread) throws InterruptedException {
+            release.countDown();
+            thread.join(10_000L);
+            assertThat("the parked thread finished", thread.isAlive(), is(false));
+        }
+    }
+
+    /** A clock that parks the chosen thread at its first read. */
+    private static final class ParkingClock implements LongSupplier {
+        final AtomicLong millis = new AtomicLong(10_000L);
+        final ParkPoint firstRead = new ParkPoint();
+
+        @Override
+        public long getAsLong() {
+            if (firstRead.isForCurrentThread()) {
+                firstRead.park();
+            }
+            return millis.get();
+        }
+
+        Thread startAndPark(Runnable action) throws InterruptedException {
+            return firstRead.startAndPark(action);
+        }
+
+        void releaseAndJoin(Thread thread) throws InterruptedException {
+            firstRead.releaseAndJoin(thread);
+        }
+    }
+
+    /**
+     * A scenario that parks the chosen thread the first time it reads the name once the scenario's run
+     * is registered: inside {@code start}, after the run became visible to other threads.
+     */
+    private static final class ParksOnceRegisteredScenario extends LoadScenario {
+        final ParkPoint onceRegistered = new ParkPoint();
+        private final LoadScenarioOrchestrator orchestrator;
+
+        ParksOnceRegisteredScenario(LoadScenarioOrchestrator orchestrator, String name) {
+            this.orchestrator = orchestrator;
+            withName(name);
+            withProfile(LoadProfile.constant(1, 1_000L));
+            withSteps(new LoadStep().withRequest(request().withPath("/api").withHeader("Host", "target")));
+        }
+
+        @Override
+        public String getName() {
+            String name = super.getName();
+            if (onceRegistered.isForCurrentThread() && orchestrator.isActive(name)) {
+                onceRegistered.park();
+            }
+            return name;
+        }
+    }
+
+    /** An orchestrator whose scheduler never ticks, so only the test's own threads tick or stop a run. */
+    private static LoadScenarioOrchestrator orchestratorTickedOnlyByTheTest(LongSupplier clock) {
+        return new LoadScenarioOrchestrator(clock, mock(ScheduledExecutorService.class));
+    }
+
+    private static LoadScenario oneSecondScenario(String name) {
+        return new LoadScenario()
+            .withName(name)
+            .withProfile(LoadProfile.constant(1, 1_000L))
+            .withSteps(new LoadStep().withRequest(request().withPath("/api").withHeader("Host", "target")));
+    }
+
+    /** A sender whose responses never arrive, so a run's only way to end is a tick or a stop. */
+    private static final Function<HttpRequest, CompletableFuture<HttpResponse>> NEVER_RESPONDS = httpRequest -> new CompletableFuture<>();
+
+    @Test
+    public void aStopThatLosesToAnotherStopKeepsTheTerminalStatus() throws Exception {
+        ParkingClock parkingClock = new ParkingClock();
+        LoadScenarioOrchestrator raced = orchestratorTickedOnlyByTheTest(parkingClock);
+        try {
+            assertThat(raced.start(oneSecondScenario("stop-vs-stop"), NEVER_RESPONDS), is(nullValue()));
+
+            // the losing stop has begun terminating the run and is held before it records anything
+            Thread losingStop = parkingClock.startAndPark(() -> raced.stop("stop-vs-stop"));
+            parkingClock.millis.set(10_400L);
+            raced.stop("stop-vs-stop");
+            parkingClock.millis.set(10_900L);
+            parkingClock.releaseAndJoin(losingStop);
+
+            LoadScenarioOrchestrator.LoadScenarioStatus status = raced.statusFor("stop-vs-stop");
+            assertThat("the stopped run still has a status", status, is(notNullValue()));
+            assertThat(status.state, is(org.mockserver.load.LoadScenarioState.STOPPED));
+            assertThat("the status is the one recorded by the stop that ended the run", status.endedAtEpochMillis, is(10_400L));
+            assertThat(raced.isActive("stop-vs-stop"), is(false));
+        } finally {
+            raced.reset();
+        }
+    }
+
+    @Test
+    public void aCompletingTickThatLosesToAStopKeepsTheStoppedStatus() throws Exception {
+        ParkingClock parkingClock = new ParkingClock();
+        LoadScenarioOrchestrator raced = orchestratorTickedOnlyByTheTest(parkingClock);
+        try {
+            assertThat(raced.start(oneSecondScenario("tick-vs-stop"), NEVER_RESPONDS), is(nullValue()));
+            assertThat(raced.statusFor("tick-vs-stop").state, is(org.mockserver.load.LoadScenarioState.RUNNING));
+
+            // the tick has passed its "is this run still live" check and is held before it sees that the
+            // only stage has elapsed, which is what makes it complete the run
+            parkingClock.millis.set(12_000L);
+            Thread completingTick = parkingClock.startAndPark(raced::tickNow);
+            raced.stop("tick-vs-stop");
+            parkingClock.releaseAndJoin(completingTick);
+
+            LoadScenarioOrchestrator.LoadScenarioStatus status = raced.statusFor("tick-vs-stop");
+            assertThat("the stopped run still has a status", status, is(notNullValue()));
+            assertThat("the stop ended the run, so the late completion must not relabel it", status.state, is(org.mockserver.load.LoadScenarioState.STOPPED));
+        } finally {
+            raced.reset();
+        }
+    }
+
+    @Test
+    public void aCompletingTickThatLosesToAnotherTickKeepsTheCompletedStatus() throws Exception {
+        ParkingClock parkingClock = new ParkingClock();
+        LoadScenarioOrchestrator raced = orchestratorTickedOnlyByTheTest(parkingClock);
+        try {
+            assertThat(raced.start(oneSecondScenario("tick-vs-tick"), NEVER_RESPONDS), is(nullValue()));
+
+            // both ticks see the run as live; the held one completes it second
+            parkingClock.millis.set(12_000L);
+            Thread losingTick = parkingClock.startAndPark(raced::tickNow);
+            raced.tickNow();
+            parkingClock.releaseAndJoin(losingTick);
+
+            LoadScenarioOrchestrator.LoadScenarioStatus status = raced.statusFor("tick-vs-tick");
+            assertThat("the completed run still has a status", status, is(notNullValue()));
+            assertThat(status.state, is(org.mockserver.load.LoadScenarioState.COMPLETED));
+        } finally {
+            raced.reset();
+        }
+    }
+
+    @Test
+    public void aStopLandingWhileItsRunIsStillStartingKeepsTheStoppedStatus() throws Exception {
+        LoadScenarioOrchestrator raced = orchestratorTickedOnlyByTheTest(clock::get);
+        try {
+            ParksOnceRegisteredScenario scenario = new ParksOnceRegisteredScenario(raced, "start-vs-stop");
+
+            // the start has registered its run and is held before it finishes
+            Thread starting = scenario.onceRegistered.startAndPark(() -> raced.start(scenario, NEVER_RESPONDS));
+            raced.stop("start-vs-stop");
+            scenario.onceRegistered.releaseAndJoin(starting);
+
+            LoadScenarioOrchestrator.LoadScenarioStatus status = raced.statusFor("start-vs-stop");
+            assertThat("the stopped run still has a status", status, is(notNullValue()));
+            assertThat(status.state, is(org.mockserver.load.LoadScenarioState.STOPPED));
+            assertThat(raced.isActive("start-vs-stop"), is(false));
+        } finally {
+            raced.reset();
+        }
+    }
+
+    @Test
+    public void aCompletingTickOfAReplacedRunLeavesTheNewRunActive() throws Exception {
+        ParkingClock parkingClock = new ParkingClock();
+        LoadScenarioOrchestrator raced = orchestratorTickedOnlyByTheTest(parkingClock);
+        try {
+            assertThat(raced.start(oneSecondScenario("tick-vs-retrigger"), NEVER_RESPONDS), is(nullValue()));
+            String replacedRunId = raced.statusFor("tick-vs-retrigger").runId;
+
+            parkingClock.millis.set(12_000L);
+            Thread completingTick = parkingClock.startAndPark(raced::tickNow);
+            assertThat(raced.start(oneSecondScenario("tick-vs-retrigger"), NEVER_RESPONDS), is(nullValue()));
+            parkingClock.releaseAndJoin(completingTick);
+
+            LoadScenarioOrchestrator.LoadScenarioStatus status = raced.statusFor("tick-vs-retrigger");
+            assertThat("the re-triggered run is still registered", raced.isActive("tick-vs-retrigger"), is(true));
+            assertThat(status.state, is(org.mockserver.load.LoadScenarioState.RUNNING));
+            assertThat("the status is the new run's, not the replaced run's", status.runId, is(not(replacedRunId)));
+        } finally {
+            raced.reset();
+        }
     }
 
     /**
