@@ -3229,6 +3229,9 @@ public class ConfigurationProperties {
      * path included) and is advertised to the client; a larger one is refused with 431 on its stream over HTTP/2,
      * and closes the connection over HTTP/3
      * <p>
+     * It is also the most MockServer reads of an upstream's response headers, and of its trailers, when it forwards or
+     * proxies a request over HTTP/1.1 or HTTP/2; a response with larger ones fails that forward with 502
+     * <p>
      * The default is 262,144 (256 KiB). The smallest limit is 1: zero or a negative value is read as 1.
      *
      * @param size maximum size of HTTP request headers

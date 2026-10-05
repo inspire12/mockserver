@@ -699,9 +699,9 @@ public class HttpResponse extends Action<HttpResponse> implements HttpMessage<Ht
     public boolean cookieHeaderDoesNotAlreadyExists(Cookie cookieValue) {
         List<String> setCookieHeaders = getHeader(SET_COOKIE.toString());
         for (String setCookieHeader : setCookieHeaders) {
-            String existingCookieName = ClientCookieDecoder.LAX.decode(setCookieHeader).name();
-            String existingCookieValue = ClientCookieDecoder.LAX.decode(setCookieHeader).value();
-            if (existingCookieName.equalsIgnoreCase(cookieValue.getName().getValue()) && existingCookieValue.equalsIgnoreCase(cookieValue.getValue().toString())) {
+            // null for a value with no name or no "="
+            io.netty.handler.codec.http.cookie.Cookie existingCookie = ClientCookieDecoder.LAX.decode(setCookieHeader);
+            if (existingCookie != null && existingCookie.name().equalsIgnoreCase(cookieValue.getName().getValue()) && existingCookie.value().equalsIgnoreCase(cookieValue.getValue().toString())) {
                 return false;
             }
         }
@@ -711,9 +711,8 @@ public class HttpResponse extends Action<HttpResponse> implements HttpMessage<Ht
     public boolean cookieHeaderDoesNotAlreadyExists(String name, String value) {
         List<String> setCookieHeaders = getHeader(SET_COOKIE.toString());
         for (String setCookieHeader : setCookieHeaders) {
-            String existingCookieName = ClientCookieDecoder.LAX.decode(setCookieHeader).name();
-            String existingCookieValue = ClientCookieDecoder.LAX.decode(setCookieHeader).value();
-            if (existingCookieName.equalsIgnoreCase(name) && existingCookieValue.equalsIgnoreCase(value)) {
+            io.netty.handler.codec.http.cookie.Cookie existingCookie = ClientCookieDecoder.LAX.decode(setCookieHeader);
+            if (existingCookie != null && existingCookie.name().equalsIgnoreCase(name) && existingCookie.value().equalsIgnoreCase(value)) {
                 return false;
             }
         }

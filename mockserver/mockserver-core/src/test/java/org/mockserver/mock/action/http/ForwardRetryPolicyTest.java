@@ -1,6 +1,7 @@
 package org.mockserver.mock.action.http;
 
 import org.junit.Test;
+import org.mockserver.httpclient.HeaderLimitExceededException;
 import org.mockserver.model.HttpResponse;
 
 import java.util.concurrent.CompletableFuture;
@@ -107,6 +108,31 @@ public class ForwardRetryPolicyTest {
 
         assertThat(calls.get(), is(2));
         assertThat(result.getStatusCode(), is(200));
+    }
+
+    @Test
+    public void shouldNotRetryAForwardRefusedForAHeaderLimit() throws Exception {
+        // the upstream would answer with the same headers again
+        HeaderLimitExceededException refusal = new HeaderLimitExceededException("upstream response headers are larger than maxHeaderSize (262144 bytes)");
+        for (Throwable failure : new Throwable[]{refusal, new IllegalStateException("proxy connection failed", refusal)}) {
+            AtomicInteger calls = new AtomicInteger(0);
+            Supplier<CompletableFuture<HttpResponse>> attempt = () -> {
+                calls.incrementAndGet();
+                CompletableFuture<HttpResponse> failed = new CompletableFuture<>();
+                failed.completeExceptionally(failure);
+                return failed;
+            };
+
+            try {
+                get(ForwardRetryPolicy.execute("GET", 3, 0, attempt));
+                fail("expected the refusal");
+            } catch (ExecutionException e) {
+                assertThat(HeaderLimitExceededException.in(e), sameInstance(refusal));
+            }
+            assertThat(calls.get(), is(1));
+            assertThat(ForwardRetryPolicy.isTransientFailure(null, failure), is(false));
+        }
+        assertThat(ForwardRetryPolicy.isTransientFailure(null, new java.io.IOException("Connection reset")), is(true));
     }
 
     @Test

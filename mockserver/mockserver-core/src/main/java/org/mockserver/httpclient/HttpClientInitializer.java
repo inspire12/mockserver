@@ -5,9 +5,9 @@ import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.handler.codec.http.HttpClientCodec;
+import io.netty.handler.codec.http.HttpObjectDecoder;
 import io.netty.handler.codec.http2.*;
 import io.netty.handler.logging.LogLevel;
-import io.netty.handler.proxy.HttpProxyHandler;
 import io.netty.handler.proxy.Socks5ProxyHandler;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.timeout.ReadTimeoutHandler;
@@ -16,6 +16,7 @@ import org.mockserver.codec.MockServerBinaryClientCodec;
 import org.mockserver.codec.MockServerHttpClientCodec;
 import org.mockserver.codec.StreamingAwareHttpObjectAggregator;
 import org.mockserver.configuration.Configuration;
+import org.mockserver.configuration.ConfigurationProperties;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.LoggingHandler;
 import org.mockserver.logging.MockServerLogger;
@@ -78,11 +79,8 @@ public class HttpClientInitializer extends ChannelInitializer<SocketChannel> {
         if (proxyConfigurations != null) {
             if (secure && proxyConfigurations.containsKey(ProxyConfiguration.Type.HTTPS)) {
                 ProxyConfiguration proxyConfiguration = proxyConfigurations.get(ProxyConfiguration.Type.HTTPS);
-                if (isNotBlank(proxyConfiguration.getUsername()) && isNotBlank(proxyConfiguration.getPassword())) {
-                    pipeline.addLast(new HttpProxyHandler(proxyConfiguration.getProxyAddress(), proxyConfiguration.getUsername(), proxyConfiguration.getPassword()));
-                } else {
-                    pipeline.addLast(new HttpProxyHandler(proxyConfiguration.getProxyAddress()));
-                }
+                boolean credentials = isNotBlank(proxyConfiguration.getUsername()) && isNotBlank(proxyConfiguration.getPassword());
+                pipeline.addLast(new HttpConnectProxyHandler(proxyConfiguration.getProxyAddress(), credentials ? proxyConfiguration.getUsername() : null, credentials ? proxyConfiguration.getPassword() : null, mockServerLogger, maxHeaderSize()));
             } else if (proxyConfigurations.containsKey(ProxyConfiguration.Type.SOCKS5)) {
                 ProxyConfiguration proxyConfiguration = proxyConfigurations.get(ProxyConfiguration.Type.SOCKS5);
                 if (isNotBlank(proxyConfiguration.getUsername()) && isNotBlank(proxyConfiguration.getPassword())) {
@@ -150,15 +148,26 @@ public class HttpClientInitializer extends ChannelInitializer<SocketChannel> {
         }
     }
 
+    /**
+     * The most an upstream's response headers, or its trailers, may be: read when a connection's codec is built, so a
+     * change applies to new connections.
+     */
+    private int maxHeaderSize() {
+        return configuration != null ? configuration.maxHeaderSize() : ConfigurationProperties.maxHeaderSize();
+    }
+
     private void configureHttp1Pipeline(ChannelPipeline pipeline) {
         addReadTimeoutHandlerIfNotPooled(pipeline);
-        pipeline.addLast(new HttpClientCodec());
+        int maxHeaderSize = maxHeaderSize();
+        // a status line is short, so it and each chunk-size line keep Netty's limit
+        pipeline.addLast(new HttpClientCodec(HttpObjectDecoder.DEFAULT_MAX_INITIAL_LINE_LENGTH, maxHeaderSize, HttpObjectDecoder.DEFAULT_MAX_CHUNK_SIZE));
+        pipeline.addLast(new ForwardHeaderLimit.Http1Response(mockServerLogger, maxHeaderSize));
         pipeline.addLast(new BoundedZstdHttpContentDecompressor());
         pipeline.addLast(new TimeToFirstByteHandler());
         if (configuration != null) {
             pipeline.addLast(new StreamingAwareHttpObjectAggregator(configuration.maxResponseBodySize(), configuration, mockServerLogger));
         } else {
-            pipeline.addLast(new StreamingAwareHttpObjectAggregator(org.mockserver.configuration.ConfigurationProperties.maxResponseBodySize()));
+            pipeline.addLast(new StreamingAwareHttpObjectAggregator(ConfigurationProperties.maxResponseBodySize()));
         }
         pipeline.addLast(new MockServerHttpClientCodec(mockServerLogger, proxyConfigurations));
         pipeline.addLast(httpClientHandler);
@@ -230,15 +239,18 @@ public class HttpClientInitializer extends ChannelInitializer<SocketChannel> {
         // connection, truncating the stream. The pre-dispatch window (connect + TLS handshake) is already
         // covered by the connect timeout and TLS handshake timeout.
 
-        int maxFrameSize = configuration != null ? configuration.maxResponseBodySize() : org.mockserver.configuration.ConfigurationProperties.maxResponseBodySize();
+        int maxFrameSize = configuration != null ? configuration.maxResponseBodySize() : ConfigurationProperties.maxResponseBodySize();
+        int maxHeaderSize = maxHeaderSize();
+        // the limit an upstream announces for requests is advisory (RFC 9113 section 6.5.2): send, and relay its answer
         Http2FrameCodecBuilder frameCodecBuilder = Http2FrameCodecBuilder.forClient()
-            .initialSettings(forwardClientSettings(maxFrameSize));
+            .initialSettings(forwardClientSettings(maxFrameSize, maxHeaderSize))
+            .encoderIgnoreMaxHeaderListSize(true);
         if (mockServerLogger.isEnabledForInstance(TRACE)) {
             frameCodecBuilder.frameLogger(new Http2FrameLogger(LogLevel.TRACE, HttpClientHandler.class.getName()));
         }
         pipeline.addLast(frameCodecBuilder.build());
 
-        Http2ForwardStreamChildInitializer childInitializer = new Http2ForwardStreamChildInitializer(configuration, mockServerLogger, proxyConfigurations, httpClientHandler, httpClientConnectionHandler);
+        Http2ForwardStreamChildInitializer childInitializer = new Http2ForwardStreamChildInitializer(configuration, mockServerLogger, proxyConfigurations, httpClientHandler, httpClientConnectionHandler, maxHeaderSize);
         // Push is disabled, so an inbound (server-initiated) stream is never a push — it is a response
         // MockServer's own non-multiplex HTTP/2 server returned on a server-initiated stream instead of the
         // request's stream. Route it through the same response pipeline (NOT reset) so the round trip
@@ -247,6 +259,7 @@ public class HttpClientInitializer extends ChannelInitializer<SocketChannel> {
         pipeline.addLast(new Http2MultiplexHandler(childInitializer));
         // Intercepts the MockServer request written to the parent channel and dispatches it on a new stream.
         pipeline.addLast(new Http2ForwardRequestDispatchHandler(childInitializer));
+        pipeline.addLast(new ForwardHeaderLimit.Http2Connection(mockServerLogger, maxHeaderSize));
 
         // ALPN already proved HTTP/2; the frame codec consumes SETTINGS, so complete immediately.
         recordForwardUpstreamProtocol(pipeline, "http2");
@@ -255,12 +268,15 @@ public class HttpClientInitializer extends ChannelInitializer<SocketChannel> {
 
     /**
      * We are a client, so never accept server push. The upstream may open one stream of its own at a time: a legacy
-     * server answers on one, and every stream it opens gets its own response aggregator.
+     * server answers on one, and every stream it opens gets its own response aggregator. A response's header list,
+     * and its trailers, may be up to {@code maxHeaderSize}, which is announced as
+     * {@code SETTINGS_MAX_HEADER_LIST_SIZE}.
      */
-    static Http2Settings forwardClientSettings(int maxFrameSize) {
+    static Http2Settings forwardClientSettings(int maxFrameSize, int maxHeaderSize) {
         return Http2Settings.defaultSettings()
             .pushEnabled(false)
             .maxConcurrentStreams(1)
+            .maxHeaderListSize(maxHeaderSize)
             .maxFrameSize(maxFrameSize < Http2CodecUtil.MAX_FRAME_SIZE_LOWER_BOUND
                 ? Http2CodecUtil.MAX_FRAME_SIZE_LOWER_BOUND
                 : Math.min(maxFrameSize, Http2CodecUtil.MAX_FRAME_SIZE_UPPER_BOUND));

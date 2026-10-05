@@ -163,7 +163,7 @@ This release delivers a sustained performance and memory programme alongside dat
   to requests sent through a `CONNECT` or SOCKS tunnel, which were forwarded. A request is also unreadable
   when the request before it on the same connection left bytes behind: a client that writes a body with
   neither `Content-Length` nor chunked encoding (Node's `http.request` does this for a `GET`) gets `400`
-  for its next request on that connection, where it used to get `404` for `GET /bad-request`. HTTP/2 and HTTP/3 take the same header limit (see the `maxHeaderSize` entry below). The limits apply only to requests MockServer receives: a mocked response with larger headers is sent intact, through a tunnel too. A proxied response is limited separately and as before: MockServer reads an upstream's response headers up to 8 KB.
+  for its next request on that connection, where it used to get `404` for `GET /bad-request`. HTTP/2 and HTTP/3 take the same header limit (see the `maxHeaderSize` entry below). The limits apply only to requests MockServer receives: a mocked response with larger headers is sent intact, through a tunnel too. A response MockServer reads from an upstream when it forwards or proxies is limited by `maxHeaderSize` as well (see "A forwarded or proxied response with more than 8 KB of headers now passes through" under Fixed).
 - **A client can no longer make the server hold far more memory than the request it is sending.** Each piece
   of a request body is a slice of the network read it arrived in, and the server kept the whole read allocated
   while it held any piece of it. Over HTTP/2, a client that put each small DATA frame of a request in a read
@@ -231,6 +231,12 @@ This release delivers a sustained performance and memory programme alongside dat
   `2147483647`, which removes the limit for HTTP/1.1, removes it for HTTP/2 and HTTP/3. To keep the
   old 8 KB limit on HTTP/2 and HTTP/3 set `maxHeaderSize=8192`, which limits HTTP/1.1 headers to
   8 KB too.
+  The same value now also limits the response headers MockServer reads from an upstream when it forwards or
+  proxies, and a response over the limit is answered `502` instead of being relayed in part (see Fixed).
+- **A request with headers larger than the limit an HTTP/2 upstream has announced is now sent to it, and the
+  upstream's answer (usually `431`) is passed on.** Before, on a connection where the upstream's limit had already
+  been read, MockServer did not send the request and answered `502`. HTTP/2 makes that limit advisory, so the
+  request now gets the same outcome on every connection, as it does when it is forwarded over HTTP/1.1.
 - **`EchoServer` (the echo server in `mockserver-core` used by tests) listens on IPv4 only.** It still
   listens on every IPv4 address and an OS-assigned port, but no longer accepts connections to `::1`.
   On macOS its previous dual-stack socket could be given a port another application already listened
@@ -452,6 +458,30 @@ This release delivers a sustained performance and memory programme alongside dat
 
 ### Fixed
 
+- **A forwarded or proxied response with more than 8 KB of headers now passes through.** MockServer read an
+  upstream's response headers up to 8 KB whatever `maxHeaderSize` was set to, so a response with a large
+  `Set-Cookie`, `Content-Security-Policy` or token header did not survive being forwarded. Over HTTP/1.1 the client
+  received `200` with the headers up to the oversized one and nothing after it, the body included, and the
+  connection to the upstream went back into the pool unusable, so the next request forwarded on it failed with `502`
+  after a timeout. Over HTTP/2 the client received `502` and MockServer's log did not say why. Through an upstream
+  proxy (`forwardHttpsProxy`) whose reply to `CONNECT` had headers that large, the forward failed only when the
+  proxy connect timeout ran out. MockServer now reads an upstream's response headers, and its trailers, up to
+  `maxHeaderSize` (256 KB by default), over HTTP/1.1 and HTTP/2 and in an upstream proxy's reply to `CONNECT`. A
+  response with larger headers is never passed on in part: the client is answered `502` with the reason as the
+  body, for example `upstream response headers are larger than maxHeaderSize (262144 bytes)`, the refusal is logged
+  once at `WARN`, the connection to the upstream is closed, and the request is not retried
+  (`forwardProxyRetryCount` does not apply to it). Over HTTP/2 the size is counted as that protocol defines it
+  (each header's name and value plus 32 bytes, after decompression), and MockServer tells the upstream the limit
+  when it connects; over HTTP/1.1 a response's trailers count together with its headers. Two things change for an
+  existing setup: by default responses with headers up to 256 KB are forwarded where 8 KB was the most, and a
+  `maxHeaderSize` you have set below `8192` now limits upstream response headers to that lower value.
+- **A forwarded or proxied response keeps its body when one of its `Set-Cookie` headers is not a valid cookie.** An
+  upstream response with a `Set-Cookie` header that has no name or no `=` (for example `Set-Cookie: flag; Path=/;
+  HttpOnly`, `Set-Cookie: =value`, or a bare token) reached the client as `200` with its headers and
+  `Content-Length: 0`: the body was dropped, and an `ERROR` `exception decoding response` was logged. The response
+  is now passed on whole, with that header exactly as the upstream sent it; MockServer records no cookie for it,
+  and cookies in the response's other `Set-Cookie` headers are recorded as before. A mocked response that sets both
+  a cookie and such a `Set-Cookie` header is also written correctly now.
 - **A client that drops or breaks an HTTP/2 connection no longer makes MockServer print a Netty
   warning with a stack trace.** On an HTTP/2 connection made straight to MockServer, over TLS or
   cleartext, a client that reset the connection or sent an invalid frame produced `An

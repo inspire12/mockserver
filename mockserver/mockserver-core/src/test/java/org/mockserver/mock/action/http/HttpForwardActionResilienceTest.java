@@ -4,6 +4,7 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockserver.configuration.Configuration;
+import org.mockserver.httpclient.HeaderLimitExceededException;
 import org.mockserver.httpclient.NettyHttpClient;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpForward;
@@ -12,6 +13,7 @@ import org.mockserver.model.HttpResponse;
 
 import java.net.InetSocketAddress;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -142,6 +144,50 @@ public class HttpForwardActionResilienceTest {
         assertThat(fastFail.getStatusCode(), is(503));
         assertThat(fastFail.getBodyAsString(), containsString("circuit breaker open"));
         verify(mockHttpClient, never()).sendRequest(any(HttpRequest.class), any(InetSocketAddress.class));
+    }
+
+    @Test
+    public void shouldNotCountAHeaderLimitRefusalAgainstTheCircuitBreakerNorRetryIt() throws Exception {
+        // given - breaker enabled with threshold 3 and two retries; the upstream answers, with headers over the limit
+        Configuration configuration = Configuration.configuration()
+            .forwardProxyCircuitBreakerEnabled(true)
+            .forwardProxyCircuitBreakerFailureThreshold(3)
+            .forwardProxyCircuitBreakerWindowMillis(60_000L)
+            .forwardProxyRetryCount(2)
+            .forwardProxyRetryBackoffMillis(0L);
+        CompletableFuture<HttpResponse> refused = new CompletableFuture<>();
+        refused.completeExceptionally(new HeaderLimitExceededException("upstream response headers are larger than maxHeaderSize (262144 bytes)"));
+        when(mockHttpClient.sendRequest(any(HttpRequest.class), any(InetSocketAddress.class))).thenReturn(refused);
+        HttpForwardActionHandler handler = handlerWith(configuration);
+
+        // when - more refusals than the threshold
+        for (int i = 0; i < 5; i++) {
+            try {
+                handler.handle(upstream(), request().withMethod("GET").withPath("/x")).getHttpResponse().get(5, TimeUnit.SECONDS);
+                throw new AssertionError("expected the refusal");
+            } catch (ExecutionException failed) {
+                assertThat(HeaderLimitExceededException.in(failed), is(notNullValue()));
+            }
+        }
+
+        // then - the upstream is reachable, so the breaker stays closed, and each request was sent once
+        assertThat(ForwardCircuitBreaker.getInstance().isOpen("upstream.example:8080"), is(false));
+        assertThat(MetricsHelper.openCount(), is(0));
+        verify(mockHttpClient, times(5)).sendRequest(any(HttpRequest.class), any(InetSocketAddress.class));
+
+        // and - any other failure still counts: three of them open the breaker
+        reset(mockHttpClient);
+        CompletableFuture<HttpResponse> connectionReset = new CompletableFuture<>();
+        connectionReset.completeExceptionally(new java.io.IOException("Connection reset"));
+        when(mockHttpClient.sendRequest(any(HttpRequest.class), any(InetSocketAddress.class))).thenReturn(connectionReset);
+        for (int i = 0; i < 3; i++) {
+            try {
+                handler.handle(upstream(), request().withMethod("POST").withPath("/x")).getHttpResponse().get(5, TimeUnit.SECONDS);
+            } catch (ExecutionException failed) {
+                assertThat(HeaderLimitExceededException.in(failed), is(nullValue()));
+            }
+        }
+        assertThat(ForwardCircuitBreaker.getInstance().isOpen("upstream.example:8080"), is(true));
     }
 
     @Test

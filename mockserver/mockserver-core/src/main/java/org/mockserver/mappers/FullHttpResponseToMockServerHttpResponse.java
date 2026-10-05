@@ -136,10 +136,13 @@ public class FullHttpResponseToMockServerHttpResponse {
         for (Header header : httpResponse.getHeaderList()) {
             if (header.getName().getValue().equalsIgnoreCase("Set-Cookie")) {
                 for (NottableString cookieHeader : header.getValues()) {
+                    // null for a value with no name or no "=": the header is relayed as received, with no cookie for it
                     io.netty.handler.codec.http.cookie.Cookie httpCookie = ClientCookieDecoder.LAX.decode(cookieHeader.getValue());
-                    String name = httpCookie.name().trim();
-                    String value = httpCookie.value() != null ? httpCookie.value().trim() : "";
-                    cookies.withEntry(new Cookie(string(name, false), string(value, false)));
+                    if (httpCookie != null) {
+                        String name = httpCookie.name().trim();
+                        String value = httpCookie.value() != null ? httpCookie.value().trim() : "";
+                        cookies.withEntry(new Cookie(string(name, false), string(value, false)));
+                    }
                 }
             }
             if (header.getName().getValue().equalsIgnoreCase("Cookie")) {

@@ -32,7 +32,8 @@ public class Http2ForwardStreamChannelAllocatorTest {
             new MockServerLogger(),
             Collections.emptyMap(),
             new ChannelInboundHandlerAdapter(),
-            null
+            null,
+            configuration().maxHeaderSize()
         );
         EmbeddedChannel connection = new EmbeddedChannel();
         // mirror NettyHttpClient's bootstrap option: the upstream connection itself is pooled

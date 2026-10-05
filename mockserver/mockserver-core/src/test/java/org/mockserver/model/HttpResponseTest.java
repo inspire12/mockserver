@@ -485,4 +485,17 @@ public class HttpResponseTest {
         assertThat(upstream.getFirstHeader("Content-Length"), is("13"));
         assertThat(upstream.getFirstHeader("x-added"), is("yes"));
     }
+
+    @Test
+    public void shouldLookForACookieAmongSetCookieHeadersThatAreNotAllCookies() {
+        // Netty's decoder returns null for a Set-Cookie value with no name or no "="
+        for (String notACookie : new String[]{"aaaa", "flag; Path=/; HttpOnly", "=novalue"}) {
+            HttpResponse response = response().withHeader("Set-Cookie", notACookie, "session=abc; Path=/");
+
+            assertThat(notACookie, response.cookieHeaderDoesNotAlreadyExists("session", "abc"), is(false));
+            assertThat(notACookie, response.cookieHeaderDoesNotAlreadyExists("other", "abc"), is(true));
+            assertThat(notACookie, response.cookieHeaderDoesNotAlreadyExists(new Cookie("session", "abc")), is(false));
+            assertThat(notACookie, response.cookieHeaderDoesNotAlreadyExists(new Cookie("other", "abc")), is(true));
+        }
+    }
 }

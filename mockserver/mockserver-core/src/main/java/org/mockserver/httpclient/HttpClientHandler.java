@@ -204,7 +204,7 @@ public class HttpClientHandler extends SimpleChannelInboundHandler<Message> {
                         .setMessageFormat(DIRECT_MEMORY_LIMIT_REACHED + ctx.channel() + " - " + cause.getMessage())
                 );
             }
-        } else if (isNotSslException(cause) && isNotConnectionReset(cause)) {
+        } else if (isNotSslException(cause) && isNotConnectionReset(cause) && !ForwardHeaderLimit.isAlreadyLogged(ctx.channel(), cause)) {
             if (mockServerLogger != null && mockServerLogger.isEnabledForInstance(Level.WARN)) {
                 mockServerLogger.logEvent(
                     new LogEntry()

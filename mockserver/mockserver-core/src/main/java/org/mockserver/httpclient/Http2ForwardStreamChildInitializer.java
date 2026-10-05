@@ -55,13 +55,15 @@ public class Http2ForwardStreamChildInitializer extends ChannelInitializer<Http2
     private final Map<ProxyConfiguration.Type, ProxyConfiguration> proxyConfigurations;
     private final ChannelHandler httpClientHandler;
     private final ChannelHandler httpClientConnectionHandler;
+    private final int maxHeaderSize;
 
-    Http2ForwardStreamChildInitializer(Configuration configuration, MockServerLogger mockServerLogger, Map<ProxyConfiguration.Type, ProxyConfiguration> proxyConfigurations, ChannelHandler httpClientHandler, ChannelHandler httpClientConnectionHandler) {
+    Http2ForwardStreamChildInitializer(Configuration configuration, MockServerLogger mockServerLogger, Map<ProxyConfiguration.Type, ProxyConfiguration> proxyConfigurations, ChannelHandler httpClientHandler, ChannelHandler httpClientConnectionHandler, int maxHeaderSize) {
         this.configuration = configuration;
         this.mockServerLogger = mockServerLogger;
         this.proxyConfigurations = proxyConfigurations;
         this.httpClientHandler = httpClientHandler;
         this.httpClientConnectionHandler = httpClientConnectionHandler;
+        this.maxHeaderSize = maxHeaderSize;
     }
 
     @Override
@@ -82,6 +84,9 @@ public class Http2ForwardStreamChildInitializer extends ChannelInitializer<Http2
         copyAttribute(parent, ch, EXPECT_STREAMING_RESPONSE);
 
         ChannelPipeline pipeline = ch.pipeline();
+
+        // before the handler that fails the response future, so that it fails with the reason
+        pipeline.addLast(new ForwardHeaderLimit.Http2Stream(mockServerLogger, maxHeaderSize));
 
         // Completes the response future exceptionally if the stream closes before a valid response
         // (mirrors the HTTP/1.1 pipeline's HttpClientConnectionErrorHandler). @Sharable, so the same

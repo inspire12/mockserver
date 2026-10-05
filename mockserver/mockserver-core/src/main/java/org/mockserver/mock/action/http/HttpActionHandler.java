@@ -12,6 +12,7 @@ import org.mockserver.file.FileBodyException;
 import org.mockserver.filters.HopByHopHeaderFilter;
 import org.mockserver.grpc.GrpcForwardTranslator;
 import org.mockserver.grpc.GrpcProtoDescriptorStore;
+import org.mockserver.httpclient.HeaderLimitExceededException;
 import org.mockserver.httpclient.NettyHttpClient;
 import org.mockserver.httpclient.SocketCommunicationException;
 import org.mockserver.log.model.DeferredLogArgument;
@@ -1279,6 +1280,9 @@ public class HttpActionHandler {
      * diagnostic omits the channel suffix.
      */
     private void handleUnmatchedForwardFailure(Throwable throwable, HttpRequest request, ResponseWriter responseWriter, ChannelHandlerContext ctx, InetSocketAddress remoteAddress, boolean potentiallyHttpProxy) {
+        if (returnedHeaderLimitFailure(responseWriter, request, throwable)) {
+            return;
+        }
         if (potentiallyHttpProxy && connectionException(throwable)) {
             if (mockServerLogger != null && mockServerLogger.isEnabledForInstance(TRACE)) {
                 mockServerLogger.logEvent(
@@ -1623,7 +1627,9 @@ public class HttpActionHandler {
                             responseWriter.writeResponse(request, response, false);
                         }
                         } catch (Throwable throwable) {
-                            returnBadGateway(responseWriter, request, "proxy pass forwarding failed for " + mapping.getTargetUri() + ": " + throwable.getMessage());
+                            if (!returnedHeaderLimitFailure(responseWriter, request, throwable)) {
+                                returnBadGateway(responseWriter, request, "proxy pass forwarding failed for " + mapping.getTargetUri() + ": " + throwable.getMessage());
+                            }
                         }
                         }, synchronous, throwable -> false);
                     } catch (Throwable throwable) {
@@ -3029,6 +3035,9 @@ public class HttpActionHandler {
     }
 
     void handleExceptionDuringForwardingRequest(Action action, HttpRequest request, ResponseWriter responseWriter, Throwable exception) {
+        if (returnedHeaderLimitFailure(responseWriter, request, exception)) {
+            return;
+        }
         if (connectionException(exception)) {
             if (mockServerLogger != null && mockServerLogger.isEnabledForInstance(TRACE)) {
                 mockServerLogger.logEvent(
@@ -3280,8 +3289,26 @@ public class HttpActionHandler {
         writeResponseActionResponse(responder.apply(request), responseWriter, request, action, synchronous, requestDefinition, expectationPostProcessor, effectiveChaos, capturedMatchCount, ctx, rateLimit);
     }
 
+    /**
+     * Answers a forward that failed for a header limit with a 502 whose body is the reason. The forward client
+     * logged the refusal as it raised it, so it is not logged as an unexpected exception here.
+     *
+     * @return whether {@code failure} was such a failure and has been answered
+     */
+    private boolean returnedHeaderLimitFailure(ResponseWriter responseWriter, HttpRequest request, Throwable failure) {
+        HeaderLimitExceededException headerLimit = HeaderLimitExceededException.in(failure);
+        if (headerLimit == null) {
+            return false;
+        }
+        returnBadGateway(responseWriter, request, headerLimit.getMessage(), badGatewayResponse().withBody(headerLimit.getMessage()));
+        return true;
+    }
+
     private void returnBadGateway(ResponseWriter responseWriter, HttpRequest request, String error) {
-        HttpResponse response = badGatewayResponse();
+        returnBadGateway(responseWriter, request, error, badGatewayResponse());
+    }
+
+    private void returnBadGateway(ResponseWriter responseWriter, HttpRequest request, String error, HttpResponse response) {
         if (isNotBlank(error)) {
             if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
                 mockServerLogger.logEvent(

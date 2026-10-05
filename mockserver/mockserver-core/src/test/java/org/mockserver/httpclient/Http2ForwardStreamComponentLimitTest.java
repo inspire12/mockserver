@@ -91,7 +91,7 @@ public class Http2ForwardStreamComponentLimitTest {
     @Test
     public void shouldKeepTheConnectionLimitOnTheClientsOwnStream() {
         Probe probe = new Probe();
-        Link link = new Link(HttpClientInitializer.forwardClientSettings(TEN_MIB), probe);
+        Link link = new Link(HttpClientInitializer.forwardClientSettings(TEN_MIB, CONFIGURATION.maxHeaderSize()), probe);
         try {
             Future<Http2StreamChannel> open = new Http2StreamChannelBootstrap(link.client).handler(link.childInitializer).open();
             link.pump();
@@ -111,7 +111,7 @@ public class Http2ForwardStreamComponentLimitTest {
         // bytes, 488 MB here
         int frames = 100_000;
         Probe probe = new Probe();
-        Link link = new Link(HttpClientInitializer.forwardClientSettings(TEN_MIB), probe);
+        Link link = new Link(HttpClientInitializer.forwardClientSettings(TEN_MIB, CONFIGURATION.maxHeaderSize()), probe);
         try {
             Future<Http2StreamChannel> open = new Http2StreamChannelBootstrap(link.client).handler(link.childInitializer).open();
             link.pump();
@@ -149,10 +149,10 @@ public class Http2ForwardStreamComponentLimitTest {
 
     @Test
     public void shouldAllowTheUpstreamOneStreamOfItsOwnAtATime() {
-        assertThat(HttpClientInitializer.forwardClientSettings(TEN_MIB).maxConcurrentStreams(), is(1L));
-        assertThat(HttpClientInitializer.forwardClientSettings(TEN_MIB).pushEnabled(), is(false));
+        assertThat(HttpClientInitializer.forwardClientSettings(TEN_MIB, CONFIGURATION.maxHeaderSize()).maxConcurrentStreams(), is(1L));
+        assertThat(HttpClientInitializer.forwardClientSettings(TEN_MIB, CONFIGURATION.maxHeaderSize()).pushEnabled(), is(false));
 
-        Link link = new Link(HttpClientInitializer.forwardClientSettings(TEN_MIB), new Probe());
+        Link link = new Link(HttpClientInitializer.forwardClientSettings(TEN_MIB, CONFIGURATION.maxHeaderSize()), new Probe());
         try {
             Http2StreamChannel first = link.openUpstreamStream();
             first.writeAndFlush(new DefaultHttp2HeadersFrame(new DefaultHttp2Headers().status("200"), false));
@@ -178,7 +178,7 @@ public class Http2ForwardStreamComponentLimitTest {
         private final List<Http2StreamChannel> upstreamStreams = new ArrayList<>();
 
         Link(Http2Settings clientSettings, ChannelHandler lastHandler) {
-            childInitializer = new Http2ForwardStreamChildInitializer(CONFIGURATION, new MockServerLogger(), Collections.emptyMap(), lastHandler, null);
+            childInitializer = new Http2ForwardStreamChildInitializer(CONFIGURATION, new MockServerLogger(), Collections.emptyMap(), lastHandler, null, CONFIGURATION.maxHeaderSize());
             client.pipeline().addLast(Http2FrameCodecBuilder.forClient().initialSettings(clientSettings).build());
             client.pipeline().addLast(new Http2MultiplexHandler(childInitializer));
             upstream.pipeline().addLast(Http2FrameCodecBuilder.forServer().build());

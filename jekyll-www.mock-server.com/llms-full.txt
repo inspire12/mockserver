@@ -963,7 +963,7 @@ Maximum size in bytes of the first line of an HTTP/1.1 request; a longer one is 
 - Environment variable: MOCKSERVER_MAX_INITIAL_LINE_LENGTH
 
 **maxHeaderSize**
-Maximum size in bytes of a request's headers, all counted together, over HTTP/1.1, HTTP/2 and HTTP/3. Larger headers are answered with 431 (and the connection closed over HTTP/1.1, the stream reset over HTTP/2); over HTTP/3 the connection is closed with H3_EXCESSIVE_LOAD. Over HTTP/2 and HTTP/3 the size is each header's name and value plus 32 bytes, including the method, host and URL. The trailers of an HTTP/2 or HTTP/3 request are limited the same way.
+Maximum size in bytes of a request's headers, all counted together, over HTTP/1.1, HTTP/2 and HTTP/3. Larger headers are answered with 431 (and the connection closed over HTTP/1.1, the stream reset over HTTP/2); over HTTP/3 the connection is closed with H3_EXCESSIVE_LOAD. Over HTTP/2 and HTTP/3 the size is each header's name and value plus 32 bytes, including the method, host and URL. The trailers of an HTTP/2 or HTTP/3 request are limited the same way. It is also the most MockServer reads of an upstream's response headers and trailers when it forwards or proxies (HTTP/1.1 and HTTP/2, and an upstream proxy's reply to CONNECT): a response with larger headers is not passed on, and the client is answered 502 with the reason as the body.
 - Default: 262144 (256 KB)
 - Environment variable: MOCKSERVER_MAX_HEADER_SIZE
 

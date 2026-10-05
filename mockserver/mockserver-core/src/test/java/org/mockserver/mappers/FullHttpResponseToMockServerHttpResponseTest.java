@@ -535,4 +535,24 @@ public class FullHttpResponseToMockServerHttpResponseTest {
             nettyResponse.release();
         }
     }
+
+    @Test
+    public void shouldKeepTheBodyAndTheHeaderOfASetCookieThatIsNotACookie() {
+        // Netty's decoder returns null for a Set-Cookie value with no name or no "="
+        for (String notACookie : new String[]{"aaaa", "flag; Path=/; HttpOnly", "=novalue"}) {
+            FullHttpResponse nettyResponse = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK, Unpooled.copiedBuffer("the body", StandardCharsets.UTF_8));
+            nettyResponse.headers().add(SET_COOKIE, notACookie);
+            nettyResponse.headers().add(SET_COOKIE, "session=abc; Path=/");
+            nettyResponse.headers().add(CONTENT_TYPE, "text/plain");
+            try {
+                HttpResponse result = mapper.mapFullHttpResponseToMockServerResponse(nettyResponse);
+
+                assertThat(notACookie, result.getBodyAsString(), equalTo("the body"));
+                assertThat(notACookie, result.getHeader("Set-Cookie"), contains(notACookie, "session=abc; Path=/"));
+                assertThat(notACookie, result.getCookieList(), contains(new Cookie("session", "abc")));
+            } finally {
+                nettyResponse.release();
+            }
+        }
+    }
 }

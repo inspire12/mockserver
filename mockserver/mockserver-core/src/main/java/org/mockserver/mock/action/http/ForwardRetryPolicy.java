@@ -1,5 +1,6 @@
 package org.mockserver.mock.action.http;
 
+import org.mockserver.httpclient.HeaderLimitExceededException;
 import org.mockserver.model.HttpResponse;
 
 import java.util.Set;
@@ -46,11 +47,12 @@ public final class ForwardRetryPolicy {
 
     /**
      * Whether a completed attempt (response or throwable) should be retried. A non-null throwable is
-     * always transient; a non-null response is transient only when its status code is 502/503/504.
+     * transient unless it is a refusal for a header limit, which the upstream's next answer would meet
+     * again; a non-null response is transient only when its status code is 502/503/504.
      */
     public static boolean isTransientFailure(HttpResponse response, Throwable throwable) {
         if (throwable != null) {
-            return true;
+            return HeaderLimitExceededException.in(throwable) == null;
         }
         return response != null
             && response.getStatusCode() != null
