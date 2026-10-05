@@ -91,9 +91,13 @@ final class LoopbackHttp2ResponseStreamer {
         if (isStreamed(stream)) {
             return true;
         }
-        // a whole response, an aggregated one's trailers, or a 1xx: MockServer ends no stream with a 1xx it mocks
-        if (endOfStream || HttpStatusClass.valueOf(headers.status()) == HttpStatusClass.INFORMATIONAL) {
+        // a whole response, or an aggregated one's trailers
+        if (endOfStream) {
             return false;
+        }
+        // an interim response, handed on without ending the client's stream: MockServer resets the stream of a 1xx it mocks
+        if (HttpStatusClass.valueOf(headers.status()) == HttpStatusClass.INFORMATIONAL) {
+            return true;
         }
         // a response with a content coding is decoded, so it is held whole: nothing else bounds what it decodes to
         boolean streamed = !headers.contains(HttpHeaderNames.CONTENT_LENGTH) && !headers.contains(HttpHeaderNames.CONTENT_ENCODING);

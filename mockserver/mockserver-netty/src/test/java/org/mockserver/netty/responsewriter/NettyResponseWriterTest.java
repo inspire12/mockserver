@@ -5,6 +5,7 @@ import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http.LastHttpContent;
+import io.netty.handler.codec.http2.Http2Frame;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.ReferenceCounted;
 import io.netty.util.concurrent.GenericFutureListener;
@@ -13,6 +14,7 @@ import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockserver.logging.MockServerLogger;
+import org.mockserver.model.ConnectionOptions;
 import org.mockserver.model.Delay;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
@@ -21,11 +23,20 @@ import org.mockserver.scheduler.Scheduler;
 
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.empty;
+import static org.hamcrest.Matchers.everyItem;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.hasItemInArray;
+import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.core.Is.is;
 import static org.mockito.Mockito.*;
@@ -441,6 +452,37 @@ public class NettyResponseWriterTest {
     public void shouldEndTheExchangeAfterAFinalInformationalResponse() {
         assertThat(exchangeEndedEventsAfterWriting(102), is(1));
         assertThat(exchangeEndedEventsAfterWriting(103), is(1));
+    }
+
+    /**
+     * Over HTTP/2 a final 1xx is followed by a reset of its stream; over HTTP/1.1, which has no streams, the status
+     * line and headers are all that is written.
+     */
+    @Test
+    public void shouldWriteOnlyTheInformationalResponseOverHttp1() {
+        for (ConnectionOptions options : Arrays.asList(null, connectionOptions().withChunkSize(1).withChunkDelay(new Delay(TimeUnit.MILLISECONDS, 0)))) {
+            EmbeddedChannel channel = new EmbeddedChannel(new HttpServerCodec(), new ChannelOutboundHandlerAdapter());
+            try {
+                new NettyResponseWriter(configuration(), new MockServerLogger(), channel.pipeline().lastContext(), scheduler)
+                    .writeResponse(request("/informational").withKeepAlive(true), response().withStatusCode(102).withConnectionOptions(options), false);
+                channel.runPendingTasks();
+
+                // the response object as written, which MockServer's own codec would encode: only it, and no reset
+                List<Object> written = new ArrayList<>();
+                for (Object out = channel.readOutbound(); out != null; out = channel.readOutbound()) {
+                    written.add(out);
+                }
+                assertThat(written, not(empty()));
+                assertThat(written, everyItem(not(instanceOf(Http2Frame.class))));
+                if (options == null) {
+                    assertThat(written, contains(instanceOf(HttpResponse.class)));
+                }
+                written.forEach(ReferenceCountUtil::release);
+                assertThat(channel.isOpen(), is(true));
+            } finally {
+                channel.finishAndReleaseAll();
+            }
+        }
     }
 
     @Test

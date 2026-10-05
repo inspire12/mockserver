@@ -311,6 +311,15 @@ public final class Http2TestClient implements AutoCloseable {
     }
 
     /**
+     * Closes the connection as a client that goes away does: no GOAWAY and no TLS close_notify first, and no wait
+     * for the streams still open.
+     */
+    public void closeAbruptly() throws Exception {
+        connection.eventLoop().submit(() -> connection.unsafe().close(connection.voidPromise())).get(WAIT_SECONDS, TimeUnit.SECONDS);
+        assertThat(closedWithin(WAIT_SECONDS), is(true));
+    }
+
+    /**
      * Sends bytes as they are, beneath the HTTP/2 codec: a frame the codec would not write.
      */
     public void sendRaw(byte[] bytes) throws Exception {
@@ -367,6 +376,7 @@ public final class Http2TestClient implements AutoCloseable {
                             Http2HeadersFrame headersFrame = (Http2HeadersFrame) msg;
                             CharSequence status = headersFrame.headers().status();
                             if (status != null && status.charAt(0) == '1') {
+                                exchange.interimEndedStream = headersFrame.isEndStream();
                                 exchange.interimStatus.complete(Integer.parseInt(status.toString()));
                             } else if (status != null) {
                                 readsStopped = readOnlyTheResponseHeaders;
@@ -468,6 +478,7 @@ public final class Http2TestClient implements AutoCloseable {
         private volatile long firstDataAtNanos;
         private volatile long endAtNanos;
         private volatile int streamId;
+        private volatile boolean interimEndedStream;
 
         public int streamId() {
             return streamId;
@@ -502,6 +513,15 @@ public final class Http2TestClient implements AutoCloseable {
          */
         public int interimStatus() throws Exception {
             return interimStatus.get(WAIT_SECONDS, TimeUnit.SECONDS);
+        }
+
+        /**
+         * @return whether the HEADERS frame of the {@code 1xx} response carried END_STREAM, which RFC 9113 section 8.1
+         * calls malformed; waits for the {@code 1xx}
+         */
+        public boolean interimEndedStream() throws Exception {
+            interimStatus();
+            return interimEndedStream;
         }
 
         /**

@@ -110,6 +110,7 @@ public final class Http2RequestHeaderLimit {
     static void logRefusalThen(MockServerLogger mockServerLogger, ChannelHandlerContext ctx, Http2Settings settings, boolean outbound, Throwable cause, Runnable nettysOnError) {
         try {
             logRefusal(mockServerLogger, ctx, settings, outbound, cause);
+            Http2StreamFaults.logError(mockServerLogger, ctx, outbound, cause);
         } finally {
             nettysOnError.run();
         }
@@ -205,10 +206,18 @@ public final class Http2RequestHeaderLimit {
 
         @Override
         protected HttpToHttp2ConnectionHandler build(Http2ConnectionDecoder decoder, Http2ConnectionEncoder encoder, Http2Settings initialSettings) {
+            // set here, which the superclass then leaves alone, so that the builder's own fields stay as Netty's builder has them
+            decoder.frameListener(Http2StreamFaults.tunnelFrameListener(mockServerLogger, encoder.connection(), frameListener()));
             return new HttpToHttp2ConnectionHandler(decoder, encoder, initialSettings, isValidateHeaders(), decoupleCloseAndGoAway(), flushPreface(), null) {
                 @Override
                 public void onError(ChannelHandlerContext ctx, boolean outbound, Throwable cause) {
                     logRefusalThen(mockServerLogger, ctx, initialSettings, outbound, cause, () -> super.onError(ctx, outbound, cause));
+                }
+
+                @Override
+                public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+                    Http2StreamFaults.logRequestsEndedWithConnection(mockServerLogger, ctx, connection());
+                    super.channelInactive(ctx);
                 }
             };
         }

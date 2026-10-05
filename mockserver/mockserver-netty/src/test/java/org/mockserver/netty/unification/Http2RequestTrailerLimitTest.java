@@ -8,6 +8,7 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.codec.DecoderException;
 import io.netty.handler.codec.PrematureChannelClosureException;
 import io.netty.handler.codec.http2.DefaultHttp2Connection;
 import io.netty.handler.codec.http2.DefaultHttp2Headers;
@@ -153,8 +154,14 @@ public class Http2RequestTrailerLimitTest {
         assertThat(logged, contains(containsString(HEADERS_OVER_THE_LIMIT)));
     }
 
+    /**
+     * Netty resets a stream for an error of its own once the stream's handlers have been told, so the codec stops
+     * every one of them. A response's header list refused as it is written reaches no stream that way. A stream error
+     * wrapped in another exception was raised by one of the stream's own handlers (the codec's decoder wraps what it
+     * throws), which Netty resets nothing for: stopped, it would leave the stream open with nothing logged.
+     */
     @Test
-    public void shouldPassOnAnyOtherErrorOfAStream() {
+    public void shouldStopAStreamsOwnErrorsAndPassOnEverythingElse() {
         List<Throwable> pastTheCodec = new ArrayList<>();
         EmbeddedChannel stream = new EmbeddedChannel(new LenientInboundHttp2StreamFrameCodec(), new ChannelInboundHandlerAdapter() {
             @Override
@@ -174,8 +181,10 @@ public class Http2RequestTrailerLimitTest {
             stream.pipeline().fireExceptionCaught(responseOverTheClientsLimit);
             stream.pipeline().fireExceptionCaught(anotherStreamError);
             stream.pipeline().fireExceptionCaught(trailersOverTheLimit);
+            DecoderException raisedByAHandler = new DecoderException(Http2Exception.streamError(STREAM, Http2Error.PROTOCOL_ERROR, "raised while decoding"));
+            stream.pipeline().fireExceptionCaught(raisedByAHandler);
 
-            assertThat(pastTheCodec, contains(cutShort, responseOverTheClientsLimit, anotherStreamError));
+            assertThat(pastTheCodec, contains(cutShort, responseOverTheClientsLimit, raisedByAHandler));
             assertThat(Http2RequestHeaderLimit.isRefusedRequestCutShort(stream, cutShort), is(true));
             assertThat("only the aggregator's report", Http2RequestHeaderLimit.isRefusedRequestCutShort(stream, anotherStreamError), is(false));
         } finally {

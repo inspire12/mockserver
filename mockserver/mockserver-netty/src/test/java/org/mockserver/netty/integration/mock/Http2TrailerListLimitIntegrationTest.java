@@ -220,11 +220,11 @@ public class Http2TrailerListLimitIntegrationTest {
     }
 
     /**
-     * Only an upload cut short by the trailers' refusal goes unreported. One the client gives up on is still logged,
-     * as it is today: at ERROR, by the first handler after the aggregator. A tunnel holds the upload in the relay.
+     * An upload its client gives up on is the client's choice: nothing is logged at this class's WARN level, on any
+     * route. {@code Http2ConnectionErrorLoggingIntegrationTest} checks the one INFO entry it is logged as.
      */
     @Test
-    public void shouldStillReportAnUploadTheClientResets() throws Exception {
+    public void shouldNotWarnOfAnUploadTheClientResets() throws Exception {
         try (Http2TestClient client = connect()) {
             client.send(pseudoHeaders(HttpMethod.POST, "/upload"), false)
                 .data("request body", false)
@@ -234,11 +234,7 @@ public class Http2TrailerListLimitIntegrationTest {
             assertThat(client.send(pseudoHeaders(HttpMethod.GET, "/upload"), true).status(), is(200));
         }
         assertThat("the upload was never dispatched", uploads(), contains(""));
-        if (route.tunnel) {
-            assertThat(warningsAndErrors(), is(empty()));
-        } else {
-            assertThat(warningsAndErrors(), contains(containsString("web socket server caught exception")));
-        }
+        assertThat(warningsAndErrors(), is(empty()));
     }
 
     /**

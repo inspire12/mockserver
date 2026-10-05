@@ -48,6 +48,7 @@ import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.lessThanOrEqualTo;
+import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 
 /**
@@ -246,17 +247,47 @@ public class LoopbackHttp2StreamedResponseRelayTest {
     }
 
     /**
-     * MockServer ends no stream with a 1xx it mocks, so a 1xx is never the start of a streamed response: it is handed
-     * on whole, as before, which ends the client's stream.
+     * MockServer resets the stream of a 1xx it mocks. The 1xx is handed on as the interim response it was written
+     * as, which must not end the client's stream (RFC 9113 section 8.1), and the reset with its code.
      */
     @Test
-    public void shouldHandOnAnInformationalResponseWholeAsBefore() throws Exception {
+    public void shouldHandOnAnInformationalResponseWithoutEndingTheClientsStreamAndThenItsReset() throws Exception {
         relay(3, "/hints");
 
         serverWritesHeaders(1, new DefaultHttp2Headers().status("103").set("link", "</style.css>"), false);
 
-        assertThat(writtenToProxyClient.frames, contains("3 HEADERS 103 END"));
-        assertThat(parts, is(empty()));
+        assertThat(writtenToProxyClient.frames, contains("3 HEADERS 103"));
+        assertThat(writtenToProxyClient.headers.get(3).get("link").toString(), is("</style.css>"));
+        assertThat("the client's stream is still open", proxyClientConnection.stream(3), notNullValue());
+        assertThat(writtenToProxyClient.resets, is(empty()));
+
+        serverHandler.resetStream(serverCtx, 1, Http2Error.NO_ERROR.code(), serverCtx.newPromise());
+        server.flush();
+        pump();
+
+        assertThat(writtenToProxyClient.frames, contains("3 HEADERS 103"));
+        assertThat(writtenToProxyClient.resets, contains("3:" + Http2Error.NO_ERROR.code()));
+        assertThat(writtenToServer.resets, is(empty()));
+        assertThat(remapper.mappedStreams(), is(0));
+        assertTunnelOpen();
+    }
+
+    @Test
+    public void shouldHandOnTheFinalResponseThatFollowsAnInterimResponse() throws Exception {
+        relay(3, "/hints-then-page");
+        relay(5, "/hints-then-stream");
+
+        serverWritesHeaders(1, new DefaultHttp2Headers().status("103"), false);
+        serverWritesHeaders(3, new DefaultHttp2Headers().status("103"), false);
+        serverWritesHeaders(1, new DefaultHttp2Headers().status("200").setInt("content-length", 4), false);
+        serverWritesData(1, "page", true);
+        serverWritesHeaders(3, new DefaultHttp2Headers().status("200"), false);
+        serverWritesData(3, "stream", true);
+
+        assertThat(writtenToProxyClient.frames, contains("3 HEADERS 103", "5 HEADERS 103", "3 HEADERS 200", "3 DATA 4 END", "5 HEADERS 200", "5 DATA 6 END"));
+        assertThat(writtenToProxyClient.resets, is(empty()));
+        assertExchangeEndedCleanly(3);
+        assertExchangeEndedCleanly(5);
     }
 
     @Test

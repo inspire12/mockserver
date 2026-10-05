@@ -6,6 +6,8 @@ import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelOption;
 import io.netty.handler.codec.http.*;
+import io.netty.handler.codec.http2.DefaultHttp2ResetFrame;
+import io.netty.handler.codec.http2.Http2Error;
 import io.netty.handler.codec.http2.Http2StreamChannel;
 import io.netty.util.ReferenceCountUtil;
 import org.mockserver.configuration.Configuration;
@@ -93,6 +95,41 @@ public class NettyResponseWriter extends ResponseWriter {
             // the exchange handlers after HttpServerCodec take any 1xx but 101 for an interim response
             HttpExchangeEndedEvent.fire(ctx);
         }
+    }
+
+    /**
+     * Writes a response that is one write. Over HTTP/2 a final {@code 1xx} goes out as an interim response, which may
+     * not end a stream (RFC 9113 section 8.1), so its stream is reset after it. The future returned is then the
+     * reset's: whatever closes the stream once the response is written must find it reset, or it would send its own.
+     */
+    private static ChannelFuture writeWhole(ChannelHandlerContext ctx, HttpResponse response) {
+        if (isFinalInformationalResponseOverHttp2(ctx, response)) {
+            ctx.write(withoutChunking(response));
+            return ctx.writeAndFlush(new DefaultHttp2ResetFrame(Http2Error.NO_ERROR));
+        }
+        return ctx.writeAndFlush(response);
+    }
+
+    /**
+     * Netty's HTTP/2 codec takes a {@code 1xx} only as one whole message, and a chunk size would have the response
+     * mapped to a head and its chunks.
+     */
+    private static HttpResponse withoutChunking(HttpResponse response) {
+        ConnectionOptions options = response.getConnectionOptions();
+        if (options == null || options.getChunkSize() == null) {
+            return response;
+        }
+        return response.shallowClone().withConnectionOptions(new ConnectionOptions()
+            .withSuppressContentLengthHeader(options.getSuppressContentLengthHeader())
+            .withContentLengthHeaderOverride(options.getContentLengthHeaderOverride())
+            .withSuppressConnectionHeader(options.getSuppressConnectionHeader())
+            .withKeepAliveOverride(options.getKeepAliveOverride())
+            .withCloseSocket(options.getCloseSocket())
+            .withCloseSocketDelay(options.getCloseSocketDelay()));
+    }
+
+    private static boolean isFinalInformationalResponseOverHttp2(ChannelHandlerContext ctx, HttpResponse response) {
+        return ctx.channel() instanceof Http2StreamChannel && isFinalInformationalResponse(response);
     }
 
     private static boolean isFinalInformationalResponse(HttpResponse response) {
@@ -455,12 +492,13 @@ public class NettyResponseWriter extends ResponseWriter {
 
         Delay chunkDelay = connectionOptions != null ? connectionOptions.getChunkDelay() : null;
         Integer chunkSize = connectionOptions != null ? connectionOptions.getChunkSize() : null;
-        if (chunkDelay != null && chunkSize != null && chunkSize > 0) {
+        // over HTTP/2 a final 1xx is its headers alone, written whole (writeWhole)
+        if (chunkDelay != null && chunkSize != null && chunkSize > 0 && !isFinalInformationalResponseOverHttp2(ctx, response)) {
             writeChunkedResponseWithDelay(ctx, response, connectionOptions, closeChannel, chunkDelay, lifecycleProfile);
         } else {
             // Normal / error / breakpoint-modified response: this single writeAndFlush IS the whole
             // response, so it is the terminal write — complete the in-flight token when it flushes.
-            ChannelFuture channelFuture = ctx.writeAndFlush(response);
+            ChannelFuture channelFuture = writeWhole(ctx, response);
             addCloseSocketListener(channelFuture, connectionOptions, closeChannel, lifecycleProfile);
             completeInFlightOnFlush(channelFuture);
         }

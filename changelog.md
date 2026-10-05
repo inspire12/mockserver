@@ -547,6 +547,35 @@ This release delivers a sustained performance and memory programme alongside dat
 
 ### Fixed
 
+- **A mocked response with a `1xx` status and nothing after it no longer leaves an HTTP/2 client waiting.** An
+  expectation that responds with `102`, `103` or another `1xx` status (other than `101`) has sent all it is going to
+  send. Over HTTP/2 MockServer sent the `1xx` and left the request's stream open for as long as the connection
+  lasted, so the client waited for a final response until its own timeout. Through MockServer as a CONNECT or SOCKS
+  proxy the `1xx` was sent with `END_STREAM`, which HTTP/2 does not allow on a `1xx` (RFC 9113 section 8.1): of the
+  three clients tried, Node and Go rejected it as a protocol error and curl waited until its own timeout. MockServer
+  now sends the `1xx` as an interim response and then resets that stream with `RST_STREAM` `NO_ERROR`, the same on
+  both routes, so the client is no longer left waiting. What it reports depends on the client: the JDK `HttpClient`,
+  Go and curl fail the request at once with the reset; Node's `http2` hands the `1xx` to its `headers` event and then
+  closes the stream without an error. The connection carries on with its other requests and is no longer held open
+  by that stream. A `1xx` with a chunk size (`connectionOptions`), which sent nothing at all over HTTP/2,
+  is sent the same way. HTTP/1.1 is unchanged, and so is a real interim response such as the `100` that answers
+  `Expect: 100-continue`.
+- **Log level change: an HTTP/2 upload the client gives up on is now one `INFO` entry, not an `ERROR` with a stack
+  trace.** A client that reset a stream part way through a request body, or whose connection closed part way through
+  one, was logged at `ERROR` as `web socket server caught exception` with a stack trace, though nothing was wrong
+  with MockServer and no WebSocket was involved. It is now a single `INFO` entry naming the stream and the client:
+  `HTTP/2 stream ... was cancelled by its client ...` or `HTTP/2 stream ... ended with its connection before its
+  request was complete`. **If you alert on `ERROR` entries, or on that message, they stop for this case**, and at the
+  `WARN` and `ERROR` log levels nothing is logged for it. The same entry is logged for a client that speaks HTTP/2
+  through MockServer as a CONNECT or SOCKS proxy.
+- **Log level change: an HTTP/2 stream error is logged once, as a `WARN`, and its stream is reset with the error's
+  own code.** A frame that is an error of one stream (for example a `WINDOW_UPDATE` with an increment of 0) was logged
+  as two `ERROR` entries with stack traces, and the stream was reset with `CANCEL`. It is now one `WARN` entry naming
+  the stream, the client and the error (`resetting HTTP/2 stream ... for stream error ...`), with no stack trace, and
+  the `RST_STREAM` carries the error's code (`PROTOCOL_ERROR` in that example). A client that goes on causing stream
+  errors is now disconnected: after more than 200 of them in 30 seconds the connection is closed with `GOAWAY`
+  `ENHANCE_YOUR_CALM`, logged as one `WARN`. Before, nothing limited them, because the limit does not count a reset
+  sent as `CANCEL`.
 - **TypeScript users of the Node client can call `retrieveRecordedRequestsAndResponsesAsHar` without a cast.** The
   method, which resolves with the recorded requests and their responses as one HAR 1.2 document, has been in the
   client since before 8.0.0 but was missing from its typings, so calling it from TypeScript did not compile. It is now

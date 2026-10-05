@@ -21,6 +21,7 @@ import org.mockserver.netty.integration.Http2TestClient;
 import org.slf4j.event.Level;
 
 import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
@@ -33,11 +34,16 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.both;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
+import static org.hamcrest.Matchers.emptyArray;
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.hasItems;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.lessThanOrEqualTo;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.nullValue;
@@ -50,7 +56,11 @@ import static org.mockserver.stop.Stop.stopQuietly;
  * What an HTTP/2 connection made straight to MockServer logs when the connection fails, over cleartext HTTP/2 and
  * over TLS: one entry in MockServer's own log at a level that fits the cause, and nothing through Netty's logger,
  * which reports whatever reaches the end of a pipeline at {@code WARN} with a stack trace. The connection is closed
- * as before: Netty's codec still sends the {@code GOAWAY}, and a stream's error still resets only that stream.
+ * as before: Netty's codec still sends the {@code GOAWAY}.
+ * <p>
+ * And what one of its streams logs when it ends before its request does, there and in a CONNECT or SOCKS tunnel: one
+ * {@code INFO} entry for an upload its client cancelled or whose connection closed, one {@code WARN} entry for an
+ * error of the stream's own, which resets it with that error's code, and none with a stack trace.
  */
 public class Http2ConnectionErrorLoggingIntegrationTest {
 
@@ -58,6 +68,12 @@ public class Http2ConnectionErrorLoggingIntegrationTest {
     private static final int LIMIT = 20_000;
     private static final String NETTYS_PIPELINE_LOGGER = "io.netty.channel.DefaultChannelPipeline";
     private static final String REACHED_THE_END = "reached at the tail of the pipeline";
+    private static final String TUNNEL_TARGET_HOST = "localhost";
+    private static final int TUNNEL_TARGET_PORT = 443;
+    // AbstractHttp2ConnectionHandlerBuilder's default for a server, read or written, in 30 seconds
+    private static final int RESETS_NETTY_ALLOWS = 200;
+    // the delay of a response that must still be awaited when its stream is reset, and never written while a later test runs
+    private static final int NEVER_WITHIN_THIS_CLASS_SECONDS = 600;
 
     private static final List<LogEntry> logged = new CopyOnWriteArrayList<>();
     private static final List<LogRecord> reachedTheEndOfAPipeline = new CopyOnWriteArrayList<>();
@@ -241,27 +257,267 @@ public class Http2ConnectionErrorLoggingIntegrationTest {
         assertThat(entries.get(0).getThrowable(), is(nullValue()));
     }
 
+    /**
+     * The stream is open in both tests: in the first its request is still being uploaded, so the part MockServer
+     * holds is dropped with it; in the second the request is complete and its response is not due yet.
+     */
     @Test
-    public void shouldStillResetOnlyTheStreamForAStreamError() throws Exception {
-        for (boolean tls : new boolean[]{false, true}) {
+    public void shouldResetOnlyTheStreamForAStreamErrorWithThatErrorsCodeAndWarnOnce() throws Exception {
+        mockServerClient.when(request().withPath("/slow")).respond(response().withBody("slow").withDelay(TimeUnit.SECONDS, NEVER_WITHIN_THIS_CLASS_SECONDS));
+        for (Route route : Route.values()) {
+            for (boolean uploading : new boolean[]{true, false}) {
+                String where = route + (uploading ? " while uploading" : " while awaiting the response");
+                logged.clear();
+                InetSocketAddress client;
+                int stream;
+                try (Http2TestClient connection = connect(route)) {
+                    client = connection.localAddress();
+                    Http2TestClient.Exchange open = uploading
+                        ? connection.send(pseudoHeaders(route, HttpMethod.POST, "/served"), false).data("part of the request body", false)
+                        : connection.send(pseudoHeaders(route, HttpMethod.GET, "/slow"), true);
+                    stream = open.streamId();
+
+                    connection.sendRaw(windowUpdateOfZero(stream));
+
+                    assertThat(where, open.resetErrorCode(), is(Http2Error.PROTOCOL_ERROR.code()));
+                    assertThat(where + ": the connection carries on", connection.send(pseudoHeaders(route, HttpMethod.GET, "/served"), true).status(), is(200));
+                    assertThat(where, connection.isOpen(), is(true));
+                }
+
+                List<LogEntry> entries = streamEntries(client);
+                assertThat(where, entries, hasSize(1));
+                assertThat(where, entries.get(0).getLogLevel(), is(Level.WARN));
+                assertThat(where, entries.get(0).getMessageFormat(), is("resetting HTTP/2 stream:{}from:{}for stream error:{}because:{}"));
+                assertThat(where, Arrays.asList(entries.get(0).getArguments()), hasItems(stream, Http2Error.PROTOCOL_ERROR));
+                assertThat(where, entries.get(0).getThrowable(), is(nullValue()));
+                assertThat(where, warningsAndErrors(), hasSize(1));
+                assertThat(where, connectionEntries(client), empty());
+                assertThat(where, thrownToTheEndOfAPipelineInThisTest(), empty());
+            }
+        }
+    }
+
+    @Test
+    public void shouldLogAnUploadItsClientCancelsOnceAtInfoWithNoStackTrace() throws Exception {
+        for (Route route : Route.values()) {
+            logged.clear();
             InetSocketAddress client;
-            try (Http2TestClient connection = connect(tls)) {
+            int stream;
+            try (Http2TestClient connection = connect(route)) {
                 client = connection.localAddress();
-                Http2TestClient.Exchange open = connection.send(pseudoHeaders(tls, HttpMethod.POST), false);
-                int stream = open.streamId();
+                Http2TestClient.Exchange upload = connection.send(pseudoHeaders(route, HttpMethod.POST, "/served"), false)
+                    .data("part of the request body", false)
+                    .reset(Http2Error.CANCEL);
+                stream = upload.streamId();
 
-                // WINDOW_UPDATE with an increment of 0, which is an error of the stream it names
-                connection.sendRaw(new byte[]{0, 0, 4, 8, 0, (byte) (stream >>> 24), (byte) (stream >>> 16), (byte) (stream >>> 8), (byte) stream, 0, 0, 0, 0});
+                // a frame already on its way to a stream that has gone is an error of that stream, and not worth an entry
+                connection.sendRaw(dataFrame(stream, "more of the request body"));
 
-                // by the stream's own handlers, which are told of the error and close their stream
-                assertThat(transport(tls), open.resetErrorCode(), is(Http2Error.CANCEL.code()));
-                assertThat("the connection carries on", connection.send(pseudoHeaders(tls, HttpMethod.GET), true).status(), is(200));
-                assertThat(transport(tls), connection.isOpen(), is(true));
+                // on the same connection, so MockServer has read both by the time this is answered
+                assertThat(route.name(), connection.send(pseudoHeaders(route, HttpMethod.GET, "/served"), true).status(), is(200));
             }
 
-            assertThat(transport(tls), connectionEntries(client), empty());
-            assertThat(transport(tls), thrownToTheEndOfAPipelineInThisTest(), empty());
+            List<LogEntry> entries = streamEntries(client);
+            assertThat(route.name(), entries, hasSize(1));
+            assertThat(route.name(), entries.get(0).getLogLevel(), is(Level.INFO));
+            assertThat(route.name(), entries.get(0).getMessageFormat(), is("HTTP/2 stream:{}from:{}was cancelled by its client with:{}before its request was complete"));
+            assertThat(route.name(), Arrays.asList(entries.get(0).getArguments()), hasItems(stream, Http2Error.CANCEL));
+            assertThat(route.name(), entries.get(0).getThrowable(), is(nullValue()));
+            assertThat(route.name(), warningsAndErrors(), empty());
+            assertThat(route.name(), thrownToTheEndOfAPipelineInThisTest(), empty());
         }
+        assertThat("no upload was dispatched", mockServerClient.retrieveRecordedRequests(request().withMethod("POST")), emptyArray());
+    }
+
+    /**
+     * A stream its client cancels once its request is complete held nothing, and is not an upload cut short.
+     */
+    @Test
+    public void shouldLogNothingForAStreamItsClientCancelsOnceItsRequestIsComplete() throws Exception {
+        mockServerClient.when(request().withPath("/slow")).respond(response().withBody("slow").withDelay(TimeUnit.SECONDS, NEVER_WITHIN_THIS_CLASS_SECONDS));
+        for (Route route : Route.values()) {
+            logged.clear();
+            InetSocketAddress client;
+            try (Http2TestClient connection = connect(route)) {
+                client = connection.localAddress();
+                connection.send(pseudoHeaders(route, HttpMethod.POST, "/slow"), false)
+                    .data("the whole request body", true)
+                    .reset(Http2Error.CANCEL);
+
+                assertThat(route.name(), connection.send(pseudoHeaders(route, HttpMethod.GET, "/served"), true).status(), is(200));
+            }
+
+            assertThat(route.name(), streamEntries(client), empty());
+            assertThat(route.name(), warningsAndErrors(), empty());
+        }
+    }
+
+    @Test
+    public void shouldLogAnUploadCutShortByItsConnectionClosingOnceAtInfoWithNoStackTrace() throws Exception {
+        for (Route route : Route.values()) {
+            for (boolean reset : new boolean[]{true, false}) {
+                String where = route + (reset ? " reset" : " closed");
+                logged.clear();
+                InetSocketAddress client;
+                int stream;
+                try (Http2TestClient connection = connect(route)) {
+                    client = connection.localAddress();
+                    stream = connection.send(pseudoHeaders(route, HttpMethod.POST, "/served"), false)
+                        .data("part of the request body", false)
+                        .streamId();
+                    // a stream whose request is complete is not an upload, and is not reported
+                    connection.send(pseudoHeaders(route, HttpMethod.GET, "/served"), true).body();
+
+                    if (reset) {
+                        connection.resetConnection();
+                    } else {
+                        connection.closeAbruptly();
+                    }
+                }
+
+                List<LogEntry> entries = awaitStreamEntries(client);
+                assertThat(where, entries, hasSize(1));
+                assertThat(where, entries.get(0).getLogLevel(), is(Level.INFO));
+                assertThat(where, entries.get(0).getMessageFormat(), is("HTTP/2 stream:{}from:{}ended with its connection before its request was complete"));
+                assertThat(where, Arrays.asList(entries.get(0).getArguments()), hasItem(stream));
+                assertThat(where, entries.get(0).getThrowable(), is(nullValue()));
+                assertThat(where, warningsAndErrors(), empty());
+                assertThat(where, thrownToTheEndOfAPipelineInThisTest(), empty());
+            }
+        }
+        assertThat("no upload was dispatched", mockServerClient.retrieveRecordedRequests(request().withMethod("POST")), emptyArray());
+    }
+
+    /**
+     * What bounds the entries one connection can cause: Netty closes a connection that sends more than 200
+     * RST_STREAM frames in 30 seconds, so a client cannot go on cancelling uploads on it.
+     */
+    @Test
+    public void shouldCloseAConnectionThatCancelsMoreThan200UploadsAtOnce() throws Exception {
+        for (Route route : new Route[]{Route.H2C, Route.CONNECT_TLS}) {
+            logged.clear();
+            InetSocketAddress client;
+            try (Http2TestClient connection = connect(route)) {
+                client = connection.localAddress();
+                for (int upload = 0; upload < RESETS_NETTY_ALLOWS + 1 && connection.isOpen(); upload++) {
+                    connection.send(pseudoHeaders(route, HttpMethod.POST, "/served"), false).reset(Http2Error.CANCEL);
+                }
+
+                assertThat(route.name(), connection.goAwayErrorCode(), is(Http2Error.ENHANCE_YOUR_CALM.code()));
+                assertThat(route.name(), connection.closedWithin(10), is(true));
+            }
+
+            assertThat(route.name(), awaitStreamEntries(client).size(), is(both(greaterThanOrEqualTo(RESETS_NETTY_ALLOWS)).and(lessThanOrEqualTo(RESETS_NETTY_ALLOWS + 1))));
+            assertThat(route.name(), warningsAndErrors().stream().filter(entry -> entry.getLogLevel() == Level.ERROR).collect(Collectors.toList()), empty());
+        }
+    }
+
+    /**
+     * And Netty closes a connection it has had to send more than 200 resets for an error in 30 seconds. It counts a
+     * reset by its code, and not {@code CANCEL}: resetting a stream with its error's own code is what makes this hold.
+     */
+    @Test
+    public void shouldCloseAConnectionThatCausesMoreThan200StreamErrorsAtOnce() throws Exception {
+        for (Route route : new Route[]{Route.H2C, Route.CONNECT_TLS}) {
+            logged.clear();
+            InetSocketAddress client;
+            try (Http2TestClient connection = connect(route)) {
+                client = connection.localAddress();
+                for (int error = 0; error < RESETS_NETTY_ALLOWS + 1 && connection.isOpen(); error++) {
+                    Http2TestClient.Exchange open = connection.send(pseudoHeaders(route, HttpMethod.POST, "/served"), false);
+                    connection.sendRaw(windowUpdateOfZero(open.streamId()));
+                    assertThat(route + " error " + error, open.resetErrorCode(), is(Http2Error.PROTOCOL_ERROR.code()));
+                }
+
+                assertThat(route.name(), connection.goAwayErrorCode(), is(Http2Error.ENHANCE_YOUR_CALM.code()));
+                assertThat(route.name(), connection.closedWithin(10), is(true));
+            }
+
+            assertThat(route.name(), streamEntries(client), hasSize(RESETS_NETTY_ALLOWS + 1));
+            List<LogEntry> closing = awaitConnectionEntries(client);
+            assertThat(route.name(), closing, hasSize(1));
+            assertThat(route.name(), closing.get(0).getLogLevel(), is(Level.WARN));
+            assertThat(route.name(), closing.get(0).getMessageFormat(), is("closing HTTP/2 connection from:{}for connection error:{}because:{}"));
+            assertThat(route.name(), Arrays.asList(closing.get(0).getArguments()), hasItem(Http2Error.ENHANCE_YOUR_CALM));
+            assertThat(route.name(), closing.get(0).getThrowable(), is(nullValue()));
+            assertThat(route.name(), warningsAndErrors(), hasSize(RESETS_NETTY_ALLOWS + 2));
+        }
+    }
+
+    public enum Route {
+        H2C(false, false), TLS(false, true), CONNECT_TLS(true, true), SOCKS5_H2C(true, false);
+
+        private final boolean tunnel;
+        private final boolean tls;
+
+        Route(boolean tunnel, boolean tls) {
+            this.tunnel = tunnel;
+            this.tls = tls;
+        }
+    }
+
+    private static Http2TestClient connect(Route route) throws Exception {
+        int port = mockServer.getLocalPort();
+        switch (route) {
+            case H2C:
+                return Http2TestClient.h2c(clientGroup, port);
+            case TLS:
+                return Http2TestClient.tls(clientGroup, port);
+            case CONNECT_TLS:
+                return Http2TestClient.throughConnect(clientGroup, port, TUNNEL_TARGET_HOST, TUNNEL_TARGET_PORT);
+            default:
+                return Http2TestClient.throughSocks5(clientGroup, port, TUNNEL_TARGET_HOST, TUNNEL_TARGET_PORT, false);
+        }
+    }
+
+    private static Http2Headers pseudoHeaders(Route route, HttpMethod method, String path) {
+        return new DefaultHttp2Headers()
+            .method(method.asciiName())
+            .scheme(route.tls ? "https" : "http")
+            .authority(route.tunnel ? TUNNEL_TARGET_HOST + ":" + TUNNEL_TARGET_PORT : "localhost:" + mockServer.getLocalPort())
+            .path(path);
+    }
+
+    // WINDOW_UPDATE with an increment of 0, which is an error of the stream it names
+    private static byte[] windowUpdateOfZero(int stream) {
+        return new byte[]{0, 0, 4, 8, 0, (byte) (stream >>> 24), (byte) (stream >>> 16), (byte) (stream >>> 8), (byte) stream, 0, 0, 0, 0};
+    }
+
+    private static byte[] dataFrame(int stream, String payload) {
+        byte[] data = payload.getBytes(StandardCharsets.UTF_8);
+        byte[] frame = new byte[9 + data.length];
+        frame[2] = (byte) data.length;
+        frame[5] = (byte) (stream >>> 24);
+        frame[6] = (byte) (stream >>> 16);
+        frame[7] = (byte) (stream >>> 8);
+        frame[8] = (byte) stream;
+        System.arraycopy(data, 0, frame, 9, data.length);
+        return frame;
+    }
+
+    /**
+     * The entries MockServer logged about one stream of the HTTP/2 connection from a client's address.
+     */
+    private static List<LogEntry> streamEntries(InetSocketAddress client) {
+        Pattern address = Pattern.compile(":" + client.getPort() + "(?!\\d)");
+        return logged.stream()
+            .filter(entry -> String.valueOf(entry.getMessageFormat()).contains("HTTP/2 stream"))
+            .filter(entry -> address.matcher(Arrays.toString(entry.getArguments())).find())
+            .collect(Collectors.toList());
+    }
+
+    private static List<LogEntry> awaitStreamEntries(InetSocketAddress client) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (streamEntries(client).isEmpty() && System.nanoTime() < deadline) {
+            TimeUnit.MILLISECONDS.sleep(20);
+        }
+        return streamEntries(client);
+    }
+
+    private static List<LogEntry> warningsAndErrors() {
+        return logged.stream()
+            .filter(entry -> entry.getLogLevel() == Level.WARN || entry.getLogLevel() == Level.ERROR)
+            .collect(Collectors.toList());
     }
 
     private static Http2TestClient connect(boolean tls) throws Exception {

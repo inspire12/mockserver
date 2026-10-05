@@ -227,11 +227,12 @@ public class Http2TunnelStreamedResponseBackpressureIntegrationTest {
     }
 
     /**
-     * A mocked response with a 1xx status is the whole response. Through a tunnel it ends the client's stream, as it
-     * did before streamed responses were relayed as they are written, so the tunnel is then idle and closed as idle.
+     * A mocked response with a 1xx status is the whole response. MockServer resets its stream after it, and the relay
+     * hands both on as they are: the 1xx without END_STREAM, which RFC 9113 section 8.1 forbids on an interim
+     * response, then the reset. The tunnel is then idle and closed as idle.
      */
     @Test
-    public void shouldEndTheStreamOfAMockedInformationalResponseAndCloseItsTunnelAsIdle() throws Exception {
+    public void shouldResetTheStreamOfAMockedInformationalResponseAndCloseItsTunnelAsIdle() throws Exception {
         timingClient.when(request().withPath("/processing")).respond(response().withStatusCode(102));
         timingClient.when(request().withPath("/hints")).respond(response().withStatusCode(103).withHeader("link", "</style.css>; rel=preload"));
         for (String path : Arrays.asList("/processing", "/hints")) {
@@ -239,7 +240,8 @@ public class Http2TunnelStreamedResponseBackpressureIntegrationTest {
                 Http2TestClient.Exchange informational = tunnel.send(headers(HttpMethod.GET, path), true);
 
                 assertThat(path, informational.interimStatus(), is(path.equals("/hints") ? 103 : 102));
-                assertCompleteWithin(informational, 10);
+                assertThat(path, informational.interimEndedStream(), is(false));
+                assertThat(path, informational.resetErrorCode(), is(Http2Error.NO_ERROR.code()));
                 assertThat(path + ": the tunnel is closed as idle", tunnel.closedWithin(15), is(true));
             }
         }

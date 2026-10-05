@@ -616,9 +616,9 @@ public class ResponseWriteStallTimeoutIntegrationTest {
             assertThat("the stalled stream ended", stalled.ended.await(CUT_WITHIN_MILLIS, TimeUnit.MILLISECONDS), is(true));
             assertThat("the stalled stream was reset", stalled.resetErrorCode.get(), is(Http2Error.CANCEL.code()));
             assertThat("the client was sent none of it", stalled.dataBytes.get(), is(0L));
-            // the overflow leaves the earlier stream open; it too has a response waiting and takes none of it
+            // the overflow is an error of the earlier stream, which is reset for it with that error's code
             assertThat("the overflowing stream ended", overflowing.ended.await(CUT_WITHIN_MILLIS, TimeUnit.MILLISECONDS), is(true));
-            assertThat("the overflowing stream was reset as stalled", overflowing.resetErrorCode.get(), is(Http2Error.CANCEL.code()));
+            assertThat("the overflowing stream was reset for the overflow", overflowing.resetErrorCode.get(), is(Http2Error.FLOW_CONTROL_ERROR.code()));
             assertThat("MockServer took the client's rises while the stream was stalled", client.settingsAcks.get(), greaterThan(3));
             assertThat("the connection, whose socket kept being read, stayed open", client.channel.isActive(), is(true));
         }

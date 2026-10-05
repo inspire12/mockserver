@@ -364,14 +364,13 @@ The client leg is watched, not the loopback, because only it sees an upload in p
 
 **An exchange MockServer ends without a response.** `HttpExchangeEndedEvent` is fired on the loopback leg MockServer accepts, which is not the leg the timer watches, and nothing the client leg could count ever crosses the loopback: no bytes for an abandoned request, and for a final `1xx` a response the client leg's own codec takes for an interim one. So `PortUnificationHandler.switchToHttp` adds `LoopbackExchangeEndedHandler` after the codec of a relay's loopback (`RelayLoopbackAddresses.isRelayLoopback`). On `HttpExchangeEndedEvent.INSTANCE` it looks up the tunnel's proxy client channel, which `RelayLoopbackAddresses` holds against the loopback's address, and fires the same event from that channel's `HttpServerCodec` on its own event loop, where the client leg's `HttpExchangeTracker` ends its oldest exchange as it would on a direct connection. The tunnel is then idle-closed on the same terms as a direct connection in that state; before, it counted as busy for the rest of its life (`InboundConnectionIdleTimeoutIntegrationTest`, `LoopbackExchangeEndedHandlerTest`).
 
-`RAW_RESPONSE_WRITTEN` is not passed on. The relay reads raw bytes as a response, and the client leg ends the exchange when it has relayed it; telling it as well would end a second, pipelined exchange early. Two cases therefore still differ from a direct connection:
+`RAW_RESPONSE_WRITTEN` is not passed on. The relay reads raw bytes as a response, and the client leg ends the exchange when it has relayed it; telling it as well would end a second, pipelined exchange early. One case therefore still differs from a direct connection:
 
 | Case | Direct connection | Through a tunnel |
 |---|---|---|
 | Raw bytes that are not a whole HTTP response (`responseBytes` cut short), connection kept open | closed as idle | stays open: the relay collects a response before relaying it, so the client receives nothing and its exchange never ends |
-| HTTP/2: a final `1xx` other than `101` | stays open: its stream is not ended | closed as idle: the client's stream ends with the `1xx` |
 
-An HTTP/2 stream MockServer abandons stays open on both, by design: the stream is what the client is still waiting on.
+Over HTTP/2 a mocked final `1xx` ends its stream with a reset on both, so both are then closed as idle (see [A mocked final `1xx`](#a-mocked-final-1xx)). An HTTP/2 stream MockServer abandons stays open on both, by design: the stream is what the client is still waiting on.
 
 **Tunnels and the cap.** A CONNECT/SOCKS tunnel whose target is MockServer itself holds two slots: the client's connection and the internal loopback connection `RelayConnectHandler` opens. If the loopback is refused by the cap, the loopback channel closes before `PROXIED_RESPONSE_` arrives; `RelayConnectHandler`'s `channelInactive` then answers the client with the failure response (`502` for CONNECT) and closes, where it previously waited forever.
 
@@ -632,9 +631,9 @@ Over HTTP/2 a header block (the HPACK-encoded bytes, across its `HEADERS` and `C
 | HTTP/2 in a CONNECT or SOCKS tunnel | `431` if no response has started on the stream, then `RST_STREAM(PROTOCOL_ERROR)`; the tunnel carries on |
 | HTTP/3 | connection closed with `H3_EXCESSIVE_LOAD`, as for a header section |
 
-The tunnel's `Http2ConnectionHandler` answers the stream itself. A direct connection's `Http2FrameCodec` instead hands a stream error on a stream that already has a channel to that channel's pipeline, then closes the channel with the error's code. `LenientInboundHttp2StreamFrameCodec.exceptionCaught` stops the error there, because `Http2RequestHeaderLimit` logged it as it was raised, and marks the stream; the aggregator's `PrematureChannelClosureException` for the body it held follows, and `CallbackWebSocketServerHandler` recognises it on a marked stream (`Http2RequestHeaderLimit.isRefusedRequestCutShort`). A handler that treated either as unexpected would log it again and close the stream itself, which resets it with `CANCEL` where Netty would send `PROTOCOL_ERROR`. The WARN names the trailers (`resetting HTTP/2 stream ... because the request's trailers are larger than maxHeaderSize`); `Http2RequestHeaderLimit` tells them from a request's headers by whether the connection already knows the stream.
+The tunnel's `Http2ConnectionHandler` answers the stream itself. A direct connection's `Http2FrameCodec` instead hands a stream error on a stream that already has a channel to that channel's pipeline, then closes the channel with the error's code. `LenientInboundHttp2StreamFrameCodec.exceptionCaught` stops the error there, because `Http2RequestHeaderLimit` logged it as it was raised, and marks the stream; the aggregator's `PrematureChannelClosureException` for the body it held follows, and `CallbackWebSocketServerHandler` recognises it on a marked stream (`Http2RequestHeaderLimit.isRefusedRequestCutShort`). A handler that treated either as unexpected would log it again and close the stream itself, which resets it with `CANCEL` where Netty would send `PROTOCOL_ERROR`. Every other error of a stream is stopped at the same place, for the same reason (see [HTTP/2 streams cut short](#http2-streams-cut-short)). The WARN names the trailers (`resetting HTTP/2 stream ... because the request's trailers are larger than maxHeaderSize`); `Http2RequestHeaderLimit` tells them from a request's headers by whether the connection already knows the stream.
 
-A client can also send a header block over the limit on a stream whose request it has ended, which no well-behaved client does; Netty limits it before it checks the stream's state, so it is handled as trailers are, and a response still being written or streamed on that stream stops. This is the one case a handler's own close left without any reset: with the request ended and the whole response already written to the stream's channel, closing that channel sends none, and the response went on being delivered. In a tunnel over HTTP/2 the relay hands a response on only when it has all of it (a known defect, see [Outbound Buffering and Backpressure](#outbound-buffering-and-backpressure)), so a response MockServer is still streaming has not started for the client, which is answered `431`; the relay resets the loopback stream. Over HTTP/3 a request whose trailer section was refused is not dispatched when its stream's input then closes (`Http3MockServerHandler.sectionRefused`): the end of the stream is delivered after the error that closed the connection. `Http2TrailerListLimitIntegrationTest` and `Http3TrailerSectionLimitIntegrationTest` cover each case, and check that no buffer leaked; the first also shows that an upload the client itself resets is still reported.
+A client can also send a header block over the limit on a stream whose request it has ended, which no well-behaved client does; Netty limits it before it checks the stream's state, so it is handled as trailers are, and a response still being written or streamed on that stream stops. This is the one case a handler's own close left without any reset: with the request ended and the whole response already written to the stream's channel, closing that channel sends none, and the response went on being delivered. In a tunnel over HTTP/2 the relay hands a response on only when it has all of it (a known defect, see [Outbound Buffering and Backpressure](#outbound-buffering-and-backpressure)), so a response MockServer is still streaming has not started for the client, which is answered `431`; the relay resets the loopback stream. Over HTTP/3 a request whose trailer section was refused is not dispatched when its stream's input then closes (`Http3MockServerHandler.sectionRefused`): the end of the stream is delivered after the error that closed the connection. `Http2TrailerListLimitIntegrationTest` and `Http3TrailerSectionLimitIntegrationTest` cover each case, and check that no buffer leaked; the first also shows that an upload the client itself resets is not a warning (see [HTTP/2 streams cut short](#http2-streams-cut-short)).
 
 **What a client can make MockServer hold.** Netty counts each decoded field against the limit and stops keeping fields once it is passed, so a block that is small on the wire and far larger decoded (one large field referred to many times from the HPACK dynamic table, or QPACK static-table references) is refused without being held: over HTTP/2 for less memory than the limit itself (`Http2RequestHeaderLimitTest`); over HTTP/3 the codec's `Http3HeadersSink` drops fields the same way, which `Http3HeaderSectionAllocationIntegrationTest` measures on a real QUIC connection: the heap MockServer's threads allocate to refuse a section of QPACK static-table references stays within twice the limit, and a field past the limit costs less than the smallest object. That test turns buffer leak tracking off for its own class, because tracking records a stack trace for every byte read; `Http3HeaderListLimitIntegrationTest` refuses the same kind of section with tracking on. Per connection the worst case is:
 
@@ -731,6 +730,88 @@ It must stay last: ahead of `Http2MultiplexHandler` it would take the stream err
 **Log volume.** One entry for each exception. Every row of the table but the last ends the connection (the codec after a connection error, the transport after a failed read, the handler itself for an SSL or decoder fault or the direct memory limit), so those give a client at most one entry for each connection it opens. The entry for a closed or reset connection is at `DEBUG`, below the default level, with no stack trace; the one for an SSL or decoder fault is cut to 256 characters of the exception's message; a connection error is logged at `WARN` with its stack trace (the longest message Netty was found to give one is about 1 KB, for an HTTP/1.x request where the preface belongs). Two things are outside that bound. An exception in the last row is logged at `ERROR` with its stack trace every time it is raised, and the connection stays open; no way for a client to raise one is known. And `Http2MultiplexHandler` also fires an SSL fault into every stream open at the time, whose own handlers log it as they log any exception (with the stack trace, so with Netty's whole message): those entries are the child pipeline's, one or more for each open stream.
 
 The client leg of a CONNECT or SOCKS tunnel needs no such handler: its `HttpToHttp2ConnectionHandler` does not fire connection errors down the pipeline, and the relay handlers after it handle what the transport raises. The tunnel's loopback leg is a direct connection and has it.
+
+##### HTTP/2 streams cut short
+
+**A stream that ends before its request is complete is logged once, with no stack trace: `INFO` when the client cancelled it or its connection closed, `WARN` when the stream is reset for an error of its own, and that reset carries the error's code.** It is the same on a direct connection and on the client leg of a CONNECT or SOCKS tunnel. Before, a direct connection logged a cancelled upload at `ERROR` with a stack trace as `web socket server caught exception`, logged an error of a stream twice at `ERROR` and reset the stream with `CANCEL`; a tunnel logged nothing for a cancelled upload.
+
+| What happened | Logged | The stream |
+|---|---|---|
+| The client sent `RST_STREAM` before its request was complete | `INFO` `HTTP/2 stream ... was cancelled by its client with ... before its request was complete` | closed by the client |
+| The connection closed with a request incomplete | `INFO` `HTTP/2 stream ... ended with its connection before its request was complete`, one for each such stream | closed with the connection |
+| The client sent `RST_STREAM` once its request was complete | nothing | closed by the client |
+| An error of a stream that is open (tested with a `WINDOW_UPDATE` of 0, while a request is being uploaded and while its response is awaited) | `WARN` `resetting HTTP/2 stream ... for stream error ... because ...` | reset with the error's code |
+| An error of a stream that has gone (a frame already on its way when the stream was reset) | nothing: Netty answers it with a reset | none |
+| Netty closes the connection because it had to send too many resets | `WARN` `closing HTTP/2 connection ... for connection error ENHANCE_YOUR_CALM because ...` | all closed, after a `GOAWAY` |
+| Request trailers over `maxHeaderSize` | `WARN`, by `Http2RequestHeaderLimit` (see [Request line and header limits](#request-line-and-header-limits)) | reset with `PROTOCOL_ERROR` |
+
+`Http2StreamFaults` holds every entry. The errors are logged where Netty raises them, in the `onError` both codecs already override for the header limit (`Http2RequestHeaderLimit.logRefusalThen`), so one piece of code serves both kinds of connection. The two `INFO` entries are found differently, because a request is held in a different place:
+
+| | Direct connection | Tunnel's client leg |
+|---|---|---|
+| Holds an incomplete request | the stream's aggregator, which reports it as a `PrematureChannelClosureException` when the stream's channel closes | the relay's `InboundHttp2ToHttpAdapter`, which hands a request on only when it is complete |
+| Client's `RST_STREAM` | `LenientInboundHttp2StreamFrameCodec` notes the reset Netty reports to the stream; `CallbackWebSocketServerHandler`, the first handler after the aggregator, asks `Http2StreamFaults.isRequestCutShort` about the exception | the frame listener is wrapped (`tunnelFrameListener`) and logs a reset of a stream whose client side is still open |
+| Connection closed | the same exception, on a stream whose connection is no longer active | the handler's `channelInactive` logs each stream whose client side is still open, before Netty closes them |
+| Stream's own error | `LenientInboundHttp2StreamFrameCodec` stops the exception and marks the stream; Netty then closes the stream's channel with the error's code, and the aggregator's report is recognised by the mark | Netty resets the stream with the error's code |
+
+A `PrematureChannelClosureException` on a stream that none of these explains is still logged by `CallbackWebSocketServerHandler` as before: something else closed the stream, and that is worth seeing. A WebSocket fault is logged as before too.
+
+**Why the reset must carry the error's code.** Closing a stream's channel from a handler resets it with `CANCEL` whatever went wrong, which tells the client nothing, and which Netty's limit on resets does not count (next paragraph).
+
+**What bounds the entries one connection can cause.** Each entry costs the client a stream, as a request does, and a request logs more. Beyond that, Netty closes an HTTP/2 server connection, with `GOAWAY(ENHANCE_YOUR_CALM)`, that:
+
+| Limit (Netty's default for a server, set by neither builder) | Bounds |
+|---|---|
+| whose client sends more than 200 `RST_STREAM` frames in 30 seconds (`decoderEnforceMaxRstFramesPerWindow`) | the `INFO` entries for cancelled requests |
+| whose client makes the server send more than 200 `RST_STREAM` frames in 30 seconds, not counting `CANCEL` and `NO_ERROR` (`encoderEnforceMaxRstFramesPerWindow`) | the `WARN` entries for stream errors. With the stream reset as `CANCEL`, as before, nothing bounded them: a client could repeat a stream error on stream after stream for as long as it liked |
+| (not a close) `SETTINGS_MAX_CONCURRENT_STREAMS`, 100 | the `INFO` entries when a connection closes: one for each stream then open |
+
+Both limits are Netty's builder defaults for a server; MockServer sets neither, so a Netty upgrade that changed them would change the bound (the tests pin 200). A limit trips inside a read, and the frames of that read are still processed before the connection closes, so up to about one read's worth of stream `WARN` entries can follow the closing `WARN` (a review run sent 300 in three writes of 100 and all 300 were logged); the closing entry itself is logged once.
+
+The first is an inbound connection error, which `Http2ConnectionExceptionHandler` logs on a direct connection; the second is raised while writing, reaches no handler, and is logged by `Http2StreamFaults`. `Http2ConnectionErrorLoggingIntegrationTest` covers every row over a socket on `h2`, `h2c`, a CONNECT tunnel and a SOCKS5 tunnel, and both limits; `Http2StreamFaultsTest` covers what is left to other handlers.
+
+**Not changed.** A tunnel still logs nothing for a connection error on its client leg (the first limit included). An HTTP/1.1 upload cut short by its connection closing is still logged at `ERROR` as `web socket server caught exception`.
+
+##### A mocked final `1xx`
+
+**An expectation whose response has a `1xx` status other than `101` is sent over HTTP/2 as an interim response, and its stream is then reset with `NO_ERROR`, on a direct connection and through a tunnel alike.** Before, a direct connection sent the `1xx` and left the stream open for the life of the connection, so the client waited for a response that never came and the connection was never idle; a tunnel sent the `1xx` with `END_STREAM`.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant R as Relay (tunnel only)
+    participant M as MockServer
+    C->>M: HEADERS (request), END_STREAM
+    M->>R: HEADERS :status 102
+    R->>C: HEADERS :status 102
+    M->>R: RST_STREAM NO_ERROR
+    R->>C: RST_STREAM NO_ERROR
+    Note over C,M: no stream is open: the connection is closed as idle after its timeout
+```
+
+**Why a reset.** RFC 9113 section 8.1 allows an interim response to be followed only by another response, so a stream cannot end after one without being malformed, whether the `END_STREAM` is on the `1xx` itself or on an empty DATA frame after it. Only a reset ends the stream without breaking the framing. What clients made of each, sent by a bare cleartext HTTP/2 server on macOS (by hand, not in a test):
+
+| After `HEADERS :status 102` | curl 8.7.1 (nghttp2 1.68.1) | Node 26 `http2` | Go 1.26 `net/http` |
+|---|---|---|---|
+| `END_STREAM` on the `1xx` (a tunnel, before) | waits until its own timeout | stream error `PROTOCOL_ERROR`, the `102` not delivered | `PROTOCOL_ERROR`: `1xx informational response with END_STREAM flag` |
+| an empty DATA frame with `END_STREAM` | waits until its own timeout | stream error `PROTOCOL_ERROR` | `PROTOCOL_ERROR` |
+| `RST_STREAM NO_ERROR` | fails at once: `closed cleanly, but before getting all response header fields` | the `102`, then the stream closes with no error | fails at once: `NO_ERROR; received from peer` |
+| `RST_STREAM CANCEL` | fails at once: `not closed cleanly: CANCEL` | the `102`, then the stream closes with no error | fails at once: `CANCEL; received from peer` |
+| nothing (a direct connection, before) | waits until its own timeout | waits | waits |
+
+`Http2FinalInformationalResponseIntegrationTest` checks the frames with Netty's client on `h2`, `h2c` and both kinds of tunnel, and that the JDK's `HttpClient` (17) fails the request at once with `Received RST_STREAM` and has its next request answered.
+
+**Why `NO_ERROR`.** Nothing went wrong: the expectation asked for a response that is not one. `REFUSED_STREAM` invites a retry, `PROTOCOL_ERROR` and `INTERNAL_ERROR` blame one side, and Netty counts all three towards the resets it allows a connection (see [HTTP/2 streams cut short](#http2-streams-cut-short)), so a client that asked for a few hundred such responses would have its connection closed. It counts neither `NO_ERROR` nor `CANCEL`.
+
+**How.** `NettyResponseWriter.writeWhole` writes a `DefaultHttp2ResetFrame` to the stream's channel after the response, in the same flush, and hands the reset's write on as the response's. The order matters for a response with `closeSocket`, whose stream's channel is closed when that write completes: closing a stream that has not been reset sends `CANCEL` (a delayed response with `closeSocket` did, written the other way round). A final `1xx` with a `chunkSize` (with or without a `chunkDelay`) is written whole over HTTP/2, without the chunk size (`withoutChunking`): Netty's codec takes a `1xx` only as one `FullHttpResponse`, so in pieces it sent nothing at all, neither the `1xx` nor a reset (also before this change). Over HTTP/1.1 `HttpExchangeEndedEvent` is fired, as before. Netty's `Http2StreamFrameToHttpObjectCodec` already wrote a `1xx` without `END_STREAM`. On a tunnel the loopback's `LoopbackHttp2ResponseStreamer` hands a `1xx` on as it is read, as a `StreamedHttp2ResponsePart` whose headers do not end the stream, where before `InboundHttp2ToHttpAdapter` handed it on whole and the client leg's `HttpToHttp2ConnectionHandler` ended the stream with it; `LoopbackHttp2StreamErrorHandler` then relays MockServer's reset with its code, as it does any other.
+
+**An interim response that a final one follows is not affected.** The `100` MockServer answers `Expect: 100-continue` with comes from the stream's aggregator (from the relay, in a tunnel), not from an expectation, and its stream goes on to the final response. MockServer has no way to mock a `103` that a final response follows.
+
+| Protocol | A mocked final `1xx` | Then |
+|---|---|---|
+| HTTP/1.1, direct or in a tunnel | the `1xx` status line and headers; the connection stays open | the exchange is counted as ended (`HttpExchangeEndedEvent`), so the connection is closed as idle |
+| HTTP/2, direct or in a tunnel | `HEADERS` without `END_STREAM`, then `RST_STREAM NO_ERROR` | the connection is closed as idle |
+| HTTP/3 | `HEADERS`, then the stream's output is shut down (a QUIC `FIN`), by `Http3ResponseWriter.writeStaticResponse` (read from the code, not tried with a client) | QUIC's own `http3MaxIdleTimeout`; an open stream does not hold a QUIC connection open |
 
 #### gRPC Pipeline (over HTTP/2)
 
@@ -1394,7 +1475,7 @@ response of declared length is still held whole, as before.
 flowchart LR
     MS["MockServer\n(loopback server side)"] -->|"HEADERS, DATA, trailers"| ST["LoopbackHttp2ResponseStreamer"]
     ST -->|"declared length, a content coding,\nor ended by its headers"| AG["BoundedZstdDecompressorFrameListener\nInboundHttp2ToHttpAdapter\n(whole response)"]
-    ST -->|"undeclared length"| PT["StreamedHttp2ResponsePart\nper frame"]
+    ST -->|"undeclared length,\nor a 1xx"| PT["StreamedHttp2ResponsePart\nper frame"]
     AG --> RM["LoopbackHttp2StreamIdRemapper"]
     PT --> RM
     RM --> DR["DownstreamProxyRelayHandler"]
@@ -1409,7 +1490,7 @@ flowchart LR
 | Final headers that do not end the stream and carry neither `content-length` nor `content-encoding` | frame by frame, as read |
 | Final headers with `content-length`, or that end the stream (`204`, `304`, any response with no body) | whole, by `InboundHttp2ToHttpAdapter`, as before |
 | Final headers with `content-encoding` | decoded and whole, as before |
-| A `1xx` | whole, as before, which ends the client's stream (MockServer ends no loopback stream with a `1xx` it mocks; see *Tunnels and the idle timeout*) |
+| A `1xx` | as read, as the interim response it is: its headers do not end the client's stream. MockServer resets the loopback stream of a `1xx` it mocks, and the reset is relayed with its code (see [A mocked final `1xx`](#a-mocked-final-1xx)) |
 
 **Why the length decides.** MockServer writes a response it produces as it goes without `content-length`, and one
 it has whole with it, unless the expectation says otherwise (a chunk size, trailers, `suppressContentLengthHeader`);
@@ -2127,6 +2208,7 @@ flowchart LR
 | `MockServerUnificationInitializer` | `mockserver-netty/.../netty/MockServerUnificationInitializer.java` | Replaces self with `PortUnificationHandler` |
 | `PortUnificationHandler` | `mockserver-netty/.../netty/unification/PortUnificationHandler.java` | Protocol detection and pipeline assembly |
 | `Http2ConnectionExceptionHandler` | `mockserver-netty/.../netty/unification/Http2ConnectionExceptionHandler.java` | Last handler of a direct HTTP/2 connection's pipeline; logs the exceptions that reach it, each once and at a level that fits its cause |
+| `Http2StreamFaults` | `mockserver-netty/.../netty/unification/Http2StreamFaults.java` | Logs an HTTP/2 stream that ends before its request does, once: a client's cancel or a closed connection at `INFO`, a stream's own error at `WARN`; direct connections and tunnels |
 | `Http2MultiplexChildInitializer` | `mockserver-netty/.../netty/unification/Http2MultiplexChildInitializer.java` | Per-stream child initializer for the HTTP/2 multiplex pipeline; installs `ConnectionScopeHandler`, `Http2StreamTransportTimer` when metrics are enabled, optionally `GrpcBidiRouterHandler`, and the re-aggregating chain for every HTTP/2 stream |
 | `HttpRequestHandler` | `mockserver-netty/.../netty/HttpRequestHandler.java` | Main request dispatcher |
 | `NettyResponseWriter` | `mockserver-netty/.../netty/responsewriter/NettyResponseWriter.java` | Writes responses to Netty channels |
