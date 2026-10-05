@@ -15,9 +15,11 @@ import org.mockserver.model.RetrieveType;
 import org.mockserver.model.StringBody;
 import org.mockserver.responsewriter.ResponseWriter;
 import org.mockserver.scheduler.Scheduler;
+import org.slf4j.event.Level;
 
-import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 
@@ -44,37 +46,54 @@ import static org.mockserver.model.HttpResponse.response;
 @RunWith(Parameterized.class)
 public class HttpStateRetrieveOutOfMemoryTest {
 
-    @Parameterized.Parameters(name = "{0} as {1}")
+    private static final Object[][] RETRIEVES = {
+        {RetrieveType.LOGS, Format.LOG_ENTRIES},
+        {RetrieveType.LOGS, Format.JSON},
+        {RetrieveType.REQUESTS, Format.JSON},
+        {RetrieveType.REQUESTS, Format.JAVA},
+        {RetrieveType.REQUESTS, Format.LOG_ENTRIES},
+        {RetrieveType.REQUEST_RESPONSES, Format.JSON},
+        {RetrieveType.REQUEST_RESPONSES, Format.LOG_ENTRIES},
+        {RetrieveType.RECORDED_EXPECTATIONS, Format.JSON},
+        {RetrieveType.RECORDED_EXPECTATIONS, Format.JAVA},
+        {RetrieveType.RECORDED_EXPECTATIONS, Format.LOG_ENTRIES},
+        {RetrieveType.ACTIVE_EXPECTATIONS, Format.JSON},
+        {RetrieveType.ACTIVE_EXPECTATIONS, Format.JAVA},
+    };
+
+    @Parameterized.Parameters(name = "{0} as {1} at {2}")
     public static Collection<Object[]> retrieves() {
-        return Arrays.asList(new Object[][]{
-            {RetrieveType.LOGS, Format.LOG_ENTRIES},
-            {RetrieveType.LOGS, Format.JSON},
-            {RetrieveType.REQUESTS, Format.JSON},
-            {RetrieveType.REQUESTS, Format.JAVA},
-            {RetrieveType.REQUESTS, Format.LOG_ENTRIES},
-            {RetrieveType.REQUEST_RESPONSES, Format.JSON},
-            {RetrieveType.REQUEST_RESPONSES, Format.LOG_ENTRIES},
-            {RetrieveType.RECORDED_EXPECTATIONS, Format.JSON},
-            {RetrieveType.RECORDED_EXPECTATIONS, Format.JAVA},
-            {RetrieveType.RECORDED_EXPECTATIONS, Format.LOG_ENTRIES},
-            {RetrieveType.ACTIVE_EXPECTATIONS, Format.JSON},
-            {RetrieveType.ACTIVE_EXPECTATIONS, Format.JAVA},
-        });
+        List<Object[]> retrieves = new ArrayList<>();
+        for (Level logLevel : new Level[]{Level.WARN, Level.INFO}) {
+            for (Object[] retrieve : RETRIEVES) {
+                // LOGS as JSON is a list of the entries' messages. At INFO the event log has already rendered
+                // and kept the message when it wrote the entry out, so the retrieve reads no body
+                // and the body below cannot fail it; at WARN the retrieve renders the message.
+                boolean readsNoBody = retrieve[0] == RetrieveType.LOGS && retrieve[1] == Format.JSON && logLevel == Level.INFO;
+                if (!readsNoBody) {
+                    retrieves.add(new Object[]{retrieve[0], retrieve[1], logLevel});
+                }
+            }
+        }
+        return retrieves;
     }
 
     private final RetrieveType type;
     private final Format format;
+    private final Level logLevel;
     private HttpState httpState;
     private ScheduledExecutorService schedulerExecutor;
 
-    public HttpStateRetrieveOutOfMemoryTest(RetrieveType type, Format format) {
+    public HttpStateRetrieveOutOfMemoryTest(RetrieveType type, Format format, Level logLevel) {
         this.type = type;
         this.format = format;
+        this.logLevel = logLevel;
     }
 
     @Before
     public void setUp() {
-        Configuration configuration = configuration();
+        // set here, not left to the JVM-wide mockserver.logLevel, which differs between builds
+        Configuration configuration = configuration().logLevel(logLevel);
         Scheduler scheduler = mock(Scheduler.class);
         schedulerExecutor = Executors.newScheduledThreadPool(2);
         when(scheduler.getExecutorService()).thenReturn(schedulerExecutor);
