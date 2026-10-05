@@ -23,7 +23,8 @@ public final class RawHttp1Connection implements AutoCloseable {
 
     public RawHttp1Connection(int port) throws IOException {
         socket.connect(new InetSocketAddress("localhost", port), 5_000);
-        socket.setSoTimeout(60_000);
+        // a hang guard: the build's leak detector makes the server slow to read a body of tiny chunks
+        socket.setSoTimeout(240_000);
         socket.setTcpNoDelay(true);
         in = socket.getInputStream();
         out = socket.getOutputStream();

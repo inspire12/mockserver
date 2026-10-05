@@ -37,8 +37,13 @@ public class Http2StreamPeakHeldTest {
      * The read a stream is on, a part-used block, the read being delivered and the filler request in flight.
      */
     private static final long SLACK = 64 * KIB + 16 * KIB + 2 * 64 * KIB;
+    /**
+     * A hang guard, not a speed limit: the build's leak detector records a stack trace at every access to a tracked
+     * buffer, which multiplies the time the tiny-frame shapes take.
+     */
+    private static final long HANG_GUARD_MILLIS = 900_000;
 
-    @Test(timeout = 300_000)
+    @Test(timeout = HANG_GUARD_MILLIS)
     public void shouldHoldEveryReadOfABodyInSixteenKibFramesWithoutCopying() {
         // the frames fill their reads, so nothing is copied; the reads' unused space (the adaptive read buffers and a
         // frame decoder that grows its buffer in powers of two to join a frame cut by a read) takes it past the body
@@ -52,7 +57,7 @@ public class Http2StreamPeakHeldTest {
         }
     }
 
-    @Test(timeout = 300_000)
+    @Test(timeout = HANG_GUARD_MILLIS)
     public void shouldCopyAtMostAQuarterOfABodyInSixteenKibFramesCutByTheWindow() {
         // the flow-control window cuts every fourth frame a byte short; a frame cut by a read is joined into a buffer
         // twice its size, under half used when the frame is the short one, so such buffers are copied
@@ -68,7 +73,7 @@ public class Http2StreamPeakHeldTest {
         }
     }
 
-    @Test(timeout = 300_000)
+    @Test(timeout = HANG_GUARD_MILLIS)
     public void shouldHoldLessThanNettysAggregatorWhenTinyFrameStreamsShareReadsWithALargeFrameStream() {
         int[] bodies = {256 * KIB, 256 * KIB, 256 * KIB, 256 * KIB};
         int[][] patterns = {{16 * KIB}, {1}, {100}, {1023}};
@@ -86,7 +91,7 @@ public class Http2StreamPeakHeldTest {
         }
     }
 
-    @Test(timeout = 300_000)
+    @Test(timeout = HANG_GUARD_MILLIS)
     public void shouldHoldAtMostThreeTimesTheBodyPlusSlackForRunsOfSmallFramesBetweenLargerOnes() {
         // runs of small frames between 1 KiB or 16 KiB frames of the same stream: a 16 KiB frame cut by a read is joined
         // into a 32 KiB buffer, half used and so kept, and the whole-body merge at the component limit briefly holds a
@@ -101,7 +106,7 @@ public class Http2StreamPeakHeldTest {
         }
     }
 
-    @Test(timeout = 300_000)
+    @Test(timeout = HANG_GUARD_MILLIS)
     public void shouldHoldAtMostTwiceTheBodiesPlusSlackForALargeFrameStreamBesideATinyFrameStream() {
         // 16 KiB frames sharing reads with one-byte frames
         Result production = tracked(Variant.PRODUCTION, 64 * KIB, fair(new int[]{MIB, MIB}, new int[][]{{16 * KIB}, {1}}), 2);
@@ -109,7 +114,7 @@ public class Http2StreamPeakHeldTest {
         assertThat(description, production.peakHeldBytes, lessThanOrEqualTo(2 * production.bodyBytes + 2 * SLACK));
     }
 
-    @Test(timeout = 300_000)
+    @Test(timeout = HANG_GUARD_MILLIS)
     public void shouldNotPinWholeReadsWhenAStreamKeepsOneFramePerRead() {
         // one held frame per read of about 32 KiB, the rest of the read a completed request: under half of a read up to
         // 16 KiB, either side of the 4 KiB eighth a per-frame rule would have used
@@ -121,7 +126,7 @@ public class Http2StreamPeakHeldTest {
         }
     }
 
-    @Test(timeout = 300_000)
+    @Test(timeout = HANG_GUARD_MILLIS)
     public void shouldNotPinReadsWhenARunOfOneByteFramesIsBrokenByA1KibFrame() {
         // 15 one-byte frames then one of 1 KiB, each in a read of its own
         int cycles = 1_100;
@@ -130,7 +135,7 @@ public class Http2StreamPeakHeldTest {
         assertHeldBounded("15 x 1 B + 1 KiB per read", production, netty, cycles / 16 * (15 + KIB), 1);
     }
 
-    @Test(timeout = 300_000)
+    @Test(timeout = HANG_GUARD_MILLIS)
     public void shouldNotPinReadsAcrossManyStreamsEachKeepingOneFramePerRead() {
         // 20 streams each keep one frame of every read, the rest of the read a completed request
         int streams = 20;
@@ -153,7 +158,7 @@ public class Http2StreamPeakHeldTest {
         }
     }
 
-    @Test(timeout = 300_000)
+    @Test(timeout = HANG_GUARD_MILLIS)
     public void shouldNotPinReadsWhenStreamsSendTinyFramesEachInARead() {
         // 20 streams of 60 frames of 1 or 9 bytes, every frame in a read of its own and no other traffic
         for (int pieceBytes : new int[]{1, 9}) {
@@ -170,7 +175,7 @@ public class Http2StreamPeakHeldTest {
         }
     }
 
-    @Test(timeout = 300_000)
+    @Test(timeout = HANG_GUARD_MILLIS)
     public void shouldFreeAReadKeptHalfUsedOnceABlockCopyTakesMostOfItsFrames() {
         // a 1 B, a 1,039 B and 15 frames of 1,023 B, repeated: a read can hold just over half its bytes in them, and the
         // next read's first frame completes a run of 16 whose block copy leaves that read 1,040 B used, so the read

@@ -381,6 +381,27 @@
                             </target>
                         </configuration>
                     </execution>
+                    <!-- print the leak records as soon as both test phases have run. A failed integration
+                         test fails the build at failsafe:verify, before check-netty-leaks, and the report
+                         files are not uploaded by CI, so without this the records would be lost. Prints
+                         nothing when there is no leak; never fails the build. -->
+                    <execution>
+                        <id>print-netty-leaks</id>
+                        <phase>post-integration-test</phase>
+                        <goals>
+                            <goal>run</goal>
+                        </goals>
+                        <configuration>
+                            <target>
+                                <concat>
+                                    <header>Netty ByteBuf leak records in ${mockserver.leakReportDir}:${line.separator}</header>
+                                    <fileset dir="${mockserver.leakReportDir}" erroronmissingdir="false">
+                                        <size value="0" when="more"/>
+                                    </fileset>
+                                </concat>
+                            </target>
+                        </configuration>
+                    </execution>
                     <!-- after surefire (test) AND failsafe (integration-test) have run, fail if any
                          non-empty leak file exists. Bound to verify so it covers both phases. -->
                     <execution>

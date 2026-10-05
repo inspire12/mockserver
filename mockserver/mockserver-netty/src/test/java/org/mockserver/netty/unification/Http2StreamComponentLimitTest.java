@@ -72,7 +72,8 @@ public class Http2StreamComponentLimitTest {
         }
     }
 
-    @Test(timeout = 60_000)
+    // the limit is a hang guard: the build's leak detector records a stack trace for each of these frames
+    @Test(timeout = 600_000)
     public void shouldCopyABodyOfOneByteDataFramesAboutOnce() {
         // consolidating the whole body every 1,024 frames would copy about frames^2 / 2,048 bytes: 2 GiB here
         int frames = 2 * 1024 * 1024;

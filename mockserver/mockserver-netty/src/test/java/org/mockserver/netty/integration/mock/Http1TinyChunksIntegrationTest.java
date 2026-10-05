@@ -37,6 +37,8 @@ public class Http1TinyChunksIntegrationTest {
     private static final int[] ONE_BYTE = {1};
     // 16 one-byte chunks, a 1 KiB chunk, five 10-byte chunks and a 1 KiB chunk: about 11 chunks per KiB
     private static final int[] MIXED = mixed();
+    // a hang guard, not a speed limit: the build's leak detector records a stack trace for every chunk read
+    private static final long HANG_GUARD_MILLIS = 300_000;
 
     private MockServer mockServer;
     private MockServerClient mockServerClient;
@@ -56,7 +58,7 @@ public class Http1TinyChunksIntegrationTest {
         stopQuietly(mockServer);
     }
 
-    @Test(timeout = 120_000)
+    @Test(timeout = HANG_GUARD_MILLIS)
     public void shouldReceiveABodyOfOneByteChunksUnchanged() throws Exception {
         String body = body("one-byte", MAX_REQUEST_BODY_SIZE);
         try (RawHttp1Connection connection = new RawHttp1Connection(mockServer.getLocalPort())) {
@@ -66,7 +68,7 @@ public class Http1TinyChunksIntegrationTest {
         assertReceived("/upload/one_byte", body);
     }
 
-    @Test(timeout = 120_000)
+    @Test(timeout = HANG_GUARD_MILLIS)
     public void shouldReceiveEachRequestOnAKeepAliveConnectionUnchanged() throws Exception {
         // one aggregator serves every request on the connection, so its merge state must start again at each one
         List<String> bodies = new ArrayList<>();
@@ -83,7 +85,7 @@ public class Http1TinyChunksIntegrationTest {
         }
     }
 
-    @Test(timeout = 120_000)
+    @Test(timeout = HANG_GUARD_MILLIS)
     public void shouldReceiveBodiesOnConcurrentConnectionsWithoutCrossTalk() throws Exception {
         // merged components and the reads they are made from all come from the pooled allocator, so a buffer freed
         // too early would surface as another connection's bytes in a body
@@ -118,7 +120,7 @@ public class Http1TinyChunksIntegrationTest {
         }
     }
 
-    @Test(timeout = 120_000)
+    @Test(timeout = HANG_GUARD_MILLIS)
     public void shouldAcceptABodyAtTheLimitAndAnswer413OneByteOver() throws Exception {
         String atLimit = body("at-limit", MAX_REQUEST_BODY_SIZE);
         try (RawHttp1Connection connection = new RawHttp1Connection(mockServer.getLocalPort())) {
