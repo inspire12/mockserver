@@ -467,7 +467,7 @@ This release delivers a sustained performance and memory programme alongside dat
   limit, and nothing is ordered between different client connections. If a message cannot be forwarded
   the client's connection is closed, as before, and the messages still waiting behind it are not sent
   (one warning reports how many).
-- **The internal connection behind an HTTP/2 CONNECT or SOCKS proxy tunnel is now closed as soon as its client disconnects.** When a client left with a request still unanswered, MockServer kept its own half of the tunnel open, and went on working on that request, until it was answered or for up to 30 seconds.
+- **The internal connection behind an HTTP/2 CONNECT or SOCKS proxy tunnel is now closed as soon as its client disconnects, or as soon as a request that client had finished sending has been received.** When a client left with a request still unanswered, MockServer kept its own half of the tunnel open, and went on working on that request, until it was answered or for up to 30 seconds. A request the client had sent in full before it left is still received, recorded and matched, as it would be on a direct connection; only its response is no longer waited for.
 - **A SOCKS client that connects and then disconnects without sending anything no longer leaves a connection open inside MockServer.** Each such client left MockServer's internal connection for the tunnel open until MockServer was stopped.
 - **`httpLlmResponse` with `provider: BEDROCK` now returns the AWS Bedrock Converse format on
   `/model/{model}/converse` and `/model/{model}/converse-stream`** (discussion #2757). It always returned

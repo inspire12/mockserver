@@ -32,10 +32,12 @@ import org.mockserver.logging.MockServerLogger;
 import org.slf4j.event.Level;
 
 import javax.net.ssl.SSLException;
+import java.nio.channels.ClosedChannelException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
 
 import static io.netty.handler.codec.http2.HttpConversionUtil.ExtensionHeaderNames.SCHEME;
 import static io.netty.handler.codec.http2.HttpConversionUtil.ExtensionHeaderNames.STREAM_ID;
@@ -43,6 +45,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.empty;
+import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
 
@@ -50,8 +53,8 @@ import static org.hamcrest.Matchers.is;
  * How promptly each HTTP/2 leg of the CONNECT/SOCKS relay closes when the tunnel ends, with both legs' pipelines as
  * {@code RelayConnectHandler} builds them and a real HTTP/2 peer standing in for MockServer. Closed through its
  * pipeline, an {@code HttpToHttp2ConnectionHandler} with a stream open sends a {@code GOAWAY} and stays connected for
- * its graceful-shutdown timeout (30 s). No time passes in these tests, so a leg still open at the end of one is a leg
- * waiting for that timeout.
+ * its graceful-shutdown timeout (30 s). No time passes unless a test advances it, so a leg still open at the end of one
+ * is a leg waiting for that timeout.
  */
 public class RelayHttp2LegCloseTest {
 
@@ -61,7 +64,7 @@ public class RelayHttp2LegCloseTest {
     private final List<Integer> requestBodyBytesAtServer = new ArrayList<>();
     private final List<FullHttpResponse> heldAnswers = new ArrayList<>();
     private final List<FullHttpResponse> responsesHandedToTheRelay = new ArrayList<>();
-    private EmbeddedChannel proxyClient;
+    private ProxyClientChannel proxyClient;
     private Http2Connection proxyClientConnection;
     private Http2Connection loopbackConnection;
     private EmbeddedChannel loopback;
@@ -75,7 +78,7 @@ public class RelayHttp2LegCloseTest {
                 logged.add(logEntry);
             }
         };
-        proxyClient = new EmbeddedChannel();
+        proxyClient = new ProxyClientChannel();
         loopbackConnection = new DefaultHttp2Connection(false);
         LoopbackHttp2StreamIdRemapper remapper = new LoopbackHttp2StreamIdRemapper(mockServerLogger, loopbackConnection, proxyClient);
         LoopbackHttp2StreamErrorHandler errorHandler = new LoopbackHttp2StreamErrorHandler(mockServerLogger, loopbackConnection, remapper, proxyClient);
@@ -131,6 +134,8 @@ public class RelayHttp2LegCloseTest {
     @After
     public void close() {
         heldAnswers.forEach(ReferenceCountUtil::release);
+        // at its socket: closed through its pipeline it would wait for a stream whose request never arrived whole
+        server.unsafe().close(server.voidPromise());
         loopback.finishAndReleaseAll();
         server.finishAndReleaseAll();
         proxyClient.finishAndReleaseAll();
@@ -278,6 +283,209 @@ public class RelayHttp2LegCloseTest {
         assertThat(loopbackConnection.numActiveStreams(), is(0));
     }
 
+    @Test
+    public void shouldDeliverARequestStillBeingWrittenWhenAResponseOnAnotherStreamFailsAsItsClientLeaves() throws Exception {
+        relay(3, "/answered");
+        // the client takes nothing more, so the response's body waits in the client leg's flow controller
+        proxyClientConnection.remote().flowController().initialWindowSize(0);
+        answer(1);
+        FullHttpRequest upload = upload(5, "/upload", 200_000);
+        assertThat("part of the request waits for MockServer to extend its window", loopbackConnection.remote().flowController().hasFlowControlled(loopbackConnection.stream(3)), is(true));
+
+        // the client leg sees its client leave, and then fails the response it had queued
+        proxyClient.unsafe().close(proxyClient.voidPromise());
+        pump();
+
+        assertThat("the request reached MockServer whole", requestBodyBytesAtServer, contains("upload for /answered".length(), 200_000));
+        assertThat("the loopback is then closed without waiting for a response no one is left to take", loopback.isOpen(), is(false));
+        assertThat(loopbackConnection.numActiveStreams(), is(0));
+        assertThat("nothing logged above DEBUG for a client that went away", loggedAboveDebug(), is(empty()));
+        assertThat(upload.refCnt(), is(0));
+        assertRelayedResponseReleased();
+    }
+
+    @Test
+    public void shouldDeliverARequestStillBeingWrittenWhenAResponseArrivesBeforeTheClientLegSeesItsClientLeave() throws Exception {
+        relay(3, "/answered");
+        relay(5, "/answered-later");
+        FullHttpRequest upload = upload(7, "/upload", 200_000);
+
+        closeProxyClientSocket();
+        answerWithoutExtendingTheWindow(1);
+        assertThat("left open for the request still being written", loopback.isOpen(), is(true));
+        assertThat("and still read, for MockServer's window updates", loopback.config().isAutoRead(), is(true));
+        int writesRefused = proxyClientSocket.refused;
+        answerWithoutExtendingTheWindow(3);
+        assertThat(responsesHandedToTheRelay, hasSize(2));
+        assertThat("both undelivered responses were released", refCnts(responsesHandedToTheRelay), everyItem(is(0)));
+        assertThat("the second was dropped, not written to the client", proxyClientSocket.refused, is(writesRefused));
+
+        fireProxyClientInactive();
+        assertThat("still open for the request still being written", loopback.isOpen(), is(true));
+        assertThat("and closing gracefully, so for no longer than the graceful-shutdown timeout", loopbackConnection.goAwaySent(), is(true));
+        pump();
+
+        assertThat("the request reached MockServer whole", requestBodyBytesAtServer, contains("upload for /answered".length(), "upload for /answered-later".length(), 200_000));
+        assertThat(loopback.isOpen(), is(false));
+        assertThat(loopbackConnection.numActiveStreams(), is(0));
+        assertThat("nothing logged above DEBUG for a client that went away", loggedAboveDebug(), is(empty()));
+        assertThat(upload.refCnt(), is(0));
+        assertThat("nothing is left queued for the client", proxyClient.outboundMessages(), is(empty()));
+    }
+
+    @Test
+    public void shouldCloseTheLoopbackAtOnceWhenAResponseFailsBeforeTheClientLegSeesItsClientLeaveWithNoRequestBeingWritten() throws Exception {
+        relay(3, "/answered");
+        relay(5, "/unanswered");
+
+        closeProxyClientSocket();
+        answer(1);
+
+        assertThat("closed at once: no request is waiting to be written", loopback.isOpen(), is(false));
+        assertThat("the relay stopped reading the loopback", loopback.config().isAutoRead(), is(false));
+        assertThat(loopbackConnection.numActiveStreams(), is(0));
+        assertThat("nothing logged above DEBUG for a client that went away", loggedAboveDebug(), is(empty()));
+        assertThat("the undelivered response was released", refCnts(responsesHandedToTheRelay), contains(0));
+    }
+
+    @Test
+    public void shouldCloseTheLoopbackWhenTheClientLegSeesItsClientLeaveOnlyAfterTheRequestIsWritten() throws Exception {
+        relay(3, "/answered");
+        upload(5, "/upload", 200_000);
+
+        closeProxyClientSocket();
+        answer(1);
+        assertThat("the request reached MockServer whole", requestBodyBytesAtServer, contains("upload for /answered".length(), 200_000));
+        assertThat("no one has yet closed the loopback", loopback.isOpen(), is(true));
+
+        fireProxyClientInactive();
+        pump();
+
+        assertThat(loopback.isOpen(), is(false));
+        assertThat(loopbackConnection.numActiveStreams(), is(0));
+        assertThat("nothing logged above DEBUG for a client that went away", loggedAboveDebug(), is(empty()));
+    }
+
+    @Test
+    public void shouldCloseTheLoopbackOfAClientThatHasGoneWhenTheRequestOutlivingAFailedResponseFails() throws Exception {
+        relay(3, "/answered");
+        proxyClientConnection.remote().flowController().initialWindowSize(0);
+        answer(1);
+        FullHttpRequest upload = upload(5, "/refused", 200_000);
+
+        proxyClient.unsafe().close(proxyClient.voidPromise());
+        proxyClient.runPendingTasks();
+        loopback.runPendingTasks();
+        assertThat("left open for the request still being written", loopback.isOpen(), is(true));
+        assertThat("and closing gracefully, so for no longer than the graceful-shutdown timeout", loopbackConnection.goAwaySent(), is(true));
+        // MockServer resets the stream of the request still being written
+        ByteBuf bytes;
+        while ((bytes = loopback.readOutbound()) != null) {
+            server.writeInbound(bytes);
+        }
+        ChannelHandlerContext serverCtx = server.pipeline().context(Http2ConnectionHandler.class);
+        ((Http2ConnectionHandler) serverCtx.handler()).resetStream(serverCtx, 3, Http2Error.CANCEL.code(), serverCtx.newPromise());
+        server.flush();
+        pump();
+
+        assertThat("only the first request reached MockServer", requestsAtServer, contains(1));
+        assertThat("the loopback does not wait for the stream that can no longer be answered", loopback.isOpen(), is(false));
+        assertThat(loopbackConnection.numActiveStreams(), is(0));
+        assertThat(upload.refCnt(), is(0));
+        assertRelayedResponseReleased();
+    }
+
+    @Test
+    public void shouldReleaseARequestStillBeingWrittenWhenTheLoopbackOfAClientThatHasGoneClosesFirst() throws Exception {
+        relay(3, "/answered");
+        proxyClientConnection.remote().flowController().initialWindowSize(0);
+        answer(1);
+        FullHttpRequest upload = upload(5, "/upload", 200_000);
+
+        proxyClient.unsafe().close(proxyClient.voidPromise());
+        proxyClient.runPendingTasks();
+        loopback.runPendingTasks();
+        assertThat("left open for the request still being written", loopback.isOpen(), is(true));
+        // MockServer closes its end
+        loopback.unsafe().close(loopback.voidPromise());
+        pump();
+
+        assertThat(loopback.isOpen(), is(false));
+        assertThat(loopbackConnection.numActiveStreams(), is(0));
+        assertThat("no request is still being written", UpstreamProxyRelayHandler.isWritingRequestTo(loopback), is(false));
+        assertThat(upload.refCnt(), is(0));
+        assertRelayedResponseReleased();
+    }
+
+    @Test
+    public void shouldCloseTheLoopbackOfAClientThatHasGoneWhenItsGracefulCloseTimesOutWithTheWindowNeverExtended() throws Exception {
+        relay(3, "/answered");
+        proxyClientConnection.remote().flowController().initialWindowSize(0);
+        answer(1);
+        FullHttpRequest upload = upload(5, "/upload", 200_000);
+
+        proxyClient.unsafe().close(proxyClient.voidPromise());
+        proxyClient.runPendingTasks();
+        loopback.runPendingTasks();
+        assertThat("left open for the request still being written", loopback.isOpen(), is(true));
+        assertThat("and closing gracefully", loopbackConnection.goAwaySent(), is(true));
+        // EmbeddedChannel.close() cancelled the timeout that graceful close scheduled, so it is asked for again, through
+        // the pipeline. Nothing the loopback writes is taken to MockServer, so no window update ever comes back.
+        loopback.pipeline().close();
+        loopback.advanceTimeBy(29, TimeUnit.SECONDS);
+        loopback.runScheduledPendingTasks();
+        assertThat("still waiting for the request to be written", loopback.isOpen(), is(true));
+
+        loopback.advanceTimeBy(2, TimeUnit.SECONDS);
+        loopback.runScheduledPendingTasks();
+        loopback.runPendingTasks();
+
+        assertThat("closed by the graceful shutdown's timeout", loopback.isOpen(), is(false));
+        assertThat(loopbackConnection.numActiveStreams(), is(0));
+        assertThat("no request is still being written", UpstreamProxyRelayHandler.isWritingRequestTo(loopback), is(false));
+        assertThat("the request that was never written is reported", logged(Level.ERROR), contains("exception while returning response for request:{}"));
+        // the part of the request written before the window ran out, which no one took
+        loopback.releaseOutbound();
+        assertThat(upload.refCnt(), is(0));
+        assertThat("the undelivered response was released", refCnts(responsesHandedToTheRelay), contains(0));
+    }
+
+    @Test
+    public void shouldCloseTheLoopbackAtOnceWithARequestStillBeingWrittenWhenTheClientLegIsOpenButRefusingWrites() throws Exception {
+        relay(3, "/answered");
+        FullHttpRequest upload = upload(5, "/upload", 200_000);
+
+        // as a TLS handler whose close_notify waits behind bytes its client has not taken: open, refusing every write
+        proxyClientSocket.refusing = true;
+        proxyClientSocket.holdingClose = true;
+        answer(1);
+
+        assertThat("the client's leg is still open", proxyClient.isOpen(), is(true));
+        assertThat("the loopback is closed at once", loopback.isOpen(), is(false));
+        assertThat("the relay stopped reading the loopback", loopback.config().isAutoRead(), is(false));
+        assertThat("the request did not reach MockServer", requestsAtServer, contains(1));
+        assertThat("both failures are logged", logged(Level.ERROR), contains("exception while returning writing:{}", "exception while returning response for request:{}"));
+        assertThat(upload.refCnt(), is(0));
+        assertRelayedResponseReleased();
+    }
+
+    @Test
+    public void shouldDeliverARequestStillBeingWrittenWhenTheFailedWriteHasClosedTheClientLeg() throws Exception {
+        relay(3, "/answered");
+        FullHttpRequest upload = upload(5, "/upload", 200_000);
+
+        // every write fails, but a close is carried out: the client leg's HTTP/2 handler closes it on the failed write
+        proxyClientSocket.refusing = true;
+        answer(1);
+
+        assertThat(proxyClient.isOpen(), is(false));
+        assertThat("the request reached MockServer whole", requestBodyBytesAtServer, contains("upload for /answered".length(), 200_000));
+        assertThat(loopback.isOpen(), is(false));
+        assertThat(loopbackConnection.numActiveStreams(), is(0));
+        assertThat(upload.refCnt(), is(0));
+        assertRelayedResponseReleased();
+    }
+
     /**
      * The response the relay was handed and could not deliver, and nothing left queued on either leg.
      */
@@ -353,6 +561,49 @@ public class RelayHttp2LegCloseTest {
         pump();
     }
 
+    /**
+     * Has the peer answer, and takes the answer to the loopback, without taking the peer anything the loopback wrote:
+     * MockServer has not yet read the request still being written, so has sent no window update for it.
+     */
+    private void answerWithoutExtendingTheWindow(int loopbackStreamId) {
+        for (FullHttpResponse response : new ArrayList<>(heldAnswers)) {
+            if (response.headers().getInt(STREAM_ID.text()) == loopbackStreamId) {
+                heldAnswers.remove(response);
+                server.writeAndFlush(response);
+            }
+        }
+        ByteBuf bytes;
+        while ((bytes = server.readOutbound()) != null) {
+            loopback.writeInbound(bytes);
+        }
+        proxyClient.runPendingTasks();
+        loopback.runPendingTasks();
+    }
+
+    /**
+     * The client's socket closes: the leg is inactive and fails every write, and its {@code channelInactive} has not run.
+     */
+    private void closeProxyClientSocket() {
+        proxyClient.socketClosed = true;
+        proxyClientSocket.refusal = new ClosedChannelException();
+        proxyClientSocket.refusing = true;
+        proxyClientSocket.holdingClose = true;
+    }
+
+    private void fireProxyClientInactive() {
+        proxyClient.socketClosed = false;
+        proxyClientSocket.holdingClose = false;
+        proxyClient.unsafe().close(proxyClient.voidPromise());
+    }
+
+    private static List<Integer> refCnts(List<FullHttpResponse> responses) {
+        List<Integer> refCnts = new ArrayList<>();
+        for (FullHttpResponse response : responses) {
+            refCnts.add(response.refCnt());
+        }
+        return refCnts;
+    }
+
     private void pump() {
         boolean moved;
         do {
@@ -384,8 +635,10 @@ public class RelayHttp2LegCloseTest {
      * close does not carry one out (as a TLS handler waiting to flush its {@code close_notify}).
      */
     private static final class WriteRefuser extends ChannelOutboundHandlerAdapter {
+        private Throwable refusal = new SSLException("SSLEngine closed already");
         private boolean refusing;
         private boolean holdingClose;
+        private int refused;
 
         @Override
         public void close(ChannelHandlerContext ctx, ChannelPromise promise) {
@@ -397,11 +650,25 @@ public class RelayHttp2LegCloseTest {
         @Override
         public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
             if (refusing) {
+                refused++;
                 ReferenceCountUtil.release(msg);
-                promise.setFailure(new SSLException("SSLEngine closed already"));
+                promise.setFailure(refusal);
             } else {
                 ctx.write(msg, promise);
             }
+        }
+    }
+
+    /**
+     * A client leg whose socket can be closed ahead of its {@code channelInactive}, as a real one's is: the close fails
+     * what is queued, and the event loop may read the loopback, before the task that fires {@code channelInactive} runs.
+     */
+    private static final class ProxyClientChannel extends EmbeddedChannel {
+        private boolean socketClosed;
+
+        @Override
+        public boolean isActive() {
+            return !socketClosed && super.isActive();
         }
     }
 }

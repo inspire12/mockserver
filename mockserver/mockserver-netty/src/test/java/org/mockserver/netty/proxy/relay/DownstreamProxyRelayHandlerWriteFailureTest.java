@@ -273,6 +273,99 @@ public class DownstreamProxyRelayHandlerWriteFailureTest {
         proxyClient.finishAndReleaseAll();
     }
 
+    @Test
+    public void shouldLeaveTheLoopbackOpenForARequestStillBeingWrittenWhenAWriteFailsToAProxyClientThatHasGone() {
+        List<LogEntry> logged = new CopyOnWriteArrayList<>();
+        MockServerLogger logger = new MockServerLogger(DownstreamProxyRelayHandlerWriteFailureTest.class) {
+            @Override
+            public void logEvent(LogEntry logEntry) {
+                logged.add(logEntry);
+            }
+        };
+        EmbeddedChannel proxyClient = new EmbeddedChannel();
+        SlowSocket loopbackSocket = new SlowSocket();
+        EmbeddedChannel loopback = new EmbeddedChannel(loopbackSocket, new DownstreamProxyRelayHandler(logger, proxyClient));
+        proxyClient.pipeline().addLast(new UpstreamProxyRelayHandler(logger, proxyClient, loopback, "localhost", 80, 1024));
+        FullHttpRequest request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, "/pipelined", Unpooled.copiedBuffer("upload", StandardCharsets.UTF_8));
+        proxyClient.writeInbound(request);
+        assertThat("the request is still being written", UpstreamProxyRelayHandler.isWritingRequestTo(loopback), is(true));
+        proxyClient.close();
+        FullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK, Unpooled.copiedBuffer("body", StandardCharsets.UTF_8));
+
+        loopback.writeInbound(response);
+
+        assertThat(response.refCnt(), is(0));
+        assertThat("left open for the request still being written", loopback.isOpen(), is(true));
+        assertThat("and still read", loopback.config().isAutoRead(), is(true));
+
+        loopbackSocket.drain();
+        loopback.runPendingTasks();
+
+        assertThat("the request was written", new ArrayList<>(loopback.outboundMessages()), hasItem(sameInstance(request)));
+        assertThat("and the loopback then closed", loopback.isOpen(), is(false));
+        assertThat("nothing logged above DEBUG", logged.stream().filter(entry -> entry.getLogLevel().toInt() > Level.DEBUG.toInt()).count(), is(0L));
+        loopback.finishAndReleaseAll();
+        proxyClient.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldCloseTheLoopbackAtOnceWithARequestStillBeingWrittenWhenAWriteFailsToAnOpenProxyClient() {
+        // every write fails, and a close is carried out: the client's leg was open when the write failed
+        EmbeddedChannel proxyClient = new EmbeddedChannel(new ChannelOutboundHandlerAdapter() {
+            @Override
+            public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
+                ReferenceCountUtil.release(msg);
+                promise.setFailure(new SSLException("SSLEngine closed already"));
+            }
+        });
+        SlowSocket loopbackSocket = new SlowSocket();
+        EmbeddedChannel loopback = new EmbeddedChannel(loopbackSocket, new DownstreamProxyRelayHandler(new MockServerLogger(), proxyClient));
+        proxyClient.pipeline().addLast(new UpstreamProxyRelayHandler(new MockServerLogger(), proxyClient, loopback, "localhost", 80, 1024));
+        FullHttpRequest request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, "/pipelined", Unpooled.copiedBuffer("upload", StandardCharsets.UTF_8));
+        proxyClient.writeInbound(request);
+        assertThat("the request is still being written", UpstreamProxyRelayHandler.isWritingRequestTo(loopback), is(true));
+
+        loopback.writeInbound(new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK, Unpooled.copiedBuffer("body", StandardCharsets.UTF_8)));
+
+        assertThat("the proxy client was closed", proxyClient.isOpen(), is(false));
+        assertThat("the loopback was closed at once", loopback.isOpen(), is(false));
+        assertThat("the loopback stopped reading", loopback.config().isAutoRead(), is(false));
+        loopbackSocket.drain();
+        assertThat("the request was not written", new ArrayList<>(loopback.outboundMessages()), not(hasItem(sameInstance(request))));
+        assertThat(request.refCnt(), is(0));
+        loopback.finishAndReleaseAll();
+        proxyClient.finishAndReleaseAll();
+    }
+
+    /**
+     * A socket that is taking nothing: every write waits, in order, until it drains.
+     */
+    private static final class SlowSocket extends ChannelOutboundHandlerAdapter {
+        private final List<Object> messages = new ArrayList<>();
+        private final List<ChannelPromise> promises = new ArrayList<>();
+        private ChannelHandlerContext ctx;
+        private boolean drained;
+
+        @Override
+        public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
+            if (drained) {
+                ctx.write(msg, promise);
+                return;
+            }
+            this.ctx = ctx;
+            messages.add(msg);
+            promises.add(promise);
+        }
+
+        void drain() {
+            drained = true;
+            for (int i = 0; i < messages.size(); i++) {
+                ctx.write(messages.get(i), promises.get(i));
+            }
+            ctx.flush();
+        }
+    }
+
     private static FullHttpResponse responseOnStream(int streamId) {
         DefaultFullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK, Unpooled.copiedBuffer("body " + streamId, StandardCharsets.UTF_8));
         response.headers().setInt(HttpConversionUtil.ExtensionHeaderNames.STREAM_ID.text(), streamId);

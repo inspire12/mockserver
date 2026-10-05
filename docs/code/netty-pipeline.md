@@ -1080,6 +1080,9 @@ Every write already queued behind the failed one fails the same way and is not l
 bound (`maxRequestBodySize` of unwritten streamed content) ends the relay the same way.
 
 The loopback's socket is closed directly and the client's leg through its pipeline (see [Relay close](#relay-close)).
+One case keeps the loopback open: a client that has gone with a request still being written to the loopback. The relay
+still ends, and everything the loopback delivers from then on is released unwritten, but the loopback is read until
+that request has been written (see [Relay close](#relay-close)).
 
 A failure of one HTTP/2 stream does not end the relay. When the response carries the client's stream id
 (`x-http2-stream-id`, read before the write), the failure is an HTTP/2 stream error, and the proxy client's connection
@@ -1104,7 +1107,8 @@ finished, so `RelayLegClose` closes the loopback's socket with `channel.unsafe()
 
 | The relay ends because | Loopback leg | Client leg |
 |---|---|---|
-| A write to the client failed, or too much streamed content was waiting (`DownstreamProxyRelayHandler.endRelay`) | socket closed at once | `close()` through the pipeline |
+| A write to the client failed, or too much streamed content was waiting (`DownstreamProxyRelayHandler.endRelay`), with the client's leg still open, or with no request still being written to the loopback | socket closed at once | `close()` through the pipeline |
+| The same, with the client's connection already closed and a request still being written to the loopback | left open and read, what it delivers dropped; closed as in the row below for a request still being written | already closed |
 | The client's connection closed with no request still being written to the loopback (`UpstreamProxyRelayHandler.channelInactive`, or a listener on its close for a tunnel that has no relay handlers yet) | the outbound buffer is flushed, then the socket is closed | already closed |
 | The client's connection closed with a request still being written to the loopback (`UpstreamProxyRelayHandler.channelInactive`) | `closeOnFlush` through the pipeline; the socket is closed when the last such write completes or fails | already closed |
 | The loopback closed (`DownstreamProxyRelayHandler.channelInactive`) | already closed | open streams ended as in [Relay loopback connection loss](#relay-loopback-connection-loss-http2), then `closeOnFlush` |
@@ -1127,15 +1131,37 @@ its writes of requests to the loopback that have not completed. An HTTP/2 reques
 window (65,535 bytes by default) waits in the loopback's flow controller, not in the socket's outbound buffer, so a
 socket close would fail it however the buffer was flushed first. While the count is above zero the loopback is
 therefore closed through its pipeline, which goes on writing as MockServer extends the window, and the listener of
-the last write to complete, or fail, closes the socket. That wait has the graceful shutdown's 30 s bound. The count
+the last write to complete, or fail, closes the socket. That wait has the graceful shutdown's 30 s bound (an HTTP/1.1
+loopback has none: it waits for its socket to take the request). The count
 covers requests only: a response the loopback is still reading has no one to go to. The listener on the client
 channel's close future acts only while the tunnel has no `UpstreamProxyRelayHandler`: it runs before
 `channelInactive` and would close the socket whatever the count (`RelayHttp2LegCloseTest`,
 `RelayHttp2TunnelCloseIntegrationTest`).
 
-`endRelay` does not consult the count. On a tunnel with several streams, a response on another stream that is
-still being written to the client when it leaves, or that arrives afterwards, fails to write and ends the relay,
-which closes the loopback's socket at once with any request still being written.
+`endRelay` consults the count too (`UpstreamProxyRelayHandler.isWritingRequestTo`). On a tunnel carrying several
+requests, a response on another stream is often still being written to the client when it leaves (queued behind the
+client's flow-control window, or in the socket's buffer), or arrives just afterwards. That write fails and ends the
+relay. When the client's connection has closed and a request is still being written, `endRelay` marks the relay ended
+and does nothing else: the loopback stays open and is still read, because the request's DATA waits for MockServer's
+`WINDOW_UPDATE`s, and each response it delivers is released without a write. `UpstreamProxyRelayHandler` then closes
+the loopback exactly as if no write had failed: gracefully from `channelInactive` (the 30 s bound), and at its socket
+from the listener of the last request write to complete or fail, which also covers a loopback that closes first.
+
+| When the write to the client fails | Loopback |
+|---|---|
+| The client's leg is open (refusing writes, its close perhaps held behind a TLS `close_notify`) | socket closed at once, whatever is being written: that leg's `channelInactive` may never come |
+| The client's connection has closed, no request being written | socket closed at once |
+| The client's connection has closed, a request being written | left to `UpstreamProxyRelayHandler` |
+
+A client leg whose own `Http2ConnectionHandler` closed it on the failed write has closed by the time `endRelay` runs,
+so it counts as closed. Both orders of the client's close are handled. A socket's close fails the writes in its
+outbound buffer, and lets the event loop read the loopback, before the task that fires `channelInactive` runs, so
+`endRelay` can run before `UpstreamProxyRelayHandler` has seen the client leave: it therefore tests the channel, and
+`channelInactive` follows and finds the count. Writes waiting in the HTTP/2 flow controller fail inside
+`channelInactive`, after that handler has run. The handler is found through an attribute on the loopback channel,
+since a closed channel's pipeline has been emptied. The rule does not depend on the protocol: on an HTTP/1.1 tunnel
+the request still being written is one pipelined behind a response, which the loopback's socket has not yet taken
+(`RelayHttp2LegCloseTest`, `DownstreamProxyRelayHandlerWriteFailureTest`, `RelayHttp2TunnelCloseIntegrationTest`).
 
 Until the client's first bytes show which protocol the tunnel carries, neither leg has a relay handler, so each is
 tied to the other's close by `RelayConnectHandler` itself. Before, a client that connected and left without sending

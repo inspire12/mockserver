@@ -45,6 +45,7 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -173,6 +174,35 @@ public class RelayHttp2TunnelCloseIntegrationTest {
         assertThat("nothing logged at WARN or above for a client that left", loggedAtWarnOrAbove(), is(loggedBefore));
     }
 
+    @Test
+    public void shouldReceiveARequestFromAClientThatLeavesWithAResponseOnAnotherStreamStillBeingWritten() throws Exception {
+        leaveWithAResponseStillBeingWrittenAsSoonAsALargeRequestIsSent(false);
+    }
+
+    @Test
+    public void shouldReceiveARequestOverATlsTunnelFromAClientThatLeavesWithAResponseOnAnotherStreamStillBeingWritten() throws Exception {
+        leaveWithAResponseStillBeingWrittenAsSoonAsALargeRequestIsSent(true);
+    }
+
+    private void leaveWithAResponseStillBeingWrittenAsSoonAsALargeRequestIsSent(boolean tls) throws Exception {
+        // a stream window far below the response, which the client never extends: the rest of it stays queued for the
+        // client, and fails when the client leaves
+        Http2TunnelClient client = Http2TunnelClient.open(mockServer, 1024, tls);
+        client.request("/large");
+        await("the start of the response reached the client", () -> client.dataBytes.get() == 1024);
+        await("only the client's leg and the loopback leg are open", () -> mockServer.getInboundConnectionCount() == 2);
+        List<String> loggedBefore = loggedAtWarnOrAbove();
+
+        client.postThenLeave("/upload", 2_000_000);
+        assertThat("the client left", client.channel.closeFuture().await(10, TimeUnit.SECONDS), is(true));
+        long left = System.nanoTime();
+
+        await("the request reached MockServer", () -> requestReceived("/upload"));
+        await("both legs closed", () -> mockServer.getInboundConnectionCount() == 0);
+        assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - left), lessThan(PROMPTLY_MILLIS));
+        assertThat("nothing logged at WARN or above for a client that left", loggedAtWarnOrAbove(), is(loggedBefore));
+    }
+
     private boolean requestReceived(String path) {
         return controlPlane("/mockserver/retrieve?type=REQUESTS&format=JSON", "{\"path\":\"" + path + "\"}").contains("\"" + path + "\"");
     }
@@ -286,7 +316,10 @@ public class RelayHttp2TunnelCloseIntegrationTest {
             ctx.executor().submit(() -> {
                 Http2FrameStream stream = newStream();
                 ctx.write(new DefaultHttp2HeadersFrame(new DefaultHttp2Headers().method("POST").scheme(tls ? "https" : "http").authority("127.0.0.1:443").path(uri), false).stream(stream));
-                ctx.writeAndFlush(new DefaultHttp2DataFrame(Unpooled.buffer(bodyBytes).writeZero(bodyBytes), true).stream(stream))
+                // printable: the event log's JSON spends six characters on a zero byte, in each of its copies of the body
+                byte[] body = new byte[bodyBytes];
+                Arrays.fill(body, (byte) 'x');
+                ctx.writeAndFlush(new DefaultHttp2DataFrame(Unpooled.wrappedBuffer(body), true).stream(stream))
                     .addListener(written -> ctx.channel().close());
             }).get(5, TimeUnit.SECONDS);
         }
