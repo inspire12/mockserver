@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 import static org.mockserver.configuration.ClientConfiguration.clientConfiguration;
 import static org.mockserver.configuration.Configuration.configuration;
@@ -57,7 +58,7 @@ public class ClientAndServer extends MockServerClient {
     public ClientAndServer(Configuration configuration, Integer... ports) {
         super(clientConfiguration(configuration), new CompletableFuture<>());
         this.configuration = configuration;
-        this.mockServer = new MockServer(configuration, ports);
+        this.mockServer = startServer(() -> new MockServer(configuration, ports));
         completePortFutureAndOpenUI();
     }
 
@@ -68,8 +69,18 @@ public class ClientAndServer extends MockServerClient {
     public ClientAndServer(Configuration configuration, String remoteHost, Integer remotePort, Integer... ports) {
         super(clientConfiguration(configuration), new CompletableFuture<>());
         this.configuration = configuration;
-        this.mockServer = new MockServer(configuration, remotePort, remoteHost, ports);
+        this.mockServer = startServer(() -> new MockServer(configuration, remotePort, remoteHost, ports));
         completePortFutureAndOpenUI();
+    }
+
+    // the client is built first, so a server that refuses to start must not leave the client's event loops behind
+    private MockServer startServer(Supplier<MockServer> start) {
+        try {
+            return start.get();
+        } catch (Throwable refused) {
+            releaseEventLoops();
+            throw refused;
+        }
     }
 
     private void completePortFutureAndOpenUI() {

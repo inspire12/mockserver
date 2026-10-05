@@ -50,6 +50,12 @@ public class ClusterFanIn {
         List<RequestDefinition> retrieveRequests(String peerBaseUrl, RequestDefinition filter) throws Exception;
 
         List<LogEventRequestAndResponse> retrieveRequestResponses(String peerBaseUrl, RequestDefinition filter) throws Exception;
+
+        /**
+         * Releases whatever the accessor holds to reach peers; called when the server stops.
+         */
+        default void close() {
+        }
     }
 
     /**
@@ -144,6 +150,13 @@ public class ClusterFanIn {
             }
         }
         return new FanInResult<>(merged, unreachable);
+    }
+
+    /**
+     * Releases the peer accessor's resources; called when the server stops.
+     */
+    public void close() {
+        peerAccessor.close();
     }
 
     private void logUnreachable(String peer, Throwable throwable) {

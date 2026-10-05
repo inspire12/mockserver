@@ -32,14 +32,19 @@ import java.util.List;
  * All nodes must share the same token / trust. With no token configured (the default)
  * no credential is sent — unchanged behaviour. mTLS client-certificate presentation
  * for peer queries remains a documented boundary (see {@code docs/code/clustered-state.md}).
+ * <p>
+ * <b>Lifecycle:</b> the JDK client owns a selector thread and file descriptors, so it is built by
+ * the first peer query, never for a server that does no fan-in. {@link #close()} drops it; the JDK
+ * ends the thread once the client has been garbage collected.
  */
 public class HttpClusterPeerAccessor implements ClusterFanIn.PeerAccessor {
 
     private final RequestDefinitionSerializer requestDefinitionSerializer;
     private final LogEventRequestAndResponseSerializer logEventRequestAndResponseSerializer;
-    private final HttpClient httpClient;
     private final Duration requestTimeout;
     private final String peerAuthToken;
+    private HttpClient httpClient;
+    private boolean closed;
 
     public HttpClusterPeerAccessor(Configuration configuration, MockServerLogger mockServerLogger) {
         this.requestDefinitionSerializer = new RequestDefinitionSerializer(mockServerLogger);
@@ -48,9 +53,27 @@ public class HttpClusterPeerAccessor implements ClusterFanIn.PeerAccessor {
         this.requestTimeout = Duration.ofMillis(timeoutMillis != null && timeoutMillis > 0 ? timeoutMillis : 20_000L);
         String token = configuration.clusterFanInPeerAuthToken();
         this.peerAuthToken = token != null ? token.trim() : "";
-        this.httpClient = HttpClient.newBuilder()
-            .connectTimeout(this.requestTimeout)
-            .build();
+    }
+
+    private synchronized HttpClient httpClient() {
+        if (closed) {
+            throw new IllegalStateException("cluster fan-in is closed because MockServer has stopped");
+        }
+        if (httpClient == null) {
+            httpClient = HttpClient.newBuilder()
+                .connectTimeout(requestTimeout)
+                .build();
+        }
+        return httpClient;
+    }
+
+    /**
+     * Releases the JDK client; a peer query made afterwards fails rather than building another.
+     */
+    @Override
+    public synchronized void close() {
+        closed = true;
+        httpClient = null;
     }
 
     @Override
@@ -102,7 +125,7 @@ public class HttpClusterPeerAccessor implements ClusterFanIn.PeerAccessor {
         HttpRequest request = builder
             .method("PUT", HttpRequest.BodyPublishers.ofString(requestBody))
             .build();
-        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response = httpClient().send(request, HttpResponse.BodyHandlers.ofString());
         int status = response.statusCode();
         if (status < 200 || status >= 300) {
             throw new IllegalStateException("peer " + peerBaseUrl + " returned status " + status);

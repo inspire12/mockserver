@@ -1046,6 +1046,12 @@ public class MockServerClient implements Stoppable {
      */
     public CompletableFuture<MockServerClient> stop(boolean ignoreFailure) {
         if (!stopFuture.isDone()) {
+            try {
+                port();
+            } catch (RuntimeException portNeverKnown) {
+                releaseEventLoops();
+                throw portNeverKnown;
+            }
             getMockServerEventBus().publish(EventType.STOP);
             removeMockServerEventBus();
             new Scheduler.SchedulerThreadFactory("ClientStop").newThread(() -> {
@@ -1108,6 +1114,17 @@ public class MockServerClient implements Stoppable {
             }).start();
         }
         return stopFuture;
+    }
+
+    /**
+     * Stops this client without sending anything to MockServer, for a client whose MockServer never
+     * started: there is no server to stop, only this client's event loops to release.
+     */
+    protected void releaseEventLoops() {
+        if (!eventLoopGroup.isShuttingDown()) {
+            eventLoopGroup.shutdownGracefully(0, 0, MILLISECONDS);
+        }
+        stopFuture.complete(clientClass.cast(this));
     }
 
     @Override

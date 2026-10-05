@@ -227,6 +227,20 @@ server.when(request().withPath("/test")).respond(response().withBody("OK"));
 server.stop();
 ```
 
+**Construction order and what a failed start leaves behind.** `ClientAndServer` extends
+`MockServerClient`, so the client half is built first and it opens its event loops
+(`clientNioEventLoopThreadCount` selectors) at once. If the server then refuses to start (a
+TCP port or the `http3Port` is held, for example), the constructor throws and the caller has
+no reference to stop, so `ClientAndServer` releases the client's event loops itself before
+rethrowing (`MockServerClient.releaseEventLoops()`, which sends nothing to any server).
+
+A `MockServerClient` built with a port future (`new MockServerClient(configuration, portFuture)`
+or `builder().portFuture(...)`) whose future fails or never completes has no server to stop:
+`stop()` and `close()` release its event loops the same way and mark it stopped. `stop(boolean)`
+still throws the failure to learn the port, as before. This is a behaviour change: a `stop()` that
+fails because the port future is not complete used to leave the client usable, and now leaves it
+stopped even if the future completes later, so later calls fail with "has already been stopped".
+
 ## Test Framework Integrations
 
 ### JUnit 4 Rule

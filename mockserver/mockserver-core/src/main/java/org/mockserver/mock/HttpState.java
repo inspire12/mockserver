@@ -6998,6 +6998,9 @@ public class HttpState {
         // so they are not leaked on shutdown; no-op when the async module is absent
         // or nothing is loaded.
         org.mockserver.async.AsyncApiControlPlaneRegistry.getInstance().reset();
+        if (clusterFanIn != null) {
+            clusterFanIn.close();
+        }
         getMockServerLog().stop();
         // G10 phase 2a: close the state backend (no-op for in-memory)
         if (stateBackend != null) {

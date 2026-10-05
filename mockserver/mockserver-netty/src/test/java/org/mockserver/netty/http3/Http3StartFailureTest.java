@@ -7,6 +7,7 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.integration.ClientAndServer;
+import org.mockserver.lifecycle.LeftBehind;
 import org.mockserver.netty.MockServer;
 import org.mockserver.stop.Stoppable;
 import org.mockserver.testing.socket.TestPortFactory;
@@ -20,14 +21,12 @@ import java.net.StandardProtocolFamily;
 import java.nio.channels.DatagramChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
-import java.util.regex.Pattern;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
@@ -51,9 +50,6 @@ import static org.mockserver.netty.http3.Http3TestServer.startWithHttp3;
 public class Http3StartFailureTest {
 
     private static final long DEADLINE_SECONDS = 30;
-
-    // every MockServer builds a JDK HttpClient for cluster fan-in, whose daemon thread outlives stop() too
-    private static final Pattern JDK_HTTP_CLIENT_SELECTOR = Pattern.compile("HttpClient-\\d+-SelectorManager");
 
     @Rule
     public TemporaryFolder temporaryFolder = new TemporaryFolder();
@@ -247,7 +243,7 @@ public class Http3StartFailureTest {
         if (wrongAtTheThrow.get() != null) {
             throw new AssertionError("when the start threw " + thrown.get() + ": " + wrongAtTheThrow.get().getMessage(), wrongAtTheThrow.get());
         }
-        assertThat("threads the refused server left running", threadsStillAlive(serverThreads), is(empty()));
+        assertThat("threads the refused server left running", LeftBehind.threadsStillAlive(serverThreads), is(empty()));
         return thrown.get();
     }
 
@@ -260,24 +256,6 @@ public class Http3StartFailureTest {
         assertThat("the TCP port was bound before HTTP/3 was started", started.tcpPorts, contains(greaterThan(0)));
         assertThat("the stop must be complete when the constructor throws, not merely begun", started.server.stopAsync().isDone(), is(true));
         assertThrows("the TCP listener on port " + started.tcpPorts.get(0) + " must be closed", ConnectException.class, () -> connect(started.tcpPorts.get(0)));
-    }
-
-    private static List<String> threadsStillAlive(ThreadGroup group) throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(DEADLINE_SECONDS);
-        while (true) {
-            Thread[] threads = new Thread[group.activeCount() + 16];
-            int count = group.enumerate(threads, true);
-            List<String> alive = new ArrayList<>();
-            for (int i = 0; i < count; i++) {
-                if (threads[i].isAlive() && !JDK_HTTP_CLIENT_SELECTOR.matcher(threads[i].getName()).matches()) {
-                    alive.add(threads[i].getName());
-                }
-            }
-            if (alive.isEmpty() || System.nanoTime() >= deadline) {
-                return alive;
-            }
-            Thread.sleep(50);
-        }
     }
 
     private static void connect(int tcpPort) throws Exception {

@@ -1137,6 +1137,29 @@ This release delivers a sustained performance and memory programme alongside dat
   that sets it below 500 now gives up sooner than it did, and one that sets it above 500 waits
   longer.
 - **Mocked OpenAI Responses API (`OPENAI_RESPONSES`) responses now have the shape the real API and the OpenAI Agents SDK expect, so a tool-calling agent loop completes.** A `function_call` output item had no `call_id`, so a client had nothing to echo back in its `function_call_output`. The stream's final `response.completed` event carried no `output`, and the Agents SDK reads each turn's result from there, so an agent saw an empty reply. Every function call now has a `call_id` (`call_…`) separate from its item `id` (`fc_…`). Every streamed event carries a `sequence_number`. Tool-call arguments stream as `response.function_call_arguments.delta` and `.done` events, and text streams inside `response.content_part.added` and `.done`. The arguments are split into one `delta` event per word piece or punctuation mark, the way text is. With `streamingPhysics` set, each of those events is paced by `tokensPerSecond`, so a streamed tool call now takes longer than it did as two events; the other providers still send a tool call's arguments in one piece. `response.created`, `response.in_progress` and `response.completed` carry the full response object, including `output`. Responses also include item `status`, `usage` token details (`0` when unset), and `parallel_tool_calls`, `tool_choice`, `tools`, `instructions`, `previous_response_id` and `metadata` copied from the request. A `toolChoice` set on the completion takes precedence over the request's `tool_choice`. `whenContainsToolResultFor` now matches a tool result by its `call_id`, including when the earlier call is reached through `previous_response_id`. Before, an unchained turn matched only when a client sent back the item `id`, which real clients do not do, while a chained turn with a single tool matched whatever `call_id` it answered with. A chained turn must now answer with the `call_id` MockServer issued, which is the tool call's configured `id` when one is set. Request decoding also reads the `developer` role and the top-level `instructions` as system messages.
+- **Starting and stopping MockServer in one JVM no longer leaves a thread and its file descriptors
+  behind for each server.** Every MockServer started a JDK HTTP client for cluster verify/retrieve
+  fan-in, which is off by default, and stopping the server did not let go of it. Its
+  `HttpClient-N-SelectorManager` thread and that thread's file descriptors stayed until the stopped
+  server was garbage collected, which never happens while something still refers to it: a
+  `ClientAndServer` kept in a static field of a test class, for example. A JVM that starts many
+  servers, as a test suite using the JUnit rule or extension or a `ClientAndServer` per test class
+  does, accumulated one such thread for every stopped server still referenced. The client is now created by the first query to a
+  cluster peer, so a server that does no fan-in never has one, and a server that did releases it
+  when it stops, whether or not the stopped server is still referenced (on Java 17 the thread then
+  ends at the next garbage collection). A fan-in attempted after the stop fails like an unreachable
+  peer.
+- **A `ClientAndServer` that fails to start no longer leaks its client's file descriptors.**
+  `ClientAndServer` builds its client before its server, and the client opens its event loops at
+  once (`clientNioEventLoopThreadCount` of them, 5 by default). When the server then refused to
+  start, because its port or its `http3Port` was held by another application for example, the
+  constructor threw, nothing could stop the client, and garbage collection did not reclaim its
+  selectors, so every failed start left file descriptors open for the rest of the JVM's life. A
+  failed start now releases them as it fails. The same applied to a `MockServerClient`
+  built with a port future that fails or never completes: `stop()` and `close()` gave up without
+  releasing the event loops, and now release them. A client stopped that way is stopped for good,
+  even if its port future completes afterwards: later calls fail with "has already been stopped",
+  so create a new client. Before, such a `stop()` left the client usable.
 
 ## [8.0.0] - 2026-09-15
 

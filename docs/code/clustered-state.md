@@ -555,6 +555,7 @@ sequenceDiagram
 |--------|-----------|
 | **Enable** | `clusterVerifyFanIn=true` **and** a non-empty `clusterVerifyFanInPeers` list (the OTHER nodes' control-plane base URLs). Enabled with no peers = safe no-op. |
 | **Peer query** | Each peer is queried via `PUT /mockserver/retrieve?type=…&format=JSON&fanInLocalOnly=true` using the JDK `HttpClient` (`HttpClusterPeerAccessor`). |
+| **Peer client lifecycle** | The JDK `HttpClient` is built by the **first peer query**, not when the server starts, so a server that does no fan-in (the default) never has one. `HttpState.stop()` closes the fan-in, which drops the client; a peer query made after that fails closed like an unreachable peer instead of building another. |
 | **Non-recursion** | The `fanInLocalOnly=true` marker makes the peer serve ONLY its local log — it never fans out again, so there is no recursion. |
 | **Retrieve merge** | `REQUESTS`/`REQUEST_RESPONSES` results are concatenated (local first, then each peer). Applies to all serialization formats since the merge is at the list level. |
 | **Verify merge** | Count-based request verification (`exactly`/`atLeast`/`atMost`/`between`) sums each peer's LOCAL match count with the local count, then evaluates `VerificationTimes` against the fleet-wide total (`MockServerEventLog.verify(verification, additionalRemoteMatchCount, …)`). |
@@ -571,6 +572,16 @@ nodes. **mTLS client-certificate presentation** for peer queries is *not* wired:
 `HttpClient` uses the JVM default trust store for standard TLS to `https://` peers, but a
 cluster that requires control-plane **client certificates** (`controlPlaneTLSMutualAuthenticationRequired`)
 on peer queries remains a documented boundary — use a bearer/JWT credential instead.
+
+**Why the peer client is lazy and dropped on stop.** A JDK `HttpClient` owns a selector
+thread (`HttpClient-N-SelectorManager`) and the selector's file descriptors. Java 17, the
+minimum supported version, has no way to close one: the JDK ends the thread only after the
+client has been garbage collected. A client held by a stopped server therefore lives for as
+long as anything still references that server, which in a test JVM is common (a static field
+holding a stopped `ClientAndServer`, or the process-wide registrations the most recently
+started server leaves behind). So the client is not built until a peer is actually queried,
+and stopping the server drops the only reference to it whether or not the server itself is
+still referenced. After a stop the thread ends at the next garbage collection, not at once.
 
 **Deferred boundaries (documented, not implemented):**
 
