@@ -130,6 +130,8 @@ public class WebSocketProxyRelayHandler {
             true, customHeaders, MAX_FRAME_PAYLOAD_LENGTH);
 
         final FrameTranscript transcript = new FrameTranscript(configuration.webSocketProxyMaxRecordedFrames());
+        // read for each relay, so a change applies to the next upgrade
+        final int maxHeaderSize = configuration.maxHeaderSize();
 
         Bootstrap bootstrap = new Bootstrap()
             .group(clientChannel.eventLoop())
@@ -149,9 +151,10 @@ public class WebSocketProxyRelayHandler {
                             .createClientSslContext(true, false)
                             .newHandler(ch.alloc(), upstreamHost, upstreamPort));
                     }
-                    pipeline.addLast(new HttpClientCodec());
+                    // a status line is short, so it keeps Netty's limit; the headers follow maxHeaderSize as a forward's do
+                    pipeline.addLast(new HttpClientCodec(HttpObjectDecoder.DEFAULT_MAX_INITIAL_LINE_LENGTH, maxHeaderSize, HttpObjectDecoder.DEFAULT_MAX_CHUNK_SIZE));
                     pipeline.addLast(new HttpObjectAggregator(MAX_FRAME_PAYLOAD_LENGTH));
-                    pipeline.addLast(new UpstreamHandshakeHandler(request, clientCtx, upstreamHandshaker, subprotocol, transcript));
+                    pipeline.addLast(new UpstreamHandshakeHandler(request, clientCtx, upstreamHandshaker, subprotocol, transcript, maxHeaderSize));
                 }
             });
 
@@ -273,15 +276,27 @@ public class WebSocketProxyRelayHandler {
         private final WebSocketClientHandshaker handshaker;
         private final String requestedSubprotocol;
         private final FrameTranscript transcript;
+        private final int maxHeaderSize;
+        // the client has been answered 502: whatever the upstream connection reports after that is not reported again
+        private boolean failed;
 
         private UpstreamHandshakeHandler(HttpRequest request, ChannelHandlerContext clientCtx,
                                          WebSocketClientHandshaker handshaker, String requestedSubprotocol,
-                                         FrameTranscript transcript) {
+                                         FrameTranscript transcript, int maxHeaderSize) {
             this.request = request;
             this.clientCtx = clientCtx;
             this.handshaker = handshaker;
             this.requestedSubprotocol = requestedSubprotocol;
             this.transcript = transcript;
+            this.maxHeaderSize = maxHeaderSize;
+        }
+
+        private void fail(ChannelHandlerContext ctx, String message) {
+            if (!failed) {
+                failed = true;
+                failClient(clientCtx.channel(), request, message);
+            }
+            ctx.close();
         }
 
         @Override
@@ -293,23 +308,33 @@ public class WebSocketProxyRelayHandler {
         public void channelInactive(ChannelHandlerContext ctx) {
             // upstream closed before the handshake completed
             if (!handshaker.isHandshakeComplete()) {
-                failClient(clientCtx.channel(), request, "upstream WebSocket connection closed before handshake completed");
+                fail(ctx, "upstream WebSocket connection closed before handshake completed");
             }
         }
 
         @Override
         protected void channelRead0(ChannelHandlerContext ctx, FullHttpResponse msg) {
-            if (handshaker.isHandshakeComplete()) {
+            if (failed || handshaker.isHandshakeComplete()) {
                 return;
             }
             final Channel upstreamChannel = ctx.channel();
+            // a response the codec stopped decoding holds only what it had read, and what follows is discarded or,
+            // once the codec is replaced, read as frames: it is never a handshake to finish
+            Throwable undecoded = msg.decoderResult().cause();
+            if (undecoded instanceof TooLongHttpHeaderException) {
+                fail(ctx, "upstream WebSocket handshake response headers are larger than maxHeaderSize (" + maxHeaderSize + " bytes)");
+                return;
+            }
+            if (msg.decoderResult().isFailure()) {
+                fail(ctx, "upstream WebSocket handshake response could not be read: " + (undecoded.getMessage() != null ? undecoded.getMessage() : undecoded.getClass().getSimpleName()));
+                return;
+            }
             final String negotiatedSubprotocol;
             try {
                 handshaker.finishHandshake(upstreamChannel, msg);
                 negotiatedSubprotocol = handshaker.actualSubprotocol();
             } catch (WebSocketHandshakeException e) {
-                failClient(clientCtx.channel(), request, "upstream WebSocket handshake failed: " + e.getMessage());
-                upstreamChannel.close();
+                fail(ctx, "upstream WebSocket handshake failed: " + e.getMessage());
                 return;
             }
             // upstream pipeline now speaks WebSocket frames; remove this handshake handler and relay upstream->client
@@ -380,7 +405,7 @@ public class WebSocketProxyRelayHandler {
         @Override
         public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
             if (!handshaker.isHandshakeComplete()) {
-                failClient(clientCtx.channel(), request, "upstream WebSocket error: " + cause.getMessage());
+                fail(ctx, "upstream WebSocket error: " + cause.getMessage());
             }
             ctx.close();
         }

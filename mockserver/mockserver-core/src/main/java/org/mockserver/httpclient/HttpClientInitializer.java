@@ -42,6 +42,8 @@ import static org.slf4j.event.Level.TRACE;
 public class HttpClientInitializer extends ChannelInitializer<SocketChannel> {
 
     private final Configuration configuration;
+    // set for a binary forward, which is built without a Configuration
+    private final Integer binaryForwardMaxHeaderSize;
     private final MockServerLogger mockServerLogger;
     private final boolean forwardProxyClient;
     private final Protocol httpProtocol;
@@ -51,13 +53,22 @@ public class HttpClientInitializer extends ChannelInitializer<SocketChannel> {
     private final Map<ProxyConfiguration.Type, ProxyConfiguration> proxyConfigurations;
     private final NettySslContextFactory nettySslContextFactory;
 
-    HttpClientInitializer(Map<ProxyConfiguration.Type, ProxyConfiguration> proxyConfigurations, MockServerLogger mockServerLogger, boolean forwardProxyClient, NettySslContextFactory nettySslContextFactory, Protocol httpProtocol) {
-        this(proxyConfigurations, mockServerLogger, forwardProxyClient, nettySslContextFactory, httpProtocol, null);
+    /**
+     * For a binary forward, which has no HTTP codecs and keeps Netty's TLS handshake timeout: the one thing it reads
+     * as HTTP is an upstream proxy's answer to {@code CONNECT}, with headers up to {@code maxHeaderSize}.
+     */
+    HttpClientInitializer(Map<ProxyConfiguration.Type, ProxyConfiguration> proxyConfigurations, MockServerLogger mockServerLogger, boolean forwardProxyClient, NettySslContextFactory nettySslContextFactory, int maxHeaderSize) {
+        this(proxyConfigurations, mockServerLogger, forwardProxyClient, nettySslContextFactory, null, null, maxHeaderSize);
     }
 
     HttpClientInitializer(Map<ProxyConfiguration.Type, ProxyConfiguration> proxyConfigurations, MockServerLogger mockServerLogger, boolean forwardProxyClient, NettySslContextFactory nettySslContextFactory, Protocol httpProtocol, Configuration configuration) {
+        this(proxyConfigurations, mockServerLogger, forwardProxyClient, nettySslContextFactory, httpProtocol, configuration, null);
+    }
+
+    private HttpClientInitializer(Map<ProxyConfiguration.Type, ProxyConfiguration> proxyConfigurations, MockServerLogger mockServerLogger, boolean forwardProxyClient, NettySslContextFactory nettySslContextFactory, Protocol httpProtocol, Configuration configuration, Integer binaryForwardMaxHeaderSize) {
         this.proxyConfigurations = proxyConfigurations;
         this.configuration = configuration;
+        this.binaryForwardMaxHeaderSize = binaryForwardMaxHeaderSize;
         this.mockServerLogger = mockServerLogger;
         this.forwardProxyClient = forwardProxyClient;
         this.httpProtocol = httpProtocol;
@@ -153,7 +164,7 @@ public class HttpClientInitializer extends ChannelInitializer<SocketChannel> {
      * change applies to new connections.
      */
     private int maxHeaderSize() {
-        return configuration != null ? configuration.maxHeaderSize() : ConfigurationProperties.maxHeaderSize();
+        return binaryForwardMaxHeaderSize != null ? binaryForwardMaxHeaderSize : configuration.maxHeaderSize();
     }
 
     private void configureHttp1Pipeline(ChannelPipeline pipeline) {

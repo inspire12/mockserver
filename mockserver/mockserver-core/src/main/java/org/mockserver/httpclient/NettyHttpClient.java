@@ -584,7 +584,7 @@ public class NettyHttpClient {
                 .attr(REMOTE_SOCKET, remoteAddress)
                 .attr(RESPONSE_FUTURE, responseFuture)
                 .attr(ERROR_IF_CHANNEL_CLOSED_WITHOUT_RESPONSE, !configuration.forwardBinaryRequestsWithoutWaitingForResponse())
-                .handler(new HttpClientInitializer(proxyConfigurations, mockServerLogger, forwardProxyClient, nettySslContextFactory, null));
+                .handler(new HttpClientInitializer(proxyConfigurations, mockServerLogger, forwardProxyClient, nettySslContextFactory, configuration.maxHeaderSize()));
             applyForwardSocketKeepAlive(binaryBootstrap);
             binaryBootstrap
                 .connect(remoteAddress)

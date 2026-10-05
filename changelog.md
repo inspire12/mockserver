@@ -547,6 +547,21 @@ This release delivers a sustained performance and memory programme alongside dat
 
 ### Fixed
 
+- **A proxied WebSocket now connects when the upstream's handshake reply has more than 8 KB of headers.** MockServer
+  read the upstream's reply to a proxied WebSocket handshake up to 8 KB of headers whatever `maxHeaderSize` was set
+  to. With a larger reply (a large `Set-Cookie`, for example) the client was answered `502` with a reason that did
+  not mention the size (`upstream WebSocket handshake failed: Invalid handshake response upgrade: null`), or, when
+  the large header came late in the reply, was sent `101` and could then receive the rest of the upstream's header
+  bytes as WebSocket frames. The reply is now read up to `maxHeaderSize` (256 KB by default). A
+  reply with larger headers never opens the WebSocket: the client is answered `502` with the reason as the body, for
+  example `upstream WebSocket handshake response headers are larger than maxHeaderSize (262144 bytes)`, and the
+  connection to the upstream is closed. A reply MockServer cannot read for another reason (a header line that ends
+  without a carriage return, or a connection closed part-way through the headers) is refused the same way, with
+  `upstream WebSocket handshake response could not be read: ` and the reason, where it used to be accepted with
+  `101`. A failed upstream handshake is also logged once at `WARN`, where it was
+  logged twice (the reason, then `upstream WebSocket connection closed before handshake completed`). One thing
+  changes for an existing setup: a `maxHeaderSize` you have set below `8192` now limits this reply to that lower
+  value.
 - **Retrieving a very large log no longer answers `400` with a bare negative number.** `PUT
   /mockserver/retrieve` builds its whole response in memory, and the response is much larger than
   the bodies it reports: a body is written several times in each log entry, and each byte that is
