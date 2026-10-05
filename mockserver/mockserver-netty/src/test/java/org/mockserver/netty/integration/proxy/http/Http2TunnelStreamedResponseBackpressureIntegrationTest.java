@@ -32,6 +32,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
@@ -277,7 +278,7 @@ public class Http2TunnelStreamedResponseBackpressureIntegrationTest {
      */
     @Test
     public void shouldCloseBothLegsAndTheUpstreamWhenAClientLeavesAStreamItWasNotTaking() throws Exception {
-        MockServer server = new MockServer(configuration().logLevel("WARN").startupWarmup(false).proxySetup(false).streamIdleTimeoutSeconds(120), 0);
+        MockServer server = new MockServer(configuration().logLevel("WARN").startupWarmup(false).proxySetup(false).proxySetupLogging(false).streamIdleTimeoutSeconds(120), 0);
         try {
             // on a connection of its own, closed with its response: the Java client keeps its connections for a while
             controlPlane(server, "/mockserver/expectation", "{\"httpRequest\":{\"path\":\"/upstream/.*\"},\"httpForward\":{\"host\":\"127.0.0.1\",\"port\":" + upstream.port() + ",\"scheme\":\"HTTP\"}}");
@@ -297,8 +298,8 @@ public class Http2TunnelStreamedResponseBackpressureIntegrationTest {
             assertThat("the upstream is closed", upstream.closedWithin(id, 15), is(true));
             assertThat("both legs are closed", openConnectionsBecome(server, 0), is(true));
             assertThat("at once, not when the wait for the loopback's other end runs out", TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - leftNanos), lessThan(4000L));
-            // this server's log was never reset, so it still has the notice it logs when it first forwards
-            assertThat("a client that leaves is not an error", warningsAndErrors(new MockServerClient("localhost", server.getLocalPort())), everyItem(startsWith("Forward proxy is configured to trust ALL")));
+            // this server's log was never reset, so it still has the notices it logs when it first forwards or intercepts TLS
+            assertThat("a client that leaves is not an error", warningsAndErrors(new MockServerClient("localhost", server.getLocalPort())), everyItem(anyOf(startsWith("Forward proxy is configured to trust ALL"), startsWith("MockServer proxy setup"))));
         } finally {
             stopQuietly(server);
         }
