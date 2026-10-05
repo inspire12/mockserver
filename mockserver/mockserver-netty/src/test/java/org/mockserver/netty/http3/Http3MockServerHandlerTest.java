@@ -4,6 +4,8 @@ import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.CompositeByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.handler.codec.http3.Http3Exception;
+import io.netty.handler.codec.http3.Http3ErrorCode;
 import io.netty.handler.codec.http3.DefaultHttp3DataFrame;
 import io.netty.handler.codec.http3.DefaultHttp3HeadersFrame;
 import org.junit.Test;
@@ -47,6 +49,19 @@ public class Http3MockServerHandlerTest {
     private static final String BIDI_SERVICE = "com.example.grpc.GreetingService";
     private static final String BIDI_METHOD = "Chat";
     private static final String BIDI_PATH = "/" + BIDI_SERVICE + "/" + BIDI_METHOD;
+
+    @Test
+    public void shouldRecogniseOnlyNettysRefusalOfAHeaderSectionOverTheLimit() {
+        assertThat(Http3MockServerHandler.isHeaderSectionTooLarge(new Http3Exception(Http3ErrorCode.H3_EXCESSIVE_LOAD, "Header size exceeded max allowed size (8192)")), is(true));
+        assertThat(Http3MockServerHandler.isHeaderSectionTooLarge(new Http3Exception(Http3ErrorCode.H3_EXCESSIVE_LOAD, "Received an invalid frame len 9000 for frame of type 1.")), is(true));
+
+        assertThat("an over-long frame of another type", Http3MockServerHandler.isHeaderSectionTooLarge(new Http3Exception(Http3ErrorCode.H3_EXCESSIVE_LOAD, "Received an invalid frame len 9000 for frame of type 33.")), is(false));
+        assertThat("a frame length over an int", Http3MockServerHandler.isHeaderSectionTooLarge(new Http3Exception(Http3ErrorCode.H3_EXCESSIVE_LOAD, "Received an invalid frame len.")), is(false));
+        assertThat("no message", Http3MockServerHandler.isHeaderSectionTooLarge(new Http3Exception(Http3ErrorCode.H3_EXCESSIVE_LOAD, null)), is(false));
+        assertThat("another error code", Http3MockServerHandler.isHeaderSectionTooLarge(new Http3Exception(Http3ErrorCode.H3_MESSAGE_ERROR, "Header size exceeded max allowed size (8192)")), is(false));
+        assertThat("another error code", Http3MockServerHandler.isHeaderSectionTooLarge(new Http3Exception(Http3ErrorCode.H3_FRAME_ERROR, "Received an invalid frame len 9000 for frame of type 1.")), is(false));
+        assertThat("not an HTTP/3 error", Http3MockServerHandler.isHeaderSectionTooLarge(new IllegalStateException("Header size exceeded max allowed size (8192)")), is(false));
+    }
 
     @Test
     public void shouldReleaseBodyAccumulatorOnHandlerRemoved() throws Exception {

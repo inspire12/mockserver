@@ -428,7 +428,7 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
         // = false) so unusual request header values are recorded rather than reset. gRPC's own message
         // compression is a separate concern carried by the grpc-encoding header (handled by
         // GrpcFrameCodec), on which HttpContentDecompressor is inert.
-        Http2FrameCodecBuilder frameCodecBuilder = Http2FrameCodecBuilder.forServer()
+        Http2FrameCodecBuilder frameCodecBuilder = Http2RequestHeaderLimit.frameCodecBuilder(mockServerLogger)
             // Disable INBOUND header validation on the connection-level frame decoder so unusual request
             // header values (leading space, embedded DEL/0x7F, other control characters) are decoded and
             // recorded rather than RST_STREAM'd -- MockServer records malformed traffic so users can test
@@ -449,7 +449,7 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
             // (Connection, Transfer-Encoding, ...) are still rejected by the framing layer, and OUTBOUND
             // response/trailer header NAMES remain validated by the per-stream codec.
             .validateHeaders(false)
-            .initialSettings(Http2Settings.defaultSettings()
+            .initialSettings((RelayLoopbackAddresses.isRelayLoopback(ctx.channel()) ? Http2RequestHeaderLimit.relayLoopbackSettings() : Http2RequestHeaderLimit.serverSettings(configuration))
                 .maxConcurrentStreams(HTTP2_MAX_CONCURRENT_STREAMS)
                 .maxFrameSize(configuration.maxRequestBodySize() < Http2CodecUtil.MAX_FRAME_SIZE_LOWER_BOUND
                     ? Http2CodecUtil.MAX_FRAME_SIZE_LOWER_BOUND

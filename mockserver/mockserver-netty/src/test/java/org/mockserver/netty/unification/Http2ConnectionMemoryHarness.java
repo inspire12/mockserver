@@ -21,7 +21,6 @@ import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http2.DefaultHttp2FrameWriter;
 import io.netty.handler.codec.http2.DefaultHttp2Headers;
 import io.netty.handler.codec.http2.Http2CodecUtil;
-import io.netty.handler.codec.http2.Http2FrameCodecBuilder;
 import io.netty.handler.codec.http2.Http2MultiplexHandler;
 import io.netty.handler.codec.http2.Http2Settings;
 import io.netty.handler.codec.http2.Http2StreamChannel;
@@ -195,10 +194,10 @@ final class Http2ConnectionMemoryHarness {
         connection.config().setAllocator(connectionAllocator);
         readHandle.reset(connection.config());
         connection.pipeline().addLast(
-            Http2FrameCodecBuilder.forServer()
+            Http2RequestHeaderLimit.frameCodecBuilder(new MockServerLogger(Http2ConnectionMemoryHarness.class))
                 // as PortUnificationHandler.switchToHttp2Multiplex builds it
                 .validateHeaders(false)
-                .initialSettings(Http2Settings.defaultSettings()
+                .initialSettings(Http2RequestHeaderLimit.serverSettings(configuration)
                     .maxConcurrentStreams(PortUnificationHandler.HTTP2_MAX_CONCURRENT_STREAMS)
                     .maxFrameSize(configuration.maxRequestBodySize() < Http2CodecUtil.MAX_FRAME_SIZE_LOWER_BOUND
                         ? Http2CodecUtil.MAX_FRAME_SIZE_LOWER_BOUND

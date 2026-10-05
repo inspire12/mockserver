@@ -163,10 +163,7 @@ This release delivers a sustained performance and memory programme alongside dat
   to requests sent through a `CONNECT` or SOCKS tunnel, which were forwarded. A request is also unreadable
   when the request before it on the same connection left bytes behind: a client that writes a body with
   neither `Content-Length` nor chunked encoding (Node's `http.request` does this for a `GET`) gets `400`
-  for its next request on that connection, where it used to get `404` for `GET /bad-request`. HTTP/2 and HTTP/3 are
-  unchanged: their URL and headers together were and are limited to 8 KB. The limits apply only to
-  requests MockServer receives: a mocked or proxied response with larger headers is sent intact,
-  through a tunnel too.
+  for its next request on that connection, where it used to get `404` for `GET /bad-request`. HTTP/2 and HTTP/3 take the same header limit (see the `maxHeaderSize` entry below). The limits apply only to requests MockServer receives: a mocked response with larger headers is sent intact, through a tunnel too. A proxied response is limited separately and as before: MockServer reads an upstream's response headers up to 8 KB.
 - **A client can no longer make the server hold far more memory than the request it is sending.** Each piece
   of a request body is a slice of the network read it arrived in, and the server kept the whole read allocated
   while it held any piece of it. Over HTTP/2, a client that put each small DATA frame of a request in a read
@@ -208,6 +205,26 @@ This release delivers a sustained performance and memory programme alongside dat
 
 ### Changed
 
+- **Behaviour change: `maxHeaderSize` now limits the headers of HTTP/2 and HTTP/3 requests too. They
+  were limited to 8 KB whatever it was set to.** A request with a long URL, large cookies or a large
+  token was refused over HTTP/2 or HTTP/3 once its headers passed 8 KB, and raising `maxHeaderSize`
+  made no difference. All three protocols now take the limit from `maxHeaderSize` (default 256 KB),
+  and MockServer tells HTTP/2 and HTTP/3 clients the limit when they connect. Over HTTP/2 and HTTP/3
+  the size is counted as those protocols define it: each header's name and value plus 32 bytes,
+  including the method, host and URL (which are headers there), after decompression. So a long URL
+  or a great many small headers reach the limit sooner than over HTTP/1.1, and headers that are
+  small as sent but large once decompressed are counted at their decompressed size and refused.
+  A request over the limit is answered `431` over HTTP/1.1 (and the connection closed) and over
+  HTTP/2 (and that request's stream reset, other requests on the connection carrying on; if the
+  headers as sent are more than a quarter over the limit the connection is closed instead). Over
+  HTTP/3 the connection is closed with the error `H3_EXCESSIVE_LOAD` and no `431` is sent. Each
+  refusal is logged once at `WARN`. A request sent through a `CONNECT` or SOCKS tunnel is limited
+  the same way. Three things change for an existing setup: by default HTTP/2 and HTTP/3 accept
+  headers up to 256 KB where they accepted 8 KB; a `maxHeaderSize` you have lowered now applies to
+  HTTP/2 and HTTP/3 as well; and a `maxHeaderSize` you have raised now raises their limit too, so
+  `2147483647`, which removes the limit for HTTP/1.1, removes it for HTTP/2 and HTTP/3. To keep the
+  old 8 KB limit on HTTP/2 and HTTP/3 set `maxHeaderSize=8192`, which limits HTTP/1.1 headers to
+  8 KB too.
 - **`EchoServer` (the echo server in `mockserver-core` used by tests) listens on IPv4 only.** It still
   listens on every IPv4 address and an OS-assigned port, but no longer accepts connections to `::1`.
   On macOS its previous dual-stack socket could be given a port another application already listened
@@ -429,6 +446,11 @@ This release delivers a sustained performance and memory programme alongside dat
 
 ### Fixed
 
+- **A mocked response with more than 8 KB of headers now reaches an HTTP/2 client through a
+  `CONNECT` or SOCKS tunnel.** The tunnel read MockServer's own response with an 8 KB limit on its
+  headers and reset the request's stream instead of relaying the response; the same response was
+  delivered to a client connected directly, and through a tunnel over HTTP/1.1. Response headers
+  are now relayed whatever their size.
 - **Forwarding binary (non-HTTP) messages without waiting for a response no longer stalls behind a
   `binaryProxyListener`, and keeps one connection's messages in order.** With
   `forwardBinaryRequestsWithoutWaitingForResponse` enabled, the listener was called on the thread that

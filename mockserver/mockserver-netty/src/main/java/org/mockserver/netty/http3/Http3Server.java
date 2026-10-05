@@ -155,6 +155,10 @@ public class Http3Server {
             // build settings frame: QPACK dynamic table + extended CONNECT
             DefaultHttp3SettingsFrame settingsFrame = new DefaultHttp3SettingsFrame();
             settingsFrame.put(Http3SettingsFrame.HTTP3_SETTINGS_QPACK_MAX_TABLE_CAPACITY, qpackMaxTableCapacity);
+            if (configuration != null) {
+                // the header section limit of every protocol; Netty refuses a larger one with H3_EXCESSIVE_LOAD
+                settingsFrame.put(Http3SettingsFrame.HTTP3_SETTINGS_MAX_FIELD_SECTION_SIZE, (long) configuration.maxHeaderSize());
+            }
 
             boolean connectUdpEnabled = configuration != null && Boolean.TRUE.equals(configuration.http3ConnectUdpEnabled());
             if (connectUdpEnabled) {

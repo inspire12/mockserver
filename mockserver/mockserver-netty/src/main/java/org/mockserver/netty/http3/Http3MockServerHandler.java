@@ -10,6 +10,8 @@ import io.netty.handler.codec.DecoderException;
 import io.netty.handler.codec.http3.DefaultHttp3DataFrame;
 import io.netty.handler.codec.http3.DefaultHttp3HeadersFrame;
 import io.netty.handler.codec.http3.Http3DataFrame;
+import io.netty.handler.codec.http3.Http3ErrorCode;
+import io.netty.handler.codec.http3.Http3Exception;
 import io.netty.handler.codec.http3.Http3HeadersFrame;
 import io.netty.handler.codec.http3.Http3RequestStreamInboundHandler;
 import io.netty.handler.codec.quic.QuicChannel;
@@ -760,7 +762,17 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-        if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+        if (isHeaderSectionTooLarge(cause)) {
+            // Netty has already closed the connection with H3_EXCESSIVE_LOAD
+            if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.WARN)
+                        .setMessageFormat("closing HTTP/3 connection from:{}because a request's header section is larger than maxHeaderSize:{}")
+                        .setArguments(peerAddress(ctx.channel()), configuration.maxHeaderSize())
+                );
+            }
+        } else if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
             mockServerLogger.logEvent(
                 new LogEntry()
                     .setLogLevel(Level.WARN)
@@ -770,6 +782,28 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
             );
         }
         ctx.close();
+    }
+
+    /**
+     * The client's socket address: a QUIC channel's {@code remoteAddress()} is its connection id.
+     */
+    private static Object peerAddress(Channel streamChannel) {
+        Channel connection = streamChannel.parent();
+        if (connection instanceof QuicChannel) {
+            return ((QuicChannel) connection).remoteSocketAddress();
+        }
+        return streamChannel.remoteAddress();
+    }
+
+    /**
+     * Whether Netty refused a header section over {@code SETTINGS_MAX_FIELD_SECTION_SIZE}: by its decoded size
+     * ({@code Http3HeadersSink}) or, before decoding it, by the length of its HEADERS frame ({@code Http3FrameCodec}).
+     */
+    static boolean isHeaderSectionTooLarge(Throwable cause) {
+        if (!(cause instanceof Http3Exception) || ((Http3Exception) cause).errorCode() != Http3ErrorCode.H3_EXCESSIVE_LOAD || cause.getMessage() == null) {
+            return false;
+        }
+        return cause.getMessage().startsWith("Header size exceeded max allowed size") || cause.getMessage().endsWith("for frame of type 1.");
     }
 
     /**

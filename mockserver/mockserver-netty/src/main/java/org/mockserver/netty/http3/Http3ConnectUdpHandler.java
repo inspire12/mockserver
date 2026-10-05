@@ -114,6 +114,8 @@ public class Http3ConnectUdpHandler extends ChannelInboundHandlerAdapter {
      */
     private boolean tunnelEstablished;
 
+    private boolean connectUdpRequested;
+
     /**
      * Legacy/test constructor: no configuration, so no allowlist is enforced and
      * the SSRF block falls back to global {@code ConfigurationProperties} (default off).
@@ -146,6 +148,7 @@ public class Http3ConnectUdpHandler extends ChannelInboundHandlerAdapter {
             if (method != null && "CONNECT".equalsIgnoreCase(method.toString())) {
                 if (protocol != null && "connect-udp".equalsIgnoreCase(protocol.toString())) {
                     // Extended CONNECT with :protocol=connect-udp (RFC 9298)
+                    connectUdpRequested = true;
                     handleConnectUdp(ctx, headersFrame);
                     return;
                 }
@@ -461,6 +464,11 @@ public class Http3ConnectUdpHandler extends ChannelInboundHandlerAdapter {
 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+        if (!connectUdpRequested) {
+            // not a CONNECT-UDP stream: the request handler after this one reports and closes it
+            ctx.fireExceptionCaught(cause);
+            return;
+        }
         LOG.warn("CONNECT-UDP handler exception: {}", cause.getMessage(), cause);
         closeUdpChannel();
         ctx.close();

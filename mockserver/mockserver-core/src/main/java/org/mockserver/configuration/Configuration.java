@@ -2774,8 +2774,11 @@ public class Configuration {
     }
 
     /**
-     * Maximum size in bytes of the header section of an HTTP/1.1 request, all header lines together; a larger one is
-     * refused with 431 and the connection closed
+     * Maximum size in bytes of a request's headers. Over HTTP/1.1 it is the header section, all header lines
+     * together; a larger one is refused with 431 and the connection closed. Over HTTP/2 and HTTP/3 it is the header
+     * list as those protocols size it (each field's name and value plus 32 bytes, the method, scheme, authority and
+     * path included) and is advertised to the client; a larger one is refused with 431 on its stream over HTTP/2,
+     * and closes the connection over HTTP/3
      * <p>
      * The default is 262,144 (256 KiB). The smallest limit is 1: zero or a negative value is read as 1.
      *

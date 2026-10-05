@@ -696,6 +696,14 @@ bidi-streaming) work over HTTP/3, matching the TCP (HTTP/1.1 and HTTP/2) path.
   `maxRequestBodySize` (default 10 MiB), matching the HTTP/1.1 and HTTP/2 paths;
   a request exceeding the cap is rejected (413 / stream shutdown) rather than
   buffered unboundedly.
+- **Request header size cap**: a request's header section (its pseudo-header fields included, each
+  field's name and value plus 32 bytes) is limited to `maxHeaderSize` (default 256 KiB), which
+  `Http3Server` advertises as `SETTINGS_MAX_FIELD_SECTION_SIZE`. Netty's HTTP/3 codec treats a larger
+  one as a connection error, so the connection is closed with `H3_EXCESSIVE_LOAD` and no `431` is sent,
+  unlike HTTP/1.1 and HTTP/2; `Http3MockServerHandler` logs one `WARN` entry. A `HEADERS` frame longer
+  than the limit is refused from its length, and a section that is small on the wire but decodes past
+  the limit is refused as it is decoded, the codec no longer keeping fields once the limit is passed; see
+  [netty-pipeline.md → Request line and header limits](netty-pipeline.md#request-line-and-header-limits).
 - **Request body components**: a body arrives in pieces of about one QUIC packet, so after its
   first 64 pieces the accumulator copies pieces under 16 KiB into 16 KiB blocks
   (`Http3RequestBridge.accumulateBody`) and keeps at most
