@@ -169,6 +169,102 @@ export type RequestResponse = SuccessFullRequest | string;
 
 export type PathOrRequestDefinition = string | Expectation | RequestDefinition | undefined | null;
 
+/** Recorded requests and responses as a HAR 1.2 document, as MockServer writes it for format=HAR. */
+export interface Har {
+    log: HarLog;
+}
+
+export interface HarLog {
+    version: string;
+    creator: HarCreator;
+    entries: HarEntry[];
+}
+
+export interface HarCreator {
+    name: string;
+    version: string;
+}
+
+export interface HarEntry {
+    startedDateTime: string;
+    /** total time of the exchange in milliseconds, 0 when it was not measured */
+    time: number;
+    request: HarRequest;
+    response: HarResponse;
+    cache: object;
+    timings: HarTimings;
+    serverIPAddress?: string;
+    connection?: string;
+}
+
+export interface HarNameValuePair {
+    name: string;
+    value: string;
+}
+
+export interface HarCookie {
+    name: string;
+    value: string;
+    path?: string;
+    domain?: string;
+    expires?: string;
+    httpOnly?: boolean;
+    secure?: boolean;
+}
+
+export interface HarRequest {
+    method: string;
+    url: string;
+    httpVersion: string;
+    cookies: HarCookie[];
+    headers: HarNameValuePair[];
+    queryString: HarNameValuePair[];
+    postData?: HarPostData;
+    headersSize: number;
+    /** -1 when unknown */
+    bodySize: number;
+}
+
+export interface HarPostData {
+    mimeType: string;
+    /** for a form body */
+    params?: HarNameValuePair[];
+    /** for any other body; a binary body is base64 */
+    text?: string;
+}
+
+export interface HarResponse {
+    status: number;
+    statusText: string;
+    httpVersion: string;
+    cookies: HarCookie[];
+    headers: HarNameValuePair[];
+    content: HarContent;
+    redirectURL: string;
+    headersSize: number;
+    /** -1 when unknown */
+    bodySize: number;
+}
+
+export interface HarContent {
+    size: number;
+    mimeType: string;
+    text?: string;
+    /** 'base64' when text holds a binary body */
+    encoding?: string;
+}
+
+/** milliseconds per phase; blocked, dns, connect and ssl are -1 when not measured, send, wait and receive 0 */
+export interface HarTimings {
+    blocked: number;
+    dns: number;
+    connect: number;
+    send: number;
+    wait: number;
+    receive: number;
+    ssl: number;
+}
+
 /**
  * Fluent, chainable expectation builder returned by MockServerClient.when(...),
  * mirroring the Java client's ForwardChainExpectation. The optional builder
@@ -516,6 +612,12 @@ export interface MockServerClient {
     retrieveRecordedRequests(pathOrRequestDefinition: PathOrRequestDefinition): Promise<HttpResponse[]>;
 
     retrieveRecordedRequestsAndResponses(pathOrRequestDefinition: PathOrRequestDefinition): Promise<HttpRequestAndHttpResponse[]>;
+
+    /**
+     * The recorded requests and their responses, as retrieveRecordedRequestsAndResponses
+     * selects them, as one HAR 1.2 document (PUT /mockserver/retrieve?format=HAR).
+     */
+    retrieveRecordedRequestsAndResponsesAsHar(pathOrRequestDefinition: PathOrRequestDefinition): Promise<Har>;
 
     retrieveActiveExpectations(pathOrRequestDefinition: PathOrRequestDefinition): Promise<Expectation[]>;
 

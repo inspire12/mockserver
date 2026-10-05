@@ -547,6 +547,14 @@ This release delivers a sustained performance and memory programme alongside dat
 
 ### Fixed
 
+- **TypeScript users of the Node client can call `retrieveRecordedRequestsAndResponsesAsHar` without a cast.** The
+  method, which resolves with the recorded requests and their responses as one HAR 1.2 document, has been in the
+  client since before 8.0.0 but was missing from its typings, so calling it from TypeScript did not compile. It is now
+  declared with the same argument as `retrieveRecordedRequestsAndResponses` (a path, a request matcher, or `null`
+  for everything), and resolves with a new `Har` type describing the document MockServer returns; `Har` and the
+  types it is built from (`HarEntry`, `HarRequest`, `HarResponse` and the rest) are exported from
+  `mockserver-client`. The package's tests now compare the client, and every builder reached through it, with
+  its typings member by member, so a method present at run time and missing from the typings now fails them.
 - **A proxied WebSocket now connects when the upstream's handshake reply has more than 8 KB of headers.** MockServer
   read the upstream's reply to a proxied WebSocket handshake up to 8 KB of headers whatever `maxHeaderSize` was set
   to. With a larger reply (a large `Set-Cookie`, for example) the client was answered `502` with a reason that did

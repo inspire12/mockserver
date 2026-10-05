@@ -125,13 +125,17 @@ const DECLARATION = new RegExp('^(export\\s+)?(?:declare\\s+)?(?:abstract\\s+)?(
 const UNBALANCED = 'export in a file or namespace whose braces or brackets do not balance';
 // `import(` opens a type, not a statement
 const STATEMENT_START = /^[ \t]*(?:export|declare|import(?!\s*\()|function|const|let|var|class|enum|interface|type|namespace|module|abstract)\b/;
+// in an interface a member may end at a line break, before a line that starts another member
+const MEMBER_START = /^[ \t]*(?:[A-Za-z_$][\w$]*\s*\??\s*[(:<]|(?:readonly|get|set|new)\b|[[('"])/;
+const MEMBER = /^(?!new\s*[(<])(?:readonly\s+|[gs]et\s+(?=[A-Za-z_$]))?([A-Za-z_$][\w$]*|\[Symbol\.[A-Za-z_$][\w$]*\]|'[^']*'|"[^"]*")\s*(\?)?\s*[(:<]/;
 
 /**
  * The statements of `text` that are outside any braces. `head` is the statement with comments and
  * the contents of its braces removed, `block` the contents of its first braces. A statement ends
- * at a semicolon, or at a line break before a line that starts a declaration, import or export.
+ * at a semicolon, or at a line break before a line that `start` matches: by default one that
+ * starts a declaration, import or export.
  */
-function statementsOf(text) {
+function statementsOf(text, start) {
   // comments are blanked, and so is punctuation in string literals, so that it can be counted
   const source = text.replace(/'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|\/\*[\s\S]*?\*\/|\/\/.*$/gm, function (found) {
     return found.replace(found[0] === '/' ? /[^\n]/g : /[{}()[\];]/g, ' ');
@@ -165,7 +169,7 @@ function statementsOf(text) {
       }
     } else if (braces === 0) {
       brackets += '(['.includes(character) ? 1 : (')]'.includes(character) ? -1 : 0);
-      if (character === ';' || (character === '\n' && brackets === 0 && STATEMENT_START.test(source.slice(i + 1, i + 80)))) {
+      if (character === ';' || (character === '\n' && brackets === 0 && (start || STATEMENT_START).test(source.slice(i + 1, i + 80)))) {
         end();
       } else {
         head += character;
@@ -313,6 +317,96 @@ function declaredValues(description) {
   });
 }
 
+/**
+ * The members of every `interface name` block in a .d.ts. `members` maps each name to whether it
+ * is optional; a member keyed by a well-known symbol is named `[Symbol.x]`. `unread` lists the
+ * members in no form read here (index, call and construct signatures) and an `extends` clause,
+ * whose members are not read. Members separated by commas are not split.
+ */
+function describeInterface(file, name) {
+  const members = new Map();
+  const unread = [];
+  let found = false;
+
+  statementsOf(fs.readFileSync(file, 'utf8')).forEach(function (statement) {
+    const opening = new RegExp('^(?:export\\s+)?(?:declare\\s+)?interface\\s+' + name + '\\b([^{]*)\\{\\}$').exec(statement.head);
+    if (!opening) {
+      return;
+    }
+    found = true;
+    if (/\bextends\b/.test(opening[1])) {
+      unread.push('interface ' + name + opening[1].replace(/\s+/g, ' ').trimEnd());
+    }
+    statementsOf(statement.block, MEMBER_START).forEach(function (member) {
+      const parts = MEMBER.exec(member.head);
+      if (!parts) {
+        unread.push(member.head);
+        return;
+      }
+      const key = parts[1].replace(/^(['"])([\s\S]*)\1$/, '$2');
+      // an overload makes a member required unless every declaration of it is optional
+      members.set(key, Boolean(parts[2]) && members.get(key) !== false);
+    });
+  });
+
+  return { found: found, members: members, unread: unread };
+}
+
+/**
+ * How an interface names a symbol key: a well-known symbol by identity, as `[Symbol.x]`, because
+ * its description differs between Node versions (`nodejs.dispose` on Node 22 for Symbol.dispose).
+ */
+function symbolName(key) {
+  const wellKnown = Object.getOwnPropertyNames(Symbol).find(function (property) {
+    return Symbol[property] === key;
+  });
+  return wellKnown ? '[Symbol.' + wellKnown + ']' : '[unnamed symbol ' + String(key.description) + ']';
+}
+
+/** The names a caller reaches on an object, inherited ones included; a symbol is named by symbolName. */
+function memberNames(object) {
+  const names = new Set();
+  for (let level = object; level && level !== Object.prototype && level !== Function.prototype; level = Object.getPrototypeOf(level)) {
+    for (const key of Reflect.ownKeys(level)) {
+      if (key !== 'constructor') {
+        names.add(typeof key === 'symbol' ? symbolName(key) : key);
+      }
+    }
+  }
+  return names;
+}
+
+/**
+ * Compares `object` with `interface name` of the .d.ts `file`. `problems` lists what the
+ * interface requires and the object lacks, and what of the interface was not read; `undeclared`
+ * the names the object has that the interface does not declare, except those starting with `_`,
+ * which are taken to be private state.
+ */
+function compareWithInterface(file, name, object) {
+  const label = path.basename(file) + ' ' + name;
+  const declared = describeInterface(file, name);
+  const names = memberNames(object);
+  const problems = [];
+
+  if (!declared.found) {
+    problems.push(path.basename(file) + ' declares no interface ' + name);
+  }
+  declared.unread.forEach(function (member) {
+    problems.push(label + ': a member in a form this check does not read: ' + member);
+  });
+  declared.members.forEach(function (optional, member) {
+    if (!optional && !names.has(member)) {
+      problems.push(label + ' declares ' + member + ', which the object does not have');
+    }
+  });
+  return {
+    problems: problems,
+    undeclared: Array.from(names).filter(function (member) {
+      return !member.startsWith('_') && !declared.members.has(member);
+    }).sort()
+  };
+}
+
 /** Each published .d.ts whose module is beside it in the tarball, with what that module exports. */
 function typedModules(packageRoot) {
   const files = packedFiles(packageRoot);
@@ -336,11 +430,15 @@ function typedModules(packageRoot) {
  * `acceptedDefaultExports`: files declaring a default export their module does not have.
  * `acceptedUncheckedTypings`: files in which no exported function or value was found to compare.
  * `acceptedUndeclaredExports`: by .d.ts file, the names its module exports and it does not declare.
+ * `builtObjects` lists objects the package builds, each compared with the interface that types
+ * it: `{ typings, name, build, acceptedUndeclared }`, where `build()` returns the object and
+ * `acceptedUndeclared` lists the names it has that the interface does not declare.
  */
 function registerTests(packageRoot, options) {
   const acceptedDefaultExports = (options && options.acceptedDefaultExports) || [];
   const acceptedUncheckedTypings = (options && options.acceptedUncheckedTypings) || [];
   const acceptedUndeclaredExports = (options && options.acceptedUndeclaredExports) || {};
+  const builtObjects = (options && options.builtObjects) || [];
   const manifest = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8'));
 
   test('every path package.json declares is in the published tarball', function () {
@@ -458,6 +556,28 @@ function registerTests(packageRoot, options) {
     assert.deepStrictEqual(problems, []);
   });
 
+  test('an object the package builds has every member its interface requires, and no other undeclared', function () {
+    const problems = [];
+    const undeclared = {};
+    const accepted = {};
+
+    builtObjects.forEach(function (built) {
+      const label = built.typings + ' ' + built.name;
+      const compared = compareWithInterface(path.join(packageRoot, built.typings), built.name, built.build());
+      Array.prototype.push.apply(problems, compared.problems);
+      if (compared.undeclared.length > 0) {
+        undeclared[label] = compared.undeclared;
+      }
+      if ((built.acceptedUndeclared || []).length > 0) {
+        accepted[label] = built.acceptedUndeclared.slice().sort();
+      }
+    });
+
+    assert.deepStrictEqual(problems, []);
+    assert.deepStrictEqual(undeclared, accepted,
+      'the members an object has that its interface does not declare (expected: the accepted ones)');
+  });
+
   test('a published .d.ts declares a default export only when the module beside it has one', function () {
     // `module.exports = { ... }` has no `default`: typings that declare one compile a default import
     // into a read of `undefined`, and reject the `require` form that works
@@ -473,8 +593,11 @@ function registerTests(packageRoot, options) {
 }
 
 module.exports = {
+  compareWithInterface: compareWithInterface,
   declaredValues: declaredValues,
+  describeInterface: describeInterface,
   describeTypings: describeTypings,
+  memberNames: memberNames,
   packedFiles: packedFiles,
   registerTests: registerTests
 };

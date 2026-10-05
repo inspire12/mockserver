@@ -1402,6 +1402,43 @@ describe('mock server node client (no proxy)', { concurrency: 1 }, function () {
         assert.equal(responses[1].httpResponse.body, '{"name":"one"}');
     });
 
+    it('should retrieve some requests and responses as a HAR document', async function () {
+        await client.mockSimpleResponse('/somePathOne', {name: 'one'}, 201);
+        await client.mockSimpleResponse('/somePathTwo', {name: 'two'}, 202);
+
+        await sendRequest("POST", mockServerHost, mockServerPort, "/somePathOne", "someBody");
+        await sendRequest("GET", mockServerHost, mockServerPort, "/somePathTwo");
+
+        // the fields the typings declare as always present (Har in mockServerClient.d.ts)
+        var har = await client.retrieveRecordedRequestsAndResponsesAsHar("/somePathOne");
+        assert.equal(har.log.version, '1.2');
+        assert.equal(har.log.creator.name, 'MockServer');
+        assert.equal(typeof har.log.creator.version, 'string');
+        assert.equal(har.log.entries.length, 1);
+        var entry = har.log.entries[0];
+        assert.equal(typeof entry.startedDateTime, 'string');
+        assert.equal(typeof entry.time, 'number');
+        assert.deepEqual(entry.cache, {});
+        assert.deepEqual(Object.keys(entry.timings).sort(), ['blocked', 'connect', 'dns', 'receive', 'send', 'ssl', 'wait']);
+        assert.equal(entry.request.method, 'POST');
+        assert.ok(entry.request.url.endsWith('/somePathOne'), entry.request.url);
+        assert.equal(typeof entry.request.httpVersion, 'string');
+        assert.ok(Array.isArray(entry.request.cookies) && Array.isArray(entry.request.headers) && Array.isArray(entry.request.queryString));
+        assert.equal(entry.request.postData.text, 'someBody');
+        assert.equal(typeof entry.request.headersSize, 'number');
+        assert.equal(typeof entry.request.bodySize, 'number');
+        assert.equal(entry.response.status, 201);
+        assert.equal(typeof entry.response.statusText, 'string');
+        assert.ok(Array.isArray(entry.response.cookies) && Array.isArray(entry.response.headers));
+        assert.equal(entry.response.content.text, '{"name":"one"}');
+        assert.equal(typeof entry.response.content.size, 'number');
+        assert.equal(typeof entry.response.content.mimeType, 'string');
+        assert.equal(entry.response.redirectURL, '');
+
+        var all = await client.retrieveRecordedRequestsAndResponsesAsHar({ "httpRequest": { "path": "/somePath.*" } });
+        assert.deepEqual(all.log.entries.map(function (e) { return e.response.status; }), [201, 202]);
+    });
+
     it('should retrieve some logs using object matcher', async function () {
         await client.mockSimpleResponse('/somePathOne', {name: 'one'}, 201);
 

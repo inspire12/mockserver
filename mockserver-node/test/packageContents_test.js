@@ -85,3 +85,74 @@ test('the typings reader reports what it cannot read, and does not count a defau
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('an object is compared with every member its interface declares, in each form read', function () {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mockserver-node-interface-'));
+  const file = path.join(directory, 'client.d.ts');
+  fs.writeFileSync(file, [
+    'export interface Client {',
+    '  /** a comment; with { braces } */',
+    '  call(path: string): Promise<{ status: number; body?: string }>;',
+    '  call(path: string, retries: number): Promise<void>;',
+    '  readonly settings: { verbose: boolean }',
+    '  maybe?(): void',
+    '  \'quoted-name\': string;',
+    '  get size(): number;',
+    '  configure(',
+    '    handler?: ((request: object) => object) | null,',
+    '    timeout?: number',
+    '  ): Client;',
+    '  [Symbol.dispose]?(): void;',
+    '  [Symbol.iterator](): Iterator<string>;',
+    '}',
+    'export interface Client { later(): void; }',
+    'export interface Builder extends Client {',
+    '  [key: string]: unknown;',
+    '  (call: string): void;',
+    '  new (seed: number): Builder;',
+    '}'].join('\n') + '\n');
+
+  class Built {
+    constructor() {
+      this._state = 1;
+      this.settings = {};
+      this['quoted-name'] = '';
+      this.extra = 2;
+    }
+    call() {}
+    configure() {}
+    get size() { return 0; }
+    later() {}
+    [Symbol.iterator]() {}
+  }
+  // a well-known symbol is named by identity: its description is `nodejs.dispose` on some Node versions
+  if (typeof Symbol.dispose === 'symbol') {
+    Built.prototype[Symbol.dispose] = function () {};
+  }
+  Built.prototype[Symbol('custom')] = function () {};
+
+  try {
+    const client = packageContents.describeInterface(file, 'Client');
+    assert.deepStrictEqual(Array.from(client.members), [['call', false], ['settings', false], ['maybe', true],
+      ['quoted-name', false], ['size', false], ['configure', false], ['[Symbol.dispose]', true],
+      ['[Symbol.iterator]', false], ['later', false]]);
+    assert.deepStrictEqual(client.unread, []);
+    assert.deepStrictEqual(packageContents.describeInterface(file, 'Builder').unread,
+      ['interface Builder extends Client', '[key: string]: unknown', '(call: string): void', 'new (seed: number): Builder']);
+    assert.strictEqual(packageContents.describeInterface(file, 'Missing').found, false);
+
+    assert.deepStrictEqual(packageContents.compareWithInterface(file, 'Client', new Built()),
+      { problems: [], undeclared: ['[unnamed symbol custom]', 'extra'] });
+    const partial = { call: function () {}, configure: function () {} };
+    assert.deepStrictEqual(packageContents.compareWithInterface(file, 'Client', partial).problems, [
+      'client.d.ts Client declares settings, which the object does not have',
+      'client.d.ts Client declares quoted-name, which the object does not have',
+      'client.d.ts Client declares size, which the object does not have',
+      'client.d.ts Client declares [Symbol.iterator], which the object does not have',
+      'client.d.ts Client declares later, which the object does not have']);
+    assert.deepStrictEqual(packageContents.compareWithInterface(file, 'Missing', {}).problems,
+      ['client.d.ts declares no interface Missing']);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

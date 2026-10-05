@@ -1,4 +1,4 @@
-import {mockServerClient, ClockStatus, GrpcService, MockServerClient, ScenarioHandle, ScenarioList, ScenarioState, llm as llmFactory, mcpMock, a2aMock} from '../index';
+import {mockServerClient, ClockStatus, GrpcService, Har, MockServerClient, ScenarioHandle, ScenarioList, ScenarioState, llm as llmFactory, mcpMock, a2aMock} from '../index';
 import {RequestResponse} from '../mockServerClient';
 import {ChaosExperiment, CrossProtocolScenario, Expectation, ExpectationStep, GenerateLoadScenarioFromOpenAPIRequest, GenerateLoadScenarioFromRecordingRequest, HttpChaosProfile, HttpOverrideForwardedRequest, HttpRequest, HttpResponse, LoadScenario, LoadScenarioEntry, LoadScenarioGenerationResult, LoadScenarioList, LoadScenarioRegistration, LoadScenarioReport, LoadScenarioStartResult, LoadScenarioStopResult, RequestDefinition, SloCriteria, SloVerdict} from '../mockServer';
 
@@ -491,6 +491,11 @@ async function test() {
     let generatedCode: string = await client.retrieveExpectationsAsCode('java', '/somePath');
     let recordedCode: string = await client.retrieveRecordedExpectationsAsCode('python');
     let grpcServices: GrpcService[] = await client.retrieveGrpcServices();
+    let har: Har = await client.retrieveRecordedRequestsAndResponsesAsHar('/somePath');
+    har = await client.retrieveRecordedRequestsAndResponsesAsHar({path: '/somePath', method: 'GET'});
+    har = await client.retrieveRecordedRequestsAndResponsesAsHar(null);
+    let harStatus: number = har.log.entries[0].response.status;
+    let harBodyText: string | undefined = har.log.entries[0].request.postData?.text;
     let firstServiceName: string = grpcServices[0].name;
     let firstMethodStreaming: boolean = grpcServices[0].methods[0].clientStreaming;
     requestResponse = await client.clearGrpcDescriptors();
