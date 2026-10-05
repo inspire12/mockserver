@@ -106,7 +106,6 @@ public class Http3RequestDecompressionIntegrationTest {
     @Before
     public void reset() {
         assumeQuicAvailable();
-        Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
         mockServerClient.reset();
         upstream.captured.clear();
     }

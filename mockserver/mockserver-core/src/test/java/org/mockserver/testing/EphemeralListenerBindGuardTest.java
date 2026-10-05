@@ -51,7 +51,7 @@ import static org.hamcrest.Matchers.is;
  */
 public class EphemeralListenerBindGuardTest {
 
-    private static final Path MODULES_ROOT = Paths.get("..");
+    static final Path MODULES_ROOT = Paths.get("..");
 
     private static final Set<String> TEST_SUPPORT_MODULES = Set.of("mockserver-testing", "mockserver-integration-testing");
 
@@ -224,7 +224,7 @@ public class EphemeralListenerBindGuardTest {
         return count;
     }
 
-    private static List<Path> testSources() throws IOException {
+    static List<Path> testSources() throws IOException {
         List<Path> sources = new ArrayList<>();
         try (Stream<Path> modules = Files.list(MODULES_ROOT)) {
             for (Path module : modules.filter(Files::isDirectory).collect(Collectors.toList())) {
@@ -244,7 +244,7 @@ public class EphemeralListenerBindGuardTest {
         return sources;
     }
 
-    private static String module(Path source) {
+    static String module(Path source) {
         return MODULES_ROOT.relativize(source).getName(0).toString();
     }
 
@@ -252,7 +252,7 @@ public class EphemeralListenerBindGuardTest {
      * {@code source} with its comments, and with {@code literalsToo} the contents of its string, character and
      * text-block literals, replaced by spaces; line breaks and offsets are unchanged.
      */
-    private static String blank(String source, boolean literalsToo) {
+    static String blank(String source, boolean literalsToo) {
         StringBuilder out = new StringBuilder(source);
         int i = 0;
         while (i < source.length()) {
@@ -296,7 +296,7 @@ public class EphemeralListenerBindGuardTest {
         return out.toString();
     }
 
-    private static int lineOf(String code, int offset) {
+    static int lineOf(String code, int offset) {
         int line = 1;
         for (int i = 0; i < offset; i++) {
             if (code.charAt(i) == '\n') {

@@ -118,9 +118,6 @@ public class Http3MockingMatrixIntegrationTest {
     @Before
     public void reset() {
         assumeQuicAvailable();
-        // http3Port(0) means "HTTP/3 disabled"; if the H3 server never started there is nothing to
-        // drive over QUIC, so skip rather than assert against a server that is not listening.
-        Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
         mockServerClient.reset();
         upstreamClient.reset();
     }

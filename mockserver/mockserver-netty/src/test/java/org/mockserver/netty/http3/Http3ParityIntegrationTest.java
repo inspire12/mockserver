@@ -88,7 +88,6 @@ public class Http3ParityIntegrationTest {
 
         mockServer = startWithHttp3(config);
         int http3Port = mockServer.getHttp3Port();
-        Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
         MockServerClient client = new MockServerClient("127.0.0.1", mockServer.getLocalPort());
         client.when(
@@ -122,7 +121,6 @@ public class Http3ParityIntegrationTest {
 
         mockServer = startWithHttp3(config);
         int http3Port = mockServer.getHttp3Port();
-        Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
         MockServerClient client = new MockServerClient("127.0.0.1", mockServer.getLocalPort());
         client.when(
@@ -154,7 +152,6 @@ public class Http3ParityIntegrationTest {
 
         mockServer = startWithHttp3(config);
         int http3Port = mockServer.getHttp3Port();
-        Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
         MockServerClient client = new MockServerClient("127.0.0.1", mockServer.getLocalPort());
         client.when(
@@ -188,7 +185,6 @@ public class Http3ParityIntegrationTest {
 
         mockServer = startWithHttp3(config);
         int http3Port = mockServer.getHttp3Port();
-        Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
         // Build the client cert material from MockServer's own KeyAndCertificateFactory
         // (this way, the server's trust manager will accept the cert since it trusts
@@ -238,7 +234,6 @@ public class Http3ParityIntegrationTest {
 
         mockServer = startWithHttp3(config);
         int http3Port = mockServer.getHttp3Port();
-        Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
         MockServerClient client = new MockServerClient("127.0.0.1", mockServer.getLocalPort());
         client.when(
@@ -274,7 +269,6 @@ public class Http3ParityIntegrationTest {
 
         mockServer = startWithHttp3(config);
         int http3Port = mockServer.getHttp3Port();
-        Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
         MockServerClient client = new MockServerClient("127.0.0.1", mockServer.getLocalPort());
         client.when(

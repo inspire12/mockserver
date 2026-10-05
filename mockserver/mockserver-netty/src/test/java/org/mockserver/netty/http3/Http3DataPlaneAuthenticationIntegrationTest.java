@@ -79,7 +79,6 @@ public class Http3DataPlaneAuthenticationIntegrationTest {
             .http3MaxIdleTimeout(30000L)
             .attemptToProxyIfNoMatchingExpectation(false);
         mockServer = startWithHttp3(configuration);
-        Assume.assumeTrue("HTTP/3 server did not start", mockServer.getHttp3Port() > 0);
 
         // Seed a data-plane mock via the CONTROL PLANE over HTTP/3 — this must succeed with NO
         // data-plane credentials, proving the control plane is reachable while the data plane is locked.

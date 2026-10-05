@@ -78,7 +78,6 @@ public class Http3ProtocolVerificationIntegrationTest {
 
         mockServer = startWithHttp3(config);
         int http3Port = mockServer.getHttp3Port();
-        Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
         MockServerClient client = new MockServerClient("127.0.0.1", mockServer.getLocalPort());
         client.when(

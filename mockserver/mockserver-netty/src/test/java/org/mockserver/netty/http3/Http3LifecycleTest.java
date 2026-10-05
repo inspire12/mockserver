@@ -113,8 +113,6 @@ public class Http3LifecycleTest {
         Configuration configuration = configuration().http3MaxIdleTimeout(30000L);
         MockServer server = startWithHttp3(configuration);
 
-        Assume.assumeTrue("HTTP/3 server did not start", server.getHttp3Port() > 0);
-
         server.stop();
 
         // after stop, HTTP/3 port should no longer be accessible

@@ -101,7 +101,6 @@ public class Http3ConnectUdpIntegrationTest {
         mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
-        Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
         // Send extended CONNECT with :protocol=connect-udp to the relay
         String testPayload = "hello-masque-relay";
@@ -124,7 +123,6 @@ public class Http3ConnectUdpIntegrationTest {
         mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
-        Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
         String testPayload = "hello-allowlisted-relay";
         String[] result = sendConnectUdpAndRelay(http3Port, "127.0.0.1:" + echoPort, testPayload);
@@ -146,7 +144,6 @@ public class Http3ConnectUdpIntegrationTest {
         mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
-        Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
         String[] result = sendConnectUdpRequest(http3Port, "127.0.0.1:" + echoPort);
         assertThat("status should be 403 for a non-allowlisted target", result[0], is("403"));
@@ -169,7 +166,6 @@ public class Http3ConnectUdpIntegrationTest {
         mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
-        Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
         String[] result = sendConnectUdpRequest(http3Port, "127.0.0.1:" + echoPort);
         assertThat("status should be 403 for a blocked loopback target", result[0], is("403"));
@@ -188,7 +184,6 @@ public class Http3ConnectUdpIntegrationTest {
         mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
-        Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
         // Send extended CONNECT with invalid authority (no port)
         String[] result = sendConnectUdpRequest(http3Port, "no-port-authority");
@@ -206,7 +201,6 @@ public class Http3ConnectUdpIntegrationTest {
         mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
-        Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
         // Set up an expectation via HTTP/1.1 client API
         MockServerClient client = new MockServerClient("127.0.0.1", mockServer.getLocalPort());
@@ -234,7 +228,6 @@ public class Http3ConnectUdpIntegrationTest {
         mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
-        Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
         // Send a plain CONNECT request -- without the handler in the pipeline,
         // the normal mock handler will process it (likely returning 404 or

@@ -394,6 +394,15 @@ between is reported as free. It has forms for a `Configuration`, for a function 
 forked jar of `Http3NativeStartupIntegrationTest`, which throws an `UncheckedIOException` wrapping a
 `BindException` when the process exits with the port-could-not-be-bound line).
 
+`Http3PortFindThenBindGuardTest` (in `mockserver-core`, scanning every module's test sources and the
+main sources of the test-support modules) keeps new tests on the starter. It fails the build on a
+`findFreeUdpPort`, on an `http3Port(...)` given anything but 0 outside the arguments of a
+`startWithHttp3(...)` call, and on a `mockserver.http3Port` or `MOCKSERVER_HTTP3_PORT` outside a
+comment, unless the file is in its allow-list with a reason and that exact count. The allow-list holds
+the starter, `TestPortFactory`, and the tests that need a bare port: one the server must fail to bind,
+never binds, or that the test contests itself. It is a textual check: it does not see a bare
+`Http3Server` started on a port found another way, or an `http3Port` read from a file.
+
 The server guards against the same quirk (`Ipv4UdpPortProbe`, the UDP counterpart of the TCP
 listeners' `LoopbackShadowProbe`). On macOS a dual-stack wildcard bind succeeds on a port another
 process holds on `0.0.0.0`, and that process then receives the server's `127.0.0.1` traffic; Linux

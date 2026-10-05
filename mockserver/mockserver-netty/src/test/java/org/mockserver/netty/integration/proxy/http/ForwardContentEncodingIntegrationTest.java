@@ -608,6 +608,5 @@ public class ForwardContentEncodingIntegrationTest {
 
     private static void assumeHttp3() {
         Assume.assumeTrue("native QUIC transport not available on this platform -- skipping HTTP/3", quicAvailable());
-        Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
     }
 }

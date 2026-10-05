@@ -104,7 +104,6 @@ public class Http3ServerTest {
         mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
-        Assume.assumeTrue("HTTP/3 server did not start (QUIC unavailable or port conflict)", http3Port > 0);
 
         // add an expectation via the client API (connecting to the existing server)
         MockServerClient client = new MockServerClient("127.0.0.1", mockServer.getLocalPort());
@@ -133,7 +132,6 @@ public class Http3ServerTest {
         mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
-        Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
         // send request with no matching expectation
         String[] result = sendHttp3Request(http3Port, "GET", "/nonexistent", null);
@@ -147,7 +145,6 @@ public class Http3ServerTest {
         mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
-        Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
         MockServerClient client = new MockServerClient("127.0.0.1", mockServer.getLocalPort());
         client.when(
@@ -177,7 +174,6 @@ public class Http3ServerTest {
         mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
-        Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
         MockServerClient client = new MockServerClient("127.0.0.1", mockServer.getLocalPort());
         client.when(
@@ -201,7 +197,6 @@ public class Http3ServerTest {
         mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
-        Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
         // before any connection, count should be 0
         assertThat("initial active connections should be 0",
@@ -234,7 +229,6 @@ public class Http3ServerTest {
         mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
-        Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
         MockServerClient client = new MockServerClient("127.0.0.1", mockServer.getLocalPort());
         client.when(
@@ -262,7 +256,6 @@ public class Http3ServerTest {
         mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
-        Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
         MockServerClient client = new MockServerClient("127.0.0.1", mockServer.getLocalPort());
         client.when(
@@ -291,7 +284,6 @@ public class Http3ServerTest {
         mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
-        Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
         MockServerClient client = new MockServerClient("127.0.0.1", mockServer.getLocalPort());
         client.when(
@@ -314,7 +306,6 @@ public class Http3ServerTest {
         mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
-        Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
         // issue GET /mockserver/http3status via HTTP/1.1 on the control plane port
         java.net.http.HttpClient httpClient = java.net.http.HttpClient.newBuilder()

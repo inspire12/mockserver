@@ -151,7 +151,6 @@ public class Http3ResponseWriteStallTimeoutIntegrationTest {
     @Before
     public void resetExpectations() {
         assumeQuicAvailable();
-        Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
         mockServerClient.reset();
         mockServerClient.when(request().withPath("/forward/.*")).forward(forward().withHost("127.0.0.1").withPort(upstreamPort));
     }

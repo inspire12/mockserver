@@ -520,8 +520,6 @@ public class Http3McpIntegrationTest {
         config.http3MaxIdleTimeout(30000L)
             .attemptToProxyIfNoMatchingExpectation(false);
         mockServer = startWithHttp3(config);
-        int http3Port = mockServer.getHttp3Port();
-        Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
     }
 
     /**
