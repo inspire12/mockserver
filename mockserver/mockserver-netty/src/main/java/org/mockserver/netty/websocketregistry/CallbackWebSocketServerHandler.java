@@ -19,6 +19,7 @@ import org.mockserver.logging.MockServerLogger;
 import org.mockserver.mappers.Http2StreamIds;
 import org.mockserver.mock.HttpState;
 import org.mockserver.netty.HttpRequestHandler;
+import org.mockserver.netty.unification.Http2RequestHeaderLimit;
 import org.mockserver.uuid.UUIDService;
 import org.slf4j.event.Level;
 
@@ -174,6 +175,8 @@ public class CallbackWebSocketServerHandler extends ChannelInboundHandlerAdapter
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
         if (HttpChunkLineLimiter.isRejectedRequestCutShort(ctx.channel(), cause)) {
             // already logged as the rejection that closed the connection
+        } else if (Http2RequestHeaderLimit.isRefusedRequestCutShort(ctx.channel(), cause)) {
+            // already logged as the refusal that reset the stream
         } else if (directMemoryLimitReached(cause)) {
             mockServerLogger.logEvent(
                 new LogEntry()

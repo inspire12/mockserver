@@ -224,7 +224,7 @@ This release delivers a sustained performance and memory programme alongside dat
   headers as sent are more than a quarter over the limit the connection is closed instead). Over
   HTTP/3 the connection is closed with the error `H3_EXCESSIVE_LOAD` and no `431` is sent. Each
   refusal is logged once at `WARN`. A request sent through a `CONNECT` or SOCKS tunnel is limited
-  the same way. Three things change for an existing setup: by default HTTP/2 and HTTP/3 accept
+  the same way. A request's trailers are limited like its headers, and a request with larger trailers is not matched: over HTTP/2 its stream is reset (through a tunnel a `431` is sent first if no response has started), and over HTTP/3 the connection is closed with `H3_EXCESSIVE_LOAD`. Three things change for an existing setup: by default HTTP/2 and HTTP/3 accept
   headers up to 256 KB where they accepted 8 KB; a `maxHeaderSize` you have lowered now applies to
   HTTP/2 and HTTP/3 as well; and a `maxHeaderSize` you have raised now raises their limit too, so
   `2147483647`, which removes the limit for HTTP/1.1, removes it for HTTP/2 and HTTP/3. To keep the
@@ -451,6 +451,14 @@ This release delivers a sustained performance and memory programme alongside dat
 
 ### Fixed
 
+- **An HTTP/3 request whose trailers are larger than the header limit is no longer matched.** The
+  connection was closed with `H3_EXCESSIVE_LOAD`, but MockServer still recorded the request and
+  matched it against expectations as if it had arrived whole, with no connection left to answer on.
+  Such a request is now dropped.
+- **HTTP/2 request trailers larger than the header limit now reset their stream with
+  `PROTOCOL_ERROR` and log one warning.** On an HTTP/2 connection made straight to MockServer they
+  were logged at `ERROR` as `web socket server caught exception`, with a stack trace, and the stream
+  was reset with `CANCEL`. The one `WARN` now says the trailers were larger than `maxHeaderSize`.
 - **The Node launcher (`mockserver-node`) no longer makes the calling process exit with status 0 when `java` cannot be run.** With no `java` on the `PATH`, or one that is not executable, the promise from `start_mockserver` never settled and the calling Node process exited at once with status 0, so a setup script or `npm` script that started MockServer reported success having started nothing. (With `runForked: true` the process died on an unhandled `error` event instead, with status 1.) The start is now rejected with an `Error` that says `java` was not found (`code` `ENOENT`) or could not be run (`EACCES`) and where it was looked for: on the `PATH` only, because `JAVA_HOME` is not used and there is no option for the location of `java`. The same message is printed to stderr, the calling process carries on and can exit when it has nothing left to do, and `stop_mockserver` after the failed start resolves. A `java` that exits with a failing status, or is ended by a signal, before MockServer is ready (an option in `jvmOptions` it does not accept, for example) now fails the start at once, with the last lines it printed in the message; the start used to wait out all of its retries first, about 11 seconds by default. The exit with status 0 came from a handler the launcher installed for every uncaught exception in the calling process, whoever threw it: it stopped MockServer and then exited the process with status 0. That handler is gone. An uncaught exception still ends the `java` process the launcher started, unless `runForked` is set (a `java` wrapper script that does not `exec` the JVM leaves the JVM running), and is then left to Node.js, which reports it and exits with a failing status, or to the caller's own `uncaughtException` handler; the server is ended even when such a handler deals with the exception and the process carries on. A start that fails after `java` was launched, as it does when `serverPort` is not a valid port, now ends that process, where it used to leave it running. Under Grunt the `start_mockserver` task fails with the same message and no longer follows a failed start with the hint to specify `serverPort`, which is now printed only for a problem with the options. A start with `jarPath` or `MOCKSERVER_JAR_PATH` no longer prints a "resolve is deprecated" warning and stack trace.
 - **A mocked response with more than 8 KB of headers now reaches an HTTP/2 client through a
   `CONNECT` or SOCKS tunnel.** The tunnel read MockServer's own response with an 8 KB limit on its

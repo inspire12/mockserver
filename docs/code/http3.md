@@ -712,7 +712,10 @@ bidi-streaming) work over HTTP/3, matching the TCP (HTTP/1.1 and HTTP/2) path.
   one as a connection error, so the connection is closed with `H3_EXCESSIVE_LOAD` and no `431` is sent,
   unlike HTTP/1.1 and HTTP/2; `Http3MockServerHandler` logs one `WARN` entry. A `HEADERS` frame longer
   than the limit is refused from its length, and a section that is small on the wire but decodes past
-  the limit is refused as it is decoded, the codec no longer keeping fields once the limit is passed; see
+  the limit is refused as it is decoded, the codec no longer keeping fields once the limit is passed
+  (`Http3HeaderSectionAllocationIntegrationTest` measures it). A request's trailer section is limited the
+  same way, and its WARN names the trailers; the request is not dispatched when its stream's input then
+  closes. See
   [netty-pipeline.md → Request line and header limits](netty-pipeline.md#request-line-and-header-limits).
 - **Request body components**: a body arrives in pieces of about one QUIC packet, so after its
   first 64 pieces the accumulator copies pieces under 16 KiB into 16 KiB blocks

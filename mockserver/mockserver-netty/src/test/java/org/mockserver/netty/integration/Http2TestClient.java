@@ -2,10 +2,13 @@ package org.mockserver.netty.integration;
 
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBufUtil;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
+import io.netty.channel.ChannelOption;
+import io.netty.channel.ChannelPromise;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.channel.socket.SocketChannel;
@@ -17,9 +20,14 @@ import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpVersion;
+import io.netty.handler.codec.http2.DefaultHttp2DataFrame;
 import io.netty.handler.codec.http2.DefaultHttp2HeadersFrame;
+import io.netty.handler.codec.http2.DefaultHttp2ResetFrame;
+import io.netty.handler.codec.http2.DefaultHttp2SettingsFrame;
 import io.netty.handler.codec.http2.Http2CodecUtil;
 import io.netty.handler.codec.http2.Http2DataFrame;
+import io.netty.handler.codec.http2.Http2Error;
+import io.netty.handler.codec.http2.Http2FrameCodec;
 import io.netty.handler.codec.http2.Http2FrameCodecBuilder;
 import io.netty.handler.codec.http2.Http2GoAwayFrame;
 import io.netty.handler.codec.http2.Http2Headers;
@@ -28,20 +36,27 @@ import io.netty.handler.codec.http2.Http2MultiplexHandler;
 import io.netty.handler.codec.http2.Http2ResetFrame;
 import io.netty.handler.codec.http2.Http2SecurityUtil;
 import io.netty.handler.codec.http2.Http2Settings;
+import io.netty.handler.codec.http2.Http2SettingsAckFrame;
 import io.netty.handler.codec.http2.Http2SettingsFrame;
 import io.netty.handler.codec.http2.Http2StreamChannel;
 import io.netty.handler.codec.http2.Http2StreamChannelBootstrap;
+import io.netty.handler.proxy.ProxyHandler;
+import io.netty.handler.proxy.Socks4ProxyHandler;
+import io.netty.handler.proxy.Socks5ProxyHandler;
 import io.netty.handler.ssl.ApplicationProtocolConfig;
 import io.netty.handler.ssl.ApplicationProtocolNames;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.SupportedCipherSuiteFilter;
+import io.netty.resolver.NoopAddressResolverGroup;
 import io.netty.util.ReferenceCountUtil;
 
 import java.io.ByteArrayOutputStream;
+import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
 
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -60,6 +75,8 @@ public final class Http2TestClient implements AutoCloseable {
     private final Channel connection;
     private final CompletableFuture<Http2Settings> serverSettings = new CompletableFuture<>();
     private final CompletableFuture<Long> goAway = new CompletableFuture<>();
+    private final ConcurrentLinkedQueue<CompletableFuture<Void>> settingsAcks = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<Http2StreamChannel> streamsNotReading = new ConcurrentLinkedQueue<>();
 
     private Http2TestClient(Channel connection) {
         this.connection = connection;
@@ -134,6 +151,43 @@ public final class Http2TestClient implements AutoCloseable {
         return overTls(channel, targetHost, targetPort);
     }
 
+    /**
+     * HTTP/2 through MockServer's SOCKS5 proxy, the target passed to it unresolved: over TLS with ALPN {@code h2}, or
+     * cleartext with prior knowledge.
+     */
+    public static Http2TestClient throughSocks5(EventLoopGroup group, int port, String targetHost, int targetPort, boolean tls) throws Exception {
+        return throughSocks(group, new Socks5ProxyHandler(new InetSocketAddress("127.0.0.1", port)), InetSocketAddress.createUnresolved(targetHost, targetPort), tls);
+    }
+
+    /**
+     * HTTP/2 through MockServer's SOCKS4 proxy, which takes an IPv4 address as its target.
+     */
+    public static Http2TestClient throughSocks4(EventLoopGroup group, int port, String targetAddress, int targetPort, boolean tls) throws Exception {
+        return throughSocks(group, new Socks4ProxyHandler(new InetSocketAddress("127.0.0.1", port)), new InetSocketAddress(targetAddress, targetPort), tls);
+    }
+
+    private static Http2TestClient throughSocks(EventLoopGroup group, ProxyHandler socks, InetSocketAddress target, boolean tls) throws Exception {
+        Channel channel = new Bootstrap()
+            .group(group)
+            .channel(NioSocketChannel.class)
+            // the SOCKS proxy is given the target as it is
+            .resolver(NoopAddressResolverGroup.INSTANCE)
+            .handler(new ChannelInitializer<SocketChannel>() {
+                @Override
+                protected void initChannel(SocketChannel ch) {
+                    ch.pipeline().addLast(socks);
+                }
+            })
+            .connect(target).sync().channel();
+        assertThat("SOCKS tunnel established", socks.connectFuture().await(WAIT_SECONDS, TimeUnit.SECONDS) && socks.connectFuture().isSuccess(), is(true));
+        if (tls) {
+            return overTls(channel, target.getHostString(), target.getPort());
+        }
+        Http2TestClient client = new Http2TestClient(channel);
+        client.addHttp2Handlers();
+        return client;
+    }
+
     private static Http2TestClient overTls(Channel channel, String host, int port) throws Exception {
         SslContext sslContext = SslContextBuilder.forClient()
             .trustManager(caCertificate())
@@ -175,6 +229,11 @@ public final class Http2TestClient implements AutoCloseable {
                         serverSettings.complete(((Http2SettingsFrame) msg).settings());
                     } else if (msg instanceof Http2GoAwayFrame) {
                         goAway.complete(((Http2GoAwayFrame) msg).errorCode());
+                    } else if (msg instanceof Http2SettingsAckFrame) {
+                        CompletableFuture<Void> acknowledged = settingsAcks.poll();
+                        if (acknowledged != null) {
+                            acknowledged.complete(null);
+                        }
                     }
                 } finally {
                     ReferenceCountUtil.release(msg);
@@ -211,32 +270,72 @@ public final class Http2TestClient implements AutoCloseable {
     }
 
     /**
+     * Limits the window of each stream opened from now on, so a response body larger than it stays partly unsent
+     * until the stream's reader takes what has arrived. Returns once the server has acknowledged the setting.
+     */
+    public void streamWindow(int bytes) throws Exception {
+        CompletableFuture<Void> acknowledged = new CompletableFuture<>();
+        settingsAcks.add(acknowledged);
+        connection.writeAndFlush(new DefaultHttp2SettingsFrame(new Http2Settings().initialWindowSize(bytes))).sync();
+        acknowledged.get(WAIT_SECONDS, TimeUnit.SECONDS);
+    }
+
+    /**
      * Sends a request's headers on a new stream, with END_STREAM unless a request body is to follow. A stream left
      * open is how a reset sent after the response is observed: one for a stream both sides have ended is ignored.
      */
     public Exchange send(Http2Headers headers, boolean endStream) throws Exception {
-        Exchange exchange = new Exchange();
+        return send(headers, endStream, false);
+    }
+
+    /**
+     * As {@link #send(Http2Headers, boolean)}, but reads nothing after the response's headers: the body that has
+     * arrived is not taken, so the stream's window is not given back and the rest of the body stays with the server.
+     */
+    public Exchange sendReadingOnlyTheResponseHeaders(Http2Headers headers, boolean endStream) throws Exception {
+        return send(headers, endStream, true);
+    }
+
+    private Exchange send(Http2Headers headers, boolean endStream, boolean readOnlyTheResponseHeaders) throws Exception {
+        Exchange exchange = new Exchange(connection);
         Http2StreamChannel stream = new Http2StreamChannelBootstrap(connection)
+            .option(ChannelOption.AUTO_READ, !readOnlyTheResponseHeaders)
             .handler(new ChannelInboundHandlerAdapter() {
-                private final ByteArrayOutputStream body = new ByteArrayOutputStream();
+                private boolean readsStopped;
+
+                @Override
+                public void channelActive(ChannelHandlerContext ctx) {
+                    ctx.read();
+                }
+
+                @Override
+                public void channelReadComplete(ChannelHandlerContext ctx) {
+                    if (readOnlyTheResponseHeaders && !readsStopped) {
+                        ctx.read();
+                    }
+                }
 
                 @Override
                 public void channelRead(ChannelHandlerContext ctx, Object msg) {
                     try {
                         if (msg instanceof Http2HeadersFrame) {
                             Http2HeadersFrame headersFrame = (Http2HeadersFrame) msg;
-                            if (headersFrame.headers().status() != null) {
+                            CharSequence status = headersFrame.headers().status();
+                            if (status != null && status.charAt(0) == '1') {
+                                exchange.interimStatus.complete(Integer.parseInt(status.toString()));
+                            } else if (status != null) {
+                                readsStopped = readOnlyTheResponseHeaders;
                                 exchange.headers.complete(headersFrame.headers());
-                                exchange.status.complete(Integer.parseInt(headersFrame.headers().status().toString()));
+                                exchange.status.complete(Integer.parseInt(status.toString()));
                             }
                             if (headersFrame.isEndStream()) {
-                                exchange.body.complete(body.toString(StandardCharsets.UTF_8));
+                                exchange.body.complete(exchange.received());
                             }
                         } else if (msg instanceof Http2DataFrame) {
                             Http2DataFrame data = (Http2DataFrame) msg;
-                            body.writeBytes(ByteBufUtil.getBytes(data.content()));
+                            exchange.received(ByteBufUtil.getBytes(data.content()));
                             if (data.isEndStream()) {
-                                exchange.body.complete(body.toString(StandardCharsets.UTF_8));
+                                exchange.body.complete(exchange.received());
                             }
                         } else if (msg instanceof Http2ResetFrame) {
                             reset(((Http2ResetFrame) msg).errorCode());
@@ -256,6 +355,7 @@ public final class Http2TestClient implements AutoCloseable {
                 @Override
                 public void channelInactive(ChannelHandlerContext ctx) {
                     IllegalStateException closed = new IllegalStateException("stream closed");
+                    exchange.interimStatus.completeExceptionally(closed);
                     exchange.headers.completeExceptionally(closed);
                     exchange.status.completeExceptionally(closed);
                     exchange.body.completeExceptionally(closed);
@@ -272,22 +372,35 @@ public final class Http2TestClient implements AutoCloseable {
                 private void reset(long errorCode) {
                     exchange.reset.complete(errorCode);
                     IllegalStateException reset = new IllegalStateException("stream reset with error code " + errorCode);
+                    exchange.interimStatus.completeExceptionally(reset);
                     exchange.headers.completeExceptionally(reset);
                     exchange.status.completeExceptionally(reset);
                     exchange.body.completeExceptionally(reset);
                 }
             })
             .open().sync().getNow();
+        exchange.stream = stream;
+        if (readOnlyTheResponseHeaders) {
+            streamsNotReading.add(stream);
+        }
         stream.writeAndFlush(new DefaultHttp2HeadersFrame(headers, endStream)).sync();
         return exchange;
     }
 
     @Override
     public void close() {
+        // a stream that stopped reading still holds what arrived for it, and is not closed with its connection
+        for (Http2StreamChannel stream : streamsNotReading) {
+            stream.close().syncUninterruptibly();
+        }
         connection.close().syncUninterruptibly();
     }
 
     public static final class Exchange {
+        private final Channel connection;
+        private final ByteArrayOutputStream received = new ByteArrayOutputStream();
+        private final CompletableFuture<Integer> interimStatus = new CompletableFuture<>();
+        private volatile Http2StreamChannel stream;
         private final CompletableFuture<Http2Headers> headers = new CompletableFuture<>();
         private final CompletableFuture<Integer> status = new CompletableFuture<>();
         private final CompletableFuture<String> body = new CompletableFuture<>();
@@ -311,6 +424,90 @@ public final class Http2TestClient implements AutoCloseable {
 
         public long resetErrorCode() throws Exception {
             return reset.get(WAIT_SECONDS, TimeUnit.SECONDS);
+        }
+
+        private Exchange(Channel connection) {
+            this.connection = connection;
+        }
+
+        /**
+         * @return the status of the {@code 1xx} response that came before the final one
+         */
+        public int interimStatus() throws Exception {
+            return interimStatus.get(WAIT_SECONDS, TimeUnit.SECONDS);
+        }
+
+        /**
+         * @return the response body received so far
+         */
+        public String received() {
+            synchronized (received) {
+                return received.toString(StandardCharsets.UTF_8);
+            }
+        }
+
+        private void received(byte[] bytes) {
+            synchronized (received) {
+                received.writeBytes(bytes);
+            }
+        }
+
+        /**
+         * @return whether the response body received so far came to hold {@code text} within {@code seconds}
+         */
+        public boolean receivedWithin(String text, long seconds) throws InterruptedException {
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(seconds);
+            while (!received().contains(text)) {
+                if (System.nanoTime() > deadline) {
+                    return false;
+                }
+                Thread.sleep(10);
+            }
+            return true;
+        }
+
+        public boolean isReset() {
+            return reset.isDone() && !reset.isCompletedExceptionally();
+        }
+
+        /**
+         * Sends a DATA frame of the request body.
+         */
+        public Exchange data(String body, boolean endStream) throws Exception {
+            stream.writeAndFlush(new DefaultHttp2DataFrame(Unpooled.copiedBuffer(body, StandardCharsets.UTF_8), endStream)).sync();
+            return this;
+        }
+
+        /**
+         * Resets the stream, as a client that gives up on a request does.
+         */
+        public Exchange reset(Http2Error error) throws Exception {
+            stream.writeAndFlush(new DefaultHttp2ResetFrame(error)).sync();
+            return this;
+        }
+
+        /**
+         * Sends the request's trailers: a HEADERS frame with END_STREAM, after the request's headers and body.
+         */
+        public Exchange trailers(Http2Headers trailers) throws Exception {
+            stream.writeAndFlush(new DefaultHttp2HeadersFrame(trailers, true)).sync();
+            return this;
+        }
+
+        /**
+         * Sends a HEADERS frame with END_STREAM on this stream whatever its state, as no well-behaved client does on
+         * a stream it has already ended: it is written by the frame writer, past the checks of the client's codec.
+         */
+        public Exchange headersWhateverTheStreamState(Http2Headers headers) throws Exception {
+            ChannelHandlerContext codecContext = connection.pipeline().context(Http2FrameCodec.class);
+            Http2FrameCodec codec = (Http2FrameCodec) codecContext.handler();
+            ChannelPromise written = connection.newPromise();
+            connection.eventLoop().execute(() -> {
+                codec.encoder().frameWriter().writeHeaders(codecContext, stream.stream().id(), headers, 0, true, written);
+                codecContext.flush();
+            });
+            written.sync();
+            return this;
         }
     }
 }

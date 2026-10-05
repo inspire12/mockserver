@@ -1,11 +1,14 @@
 package org.mockserver.netty.unification;
 
+import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.handler.codec.PrematureChannelClosureException;
 import io.netty.handler.codec.http2.AbstractHttp2ConnectionHandlerBuilder;
 import io.netty.handler.codec.http2.Http2CodecUtil;
 import io.netty.handler.codec.http2.Http2Connection;
 import io.netty.handler.codec.http2.Http2ConnectionDecoder;
 import io.netty.handler.codec.http2.Http2ConnectionEncoder;
+import io.netty.handler.codec.http2.Http2ConnectionHandler;
 import io.netty.handler.codec.http2.Http2Error;
 import io.netty.handler.codec.http2.Http2Exception;
 import io.netty.handler.codec.http2.Http2FrameCodec;
@@ -14,6 +17,7 @@ import io.netty.handler.codec.http2.Http2FrameListener;
 import io.netty.handler.codec.http2.Http2FrameLogger;
 import io.netty.handler.codec.http2.Http2Settings;
 import io.netty.handler.codec.http2.HttpToHttp2ConnectionHandler;
+import io.netty.util.AttributeKey;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
@@ -27,6 +31,10 @@ import org.slf4j.event.Level;
  * Netty enforces it: a header list over the limit is answered {@code 431} and its stream reset, and a header block
  * of more than the limit plus a quarter closes the connection with {@code GOAWAY}. Neither reaches a handler, so the
  * codecs built here log them as they are raised.
+ * <p>
+ * A request's trailers are limited as its headers are, and only reset their stream: the request is not dispatched,
+ * and a response being sent stops. A tunnel answers {@code 431} first if no response has started; a direct
+ * connection hands the error to the stream's own pipeline, where {@link LenientInboundHttp2StreamFrameCodec} stops it.
  */
 public final class Http2RequestHeaderLimit {
 
@@ -35,6 +43,8 @@ public final class Http2RequestHeaderLimit {
      * error: {@code Http2CodecUtil.headerListSizeExceeded(long)}.
      */
     static final String HEADER_BLOCK_TOO_LARGE = "Header size exceeded max allowed size";
+
+    private static final AttributeKey<Boolean> TRAILERS_REFUSED = AttributeKey.valueOf("HTTP2_TRAILERS_REFUSED");
 
     private Http2RequestHeaderLimit() {
     }
@@ -110,12 +120,15 @@ public final class Http2RequestHeaderLimit {
             return;
         }
         Http2Exception failure = Http2CodecUtil.getEmbeddedHttp2Exception(cause);
-        if (failure instanceof Http2Exception.HeaderListSizeException && ((Http2Exception.HeaderListSizeException) failure).duringDecode()) {
+        if (isHeaderListOverLimit(cause)) {
+            int streamId = ((Http2Exception.HeaderListSizeException) failure).streamId();
             mockServerLogger.logEvent(
                 new LogEntry()
                     .setLogLevel(Level.WARN)
-                    .setMessageFormat("refusing request on HTTP/2 stream:{}from:{}because its header list is larger than maxHeaderSize:{}")
-                    .setArguments(((Http2Exception.HeaderListSizeException) failure).streamId(), ctx.channel().remoteAddress(), settings.maxHeaderListSize())
+                    .setMessageFormat(isKnownStream(ctx, streamId)
+                        ? "resetting HTTP/2 stream:{}from:{}because the request's trailers are larger than maxHeaderSize:{}"
+                        : "refusing request on HTTP/2 stream:{}from:{}because its header list is larger than maxHeaderSize:{}")
+                    .setArguments(streamId, ctx.channel().remoteAddress(), settings.maxHeaderListSize())
             );
         } else if (isHeaderBlockTooLarge(failure)) {
             mockServerLogger.logEvent(
@@ -125,6 +138,34 @@ public final class Http2RequestHeaderLimit {
                     .setArguments(ctx.channel().remoteAddress(), settings.maxHeaderListSize())
             );
         }
+    }
+
+    /**
+     * @return whether Netty refused a header list it read, a request's headers or its trailers, for its size
+     */
+    static boolean isHeaderListOverLimit(Throwable cause) {
+        Http2Exception failure = Http2CodecUtil.getEmbeddedHttp2Exception(cause);
+        return failure instanceof Http2Exception.HeaderListSizeException && ((Http2Exception.HeaderListSizeException) failure).duringDecode();
+    }
+
+    static void trailersRefused(Channel stream) {
+        stream.attr(TRAILERS_REFUSED).set(Boolean.TRUE);
+    }
+
+    /**
+     * Whether {@code cause} is the aggregator reporting the part of a request it held when the stream was reset for
+     * its trailers: expected, and already logged as the refusal, so not worth logging again.
+     */
+    public static boolean isRefusedRequestCutShort(Channel stream, Throwable cause) {
+        return cause instanceof PrematureChannelClosureException && stream.hasAttr(TRAILERS_REFUSED);
+    }
+
+    /**
+     * A request's headers open their stream only once they have been read whole, so a header list refused on a
+     * stream the connection already knows is not the first on it: it is the request's trailers.
+     */
+    private static boolean isKnownStream(ChannelHandlerContext ctx, int streamId) {
+        return ctx.handler() instanceof Http2ConnectionHandler && ((Http2ConnectionHandler) ctx.handler()).connection().streamMayHaveExisted(streamId);
     }
 
     private static boolean isHeaderBlockTooLarge(Http2Exception failure) {

@@ -1,32 +1,14 @@
 package org.mockserver.netty.http3;
 
-import io.netty.bootstrap.Bootstrap;
-import io.netty.buffer.ByteBufUtil;
-import io.netty.channel.Channel;
-import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelInboundHandlerAdapter;
-import io.netty.channel.ChannelInitializer;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http2.DefaultHttp2Headers;
 import io.netty.handler.codec.http2.Http2Headers;
 import io.netty.handler.codec.http3.DefaultHttp3Headers;
-import io.netty.handler.codec.http3.DefaultHttp3HeadersFrame;
-import io.netty.handler.codec.http3.Http3;
-import io.netty.handler.codec.http3.Http3ClientConnectionHandler;
-import io.netty.handler.codec.http3.Http3DataFrame;
 import io.netty.handler.codec.http3.Http3ErrorCode;
 import io.netty.handler.codec.http3.Http3Headers;
-import io.netty.handler.codec.http3.Http3HeadersFrame;
-import io.netty.handler.codec.http3.Http3RequestStreamInboundHandler;
 import io.netty.handler.codec.http3.Http3SettingsFrame;
-import io.netty.handler.codec.quic.QuicChannel;
 import io.netty.handler.codec.quic.QuicConnectionCloseEvent;
-import io.netty.handler.codec.quic.QuicSslContext;
-import io.netty.handler.codec.quic.QuicSslContextBuilder;
-import io.netty.handler.codec.quic.QuicStreamChannel;
-import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
-import io.netty.util.ReferenceCountUtil;
 import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
@@ -34,7 +16,6 @@ import org.junit.Test;
 import org.mockserver.client.MockServerClient;
 import org.mockserver.netty.MockServer;
 import org.mockserver.netty.integration.Http2TestClient;
-import org.mockserver.testing.socket.Ipv4DatagramChannelFactory;
 
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
@@ -44,7 +25,6 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Map;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -122,18 +102,18 @@ public class Http3HeaderListLimitIntegrationTest {
 
     @Test
     public void shouldAdvertiseMaxHeaderSizeAsTheFieldSectionLimit() throws Exception {
-        try (Http3Connection connection = Http3Connection.open(limited)) {
+        try (Http3TestClient connection = Http3TestClient.open(clientGroup, limited)) {
             assertThat(connection.serverSettings().get(Http3SettingsFrame.HTTP3_SETTINGS_MAX_FIELD_SECTION_SIZE), is((long) LIMIT));
         }
-        try (Http3Connection connection = Http3Connection.open(defaults)) {
+        try (Http3TestClient connection = Http3TestClient.open(clientGroup, defaults)) {
             assertThat(connection.serverSettings().get(Http3SettingsFrame.HTTP3_SETTINGS_MAX_FIELD_SECTION_SIZE), is((long) DEFAULT_LIMIT));
         }
     }
 
     @Test
     public void shouldServeAHeaderSectionOfExactlyMaxHeaderSize() throws Exception {
-        try (Http3Connection connection = Http3Connection.open(limited)) {
-            Exchange exchange = connection.send(headersOfSize(limited, LIMIT));
+        try (Http3TestClient connection = Http3TestClient.open(clientGroup, limited)) {
+            Http3TestClient.Exchange exchange = connection.send(headersOfSize(limited, LIMIT));
 
             assertThat(exchange.status(), is(200));
             assertThat(exchange.body(), is("served"));
@@ -153,7 +133,7 @@ public class Http3HeaderListLimitIntegrationTest {
 
     private static void assertClosedAndLoggedOnceForAHeaderSectionOneByteOver(MockServer mockServer, MockServerClient mockServerClient) throws Exception {
         int clientPort;
-        try (Http3Connection connection = Http3Connection.open(mockServer)) {
+        try (Http3TestClient connection = Http3TestClient.open(clientGroup, mockServer)) {
             clientPort = connection.localPort();
             Http3Headers overLimit = headersOfSize(mockServer, LIMIT + 1);
 
@@ -168,14 +148,14 @@ public class Http3HeaderListLimitIntegrationTest {
         assertThat("the warning names the client's address", warnings(mockServerClient, "127.0.0.1:" + clientPort), is(1L));
         assertThat("logged once, and not as an unexpected exception", warnings(mockServerClient, "exception in HTTP/3 request handler"), is(0L));
 
-        try (Http3Connection next = Http3Connection.open(mockServer)) {
+        try (Http3TestClient next = Http3TestClient.open(clientGroup, mockServer)) {
             assertThat("the server carries on", next.send(headersOfSize(mockServer, LIMIT)).status(), is(200));
         }
     }
 
     @Test
     public void shouldCloseTheConnectionForAHeadersFrameLongerThanTheLimitBeforeReadingIt() throws Exception {
-        try (Http3Connection connection = Http3Connection.open(limited)) {
+        try (Http3TestClient connection = Http3TestClient.open(clientGroup, limited)) {
             // not compressible: Netty's HTTP/3 client sends a field it has no table entry for as it is
             connection.send(headersOfSize(limited, 3 * LIMIT));
 
@@ -194,7 +174,7 @@ public class Http3HeaderListLimitIntegrationTest {
     @Test
     public void shouldCloseTheConnectionForAHeaderSectionThatDecodesFarOverTheLimit() throws Exception {
         int references = 100_000;
-        try (Http3Connection connection = Http3Connection.open(defaults)) {
+        try (Http3TestClient connection = Http3TestClient.open(clientGroup, defaults)) {
             Http3Headers bomb = pseudoHeaders(defaults);
             for (int i = 0; i < references; i++) {
                 bomb.add("accept-encoding", "gzip, deflate, br");
@@ -238,10 +218,10 @@ public class Http3HeaderListLimitIntegrationTest {
             assertThat(description + " over HTTP/2", client.send(headers, true).status(), is(served ? 200 : 431));
         }
 
-        try (Http3Connection connection = Http3Connection.open(mockServer)) {
+        try (Http3TestClient connection = Http3TestClient.open(clientGroup, mockServer)) {
             Http3Headers headers = pseudoHeaders(mockServer);
             headers.add(FILLER, value);
-            Exchange exchange = connection.send(headers);
+            Http3TestClient.Exchange exchange = connection.send(headers);
             if (served) {
                 assertThat(description + " over HTTP/3", exchange.status(), is(200));
             } else {
@@ -300,153 +280,5 @@ public class Http3HeaderListLimitIntegrationTest {
 
     private static long warnings(MockServerClient client, String text) {
         return Arrays.stream(client.retrieveLogMessagesArray(null)).filter(message -> message.contains(text)).count();
-    }
-
-    private static final class Exchange {
-        private final CompletableFuture<Integer> status = new CompletableFuture<>();
-        private final CompletableFuture<String> body = new CompletableFuture<>();
-
-        int status() throws Exception {
-            return status.get(WAIT_SECONDS, TimeUnit.SECONDS);
-        }
-
-        String body() throws Exception {
-            return body.get(WAIT_SECONDS, TimeUnit.SECONDS);
-        }
-    }
-
-    private static final class Http3Connection implements AutoCloseable {
-        private final Channel datagramChannel;
-        private final QuicChannel quicChannel;
-        private final CompletableFuture<Http3SettingsFrame> serverSettings;
-        private final CompletableFuture<QuicConnectionCloseEvent> closedByServer;
-
-        private Http3Connection(Channel datagramChannel, QuicChannel quicChannel, CompletableFuture<Http3SettingsFrame> serverSettings, CompletableFuture<QuicConnectionCloseEvent> closedByServer) {
-            this.datagramChannel = datagramChannel;
-            this.quicChannel = quicChannel;
-            this.serverSettings = serverSettings;
-            this.closedByServer = closedByServer;
-        }
-
-        static Http3Connection open(MockServer mockServer) throws Exception {
-            assertThat("the HTTP/3 server started", mockServer.getHttp3Port(), greaterThan(0));
-            QuicSslContext sslContext = QuicSslContextBuilder.forClient()
-                .trustManager(InsecureTrustManagerFactory.INSTANCE)
-                .applicationProtocols(Http3.supportedApplicationProtocols())
-                .build();
-            Channel datagramChannel = new Bootstrap()
-                .group(clientGroup)
-                .channelFactory(Ipv4DatagramChannelFactory.INSTANCE)
-                .handler(Http3.newQuicClientCodecBuilder()
-                    .sslContext(sslContext)
-                    .maxIdleTimeout(30000, TimeUnit.MILLISECONDS)
-                    .initialMaxData(10000000)
-                    .initialMaxStreamDataBidirectionalLocal(1000000)
-                    .initialMaxStreamsBidirectional(100)
-                    .build())
-                .bind(0)
-                .sync()
-                .channel();
-            CompletableFuture<Http3SettingsFrame> serverSettings = new CompletableFuture<>();
-            CompletableFuture<QuicConnectionCloseEvent> closedByServer = new CompletableFuture<>();
-            ChannelInboundHandlerAdapter controlStreamHandler = new ChannelInboundHandlerAdapter() {
-                @Override
-                public void channelRead(ChannelHandlerContext ctx, Object msg) {
-                    if (msg instanceof Http3SettingsFrame) {
-                        serverSettings.complete((Http3SettingsFrame) msg);
-                    }
-                    ReferenceCountUtil.release(msg);
-                }
-
-                @Override
-                public boolean isSharable() {
-                    return true;
-                }
-            };
-            QuicChannel quicChannel = QuicChannel.newBootstrap(datagramChannel)
-                .handler(new ChannelInitializer<QuicChannel>() {
-                    @Override
-                    protected void initChannel(QuicChannel ch) {
-                        ch.pipeline().addLast(new Http3ClientConnectionHandler(controlStreamHandler, null, null, null, true));
-                        ch.pipeline().addLast(new ChannelInboundHandlerAdapter() {
-                            @Override
-                            public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
-                                if (evt instanceof QuicConnectionCloseEvent) {
-                                    closedByServer.complete((QuicConnectionCloseEvent) evt);
-                                }
-                                ctx.fireUserEventTriggered(evt);
-                            }
-
-                            @Override
-                            public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-                                // a connection the server closes is observed through closedByServer()
-                            }
-                        });
-                    }
-                })
-                .remoteAddress(new InetSocketAddress("127.0.0.1", mockServer.getHttp3Port()))
-                .connect()
-                .get(WAIT_SECONDS, TimeUnit.SECONDS);
-            return new Http3Connection(datagramChannel, quicChannel, serverSettings, closedByServer);
-        }
-
-        int localPort() {
-            return ((InetSocketAddress) datagramChannel.localAddress()).getPort();
-        }
-
-        Http3SettingsFrame serverSettings() throws Exception {
-            return serverSettings.get(WAIT_SECONDS, TimeUnit.SECONDS);
-        }
-
-        QuicConnectionCloseEvent closedByServer() throws Exception {
-            return closedByServer.get(WAIT_SECONDS, TimeUnit.SECONDS);
-        }
-
-        Exchange send(Http3Headers headers) throws Exception {
-            Exchange exchange = new Exchange();
-            QuicStreamChannel stream = Http3.newRequestStream(quicChannel, new Http3RequestStreamInboundHandler() {
-                private final ByteArrayOutputStream body = new ByteArrayOutputStream();
-
-                @Override
-                protected void channelRead(ChannelHandlerContext ctx, Http3HeadersFrame frame) {
-                    if (frame.headers().status() != null) {
-                        exchange.status.complete(Integer.parseInt(frame.headers().status().toString()));
-                    }
-                }
-
-                @Override
-                protected void channelRead(ChannelHandlerContext ctx, Http3DataFrame frame) {
-                    body.writeBytes(ByteBufUtil.getBytes(frame.content()));
-                    frame.release();
-                }
-
-                @Override
-                protected void channelInputClosed(ChannelHandlerContext ctx) {
-                    exchange.body.complete(body.toString(StandardCharsets.UTF_8));
-                    ctx.close();
-                }
-
-                @Override
-                public void channelInactive(ChannelHandlerContext ctx) {
-                    IllegalStateException closed = new IllegalStateException("stream closed without a response");
-                    exchange.status.completeExceptionally(closed);
-                    exchange.body.completeExceptionally(closed);
-                }
-
-                @Override
-                public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-                    exchange.status.completeExceptionally(cause);
-                    exchange.body.completeExceptionally(cause);
-                }
-            }).sync().getNow();
-            stream.writeAndFlush(new DefaultHttp3HeadersFrame(headers)).addListener(QuicStreamChannel.SHUTDOWN_OUTPUT);
-            return exchange;
-        }
-
-        @Override
-        public void close() {
-            quicChannel.close().awaitUninterruptibly(5, TimeUnit.SECONDS);
-            datagramChannel.close().awaitUninterruptibly(5, TimeUnit.SECONDS);
-        }
     }
 }

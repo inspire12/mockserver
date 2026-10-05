@@ -90,6 +90,9 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
     private Http3RequestDecompressor decompressor;
     // Set to true once the body has been rejected (too large, or a corrupt compressed body), to suppress further accumulation.
     private boolean bodyExceeded;
+    // Set once a header or trailer section over maxHeaderSize has closed the connection: the request is not
+    // dispatched when the stream's input then closes.
+    private boolean sectionRefused;
 
     public Http3MockServerHandler(
         Configuration configuration,
@@ -218,8 +221,8 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
     @Override
     protected void channelInputClosed(ChannelHandlerContext ctx) {
         try {
-            if (bodyExceeded) {
-                // Already rejected with 413 -- do not process.
+            if (bodyExceeded || sectionRefused) {
+                // Already rejected with 413, or refused for its trailers -- do not process.
                 return;
             }
 
@@ -763,12 +766,16 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
         if (isHeaderSectionTooLarge(cause)) {
+            sectionRefused = true;
             // Netty has already closed the connection with H3_EXCESSIVE_LOAD
             if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
                 mockServerLogger.logEvent(
                     new LogEntry()
                         .setLogLevel(Level.WARN)
-                        .setMessageFormat("closing HTTP/3 connection from:{}because a request's header section is larger than maxHeaderSize:{}")
+                        // a section after the request's headers is its trailers
+                        .setMessageFormat(parsedHeaders != null
+                            ? "closing HTTP/3 connection from:{}because a request's trailer section is larger than maxHeaderSize:{}"
+                            : "closing HTTP/3 connection from:{}because a request's header section is larger than maxHeaderSize:{}")
                         .setArguments(peerAddress(ctx.channel()), configuration.maxHeaderSize())
                 );
             }

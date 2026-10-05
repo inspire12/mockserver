@@ -76,4 +76,19 @@ public class LenientInboundHttp2StreamFrameCodec extends Http2StreamFrameToHttpO
         }
         super.encode(ctx, obj, out);
     }
+
+    /**
+     * Trailers over {@code maxHeaderSize} reach the stream as an exception, already logged, and Netty then resets the
+     * stream with {@code PROTOCOL_ERROR}. Do not pass it on: a handler further on logs it again and closes the stream
+     * itself, which resets it with {@code CANCEL}; for a header block sent after the request ended, on a stream whose
+     * whole response has been written, that close sends no reset at all.
+     */
+    @Override
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+        if (Http2RequestHeaderLimit.isHeaderListOverLimit(cause)) {
+            Http2RequestHeaderLimit.trailersRefused(ctx.channel());
+        } else {
+            super.exceptionCaught(ctx, cause);
+        }
+    }
 }
