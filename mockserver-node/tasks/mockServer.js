@@ -20,13 +20,16 @@ module.exports = function (grunt) {
             done(true);
         }, function(err) {
             console.error(err);
-            console.error('\n' +
-                'mockserver-node - you must at least specify serverPort, for example:\n' +
-                'start_mockserver: {\n' +
-                '    options: {\n' +
-                '        serverPort: 1080\n' +
-                '    }\n' +
-                '}\n');
+            // only a problem with the options is rejected with a string
+            if (typeof err === 'string') {
+                console.error('\n' +
+                    'mockserver-node - you must at least specify serverPort, for example:\n' +
+                    'start_mockserver: {\n' +
+                    '    options: {\n' +
+                    '        serverPort: 1080\n' +
+                    '    }\n' +
+                    '}\n');
+            }
             done(false);
         });
     });

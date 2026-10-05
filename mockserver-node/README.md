@@ -77,6 +77,28 @@ mockserver.stop_mockserver({
 
 The MockServer uses port unification to support HTTP, HTTPS, SOCKS, HTTP CONNECT, Port Forwarding Proxying on the same port. A client can then connect to the single port with both HTTP and HTTPS as the socket will automatically detected SSL traffic and decrypt it when required.
 
+### Requirements
+
+`start_mockserver` runs MockServer with the `java` command, so Java 17 or later must be installed and its `bin` directory must be on the `PATH` of the Node.js process.  `JAVA_HOME` is not used, and there is no option for the location of `java`.  The `mockserver` command described above needs no Java.
+
+### When a start fails
+
+`start_mockserver` returns a promise.  It is rejected with an `Error`, and the same message is printed to stderr, when:
+
+* there is no `java` on the `PATH` (`error.code` is `ENOENT`), or the one found cannot be run (`EACCES`): the message says where `java` was looked for
+* `java` exits with a failing status, or is ended by a signal, before MockServer is ready, for example when `jvmOptions` holds an option it does not accept: the start fails at once and the message ends with the last lines the process printed (`error.exitCode` and `error.signal` are set)
+* MockServer does not become ready in the time `startupRetries` allows
+
+A failed start never ends the calling process, and leaves it free to carry on or to exit (unless a JVM was left waiting for a debugger, see `javaDebugPort`).  Handle the rejection to fail your own script, and call `stop_mockserver` afterwards if you wish: it resolves when nothing is running.
+
+```js
+mockserver.start_mockserver({serverPort: 1080}).then(function () {
+    // MockServer is ready
+}, function (error) {
+    process.exitCode = 1;
+});
+```
+
 ## Grunt Plugin
 
 If you haven't used [Grunt](http://gruntjs.com/) before, be sure to check out the [Getting Started](http://gruntjs.com/getting-started) guide, as it explains how to create a [Gruntfile](http://gruntjs.com/sample-gruntfile) as well as install and use Grunt plugins.
@@ -190,6 +212,12 @@ This value indicates whether Java debugging should be enabled and if so which po
 
 Note that `suspend=y` is used so the MockServer will pause until the debugger is attached.  The grunt task will wait 50 seconds for the debugger to be attached before it exits with a failure status.  The paused JVM is left running when that happens, so a debugger can still be attached to it; stop it yourself when you are done.
   
+#### options.runForked
+Type: `Boolean`
+Default value: `false`
+
+If the calling process meets an uncaught exception, the MockServer it launched is ended so that it is not left running once the process has gone.  The exception itself is left alone: Node.js reports it and exits with a failing status, or your own `uncaughtException` handler deals with it.  The server is ended even when your own handler, or a test runner, deals with the exception and the process carries on. Only the `java` process the launcher started is signalled: if the `java` on your `PATH` is a wrapper script that does not `exec` the JVM, the JVM is left running.  Set this option to `true` to leave MockServer running instead.
+
 #### options.jvmOptions
 Type: `String`
 Default value: `undefined`

@@ -165,7 +165,7 @@ function killLaunched() {
     }
 }
 
-// runForked keeps the launcher's uncaughtException handler, which exits with status 0, out of this process
+// runForked: nothing but the test itself ends what it launched
 function startOn(port, startupRetries, extraOptions) {
     return mockserver.start_mockserver(Object.assign({
         serverPort: port,
@@ -315,16 +315,17 @@ test('start gives up and stops the launched process when the server never become
     }
 });
 
-test('start says so when the launched process had already exited', async function (t) {
+// a failing status rejects the start at once (test/node/launch_failure); status 0 is left to the readiness check
+test('start says so when the launched process had already exited with status 0', async function (t) {
     var stub = await startStub(hangUp);
     var consoleError = t.mock.method(console, 'error', function () {
     });
 
     try {
-        var outcome = await outcomeOf(startOn(stub.port, 20, {jvmOptions: ['-Dstandin.exit=3']}), 8000);
+        var outcome = await outcomeOf(startOn(stub.port, 20, {jvmOptions: ['-Dstandin.exit=0']}), 8000);
 
         assert.strictEqual(outcome.state, 'rejected');
-        assert.match(outcome.error.message, new RegExp(NOT_READY + stub.port + ' within [\\d.]+ seconds \\(socket hang up\\); its java process had already exited \\(code=3, signal=null\\)$'));
+        assert.match(outcome.error.message, new RegExp(NOT_READY + stub.port + ' within [\\d.]+ seconds \\(socket hang up\\); its java process had already exited \\(code=0, signal=null\\)$'));
         assert.deepStrictEqual(printed(consoleError), [outcome.error.message, 'last MockServer output:\nstand-in java exiting']);
     } finally {
         stub.close();

@@ -268,9 +268,8 @@
               } catch (error) {
                 // The partial can be gone entirely - removed by something else
                 // while the download ran. Reject rather than throwing out of
-                // this handler, where an uncaught exception would be taken by
-                // the uncaughtException handler in index.js as a reason to tear
-                // the whole process down while this promise never settles.
+                // this handler, where it would be an uncaught exception in the
+                // calling process and this promise would never settle.
                 fail('Saving ' + dest + ' failed with error ' + error);
                 return;
               }

@@ -158,7 +158,7 @@ module.exports = (function () {
 
     // Sends one poll request and calls done(error, response) exactly once. A poll not fully answered within
     // the timeout is ended with error.timedOut set. The timeout runs by the clock, not on an idle connection,
-    // so an answer that trickles in cannot outlast it.
+    // so an answer that trickles in cannot outlast it. Returns a function that ends the poll without calling done.
     function pollOnce(request, done) {
       var settled = false;
       var timer;
@@ -202,15 +202,25 @@ module.exports = (function () {
       req.on('error', settle);
 
       req.end();
+
+      return function abandon() {
+        settled = true;
+        clearTimeout(timer);
+        req.destroy();
+      };
     }
 
     // Polls until decided(error, response) is true or the retries run out, then calls finished(true, response)
     // or finished(false, error) with the last poll's error if it had one. A poll that timed out took the time
     // of many retries and is charged for them, so a server that accepts and never answers is given up on about
     // as soon as one that refuses. Only the count limits other polls: a slow host must not shorten the wait.
+    // Returns a function that ends the polling without calling finished.
     function pollUntil(request, retries, waitingMessage, decided, finished) {
+      var abandonPoll;
+      var nextAttempt;
+
       function attempt(retriesLeft) {
-        pollOnce(request, function (error, response) {
+        abandonPoll = pollOnce(request, function (error, response) {
           if (decided(error, response)) {
             finished(true, response);
             return;
@@ -219,7 +229,7 @@ module.exports = (function () {
             retriesLeft -= POLL_REQUEST_TIMEOUT_MILLIS / POLL_INTERVAL_MILLIS;
           }
           if (retriesLeft > 0) {
-            setTimeout(function () {
+            nextAttempt = setTimeout(function () {
               if (waitingMessage) {
                 console.log(waitingMessage + " retries remaining: " + retriesLeft);
               }
@@ -232,23 +242,19 @@ module.exports = (function () {
       }
 
       attempt(retries);
+
+      return function cancel() {
+        clearTimeout(nextAttempt);
+        abandonPoll();
+      };
     }
 
-    // ready as soon as any answer arrives; rejects with the last poll's error
-    function checkStarted(request, retries, verbose) {
-      var deferred = defer();
-
-      pollUntil(request, retries, verbose && "waiting for MockServer to start", function (error) {
+    // ready as soon as any answer arrives: calls finished(true, response), or finished(false, error) with the
+    // last poll's error; returns a function that ends the check without calling finished
+    function checkStarted(request, retries, verbose, finished) {
+      return pollUntil(request, retries, verbose && "waiting for MockServer to start", function (error) {
         return !error;
-      }, function (ready, result) {
-        if (ready) {
-          deferred.resolve(result);
-        } else {
-          deferred.reject(result);
-        }
-      });
-
-      return deferred.promise;
+      }, finished);
     }
 
     // stopped once a connection fails; a server that still accepts one, answering or not, has not stopped
@@ -300,6 +306,75 @@ module.exports = (function () {
       error.code = lastError.code;
       error.cause = lastError;
       return error;
+    }
+
+    var COULD_NOT_START = 'MockServer could not be started: ';
+
+    function javaLookup() {
+      var javaHome = process.env.JAVA_HOME;
+      return 'The launcher runs "java" from the PATH of this process (PATH=' + (process.env.PATH || '') +
+        '); it does not use JAVA_HOME (' + (javaHome ? 'set to ' + javaHome : 'not set') +
+        ') and has no option for the location of java.';
+    }
+
+    // The rejection for a start whose java process could not be launched at all.
+    function failedLaunch(spawnError) {
+      var message;
+      if (spawnError.code === 'ENOENT') {
+        message = COULD_NOT_START + 'no "java" command was found. ' + javaLookup() + ' Install Java 17 or later ' +
+          'and add its bin directory to PATH, or use the "mockserver" command of this package, which needs no Java.';
+      } else if (spawnError.code === 'EACCES') {
+        message = COULD_NOT_START + 'permission was denied to run a "java" found on the PATH of this process (' +
+          spawnError.message + '); check that it is an executable file. ' + javaLookup();
+      } else {
+        message = COULD_NOT_START + 'running "java" failed (' + spawnError.message + '). ' + javaLookup();
+      }
+      var error = new Error(message);
+      error.code = spawnError.code;
+      error.cause = spawnError;
+      return error;
+    }
+
+    // The rejection for a start whose java process ended in failure before MockServer answered.
+    function exitedBeforeReady(code, signal, port) {
+      var message = COULD_NOT_START + 'its java process ' +
+        (signal ? 'was ended by signal ' + signal : 'exited with status ' + code) +
+        ' before MockServer became ready on port ' + port;
+      var tail = capturedOutputTail(30);
+      if (tail) {
+        message += '; its last output:\n' + tail;
+      }
+      var error = new Error(message);
+      error.exitCode = code;
+      error.signal = signal;
+      return error;
+    }
+
+    // printed as well as rejected with: a caller that does not handle the rejection is told of nothing else
+    function reported(error) {
+      console.error(error.message);
+      return error;
+    }
+
+    // The launched processes to end if the calling process meets an uncaught exception: every one started
+    // without runForked. 'uncaughtExceptionMonitor' leaves the exception, and the status the process exits
+    // with, to the caller and to Node.
+    var endedWithCaller = new Set();
+    var watchingForUncaughtException = false;
+
+    function endWithCaller(launched) {
+      endedWithCaller.add(launched);
+      launched.once('exit', function () {
+        endedWithCaller.delete(launched);
+      });
+      if (!watchingForUncaughtException) {
+        watchingForUncaughtException = true;
+        process.on('uncaughtExceptionMonitor', function () {
+          endedWithCaller.forEach(function (running) {
+            running.kill();
+          });
+        });
+      }
     }
 
     var STOP_REQUEST_TIMEOUT_MILLIS = 10000;
@@ -432,7 +507,21 @@ module.exports = (function () {
       }
   
       var startupRetries = options.startupRetries || (options.javaDebugPort ? 500 : 110);
+      var settled = false;
+      var stopCheckingStarted;
       var launched;
+
+      // true for the first outcome of this start only, and ends the readiness check: a start settles once
+      function firstOutcome() {
+        if (settled) {
+          return false;
+        }
+        settled = true;
+        if (stopCheckingStarted) {
+          stopCheckingStarted();
+        }
+        return true;
+      }
 
       // An explicitly-provided jar (the jarPath option or the MOCKSERVER_JAR_PATH
       // environment variable) is used as-is and short-circuits the download
@@ -444,14 +533,12 @@ module.exports = (function () {
       var explicitJarPath = options.jarPath || process.env.MOCKSERVER_JAR_PATH;
       var jarReady;
       if (explicitJarPath) {
-        try {
-          jarReady = Q.resolve(resolveExplicitJarPath(
+        jarReady = Q.try(function () {
+          return resolveExplicitJarPath(
             explicitJarPath,
             options.jarPath ? 'jarPath option' : 'MOCKSERVER_JAR_PATH',
-            logLevel || options.verbose));
-        } catch (error) {
-          jarReady = Q.reject(error);
-        }
+            logLevel || options.verbose);
+        });
       } else {
         // double check the jar has already been downloaded, then resolve the jar
         // for the specific version being launched - a wildcard version would match
@@ -502,58 +589,80 @@ module.exports = (function () {
         if (options.verbose) {
           console.log('Running \'java ' + commandLineOptions.join(' ') + '\'');
         }
-        if (!options.runForked) {
-          var exitHandler = function(config, err) {
-            return stop_mockserver(config.options).then(function () {
-              if (err) {
-                console.log(err.stack);
-              }
-              if (config.exit) {
-                process.exit();
-              }
-            });
-          };
-  
-          // stop mockserver for uncaught exceptions
-          process.on('uncaughtException', exitHandler.bind(null, {exit: true, options: options}));
-        }
         // Always pipe stdout+stderr so we can capture them into the bounded ring buffer. Preserve the
         // previous surfacing behaviour: stdout is echoed to the parent only when verbose, stderr is
         // always echoed (as it was when routed directly to process.stderr).
         mockServerOutput = '';
         mockServerExit = undefined;
-        mockServer = spawn('java', commandLineOptions, {
+        launched = spawn('java', commandLineOptions, {
           stdio: ['ignore', 'pipe', 'pipe']
         });
-        mockServer.stdout.on('data', function (chunk) {
-          appendCapturedOutput(chunk);
-          if (options.verbose) {
-            process.stdout.write(chunk);
+        mockServer = launched;
+        // Without a listener a failure to launch java, or to signal it later, is an uncaught exception in
+        // the calling process. Attached before anything else can throw: the failure is reported a tick later.
+        launched.on('error', function (processError) {
+          if (firstOutcome()) {
+            deferred.reject(reported(failedLaunch(processError)));
+          } else {
+            console.error('MockServer java process: ' + processError.message);
           }
         });
-        mockServer.stderr.on('data', function (chunk) {
-          appendCapturedOutput(chunk);
-          process.stderr.write(chunk);
-        });
-        mockServer.once('exit', function (code, signal) {
+        // a launch that fails for want of file descriptors has no output streams
+        if (launched.stdout) {
+          launched.stdout.on('data', function (chunk) {
+            appendCapturedOutput(chunk);
+            if (options.verbose) {
+              process.stdout.write(chunk);
+            }
+          });
+        }
+        if (launched.stderr) {
+          launched.stderr.on('data', function (chunk) {
+            appendCapturedOutput(chunk);
+            process.stderr.write(chunk);
+          });
+        }
+        launched.once('exit', function (code, signal) {
           mockServerExit = { code: code, signal: signal };
         });
-        launched = mockServer;
+        // 'close' follows 'exit' once all of the output has been read. A process that exits with status 0
+        // is left to the readiness check, as one that hands over to a server it started would be.
+        launched.once('close', function (code, signal) {
+          if (code !== 0 && firstOutcome()) {
+            deferred.reject(reported(exitedBeforeReady(code, signal, port)));
+          }
+        });
+        if (!options.runForked && launched.pid) {
+          endWithCaller(launched);
+        }
 
-      }).then(function () {
         var since = Date.now();
-        checkStarted({
+        stopCheckingStarted = checkStarted({
           method: 'PUT',
           host: "localhost",
           path: "/mockserver/retrieve?type=ACTIVE_EXPECTATIONS",
           port: port
-        }, startupRetries, options.verbose).then(function (response) {
-          deferred.resolve(response);
-        }, function (lastError) {
-          deferred.reject(failedStart(launched, lastError, port, since, options.javaDebugPort, options.verbose));
+        }, startupRetries, options.verbose, function (ready, result) {
+          if (!firstOutcome()) {
+            return;
+          }
+          if (ready) {
+            deferred.resolve(result);
+          } else {
+            deferred.reject(failedStart(launched, result, port, since, options.javaDebugPort, options.verbose));
+          }
         });
-      }, function (error) {
-        deferred.reject(error);
+
+      }).then(undefined, function (error) {
+        if (firstOutcome()) {
+          // Whatever was thrown after the launch, the launched process must not outlive the failed start.
+          // Only one with a pid: until the 'error' of a failed launch is emitted, a signal sent to that
+          // child goes to the process group of the caller.
+          if (launched && launched.pid) {
+            launched.kill();
+          }
+          deferred.reject(error);
+        }
       });
   
       return deferred.promise;

@@ -31,6 +31,13 @@ export interface StartServerOptions {
   javaDebugPort?: number;
   proxyRemotePort?: number;
   proxyRemoteHost?: string;
+  /**
+   * By default the launched MockServer is ended if the calling process meets an uncaught exception,
+   * which is otherwise left to Node and to the caller's own handlers: it is ended even when one of
+   * those handles the exception and the process carries on. Only the java process the launcher started
+   * is signalled, so a java wrapper script that does not exec the JVM leaves the JVM running. Set to
+   * true to leave MockServer running.
+   */
   runForked?: boolean;
 }
 
@@ -46,6 +53,15 @@ export interface MockServerExit {
 }
 
 declare const mockserverNode: {
+  /**
+   * Launches MockServer with the `java` found on the PATH of this process (JAVA_HOME is not used) and
+   * resolves once it answers. Rejects with an Error, also printed to stderr, and never ends the calling
+   * process, when: java cannot be run (`code` is 'ENOENT' when there is none on the PATH, 'EACCES' when
+   * it is not executable); java exits with a failing status or is ended by a signal before MockServer is
+   * ready (`exitCode` and `signal` are set, and the message ends with its last output); or MockServer
+   * does not become ready in the time `startupRetries` allows. A missing or renamed option rejects with
+   * a string.
+   */
   start_mockserver: (options: StartServerOptions) => Promise<void>,
   stop_mockserver: (options: StopServerOptions) => Promise<void>,
   /** The launched MockServer java child process, or undefined before the first start. */
