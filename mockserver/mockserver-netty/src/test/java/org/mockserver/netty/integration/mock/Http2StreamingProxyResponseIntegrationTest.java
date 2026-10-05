@@ -147,7 +147,7 @@ public class Http2StreamingProxyResponseIntegrationTest {
                     });
                 }
             })
-            .bind(0).sync().channel();
+            .bind(new InetSocketAddress("127.0.0.1", 0)).sync().channel();
         h2UpstreamPort = ((InetSocketAddress) h2UpstreamChannel.localAddress()).getPort();
 
         h1OnlyUpstreamChannel = new ServerBootstrap()
@@ -167,7 +167,7 @@ public class Http2StreamingProxyResponseIntegrationTest {
                     });
                 }
             })
-            .bind(0).sync().channel();
+            .bind(new InetSocketAddress("127.0.0.1", 0)).sync().channel();
         h1OnlyUpstreamPort = ((InetSocketAddress) h1OnlyUpstreamChannel.localAddress()).getPort();
 
         Configuration configuration = configuration()

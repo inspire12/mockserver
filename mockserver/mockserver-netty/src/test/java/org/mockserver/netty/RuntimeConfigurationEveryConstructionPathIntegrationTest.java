@@ -33,6 +33,7 @@ import org.mockserver.configuration.Configuration;
 import org.mockserver.integration.ClientAndServer;
 import org.mockserver.metrics.Metrics;
 import org.mockserver.proxyconfiguration.ProxyConfiguration;
+import org.mockserver.socket.PortFactory;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -40,7 +41,6 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.reflect.Field;
 import java.net.HttpURLConnection;
-import java.net.ServerSocket;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
@@ -323,11 +323,7 @@ public class RuntimeConfigurationEveryConstructionPathIntegrationTest {
     }
 
     private static int unusedPort() {
-        try (ServerSocket socket = new ServerSocket(0)) {
-            return socket.getLocalPort();
-        } catch (IOException e) {
-            throw new IllegalStateException(e);
-        }
+        return PortFactory.findFreePort();
     }
 
     private static String expectation(String path) {

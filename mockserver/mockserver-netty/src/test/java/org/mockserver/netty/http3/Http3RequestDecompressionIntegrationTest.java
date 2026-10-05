@@ -61,6 +61,7 @@ import static org.mockserver.model.HttpForward.forward;
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
 import static org.mockserver.model.JsonBody.json;
+import static org.mockserver.netty.http3.Http3TestServer.startWithHttp3;
 import static org.mockserver.stop.Stop.stopQuietly;
 
 /**
@@ -86,11 +87,9 @@ public class Http3RequestDecompressionIntegrationTest {
     public static void startServer() throws IOException {
         assumeQuicAvailable();
         upstream = new CapturingUpstream();
-        int udpPort = org.mockserver.testing.socket.TestPortFactory.findFreeUdpPort();
-        mockServer = new MockServer(configuration()
-            .http3Port(udpPort)
+        mockServer = startWithHttp3(configuration()
             .http3MaxIdleTimeout(30000L)
-            .maxRequestBodySize(MAX_BODY), 0);
+            .maxRequestBodySize(MAX_BODY));
         mockServerClient = new MockServerClient("127.0.0.1", mockServer.getLocalPort());
         http3Port = mockServer.getHttp3Port();
     }

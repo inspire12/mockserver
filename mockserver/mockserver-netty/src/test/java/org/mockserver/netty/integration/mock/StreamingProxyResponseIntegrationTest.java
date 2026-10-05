@@ -86,11 +86,11 @@ public class StreamingProxyResponseIntegrationTest {
                     ch.pipeline().addLast(new ChunkedUpstreamHandler());
                 }
             });
-        upstreamChannel = b.bind(0).sync().channel();
+        upstreamChannel = b.bind(new InetSocketAddress("127.0.0.1", 0)).sync().channel();
         upstreamPort = ((InetSocketAddress) upstreamChannel.localAddress()).getPort();
 
         // Start MockServer configured to forward to the upstream
-        ConfigurationProperties.proxyRemoteHost("localhost");
+        ConfigurationProperties.proxyRemoteHost("127.0.0.1");
         ConfigurationProperties.proxyRemotePort(upstreamPort);
         mockServerPort = new MockServer().getLocalPort();
         mockServerClient = new MockServerClient("localhost", mockServerPort);
@@ -369,7 +369,7 @@ public class StreamingProxyResponseIntegrationTest {
             socket.setSoTimeout(10000);
             OutputStream output = socket.getOutputStream();
             output.write(("GET /sse HTTP/1.1\r\n" +
-                "Host: localhost:" + upstreamPort + "\r\n" +
+                "Host: 127.0.0.1:" + upstreamPort + "\r\n" +
                 "Connection: close\r\n" +
                 "\r\n").getBytes(StandardCharsets.UTF_8));
             output.flush();
@@ -405,7 +405,7 @@ public class StreamingProxyResponseIntegrationTest {
             socket.setSoTimeout(10000);
             OutputStream output = socket.getOutputStream();
             output.write(("GET /chunked HTTP/1.1\r\n" +
-                "Host: localhost:" + upstreamPort + "\r\n" +
+                "Host: 127.0.0.1:" + upstreamPort + "\r\n" +
                 "Connection: close\r\n" +
                 "\r\n").getBytes(StandardCharsets.UTF_8));
             output.flush();
@@ -431,7 +431,7 @@ public class StreamingProxyResponseIntegrationTest {
             socket.setSoTimeout(5000);
             OutputStream output = socket.getOutputStream();
             output.write(("GET /normal HTTP/1.1\r\n" +
-                "Host: localhost:" + upstreamPort + "\r\n" +
+                "Host: 127.0.0.1:" + upstreamPort + "\r\n" +
                 "Connection: close\r\n" +
                 "\r\n").getBytes(StandardCharsets.UTF_8));
             output.flush();
@@ -455,7 +455,7 @@ public class StreamingProxyResponseIntegrationTest {
             socket.setSoTimeout(10000);
             OutputStream output = socket.getOutputStream();
             output.write(("GET /close-mid-stream HTTP/1.1\r\n" +
-                "Host: localhost:" + upstreamPort + "\r\n" +
+                "Host: 127.0.0.1:" + upstreamPort + "\r\n" +
                 "Connection: close\r\n" +
                 "\r\n").getBytes(StandardCharsets.UTF_8));
             output.flush();
@@ -484,13 +484,13 @@ public class StreamingProxyResponseIntegrationTest {
             .when(request().withPath("/replace-header-only"))
             .forward(
                 forwardOverriddenRequest(
-                    request().withPath("/sse-long-pause").withHeader("Host", "localhost:" + upstreamPort),
+                    request().withPath("/sse-long-pause").withHeader("Host", "127.0.0.1:" + upstreamPort),
                     response().withHeader("X-Custom-Override", "applied")
                 )
             );
 
         String req = "GET /replace-header-only HTTP/1.1\r\n" +
-            "Host: localhost:" + upstreamPort + "\r\n" +
+            "Host: 127.0.0.1:" + upstreamPort + "\r\n" +
             "Connection: close\r\n\r\n";
         TimedResponse r = sendAndMeasure(req, 15000);
 
@@ -515,13 +515,13 @@ public class StreamingProxyResponseIntegrationTest {
             .when(request().withPath("/replace-body"))
             .forward(
                 forwardOverriddenRequest(
-                    request().withPath("/sse-long-pause").withHeader("Host", "localhost:" + upstreamPort),
+                    request().withPath("/sse-long-pause").withHeader("Host", "127.0.0.1:" + upstreamPort),
                     response().withBody("replaced-body")
                 )
             );
 
         String req = "GET /replace-body HTTP/1.1\r\n" +
-            "Host: localhost:" + upstreamPort + "\r\n" +
+            "Host: 127.0.0.1:" + upstreamPort + "\r\n" +
             "Connection: close\r\n\r\n";
         TimedResponse r = sendAndMeasure(req, 15000);
 
@@ -543,7 +543,7 @@ public class StreamingProxyResponseIntegrationTest {
             socket.setSoTimeout(10000);
             OutputStream output = socket.getOutputStream();
             output.write(("GET /sse HTTP/1.1\r\n" +
-                "Host: localhost:" + upstreamPort + "\r\n" +
+                "Host: 127.0.0.1:" + upstreamPort + "\r\n" +
                 "Connection: close\r\n" +
                 "\r\n").getBytes(StandardCharsets.UTF_8));
             output.flush();
@@ -586,7 +586,7 @@ public class StreamingProxyResponseIntegrationTest {
             socket.setSoTimeout(10000);
             OutputStream output = socket.getOutputStream();
             output.write(("GET /chunked HTTP/1.1\r\n" +
-                "Host: localhost:" + upstreamPort + "\r\n" +
+                "Host: 127.0.0.1:" + upstreamPort + "\r\n" +
                 "Connection: close\r\n" +
                 "\r\n").getBytes(StandardCharsets.UTF_8));
             output.flush();
@@ -623,7 +623,7 @@ public class StreamingProxyResponseIntegrationTest {
             socket.setSoTimeout(10000);
             OutputStream output = socket.getOutputStream();
             output.write(("GET /binary-stream HTTP/1.1\r\n" +
-                "Host: localhost:" + upstreamPort + "\r\n" +
+                "Host: 127.0.0.1:" + upstreamPort + "\r\n" +
                 "Connection: close\r\n" +
                 "\r\n").getBytes(StandardCharsets.UTF_8));
             output.flush();
@@ -697,7 +697,7 @@ public class StreamingProxyResponseIntegrationTest {
         // after the 2s completion (which is what made opencode time out on response headers).
         mockServerClient
             .when(request().withPath("/codex-stream"))
-            .forward(forward().withHost("localhost").withPort(upstreamPort));
+            .forward(forward().withHost("127.0.0.1").withPort(upstreamPort));
 
         String body = "{\"stream\":true,\"model\":\"x\"}";
         String req = "POST /codex-stream HTTP/1.1\r\n" +
@@ -744,7 +744,7 @@ public class StreamingProxyResponseIntegrationTest {
         // coerced into a STRING by the text heuristic that recovers SSE/JSON streams.
         mockServerClient
             .when(request().withPath("/codex-binary-stream"))
-            .forward(forward().withHost("localhost").withPort(upstreamPort));
+            .forward(forward().withHost("127.0.0.1").withPort(upstreamPort));
 
         String body = "{\"stream\":true}";
         String req = "POST /codex-binary-stream HTTP/1.1\r\n" +
@@ -776,7 +776,7 @@ public class StreamingProxyResponseIntegrationTest {
         // (non-streaming) forward traffic is unaffected.
         mockServerClient
             .when(request().withPath("/codex-stream"))
-            .forward(forward().withHost("localhost").withPort(upstreamPort));
+            .forward(forward().withHost("127.0.0.1").withPort(upstreamPort));
 
         String req = "GET /codex-stream HTTP/1.1\r\n" +
             "Host: localhost\r\n" +
@@ -817,7 +817,7 @@ public class StreamingProxyResponseIntegrationTest {
         try {
             streamingForwardClient
                 .when(request().withPath("/sse-long-pause"))
-                .forward(forward().withHost("localhost").withPort(upstreamPort));
+                .forward(forward().withHost("127.0.0.1").withPort(upstreamPort));
 
             String req = "GET /sse-long-pause HTTP/1.1\r\n" +
                 "Host: localhost\r\n" +
@@ -890,7 +890,7 @@ public class StreamingProxyResponseIntegrationTest {
         // unmatched-proxy streaming path.
         mockServerClient
             .when(request().withPath("/sse"))
-            .forward(forward().withHost("localhost").withPort(upstreamPort));
+            .forward(forward().withHost("127.0.0.1").withPort(upstreamPort));
 
         // Read the streamed forward to completion on the client side (Connection: close, so readLine()
         // returns null only once the server has written the terminating chunk and closed the socket).

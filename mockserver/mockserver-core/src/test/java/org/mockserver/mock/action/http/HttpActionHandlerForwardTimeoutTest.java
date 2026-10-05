@@ -20,6 +20,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -195,7 +196,7 @@ public class HttpActionHandlerForwardTimeoutTest {
     }
 
     private ServerSocket startSilentServer() throws Exception {
-        ServerSocket server = new ServerSocket(0);
+        ServerSocket server = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"));
         silentAcceptThread = new Thread(() -> {
             while (!Thread.currentThread().isInterrupted() && !server.isClosed()) {
                 try {
@@ -215,7 +216,7 @@ public class HttpActionHandlerForwardTimeoutTest {
     }
 
     private ServerSocket startRespondingServer() throws Exception {
-        ServerSocket server = new ServerSocket(0);
+        ServerSocket server = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"));
         respondingAcceptThread = new Thread(() -> {
             while (!Thread.currentThread().isInterrupted() && !server.isClosed()) {
                 try {

@@ -25,7 +25,6 @@ import org.mockserver.client.MockServerClient;
 import org.mockserver.metrics.Metrics;
 import org.mockserver.netty.MockServer;
 import org.mockserver.testing.socket.Ipv4DatagramChannelFactory;
-import org.mockserver.testing.socket.TestPortFactory;
 
 import java.net.InetSocketAddress;
 import java.util.Random;
@@ -42,6 +41,7 @@ import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.model.BinaryBody.binary;
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
+import static org.mockserver.netty.http3.Http3TestServer.startWithHttp3;
 import static org.mockserver.stop.Stop.stopQuietly;
 
 /**
@@ -73,12 +73,11 @@ public class Http3ConnectionCreditWriteStallIntegrationTest {
         new Random(105).nextBytes(heldBody);
         readBody = new byte[96 * 1024];
         new Random(106).nextBytes(readBody);
-        mockServer = new MockServer(configuration()
+        mockServer = startWithHttp3(configuration()
             .logLevel("WARN")
             .metricsEnabled(true)
-            .http3Port(TestPortFactory.findFreeUdpPort())
             .http3MaxIdleTimeout(60_000L)
-            .responseWriteStallTimeoutMillis(STALL_MILLIS), 0);
+            .responseWriteStallTimeoutMillis(STALL_MILLIS));
         mockServerClient = new MockServerClient("127.0.0.1", mockServer.getLocalPort());
         http3Port = mockServer.getHttp3Port();
     }

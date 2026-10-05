@@ -12,6 +12,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -106,7 +107,7 @@ public class MaxResponseBodySizeIntegrationTest {
             .when(request().withPath("/upstream/.*"))
             .forward(
                 forward()
-                    .withHost("localhost")
+                    .withHost("127.0.0.1")
                     .withPort(upstream.getPort())
             );
     }
@@ -241,7 +242,7 @@ public class MaxResponseBodySizeIntegrationTest {
         private volatile boolean running = true;
 
         private FixedSizeBodyUpstream() throws IOException {
-            serverSocket = new ServerSocket(0);
+            serverSocket = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"));
             acceptThread = new Thread(this::acceptLoop, "max-response-body-size-upstream");
             acceptThread.setDaemon(true);
             acceptThread.start();

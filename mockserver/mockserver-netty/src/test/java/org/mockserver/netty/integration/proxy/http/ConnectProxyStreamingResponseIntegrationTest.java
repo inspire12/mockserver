@@ -85,7 +85,7 @@ public class ConnectProxyStreamingResponseIntegrationTest {
                     ch.pipeline().addLast(new NoContentTypeSseUpstreamHandler());
                 }
             });
-        upstreamChannel = b.bind(0).sync().channel();
+        upstreamChannel = b.bind(new InetSocketAddress("127.0.0.1", 0)).sync().channel();
         upstreamPort = ((InetSocketAddress) upstreamChannel.localAddress()).getPort();
 
         mockServerPort = new MockServer().getLocalPort();
@@ -112,7 +112,7 @@ public class ConnectProxyStreamingResponseIntegrationTest {
         // (secure) CONNECT tunnel.
         mockServerClient
             .when(request())
-            .forward(forward().withHost("localhost").withPort(upstreamPort));
+            .forward(forward().withHost("127.0.0.1").withPort(upstreamPort));
     }
 
     @Test

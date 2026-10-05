@@ -50,6 +50,7 @@ import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
 import static org.mockserver.model.JsonBody.json;
+import static org.mockserver.netty.http3.Http3TestServer.startWithHttp3;
 
 /**
  * Integration tests for gRPC over HTTP/3.
@@ -414,35 +415,17 @@ public class Http3GrpcIntegrationTest {
     }
 
     /**
-     * Start a MockServer whose HTTP/3 (QUIC) listener binds a probed UDP port, with a bounded
-     * retry to absorb the TOCTOU window between {@link #findAvailableUdpPort()} closing the probe
-     * socket and the QUIC listener binding the same port (a collision under load would otherwise
-     * leave the HTTP/3 server unstarted and silently skip the test via the assumption below).
+     * Start a MockServer with HTTP/3 (QUIC) on a UDP port it holds; see {@link Http3TestServer}.
      * <p>
-     * The {@code configFactory} must build a fresh {@link Configuration} on each call so a new
-     * probe port can be assigned per attempt; this helper sets {@code http3Port}. Returns the
-     * actually-bound HTTP/3 port, or skips the test (assumption) if QUIC could not start at all.
+     * The {@code configFactory} must build a fresh {@link Configuration} on each call; this helper
+     * sets {@code http3Port}. Returns the bound HTTP/3 port.
      */
     private int startMockServerWithRetry(java.util.function.Supplier<Configuration> configFactory) {
-        final int maxAttempts = 3;
-        int http3Port = 0;
-        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-            int udpPort = findAvailableUdpPort();
-            // give the server QUIC connection generous idle headroom (matching the client's 30s) so a
-            // slow handshake under load is not torn down by the default 5s server idle timeout
-            Configuration config = configFactory.get().http3Port(udpPort).http3MaxIdleTimeout(30000L);
-            MockServer candidate = new MockServer(config, 0);
-            http3Port = candidate.getHttp3Port();
-            if (http3Port > 0) {
-                mockServer = candidate;
-                mockServerClient = new MockServerClient("127.0.0.1", candidate.getLocalPort());
-                return http3Port;
-            }
-            // HTTP/3 failed to bind (likely a port collision) -- tear down and retry on a new port
-            candidate.stop();
-        }
-        Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
-        return http3Port;
+        // give the server QUIC connection generous idle headroom (matching the client's 30s) so a
+        // slow handshake under load is not torn down by the default 5s server idle timeout
+        mockServer = startWithHttp3(udpPort -> new MockServer(configFactory.get().http3Port(udpPort).http3MaxIdleTimeout(30000L), 0));
+        mockServerClient = new MockServerClient("127.0.0.1", mockServer.getLocalPort());
+        return mockServer.getHttp3Port();
     }
 
     /**
@@ -748,18 +731,6 @@ public class Http3GrpcIntegrationTest {
         }
         // unreachable: the loop either returns or rethrows on the final attempt
         throw lastFailure;
-    }
-
-    /**
-     * Find a free UDP port for the HTTP/3 (QUIC) server.
-     *
-     * <p>Delegates to the shared {@link org.mockserver.testing.socket.TestPortFactory} so the probing
-     * strategy lives in one place. A failure to find a port is now raised rather than reported as port
-     * {@code 0}: {@code http3Port(0)} means "HTTP/3 disabled", which would silently turn an
-     * infrastructure failure into a test that skips or asserts against a server that never started.
-     */
-    private static int findAvailableUdpPort() {
-        return org.mockserver.testing.socket.TestPortFactory.findFreeUdpPort();
     }
 
     private static void assumeQuicAvailable() {

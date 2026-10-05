@@ -44,6 +44,7 @@ import static org.hamcrest.Matchers.*;
 import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
+import static org.mockserver.netty.http3.Http3TestServer.startWithHttp3;
 import static org.mockserver.socket.tls.KeyAndCertificateFactoryFactory.createKeyAndCertificateFactory;
 
 /**
@@ -81,13 +82,11 @@ public class Http3ParityIntegrationTest {
     @Test
     public void shouldPropagateTraceparentOverHttp3WhenEnabled() throws Exception {
         // given -- otelPropagateTraceContext enabled
-        int udpPort = findAvailableUdpPort();
         Configuration config = configuration()
-            .http3Port(udpPort)
             .http3MaxIdleTimeout(30000L)
             .otelPropagateTraceContext(true);
 
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
         int http3Port = mockServer.getHttp3Port();
         Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
@@ -119,10 +118,9 @@ public class Http3ParityIntegrationTest {
     @Test
     public void shouldNotPropagateTraceparentWhenDisabled() throws Exception {
         // given -- default config (otelPropagateTraceContext disabled)
-        int udpPort = findAvailableUdpPort();
-        Configuration config = configuration().http3Port(udpPort).http3MaxIdleTimeout(30000L);
+        Configuration config = configuration().http3MaxIdleTimeout(30000L);
 
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
         int http3Port = mockServer.getHttp3Port();
         Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
@@ -150,13 +148,11 @@ public class Http3ParityIntegrationTest {
     @Test
     public void shouldPropagateTraceparentWithoutTracestateWhenAbsent() throws Exception {
         // given
-        int udpPort = findAvailableUdpPort();
         Configuration config = configuration()
-            .http3Port(udpPort)
             .http3MaxIdleTimeout(30000L)
             .otelPropagateTraceContext(true);
 
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
         int http3Port = mockServer.getHttp3Port();
         Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
@@ -186,13 +182,11 @@ public class Http3ParityIntegrationTest {
     @Test
     public void shouldCaptureClientCertificateOverHttp3() throws Exception {
         // given -- start MockServer with mTLS enabled over H3
-        int udpPort = findAvailableUdpPort();
         Configuration config = configuration()
-            .http3Port(udpPort)
             .http3MaxIdleTimeout(30000L)
             .attemptToProxyIfNoMatchingExpectation(false);
 
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
         int http3Port = mockServer.getHttp3Port();
         Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
@@ -238,13 +232,11 @@ public class Http3ParityIntegrationTest {
     @Test
     public void shouldHandleNoCertGracefullyOverHttp3() throws Exception {
         // given -- start MockServer with H3 but no mTLS requirement
-        int udpPort = findAvailableUdpPort();
         Configuration config = configuration()
-            .http3Port(udpPort)
             .http3MaxIdleTimeout(30000L)
             .attemptToProxyIfNoMatchingExpectation(false);
 
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
         int http3Port = mockServer.getHttp3Port();
         Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
@@ -278,10 +270,9 @@ public class Http3ParityIntegrationTest {
     @Test
     public void shouldNotAffectBehaviourWithDefaultOtelConfig() throws Exception {
         // given -- default config: otelPropagateTraceContext=false, otelGenerateTraceId=false
-        int udpPort = findAvailableUdpPort();
-        Configuration config = configuration().http3Port(udpPort).http3MaxIdleTimeout(30000L);
+        Configuration config = configuration().http3MaxIdleTimeout(30000L);
 
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
         int http3Port = mockServer.getHttp3Port();
         Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
@@ -305,18 +296,6 @@ public class Http3ParityIntegrationTest {
     }
 
     // ---- helper methods ----
-
-    /**
-     * Find a free UDP port for the HTTP/3 (QUIC) server.
-     *
-     * <p>Delegates to the shared {@link org.mockserver.testing.socket.TestPortFactory} so the probing
-     * strategy lives in one place. A failure to find a port is now raised rather than reported as port
-     * {@code 0}: {@code http3Port(0)} means "HTTP/3 disabled", which would silently turn an
-     * infrastructure failure into a test that skips or asserts against a server that never started.
-     */
-    private static int findAvailableUdpPort() {
-        return org.mockserver.testing.socket.TestPortFactory.findFreeUdpPort();
-    }
 
     /**
      * Response capture holding status, body, and response headers.

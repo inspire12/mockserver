@@ -331,7 +331,9 @@ does the release's `-http3` publish.
 
 ### Test UDP sockets (macOS port shadowing)
 
-HTTP/3 tests must take a server's UDP port from `TestPortFactory.findFreeUdpPort()` and build every
+HTTP/3 tests must start their server through `Http3TestServer.startWithHttp3(...)` (in
+`mockserver-netty`'s test sources), which takes candidate UDP ports from
+`TestPortFactory.findFreeUdpPort()`, and build every
 test-side datagram channel (QUIC clients, test QUIC servers, UDP echo targets) with
 `.channelFactory(Ipv4DatagramChannelFactory.INSTANCE)`, never a plain `NioDatagramChannel` bound to
 port 0. On macOS a dual-stack socket's port allocator ignores IPv4 sockets, so it can hand out a port
@@ -340,6 +342,14 @@ that process. A QUIC client affected this way never sees the server's reply, and
 `TimeoutException` in `QuicChannel` connect. On a developer Mac about 0.1% of dual-stack client binds
 and 0.15% of dual-stack port probes were affected, with or without CPU load, which is consistent with
 about one HTTP/3 test failing per full `mockserver-netty` run. Linux never hands out such a port.
+
+`http3Port` cannot ask for an ephemeral port, so a candidate can be taken between being found and
+being bound. `startWithHttp3` starts the server on a candidate and checks it serves HTTP/3 on that
+port. If it does not, the server is stopped and the next candidate is tried only when a bind probe
+shows the port is held by another socket (at most five candidates); HTTP/3 not starting on a port
+that is free, or the start throwing, fails the test at once. It has forms for a `Configuration`, for a
+function that builds the `MockServer`, for a bare `Http3Server`, and for a server that is not an
+in-process `MockServer` (the forked jar of `Http3NativeStartupIntegrationTest`).
 
 The server guards against the same quirk (`Ipv4UdpPortProbe`, the UDP counterpart of the TCP
 listeners' `LoopbackShadowProbe`). On macOS a dual-stack wildcard bind succeeds on a port another
@@ -354,7 +364,7 @@ refused port free when `start` throws: refusing after Netty had bound left the s
 event loop deregistered it, so the caller could not rebind the port for up to about 200 ms. The probe has to come first: on both macOS and Linux an IPv4 bind fails once the same process's
 own dual-stack socket holds the port, so a probe after the bind cannot tell MockServer's socket from
 another application's. Port 0 is bound as before, without the probe: `MockServer` starts HTTP/3 only
-for an `http3Port` above 0, and tests take their port from `TestPortFactory.findFreeUdpPort()`. `MockServer` logs a failed HTTP/3 start as a warning and keeps serving TCP, so a refused
+for an `http3Port` above 0, and tests take their port through `Http3TestServer.startWithHttp3`. `MockServer` logs a failed HTTP/3 start as a warning and keeps serving TCP, so a refused
 `http3Port` disables HTTP/3 rather than failing start-up. `Http3ServerIpv4PortConflictTest` covers it, rebinding a refused port 25 times in one JVM.
 
 ### Test QUIC client writes (flush every awaited write)

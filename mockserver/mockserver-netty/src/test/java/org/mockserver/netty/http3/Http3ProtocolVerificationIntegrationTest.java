@@ -37,6 +37,7 @@ import static org.hamcrest.Matchers.*;
 import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
+import static org.mockserver.netty.http3.Http3TestServer.startWithHttp3;
 import static org.mockserver.verify.VerificationTimes.atLeast;
 
 /**
@@ -73,10 +74,9 @@ public class Http3ProtocolVerificationIntegrationTest {
     @Test
     public void shouldRecordAndVerifyHttp3Protocol() throws Exception {
         // given -- a MockServer with HTTP/3 enabled and a simple expectation
-        int udpPort = findAvailableUdpPort();
-        Configuration config = configuration().http3Port(udpPort).http3MaxIdleTimeout(30000L);
+        Configuration config = configuration().http3MaxIdleTimeout(30000L);
 
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
         int http3Port = mockServer.getHttp3Port();
         Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
 
@@ -120,18 +120,6 @@ public class Http3ProtocolVerificationIntegrationTest {
     }
 
     // ---- helpers ----
-
-    /**
-     * Find a free UDP port for the HTTP/3 (QUIC) server.
-     *
-     * <p>Delegates to the shared {@link org.mockserver.testing.socket.TestPortFactory} so the probing
-     * strategy lives in one place. A failure to find a port is now raised rather than reported as port
-     * {@code 0}: {@code http3Port(0)} means "HTTP/3 disabled", which would silently turn an
-     * infrastructure failure into a test that skips or asserts against a server that never started.
-     */
-    private static int findAvailableUdpPort() {
-        return org.mockserver.testing.socket.TestPortFactory.findFreeUdpPort();
-    }
 
     private String sendHttp3Request(int port, String path) throws Exception {
         clientGroup = new NioEventLoopGroup(1);

@@ -40,6 +40,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.mockserver.configuration.Configuration.configuration;
+import static org.mockserver.netty.http3.Http3TestServer.startWithHttp3;
 
 /**
  * Real-QUIC end-to-end integration test for the data-plane authentication gate over HTTP/3.
@@ -75,10 +76,9 @@ public class Http3DataPlaneAuthenticationIntegrationTest {
             .dataPlaneBearerAuthenticationToken(BEARER_TOKEN)
             .dataPlaneApiKeyAuthenticationHeader(API_KEY_HEADER)
             .dataPlaneApiKeyAuthenticationValue(API_KEY_VALUE)
-            .http3Port(findAvailableUdpPort())
             .http3MaxIdleTimeout(30000L)
             .attemptToProxyIfNoMatchingExpectation(false);
-        mockServer = new MockServer(configuration, 0);
+        mockServer = startWithHttp3(configuration);
         Assume.assumeTrue("HTTP/3 server did not start", mockServer.getHttp3Port() > 0);
 
         // Seed a data-plane mock via the CONTROL PLANE over HTTP/3 — this must succeed with NO
@@ -183,18 +183,6 @@ public class Http3DataPlaneAuthenticationIntegrationTest {
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
-    }
-
-    /**
-     * Find a free UDP port for the HTTP/3 (QUIC) server.
-     *
-     * <p>Delegates to the shared {@link org.mockserver.testing.socket.TestPortFactory} so the probing
-     * strategy lives in one place. A failure to find a port is now raised rather than reported as port
-     * {@code 0}: {@code http3Port(0)} means "HTTP/3 disabled", which would silently turn an
-     * infrastructure failure into a test that skips or asserts against a server that never started.
-     */
-    private static int findAvailableUdpPort() {
-        return org.mockserver.testing.socket.TestPortFactory.findFreeUdpPort();
     }
 
     static class Http3ResponseCapture {

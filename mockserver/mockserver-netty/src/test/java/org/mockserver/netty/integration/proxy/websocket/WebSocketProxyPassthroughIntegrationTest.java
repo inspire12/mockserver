@@ -509,7 +509,7 @@ public class WebSocketProxyPassthroughIntegrationTest {
                         pipeline.addLast(new EchoHandler(secure));
                     }
                 });
-            serverChannel = bootstrap.bind(0).sync().channel();
+            serverChannel = bootstrap.bind(new java.net.InetSocketAddress("127.0.0.1", 0)).sync().channel();
             port = ((java.net.InetSocketAddress) serverChannel.localAddress()).getPort();
         }
 

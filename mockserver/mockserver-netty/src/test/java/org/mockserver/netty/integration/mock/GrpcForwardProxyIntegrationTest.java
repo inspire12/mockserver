@@ -162,7 +162,7 @@ public class GrpcForwardProxyIntegrationTest {
 
             proxyClient
                 .when(request().withMethod("POST").withPath("/" + SERVICE + "/Greeting"))
-                .forward(forward().withHost("localhost").withPort(rawUpstream.port()));
+                .forward(forward().withHost("127.0.0.1").withPort(rawUpstream.port()));
 
             byte[] requestFrame = GrpcFrameCodec.encode(converter.toProtobuf("{\"name\":\"Ghost\"}", greetingMethod.getInputType()));
             HttpRawResponse response = sendGrpcCall(proxy.getLocalPort(), "/" + SERVICE + "/Greeting", requestFrame);
@@ -209,7 +209,7 @@ public class GrpcForwardProxyIntegrationTest {
         }
 
         static RawGrpcUpstream startNotFound() throws Exception {
-            java.net.ServerSocket ss = new java.net.ServerSocket(0);
+            java.net.ServerSocket ss = new java.net.ServerSocket(0, 50, java.net.InetAddress.getByName("127.0.0.1"));
             Thread t = new Thread(() -> {
                 while (!ss.isClosed()) {
                     try (Socket client = ss.accept()) {

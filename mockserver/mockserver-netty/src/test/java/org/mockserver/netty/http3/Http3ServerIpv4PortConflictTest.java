@@ -12,6 +12,7 @@ import java.nio.channels.DatagramChannel;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
 import static org.junit.Assert.assertThrows;
+import static org.mockserver.netty.http3.Http3TestServer.startWithHttp3;
 import static org.mockserver.testing.socket.TestPortFactory.findFreeUdpPort;
 
 /**
@@ -100,10 +101,10 @@ public class Http3ServerIpv4PortConflictTest {
     @Test
     public void shouldStartOnAFreeExplicitPort() throws Exception {
         assumeQuicAvailable();
-        int port = findFreeUdpPort();
         server = new Http3Server();
 
-        assertThat(server.start(port), is(port));
+        int port = startWithHttp3(server);
+
         assertThat(server.getPort(), is(port));
     }
 

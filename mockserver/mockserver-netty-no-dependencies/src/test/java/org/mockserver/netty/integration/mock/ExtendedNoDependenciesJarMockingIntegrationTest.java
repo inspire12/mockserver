@@ -6,11 +6,13 @@ import org.junit.Test;
 import org.mockserver.netty.integration.NoDependenciesJarRunner;
 
 import java.io.IOException;
-import java.net.ServerSocket;
+import java.net.InetSocketAddress;
+import java.net.StandardProtocolFamily;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.channels.ServerSocketChannel;
 import java.time.Duration;
 
 import static org.junit.Assert.assertEquals;
@@ -139,15 +141,17 @@ public class ExtendedNoDependenciesJarMockingIntegrationTest {
 
     /**
      * Matches the {@code org.mockserver.socket.PortFactory.findFreePort()} pattern
-     * used elsewhere in the project: bind {@code ServerSocket(0)} to get an OS-
-     * assigned ephemeral port, then close and hope the forked JVM grabs it before
+     * used elsewhere in the project: bind an IPv4 socket (never given a port another
+     * process listens on at 127.0.0.1) to port 0 to get an OS-assigned ephemeral port,
+     * then close and hope the forked JVM grabs it before
      * anyone else does. The window is microseconds; the runner's
      * {@code waitUntilReady} will surface a {@code BindException} as a fast
      * process exit if the race ever loses.
      */
     private static int findFreePort() {
-        try (ServerSocket s = new ServerSocket(0)) {
-            return s.getLocalPort();
+        try (ServerSocketChannel s = ServerSocketChannel.open(StandardProtocolFamily.INET)) {
+            s.bind(new InetSocketAddress(0));
+            return s.socket().getLocalPort();
         } catch (IOException e) {
             throw new RuntimeException("Could not allocate a free port for the test", e);
         }

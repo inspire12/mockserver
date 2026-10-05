@@ -40,6 +40,7 @@ import static org.hamcrest.Matchers.*;
 import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
+import static org.mockserver.netty.http3.Http3TestServer.startWithHttp3;
 
 /**
  * Tests the HTTP/3 server integration with MockServer's expectation pipeline.
@@ -80,10 +81,8 @@ public class Http3ServerTest {
         // start server in echo-only mode (legacy constructor)
         // a found port rather than start(0): on macOS a dual-stack ephemeral bind can share its port
         // with another process's IPv4 socket, which then receives the 127.0.0.1 traffic (see TestPortFactory)
-        int requestedPort = findAvailableUdpPort();
         standaloneServer = new Http3Server();
-        int port = standaloneServer.start(requestedPort);
-        assertThat("server should bind the requested port", port, is(requestedPort));
+        int port = startWithHttp3(standaloneServer);
         assertThat("getPort should return the bound port", standaloneServer.getPort(), is(port));
 
         // verify echo response
@@ -100,11 +99,9 @@ public class Http3ServerTest {
         // We set http3Port to a non-zero value; MockServer will bind it
         Configuration config = configuration().http3Port(0);
         // http3Port(0) means disabled. We need to use a real port.
-        // Use a helper to find an available UDP port.
-        int udpPort = findAvailableUdpPort();
-        config.http3Port(udpPort).http3MaxIdleTimeout(30000L);
+        config.http3MaxIdleTimeout(30000L);
 
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
         Assume.assumeTrue("HTTP/3 server did not start (QUIC unavailable or port conflict)", http3Port > 0);
@@ -129,13 +126,11 @@ public class Http3ServerTest {
 
     @Test
     public void shouldReturnNotFoundForUnmatchedRequest() throws Exception {
-        int udpPort = findAvailableUdpPort();
         Configuration config = configuration()
-            .http3Port(udpPort)
             .http3MaxIdleTimeout(30000L)
             .attemptToProxyIfNoMatchingExpectation(false); // disable proxy attempt for clean 404
 
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
         Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
@@ -147,10 +142,9 @@ public class Http3ServerTest {
 
     @Test
     public void shouldHandlePostRequestWithBody() throws Exception {
-        int udpPort = findAvailableUdpPort();
-        Configuration config = configuration().http3Port(udpPort).http3MaxIdleTimeout(30000L);
+        Configuration config = configuration().http3MaxIdleTimeout(30000L);
 
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
         Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
@@ -173,16 +167,14 @@ public class Http3ServerTest {
     @Test
     public void shouldApplyConfiguredTransportParameters() throws Exception {
         // verify that custom QUIC transport parameters are applied and requests still work
-        int udpPort = findAvailableUdpPort();
         Configuration config = configuration()
-            .http3Port(udpPort)
             .http3MaxIdleTimeout(10000L)          // 10 seconds (non-default)
             .http3InitialMaxData(5000000L)         // 5 MB (non-default)
             .http3InitialMaxStreamDataBidirectional(500000L) // 500 KB (non-default)
             .http3InitialMaxStreamsBidirectional(50L)        // 50 streams (non-default)
             .http3QpackMaxTableCapacity(4096L);    // 4 KB QPACK dynamic table
 
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
         Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
@@ -204,10 +196,9 @@ public class Http3ServerTest {
 
     @Test
     public void shouldTrackActiveConnectionCount() throws Exception {
-        int udpPort = findAvailableUdpPort();
-        Configuration config = configuration().http3Port(udpPort).http3MaxIdleTimeout(30000L);
+        Configuration config = configuration().http3MaxIdleTimeout(30000L);
 
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
         Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
@@ -238,10 +229,9 @@ public class Http3ServerTest {
     @Test
     public void shouldPreserveDefaultBehaviourWhenNoTransportParamsConfigured() throws Exception {
         // verify that the server starts and works with default config (no transport param overrides)
-        int udpPort = findAvailableUdpPort();
-        Configuration config = configuration().http3Port(udpPort).http3MaxIdleTimeout(30000L);
+        Configuration config = configuration().http3MaxIdleTimeout(30000L);
 
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
         Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
@@ -264,13 +254,12 @@ public class Http3ServerTest {
         // should be disabled — matching the old 1-arg Http3ServerConnectionHandler
         // constructor behaviour. Verify the server starts and serves requests without
         // creating QPACK encoder/decoder streams.
-        int udpPort = findAvailableUdpPort();
-        Configuration config = configuration().http3Port(udpPort).http3MaxIdleTimeout(30000L);
+        Configuration config = configuration().http3MaxIdleTimeout(30000L);
 
         // assert the default is 0
         assertThat("default QPACK max table capacity should be 0", config.http3QpackMaxTableCapacity(), equalTo(0L));
 
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
         Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
@@ -292,16 +281,14 @@ public class Http3ServerTest {
     public void shouldEnableQpackDynamicTableWithNonZeroCapacity() throws Exception {
         // when QPACK max table capacity is set to a non-zero value, the QPACK dynamic
         // table should be enabled. Verify the server starts and serves requests.
-        int udpPort = findAvailableUdpPort();
         Configuration config = configuration()
-            .http3Port(udpPort)
             .http3MaxIdleTimeout(30000L)
             .http3QpackMaxTableCapacity(4096L);
 
         // assert the capacity is non-zero
         assertThat("QPACK max table capacity should be 4096", config.http3QpackMaxTableCapacity(), equalTo(4096L));
 
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
         Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
@@ -322,10 +309,9 @@ public class Http3ServerTest {
     @Test
     public void shouldReturnHttp3StatusEndpoint() throws Exception {
         // start MockServer with HTTP/3 enabled
-        int udpPort = findAvailableUdpPort();
-        Configuration config = configuration().http3Port(udpPort).http3MaxIdleTimeout(30000L);
+        Configuration config = configuration().http3MaxIdleTimeout(30000L);
 
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
         Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
@@ -380,18 +366,6 @@ public class Http3ServerTest {
     }
 
     // ---- helper methods ----
-
-    /**
-     * Find a free UDP port for the HTTP/3 (QUIC) server.
-     *
-     * <p>Delegates to the shared {@link org.mockserver.testing.socket.TestPortFactory} so the probing
-     * strategy lives in one place. A failure to find a port is now raised rather than reported as port
-     * {@code 0}: {@code http3Port(0)} means "HTTP/3 disabled", which would silently turn an
-     * infrastructure failure into a test that skips or asserts against a server that never started.
-     */
-    private static int findAvailableUdpPort() {
-        return org.mockserver.testing.socket.TestPortFactory.findFreeUdpPort();
-    }
 
     /**
      * Send an HTTP/3 request to the given port and return [status, body].

@@ -6,21 +6,24 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.mockserver.netty.http3.Http3NativeUnavailableException;
+import org.mockserver.socket.PortFactory;
 import org.mockserver.testing.socket.TestPortFactory;
 import org.mockserver.version.Version;
 
 import java.io.File;
 import java.io.IOException;
-import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
+import static org.mockserver.netty.http3.Http3TestServer.startWithHttp3;
 
 /**
  * Boots the real assembly jars in a forked JVM with {@code http3Port} set. The DEFAULT jar carries no
@@ -30,6 +33,8 @@ import static org.hamcrest.Matchers.*;
 public class Http3NativeStartupIntegrationTest {
 
     private static final long TIMEOUT_SECONDS = 60;
+    private static final Pattern HTTP3_STARTED = Pattern.compile("HTTP/3 \\(QUIC\\) server started on UDP port:\\s*(\\d+)");
+    private static final Pattern HTTP3_OUTCOME = Pattern.compile(HTTP3_STARTED.pattern() + "|HTTP/3 disabled");
 
     @Rule
     public TemporaryFolder temporaryFolder = new TemporaryFolder();
@@ -92,26 +97,67 @@ public class Http3NativeStartupIntegrationTest {
     @Test
     public void shouldServeHttp3FromTheHttp3Classifier() throws Exception {
         File output = temporaryFolder.newFile("http3-jar.log");
-        Process process = start(assemblyJar("jar-with-dependencies-http3"), output);
+        File jar = assemblyJar("jar-with-dependencies-http3");
+        Process process = startWithHttp3(udpPort -> startAndAwaitHttp3Outcome(jar, output, udpPort), started -> http3PortStartedIn(output), Http3NativeStartupIntegrationTest::stop);
         try {
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(TIMEOUT_SECONDS);
-            while (System.nanoTime() < deadline && process.isAlive() && !read(output).contains("HTTP/3 (QUIC) server started on UDP port")) {
-                Thread.sleep(250);
-            }
             assertThat(read(output), containsString("HTTP/3 (QUIC) server started on UDP port"));
         } finally {
-            process.destroy();
-            if (!process.waitFor(10, TimeUnit.SECONDS)) {
-                process.destroyForcibly();
+            stop(process);
+        }
+    }
+
+    // returns once the server has logged whether HTTP/3 started; a server that says neither fails the test
+    private static Process startAndAwaitHttp3Outcome(File jar, File output, int udpPort) {
+        Process process = null;
+        String log = "";
+        try {
+            process = start(jar, output, udpPort);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(TIMEOUT_SECONDS);
+            while (System.nanoTime() < deadline && process.isAlive() && !HTTP3_OUTCOME.matcher(log = read(output)).find()) {
+                Thread.sleep(250);
             }
+            if (HTTP3_OUTCOME.matcher(log = read(output)).find()) {
+                return process;
+            }
+        } catch (IOException | InterruptedException e) {
+            log = e + "\n" + log;
+        }
+        if (process != null) {
+            stop(process);
+        }
+        throw new AssertionError("the server did not report whether HTTP/3 started on UDP port " + udpPort + ":\n" + log);
+    }
+
+    private static int http3PortStartedIn(File output) {
+        try {
+            Matcher started = HTTP3_STARTED.matcher(read(output));
+            return started.find() ? Integer.parseInt(started.group(1)) : -1;
+        } catch (IOException e) {
+            throw new AssertionError(e);
+        }
+    }
+
+    private static void stop(Process process) {
+        process.destroy();
+        try {
+            if (!process.waitFor(10, TimeUnit.SECONDS)) {
+                process.destroyForcibly().waitFor(10, TimeUnit.SECONDS);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            process.destroyForcibly();
         }
     }
 
     private static Process start(File jar, File output, String... jvmOptions) throws IOException {
+        return start(jar, output, freeUdpPort(), jvmOptions);
+    }
+
+    private static Process start(File jar, File output, int udpPort, String... jvmOptions) throws IOException {
         List<String> command = new ArrayList<>();
         command.add(new File(System.getProperty("java.home"), "bin" + File.separator + "java").getAbsolutePath());
         command.add("-Dfile.encoding=UTF-8");
-        command.add("-Dmockserver.http3Port=" + freeUdpPort());
+        command.add("-Dmockserver.http3Port=" + udpPort);
         command.addAll(Arrays.asList(jvmOptions));
         command.addAll(Arrays.asList("-jar", jar.getAbsolutePath(), "-serverPort", Integer.toString(freeTcpPort())));
         return new ProcessBuilder(command).redirectErrorStream(true).redirectOutput(output).start();
@@ -138,10 +184,8 @@ public class Http3NativeStartupIntegrationTest {
         return new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
     }
 
-    private static int freeTcpPort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0)) {
-            return socket.getLocalPort();
-        }
+    private static int freeTcpPort() {
+        return PortFactory.findFreePort();
     }
 
     private static int freeUdpPort() {

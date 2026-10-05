@@ -1,12 +1,12 @@
 package org.mockserver.netty.integration;
 
 import org.junit.Test;
+import org.mockserver.socket.PortFactory;
 
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
-import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -35,8 +35,8 @@ import static org.junit.Assert.assertTrue;
  * jar boots and logs its startup banner with no SLF4J provider warnings), not
  * jar internals, so it stays valid across SLF4J upgrades.
  *
- * <p>The free-port lookup has an unavoidable TOCTOU window — the {@link
- * ServerSocket} is closed before the forked JVM binds the port — so on a rare
+ * <p>The free-port lookup has an unavoidable TOCTOU window — the probe
+ * socket is closed before the forked JVM binds the port — so on a rare
  * race loss the forked server fails to bind and the test reports a missing
  * startup banner.
  */
@@ -261,23 +261,18 @@ public class JarWithDependenciesLoggingIntegrationTest {
     }
 
     /**
-     * Two distinct free ports. Both sockets are held open until each has reported its port, so the
-     * two cannot collide — calling {@link #findFreePort()} twice in a row can hand back the same
-     * ephemeral port, which would start the server with {@code -serverPort P,P}, fail the second
-     * bind and surface as a 60-second timeout rather than anything diagnostic. The TOCTOU window
-     * this class already documents still applies to each port individually.
+     * Two distinct free ports, found in one batch so the two cannot collide — calling
+     * {@link #findFreePort()} twice in a row can hand back the same ephemeral port, which would start
+     * the server with {@code -serverPort P,P}, fail the second bind and surface as a 60-second timeout
+     * rather than anything diagnostic. The TOCTOU window this class already documents still applies to
+     * each port individually.
      */
-    private static int[] findTwoFreePorts() throws IOException {
-        try (ServerSocket first = new ServerSocket(0);
-             ServerSocket second = new ServerSocket(0)) {
-            return new int[]{first.getLocalPort(), second.getLocalPort()};
-        }
+    private static int[] findTwoFreePorts() {
+        return PortFactory.findFreePorts(2);
     }
 
-    private static int findFreePort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0)) {
-            return socket.getLocalPort();
-        }
+    private static int findFreePort() {
+        return PortFactory.findFreePort();
     }
 
     private static String javaBin() {

@@ -12,6 +12,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
@@ -45,7 +46,7 @@ public class ForwardTinyChunkResponseIntegrationTest {
         mockServerClient = new MockServerClient("localhost", mockServer.getLocalPort());
         mockServerClient
             .when(request().withPath("/upstream/.*"))
-            .forward(forward().withHost("localhost").withPort(upstream.getPort()));
+            .forward(forward().withHost("127.0.0.1").withPort(upstream.getPort()));
     }
 
     @After
@@ -98,7 +99,7 @@ public class ForwardTinyChunkResponseIntegrationTest {
      */
     private static final class TinyChunkUpstream implements AutoCloseable {
 
-        private final ServerSocket serverSocket = new ServerSocket(0);
+        private final ServerSocket serverSocket = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"));
         private final AtomicInteger connections = new AtomicInteger();
         private volatile boolean running = true;
 

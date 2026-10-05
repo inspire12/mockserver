@@ -10,6 +10,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
@@ -40,7 +41,7 @@ public class StreamedResponseFramingIntegrationTest {
 
     @BeforeClass
     public static void startServers() throws Exception {
-        upstream = new ServerSocket(0);
+        upstream = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"));
         Thread acceptor = new Thread(() -> {
             while (!upstream.isClosed()) {
                 try {

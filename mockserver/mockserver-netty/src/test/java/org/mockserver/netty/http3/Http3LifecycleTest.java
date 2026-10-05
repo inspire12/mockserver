@@ -9,6 +9,7 @@ import org.mockserver.netty.http3.Http3Server;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
 import static org.mockserver.configuration.Configuration.configuration;
+import static org.mockserver.netty.http3.Http3TestServer.startWithHttp3;
 
 /**
  * Tests for HTTP/3 lifecycle integration with MockServer.
@@ -48,8 +49,7 @@ public class Http3LifecycleTest {
         }
 
         // now try with a dynamic UDP port to trigger the HTTP/3 startup path
-        int udpPort = findAvailableUdpPort();
-        Configuration configuration2 = configuration().http3Port(udpPort).http3MaxIdleTimeout(30000L);
+        Configuration configuration2 = configuration().http3MaxIdleTimeout(30000L);
 
         // the unavailable case is a start-up FAILURE now, and is asserted by
         // shouldFailFastWhenQuicUnavailable below rather than folded in as an else-branch here
@@ -57,7 +57,7 @@ public class Http3LifecycleTest {
 
         MockServer server2 = null;
         try {
-            server2 = new MockServer(configuration2, 0);
+            server2 = startWithHttp3(configuration2);
             assertThat("main server should be running", server2.getLocalPort(), is(greaterThan(0)));
 
             assertThat("HTTP/3 should be started when QUIC is available",
@@ -110,9 +110,8 @@ public class Http3LifecycleTest {
         // after it would never be reached and a legitimate skip would surface as a test error
         Assume.assumeTrue("native QUIC not available on this platform", Http3Server.isQuicAvailable());
 
-        int udpPort = findAvailableUdpPort();
-        Configuration configuration = configuration().http3Port(udpPort).http3MaxIdleTimeout(30000L);
-        MockServer server = new MockServer(configuration, 0);
+        Configuration configuration = configuration().http3MaxIdleTimeout(30000L);
+        MockServer server = startWithHttp3(configuration);
 
         Assume.assumeTrue("HTTP/3 server did not start", server.getHttp3Port() > 0);
 

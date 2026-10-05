@@ -7,11 +7,13 @@ import org.mockserver.netty.integration.NoDependenciesJarRunner;
 
 import java.io.File;
 import java.io.IOException;
-import java.net.ServerSocket;
+import java.net.InetSocketAddress;
+import java.net.StandardProtocolFamily;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.channels.ServerSocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -205,11 +207,13 @@ public class NoDependenciesJarPropertyFileMockingIntegrationTest {
 
     /**
      * Same OS-assigned-ephemeral-port pattern used by the sibling test and by
-     * {@code org.mockserver.socket.PortFactory.findFreePort()}.
+     * {@code org.mockserver.socket.PortFactory.findFreePort()}: an IPv4 socket, which is never given a
+     * port another process listens on at 127.0.0.1.
      */
     private static int findFreePort() {
-        try (ServerSocket s = new ServerSocket(0)) {
-            return s.getLocalPort();
+        try (ServerSocketChannel s = ServerSocketChannel.open(StandardProtocolFamily.INET)) {
+            s.bind(new InetSocketAddress(0));
+            return s.socket().getLocalPort();
         } catch (IOException e) {
             throw new RuntimeException("Could not allocate a free port for the test", e);
         }

@@ -8,6 +8,7 @@ import javax.net.ssl.SSLServerSocket;
 import javax.net.ssl.SSLServerSocketFactory;
 import javax.net.ssl.SSLSocket;
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.Socket;
 
 import static org.mockserver.configuration.Configuration.configuration;
@@ -33,12 +34,15 @@ public class SSLSocketFactory {
         return sslSocket;
     }
 
+    /**
+     * @return a TLS server socket listening on an ephemeral port of 127.0.0.1 only
+     */
     @VisibleForTesting
     public synchronized SSLServerSocket wrapSocket() throws IOException {
         // ssl socket factory
         SSLServerSocketFactory sslSocketFactory = new KeyStoreFactory(configuration(), new MockServerLogger()).sslContext().getServerSocketFactory();
 
         // ssl socket
-        return (SSLServerSocket) sslSocketFactory.createServerSocket(0);
+        return (SSLServerSocket) sslSocketFactory.createServerSocket(0, 50, InetAddress.getByName("127.0.0.1"));
     }
 }

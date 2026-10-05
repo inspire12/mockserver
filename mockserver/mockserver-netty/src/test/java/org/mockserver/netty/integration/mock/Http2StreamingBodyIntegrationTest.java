@@ -129,7 +129,7 @@ public class Http2StreamingBodyIntegrationTest {
                     ch.pipeline().addLast(new SseUpstreamHandler());
                 }
             })
-            .bind(0).sync().channel();
+            .bind(new InetSocketAddress("127.0.0.1", 0)).sync().channel();
         upstreamPort = ((InetSocketAddress) upstreamChannel.localAddress()).getPort();
 
         // Forward MockServer with streaming enabled: an SSE upstream is relayed as a StreamingBody
@@ -139,7 +139,7 @@ public class Http2StreamingBodyIntegrationTest {
         forwardClient = new MockServerClient("localhost", forwardServer.getLocalPort());
         forwardClient
             .when(request().withPath("/h2_streaming_sse"))
-            .forward(forward().withHost("localhost").withPort(upstreamPort));
+            .forward(forward().withHost("127.0.0.1").withPort(upstreamPort));
     }
 
     @AfterClass

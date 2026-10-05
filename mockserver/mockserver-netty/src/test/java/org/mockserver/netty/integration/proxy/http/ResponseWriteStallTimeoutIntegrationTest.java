@@ -165,7 +165,7 @@ public class ResponseWriteStallTimeoutIntegrationTest {
                     ch.pipeline().addLast(new HttpServerCodec(), new HttpObjectAggregator(1024 * 1024), handler);
                 }
             })
-            .bind(0).sync().channel();
+            .bind(new InetSocketAddress("127.0.0.1", 0)).sync().channel();
         upstreamPort = ((InetSocketAddress) upstreamChannel.localAddress()).getPort();
 
         // a stream idle timeout far longer than any test, so only the write-stall timeout can close an upstream; WARN

@@ -35,7 +35,6 @@ import org.mockserver.client.MockServerClient;
 import org.mockserver.netty.MockServer;
 import org.mockserver.netty.integration.Http2TestClient;
 import org.mockserver.testing.socket.Ipv4DatagramChannelFactory;
-import org.mockserver.testing.socket.TestPortFactory;
 
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
@@ -56,6 +55,7 @@ import static org.hamcrest.Matchers.startsWith;
 import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
+import static org.mockserver.netty.http3.Http3TestServer.startWithHttp3;
 import static org.mockserver.stop.Stop.stopQuietly;
 
 /**
@@ -87,12 +87,12 @@ public class Http3HeaderListLimitIntegrationTest {
     @BeforeClass
     public static void startServers() {
         // the test JVM defaults to ERROR, which would drop the WARN entries this class asserts on
-        limited = new MockServer(configuration().http3Port(TestPortFactory.findFreeUdpPort()).http3MaxIdleTimeout(30000L).maxHeaderSize(LIMIT).logLevel("WARN"), 0);
+        limited = startWithHttp3(configuration().http3MaxIdleTimeout(30000L).maxHeaderSize(LIMIT).logLevel("WARN"));
         limitedClient = new MockServerClient("127.0.0.1", limited.getLocalPort());
-        defaults = new MockServer(configuration().http3Port(TestPortFactory.findFreeUdpPort()).http3MaxIdleTimeout(30000L).logLevel("WARN"), 0);
+        defaults = startWithHttp3(configuration().http3MaxIdleTimeout(30000L).logLevel("WARN"));
         defaultsClient = new MockServerClient("127.0.0.1", defaults.getLocalPort());
         // CONNECT-UDP puts a handler of its own ahead of the request handler on every stream
-        connectUdp = new MockServer(configuration().http3Port(TestPortFactory.findFreeUdpPort()).http3MaxIdleTimeout(30000L).http3ConnectUdpEnabled(true).maxHeaderSize(LIMIT).logLevel("WARN"), 0);
+        connectUdp = startWithHttp3(configuration().http3MaxIdleTimeout(30000L).http3ConnectUdpEnabled(true).maxHeaderSize(LIMIT).logLevel("WARN"));
         connectUdpClient = new MockServerClient("127.0.0.1", connectUdp.getLocalPort());
         clientGroup = new NioEventLoopGroup(2);
     }

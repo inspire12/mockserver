@@ -58,6 +58,7 @@ import static org.hamcrest.Matchers.lessThan;
 import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.model.HttpForward.forward;
 import static org.mockserver.model.HttpRequest.request;
+import static org.mockserver.netty.http3.Http3TestServer.startWithHttp3;
 import static org.mockserver.stop.Stop.stopQuietly;
 
 /**
@@ -126,17 +127,15 @@ public class Http3StreamingForwardIntegrationTest {
                     ch.pipeline().addLast(new SseUpstreamHandler());
                 }
             })
-            .bind(0).sync().channel();
+            .bind(new InetSocketAddress("127.0.0.1", 0)).sync().channel();
         upstreamPort = ((InetSocketAddress) upstreamChannel.localAddress()).getPort();
 
         // Front MockServer with HTTP/3 (QUIC) enabled AND streaming-response relaying enabled, so a
         // forwarded SSE upstream is relayed incrementally as a StreamingBody rather than aggregated.
-        int udpPort = org.mockserver.testing.socket.TestPortFactory.findFreeUdpPort();
         Configuration config = configuration()
-            .http3Port(udpPort)
             .http3MaxIdleTimeout(30000L)
             .streamingResponsesEnabled(true);
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
         mockServerClient = new MockServerClient("127.0.0.1", mockServer.getLocalPort());
         http3Port = mockServer.getHttp3Port();
     }

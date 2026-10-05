@@ -64,6 +64,7 @@ import static org.mockserver.model.BinaryBody.binary;
 import static org.mockserver.model.HttpForward.forward;
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
+import static org.mockserver.netty.http3.Http3TestServer.startWithHttp3;
 import static org.mockserver.stop.Stop.stopQuietly;
 
 /**
@@ -121,17 +122,16 @@ public class Http3ResponseWriteStallTimeoutIntegrationTest {
                     ch.pipeline().addLast(new HttpServerCodec(), new HttpObjectAggregator(1024 * 1024), handler);
                 }
             })
-            .bind(0).sync().channel();
+            .bind(new InetSocketAddress("127.0.0.1", 0)).sync().channel();
         upstreamPort = ((InetSocketAddress) upstreamChannel.localAddress()).getPort();
 
-        mockServer = new MockServer(configuration()
+        mockServer = startWithHttp3(configuration()
             .logLevel("WARN")
             .metricsEnabled(true)
-            .http3Port(org.mockserver.testing.socket.TestPortFactory.findFreeUdpPort())
             .http3MaxIdleTimeout(60_000L)
             .streamingResponsesEnabled(true)
             .streamIdleTimeoutSeconds(120)
-            .responseWriteStallTimeoutMillis(STALL_MILLIS), 0);
+            .responseWriteStallTimeoutMillis(STALL_MILLIS));
         mockServerClient = new MockServerClient("127.0.0.1", mockServer.getLocalPort());
         http3Port = mockServer.getHttp3Port();
     }

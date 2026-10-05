@@ -112,7 +112,7 @@ public class NoContentTypeBinaryBodyIntegrationTest {
                     ch.pipeline().addLast(new HttpServerCodec(), new HttpObjectAggregator(16 * 1024 * 1024), recordingHandler);
                 }
             })
-            .bind(0).sync().channel();
+            .bind(new InetSocketAddress("127.0.0.1", 0)).sync().channel();
         plainUpstreamPort = ((InetSocketAddress) plainUpstreamChannel.localAddress()).getPort();
 
         SelfSignedCertificate certificate = new SelfSignedCertificate();
@@ -150,7 +150,7 @@ public class NoContentTypeBinaryBodyIntegrationTest {
                     });
                 }
             })
-            .bind(0).sync().channel();
+            .bind(new InetSocketAddress("127.0.0.1", 0)).sync().channel();
         tlsUpstreamPort = ((InetSocketAddress) tlsUpstreamChannel.localAddress()).getPort();
 
         mockServer = new MockServer(configuration()

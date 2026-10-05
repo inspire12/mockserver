@@ -14,6 +14,7 @@ import org.junit.Assume;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.mockserver.netty.MockServer;
+import org.mockserver.socket.PortFactory;
 
 import java.io.IOException;
 import java.net.Inet6Address;
@@ -52,7 +53,7 @@ public class LoopbackShadowProbeTest {
     @Test
     public void shouldFindNoShadowForAnUncontestedWildcardServerWithoutDisturbingItsChildPipeline() throws Exception {
         AtomicInteger childConnections = new AtomicInteger();
-        Channel server = bind(new InetSocketAddress(0), childConnections);
+        Channel server = bind(new InetSocketAddress(PortFactory.findFreePort()), childConnections);
         try {
             assertThat(LoopbackShadowProbe.findShadowedLoopback(server, 5000), is(nullValue()));
 
@@ -105,7 +106,7 @@ public class LoopbackShadowProbeTest {
             .channel(NioServerSocketChannel.class)
             .option(ChannelOption.AUTO_READ, false)
             .childHandler(new CountingChildHandler(new AtomicInteger()))
-            .bind(new InetSocketAddress(0))
+            .bind(new InetSocketAddress(PortFactory.findFreePort()))
             .sync()
             .channel();
         try {
@@ -130,7 +131,7 @@ public class LoopbackShadowProbeTest {
                 .group(stalledGroup, stalledGroup)
                 .channel(NioServerSocketChannel.class)
                 .childHandler(new CountingChildHandler(new AtomicInteger()))
-                .bind(new InetSocketAddress(0))
+                .bind(new InetSocketAddress(PortFactory.findFreePort()))
                 .sync()
                 .channel();
             Runnable stallEventLoop = () -> {
@@ -168,7 +169,7 @@ public class LoopbackShadowProbeTest {
                 .group(busyGroup, busyGroup)
                 .channel(NioServerSocketChannel.class)
                 .childHandler(new CountingChildHandler(new AtomicInteger()))
-                .bind(new InetSocketAddress(0))
+                .bind(new InetSocketAddress(PortFactory.findFreePort()))
                 .sync()
                 .channel();
             CountDownLatch release = new CountDownLatch(1);
@@ -196,7 +197,7 @@ public class LoopbackShadowProbeTest {
     public void shouldNotRouteTheProbeThroughAJvmWideProxy() throws Exception {
         // a relayed probe arrives from the proxy's address, not the probe's, so it would look shadowed
         MockServer socksProxy = new MockServer();
-        Channel server = bind(new InetSocketAddress(0), new AtomicInteger());
+        Channel server = bind(new InetSocketAddress(PortFactory.findFreePort()), new AtomicInteger());
         ProxySelector originalProxySelector = ProxySelector.getDefault();
         try {
             ProxySelector.setDefault(new ProxySelector() {

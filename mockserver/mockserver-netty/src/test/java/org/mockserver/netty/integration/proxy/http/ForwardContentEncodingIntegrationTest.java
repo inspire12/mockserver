@@ -33,6 +33,7 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 import org.mockserver.client.MockServerClient;
 import org.mockserver.codec.BodyContentEncodingEncoder;
+import org.mockserver.configuration.Configuration;
 import org.mockserver.metrics.remotewrite.RemoteWriteV1Encoder;
 import org.mockserver.metrics.remotewrite.SnappyBlock;
 import org.mockserver.model.HttpRequest;
@@ -83,6 +84,7 @@ import static org.mockserver.model.HttpOverrideForwardedRequest.forwardOverridde
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
 import static org.mockserver.netty.MockServerCaTrustTestSupport.caTrustingSslContext;
+import static org.mockserver.netty.http3.Http3TestServer.startWithHttp3;
 import static org.mockserver.stop.Stop.stopQuietly;
 
 /**
@@ -107,9 +109,8 @@ public class ForwardContentEncodingIntegrationTest {
     @BeforeClass
     public static void startServer() throws IOException {
         upstream = new CapturingUpstream();
-        mockServer = new MockServer(configuration()
-            .http3Port(quicAvailable() ? org.mockserver.testing.socket.TestPortFactory.findFreeUdpPort() : null)
-            .http3MaxIdleTimeout(30000L), 0);
+        Configuration configuration = configuration().http3MaxIdleTimeout(30000L);
+        mockServer = quicAvailable() ? startWithHttp3(configuration) : new MockServer(configuration, 0);
         mockServerClient = new MockServerClient("127.0.0.1", mockServer.getLocalPort());
         http3Port = quicAvailable() ? mockServer.getHttp3Port() : 0;
     }

@@ -40,6 +40,7 @@ import static org.hamcrest.Matchers.*;
 import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
+import static org.mockserver.netty.http3.Http3TestServer.startWithHttp3;
 
 /**
  * Integration tests for the HTTP/3 CONNECT-UDP (MASQUE) relay with a real QUIC
@@ -93,13 +94,11 @@ public class Http3ConnectUdpIntegrationTest {
         int echoPort = startUdpEchoServer();
 
         // Start MockServer with HTTP/3 + CONNECT-UDP enabled
-        int udpPort = findAvailableUdpPort();
         Configuration config = configuration()
-            .http3Port(udpPort)
             .http3MaxIdleTimeout(30000L)
             .http3ConnectUdpEnabled(true);
 
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
         Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
@@ -116,15 +115,13 @@ public class Http3ConnectUdpIntegrationTest {
     public void shouldRelayWhenTargetIsInAllowlist() throws Exception {
         int echoPort = startUdpEchoServer();
 
-        int udpPort = findAvailableUdpPort();
         Configuration config = configuration()
-            .http3Port(udpPort)
             .http3MaxIdleTimeout(30000L)
             .http3ConnectUdpEnabled(true)
             // host-only allowlist entry permits the loopback echo target on any port
             .http3ConnectUdpAllowedTargets("127.0.0.1");
 
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
         Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
@@ -140,15 +137,13 @@ public class Http3ConnectUdpIntegrationTest {
     public void shouldRejectConnectUdpWhenTargetNotInAllowlist() throws Exception {
         int echoPort = startUdpEchoServer();
 
-        int udpPort = findAvailableUdpPort();
         Configuration config = configuration()
-            .http3Port(udpPort)
             .http3MaxIdleTimeout(30000L)
             .http3ConnectUdpEnabled(true)
             // only a different target is permitted, so the echo target must be refused
             .http3ConnectUdpAllowedTargets("allowed.example.com:443");
 
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
         Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
@@ -165,15 +160,13 @@ public class Http3ConnectUdpIntegrationTest {
     public void shouldRejectConnectUdpToPrivateNetworkWhenSsrfBlockingEnabled() throws Exception {
         int echoPort = startUdpEchoServer();
 
-        int udpPort = findAvailableUdpPort();
         Configuration config = configuration()
-            .http3Port(udpPort)
             .http3MaxIdleTimeout(30000L)
             .http3ConnectUdpEnabled(true)
             // reuse the forward-proxy SSRF block; loopback is a blocked private address
             .forwardProxyBlockPrivateNetworks(true);
 
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
         Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
@@ -188,13 +181,11 @@ public class Http3ConnectUdpIntegrationTest {
 
     @Test
     public void shouldRejectConnectUdpWithInvalidAuthority() throws Exception {
-        int udpPort = findAvailableUdpPort();
         Configuration config = configuration()
-            .http3Port(udpPort)
             .http3MaxIdleTimeout(30000L)
             .http3ConnectUdpEnabled(true);
 
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
         Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
@@ -208,13 +199,11 @@ public class Http3ConnectUdpIntegrationTest {
 
     @Test
     public void shouldStillServeNormalRequestsWhenFlagEnabled() throws Exception {
-        int udpPort = findAvailableUdpPort();
         Configuration config = configuration()
-            .http3Port(udpPort)
             .http3MaxIdleTimeout(30000L)
             .http3ConnectUdpEnabled(true);
 
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
         Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
@@ -238,13 +227,11 @@ public class Http3ConnectUdpIntegrationTest {
 
     @Test
     public void shouldNotInterceptConnectWhenFlagDisabled() throws Exception {
-        int udpPort = findAvailableUdpPort();
         Configuration config = configuration()
-            .http3Port(udpPort)
             .http3MaxIdleTimeout(30000L)
             .http3ConnectUdpEnabled(false); // explicitly disabled
 
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
 
         int http3Port = mockServer.getHttp3Port();
         Assume.assumeTrue("HTTP/3 server did not start", http3Port > 0);
@@ -667,18 +654,6 @@ public class Http3ConnectUdpIntegrationTest {
             status != null ? status : "null",
             responseBody != null ? responseBody : ""
         };
-    }
-
-    /**
-     * Find a free UDP port for the HTTP/3 (QUIC) server.
-     *
-     * <p>Delegates to the shared {@link org.mockserver.testing.socket.TestPortFactory} so the probing
-     * strategy lives in one place. A failure to find a port is now raised rather than reported as port
-     * {@code 0}: {@code http3Port(0)} means "HTTP/3 disabled", which would silently turn an
-     * infrastructure failure into a test that skips or asserts against a server that never started.
-     */
-    private static int findAvailableUdpPort() {
-        return org.mockserver.testing.socket.TestPortFactory.findFreeUdpPort();
     }
 
     private static void assumeQuicAvailable() {

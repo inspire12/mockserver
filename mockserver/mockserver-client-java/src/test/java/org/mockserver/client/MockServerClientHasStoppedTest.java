@@ -9,6 +9,7 @@ import org.mockserver.httpclient.SocketCommunicationException;
 import org.mockserver.test.ClosedPort;
 
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.ArrayList;
@@ -51,7 +52,7 @@ public class MockServerClientHasStoppedTest {
 
     @Before
     public void startUnresponsiveServer() throws IOException {
-        unresponsiveServer = new ServerSocket(0);
+        unresponsiveServer = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"));
         Thread acceptThread = new Thread(() -> {
             try {
                 while (!unresponsiveServer.isClosed()) {
@@ -96,7 +97,7 @@ public class MockServerClientHasStoppedTest {
     public void shouldNotReportStoppedWhenStillBoundButUnresponsive() {
         // given - a server that accepts connections but never responds, i.e. still holding its port
         Configuration configuration = configuration().maxSocketTimeoutInMillis(SOCKET_TIMEOUT_MILLIS);
-        mockServerClient = new MockServerClient(configuration, "localhost", unresponsiveServer.getLocalPort());
+        mockServerClient = new MockServerClient(configuration, "127.0.0.1", unresponsiveServer.getLocalPort());
 
         // then - a read timeout must not be reported as "stopped": the port is demonstrably still held
         assertThat(

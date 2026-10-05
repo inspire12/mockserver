@@ -205,6 +205,11 @@ This release delivers a sustained performance and memory programme alongside dat
 
 ### Changed
 
+- **The integration-testing helper `SSLSocketFactory.wrapSocket()` now listens on `127.0.0.1` only.** The no-argument
+  `wrapSocket()` in the `mockserver-integration-testing` artifact returns a TLS server socket on an ephemeral port. It
+  used to listen on every address; on macOS such a socket can be given a port that another local application already
+  listens on at 127.0.0.1, which then receives the connections meant for it. Connect to the socket at `127.0.0.1`. A
+  test that reached it from another host, or at `::1`, needs a server socket of its own.
 - **Behaviour change: `maxHeaderSize` now limits the headers of HTTP/2 and HTTP/3 requests too. They
   were limited to 8 KB whatever it was set to.** A request with a long URL, large cookies or a large
   token was refused over HTTP/2 or HTTP/3 once its headers passed 8 KB, and raising `maxHeaderSize`

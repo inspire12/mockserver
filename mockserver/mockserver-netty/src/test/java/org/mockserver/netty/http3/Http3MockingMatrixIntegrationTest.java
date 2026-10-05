@@ -50,6 +50,7 @@ import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
 import static org.mockserver.model.JsonBody.json;
 import static org.mockserver.model.StringBody.exact;
+import static org.mockserver.netty.http3.Http3TestServer.startWithHttp3;
 import static org.mockserver.stop.Stop.stopQuietly;
 
 /**
@@ -99,11 +100,9 @@ public class Http3MockingMatrixIntegrationTest {
         upstreamClient = new MockServerClient("127.0.0.1", upstreamServer.getLocalPort());
 
         // front MockServer with HTTP/3 (QUIC) enabled on an ephemeral UDP port
-        int udpPort = org.mockserver.testing.socket.TestPortFactory.findFreeUdpPort();
         Configuration config = configuration()
-            .http3Port(udpPort)
             .http3MaxIdleTimeout(30000L);
-        mockServer = new MockServer(config, 0);
+        mockServer = startWithHttp3(config);
         mockServerClient = new MockServerClient("127.0.0.1", mockServer.getLocalPort());
         http3Port = mockServer.getHttp3Port();
     }
