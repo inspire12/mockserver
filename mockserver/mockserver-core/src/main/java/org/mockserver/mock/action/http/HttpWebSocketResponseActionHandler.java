@@ -24,6 +24,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 
+import static org.mockserver.exception.ExceptionHandling.causeDescription;
+import static org.mockserver.exception.ExceptionHandling.clientGoneException;
 import static org.mockserver.log.model.LogEntry.LogMessageType.EXPECTATION_RESPONSE;
 
 public class HttpWebSocketResponseActionHandler {
@@ -378,6 +380,19 @@ public class HttpWebSocketResponseActionHandler {
                 }
                 scheduleMessages(messages, index + 1, ctx, httpWebSocketResponse, request, handshaker,
                     streamBreakpointsActive, streamId, reqMethod, reqPath, useWsDispatch, breakpointClientId, streamBreakpointId);
+            } else if (clientGoneException(future.cause())) {
+                // a client that has gone is an ordinary end of the response
+                if (mockServerLogger.isEnabledForInstance(Level.DEBUG)) {
+                    mockServerLogger.logEvent(
+                        new LogEntry()
+                            .setLogLevel(Level.DEBUG)
+                            .setCorrelationId(request.getLogCorrelationId())
+                            .setHttpRequest(request)
+                            .setMessageFormat("client left before WebSocket message {} was sent:{}for request:{}")
+                            .setArguments(index + 1, causeDescription(future.cause()), request)
+                    );
+                }
+                finishWebSocket(ctx, httpWebSocketResponse, handshaker, streamBreakpointsActive, streamId);
             } else {
                 if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
                     mockServerLogger.logEvent(

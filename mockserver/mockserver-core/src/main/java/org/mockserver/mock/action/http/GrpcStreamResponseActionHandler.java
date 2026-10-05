@@ -23,6 +23,8 @@ import org.slf4j.event.Level;
 
 import java.util.List;
 
+import static org.mockserver.exception.ExceptionHandling.causeDescription;
+import static org.mockserver.exception.ExceptionHandling.clientGoneException;
 import static org.mockserver.log.model.LogEntry.LogMessageType.EXPECTATION_RESPONSE;
 
 public class GrpcStreamResponseActionHandler {
@@ -292,6 +294,19 @@ public class GrpcStreamResponseActionHandler {
                 }
                 scheduleMessages(deadline, messages, index + 1, ctx, grpcStreamResponse, request, methodDescriptor,
                     streamBreakpointsActive, streamId, reqMethod, reqPath, useWsDispatch, breakpointClientId, streamBreakpointId);
+            } else if (clientGoneException(future.cause())) {
+                // a client that has gone is an ordinary end of the response
+                if (mockServerLogger.isEnabledForInstance(Level.DEBUG)) {
+                    mockServerLogger.logEvent(
+                        new LogEntry()
+                            .setLogLevel(Level.DEBUG)
+                            .setCorrelationId(request.getLogCorrelationId())
+                            .setHttpRequest(request)
+                            .setMessageFormat("client left before gRPC stream message {} was sent:{}for request:{}")
+                            .setArguments(index + 1, causeDescription(future.cause()), request)
+                    );
+                }
+                finishStream(deadline, ctx, grpcStreamResponse, streamBreakpointsActive, streamId);
             } else {
                 if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
                     mockServerLogger.logEvent(

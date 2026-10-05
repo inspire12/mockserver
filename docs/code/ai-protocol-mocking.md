@@ -85,6 +85,8 @@ flowchart TB
 
 The HTTP/1.1 close decision mirrors the non-streaming path (`NettyResponseWriter.writeAndCloseSocket`): an explicit `closeConnection` on the `httpSseResponse` wins; otherwise the request's own keep-alive intent decides (`request.isKeepAlive()`); and `alwaysCloseSocketConnections` forces a close regardless. An **absent** `closeConnection` therefore no longer means "always close" — it honours the client's keep-alive, so a streaming response no longer breaks a connection it advertised as reusable.
 
+A client may leave in the middle of the stream. When an event's write fails because the client has gone (its connection or TLS session closed, or the connection reset or broken, as `ExceptionHandling.clientGoneException` classifies it), the stream ends and the departure is logged at `DEBUG`, naming the cause's class and message (`IOException: Broken pipe`, `ClosedChannelException`), with no stack trace. Any other write failure ends the stream with a `WARN` and its cause. The gRPC server-stream (`GrpcStreamResponseActionHandler`) and WebSocket (`HttpWebSocketResponseActionHandler`) handlers treat a failed message write the same way.
+
 > **Remaining inconsistency — an absent `closeConnection` still differs across the streaming actions.**
 > Since the issue #2641 fix, SSE (`HttpSseResponseActionHandler`) treats an absent value as
 > **keep-alive-aware** (close only if the request itself is not keep-alive, or `alwaysCloseSocketConnections`

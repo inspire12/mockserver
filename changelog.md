@@ -1212,6 +1212,12 @@ This release delivers a sustained performance and memory programme alongside dat
   releasing the event loops, and now release them. A client stopped that way is stopped for good,
   even if its port future completes afterwards: later calls fail with "has already been stopped",
   so create a new client. Before, such a `stop()` left the client usable.
+- **A client that leaves in the middle of a mocked streaming response is no longer logged as a warning.** When a client
+  closed or reset its connection, or closed its TLS session, while a mocked server-sent-events or LLM streaming
+  response, a gRPC server stream or a mocked WebSocket conversation was still being written, MockServer logged the
+  failed write at `WARN` with a stack trace, on direct connections and through CONNECT tunnels, over HTTP/1.1 and
+  HTTP/2. Such a departure now ends the response quietly and is logged only at `DEBUG`, naming the cause, without a
+  stack trace; any other write failure is still a `WARN` with its cause.
 
 ## [8.0.0] - 2026-09-15
 

@@ -5,6 +5,7 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.handler.codec.DecoderException;
 import io.netty.handler.ssl.NotSslRecordException;
+import io.netty.handler.ssl.SslClosedEngineException;
 import io.netty.util.internal.OutOfDirectMemoryError;
 import io.netty.util.internal.PlatformDependent;
 import org.apache.commons.lang3.exception.ExceptionUtils;
@@ -16,6 +17,8 @@ import org.mockserver.socket.tls.SniHandler;
 import javax.net.ssl.SSLException;
 import javax.net.ssl.SSLHandshakeException;
 import java.net.ConnectException;
+import java.nio.channels.ClosedChannelException;
+import java.nio.channels.ClosedSelectorException;
 import java.nio.channels.DatagramChannel;
 import java.nio.channels.SocketChannel;
 import java.security.SignatureException;
@@ -230,6 +233,31 @@ public class ExceptionHandling {
         return throwable.getCause() instanceof SSLException
             || throwable instanceof DecoderException
             || throwable instanceof NotSslRecordException;
+    }
+
+    /**
+     * returns true if a write failed because its connection had already closed, or because its client had closed its
+     * TLS session (the socket may stay open a moment longer)
+     */
+    public static boolean socketClosedException(Throwable throwable) {
+        return throwable instanceof ClosedChannelException || throwable instanceof ClosedSelectorException || throwable instanceof SslClosedEngineException;
+    }
+
+    /**
+     * returns true if a write to a client failed because the client has gone: its connection or TLS session closed,
+     * or its connection reset or broken, as {@link #connectionClosedException(Throwable)} classifies it
+     */
+    public static boolean clientGoneException(Throwable throwable) {
+        return socketClosedException(throwable) || !(isSslOrDecoderFault(throwable) || connectionClosedException(throwable));
+    }
+
+    /**
+     * the exception's class and, when it has one, its message, such as {@code IOException: Broken pipe}: a closed
+     * channel's exception has no message
+     */
+    public static String causeDescription(Throwable throwable) {
+        String message = throwable.getMessage();
+        return throwable.getClass().getSimpleName() + (message == null || message.isEmpty() ? "" : ": " + message);
     }
 
     private static final List<Class<? extends Exception>> SSL_HANDSHAKE_FAILURE_CLASSES = Arrays.asList(SSLException.class, SSLHandshakeException.class, CertPathValidatorException.class, SignatureException.class);

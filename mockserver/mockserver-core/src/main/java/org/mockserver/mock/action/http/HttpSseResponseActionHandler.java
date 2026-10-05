@@ -19,6 +19,8 @@ import org.slf4j.event.Level;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 
+import static org.mockserver.exception.ExceptionHandling.causeDescription;
+import static org.mockserver.exception.ExceptionHandling.clientGoneException;
 import static org.mockserver.log.model.LogEntry.LogMessageType.EXPECTATION_RESPONSE;
 
 public class HttpSseResponseActionHandler {
@@ -134,6 +136,19 @@ public class HttpSseResponseActionHandler {
                             );
                         }
                         scheduleEvents(events, index + 1, ctx, httpSseResponse, request, format);
+                    } else if (clientGoneException(future.cause())) {
+                        // a client that has gone is an ordinary end of the response
+                        if (mockServerLogger.isEnabledForInstance(Level.DEBUG)) {
+                            mockServerLogger.logEvent(
+                                new LogEntry()
+                                    .setLogLevel(Level.DEBUG)
+                                    .setCorrelationId(request.getLogCorrelationId())
+                                    .setHttpRequest(request)
+                                    .setMessageFormat("client left before streaming chunk {} was sent:{}for request:{}")
+                                    .setArguments(index + 1, causeDescription(future.cause()), request)
+                            );
+                        }
+                        finishStream(ctx, httpSseResponse, request);
                     } else {
                         if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
                             mockServerLogger.logEvent(

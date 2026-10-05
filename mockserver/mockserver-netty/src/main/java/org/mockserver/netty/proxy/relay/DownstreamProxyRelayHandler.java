@@ -8,7 +8,6 @@ import io.netty.handler.codec.http.HttpMessage;
 import io.netty.handler.codec.http.HttpObject;
 import io.netty.handler.codec.http2.Http2CodecUtil;
 import io.netty.handler.codec.http2.Http2Exception;
-import io.netty.handler.ssl.SslClosedEngineException;
 import io.netty.util.ReferenceCountUtil;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.log.model.SensitiveLogValue;
@@ -17,8 +16,6 @@ import org.mockserver.socket.ChannelReadPause;
 import org.mockserver.logging.MockServerLogger;
 import org.slf4j.event.Level;
 
-import java.nio.channels.ClosedChannelException;
-import java.nio.channels.ClosedSelectorException;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static io.netty.handler.codec.http2.HttpConversionUtil.ExtensionHeaderNames.STREAM_ID;
@@ -28,6 +25,7 @@ import static org.mockserver.exception.ExceptionHandling.directMemoryLimitReache
 import static org.mockserver.exception.ExceptionHandling.connectionClosedException;
 import static org.mockserver.exception.ExceptionHandling.isSslOrDecoderFault;
 import static org.mockserver.exception.ExceptionHandling.sniDescription;
+import static org.mockserver.exception.ExceptionHandling.socketClosedException;
 
 public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<HttpObject> {
 
@@ -137,7 +135,7 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
             } else if (!relayEnded) {
                 // every write already queued behind this one fails the same way, so only the first is logged; a client
                 // connection that has closed is not a failure worth an error (its streams' writes fail with it)
-                if (upstreamChannel.isActive() && isNotSocketClosedException(future.cause())) {
+                if (upstreamChannel.isActive() && !socketClosedException(future.cause())) {
                     mockServerLogger.logEvent(writeFailure(msg, future.cause()));
                 }
                 endRelay(ctx);
@@ -193,11 +191,6 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
 
     private static boolean isStreamFailure(Throwable cause) {
         return Http2CodecUtil.getEmbeddedHttp2Exception(cause) instanceof Http2Exception.StreamException;
-    }
-
-    private boolean isNotSocketClosedException(Throwable cause) {
-        // a client that has closed its TLS session has gone, though its socket may be open a moment longer
-        return !(cause instanceof ClosedChannelException || cause instanceof ClosedSelectorException || cause instanceof SslClosedEngineException);
     }
 
     @Override
