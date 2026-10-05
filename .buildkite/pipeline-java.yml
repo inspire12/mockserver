@@ -95,7 +95,7 @@ steps:
       # The WAR built by the reactor, kept as a published build output. The container-tests
       # step's WAR case now takes its copy from ":maven: container-test jars" instead.
       - "mockserver/mockserver-war/target/mockserver-war-*.war"
-    timeout_in_minutes: 60
+    timeout_in_minutes: 90
     # The default queue is partly Spot; a reclaim mid-build kills the agent
     # (exit -1 / agent lost). Auto-retry so an infra eviction re-runs the long
     # build instead of failing it. Real test failures exit 1 and are NOT retried.
@@ -123,7 +123,7 @@ steps:
   # tests, so a rename of a client/model fluent method (mockserver-core or
   # mockserver-client-java) would ship broken generated code silently. This gate
   # emits a kitchen-sink matrix of standardToJava outputs and javac-compiles them.
-  # Runs in THIS parallel group (alongside the 60-min build, on its own agent) so
+  # Runs in THIS parallel group (alongside the :maven: build, on its own agent) so
   # it adds no critical-path time; it does its own quick client-java install
   # (-DskipTests) reusing the restored maven cache. The mockserver-java pipeline is
   # already path-gated (generate-pipeline.sh) to mockserver/ + mockserver-ui/
