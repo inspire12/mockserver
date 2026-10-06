@@ -10,7 +10,9 @@ import org.mockserver.model.TcpChaosProfile;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -405,10 +407,8 @@ public class ChaosAutoHaltMonitorTest {
 
     @Test
     public void shouldMaintainAccurateWindowSizeUnderConcurrency() throws Exception {
-        // Regression test for the TOCTOU race in evictExpired(): before the fix,
-        // two threads could both peekFirst() the same expired head; one would
-        // pollFirst() an UNEXPIRED entry and the AtomicInteger windowSize would
-        // permanently undercount, preventing the circuit breaker from firing.
+        // Guards both window races: two threads evicting the same expired head (an
+        // undercount) and a timestamp appended behind a newer one (an overcount).
         //
         // Strategy: many threads hammer recordError() concurrently with a clock
         // that produces a mix of soon-to-expire and fresh timestamps. After all
@@ -477,6 +477,54 @@ public class ChaosAutoHaltMonitorTest {
         assertThat("window size must be exact after concurrent hammering "
                 + "(was " + actualSize + ", expected " + expectedInWindow + ")",
             actualSize, is(expectedInWindow));
+    }
+
+    @Test
+    public void shouldNotCountAnExpiredErrorAppendedBehindANewerOne() throws Exception {
+        // given - thread A reads timestamp T from the clock and is held there, while
+        // thread B is free to record T+1 if the monitor lets it
+        final long t = 10_000L;
+        final long windowMillis = 1_000L;
+        AtomicLong ticker = new AtomicLong(t);
+        CountDownLatch aHoldsItsTimestamp = new CountDownLatch(1);
+        CountDownLatch releaseA = new CountDownLatch(1);
+        ChaosAutoHaltMonitor monitor = new ChaosAutoHaltMonitor(() -> {
+            long value = ticker.getAndIncrement();
+            if (value == t) {
+                aHoldsItsTimestamp.countDown();
+                try {
+                    releaseA.await(10, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            return value;
+        });
+        ConfigurationProperties.chaosAutoHaltEnabled(true);
+        ConfigurationProperties.chaosAutoHaltErrorThreshold(1_000);
+        ConfigurationProperties.chaosAutoHaltWindowMillis(windowMillis);
+
+        Thread a = new Thread(() -> monitor.recordError("error"), "auto-halt-A");
+        a.start();
+        assertThat("A reached the clock", aHoldsItsTimestamp.await(10, TimeUnit.SECONDS), is(true));
+        Thread b = new Thread(() -> monitor.recordError("error"), "auto-halt-B");
+        b.start();
+        // B either completes (the monitor let it append past A) or blocks behind A
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (b.getState() != Thread.State.TERMINATED && b.getState() != Thread.State.BLOCKED
+            && b.getState() != Thread.State.WAITING && System.nanoTime() < deadline) {
+            Thread.sleep(1);
+        }
+        releaseA.countDown();
+        a.join(10_000);
+        b.join(10_000);
+        assertThat(a.isAlive() || b.isAlive(), is(false));
+
+        // when - time moves on so T has left the window but T+1 has not
+        ticker.set(t + windowMillis);
+
+        // then - only T+1 is counted
+        assertThat(monitor.currentWindowSize(), is(1));
     }
 
     @Test

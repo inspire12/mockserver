@@ -338,6 +338,12 @@ Only **destructive** fault types count toward the window: `"error"` (synthetic
 `"slow"`, `"truncate"`, `"malformed"`, `"graphql"`) do not contribute — a
 latency-only experiment never auto-halts.
 
+Eviction removes expired timestamps from the head of the window only, so the window
+must stay in timestamp order: reading the clock, appending, evicting and counting share
+one short critical section (`evictLock`). Reading the clock outside it lets a thread
+append an older timestamp behind a newer one, which then outlives its window and is
+counted towards the threshold.
+
 Connection-lifecycle faults integrate as follows:
 - A mid-response RST (L1 `resetMidResponse`) records a `"drop"` fault,
   contributing to the window (gated by `connectionLifecycleAutoHaltCountsRst`,

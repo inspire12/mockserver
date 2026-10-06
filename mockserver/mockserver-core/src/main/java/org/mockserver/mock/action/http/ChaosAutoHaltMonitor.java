@@ -32,8 +32,8 @@ import java.util.function.LongSupplier;
  *
  * <p>The monitor is evaluated per chaos-fault injection (called from
  * {@link org.mockserver.metrics.Metrics#incrementHttpChaosInjected(String)}).
- * It does not block the event loop — the sliding window is maintained in a
- * lock-free {@link ConcurrentLinkedDeque} of timestamps.
+ * The sliding window is a {@link ConcurrentLinkedDeque} of timestamps; appending,
+ * evicting and sizing it share one short critical section, which never blocks on I/O.
  *
  * <p><b>Configuration</b> (all read dynamically, preferring the installed {@link Configuration}
  * instance and falling back to the static {@link ConfigurationProperties} store — see
@@ -66,11 +66,9 @@ public class ChaosAutoHaltMonitor {
     /** Guards against concurrent double-trigger: only one thread performs the halt block per trigger. */
     private final AtomicBoolean halting = new AtomicBoolean(false);
     /**
-     * Lock that serializes the evict-then-check-threshold critical section.
-     * Without this, two concurrent {@code recordError()} threads can both
-     * {@code peekFirst()} the same expired head; the loser's {@code pollFirst()}
-     * removes an <em>unexpired</em> entry, permanently undercounting the window
-     * and preventing the circuit breaker from firing (TOCTOU race).
+     * Serializes the read-clock, append, evict and size sequence. Without it two
+     * threads can both {@code peekFirst()} the same expired head and the loser
+     * polls an unexpired entry, or append timestamps out of order.
      */
     private final Object evictLock = new Object();
 
@@ -160,14 +158,13 @@ public class ChaosAutoHaltMonitor {
             return;
         }
 
-        long now = clock.getAsLong();
-        errorTimestamps.addLast(now);
-
-        // Evict expired entries and read the window size under the same lock to
-        // prevent the TOCTOU race where two threads both peek the same expired
-        // head and one of them polls an unexpired entry instead.
+        // Reading the clock and appending under the lock keeps the deque in timestamp
+        // order, which head-only eviction relies on: an older timestamp appended behind
+        // a newer one would outlive its window.
         int currentSize;
         synchronized (evictLock) {
+            long now = clock.getAsLong();
+            errorTimestamps.addLast(now);
             evictExpired(now);
             currentSize = errorTimestamps.size();
         }
