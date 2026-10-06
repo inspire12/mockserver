@@ -215,6 +215,62 @@ public class DownstreamProxyRelayHandlerStreamBoundTest {
         assertThat(pendingMessages.size(), is(4));
     }
 
+    @Test
+    public void shouldNotAbortAStreamedResponseBehindRawBytesStillWaitingToBeWritten() {
+        givenAProxyClientThatNeverFinishesAWrite();
+
+        loopback.writeInbound(rawBytes(3 * 1024));
+        loopback.writeInbound(new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK));
+        loopback.writeInbound(piece(2 * 1024));
+
+        assertThat("the raw and streamed bytes together pass the bound, the streamed ones alone do not", proxyClient.isOpen(), is(true));
+        assertThat(loopback.isOpen(), is(true));
+        assertThat(pendingMessages.size(), is(3));
+    }
+
+    @Test
+    public void shouldStillAbortAStreamedResponseBehindRawBytesOncePassingTheBoundByItself() {
+        givenAProxyClientThatNeverFinishesAWrite();
+        loopback.writeInbound(rawBytes(1024));
+        for (int i = 0; i < 4; i++) {
+            loopback.writeInbound(piece(1024));
+        }
+        assertThat(proxyClient.isOpen(), is(true));
+
+        HttpContent passesTheBound = piece(1);
+        loopback.writeInbound(passesTheBound);
+
+        assertThat(passesTheBound.refCnt(), is(0));
+        assertThat(proxyClient.isOpen(), is(false));
+        assertThat(loopback.isOpen(), is(false));
+    }
+
+    @Test
+    public void shouldPauseReadsOnRawAndStreamedBytesTogetherAndResumeOnlyWhenBothHaveDrained() {
+        // raw bytes written first, then the streamed ones
+        assertPausedUntilBothDrain(1024, 1536, 0);
+        releaseEverything();
+        pendingMessages.clear();
+        pendingWrites.clear();
+        // the streamed bytes written first, then the raw ones
+        assertPausedUntilBothDrain(1536, 1024, 1);
+    }
+
+    private void assertPausedUntilBothDrain(int raw, int streamed, int writtenFirst) {
+        givenAProxyClientThatNeverFinishesAWrite();
+
+        loopback.writeInbound(rawBytes(raw));
+        assertThat("raw bytes alone are within half the bound", loopback.config().isAutoRead(), is(true));
+        loopback.writeInbound(piece(streamed));
+        assertThat("together they are above half the bound", loopback.config().isAutoRead(), is(false));
+
+        pendingWrites.remove(writtenFirst).setSuccess();
+        assertThat("still above a quarter of the bound unwritten", loopback.config().isAutoRead(), is(false));
+        pendingWrites.remove(0).setSuccess();
+        assertThat(loopback.config().isAutoRead(), is(true));
+        assertThat(proxyClient.isOpen(), is(true));
+    }
+
     private void givenAProxyClientThatNeverFinishesAWrite() {
         proxyClient = new EmbeddedChannel(new ChannelOutboundHandlerAdapter() {
             @Override
@@ -230,6 +286,10 @@ public class DownstreamProxyRelayHandlerStreamBoundTest {
                 ctx.read();
             }
         }, new DownstreamProxyRelayHandler(new MockServerLogger(), proxyClient, BOUND));
+    }
+
+    private static RawResponseBytes rawBytes(int size) {
+        return new RawResponseBytes(Unpooled.buffer(size).writeZero(size), true);
     }
 
     private static HttpContent piece(int size) {

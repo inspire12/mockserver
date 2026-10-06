@@ -10,14 +10,19 @@ import io.netty.channel.ChannelPromise;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.channel.local.LocalAddress;
 import io.netty.handler.codec.http.DefaultFullHttpResponse;
+import io.netty.handler.codec.http.DefaultHttpContent;
+import io.netty.handler.codec.http.DefaultHttpHeaders;
+import io.netty.handler.codec.http.DefaultHttpResponse;
 import io.netty.handler.codec.http.FullHttpResponse;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpHeaderNames;
+import io.netty.handler.codec.http.HttpHeaderValues;
 import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http.HttpVersion;
+import io.netty.handler.codec.http.LastHttpContent;
 import io.netty.util.ReferenceCountUtil;
 import org.junit.After;
 import org.junit.Before;
@@ -271,6 +276,34 @@ public class LoopbackRawResponseRelayTest {
         assertThat("drained", ChannelReadPause.holds(relayLoopback), is(0));
         assertThat(relayedBytes().length(), is(large.length));
         assertThat(exchangesEndedByRawBytes(), is(1));
+    }
+
+    @Test
+    public void shouldRelayAStreamedResponsePipelinedBehindRawBytesASlowClientHasNotYetRead() {
+        // as the relay passes a streamed response on, piece by piece
+        relayLoopback.pipeline().remove(HttpObjectAggregator.class);
+        request("GET");
+        request("GET");
+        holdWrites = true;
+        byte[] raw = new byte[3 * BOUND / 4];
+        writeRawBytes(raw);
+        acceptedLoopback.writeOutbound(new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK, new DefaultHttpHeaders().set(HttpHeaderNames.TRANSFER_ENCODING, HttpHeaderValues.CHUNKED)));
+        acceptedLoopback.writeOutbound(new DefaultHttpContent(Unpooled.buffer(BOUND / 2).writeZero(BOUND / 2)));
+        acceptedLoopback.writeOutbound(LastHttpContent.EMPTY_LAST_CONTENT);
+
+        relayLoopback.writeInbound(Unpooled.copiedBuffer(writtenToLoopback()));
+
+        assertThat("more than the bound is waiting, but less than the bound of it is streamed", proxyClient.isOpen(), is(true));
+        assertThat(relayLoopback.isOpen(), is(true));
+        while (!heldWrites.isEmpty()) {
+            heldWrites.remove(0).setSuccess();
+        }
+        String relayed = relayedBytes();
+        assertThat(relayed.substring(0, raw.length), is(new String(raw, StandardCharsets.ISO_8859_1)));
+        assertThat(relayed, containsString("HTTP/1.1 200 OK\r\n"));
+        assertThat("the streamed response was relayed to its end", relayed.endsWith("\r\n0\r\n\r\n"), is(true));
+        assertThat(ChannelReadPause.holds(relayLoopback), is(0));
+        assertThat(proxyClient.isOpen(), is(true));
     }
 
     @Test

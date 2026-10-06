@@ -39,13 +39,16 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
     private final long maxUnwrittenStreamedBytes;
     private final long pauseReadsAboveBytes;
     private final AtomicLong unwrittenStreamedBytes = new AtomicLong();
+    // counted apart so a raw backlog pauses reads but never aborts a streamed response behind it
+    private final AtomicLong unwrittenRawBytes = new AtomicLong();
     // both confined to the loopback's event loop, which the proxy client's channel shares
     private boolean relayEnded;
     private boolean readsPaused;
 
     /**
-     * Above this many unwritten streamed bytes (or half the bound, if less) the loopback stops reading until they drain
-     * to half as many, so a slow proxy client gets backpressure long before {@code maxUnwrittenStreamedBytes} aborts.
+     * Above this many unwritten streamed and raw bytes together (or half the bound, if less) the loopback stops reading
+     * until they drain to half as many, so a slow proxy client gets backpressure long before
+     * {@code maxUnwrittenStreamedBytes} aborts.
      */
     static final long PAUSE_READS_ABOVE_BYTES = 256 * 1024;
 
@@ -105,9 +108,11 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
         // an aggregated message is already bounded by its aggregator
         final int streamedBytes = rawBytes ? ((RawResponseBytes) msg).content().readableBytes()
             : msg instanceof HttpContent && !(msg instanceof FullHttpMessage) ? ((HttpContent) msg).content().readableBytes() : 0;
-        final long unwritten = streamedBytes > 0 && bounded ? unwrittenStreamedBytes.addAndGet(streamedBytes) : 0;
+        final AtomicLong itsCount = rawBytes ? unwrittenRawBytes : unwrittenStreamedBytes;
+        final boolean counted = streamedBytes > 0 && bounded;
+        final long unwrittenOfItsKind = counted ? itsCount.addAndGet(streamedBytes) : 0;
         // raw bytes are never cut short, as on a direct connection: the pause below is what bounds them
-        if (unwritten > maxUnwrittenStreamedBytes && !rawBytes) {
+        if (unwrittenOfItsKind > maxUnwrittenStreamedBytes && !rawBytes) {
             ReferenceCountUtil.release(msg);
             if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
                 mockServerLogger.logEvent(
@@ -121,7 +126,7 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
             endRelay(ctx);
             return;
         }
-        if (unwritten > pauseReadsAboveBytes && !readsPaused) {
+        if (counted && unwrittenBytes() > pauseReadsAboveBytes && !readsPaused) {
             readsPaused = true;
             ChannelReadPause.pause(ctx.channel());
         }
@@ -129,9 +134,12 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
         final Integer clientStreamId = msg instanceof StreamedHttp2ResponsePart ? Integer.valueOf(((StreamedHttp2ResponsePart) msg).streamId())
             : msg instanceof HttpMessage ? ((HttpMessage) msg).headers().getInt(STREAM_ID.text()) : null;
         (rawBytes ? writeBeneathCodec((RawResponseBytes) msg) : upstreamChannel.writeAndFlush(msg)).addListener((ChannelFutureListener) future -> {
-            if (unwritten > 0 && unwrittenStreamedBytes.addAndGet(-streamedBytes) <= pauseReadsAboveBytes / 2 && readsPaused) {
-                readsPaused = false;
-                ChannelReadPause.resume(ctx.channel());
+            if (counted) {
+                itsCount.addAndGet(-streamedBytes);
+                if (readsPaused && unwrittenBytes() <= pauseReadsAboveBytes / 2) {
+                    readsPaused = false;
+                    ChannelReadPause.resume(ctx.channel());
+                }
             }
             if (future.isSuccess()) {
                 // while paused, reads resume only when the backlog has drained (resume above)
@@ -161,6 +169,10 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
                 endRelay(ctx);
             }
         });
+    }
+
+    private long unwrittenBytes() {
+        return unwrittenStreamedBytes.get() + unwrittenRawBytes.get();
     }
 
     /**

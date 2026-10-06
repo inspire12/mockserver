@@ -1009,7 +1009,7 @@ from the code that waits for writability, and each protocol has its own:
 | HTTP/2 response | Netty's `DefaultHttp2RemoteFlowController` writes at most `max(bytesBeforeUnwritable(), 32 KB)` of DATA per pass, and nothing while the connection is unwritable | About 64 KB by Netty's design (not measured here); the rest of the body waits in the flow controller as slices of the original buffer |
 | WebSocket proxy passthrough | `FrameRelayHandler` turns the peer's `autoRead` off while the channel it writes to is unwritable | What one read of the peer brought in |
 | Streaming forward (`StreamingResponseRelayHandler`) | Reads the upstream again only once the decoded bytes not yet written have drained to min(64 KiB, `maxResponseBodySize` / 4); past `maxResponseBodySize` the stream is aborted | The watermark plus one upstream read, decoded |
-| CONNECT / SOCKS tunnel | The relay aggregates each response from the loopback server before writing it to the client, except a streamed one and raw bytes, which it relays piece by piece. In an HTTP/1.1 tunnel the loopback's reads are stopped above min(256 KiB, `maxRequestBodySize` / 2) unwritten until the backlog halves, and a streamed response (never raw bytes) is aborted above `maxRequestBodySize`. In an HTTP/2 tunnel each DATA frame is handed on as it is read and its bytes are returned to the loopback stream's flow-control window only once written to the client, so MockServer may send one window (65,535 bytes) more than the client has taken (see [HTTP/2 loopback: streamed responses](#http2-loopback-streamed-responses)) | The whole response, up to `maxRequestBodySize`; a streamed one or raw bytes, about 256 KiB plus one read in an HTTP/1.1 tunnel; a streamed one, one flow-control window per stream in an HTTP/2 tunnel |
+| CONNECT / SOCKS tunnel | The relay aggregates each response from the loopback server before writing it to the client, except a streamed one and raw bytes, which it relays piece by piece. In an HTTP/1.1 tunnel the loopback's reads are stopped above min(256 KiB, `maxRequestBodySize` / 2) unwritten (streamed and raw bytes together) until the backlog halves, and a streamed response is aborted when its unwritten streamed bytes alone, not counting raw bytes, pass `maxRequestBodySize`; raw bytes are never aborted. In an HTTP/2 tunnel each DATA frame is handed on as it is read and its bytes are returned to the loopback stream's flow-control window only once written to the client, so MockServer may send one window (65,535 bytes) more than the client has taken (see [HTTP/2 loopback: streamed responses](#http2-loopback-streamed-responses)) | The whole response, up to `maxRequestBodySize`; a streamed one or raw bytes, about 256 KiB plus one read in an HTTP/1.1 tunnel; a streamed one, one flow-control window per stream in an HTTP/2 tunnel |
 
 **Why the body, and why direct memory.** An HTTP/1.1 response body is a heap buffer (usually the
 expectation's own bytes). The NIO and epoll transports copy a heap buffer into a direct buffer when it is
@@ -1457,7 +1457,10 @@ once everything written before it has been read (`LoopbackRawResponseRelayTest`;
 **Bound.** The splitter holds nothing between reads. Raw bytes not yet written to the client count with streamed
 content toward the pause of the loopback's reads (above min(256 KiB, `maxRequestBodySize` / 2), until half as many),
 so a slow client holds about that much plus one read. They are never cut short at `maxRequestBodySize`, as a
-streamed response is: a direct client is sent all of them. A relay that has ended releases them unwritten.
+streamed response is: a direct client is sent all of them. `DownstreamProxyRelayHandler` counts them apart from
+streamed content, and only the streamed count is held to `maxRequestBodySize`, so a raw backlog does not abort a
+streamed response pipelined behind it (`DownstreamProxyRelayHandlerStreamBoundTest`, `LoopbackRawResponseRelayTest`).
+A relay that has ended releases them unwritten.
 
 **The codecs' request-method queues.** Netty 4.2.18 bounds `HttpServerCodec`'s queue of requests awaiting a response
 at 128 (`maxPipelineDepth`) and closes the connection on the next request. Through a tunnel the client leg's codec
@@ -1514,7 +1517,7 @@ first failure: it logs that failure once (`exception while returning writing`, o
 with a `ChannelReadPause` hold it never releases, closes both legs, and releases whatever the loopback still delivers,
 response by response and, for a response relayed as it is streamed, part by part.
 Every write already queued behind the failed one fails the same way and is not logged. Exceeding the streamed-bytes
-bound (`maxRequestBodySize` of unwritten streamed content) ends the relay the same way.
+bound (`maxRequestBodySize` of unwritten streamed content, raw bytes not counted) ends the relay the same way.
 
 The loopback's socket is closed directly and the client's leg through its pipeline (see [Relay close](#relay-close)).
 One case keeps the loopback open: a client that has gone with a request still being written to the loopback. The relay
