@@ -13,15 +13,21 @@ import org.mockserver.socket.tls.KeyStoreFactory;
 import org.slf4j.event.Level;
 
 import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLEngine;
+import javax.net.ssl.SSLEngineResult;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.TrustManagerFactory;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.Socket;
+import java.net.SocketException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -31,6 +37,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
@@ -414,6 +421,72 @@ public class BinarySessionMockingIntegrationTest {
         mockMessagesThatHaveNoReply();
 
         writeNothingAndKeepTheConnectionOpen(Transport.TLS_1_3_TURNED_ON_PART_WAY);
+    }
+
+    private static final String UNKNOWN_MESSAGE_FORMAT = "unknown message format, only HTTP requests are supported for mocking or HTTP & binary requests for proxying, but request is not being proxied and request is not valid HTTP";
+
+    private static boolean endOfStreamOrReset(Socket socket) throws IOException {
+        try {
+            return socket.getInputStream().read() == -1;
+        } catch (SocketException reset) {
+            // a close with bytes still unread on MockServer's side is a reset
+            return true;
+        }
+    }
+
+    @Test
+    public void shouldAnswerAndCloseQuietlyWhenNoExpectationMatchesAMessageThatAHandshakeFollows() throws Exception {
+        SSLEngine client = SSLContext.getDefault().createSSLEngine();
+        client.setUseClientMode(true);
+        client.beginHandshake();
+        ByteBuffer clientHello = ByteBuffer.allocate(client.getSession().getPacketBufferSize());
+        assertThat(client.wrap(ByteBuffer.allocate(0), clientHello).getStatus(), is(SSLEngineResult.Status.OK));
+        // it exactly fills the connection's first read, so the handshake starts the next read of the same loop
+        byte[] unmatched = new byte[2048];
+        Arrays.fill(unmatched, (byte) 'u');
+        ByteArrayOutputStream onTheWire = new ByteArrayOutputStream();
+        onTheWire.write(unmatched);
+        onTheWire.write(clientHello.array(), 0, clientHello.position());
+        for (int connection = 0; connection < 5; connection++) {
+            Socket session = opened(new Socket("127.0.0.1", mockServer.getLocalPort()));
+
+            send(session, onTheWire.toByteArray());
+
+            byte[] reply = session.getInputStream().readNBytes(UNKNOWN_MESSAGE_FORMAT.length());
+            assertThat("the answer, in the clear", new String(reply, StandardCharsets.UTF_8), is(UNKNOWN_MESSAGE_FORMAT));
+            assertThat("then the close, with no handshake begun", endOfStreamOrReset(session), is(true));
+        }
+        assertThat("one answer for each connection", timesAnUnknownMessageWasAnswered(), is(5L));
+        assertThat(faultsLogged(), is(empty()));
+    }
+
+    @Test
+    public void shouldDropWhatFollowsBytesHeldAsAPossibleHandshakeWhenNoExpectationMatchesThem() throws Exception {
+        Socket session = connect(Transport.IN_THE_CLEAR);
+        exchange(session, STARTUP, AUTHENTICATION_OK_AND_READY);
+
+        // held, as the possible start of a TLS handshake, until what follows shows it is a message of its own
+        send(session, new byte[]{22});
+        TimeUnit.MILLISECONDS.sleep(300);
+        send(session, new byte[]{'x', 'x', 'x'});
+
+        byte[] reply = session.getInputStream().readNBytes(UNKNOWN_MESSAGE_FORMAT.length());
+        assertThat("the held byte is answered", new String(reply, StandardCharsets.UTF_8), is(UNKNOWN_MESSAGE_FORMAT));
+        assertThat("and the connection closed", endOfStreamOrReset(session), is(true));
+        // what followed it, read in the same loop, would be answered on the closed connection straight after
+        TimeUnit.MILLISECONDS.sleep(500);
+        assertThat("what followed it is not taken as a message", timesAnUnknownMessageWasAnswered(), is(1L));
+        assertThat(faultsLogged(), is(empty()));
+    }
+
+    private long timesAnUnknownMessageWasAnswered() {
+        return Arrays.stream(mockServer.retrieveLogMessagesArray(null)).filter(logged -> logged.contains("unknown message format")).count();
+    }
+
+    private List<String> faultsLogged() {
+        return Arrays.stream(mockServer.retrieveLogMessagesArray(null))
+            .filter(logged -> logged.contains("Exception") || logged.contains("caught by port unification handler"))
+            .collect(Collectors.toList());
     }
 
     @Test

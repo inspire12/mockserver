@@ -275,6 +275,9 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
                 // what this read loop brought before the handshake is a message sent in the clear: it is handled,
                 // and answered or forwarded in the clear, before TLS is turned on
                 ctx.fireChannelReadComplete();
+                if (endedByWhatWasPassedOn(ctx, msg)) {
+                    return;
+                }
                 enableTls(ctx, msg);
                 ctx.pipeline().remove(this);
             } else {
@@ -286,6 +289,7 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
                     ctx.fireChannelRead(msg.readBytes(held));
                     // it arrived in an earlier read than what follows it, so it is not joined to that
                     ctx.fireChannelReadComplete();
+                    endedByWhatWasPassedOn(ctx, msg);
                     return;
                 }
                 ctx.fireChannelRead(msg.readBytes(actualReadableBytes()));
@@ -320,6 +324,22 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
         if (mockServerLogger.isEnabledForInstance(TRACE)) {
             loggingHandler.addLoggingHandler(ctx);
         }
+    }
+
+    /**
+     * Whether handling a message passed on part way through a read closed the connection or removed this handler,
+     * so the rest of the read must not be looked at. On a closed connection the rest is dropped: nothing would
+     * answer it. Where a close completes at once, this handler has been removed and its buffer released by now.
+     */
+    private boolean endedByWhatWasPassedOn(ChannelHandlerContext ctx, ByteBuf msg) {
+        if (ctx.isRemoved()) {
+            return true;
+        }
+        if (ctx.channel().isActive()) {
+            return false;
+        }
+        msg.skipBytes(actualReadableBytes());
+        return true;
     }
 
     private void switchToUnknownProtocol(ChannelHandlerContext ctx, ByteBuf msg) {

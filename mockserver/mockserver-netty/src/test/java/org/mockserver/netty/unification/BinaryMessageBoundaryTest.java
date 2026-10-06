@@ -16,6 +16,7 @@ import org.junit.Test;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.httpclient.NettyHttpClient;
 import org.mockserver.lifecycle.LifeCycle;
+import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.mock.Expectation;
 import org.mockserver.mock.HttpState;
@@ -25,6 +26,7 @@ import org.mockserver.netty.MockServerUnificationInitializer;
 import org.mockserver.scheduler.Scheduler;
 import org.mockserver.socket.ChannelReadPause;
 import org.mockserver.socket.tls.NettySslContextFactory;
+import org.slf4j.event.Level;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLEngine;
@@ -32,6 +34,7 @@ import javax.net.ssl.SSLEngineResult;
 import java.io.ByteArrayOutputStream;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -43,6 +46,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.nullValue;
+import static org.hamcrest.Matchers.startsWith;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.Mockito.doAnswer;
@@ -91,7 +95,8 @@ public class BinaryMessageBoundaryTest {
 
     @BeforeClass
     public static void startServerState() throws Exception {
-        httpState = new HttpState(configuration(), new MockServerLogger(), scheduler);
+        // WARN, whatever the JVM's level is: a fault caught on a connection is logged at WARN
+        httpState = new HttpState(configuration(), new MockServerLogger(configuration().logLevel(Level.WARN), BinaryMessageBoundaryTest.class), scheduler);
         serverTls = new NettySslContextFactory(configuration(), new MockServerLogger(), true);
         // made once here, so that each connection finds it ready and takes it on its own thread
         serverTls.createServerSslContext();
@@ -600,6 +605,44 @@ public class BinaryMessageBoundaryTest {
             ByteBuf handshake = connection.channel.readOutbound();
             assertThat(which + ": then the server's side of the handshake", (int) handshake.getByte(handshake.readerIndex()), is(22));
             handshake.release();
+        }
+    }
+
+    /** Faults MockServer has logged so far, in every connection: each logged entry that carries an exception. */
+    private static long faultsLogged() throws Exception {
+        CompletableFuture<List<LogEntry>> logged = new CompletableFuture<>();
+        httpState.getMockServerLog().retrieveMessageLogEntries(null, logged::complete);
+        return logged.get(10, TimeUnit.SECONDS).stream().filter(entry -> entry.getThrowable() != null).count();
+    }
+
+    @Test
+    public void shouldCloseWithoutTurningTlsOnWhenNoExpectationMatchesTheMessageBeforeAHandshake() throws Exception {
+        httpState.add(new Expectation(binaryRequest(message('g', 23))).thenRespondWithBinary(binaryResponse(message('h', 1))));
+        for (boolean firstMessage : new boolean[]{true, false}) {
+            Connection connection = connectToAMockServerThatIsNotProxying();
+            if (!firstMessage) {
+                connection.clientWrites(message('g', 23));
+                connection.serverReads();
+                connection.channel.<ByteBuf>readOutbound().release();
+                connection.readLoops = 0;
+            }
+            long faultsBefore = faultsLogged();
+
+            // no expectation matches it: MockServer says so and closes the connection
+            connection.clientWrites(firstMessage ? message('u', 2048) : message('u', BINARY_READ_SIZE));
+            connection.onTheWire(clientHello());
+            connection.serverReads();
+
+            String which = firstMessage ? "a first message" : "a later message";
+            assertThat(which, connection.readLoops, is(1));
+            ByteBuf reply = connection.channel.readOutbound();
+            assertThat(which + " is answered in the clear", reply.toString(StandardCharsets.UTF_8), startsWith("unknown message format"));
+            reply.release();
+            assertThat(which + ": and the connection is closed", connection.channel.isOpen(), is(false));
+            assertThat(which + ": with no handshake begun on it", connection.channel.<ByteBuf>readOutbound(), is(nullValue()));
+            assertThat(which + ": or TLS turned on", PortUnificationHandler.isSslEnabledUpstream(connection.channel), is(false));
+            assertThat(which + ": and nothing went wrong", faultsLogged(), is(faultsBefore));
+            connection.channel.checkException();
         }
     }
 
