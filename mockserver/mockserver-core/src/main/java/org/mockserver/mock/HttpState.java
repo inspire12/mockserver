@@ -317,6 +317,9 @@ public class HttpState {
     private volatile org.mockserver.llm.client.LlmBackend llmBackend;
     // optional — set by the runtime (NettyHttpClient) to enable PUT /mockserver/replay
     private volatile java.util.function.Function<HttpRequest, CompletableFuture<HttpResponse>> replayHandler;
+    // what this server registered in process-wide places, removed on stop() wherever it is still registered
+    private final List<Object> metricsSuppliers = new ArrayList<>();
+    private volatile java.util.function.Function<HttpRequest, CompletableFuture<HttpResponse>> installedRequestSender;
     // readiness flag — flipped true once the constructor (incl. synchronous expectation
     // initializers / OpenAPI seeding) has completed. The liveness/status endpoints answer 200 the
     // instant the port binds, but a readiness probe should stay not-ready until seeding finishes so
@@ -426,9 +429,9 @@ public class HttpState {
                 }
             });
         }
-        Metrics.setActiveExpectationsSupplier(() -> requestMatchers.retrieveActiveExpectations(null));
-        Metrics.setClusterMemberCountSupplier(() -> stateBackend.clusterInfo().members().size());
-        Metrics.setEventLogRingStatsSupplier(() -> new Metrics.RingStats(
+        Metrics.setActiveExpectationsSupplier(registeredWithMetrics(() -> requestMatchers.retrieveActiveExpectations(null)));
+        Metrics.setClusterMemberCountSupplier(registeredWithMetrics(() -> stateBackend.clusterInfo().members().size()));
+        Metrics.setEventLogRingStatsSupplier(registeredWithMetrics(() -> new Metrics.RingStats(
             mockServerLog.getRingBufferOccupancy(),
             mockServerLog.getRingBufferSizeInForce(),
             mockServerLog.getInFlightBytes(),
@@ -436,15 +439,15 @@ public class HttpState {
             mockServerLog.getRetainedEntryCount(),
             mockServerLog.getRetainedBytes(),
             mockServerLog.getMaxRetainedBytes(),
-            mockServerLog.getMaxRetainedEntries()));
+            mockServerLog.getMaxRetainedEntries())));
         if (scheduler != null) {
-            Metrics.setSchedulerQueueDepthSuppliers(scheduler::getQueuedTaskCount, scheduler::getQueuedTemplateActionCount);
-            Metrics.setPendingDelayedTasksSupplier(scheduler::getPendingDelayedTaskCount);
+            Metrics.setSchedulerQueueDepthSuppliers(registeredWithMetrics(scheduler::getQueuedTaskCount), registeredWithMetrics(scheduler::getQueuedTemplateActionCount));
+            Metrics.setPendingDelayedTasksSupplier(registeredWithMetrics(scheduler::getPendingDelayedTaskCount));
         }
-        Metrics.setExpectationStoreStatsSupplier(() -> new Metrics.ExpectationStoreStats(
+        Metrics.setExpectationStoreStatsSupplier(registeredWithMetrics(() -> new Metrics.ExpectationStoreStats(
             requestMatchers.getExpectationBytes(),
             requestMatchers.getMaxExpectationBytes(),
-            requestMatchers.getExpectationByteEvictedCount()));
+            requestMatchers.getExpectationByteEvictedCount())));
         if (configuration.persistExpectations()) {
             this.expectationFileSystemPersistence = new ExpectationFileSystemPersistence(configuration, mockServerLogger, requestMatchers, stateBackend.blobs());
         }
@@ -479,7 +482,7 @@ public class HttpState {
                 }
             });
         }
-        CrossProtocolEventBus.getInstance().setScenarioManager(requestMatchers.getScenarioManager());
+        CrossProtocolEventBus.getInstance().registerScenarioManager(requestMatchers.getScenarioManager());
         // T1.9: opt-in cluster verify/retrieve fan-in. The per-node event log means a
         // verify/retrieve behind a load balancer sees only local traffic; when enabled
         // (clusterVerifyFanIn=true + clusterVerifyFanInPeers set) this aggregates across
@@ -608,6 +611,23 @@ public class HttpState {
      */
     public void setReplayHandler(java.util.function.Function<HttpRequest, CompletableFuture<HttpResponse>> replayHandler) {
         this.replayHandler = replayHandler;
+    }
+
+    /**
+     * Install {@code requestSender} as this server's replay handler and as the process-wide sender of load
+     * scenarios and drift alerts. {@link #stop()} removes it from those that still hold it, so pass the same
+     * instance on every call. Called by the runtime.
+     */
+    public void installRequestSender(java.util.function.Function<HttpRequest, CompletableFuture<HttpResponse>> requestSender) {
+        this.installedRequestSender = requestSender;
+        setReplayHandler(requestSender);
+        org.mockserver.mock.action.http.LoadScenarioOrchestrator.getInstance().setSender(requestSender);
+        org.mockserver.mock.drift.DriftAlertNotifier.getInstance().setSender(requestSender);
+    }
+
+    private <T> T registeredWithMetrics(T supplier) {
+        metricsSuppliers.add(supplier);
+        return supplier;
     }
 
     public Configuration getConfiguration() {
@@ -7069,6 +7089,10 @@ public class HttpState {
         if (clusterFanIn != null) {
             clusterFanIn.close();
         }
+        Metrics.clearLiveStateSuppliers(metricsSuppliers.toArray());
+        CrossProtocolEventBus.getInstance().unregisterScenarioManager(requestMatchers.getScenarioManager());
+        org.mockserver.mock.action.http.LoadScenarioOrchestrator.getInstance().clearSender(installedRequestSender);
+        org.mockserver.mock.drift.DriftAlertNotifier.getInstance().clearSender(installedRequestSender);
         getMockServerLog().stop();
         // G10 phase 2a: close the state backend (no-op for in-memory)
         if (stateBackend != null) {

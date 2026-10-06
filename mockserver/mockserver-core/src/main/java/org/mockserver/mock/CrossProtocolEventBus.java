@@ -10,6 +10,7 @@ import org.mockserver.state.StateBackend;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -45,6 +46,8 @@ public class CrossProtocolEventBus {
     private final ConcurrentHashMap<CrossProtocolTrigger, List<CrossProtocolScenario>> listeners =
         new ConcurrentHashMap<>();
     private volatile ScenarioManager scenarioManager;
+    // guarded by this
+    private final List<ScenarioManager> registeredScenarioManagers = new ArrayList<>();
 
     // G11 follow-up: optional clustered backend for fleet replication
     private volatile KeyValueStore<ObjectNode> backendStore;
@@ -66,8 +69,34 @@ public class CrossProtocolEventBus {
         return INSTANCE;
     }
 
-    public void setScenarioManager(ScenarioManager manager) {
+    public synchronized void setScenarioManager(ScenarioManager manager) {
         this.scenarioManager = manager;
+    }
+
+    /**
+     * Use {@code manager}, a starting server's, from now on. The managers of servers still running are kept, in
+     * the order they registered, for {@link #unregisterScenarioManager}.
+     */
+    public synchronized void registerScenarioManager(ScenarioManager manager) {
+        if (manager != null) {
+            registeredScenarioManagers.removeIf(registered -> registered == manager);
+            registeredScenarioManagers.add(manager);
+            this.scenarioManager = manager;
+        }
+    }
+
+    /**
+     * Forget {@code manager}, a stopping server's, so it is not kept in memory. If it is the manager in use, the
+     * one registered most recently by a server still running is used instead, so that server's captures and
+     * templates keep working; a manager in use that is not {@code manager} is kept.
+     */
+    public synchronized void unregisterScenarioManager(ScenarioManager manager) {
+        if (manager != null) {
+            registeredScenarioManagers.removeIf(registered -> registered == manager);
+            if (this.scenarioManager == manager) {
+                this.scenarioManager = registeredScenarioManagers.isEmpty() ? null : registeredScenarioManagers.get(registeredScenarioManagers.size() - 1);
+            }
+        }
     }
 
     /**

@@ -709,6 +709,17 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **A stopped MockServer no longer stays in memory.** A server registers itself in places shared by the whole
+  JVM as it starts and serves (its live metrics gauges, its scenario state, and the sender used by load scenarios
+  and drift alerts), and stopping it never removed them, so the most recently started server kept its whole event
+  log and expectations in memory after `stop()`, and the gauges went on reporting it. Stopping a server now
+  removes each of those registrations that is still its own; a server still running in the same JVM gets its
+  scenario state (used by captures and scenario templates) back when a newer server stops.
+- **A breakpoint or callback whose WebSocket cannot be registered no longer leaves its threads running.** When
+  `addBreakpoint(...)` or a callback `respond(...)`/`forward(...)` failed to register its WebSocket with
+  MockServer (a timeout, a refusal, or an unreachable server), the event loops opened for it kept running: until
+  the JVM exited for a breakpoint, and until the client was stopped or reset for a callback. They are now
+  released when the registration fails.
 - **A gRPC bidirectional stream over HTTP/2, including a server reflection stream, now ends normally when its client
   ends the request with trailers.** The response finishes with its `grpc-status`, as it does when the request ends on
   a DATA frame. Before, the trailers were taken for the request's headers a second time, and the whole HTTP/2

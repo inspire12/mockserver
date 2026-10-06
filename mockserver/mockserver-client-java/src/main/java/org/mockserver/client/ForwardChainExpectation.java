@@ -547,11 +547,12 @@ public class ForwardChainExpectation {
 
     @SuppressWarnings("rawtypes")
     private <T extends HttpMessage> String registerWebSocketClient(ExpectationCallback<T> expectationCallback, ExpectationForwardAndResponseCallback expectationForwardResponseCallback) {
+        WebSocketClient<T> webSocketClient = null;
         try {
             String clientId = UUIDService.getUUID();
             LocalCallbackRegistry.registerCallback(clientId, expectationCallback);
             LocalCallbackRegistry.registerCallback(clientId, expectationForwardResponseCallback);
-            final WebSocketClient<T> webSocketClient = new WebSocketClient<>(
+            webSocketClient = new WebSocketClient<>(
                 new NioEventLoopGroup(configuration.webSocketClientEventLoopThreadCount(), new Scheduler.SchedulerThreadFactory(WebSocketClient.class.getSimpleName() + "-eventLoop")),
                 clientId,
                 mockServerLogger
@@ -566,11 +567,18 @@ public class ForwardChainExpectation {
             mockServerEventBus.subscribe(webSocketClient::stopClient, EventType.STOP, EventType.RESET);
             return register.get(configuration.maxFutureTimeoutInMillis(), MILLISECONDS);
         } catch (Exception e) {
-            if (e.getCause() instanceof WebSocketException) {
-                throw new ClientException(e.getCause().getMessage(), e);
-            } else {
-                throw new ClientException("Unable to retrieve client registration id", e);
+            ClientException notRegistered = e.getCause() instanceof WebSocketException
+                ? new ClientException(e.getCause().getMessage(), e)
+                : new ClientException("Unable to retrieve client registration id", e);
+            if (webSocketClient != null) {
+                // the caller gets no expectation to use it with, so its event loops must be released now
+                try {
+                    webSocketClient.stopClient();
+                } catch (RuntimeException stopFailure) {
+                    notRegistered.addSuppressed(stopFailure);
+                }
             }
+            throw notRegistered;
         }
     }
 

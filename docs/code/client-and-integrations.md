@@ -241,6 +241,14 @@ still throws the failure to learn the port, as before. This is a behaviour chang
 fails because the port future is not complete used to leave the client usable, and now leaves it
 stopped even if the future completes later, so later calls fail with "has already been stopped".
 
+**A WebSocket that could not be registered releases its event loops.** A breakpoint
+(`addBreakpoint(...)`) or a closure callback (`respond(callback)` / `forward(callback)`) opens a
+WebSocket of its own to MockServer, on a new event loop group of `webSocketClientEventLoopThreadCount`
+loops. If the registration fails (it times out after `maxFutureTimeoutInMillis`, is refused, or the
+server is unreachable), the caller gets a `ClientException` and nothing it could stop, so the client
+stops that WebSocket client, and with it the group, before throwing. Previously the breakpoint group ran
+until the JVM exited and the callback group until the client was stopped or reset.
+
 ## Test Framework Integrations
 
 ### JUnit 4 Rule

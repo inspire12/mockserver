@@ -1021,6 +1021,34 @@ public class Metrics {
     }
 
     /**
+     * Remove each live-state reader that is still one of {@code registered}, so the gauges no longer read,
+     * or keep in memory, a server that has stopped. A reader registered since by another server is kept.
+     */
+    public static void clearLiveStateSuppliers(Object... registered) {
+        List<AtomicReference<?>> liveStateSuppliers = Arrays.asList(
+            schedulerQueueDepthSupplier,
+            templateActionQueueDepthSupplier,
+            pendingDelayedTasksSupplier,
+            activeExpectationsSupplier,
+            clusterMemberCountSupplier,
+            eventLogRingStatsSupplier,
+            expectationStoreStatsSupplier
+        );
+        for (Object supplier : registered) {
+            if (supplier != null) {
+                for (AtomicReference<?> reference : liveStateSuppliers) {
+                    clearIfStill(reference, supplier);
+                }
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void clearIfStill(AtomicReference<?> reference, Object supplier) {
+        ((AtomicReference<Object>) reference).compareAndSet(supplier, null);
+    }
+
+    /**
      * Count one task refused because the bound named by {@code reason} was full ({@code delayed_responses},
      * {@code template_actions}, {@code delay_skipped}, {@code side_actions} or {@code websocket_replies}). No-op
      * unless metrics are enabled.

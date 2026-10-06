@@ -130,6 +130,7 @@ public class HttpActionHandler {
     private HopByHopHeaderFilter hopByHopHeaderFilter = new HopByHopHeaderFilter();
     private HttpRequestToCurlSerializer httpRequestToCurlSerializer;
     private final org.mockserver.metrics.Metrics metrics;
+    private final java.util.function.Function<HttpRequest, java.util.concurrent.CompletableFuture<HttpResponse>> requestSender = request -> getHttpClient().sendRequest(request);
 
     /**
      * @return the shared {@link Scheduler}. Exposed to the (same-package) local object-callback handlers
@@ -3927,6 +3928,14 @@ public class HttpActionHandler {
 
     public NettyHttpClient getHttpClient() {
         return httpClient;
+    }
+
+    /**
+     * @return a sender that issues a request with {@link #getHttpClient()}, the same instance for the life of
+     * this handler, so that a server can later remove it from the process-wide places it installed it in
+     */
+    public java.util.function.Function<HttpRequest, java.util.concurrent.CompletableFuture<HttpResponse>> getRequestSender() {
+        return requestSender;
     }
 
 

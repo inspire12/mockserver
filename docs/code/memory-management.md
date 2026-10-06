@@ -985,6 +985,20 @@ The LMAX Disruptor ring buffer pre-allocates `LogEntry` slots separately. Data i
 
 This complements `failVerificationOnEvictedLog` (default `true`), which makes upper-bound verifications (`never()`, `atMost(n)`, `exactly(n)`, `once()`, `between(a,b)`) **fail** rather than pass on discarded evidence — that failure message is likewise bound-aware, and names drops separately from evictions (see [Ring In-Flight Bounding and Drops](#ring-in-flight-bounding-and-drops)). The two together cover both halves of the eviction hazard: the WARN flags coverage loss at the moment it begins, and the fail-closed verify flags it again at the point a specific verification is undermined.
 
+**A stopped server is not kept by process-wide registrations.** A starting server registers itself in
+process-wide places: the live-state gauge readers in `Metrics` (expectations, event-log ring, expectation
+bytes, cluster members, scheduler queues), the scenario manager of `CrossProtocolEventBus`, and, once it
+has served a request, its request sender in `LoadScenarioOrchestrator` and `DriftAlertNotifier`. Each of
+these refers back to the server's `HttpState`, and so to its whole event log and expectation store. On
+`stop()` the server removes each registration that is still its own (compare-and-clear), so a stopped
+server that nothing else references is collected; a registration made since by another server in the same
+JVM is left alone. The scenario manager is not just reported but used (captures, the `scenario` template
+helper, cross-protocol triggers), so the bus keeps the managers of the servers still running, in start
+order, and when the one in use stops it goes back to the most recent of them instead of to none. The in-flight reader given to `PreemptionSimulator` reads a counter, not the server, so
+it holds nothing. `StoppedServerIsCollectedTest` guards this for the default in-memory state backend; with
+a clustered backend the chaos registries and the cross-protocol bus also keep a store of that backend after
+a stop, which has not been checked for references back to the server.
+
 **Clearing expectations does NOT clear the log.** `PUT /mockserver/clear?type=EXPECTATIONS` only clears stored expectations; the request/event log is independent and keeps its entries (bounded by `maxLogEntries` and `maxEventLogSizeInBytes`). To free the log, use `PUT /mockserver/clear?type=LOG` (or `?type=ALL`), or `PUT /mockserver/reset` (clears both). Long-running, high-throughput servers should either lower `maxLogEntries`, set a byte budget, or periodically clear the log.
 
 ## Expectation Memory Analysis

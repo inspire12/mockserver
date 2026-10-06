@@ -150,8 +150,18 @@ public class LoadScenarioOrchestrator {
      * the upstream response. Called by the Netty runtime, wiring the existing HTTP client so the
      * core never depends on it directly (mirrors {@code HttpState.setReplayHandler}).
      */
-    public void setSender(Function<HttpRequest, CompletableFuture<HttpResponse>> sender) {
+    public synchronized void setSender(Function<HttpRequest, CompletableFuture<HttpResponse>> sender) {
         this.installedSender = sender;
+    }
+
+    /**
+     * Remove {@code sender} if it is still the installed one, as when the server that installed it stops; a
+     * sender installed since by another server is kept.
+     */
+    public synchronized void clearSender(Function<HttpRequest, CompletableFuture<HttpResponse>> sender) {
+        if (sender != null && this.installedSender == sender) {
+            this.installedSender = null;
+        }
     }
 
     /** Install the configuration used for caps and template engines. Called by the runtime. */

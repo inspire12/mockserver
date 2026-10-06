@@ -57,6 +57,25 @@ public class DriftAlertNotifierTest {
     }
 
     @Test
+    public void clearingASenderRemovesItOnlyWhileItIsStillTheInstalledOne() {
+        DriftAlertNotifier notifier = new DriftAlertNotifier(() -> 1000L);
+        CapturingSender stoppedServers = new CapturingSender();
+        CapturingSender runningServers = new CapturingSender();
+        notifier.configure(true, "https://hooks.example.com/drift", SemanticSeverity.BREAKING, 0);
+        notifier.setSender(stoppedServers);
+        notifier.setSender(runningServers);
+
+        notifier.clearSender(stoppedServers);
+        notifier.onDriftStored(record(DriftType.STATUS, "statusCode"));
+        assertThat("a sender installed since by another server is kept", runningServers.captured, hasSize(1));
+
+        notifier.clearSender(runningServers);
+        notifier.onDriftStored(record(DriftType.STATUS, "body"));
+        assertThat(runningServers.captured, hasSize(1));
+        assertThat(stoppedServers.captured, hasSize(0));
+    }
+
+    @Test
     public void breakingDriftFiresCorrectPayload() throws Exception {
         DriftAlertNotifier notifier = new DriftAlertNotifier(() -> 1000L);
         CapturingSender sender = new CapturingSender();

@@ -10,6 +10,7 @@ import org.mockserver.state.StateBackend;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.sameInstance;
 import static org.hamcrest.core.Is.is;
 import static org.hamcrest.core.IsNull.nullValue;
 
@@ -23,6 +24,38 @@ public class CrossProtocolEventBusTest {
         bus = new CrossProtocolEventBus();
         scenarioManager = new ScenarioManager();
         bus.setScenarioManager(scenarioManager);
+    }
+
+    @Test
+    public void shouldUseTheManagerOfTheMostRecentServerStillRegistered() {
+        CrossProtocolEventBus registrations = new CrossProtocolEventBus();
+        ScenarioManager older = new ScenarioManager();
+        ScenarioManager newer = new ScenarioManager();
+        registrations.registerScenarioManager(older);
+        registrations.registerScenarioManager(newer);
+
+        registrations.unregisterScenarioManager(older);
+        assertThat("a stopping server's manager not in use leaves the one in use", registrations.getScenarioManager(), sameInstance(newer));
+
+        registrations.registerScenarioManager(older);
+        registrations.unregisterScenarioManager(older);
+        assertThat("the manager of the server still running is used again", registrations.getScenarioManager(), sameInstance(newer));
+
+        registrations.unregisterScenarioManager(newer);
+        assertThat("no server is left", registrations.getScenarioManager(), is(nullValue()));
+    }
+
+    @Test
+    public void shouldKeepAManagerSetDirectlyWhenARegisteredServerStops() {
+        CrossProtocolEventBus registrations = new CrossProtocolEventBus();
+        ScenarioManager registered = new ScenarioManager();
+        ScenarioManager setDirectly = new ScenarioManager();
+        registrations.registerScenarioManager(registered);
+        registrations.setScenarioManager(setDirectly);
+
+        registrations.unregisterScenarioManager(registered);
+
+        assertThat(registrations.getScenarioManager(), sameInstance(setDirectly));
     }
 
     @Test

@@ -90,23 +90,16 @@ public class HttpRequestHandler extends SimpleChannelInboundHandler<HttpRequest>
         this.metricsHandler = new MetricsHandler(configuration);
         this.openAPISpecHandler = new OpenAPISpecHandler();
         this.configurationSerializer = new ConfigurationSerializer(mockServerLogger);
-        // Wire the replay handler so PUT /mockserver/replay can re-issue
-        // requests using the existing NettyHttpClient (forward/proxy client).
-        httpState.setReplayHandler(req -> httpActionHandler.getHttpClient().sendRequest(req));
-        // Wire the load-scenario sender similarly so PUT /mockserver/loadScenario can drive
-        // traffic using the existing NettyHttpClient, without core depending on it directly.
-        org.mockserver.mock.action.http.LoadScenarioOrchestrator.getInstance()
-            .setSender(req -> httpActionHandler.getHttpClient().sendRequest(req));
+        // Wire the existing NettyHttpClient (forward/proxy client) as the sender of PUT /mockserver/replay,
+        // load scenarios and drift-alert webhooks, without core depending on it directly.
+        if (httpActionHandler != null) {
+            httpState.installRequestSender(httpActionHandler.getRequestSender());
+        }
         org.mockserver.mock.action.http.LoadScenarioOrchestrator.getInstance()
             .setConfiguration(configuration);
-        // Wire the drift-alert webhook sender similarly so DriftAlertNotifier can POST drift alerts
-        // using the existing NettyHttpClient, without core depending on it directly. Fire-and-forget;
-        // a webhook failure never affects drift analysis or the served response.
-        org.mockserver.mock.drift.DriftAlertNotifier.getInstance()
-            .setSender(req -> httpActionHandler.getHttpClient().sendRequest(req));
         // Wire the preemption simulator's in-flight count to the live LifeCycle gauge so
         // GET /mockserver/preemption reports the real number of draining requests (not 0).
-        org.mockserver.mock.action.http.PreemptionSimulator.getInstance().setInFlightSupplier(server::getRequestsInFlight);
+        org.mockserver.mock.action.http.PreemptionSimulator.getInstance().setInFlightSupplier(server.getRequestsInFlightSupplier());
     }
 
     private static boolean isProxyingRequest(ChannelHandlerContext ctx) {

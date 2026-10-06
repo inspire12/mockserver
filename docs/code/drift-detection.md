@@ -274,7 +274,9 @@ flowchart LR
 - **Injected sender** — `mockserver-core` must not depend on the Netty HTTP client, so the actual
   request sender is injected via `DriftAlertNotifier.setSender(...)` (mirrors
   `LoadScenarioOrchestrator.setSender` / `HttpState.setReplayHandler`). The Netty runtime wires it from
-  `HttpActionHandler.getHttpClient()` in `HttpRequestHandler`'s constructor.
+  `HttpActionHandler.getHttpClient()` in `HttpRequestHandler`'s constructor, through
+  `HttpState.installRequestSender(...)`; `HttpState.stop()` removes it again only while it is still the
+  stopping server's sender (`clearSender(...)`).
 - **Fail-soft** — the whole of `onDriftStored(...)` is wrapped in a try/catch that swallows (TRACE-logs)
   every error, and the outbound send is non-blocking (no `.get()`) with an `exceptionally` handler. A
   webhook misconfiguration, a slow/unreachable endpoint, or a malformed URL can therefore **never** throw

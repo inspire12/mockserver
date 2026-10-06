@@ -4133,9 +4133,10 @@ public class MockServerClient implements Stoppable {
         if (breakpointWebSocketClient != null) {
             return breakpointWebSocketClient;
         }
+        BreakpointWebSocketClient wsClient = null;
         try {
             String bpClientId = UUIDService.getUUID();
-            BreakpointWebSocketClient wsClient = new BreakpointWebSocketClient(
+            wsClient = new BreakpointWebSocketClient(
                 new NioEventLoopGroup(
                     configuration.webSocketClientEventLoopThreadCount(),
                     new Scheduler.SchedulerThreadFactory("BreakpointWSClient-eventLoop")
@@ -4166,7 +4167,16 @@ public class MockServerClient implements Stoppable {
             }, EventType.STOP, EventType.RESET);
             return wsClient;
         } catch (Exception e) {
-            throw new ClientException("Unable to establish breakpoint WebSocket connection", e);
+            ClientException notRegistered = new ClientException("Unable to establish breakpoint WebSocket connection", e);
+            if (wsClient != null) {
+                // nothing else refers to it, so its event loops must be released here
+                try {
+                    wsClient.stopClient();
+                } catch (RuntimeException stopFailure) {
+                    notRegistered.addSuppressed(stopFailure);
+                }
+            }
+            throw notRegistered;
         }
     }
 

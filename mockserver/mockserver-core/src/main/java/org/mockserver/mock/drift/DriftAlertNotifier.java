@@ -79,8 +79,18 @@ public class DriftAlertNotifier {
      * (mirrors {@code LoadScenarioOrchestrator.setSender}). This is runtime wiring, not configuration: it
      * is deliberately not cleared by {@link #reset()}.
      */
-    public void setSender(Function<HttpRequest, CompletableFuture<HttpResponse>> sender) {
+    public synchronized void setSender(Function<HttpRequest, CompletableFuture<HttpResponse>> sender) {
         this.sender = sender;
+    }
+
+    /**
+     * Remove {@code sender} if it is still the installed one, as when the server that installed it stops; a
+     * sender installed since by another server is kept.
+     */
+    public synchronized void clearSender(Function<HttpRequest, CompletableFuture<HttpResponse>> sender) {
+        if (sender != null && this.sender == sender) {
+            this.sender = null;
+        }
     }
 
     /**

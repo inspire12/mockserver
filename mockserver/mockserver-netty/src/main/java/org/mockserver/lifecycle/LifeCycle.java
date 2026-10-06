@@ -108,6 +108,7 @@ public abstract class LifeCycle implements Stoppable {
     // starts processing, decremented when its response has been written). Used by stopAsync() to
     // drain in-flight requests before shutting down the event loops (WS7.2 graceful shutdown).
     private final java.util.concurrent.atomic.AtomicInteger requestsInFlight = new java.util.concurrent.atomic.AtomicInteger(0);
+    private final java.util.function.IntSupplier requestsInFlightSupplier = requestsInFlight::get;
     private final Scheduler scheduler;
     // optional OTel exporters — null unless the corresponding config is enabled
     private final org.mockserver.metrics.OtelMetricsExporter otelMetricsExporter;
@@ -324,6 +325,14 @@ public abstract class LifeCycle implements Stoppable {
      */
     public int getRequestsInFlight() {
         return requestsInFlight.get();
+    }
+
+    /**
+     * @return a reader of {@link #getRequestsInFlight()} that does not refer to this server, so a process-wide
+     * place it is installed in does not keep a stopped server in memory
+     */
+    public java.util.function.IntSupplier getRequestsInFlightSupplier() {
+        return requestsInFlightSupplier;
     }
 
     /**

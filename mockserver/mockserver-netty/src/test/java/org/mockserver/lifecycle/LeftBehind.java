@@ -29,6 +29,9 @@ public final class LeftBehind {
 
     private static final Pattern JDK_HTTP_CLIENT_SELECTOR = Pattern.compile("HttpClient-\\d+-SelectorManager");
 
+    // the JVM's common pool starts a worker in the group of whichever thread first needs one, and keeps it a while
+    private static final Pattern COMMON_POOL_WORKER = Pattern.compile("ForkJoinPool\\.commonPool-worker-\\d+");
+
     // longer than the two seconds Netty waits before it ends the event loops of a group shut down gracefully
     private static final int SETTLED_AFTER_UNCHANGED_SAMPLES = 25;
     private static final long SAMPLE_MILLIS = 100;
@@ -66,10 +69,11 @@ public final class LeftBehind {
     }
 
     /**
-     * @return the threads of {@code group} still alive once the deadline has passed, none if all ended sooner
+     * @return the threads of {@code group}, other than the JVM's common pool workers, still alive once the
+     * deadline has passed, none if all ended sooner
      */
     public static List<String> threadsStillAlive(ThreadGroup group) throws InterruptedException {
-        return stillAlive(group, thread -> true, false);
+        return stillAlive(group, thread -> !COMMON_POOL_WORKER.matcher(thread.getName()).matches(), false);
     }
 
     /**

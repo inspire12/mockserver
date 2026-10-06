@@ -717,7 +717,11 @@ Interaction with other features:
 `mockserver-core` must not depend on the Netty HTTP client, so the request sender is **injected** via
 `LoadScenarioOrchestrator.setSender(Function<HttpRequest, CompletableFuture<HttpResponse>>)` — exactly
 like `HttpState.setReplayHandler`. The Netty runtime wires it from
-`HttpActionHandler.getHttpClient()` in `HttpRequestHandler`. Unit tests pass a deterministic synchronous
+`HttpActionHandler.getHttpClient()` in `HttpRequestHandler`, through `HttpState.installRequestSender(...)`,
+which installs one sender per server (`HttpActionHandler.getRequestSender()`). The orchestrator is a
+process-wide singleton, so the last server to install its sender wins; `HttpState.stop()` calls
+`clearSender(...)`, which removes the sender only while it is still that server's, so a stopped server is
+not kept in memory and a server still running keeps its sender. Unit tests pass a deterministic synchronous
 fake sender directly to `start(scenario, sender)`.
 
 ## Self-load guard

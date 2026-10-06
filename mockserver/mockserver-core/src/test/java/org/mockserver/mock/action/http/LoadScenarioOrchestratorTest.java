@@ -1423,6 +1423,23 @@ public class LoadScenarioOrchestratorTest {
     }
 
     @Test
+    public void clearingASenderRemovesItOnlyWhileItIsStillTheInstalledOne() {
+        LoadScenarioOrchestrator installed = orchestratorTickedOnlyByTheTest(clock::get);
+        Function<HttpRequest, CompletableFuture<HttpResponse>> stoppedServers = httpRequest -> new CompletableFuture<>();
+        try {
+            installed.setSender(stoppedServers);
+            installed.setSender(NEVER_RESPONDS);
+            installed.clearSender(stoppedServers);
+            assertThat("a sender installed since by another server is kept", installed.start(oneSecondScenario("kept"), null), is(nullValue()));
+
+            installed.clearSender(NEVER_RESPONDS);
+            assertThat(installed.start(oneSecondScenario("cleared"), null), is("no load sender installed (server runtime not wired)"));
+        } finally {
+            installed.reset();
+        }
+    }
+
+    @Test
     public void aStopLandingWhileItsRunIsStillStartingKeepsTheStoppedStatus() throws Exception {
         LoadScenarioOrchestrator raced = orchestratorTickedOnlyByTheTest(clock::get);
         try {

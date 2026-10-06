@@ -578,8 +578,7 @@ thread (`HttpClient-N-SelectorManager`) and the selector's file descriptors. Jav
 minimum supported version, has no way to close one: the JDK ends the thread only after the
 client has been garbage collected. A client held by a stopped server therefore lives for as
 long as anything still references that server, which in a test JVM is common (a static field
-holding a stopped `ClientAndServer`, or the process-wide registrations the most recently
-started server leaves behind). So the client is not built until a peer is actually queried,
+holding a stopped `ClientAndServer`). So the client is not built until a peer is actually queried,
 and stopping the server drops the only reference to it whether or not the server itself is
 still referenced. After a stop the thread ends at the next garbage collection, not at once.
 
