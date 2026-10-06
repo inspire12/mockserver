@@ -1101,7 +1101,7 @@ Convenience builders are provided for common patterns:
 - **Registration**: scenarios are registered with `CrossProtocolEventBus.getInstance()` when expectations are added (via `ExpectationDTO.buildObject()`)
 - **Firing**: protocol handlers call `fire(trigger, identifier)` on successful events
 - **Reset**: `HttpState.reset()` calls `CrossProtocolEventBus.getInstance().reset()` to clear all listeners
-- **Scenario manager**: each `HttpState` registers its `ScenarioManager` as it starts (`registerScenarioManager`) and unregisters it as it stops; the bus uses the most recently registered manager of a server still running, so stopping a newer server hands the scenario state back to an older one still running, and a stopped server is not kept in memory
+- **Scenario manager**: each `HttpState` registers its `ScenarioManager` as it starts (`registerScenarioManager`) and unregisters it as it stops; the bus uses the most recently registered manager of a server still running, so stopping a newer server hands the scenario state back to an older one still running, and a stopped server is not kept in memory; the managers kept for that fallback are held weakly, so one whose server was never stopped is dropped once nothing else refers to it (though a server never stopped is still kept by its own event-log thread: see plan row 460)
 - **Pattern matching**: if `matchPattern` is set, the event identifier must contain the pattern; if unset, all events of that trigger type match
 
 ## Known API Inconsistencies and Open Questions

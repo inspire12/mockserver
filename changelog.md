@@ -715,6 +715,12 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **A callback whose WebSocket could not be registered is no longer kept in memory.** When `respond(callback)` or
+  `forward(callback)` failed to register its WebSocket (for example because MockServer could not be reached), the
+  Java client threw a `ClientException` but left the callback in its in-JVM callback store. Each such entry kept the
+  callback, and whatever it referred to, in memory and took one of the store's `maxWebSocketExpectations` slots, so
+  repeated failures could push out the entry of a working callback, whose calls then went over its WebSocket instead
+  of being run in-process. The client now removes the callback when the registration fails.
 - **A client that sends a request body over `maxRequestBodySize` now receives the 413 response instead of a
   connection reset.** When the connection was to close after the 413 (the request said `Connection: close`
   or was HTTP/1.0, or its body had already started arriving), MockServer closed it at once with the rest of

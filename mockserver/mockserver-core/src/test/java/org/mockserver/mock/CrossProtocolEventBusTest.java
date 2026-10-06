@@ -8,6 +8,9 @@ import org.mockserver.model.CrossProtocolTrigger;
 import org.mockserver.state.InMemoryStateBackend;
 import org.mockserver.state.StateBackend;
 
+import java.lang.ref.WeakReference;
+import java.util.concurrent.TimeUnit;
+
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.sameInstance;
@@ -43,6 +46,32 @@ public class CrossProtocolEventBusTest {
 
         registrations.unregisterScenarioManager(newer);
         assertThat("no server is left", registrations.getScenarioManager(), is(nullValue()));
+    }
+
+    @Test
+    public void shouldNotKeepTheManagerOfAServerThatWasNeverStoppedAndFallBackPastIt() throws InterruptedException {
+        CrossProtocolEventBus registrations = new CrossProtocolEventBus();
+        ScenarioManager running = new ScenarioManager();
+        registrations.registerScenarioManager(running);
+        WeakReference<ScenarioManager> neverUnregistered = registeredAndDropped(registrations);
+        ScenarioManager newer = new ScenarioManager();
+        registrations.registerScenarioManager(newer);
+
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        while (neverUnregistered.get() != null && System.nanoTime() < deadline) {
+            System.gc();
+            Thread.sleep(100);
+        }
+        assertThat("the bus keeps the manager of a server never stopped that nothing else refers to", neverUnregistered.get(), is(nullValue()));
+
+        registrations.unregisterScenarioManager(newer);
+        assertThat("the manager of the server still running is used again", registrations.getScenarioManager(), sameInstance(running));
+    }
+
+    private static WeakReference<ScenarioManager> registeredAndDropped(CrossProtocolEventBus registrations) {
+        ScenarioManager manager = new ScenarioManager();
+        registrations.registerScenarioManager(manager);
+        return new WeakReference<>(manager);
     }
 
     @Test

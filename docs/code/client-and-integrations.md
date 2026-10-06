@@ -248,6 +248,11 @@ loops. If the registration fails (it times out after `maxFutureTimeoutInMillis`,
 server is unreachable), the caller gets a `ClientException` and nothing it could stop, so the client
 stops that WebSocket client, and with it the group, before throwing. Previously the breakpoint group ran
 until the JVM exited and the callback group until the client was stopped or reset.
+A closure callback is put in `LocalCallbackRegistry` under its `clientId` before the WebSocket is
+registered; on that failure it is taken out again, since no expectation will refer to the id. The
+registry is process-wide and bounded by `maxWebSocketExpectations`, so a stale entry would otherwise keep
+the callback (and what it captured) in memory and take a slot, evicting the entry of a live callback,
+whose calls would then go over its WebSocket instead of in-process.
 
 ## Test Framework Integrations
 

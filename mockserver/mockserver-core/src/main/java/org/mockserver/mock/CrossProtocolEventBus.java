@@ -10,6 +10,7 @@ import org.mockserver.state.StateBackend;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -46,8 +47,8 @@ public class CrossProtocolEventBus {
     private final ConcurrentHashMap<CrossProtocolTrigger, List<CrossProtocolScenario>> listeners =
         new ConcurrentHashMap<>();
     private volatile ScenarioManager scenarioManager;
-    // guarded by this
-    private final List<ScenarioManager> registeredScenarioManagers = new ArrayList<>();
+    // guarded by this; weak, so a server that is never stopped does not keep its manager once it is unreachable
+    private final List<WeakReference<ScenarioManager>> registeredScenarioManagers = new ArrayList<>();
 
     // G11 follow-up: optional clustered backend for fleet replication
     private volatile KeyValueStore<ObjectNode> backendStore;
@@ -75,12 +76,13 @@ public class CrossProtocolEventBus {
 
     /**
      * Use {@code manager}, a starting server's, from now on. The managers of servers still running are kept, in
-     * the order they registered, for {@link #unregisterScenarioManager}.
+     * the order they registered, for {@link #unregisterScenarioManager}; they are held weakly, so the manager of a
+     * server that was never stopped is dropped once nothing else refers to it.
      */
     public synchronized void registerScenarioManager(ScenarioManager manager) {
         if (manager != null) {
-            registeredScenarioManagers.removeIf(registered -> registered == manager);
-            registeredScenarioManagers.add(manager);
+            removeRegistered(manager);
+            registeredScenarioManagers.add(new WeakReference<>(manager));
             this.scenarioManager = manager;
         }
     }
@@ -92,11 +94,30 @@ public class CrossProtocolEventBus {
      */
     public synchronized void unregisterScenarioManager(ScenarioManager manager) {
         if (manager != null) {
-            registeredScenarioManagers.removeIf(registered -> registered == manager);
+            removeRegistered(manager);
             if (this.scenarioManager == manager) {
-                this.scenarioManager = registeredScenarioManagers.isEmpty() ? null : registeredScenarioManagers.get(registeredScenarioManagers.size() - 1);
+                this.scenarioManager = mostRecentlyRegistered();
             }
         }
+    }
+
+    private ScenarioManager mostRecentlyRegistered() {
+        for (int i = registeredScenarioManagers.size() - 1; i >= 0; i--) {
+            ScenarioManager registered = registeredScenarioManagers.get(i).get();
+            if (registered != null) {
+                return registered;
+            }
+            registeredScenarioManagers.remove(i);
+        }
+        return null;
+    }
+
+    // also drops the entries of managers already collected
+    private void removeRegistered(ScenarioManager manager) {
+        registeredScenarioManagers.removeIf(registered -> {
+            ScenarioManager referent = registered.get();
+            return referent == null || referent == manager;
+        });
     }
 
     /**

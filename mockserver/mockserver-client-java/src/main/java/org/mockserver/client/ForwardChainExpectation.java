@@ -548,8 +548,8 @@ public class ForwardChainExpectation {
     @SuppressWarnings("rawtypes")
     private <T extends HttpMessage> String registerWebSocketClient(ExpectationCallback<T> expectationCallback, ExpectationForwardAndResponseCallback expectationForwardResponseCallback) {
         WebSocketClient<T> webSocketClient = null;
+        String clientId = UUIDService.getUUID();
         try {
-            String clientId = UUIDService.getUUID();
             LocalCallbackRegistry.registerCallback(clientId, expectationCallback);
             LocalCallbackRegistry.registerCallback(clientId, expectationForwardResponseCallback);
             webSocketClient = new WebSocketClient<>(
@@ -570,6 +570,8 @@ public class ForwardChainExpectation {
             ClientException notRegistered = e.getCause() instanceof WebSocketException
                 ? new ClientException(e.getCause().getMessage(), e)
                 : new ClientException("Unable to retrieve client registration id", e);
+            // no expectation will refer to this id, and its entries take slots that live callbacks need
+            LocalCallbackRegistry.unregisterCallback(clientId);
             if (webSocketClient != null) {
                 // the caller gets no expectation to use it with, so its event loops must be released now
                 try {

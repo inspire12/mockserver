@@ -994,7 +994,11 @@ these refers back to the server's `HttpState`, and so to its whole event log and
 server that nothing else references is collected; a registration made since by another server in the same
 JVM is left alone. The scenario manager is not just reported but used (captures, the `scenario` template
 helper, cross-protocol triggers), so the bus keeps the managers of the servers still running, in start
-order, and when the one in use stops it goes back to the most recent of them instead of to none. The in-flight reader given to `PreemptionSimulator` reads a counter, not the server, so
+order, and when the one in use stops it goes back to the most recent of them instead of to none. It holds
+those managers weakly, so a server that is never stopped does not stay in that list once nothing else
+refers to it, and the fallback skips managers already collected. (An `HttpState` dropped without `stop()`
+is still kept by its own event-log thread, which only `stop()` ends; `AbandonedHttpStateIsCollectedTest`
+checks that, once that thread has ended, no process-wide registration keeps it.) The in-flight reader given to `PreemptionSimulator` reads a counter, not the server, so
 it holds nothing. `StoppedServerIsCollectedTest` guards this for the default in-memory state backend; with
 a clustered backend the chaos registries and the cross-protocol bus also keep a store of that backend after
 a stop, which has not been checked for references back to the server.
