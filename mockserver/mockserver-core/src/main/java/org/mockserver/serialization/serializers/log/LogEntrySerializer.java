@@ -74,7 +74,7 @@ public class LogEntrySerializer extends StdSerializer<LogEntry> {
         // one view per entry: redaction settings and this entry's credential values are resolved once
         LogEntry.RedactedView redacted = logEntry.redactedView(configuration);
         // Derived on demand (see LogEntry), so read it once rather than building it twice per serialize.
-        org.mockserver.mock.Expectation expectation = redacted.getExpectation();
+        org.mockserver.mock.Expectation expectation = redacted.getSerializedExpectation();
         if (expectation != null) {
             jgen.writeObjectField("expectation", expectation);
         }
@@ -85,14 +85,13 @@ public class LogEntrySerializer extends StdSerializer<LogEntry> {
         if (messageFormat != null) {
             jgen.writeStringField("messageFormat", messageFormat);
         }
-        String message = redacted.getMessage();
+        // the entry's own request and response are written in full above; the message and arguments quote them compactly
+        String message = redacted.getSerializedMessage();
         if (message != null) {
             jgen.writeObjectField("message", message.replaceAll(" {2}", "   ").split(NEW_LINE));
         }
-        // Hoisted deliberately: getArguments() converts a JSON body to a node tree on every
-        // call now that the conversion is deferred out of the retained entry, so calling it
-        // twice re-parsed every body twice per serialize. It was a free getter before.
-        Object[] arguments = redacted.getArguments();
+        // Hoisted deliberately: rendering the arguments converts a JSON body to a node tree on every call.
+        Object[] arguments = redacted.getSerializedArguments();
         if (arguments != null) {
             jgen.writeObjectField("arguments", arguments);
         }

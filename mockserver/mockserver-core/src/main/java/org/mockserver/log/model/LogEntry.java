@@ -702,6 +702,25 @@ public class LogEntry implements EventTranslator<LogEntry> {
             .thenRespond(redaction.redactor.redactResponseObject(httpResponse));
     }
 
+    /**
+     * The expectation as {@code LOG_ENTRIES} writes it. A real expectation is written in full. The synthetic one is
+     * derived from this entry's own request and response, which the entry already writes in full, so it is written
+     * without their bodies, keeping its id, method, path, headers and status.
+     */
+    private Expectation serializedExpectationFor(Redaction redaction) {
+        Expectation full = expectationFor(redaction);
+        if (full == null || expectation != null) {
+            return full;
+        }
+        RequestDefinition request = full.getHttpRequest();
+        Expectation withoutBodies = new Expectation(
+            request instanceof HttpRequest ? ((HttpRequest) request).shallowClone().withBody((Body) null) : request,
+            Times.once(), TimeToLive.unlimited(), 0
+        ).withId(full.getId());
+        HttpResponse response = full.getHttpResponse();
+        return response == null ? withoutBodies : withoutBodies.thenRespond(response.shallowClone().withBody((BodyWithContentType) null));
+    }
+
     @JsonIgnore
     public LogEntry setExpectation(Expectation expectation) {
         this.expectation = expectation;
@@ -904,8 +923,33 @@ public class LogEntry implements EventTranslator<LogEntry> {
             // scrubbing text costs values x length, and a verification failure can quote thousands of requests
             message = formatLogMessage(redaction.scrub(messageFormat), argumentsFor(redaction));
         }
-        renderedMessage = redaction == null ? message : new RedactedMessage(redaction.key, message);
+        if (!quotesHttpMessage()) {
+            renderedMessage = redaction == null ? message : new RedactedMessage(redaction.key, message);
+        }
         return message;
+    }
+
+    /**
+     * Whether the message quotes a request, a response, a curl command or anything that may hold one. Such a
+     * message is not memoised: it repeats bodies, escaped to several times their size, which the event log's byte
+     * budget does not count, so a retained entry renders it again on each read instead.
+     */
+    private boolean quotesHttpMessage() {
+        for (Object argument : arguments) {
+            if (argument instanceof HttpRequest
+                || argument instanceof HttpResponse
+                || argument instanceof DeferredLogArgument
+                || argument instanceof LogEventRequestAndResponse
+                || argument instanceof HttpRequestAndHttpResponse
+                || argument instanceof Expectation
+                || argument instanceof Collection
+                || argument instanceof Map
+                || argument instanceof Optional
+                || argument instanceof Object[]) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @JsonIgnore
@@ -960,15 +1004,17 @@ public class LogEntry implements EventTranslator<LogEntry> {
     /**
      * The log-message arguments in their <em>rendered</em> form: any {@link HttpRequest}/{@link HttpResponse}
      * argument has its body converted to a {@link LogEntryBody} (a parsed {@link com.fasterxml.jackson.databind.JsonNode}
-     * for a {@link JsonBody}, else the stringified body) so both the JSON log surface ({@link org.mockserver.serialization.serializers.log.LogEntrySerializer})
-     * and the rendered message text ({@link #getMessage()}) reproduce exactly the same output.
+     * for a {@link JsonBody}, else the stringified body), the form the rendered message ({@link #getMessage()}) and the
+     * dashboard quote. {@code LOG_ENTRIES} writes the entry's own request, response and curl command compactly instead
+     * (see {@link RedactedView#getSerializedArguments()}).
      * <p>
      * The conversion is performed <strong>transiently here at read/render time</strong> and is NOT retained: the entry
      * stores the arguments in their raw form ({@link #arguments}, sharing the already-retained primary request/response
      * bodies), so a logged entry sitting in the event-log deque no longer pins a second, ~5x larger parsed
      * {@code JsonNode}/{@code LinkedHashMap} tree per JSON body for its whole lifetime. Each call rebuilds the converted
      * array and the caller is expected to discard it once it has produced its output (the serializer writes it and drops
-     * it; {@link #getMessage()} memoises the resulting string and drops the tree).
+     * it; {@link #getMessage()} drops the tree, and memoises the resulting string only when no argument quotes a request
+     * or response).
      */
     public Object[] getArguments() {
         return getArguments(null);
@@ -1011,28 +1057,111 @@ public class LogEntry implements EventTranslator<LogEntry> {
         if (arguments == null) {
             return null;
         }
-        if (redaction == null) {
-            return Arrays
-                .stream(arguments)
-                .map(argument -> {
-                    if (argument instanceof HttpRequest) {
-                        return updateBody((HttpRequest) argument);
-                    } else if (argument instanceof HttpResponse) {
-                        return updateBody((HttpResponse) argument);
-                    } else if (argument instanceof DeferredLogArgument) {
-                        return ((DeferredLogArgument) argument).render(null);
-                    } else if (argument instanceof SensitiveLogValue) {
-                        return ((SensitiveLogValue) argument).getValue();
-                    } else {
-                        return argument;
-                    }
-                })
-                .toArray(Object[]::new);
-        }
         return Arrays
             .stream(arguments)
-            .map(argument -> redactArgument(argument, redaction, 0))
+            .map(argument -> renderArgument(argument, redaction))
             .toArray(Object[]::new);
+    }
+
+    private Object renderArgument(Object argument, Redaction redaction) {
+        if (redaction != null) {
+            return redactArgument(argument, redaction, 0);
+        } else if (argument instanceof HttpRequest) {
+            return updateBody((HttpRequest) argument);
+        } else if (argument instanceof HttpResponse) {
+            return updateBody((HttpResponse) argument);
+        } else if (argument instanceof DeferredLogArgument) {
+            return ((DeferredLogArgument) argument).render(null);
+        } else if (argument instanceof SensitiveLogValue) {
+            return ((SensitiveLogValue) argument).getValue();
+        } else {
+            return argument;
+        }
+    }
+
+    /**
+     * The arguments as {@code LOG_ENTRIES} writes them: an argument that is this entry's own request or response, or
+     * the curl command for its own request, is written in its compact form ({@code POST /path}, {@code 200}), because
+     * the entry already writes that request and response in full, with their bodies, once. Any other argument is
+     * rendered as {@link #getArguments(org.mockserver.configuration.Configuration)} renders it.
+     */
+    private Object[] serializedArgumentsFor(Redaction redaction) {
+        if (arguments == null) {
+            return null;
+        }
+        Object[] serialized = new Object[arguments.length];
+        for (int i = 0; i < arguments.length; i++) {
+            Object own = ownHttpMessage(arguments[i]);
+            if (own != null) {
+                String compact = org.mockserver.formatting.StringFormatter.toCompactString(own);
+                serialized[i] = redaction == null ? compact : redaction.scrub(compact);
+            } else {
+                serialized[i] = renderArgument(arguments[i], redaction);
+            }
+        }
+        return serialized;
+    }
+
+    private String serializedMessageFor(Redaction redaction) {
+        if (arguments == null || !quotesOwnHttpMessage()) {
+            return messageFor(redaction);
+        }
+        String format = redaction == null ? messageFormat : redaction.scrub(messageFormat);
+        return formatLogMessage(format, serializedArgumentsFor(redaction));
+    }
+
+    private boolean quotesOwnHttpMessage() {
+        for (Object argument : arguments) {
+            if (ownHttpMessage(argument) != null) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // the entry's own request or response that the argument quotes (by identity), or null
+    private Object ownHttpMessage(Object argument) {
+        Object quoted = argument instanceof DeferredLogArgument ? ((DeferredLogArgument) argument).getRequest() : argument;
+        if (quoted == null) {
+            return null;
+        }
+        if (quoted == httpResponse) {
+            return quoted;
+        }
+        if (httpRequests != null) {
+            for (RequestDefinition request : httpRequests) {
+                if (quoted == request) {
+                    return quoted;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Replaces every argument that quotes {@code original} (itself, or the curl command for it) with one quoting
+     * {@code replacement}: the event log retains a truncated copy of a large body, and an argument still holding
+     * the original would keep the whole body reachable.
+     */
+    public LogEntry replaceQuoted(Object original, Object replacement) {
+        if (arguments != null && original != null) {
+            // a copy: a cloned entry shares its arguments array with the entry it was cloned from
+            Object[] replaced = arguments.clone();
+            for (int i = 0; i < replaced.length; i++) {
+                if (replaced[i] == original) {
+                    replaced[i] = replacement;
+                } else if (replaced[i] instanceof DeferredLogArgument
+                    && ((DeferredLogArgument) replaced[i]).getRequest() == original
+                    && replacement instanceof HttpRequest) {
+                    replaced[i] = ((DeferredLogArgument) replaced[i]).withRequest((HttpRequest) replacement);
+                }
+            }
+            this.arguments = replaced;
+            this.renderedMessage = null;
+            this.hashCode = 0;
+            this.estimatedHeapSize = -1;
+        }
+        return this;
     }
 
     /**
@@ -1246,6 +1375,22 @@ public class LogEntry implements EventTranslator<LogEntry> {
 
         public String getMessage() {
             return messageFor(redaction);
+        }
+
+        /**
+         * The message as {@code LOG_ENTRIES} writes it: as {@link #getMessage()}, except that the entry's own
+         * request, response or curl command is quoted in its compact form (see {@link #getSerializedArguments()}).
+         */
+        public String getSerializedMessage() {
+            return serializedMessageFor(redaction);
+        }
+
+        public Object[] getSerializedArguments() {
+            return serializedArgumentsFor(redaction);
+        }
+
+        public Expectation getSerializedExpectation() {
+            return serializedExpectationFor(redaction);
         }
 
         public String getCompactMessage() {

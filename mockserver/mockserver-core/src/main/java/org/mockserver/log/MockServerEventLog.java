@@ -872,20 +872,22 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
             HttpRequest httpRequest = (HttpRequest) requestDefinition;
             byte[] body = httpRequest.getBodyAsRawBytes();
             if (body != null && body.length > maxLoggedBodyBytes) {
-                logEntry.setHttpRequest(httpRequest
+                HttpRequest truncated = httpRequest
                     .clone()
                     .withBody(Arrays.copyOf(body, maxLoggedBodyBytes))
-                    .withHeader(TRUNCATED_BODY_HEADER, String.valueOf(body.length)));
+                    .withHeader(TRUNCATED_BODY_HEADER, String.valueOf(body.length));
+                logEntry.setHttpRequest(truncated).replaceQuoted(httpRequest, truncated);
             }
         }
         HttpResponse httpResponse = logEntry.getHttpResponse();
         if (httpResponse != null) {
             byte[] body = httpResponse.getBodyAsRawBytes();
             if (body != null && body.length > maxLoggedBodyBytes) {
-                logEntry.setHttpResponse(httpResponse
+                HttpResponse truncated = httpResponse
                     .clone()
                     .withBody(Arrays.copyOf(body, maxLoggedBodyBytes))
-                    .withHeader(TRUNCATED_BODY_HEADER, String.valueOf(body.length)));
+                    .withHeader(TRUNCATED_BODY_HEADER, String.valueOf(body.length));
+                logEntry.setHttpResponse(truncated).replaceQuoted(httpResponse, truncated);
             }
         }
     }

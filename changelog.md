@@ -6,7 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-This release delivers a sustained performance and memory programme alongside data-integrity fixes under load. The headline numbers, from the single-load-generator benchmark on the same six-core rig (builds 420 and 464): the healthy ceiling rises from 39,033 to 57,149 req/s and the peak from 43,671 to 59,905 req/s, with p95 at 32,000 req/s falling from 56.6 ms to 0.44 ms on the new ZGC default in the Docker images; event-log retained heap at 20,000 entries falls from 429 MB to 61 MB; Docker image download shrinks ~23%; and instance shutdown drops from ~107 ms to near zero. Four BREAKING changes affect only users of HTTP/3, of DNS mocking, of the TypeScript typings of the Node client's `mockserver-client/llm` path, or of binary (non-HTTP) proxying — see the `BREAKING` entries in *Changed*.
+This release delivers a sustained performance and memory programme alongside data-integrity fixes under load. The headline numbers, from the single-load-generator benchmark on the same six-core rig (builds 420 and 464): the healthy ceiling rises from 39,033 to 57,149 req/s and the peak from 43,671 to 59,905 req/s, with p95 at 32,000 req/s falling from 56.6 ms to 0.44 ms on the new ZGC default in the Docker images; event-log retained heap at 20,000 entries falls from 429 MB to 61 MB; Docker image download shrinks ~23%; and instance shutdown drops from ~107 ms to near zero. Five BREAKING changes affect only users of HTTP/3, of DNS mocking, of the TypeScript typings of the Node client's `mockserver-client/llm` path, of binary (non-HTTP) proxying, or of code that reads the `message` or `arguments` of `LOG_ENTRIES` output — see the `BREAKING` entries in *Changed*.
 
 **BREAKING** — if you set `http3Port`, HTTP/3's native library now ships separately: use the `jar-with-dependencies-http3` jar, or in containers the new `mockserver/mockserver:<version>-http3` image (Helm: `image.variant=http3`). A server configured for HTTP/3 without it now refuses to start with a message naming the exact fix, where it used to log a warning and ignore the port — which is what every published Docker image did, because none of them could load the native. It also refuses to start when the HTTP/3 port itself cannot be used, for example because another application holds that UDP port, where it used to log a warning and serve only HTTP/1.1 and HTTP/2. If you do not use HTTP/3 — the default — nothing changes except a smaller standalone jar.
 
@@ -15,6 +15,8 @@ This release delivers a sustained performance and memory programme alongside dat
 **BREAKING** — for TypeScript users of the Node client's deep import `mockserver-client/llm`: its typings no longer declare a default export; everything imported from `mockserver-client` itself type-checks as in 8.0.0. See *Changed*.
 
 **BREAKING** — if you proxy a binary (non-HTTP) protocol through MockServer, a client's connection now gets one upstream connection for its whole life instead of a new one for every message (`forwardBinaryRequestsUseSingleConnection`, on by default). The upstream therefore sees one connection per client connection, held open as long as the client's is, everything it sends reaches the client, when it closes its connection the client's is closed too, and a client whose upstream never answers is no longer cut off after `maxFutureTimeout`. Set `forwardBinaryRequestsUseSingleConnection=false` to get the 8.0.0 behaviour back exactly. A client that turns TLS on part way through, such as PostgreSQL with `sslmode=require`, now has its upstream connection upgraded to TLS on the same connection, so such a database can be proxied (SCRAM channel binding needs `channelBinding=disable` in the client, or MockServer given the server's own certificate). A connection whose client starts with TLS, and every binary connection when an upstream proxy is configured, is still forwarded as in 8.0.0. `forwardBinaryRequestsWithoutWaitingForResponse` is deprecated and applies only when the new setting is `false`. If you do not proxy binary protocols nothing changes.
+
+**BREAKING** — if you retrieve logs with `format=LOG_ENTRIES` (or through the MCP `retrieve_logs` and `raw_retrieve` tools) and read a request or response body from an entry's `message` or `arguments`, read it from the entry's `httpRequest` or `httpResponse` instead: those fields now refer to the entry's own request or response by a short form such as `"POST /orders"` or `"201"`, and the `expectation` recorded for a proxied exchange is written without its bodies. Each body is written once, so a log of large bodies retrieves at about a third of its former size. See *Changed*.
 
 | Metric | Before | After |
 |--------|--------|-------|
@@ -224,6 +226,57 @@ This release delivers a sustained performance and memory programme alongside dat
   binary expectation exists, every relayed message is matched before it is forwarded, with the usual
   match log entries.
 
+- **BREAKING: `LOG_ENTRIES` output writes each request and response body once; the `message` and
+  `arguments` of an entry refer to the entry's own request and response by a short form.** A log
+  entry retrieved with `format=LOG_ENTRIES` used to write its request three times: in
+  `httpRequest`, again as an element of `arguments`, and again inside the rendered `message`, where
+  every character that is not printable became a six-character escape twice over. A 1 MiB request
+  body of zero bytes made a 19.9 MB entry, and 1 MiB of binary data a 4.2 MB one. Now the full
+  request and response are written only in `httpRequest` (or `httpRequests`) and `httpResponse`;
+  where `arguments` and `message` refer to that same request or response they show its method
+  and path or its status code, as `compactLogFormat` already shows them on the console, and the
+  curl command logged for a forwarded request is shown as that request's method and path. The same entries are now 6.3 MB and 1.4 MB. An
+  argument that is a different request or response (for example the one a request was compared
+  with) is still written in full. For a received `POST /orders`, before:
+
+  ```json
+  "httpRequest" : { "method" : "POST", "path" : "/orders", "body" : "..." },
+  "messageFormat" : "received request:{}",
+  "message" : [ "received request:", "", "   {", "      \"method\" : \"POST\",", ... , "   }" ],
+  "arguments" : [ { "method" : "POST", "path" : "/orders", "body" : "..." } ]
+  ```
+
+  after:
+
+  ```json
+  "httpRequest" : { "method" : "POST", "path" : "/orders", "body" : "..." },
+  "messageFormat" : "received request:{}",
+  "message" : [ "received request:", "", "   POST /orders" ],
+  "arguments" : [ "POST /orders" ]
+  ```
+
+  For a forwarded `POST /orders` answered `201`, `"expectation" : { "httpRequest" : { "method" : "POST", "path" : "/orders", ... }, "httpResponse" : { "statusCode" : 201, ... }, "id" : "..." }` no longer carries a `body` in either part.
+
+  This applies to every retrieve that returns `LOG_ENTRIES` (`type=LOGS`, `REQUESTS`,
+  `REQUEST_RESPONSES` and `RECORDED_EXPECTATIONS`) and to the MCP `retrieve_logs` and
+  `raw_retrieve` tools, which return that output unchanged. The Java client's
+  `retrieveLogEntries` returns the short form in `getArguments()`, so a message it re-renders
+  quotes it too. Nothing else changes: the dashboard, and logs retrieved as text (`format=JSON`,
+  the default, and `JAVA`), still show the full request and response in each message. There is
+  no setting to restore the old form; the full request and response are in the same entry.
+  The `expectation` that an entry for a proxied (forwarded) exchange records from its own request
+  and response is written without their bodies too: it keeps its id, method, path, headers and
+  status code, and the bodies are in the entry's `httpRequest` and `httpResponse`. An expectation
+  that matched the request is still written in full. Recorded expectations retrieved in any other
+  format (`format=JSON`, `JAVA`, ...) keep their bodies, as does *Capture as Mock* in the dashboard.
+
+- **At the default `INFO` log level, a logged request or response no longer keeps a second, larger
+  copy of its body in memory.** Writing an entry to the console rendered its message, and the
+  entry kept that text for as long as it stayed in the log. For an entry about a request or
+  response that text repeats the bodies, escaped, and the `maxEventLogSizeInBytes` budget did not
+  count it, so a log of 1 MiB zero-byte bodies held about 7 times the heap the budget allowed
+  (2.3 times for binary bodies). Such a message is now rendered again whenever it is read, and a
+  retained entry holds about what the budget counts. Log output is unchanged.
 ### Changed
 
 - **The dashboard shortens bodies longer than 64 KiB, with a button to load the whole body.** Each
@@ -648,6 +701,12 @@ This release delivers a sustained performance and memory programme alongside dat
   short, and the message could be returned as the response body. The error now says how many items
   there were and which one failed (for a log entry, its type and correlation id), and still carries
   the underlying cause.
+- **`maxLoggedBodyBytes` now limits every copy of a logged body, not only one.** It truncates the
+  request and response bodies an entry keeps in the event log, but the entry's message arguments,
+  and the curl command logged for a forwarded request, still referred to the original request and
+  response, so the whole bodies stayed in memory and appeared in full in the entry's message.
+  They now refer to the truncated copies, so the console line and logs retrieved as text show the
+  truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
 - **A gRPC bidirectional stream over HTTP/2, including a server reflection stream, now ends normally when its client

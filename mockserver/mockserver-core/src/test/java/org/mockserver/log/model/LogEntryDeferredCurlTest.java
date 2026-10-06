@@ -130,11 +130,15 @@ public class LogEntryDeferredCurlTest {
         out.add(entry.getCompactMessage());
         out.add(entry.getMessage(notRedacting));
         out.add(entry.getCompactMessage(notRedacting));
-        out.add(new LogEntrySerializer(LOGGER).serialize(entry));
-        out.add(new LogEntrySerializer(LOGGER, notRedacting).serialize(entry));
         out.add(String.valueOf(entry.getArguments()[2]));
         out.add(String.valueOf(entry.getArguments(notRedacting)[2]));
         return out;
+    }
+
+    // LOG_ENTRIES quotes the curl for the entry's own request compactly, so it is exercised here, not compared
+    private static void serialize(LogEntry entry) {
+        new LogEntrySerializer(LOGGER).serialize(entry);
+        new LogEntrySerializer(LOGGER, configuration().redactSecretsInLog(false)).serialize(entry);
     }
 
     private static void renderRedacted(LogEntry entry) {
@@ -191,6 +195,7 @@ public class LogEntryDeferredCurlTest {
             // the response is written after it is logged, and the entry is read later by retrieve / dashboard
             writer.mapMockServerResponseToNettyResponse(exchange.response).forEach(io.netty.util.ReferenceCountUtil::release);
             List<String> actual = renderings(retained);
+            serialize(retained);
             renderRedacted(retained);
 
             assertThat(exchange.name, actual, is(expected));

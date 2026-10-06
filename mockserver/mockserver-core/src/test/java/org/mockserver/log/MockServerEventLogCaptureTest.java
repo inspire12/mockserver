@@ -5,6 +5,7 @@ import org.mockserver.configuration.Configuration;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpRequest;
+import org.mockserver.model.HttpResponse;
 import org.mockserver.model.RequestDefinition;
 import org.mockserver.scheduler.Scheduler;
 
@@ -30,6 +31,10 @@ import static org.mockserver.model.HttpResponse.response;
  * budget caps the total retained size.
  */
 public class MockServerEventLogCaptureTest {
+
+    private static String base64(String text) {
+        return java.util.Base64.getEncoder().encodeToString(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
 
     private MockServerEventLog synchronousEventLog(Configuration configuration) {
         // synchronous processing (false) so add() runs processLogEntry inline and assertions are deterministic
@@ -80,6 +85,31 @@ public class MockServerEventLogCaptureTest {
         assertThat(retainedRequest.getFirstHeader("x-mockserver-body-truncated"), is("16"));
         assertThat(retained.getHttpResponse().getBodyAsRawBytes().length, is(5));
         assertThat(retained.getHttpResponse().getFirstHeader("x-mockserver-body-truncated"), is("25"));
+    }
+
+    @Test
+    public void shouldTruncateTheRequestAndResponseQuotedAsArgumentsToo() {
+        // given
+        MockServerEventLog log = synchronousEventLog(configuration().maxLoggedBodyBytes(5));
+        HttpRequest liveRequest = request("/capture").withMethod("POST").withBody("0123456789ABCDEF");
+        HttpResponse liveResponse = response().withStatusCode(200).withBody("a-very-long-response-body");
+
+        // when
+        log.add(new LogEntry()
+            .setType(FORWARDED_REQUEST)
+            .setHttpRequest(liveRequest)
+            .setHttpResponse(liveResponse)
+            .setMessageFormat("returning response:{}for forwarded request:{}")
+            .setArguments(liveResponse, liveRequest));
+
+        // then - the arguments quote the truncated copies, so the retained entry holds no full body
+        LogEntry retained = retrieveMessageLogEntries(log, null).get(0);
+        Object[] arguments = retained.getArguments();
+        // a truncated body is kept as bytes, so it renders as base64
+        assertThat(((HttpResponse) arguments[0]).getBodyAsString(), is(base64("a-ver")));
+        assertThat(((HttpRequest) arguments[1]).getBodyAsString(), is(base64("01234")));
+        assertThat(retained.getMessage().contains("0123456789ABCDEF"), is(false));
+        assertThat(liveRequest.getBodyAsRawBytes().length, is(16));
     }
 
     @Test

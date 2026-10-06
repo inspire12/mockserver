@@ -301,15 +301,13 @@ public class LogEntryTest {
             .setHttpResponse(response().withStatusCode(200).withBody("hi"))
             .setExpectation(eagerSynthetic(request().withPath("/x"), response().withStatusCode(200).withBody("hi")));
 
-        String syntheticJson = mapper.writeValueAsString(synthetic);
-        String eagerJson = mapper.writeValueAsString(eager);
-
         // The negative control targets this assertion: if getExpectation() stops deriving the synthetic
         // expectation, the "expectation" object disappears from the serialized entry and this fails.
-        assertThat(syntheticJson, containsString("\"expectation\""));
-        // The only difference between the two serializations is the random expectation id; strip it and
-        // the JSON is byte-identical, proving behaviour (serialized output) is unchanged.
-        assertThat(stripExpectationId(syntheticJson), is(stripExpectationId(eagerJson)));
+        assertThat(mapper.writeValueAsString(synthetic), containsString("\"expectation\""));
+        // The derived expectation equals the eagerly built one except for its random id. (LOG_ENTRIES writes a
+        // synthetic one without the bodies the entry already writes, so the two entries' JSON now differ.)
+        assertThat(stripExpectationId(mapper.writeValueAsString(synthetic.getExpectation())),
+            is(stripExpectationId(mapper.writeValueAsString(eager.getExpectation()))));
     }
 
     private static String stripExpectationId(String json) {

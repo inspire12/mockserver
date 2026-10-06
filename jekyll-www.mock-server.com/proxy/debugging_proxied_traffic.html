@@ -42,7 +42,7 @@ sitemap:
 	</thead>
 	<tbody>
 		<tr><td><strong>JSON</strong> (default)</td><td>REQUESTS, REQUEST_RESPONSES</td><td>Inspect the raw recorded requests/response pairs, or process them in a script.</td></tr>
-		<tr><td><strong>LOG_ENTRIES</strong></td><td>REQUESTS, REQUEST_RESPONSES</td><td>Read the traffic in MockServer's human-readable log format.</td></tr>
+		<tr><td><strong>LOG_ENTRIES</strong></td><td>REQUESTS, REQUEST_RESPONSES</td><td>Get MockServer's structured log entries for the traffic: each request and response, with its body, is in the entry's <code>httpRequest</code> and <code>httpResponse</code>; the <code>message</code> refers to them by method and path or status code.</td></tr>
 		<tr><td><strong>HAR</strong></td><td>REQUEST_RESPONSES</td><td>Open the recording in browser DevTools or any HTTP-analysis tool that reads <a href="http://www.softwareishard.com/blog/har-12-spec/" target="_blank" rel="noopener noreferrer">HAR 1.2</a> — a great way to share a capture.</td></tr>
 		<tr><td><strong>CURL</strong></td><td>REQUESTS, REQUEST_RESPONSES</td><td>Get one <code>curl</code> command per recorded request so you can replay an individual call by hand.</td></tr>
 		<tr><td><strong>JAVA</strong></td><td>RECORDED_EXPECTATIONS</td><td>Render recorded traffic as Java client code (handy for pasting into a test). For raw recorded requests use <strong>RECORDED_EXPECTATIONS</strong> rather than <strong>REQUESTS</strong> &mdash; with <strong>REQUESTS</strong> the Java format returns the requests as JSON, not Java code.</td></tr>

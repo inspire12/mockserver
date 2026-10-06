@@ -4418,6 +4418,9 @@ public abstract class AbstractExtendedMockingIntegrationTest extends AbstractBas
             assertThat(actual.get("messageFormat").asText(), is(expected.getMessageFormat()));
             assertThat(actual.has("httpRequest"), is(true));
             assertThat(actual.get("httpRequest").get("path").asText(), is(((HttpRequest) expected.getHttpRequest()).getPath().getValue()));
+            // the request is written once, in httpRequest; arguments and message quote it compactly
+            assertThat(actual.get("arguments").get(0).asText(), is("GET " + ((HttpRequest) expected.getHttpRequest()).getPath().getValue()));
+            assertThat(actual.get("message").toString(), org.hamcrest.Matchers.not(containsString("accept-encoding")));
         }
     }
 

@@ -32,6 +32,17 @@ public final class DeferredLogArgument {
         return new DeferredLogArgument(serializer, request, remoteAddress);
     }
 
+    HttpRequest getRequest() {
+        return request;
+    }
+
+    /**
+     * The same command for {@code replacement}, for an entry that retains a truncated copy of the request.
+     */
+    DeferredLogArgument withRequest(HttpRequest replacement) {
+        return new DeferredLogArgument(serializer, replacement, remoteAddress);
+    }
+
     /**
      * The curl command for the request as {@code redactor} masks it ({@code null} renders it unredacted), or a
      * short placeholder if rendering fails, so one bad argument cannot break a retrieve or dashboard read of

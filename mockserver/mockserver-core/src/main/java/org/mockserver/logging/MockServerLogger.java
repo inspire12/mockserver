@@ -211,8 +211,9 @@ public class MockServerLogger {
             Level effectiveLevel = resolveEffectiveLevel(logEntry.getType(), configuration.logLevelOverrides(), configuration.logLevel());
             if (logEntry.isAlwaysLog() || isEnabled(logEntry.getLogLevel(), effectiveLevel)) {
                 LogEntry.RedactedView redacted = logEntry.redactedView(configuration);
-                if (isNotBlank(redacted.getMessage())) {
-                    writeLogEntry(logger, logEntry, redacted, configuration.compactLogFormat());
+                String message = redacted.getMessage();
+                if (isNotBlank(message)) {
+                    writeLogEntry(logger, logEntry, redacted, message, configuration.compactLogFormat());
                 }
             }
         }
@@ -223,15 +224,17 @@ public class MockServerLogger {
             Level effectiveLevel = resolveEffectiveLevel(logEntry.getType(), ConfigurationProperties.logLevelOverrides(), ConfigurationProperties.logLevel());
             if (logEntry.isAlwaysLog() || isEnabled(logEntry.getLogLevel(), effectiveLevel)) {
                 LogEntry.RedactedView redacted = logEntry.redactedView(null);
-                if (isNotBlank(redacted.getMessage())) {
-                    writeLogEntry(logger, logEntry, redacted, ConfigurationProperties.compactLogFormat());
+                String message = redacted.getMessage();
+                if (isNotBlank(message)) {
+                    writeLogEntry(logger, logEntry, redacted, message, ConfigurationProperties.compactLogFormat());
                 }
             }
         }
     }
 
-    private static void writeLogEntry(Logger logger, LogEntry logEntry, LogEntry.RedactedView redacted, boolean compact) {
-        String message = compact ? redacted.getCompactMessage() : redacted.getMessage();
+    // the rendered message is passed in: an entry quoting a request does not memoise it, so rendering twice costs twice
+    private static void writeLogEntry(Logger logger, LogEntry logEntry, LogEntry.RedactedView redacted, String renderedMessage, boolean compact) {
+        String message = compact ? redacted.getCompactMessage() : renderedMessage;
         Throwable throwable = redacted.getThrowable();
         switch (logEntry.getLogLevel()) {
             case ERROR:
