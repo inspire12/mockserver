@@ -111,8 +111,9 @@ public class LoopbackPortConflictIntegrationTest {
         HttpURLConnection connection = (HttpURLConnection) new URL("http", "127.0.0.1", port, "/mockserver/status").openConnection();
         try {
             connection.setRequestMethod("PUT");
-            connection.setConnectTimeout(2000);
-            connection.setReadTimeout(2000);
+            // generous for a loaded agent: a held listener never answers, so a misrouted request still fails
+            connection.setConnectTimeout(20_000);
+            connection.setReadTimeout(20_000);
             try (InputStream inputStream = connection.getInputStream()) {
                 ByteArrayOutputStream body = new ByteArrayOutputStream();
                 inputStream.transferTo(body);

@@ -97,6 +97,8 @@ public class HttpActionHandlerStreamedLlmUsageTest {
     private HttpState mockHttpStateHandler;
     @InjectMocks
     private HttpActionHandler actionHandler;
+    private volatile HttpForward nextForward;
+    private volatile HttpForwardActionResult nextForwardResult;
 
     private InMemorySpanExporter spans;
     private GenAiSpanExporter exporter;
@@ -125,6 +127,12 @@ public class HttpActionHandlerStreamedLlmUsageTest {
 
         openMocks(this);
         when(mockServerLogger.isEnabledForInstance(any(Level.class))).thenReturn(true);
+        // stubbed once, before any forward: a forward's drift analysis calls mockHttpStateHandler from a
+        // scheduler thread, and a stubbing made while it does can attach to that thread's invocation
+        when(mockHttpStateHandler.firstMatchingExpectation(any(HttpRequest.class)))
+            .thenAnswer(invocation -> new Expectation(invocation.getArgument(0, HttpRequest.class)).thenForward(nextForward));
+        when(mockHttpForwardActionHandler.handle(any(HttpForward.class), any(HttpRequest.class)))
+            .thenAnswer(invocation -> nextForwardResult);
 
         spans = InMemorySpanExporter.create();
         exporter = GenAiSpanExporter.startWithProcessor(SimpleSpanProcessor.create(spans));
@@ -147,9 +155,8 @@ public class HttpActionHandlerStreamedLlmUsageTest {
         CompletableFuture<HttpResponse> future = new CompletableFuture<>();
         future.complete(upstreamResponse);
         HttpForwardActionResult forwardResult = new HttpForwardActionResult(forwardedRequest, future, null, new InetSocketAddress(1234));
-        HttpForward forward = forward().withHost(host).withPort(443).withScheme(HttpForward.Scheme.HTTPS);
-        when(mockHttpStateHandler.firstMatchingExpectation(request)).thenReturn(new Expectation(request).thenForward(forward));
-        when(mockHttpForwardActionHandler.handle(any(HttpForward.class), any(HttpRequest.class))).thenReturn(forwardResult);
+        nextForward = forward().withHost(host).withPort(443).withScheme(HttpForward.Scheme.HTTPS);
+        nextForwardResult = forwardResult;
 
         actionHandler.processAction(request, mockResponseWriter, null, new HashSet<>(), false, true);
     }
