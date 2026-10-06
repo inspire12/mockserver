@@ -74,6 +74,8 @@ sitemap:
 
 <p>Updates are throttled to at most one per second to prevent UI flooding during high-traffic scenarios. If the browser has not yet received the previous update (for example over a slow network, or when captured requests have large bodies), MockServer waits for it to catch up and then sends the latest state, rather than queuing updates the browser cannot keep up with.</p>
 
+<p><strong>Large bodies are shortened in the dashboard.</strong> A request or response body longer than 64 KiB is shown cut to its first 64 KiB, with a note saying how long it is in full and a <strong>Load Full Body</strong> button that fetches the whole body from MockServer when you need it. Replay, Repeat, Clear, Copy as curl and Capture as Mock load the full body first, so they never act on a shortened one; if the request has already been cleared from the log they do nothing and say so. For other actions, load the full body first. MockServer itself always keeps and serves the full body; only the dashboard's live view is shortened. If many recent requests have large bodies, an update can reach its size limit (about 16 MB); the dashboard then shows the newest requests and says older ones are not shown. Filter the requests or clear the log to see older ones.</p>
+
 <a id="ui_features_section" class="anchor" href="#ui_features_section">&nbsp;</a>
 
 <h2>Common Features</h2>

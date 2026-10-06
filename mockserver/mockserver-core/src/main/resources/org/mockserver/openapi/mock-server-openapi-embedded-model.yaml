@@ -1118,6 +1118,46 @@ paths:
                       nullable: true
         '400':
           description: failed to retrieve audit entries
+  /mockserver/logEntryBody:
+    get:
+      tags:
+        - control
+      summary: retrieve one log entry's request or response with its full body
+      description: >-
+        Returns the request or the response of one log entry, by the entry's id, with its body in
+        full. The dashboard shortens long bodies in its live updates and uses this to load a full
+        body on demand. Secrets are redacted as in the log when redactSecretsInLog is on. Returns
+        404 once the entry has been cleared or evicted from the log.
+      parameters:
+        - in: query
+          name: id
+          schema:
+            type: string
+          required: true
+          description: the log entry's id (the dashboard sends it with each shortened body)
+        - in: query
+          name: part
+          schema:
+            type: string
+            enum: [request, response]
+          required: true
+          description: which message of the entry to return
+      responses:
+        '200':
+          description: the request (as httpRequest) or the response (as httpResponse)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  httpRequest:
+                    type: object
+                  httpResponse:
+                    type: object
+        '400':
+          description: id or part missing or invalid
+        '404':
+          description: no such log entry, or it has no request or response
   /mockserver/scenario:
     get:
       tags:

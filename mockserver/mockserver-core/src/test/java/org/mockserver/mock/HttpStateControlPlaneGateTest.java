@@ -85,6 +85,7 @@ public class HttpStateControlPlaneGateTest {
             "/loadScenario/generateFromRecording",
             "/loadScenario/start",
             "/loadScenario/stop",
+            "/logEntryBody",
             "/mode",
             "/oidc",
             "/openapi",

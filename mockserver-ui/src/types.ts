@@ -16,6 +16,21 @@ export type Description =
   | RequestDefinitionDescription
   | RequestDefinitionObjectDescription;
 
+/**
+ * The server shortens long bodies in dashboard updates. This says which body was cut, how long it is
+ * in full and how much is shown (both in characters), and which log entry to load it from
+ * (GET /mockserver/logEntryBody). An expectation shown in a log message, or a request or response argument
+ * that is not the entry's own, can be cut but not loaded (`loadable: false`).
+ */
+export interface TruncatedBody {
+  logEntryId: string;
+  part: 'request' | 'response' | 'expectation';
+  originalLength: number;
+  shownLength: number;
+  /** False when this is not the log entry's own request or response, so it cannot be loaded from the entry. */
+  loadable?: boolean;
+}
+
 export interface MessagePart {
   key: string;
   value: string | string[] | Record<string, unknown> | number;
@@ -23,6 +38,7 @@ export interface MessagePart {
   json?: boolean;
   multiline?: boolean;
   because?: boolean;
+  truncatedBody?: TruncatedBody;
 }
 
 export interface LogEntryValue {
@@ -67,6 +83,11 @@ export interface JsonListItem {
    * renumbers on every push and refers to nothing.
    */
   timestamp?: string;
+  /** The row's request or response bodies the server shortened; absent when both were sent whole. */
+  truncatedBodies?: {
+    httpRequest?: TruncatedBody;
+    httpResponse?: TruncatedBody;
+  };
 }
 
 export interface WebSocketMessage {
@@ -86,6 +107,8 @@ export interface WebSocketMessage {
   activeExpectationsIncludeLlm?: boolean;
   recordedRequests: JsonListItem[];
   proxiedRequests: JsonListItem[];
+  /** The update reached its size limit, so older log rows were left out of it. */
+  frameLimitReached?: boolean;
   error?: string;
 }
 

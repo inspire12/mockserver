@@ -16,6 +16,8 @@ import ScienceOutlinedIcon from '@mui/icons-material/ScienceOutlined';
 import type { JsonListItem as JsonListItemType } from '../types';
 import type { ConversationPredicates } from '../lib/llmTraffic';
 import JsonViewer from './JsonViewer';
+import TruncatedBodyNotice from './TruncatedBodyNotice';
+import { useLoadFullRow } from '../hooks/useLoadFullRow';
 import DescriptionDisplay from './DescriptionDisplay';
 import PredicatePills from './PredicatePills';
 import { monospaceFontFamily, transitions } from '../theme';
@@ -261,6 +263,7 @@ function extractChaosSummary(value: Record<string, unknown>): string | null {
 
 function JsonListItem({ item, index, turnPosition, expanded: expandedProp, onToggleExpand, onEdit, onDuplicate, onDelete, onTest, onSelectToggle, selected }: JsonListItemProps) {
   const [internalExpanded, setInternalExpanded] = useState(false);
+  const loadFullRow = useLoadFullRow();
   const expanded = expandedProp ?? internalExpanded;
   const handleToggle = () => {
     if (onToggleExpand) onToggleExpand(item.key);
@@ -650,6 +653,14 @@ function JsonListItem({ item, index, turnPosition, expanded: expandedProp, onTog
             <Box sx={{ mb: 1 }}>
               <PredicatePills predicates={llmBadge.predicates} />
             </Box>
+          )}
+          {(item.truncatedBodies?.httpRequest ?? item.truncatedBodies?.httpResponse) && (
+            <TruncatedBodyNotice
+              marker={item.truncatedBodies?.httpRequest ?? item.truncatedBodies?.httpResponse ?? { logEntryId: '', part: 'request', originalLength: 0, shownLength: 0 }}
+              onLoad={async () => {
+                await loadFullRow(item);
+              }}
+            />
           )}
           <JsonViewer data={item.value} collapsed={1} enableClipboard={true} />
         </Box>

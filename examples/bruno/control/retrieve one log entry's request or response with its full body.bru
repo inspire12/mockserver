@@ -1,0 +1,22 @@
+meta {
+  name: retrieve one log entry's request or response with its full body
+  type: http
+  seq: 11
+}
+
+get {
+  url: {{baseUrl}}/mockserver/logEntryBody?id=replace-with-a-log-entry-id&part=request
+  body: none
+  auth: inherit
+}
+
+params:query {
+  id: replace-with-a-log-entry-id
+  part: request
+}
+
+docs {
+  Returns the request or the response of one log entry, by the entry's id, with its body in full. The dashboard shortens long bodies in its live updates and uses this to load a full body on demand. Secrets are redacted as in the log when redactSecretsInLog is on. Returns 404 once the entry has been cleared or evicted from the log.
+  
+  Full API reference: https://www.mock-server.com/mock_server/mockserver_clients.html
+}

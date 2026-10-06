@@ -17,6 +17,9 @@ public class DashboardLogEntryDTO extends ObjectWithJsonToString {
     private static final String[] EXCLUDED_FIELDS = {
         "id",
         "timestamp",
+        "messageSizes",
+        "argumentSizes",
+        "argumentOwnMessageParts",
     };
     private String id;
     private String correlationId;
@@ -28,6 +31,9 @@ public class DashboardLogEntryDTO extends ObjectWithJsonToString {
     private String messageFormat;
     private Object[] arguments;
     private String[] throwable;
+    private final DashboardBodyCap.Sizes messageSizes = new DashboardBodyCap.Sizes();
+    private final DashboardBodyCap.Sizes argumentSizes = new DashboardBodyCap.Sizes();
+    private String[] argumentOwnMessageParts;
     private String because;
 
     private Description description;
@@ -54,16 +60,72 @@ public class DashboardLogEntryDTO extends ObjectWithJsonToString {
         setCorrelationId(logEntry.getCorrelationId());
         setTimestamp(logEntry.getTimestamp());
         setType(logEntry.getType());
-        setHttpRequests(logEntry.getHttpUpdatedRequests(configuration));
-        setHttpResponse(logEntry.getHttpUpdatedResponse(configuration));
+        // Bodies are cut to DashboardBodyCap.MAX_BODY_CHARACTERS after redaction, so a cut never exposes what
+        // redaction would have hidden.
+        RequestDefinition[] requests = logEntry.getHttpUpdatedRequests(configuration);
+        for (int i = 0; i < requests.length; i++) {
+            requests[i] = DashboardBodyCap.cap(requests[i], messageSizes);
+        }
+        setHttpRequests(requests);
+        setHttpResponse(DashboardBodyCap.cap(logEntry.getHttpUpdatedResponse(configuration), messageSizes));
         LogEntry.RedactedView redacted = logEntry.redactedView(configuration);
         setMessageFormat(redacted.getMessageFormat());
-        setArguments(redacted.getArguments());
+        Object[] arguments = redacted.getArguments();
+        if (arguments != null) {
+            argumentOwnMessageParts = new String[arguments.length];
+            for (int i = 0; i < arguments.length; i++) {
+                arguments[i] = DashboardBodyCap.capArgument(arguments[i], argumentSizes);
+                argumentOwnMessageParts[i] = logEntry.argumentOwnMessagePart(i);
+            }
+        }
+        setArguments(arguments);
         Throwable throwable = redacted.getThrowable();
         if (throwable != null) {
             setThrowable(getStackTrace(throwable).split(System.lineSeparator()));
         }
-        setBecause(redacted.getBecause());
+        setBecause(DashboardBodyCap.capText(redacted.getBecause()));
+    }
+
+    /**
+     * The full body length of a request or response of this entry (its own, or one of its message arguments)
+     * whose body the dashboard cut short, or {@code null} when it was sent whole.
+     */
+    @JsonIgnore
+    public Long originalBodyLength(Object message) {
+        Long length = messageSizes.originalLength(message);
+        return length != null ? length : argumentSizes.originalLength(message);
+    }
+
+    /**
+     * Whether the argument at {@code index} is this entry's own request or response, so its full body can be
+     * loaded from the entry; a request or response argument that is a different object cannot.
+     */
+    @JsonIgnore
+    public boolean argumentLoadableFromEntry(int index) {
+        return argumentOwnMessageParts != null && index >= 0 && index < argumentOwnMessageParts.length
+            && argumentOwnMessageParts[index] != null;
+    }
+
+    /**
+     * How many characters of a request's or response's body this entry sends (after any cut), or {@code null}
+     * for a message that is not one of this entry's.
+     */
+    @JsonIgnore
+    public Long shownBodyLength(Object message) {
+        Long length = messageSizes.shownLength(message);
+        return length != null ? length : argumentSizes.shownLength(message);
+    }
+
+    /**
+     * Roughly how many characters this entry adds to an update as a log message (its arguments), used to
+     * keep an update under its size ceiling.
+     */
+    @JsonIgnore
+    public long estimatedLogMessageCharacters() {
+        return DashboardBodyCap.MESSAGE_OVERHEAD_CHARACTERS
+            + (messageFormat != null ? messageFormat.length() : 0)
+            + argumentSizes.displayedCharacters()
+            + (throwable != null ? throwable.length * 100L : 0);
     }
 
     public String getId() {

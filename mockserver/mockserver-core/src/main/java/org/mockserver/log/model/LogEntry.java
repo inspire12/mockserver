@@ -975,6 +975,26 @@ public class LogEntry implements EventTranslator<LogEntry> {
     }
 
     /**
+     * {@code "request"} or {@code "response"} when the argument at {@code index} is this entry's own request or
+     * response (the same object), otherwise {@code null}. Only such an argument can be shown whole from the entry
+     * (GET /mockserver/logEntryBody returns the entry's own request or response).
+     */
+    @JsonIgnore
+    public String argumentOwnMessagePart(int index) {
+        if (arguments == null || index < 0 || index >= arguments.length || arguments[index] == null) {
+            return null;
+        }
+        Object argument = arguments[index];
+        if (argument == getHttpRequest()) {
+            return "request";
+        }
+        if (argument == httpResponse) {
+            return "response";
+        }
+        return null;
+    }
+
+    /**
      * The log arguments, with bodies rendered and secrets redacted.
      * <p>
      * Redaction matters here and not only on {@link #getHttpUpdatedRequests}: these arguments reach

@@ -75,7 +75,9 @@ import {
   ScriptedTurnsPanel,
 } from './ConversationView';
 import type { ScriptedTurn } from './ConversationView';
-import type { JsonListItem } from '../types';
+import type { JsonListItem, TruncatedBody } from '../types';
+import TruncatedBodyNotice from './TruncatedBodyNotice';
+import { useLoadFullRow } from '../hooks/useLoadFullRow';
 import { isCapturableTraffic } from '../lib/expectationFromCapture';
 import type { CreateFromMenuAction } from './LogEntry';
 import { replayRequests } from '../lib/replay';
@@ -1472,13 +1474,15 @@ function ReplayDialog({ open, onClose, item, connectionParams }: ReplayDialogPro
   const [loading, setLoading] = useState(false);
   const [replayResponse, setReplayResponse] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState<HumanError | null>(null);
+  const loadFullRow = useLoadFullRow();
 
   const handleReplay = useCallback(async () => {
     setLoading(true);
     setError(null);
     setReplayResponse(null);
     try {
-      const httpRequest = (item.value['httpRequest'] as Record<string, unknown> | undefined) ?? {};
+      const fullItem = await loadFullRow(item);
+      const httpRequest = (fullItem.value['httpRequest'] as Record<string, unknown> | undefined) ?? {};
       const result = await replayRequests(connectionParams, httpRequest);
       setReplayResponse(result);
     } catch (err) {
@@ -1489,7 +1493,7 @@ function ReplayDialog({ open, onClose, item, connectionParams }: ReplayDialogPro
     } finally {
       setLoading(false);
     }
-  }, [connectionParams, item]);
+  }, [connectionParams, item, loadFullRow]);
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
@@ -1673,8 +1677,19 @@ function tryParseJsonObject(text: string): Record<string, unknown> | null {
   }
 }
 
+function notifyFullBodyLoadFailed(e: unknown) {
+  useDashboardStore.getState().setNotification({
+    message: `Could not load the full body, so nothing was done: ${humanizeError(e).message}`,
+    severity: 'error',
+  });
+}
+
 /** Structured Request tab: method/path/query prominently, headers table, body. */
-function StructuredRequestPanel({ value }: { value: Record<string, unknown> }) {
+function StructuredRequestPanel({ value, truncated, onLoadFull }: {
+  value: Record<string, unknown>;
+  truncated?: TruncatedBody;
+  onLoadFull?: () => Promise<void>;
+}) {
   const req =
     value['httpRequest'] && typeof value['httpRequest'] === 'object' && !Array.isArray(value['httpRequest'])
       ? (value['httpRequest'] as Record<string, unknown>)
@@ -1704,13 +1719,18 @@ function StructuredRequestPanel({ value }: { value: Record<string, unknown> }) {
       <SectionLabel>Headers</SectionLabel>
       <KeyValueTable pairs={headerPairs(req['headers'])} emptyLabel="No headers" />
       <SectionLabel>Body</SectionLabel>
+      {truncated && <TruncatedBodyNotice marker={truncated} onLoad={onLoadFull} />}
       <BodyView body={req['body']} />
     </Box>
   );
 }
 
 /** Structured Response tab: status/reason prominently, headers table, body. */
-function StructuredResponsePanel({ value }: { value: Record<string, unknown> }) {
+function StructuredResponsePanel({ value, truncated, onLoadFull }: {
+  value: Record<string, unknown>;
+  truncated?: TruncatedBody;
+  onLoadFull?: () => Promise<void>;
+}) {
   const res =
     value['httpResponse'] && typeof value['httpResponse'] === 'object' && !Array.isArray(value['httpResponse'])
       ? (value['httpResponse'] as Record<string, unknown>)
@@ -1737,6 +1757,7 @@ function StructuredResponsePanel({ value }: { value: Record<string, unknown> }) 
       <SectionLabel>Headers</SectionLabel>
       <KeyValueTable pairs={headerPairs(res['headers'])} emptyLabel="No headers" />
       <SectionLabel>Body</SectionLabel>
+      {truncated && <TruncatedBodyNotice marker={truncated} onLoad={onLoadFull} />}
       <BodyView body={res['body']} />
     </Box>
   );
@@ -1867,8 +1888,16 @@ function DetailActions({ item, summary, canCapture, unmatched, onCaptureAsMock, 
     [httpRequest, item.value, summary.method, summary.path, summary.host, setBreakpoint],
   );
 
+  const loadFullRow = useLoadFullRow();
   const handleCopyCurl = useCallback(async () => {
-    const curl = buildRequestCurl(item.value, summary);
+    let fullItem: JsonListItem;
+    try {
+      fullItem = await loadFullRow(item);
+    } catch (e) {
+      notifyFullBodyLoadFailed(e);
+      return;
+    }
+    const curl = buildRequestCurl(fullItem.value, summary);
     if (!curl) return;
     try {
       await navigator.clipboard.writeText(curl);
@@ -1877,7 +1906,7 @@ function DetailActions({ item, summary, canCapture, unmatched, onCaptureAsMock, 
       // Clipboard denied (insecure context / permissions) — silently no-op,
       // consistent with the shared CopyButton's failure handling.
     }
-  }, [item.value, summary, flashCurlCopied]);
+  }, [item, loadFullRow, summary, flashCurlCopied]);
 
   return (
     <>
@@ -1997,6 +2026,11 @@ function DetailPane({ item, summary, scriptedTurns, onCaptureAsMock, onReplay, o
   // Mask known secret headers before rendering the Raw JSON view so credentials
   // (Authorization, x-api-key, Cookie, …) are not shown verbatim.
   const maskedValue = useMemo(() => maskSecretsInValue(item.value), [item.value]);
+  const loadFullRow = useLoadFullRow();
+  const loadFull = useCallback(async () => {
+    await loadFullRow(item);
+  }, [loadFullRow, item]);
+  const rowTruncation = item.truncatedBodies?.httpRequest ?? item.truncatedBodies?.httpResponse;
   // Decoded non-stream response body text, used to flag a truncated/malformed
   // response in the conversation view (undefined when the body parsed cleanly).
   const rawResponseBody = useMemo(
@@ -2028,6 +2062,7 @@ function DetailPane({ item, summary, scriptedTurns, onCaptureAsMock, onReplay, o
         </Box>
         <Divider />
         <Box sx={{ flex: 1, overflowY: 'auto', p: 1 }}>
+          {rowTruncation && <TruncatedBodyNotice marker={rowTruncation} onLoad={loadFull} />}
           <JsonViewer data={maskedValue} collapsed={2} />
         </Box>
       </Box>
@@ -2069,8 +2104,15 @@ function DetailPane({ item, summary, scriptedTurns, onCaptureAsMock, onReplay, o
       </Box>
       <Divider />
       <Box sx={{ flex: 1, overflowY: 'auto', p: 1, minHeight: 0 }}>
-        {activeLabel === 'Request' && <StructuredRequestPanel value={maskedValue} />}
-        {activeLabel === 'Response' && <StructuredResponsePanel value={maskedValue} />}
+        {rowTruncation && activeLabel !== 'Request' && activeLabel !== 'Response' && (
+          <TruncatedBodyNotice marker={rowTruncation} onLoad={loadFull} />
+        )}
+        {activeLabel === 'Request' && (
+          <StructuredRequestPanel value={maskedValue} truncated={item.truncatedBodies?.httpRequest} onLoadFull={loadFull} />
+        )}
+        {activeLabel === 'Response' && (
+          <StructuredResponsePanel value={maskedValue} truncated={item.truncatedBodies?.httpResponse} onLoadFull={loadFull} />
+        )}
         {activeLabel === 'Messages' && summary.parsed.kind === 'anthropic' && (
           <AnthropicMessagesPanel parsed={summary.parsed} />
         )}
@@ -2164,6 +2206,17 @@ export default function TrafficInspector() {
   const selectedKey = useDashboardStore((s) => s.selectedTrafficKey);
   const setSelectedKey = useDashboardStore((s) => s.setSelectedTrafficKey);
   const connectionParams = useConnectionParams();
+  const loadFullRow = useLoadFullRow();
+  // A capture or repeat built from a shortened body would be wrong: open it only once the body is whole.
+  const loadFullRowThen = useCallback(async (item: JsonListItem, open: () => void) => {
+    try {
+      await loadFullRow(item);
+    } catch (e) {
+      notifyFullBodyLoadFailed(e);
+      return;
+    }
+    open();
+  }, [loadFullRow]);
   const theme = useTheme();
   // On narrow screens the side-by-side master/detail split squashes the detail
   // pane to a sliver; stack master-over-detail (column) on small screens.
@@ -2504,7 +2557,7 @@ export default function TrafficInspector() {
       // No bulk endpoint exists — batch one clear-by-request-matcher call per
       // selected row (allSettled so one failure doesn't abort the rest).
       const results = await Promise.allSettled(
-        targets.map((item) => clearLoggedRequest(connectionParams, requestDefinitionOf(item.value))),
+        targets.map(async (item) => clearLoggedRequest(connectionParams, requestDefinitionOf((await loadFullRow(item)).value))),
       );
       const clearedKeys = new Set(
         targets.filter((_, i) => results[i]?.status === 'fulfilled').map((item) => item.key),
@@ -2535,7 +2588,7 @@ export default function TrafficInspector() {
     } finally {
       clearingRef.current = false;
     }
-  }, [allRequests, validSelectedKeys, connectionParams]);
+  }, [allRequests, validSelectedKeys, connectionParams, loadFullRow]);
 
   // The side-by-side master/detail split is user-resizable only when the detail
   // pane is actually shown (not stacked, an entry selected, not comparing/selecting).
@@ -2888,9 +2941,13 @@ export default function TrafficInspector() {
               item={selectedEntry.item}
               summary={selectedEntry.summary}
               scriptedTurns={scriptedTurns}
-              onCaptureAsMock={() => setCaptureDialogOpen(true)}
+              onCaptureAsMock={() => {
+                void loadFullRowThen(selectedEntry.item, () => setCaptureDialogOpen(true));
+              }}
               onReplay={() => setReplayDialogOpen(true)}
-              onRepeat={() => setRepeatDialogOpen(true)}
+              onRepeat={() => {
+                void loadFullRowThen(selectedEntry.item, () => setRepeatDialogOpen(true));
+              }}
               onAddToDiffPool={handleAddSelectedToDiffPool}
               inDiffPool={selectedInDiffPool}
               unmatched={selectedEntry.unmatched}

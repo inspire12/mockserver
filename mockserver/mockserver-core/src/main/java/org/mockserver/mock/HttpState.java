@@ -57,7 +57,9 @@ import org.slf4j.event.Level;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -145,6 +147,7 @@ public class HttpState {
         "/loadScenario/generateFromRecording",
         "/loadScenario/start",
         "/loadScenario/stop",
+        "/logEntryBody",
         "/mode",
         "/oidc",
         "/openapi",
@@ -3538,6 +3541,12 @@ public class HttpState {
                 }
                 return true;
             }
+            if (request.matches("GET", PATH_PREFIX + "/logEntryBody", "/logEntryBody")) {
+                if (controlPlaneRequestAuthenticated(request, responseWriter)) {
+                    responseWriter.writeResponse(request, withDashboardCORS(request, handleLogEntryBodyGet(request)), true);
+                }
+                return true;
+            }
             if (request.matches("GET", PATH_PREFIX + "/audit", "/audit")) {
                 if (controlPlaneRequestAuthenticated(request, responseWriter)) {
                     responseWriter.writeResponse(request, withDashboardCORS(request, handleAuditGet(request)), true);
@@ -6705,6 +6714,57 @@ public class HttpState {
             }
         }
         return null;
+    }
+
+    /**
+     * Handles GET /mockserver/logEntryBody?id=&lt;log entry id&gt;&amp;part=request|response: the log entry's request or
+     * response in full, as the dashboard would show it untruncated (secrets redacted when redactSecretsInLog is on).
+     * The dashboard caps bodies in its update frames and fetches a full one with this when asked.
+     */
+    private HttpResponse handleLogEntryBodyGet(HttpRequest request) {
+        String id = request.getFirstQueryStringParameter("id");
+        String part = request.getFirstQueryStringParameter("part");
+        if (isBlank(id) || !("request".equals(part) || "response".equals(part))) {
+            return response().withStatusCode(BAD_REQUEST.code())
+                .withBody("{\"error\":\"id and part (request or response) are required\"}", MediaType.JSON_UTF_8);
+        }
+        CompletableFuture<LogEntry> found = new CompletableFuture<>();
+        mockServerLog.retrieveLogEntryById(id, found::complete);
+        try {
+            LogEntry logEntry = found.get(configuration.maxFutureTimeoutInMillis(), MILLISECONDS);
+            Object message = null;
+            if (logEntry != null && "request".equals(part)) {
+                RequestDefinition[] requests = logEntry.getHttpUpdatedRequests(configuration);
+                message = requests.length > 0 ? requests[0] : null;
+            } else if (logEntry != null) {
+                message = logEntry.getHttpUpdatedResponse(configuration);
+            }
+            com.fasterxml.jackson.databind.ObjectMapper objectMapper = ObjectMapperFactory.createObjectMapper();
+            if (message == null) {
+                return response().withStatusCode(NOT_FOUND.code())
+                    .withBody(objectMapper.writeValueAsString(Collections.singletonMap("error",
+                        "no " + part + " for this log entry; it may have been cleared or evicted")), MediaType.JSON_UTF_8);
+            }
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("request".equals(part) ? "httpRequest" : "httpResponse", message);
+            return response().withStatusCode(OK.code())
+                .withBody(objectMapper.writeValueAsString(body), MediaType.JSON_UTF_8);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            return response().withStatusCode(INTERNAL_SERVER_ERROR.code())
+                .withBody("{\"error\":\"interrupted retrieving log entry\"}", MediaType.JSON_UTF_8);
+        } catch (Exception | OutOfMemoryError e) {
+            if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.WARN)
+                        .setMessageFormat("failed to return a log entry's full body to the dashboard")
+                        .setThrowable(org.mockserver.exception.ExceptionHandling.boundedFault(e))
+                );
+            }
+            return response().withStatusCode(INTERNAL_SERVER_ERROR.code())
+                .withBody("{\"error\":\"failed to retrieve log entry body\"}", MediaType.JSON_UTF_8);
+        }
     }
 
     /**

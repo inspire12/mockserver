@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.databind.SerializerProvider;
 import com.fasterxml.jackson.databind.ser.std.StdSerializer;
 import com.google.common.collect.ImmutableMap;
+import org.mockserver.dashboard.model.DashboardBodyCap;
 import org.mockserver.dashboard.model.DashboardLogEntryDTO;
 import org.mockserver.model.NottableString;
 
@@ -66,12 +67,16 @@ public class DashboardLogEntryDTOSerializer extends StdSerializer<DashboardLogEn
                             ));
                         }
                     } else {
-                        messageParts.add(ImmutableMap.of(
-                            "key", logEntry.getId() + "_" + i + "arg",
-                            "json", true,
-                            "argument", true,
-                            "value", arguments[i] != null ? arguments[i] : "\"\""
-                        ));
+                        ImmutableMap.Builder<String, Object> part = ImmutableMap.<String, Object>builder()
+                            .put("key", logEntry.getId() + "_" + i + "arg")
+                            .put("json", true)
+                            .put("argument", true)
+                            .put("value", arguments[i] != null ? arguments[i] : "\"\"");
+                        Long originalLength = logEntry.originalBodyLength(arguments[i]);
+                        if (originalLength != null) {
+                            part.put("truncatedBody", DashboardBodyCap.truncationMarker(logEntry.getId(), arguments[i], originalLength, logEntry.argumentLoadableFromEntry(i)));
+                        }
+                        messageParts.add(part.build());
                     }
                 }
             }

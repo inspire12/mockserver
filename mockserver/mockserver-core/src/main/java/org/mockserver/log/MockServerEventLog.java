@@ -1372,6 +1372,27 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
         });
     }
 
+    /**
+     * The retained, not deleted, entry with this {@link LogEntry#id()}, or {@code null} once it has been evicted
+     * or cleared. Scans newest first off the consumer thread, as the dashboard's walk does.
+     */
+    public void retrieveLogEntryById(String id, Consumer<LogEntry> consumer) {
+        runOffConsumer(() -> {
+            LogEntry found = null;
+            if (id != null) {
+                Iterator<LogEntry> entries = eventLog.descendingIterator();
+                while (entries.hasNext()) {
+                    LogEntry entry = entries.next();
+                    if (entry != null && !entry.isDeleted() && id.equals(entry.id())) {
+                        found = entry;
+                        break;
+                    }
+                }
+            }
+            consumer.accept(found);
+        });
+    }
+
     public Future<String> verify(Verification verification) {
         CompletableFuture<String> result = new CompletableFuture<>();
         verify(verification, result::complete);

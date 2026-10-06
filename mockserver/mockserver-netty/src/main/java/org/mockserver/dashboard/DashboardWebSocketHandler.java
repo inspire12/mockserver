@@ -20,6 +20,7 @@ import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpVersion;
 import org.mockserver.codec.HttpChunkLineLimiter;
 import org.mockserver.collections.CircularHashMap;
+import org.mockserver.dashboard.model.DashboardBodyCap;
 import org.mockserver.dashboard.model.DashboardLogEntryDTO;
 import org.mockserver.dashboard.model.DashboardLogEntryDTOGroup;
 import org.mockserver.dashboard.serializers.*;
@@ -151,6 +152,10 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
     // A genuinely tighter aggregate bound, if ever needed, is a separate control (a connection cap or a
     // shared budget), NOT something per-request validation buys.
     private static final int MAX_LOG_UPDATE_ITEM_LIMIT = 500;
+    // Roughly how many characters of log rows one update may carry (bodies are capped at
+    // DashboardBodyCap.MAX_BODY_CHARACTERS first). Building an update allocates about six times its size, and
+    // the browser parses the whole of it, so this keeps one dashboard's update to about 100 MB of allocation.
+    static final long MAX_UPDATE_CHARACTERS = 16L * 1024 * 1024;
     // Expectations stay on the fixed cap - not client-tunable (see the split rationale above).
     private static final int EXPECTATION_UPDATE_ITEM_LIMIT = 100;
     // Maximum number of dashboard connections whose updates this @Sharable handler fans out to (see the
@@ -1091,20 +1096,25 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
                     List<Map<String, Object>> proxiedRequests = new LinkedList<>();
                     List<Map<String, Object>> recordedRequests = new LinkedList<>();
                     List<Object> logMessages = new LinkedList<>();
+                    FrameBudget budget = new FrameBudget(MAX_UPDATE_CHARACTERS);
                     populateLogSections(
-                        reverseLogEventsStream, true, logItemLimit,
+                        reverseLogEventsStream, true, logItemLimit, budget,
                         logMessages, recordedRequests, proxiedRequests,
                         logMessagesDescriptionProcessor, recordedRequestsDescriptionProcessor, proxiedRequestsDescriptionProcessor);
                     // The write permit was acquired before this walk (leading path) or held by the flush, so
                     // just serialise and write - do not re-acquire or re-walk.
-                    ImmutableMap<String, Object> message = ImmutableMap.of(
-                        "logMessages", logMessages,
-                        "activeExpectations", activeExpectations,
-                        "activeExpectationsTotal", activeExpectationsTotal,
-                        "activeExpectationsIncludeLlm", activeExpectationsIncludeLlm,
-                        "recordedRequests", recordedRequests,
-                        "proxiedRequests", proxiedRequests // reverse
-                    );
+                    ImmutableMap.Builder<String, Object> frame = ImmutableMap.<String, Object>builder()
+                        .put("logMessages", logMessages)
+                        .put("activeExpectations", activeExpectations)
+                        .put("activeExpectationsTotal", activeExpectationsTotal)
+                        .put("activeExpectationsIncludeLlm", activeExpectationsIncludeLlm)
+                        .put("recordedRequests", recordedRequests)
+                        .put("proxiedRequests", proxiedRequests); // reverse
+                    // only when it applies, so an update under the ceiling is unchanged
+                    if (budget.limitReached()) {
+                        frame.put("frameLimitReached", true);
+                    }
+                    ImmutableMap<String, Object> message = frame.build();
                     if (deliverInline) {
                         writeMessageNow(ctx, message);
                     } else {
@@ -1165,6 +1175,93 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
         DescriptionProcessor recordedRequestsDescriptionProcessor,
         DescriptionProcessor proxiedRequestsDescriptionProcessor
     ) {
+        populateLogSections(reverseLogEventsStream, shortCircuit, logItemLimit, new FrameBudget(Long.MAX_VALUE),
+            logMessages, recordedRequests, proxiedRequests,
+            logMessagesDescriptionProcessor, recordedRequestsDescriptionProcessor, proxiedRequestsDescriptionProcessor);
+    }
+
+    /**
+     * Roughly how many characters an update may hold. Rows arrive newest first, so once a row would take the
+     * update past this, it and every older row are left out and the update says so (frameLimitReached).
+     */
+    static final class FrameBudget {
+        private final long maxCharacters;
+        private long usedCharacters;
+        private boolean limitReached;
+
+        FrameBudget(long maxCharacters) {
+            this.maxCharacters = maxCharacters;
+        }
+
+        boolean admit(long characters) {
+            if (limitReached) {
+                return false;
+            }
+            if (usedCharacters > 0 && usedCharacters + characters > maxCharacters) {
+                limitReached = true;
+                return false;
+            }
+            usedCharacters += characters;
+            return true;
+        }
+
+        boolean limitReached() {
+            return limitReached;
+        }
+    }
+
+    // The request or response a recorded row shows, and the log entry that holds it in full.
+    private static final class RowMessage {
+        private final Object message;
+        private final DashboardLogEntryDTO source;
+
+        private RowMessage(Object message, DashboardLogEntryDTO source) {
+            this.message = message;
+            this.source = source;
+        }
+
+        private long characters() {
+            Long shown = source.shownBodyLength(message);
+            return DashboardBodyCap.MESSAGE_OVERHEAD_CHARACTERS + (shown != null ? shown : bodyCharacters(message));
+        }
+    }
+
+    private static long bodyCharacters(Object message) {
+        org.mockserver.model.Body<?> body = message instanceof HttpRequest ? ((HttpRequest) message).getBody()
+            : message instanceof org.mockserver.model.HttpResponse ? ((org.mockserver.model.HttpResponse) message).getBody() : null;
+        if (body == null) {
+            return 0;
+        }
+        Object value = body.getValue();
+        return value instanceof String ? ((String) value).length() : DashboardBodyCap.MAX_BODY_CHARACTERS;
+    }
+
+    // Marks each of a row's messages whose body was cut, with the log entry to load it from.
+    private static void markTruncated(Map<String, Object> row, String field, RowMessage rowMessage, boolean loadable) {
+        if (rowMessage == null) {
+            return;
+        }
+        Long original = rowMessage.source.originalBodyLength(rowMessage.message);
+        if (original != null) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> truncated = (Map<String, Object>) row.computeIfAbsent("truncatedBodies", k -> new LinkedHashMap<String, Object>());
+            truncated.put(field, DashboardBodyCap.truncationMarker(rowMessage.source.getId(), rowMessage.message, original, loadable));
+        }
+    }
+
+    @VisibleForTesting
+    static void populateLogSections(
+        Stream<DashboardLogEntryDTO> reverseLogEventsStream,
+        boolean shortCircuit,
+        int logItemLimit,
+        FrameBudget budget,
+        List<Object> logMessages,
+        List<Map<String, Object>> recordedRequests,
+        List<Map<String, Object>> proxiedRequests,
+        DescriptionProcessor logMessagesDescriptionProcessor,
+        DescriptionProcessor recordedRequestsDescriptionProcessor,
+        DescriptionProcessor proxiedRequestsDescriptionProcessor
+    ) {
         Map<String, DashboardLogEntryDTOGroup> logEntryGroups = new HashMap<>();
         // The dashboard Traffic/Sessions/Cost panels render each
         // mock-matched request alongside the response that was
@@ -1173,25 +1270,26 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
         // before its corresponding RECEIVED_REQUEST, so we stash
         // responses by correlationId and look them up when the
         // matching request is processed.
-        Map<String, Object> responsesByCorrelationId = new HashMap<>();
-        // Short-circuit once all three output categories are full. The stream is sequential and
-        // ordered and this predicate is evaluated BEFORE each element, so an element only reaches
-        // the body while at least one category still has room. Once logMessages, recordedRequests
-        // and proxiedRequests have each hit logItemLimit no later element could be added to
-        // ANY of them (every add below is guarded by the same size check, and responsesByCorrelationId
-        // is only ever consumed to enrich recordedRequests, which is full), so stopping here drops
-        // only entries the old full walk would have discarded -- the emitted frame is byte-identical
-        // while the walk becomes O(depth needed) not O(entire log).
+        Map<String, RowMessage> responsesByCorrelationId = new HashMap<>();
+        // Short-circuit once all three output categories are full, or the update has reached its size
+        // ceiling. The stream is sequential and ordered and this predicate is evaluated BEFORE each element,
+        // so an element only reaches the body while at least one category still has room. Once logMessages,
+        // recordedRequests and proxiedRequests have each hit logItemLimit no later element could be added to
+        // ANY of them (every add below is guarded by the same size check, and responsesByCorrelationId is
+        // only ever consumed to enrich recordedRequests, which is full), so stopping here drops only entries
+        // the old full walk would have discarded -- the emitted frame is byte-identical while the walk
+        // becomes O(depth needed) not O(entire log).
         Stream<DashboardLogEntryDTO> boundedStream = shortCircuit
             ? reverseLogEventsStream.takeWhile(logEntryDTO ->
-                logMessages.size() < logItemLimit
+                !budget.limitReached()
+                    && (logMessages.size() < logItemLimit
                     || recordedRequests.size() < logItemLimit
-                    || proxiedRequests.size() < logItemLimit)
+                    || proxiedRequests.size() < logItemLimit))
             : reverseLogEventsStream;
         boundedStream
             .forEach(logEntryDTO -> {
                 if (logEntryDTO != null) {
-                    if (logMessages.size() < logItemLimit) {
+                    if (logMessages.size() < logItemLimit && budget.admit(logEntryDTO.estimatedLogMessageCharacters())) {
                         DashboardLogEntryDTO dashboardLogEntryDTO = logEntryDTO.setDescription(logMessagesDescriptionProcessor.description(logEntryDTO));
                         if (isNotBlank(logEntryDTO.getCorrelationId()) && logEntryDTO.getType() != TRACE) {
                             DashboardLogEntryDTOGroup logEntryGroup = logEntryGroups.get(logEntryDTO.getCorrelationId());
@@ -1208,18 +1306,24 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
                     if ((logEntryDTO.getType() == EXPECTATION_RESPONSE || logEntryDTO.getType() == NO_MATCH_RESPONSE)
                         && isNotBlank(logEntryDTO.getCorrelationId())
                         && logEntryDTO.getHttpResponse() != null) {
-                        responsesByCorrelationId.putIfAbsent(logEntryDTO.getCorrelationId(), logEntryDTO.getHttpResponse());
+                        responsesByCorrelationId.putIfAbsent(logEntryDTO.getCorrelationId(), new RowMessage(logEntryDTO.getHttpResponse(), logEntryDTO));
                     }
                     if (recordedRequestsPredicate.test(logEntryDTO) && recordedRequests.size() < logItemLimit) {
-                        for (RequestDefinition request : logEntryDTO.getHttpRequests()) {
+                        RequestDefinition[] entryRequests = logEntryDTO.getHttpRequests();
+                        for (int requestIndex = 0; requestIndex < entryRequests.length; requestIndex++) {
+                            RequestDefinition request = entryRequests[requestIndex];
                             if (request != null) {
-                                Map<String, Object> value = new LinkedHashMap<>();
-                                value.put("httpRequest", request);
-                                Object response = isNotBlank(logEntryDTO.getCorrelationId())
+                                RowMessage requestMessage = new RowMessage(request, logEntryDTO);
+                                RowMessage responseMessage = isNotBlank(logEntryDTO.getCorrelationId())
                                     ? responsesByCorrelationId.get(logEntryDTO.getCorrelationId())
                                     : null;
-                                if (response != null) {
-                                    value.put("httpResponse", response);
+                                if (!budget.admit(requestMessage.characters() + (responseMessage != null ? responseMessage.characters() : 0))) {
+                                    break;
+                                }
+                                Map<String, Object> value = new LinkedHashMap<>();
+                                value.put("httpRequest", request);
+                                if (responseMessage != null) {
+                                    value.put("httpResponse", responseMessage.message);
                                 }
                                 Map<String, Object> entry = new LinkedHashMap<>();
                                 Description description = recordedRequestsDescriptionProcessor.description(request);
@@ -1233,17 +1337,22 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
                                 // renumbers on every push and corresponds to nothing the reader can
                                 // refer to. A timestamp is stable and comparable with the log panel.
                                 entry.put("timestamp", logEntryDTO.getTimestamp());
+                                // the endpoint returns an entry's first request
+                                markTruncated(entry, "httpRequest", requestMessage, requestIndex == 0);
+                                markTruncated(entry, "httpResponse", responseMessage, true);
                                 recordedRequests.add(entry);
                             }
                         }
                     }
                     if (proxiedRequestsPredicate.test(logEntryDTO) && proxiedRequests.size() < logItemLimit) {
+                        RowMessage requestMessage = logEntryDTO.getHttpRequest() != null ? new RowMessage(logEntryDTO.getHttpRequest(), logEntryDTO) : null;
+                        RowMessage responseMessage = logEntryDTO.getHttpResponse() != null ? new RowMessage(logEntryDTO.getHttpResponse(), logEntryDTO) : null;
                         Map<String, Object> value = new LinkedHashMap<>();
-                        if (logEntryDTO.getHttpRequest() != null) {
-                            value.put("httpRequest", logEntryDTO.getHttpRequest());
+                        if (requestMessage != null) {
+                            value.put("httpRequest", requestMessage.message);
                         }
-                        if (logEntryDTO.getHttpResponse() != null) {
-                            value.put("httpResponse", logEntryDTO.getHttpResponse());
+                        if (responseMessage != null) {
+                            value.put("httpResponse", responseMessage.message);
                         }
                         Map<String, Object> entry = new LinkedHashMap<>();
                         Description description = proxiedRequestsDescriptionProcessor.description(logEntryDTO.getHttpRequest());
@@ -1252,8 +1361,10 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
                         }
                         entry.put("value", value);
                         entry.put("key", logEntryDTO.getId() + "_proxied");
-                        if (!value.isEmpty()) {
+                        if (!value.isEmpty() && budget.admit((requestMessage != null ? requestMessage.characters() : 0) + (responseMessage != null ? responseMessage.characters() : 0))) {
                             entry.put("timestamp", logEntryDTO.getTimestamp());
+                            markTruncated(entry, "httpRequest", requestMessage, true);
+                            markTruncated(entry, "httpResponse", responseMessage, true);
                             proxiedRequests.add(entry);
                         }
                     }

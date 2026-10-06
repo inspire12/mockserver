@@ -27,6 +27,7 @@ import ShortcutsDialog from './components/ShortcutsDialog';
 import ErrorBoundary from './components/ErrorBoundary';
 import AnalyticsBanner from './components/AnalyticsBanner';
 import LogPressureBanner from './components/LogPressureBanner';
+import FrameLimitBanner from './components/FrameLimitBanner';
 import { getConfiguration } from './lib/configuration';
 import { initAnalytics, trackView } from './lib/analytics';
 import type { RequestFilter } from './types';
@@ -297,6 +298,7 @@ export default function App() {
           {(view === 'dashboard' || view === 'traffic') && (
             <LogPressureBanner connectionParams={params} />
           )}
+          {(view === 'dashboard' || view === 'traffic') && <FrameLimitBanner />}
           <AnalyticsBanner />
           {(view === 'dashboard' || view === 'traffic' || view === 'sessions') && (
             <FilterPanel onFilterChange={handleFilterChange} />

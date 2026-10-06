@@ -18,8 +18,11 @@ import MoreVertIcon from '@mui/icons-material/MoreVert';
 import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutlined';
 import FactCheckOutlinedIcon from '@mui/icons-material/FactCheckOutlined';
 import BoltIcon from '@mui/icons-material/Bolt';
-import type { LogEntryValue, MessagePart } from '../types';
+import type { LogEntryValue, MessagePart, TruncatedBody } from '../types';
 import JsonViewer from './JsonViewer';
+import TruncatedBodyNotice from './TruncatedBodyNotice';
+import { useConnectionParams } from '../hooks/useConnectionParams';
+import { fetchFullMessage, isLoadable } from '../lib/fullBody';
 import BecauseSection from './BecauseSection';
 import EventLogLossDetails from './EventLogLossDetails';
 import CopyButton from './CopyButton';
@@ -372,6 +375,32 @@ function addLinks(value: string) {
   return value;
 }
 
+// A request or response argument whose body the server shortened: says so, and loads it whole on request.
+function TruncatedJsonArgument({ part, marker }: { part: MessagePart; marker: TruncatedBody }) {
+  const params = useConnectionParams();
+  const [full, setFull] = useState<Record<string, unknown> | null>(null);
+  return (
+    <>
+      <Box sx={{ display: 'inline-block', pl: 0.5, verticalAlign: 'top' }}>
+        {!full && (
+          <TruncatedBodyNotice
+            marker={marker}
+            onLoad={!isLoadable(marker) ? undefined : async () => {
+              setFull(await fetchFullMessage(params, marker));
+            }}
+          />
+        )}
+        <JsonViewer
+          data={full ?? (part.value as Record<string, unknown>)}
+          collapsed={0}
+          enableClipboard={true}
+        />
+      </Box>
+      {'\u00A0'}
+    </>
+  );
+}
+
 function renderMessagePart(part: MessagePart) {
   if (part.value === undefined || part.value === null) return null;
 
@@ -394,6 +423,9 @@ function renderMessagePart(part: MessagePart) {
   if (part.json) {
     const loss = parseEventLogLoss(part.value);
     if (loss) return <EventLogLossDetails key={part.key} loss={loss} />;
+    if (typeof part.value === 'object' && part.value !== null && part.truncatedBody) {
+      return <TruncatedJsonArgument key={part.key} part={part} marker={part.truncatedBody} />;
+    }
     if (typeof part.value === 'object' && part.value !== null) {
       return (
         // Trailing non-breaking space separates the expandable JSON block from

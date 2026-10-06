@@ -305,6 +305,7 @@ public class LogEntryRedactionSurfacesTest {
         assertAllSecrets("LOGS", retrieve(httpState, RetrieveType.LOGS, null));
         assertAllSecrets("LOGS LOG_ENTRIES", retrieve(httpState, RetrieveType.LOGS, "LOG_ENTRIES"));
         assertThat(retrieve(httpState, RetrieveType.REQUESTS, "CURL"), containsString("COOKIE-SECRET-4"));
+        assertAllSecrets("logEntryBody", logEntryBodies(httpState));
     }
 
     @Test
@@ -1082,6 +1083,35 @@ public class LogEntryRedactionSurfacesTest {
         }
         for (String format : Arrays.asList("JSON", "HAR")) {
             assertNoSecrets("REQUEST_RESPONSES " + format, retrieve(httpState, RetrieveType.REQUEST_RESPONSES, format));
+        }
+        assertNoSecrets("logEntryBody", logEntryBodies(httpState));
+    }
+
+    /**
+     * The forwarded entry's request and response as GET /mockserver/logEntryBody returns them, which is how the
+     * dashboard loads a body it shortened.
+     */
+    private static String logEntryBodies(HttpState httpState) {
+        try {
+            CompletableFuture<List<LogEntry>> logged = new CompletableFuture<>();
+            httpState.getMockServerLog().retrieveMessageLogEntries(null, logged::complete);
+            String id = logged.get(10, java.util.concurrent.TimeUnit.SECONDS).stream()
+                .filter(entry -> entry.getType() == FORWARDED_REQUEST)
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no forwarded entry logged"))
+                .id();
+            StringBuilder bodies = new StringBuilder();
+            for (String part : Arrays.asList("request", "response")) {
+                CapturingResponseWriter responseWriter = new CapturingResponseWriter();
+                HttpRequest get = request("/mockserver/logEntryBody").withMethod("GET")
+                    .withQueryStringParameter("id", id).withQueryStringParameter("part", part);
+                assertThat(httpState.handle(get, responseWriter, false), is(true));
+                assertThat("logEntryBody " + part + " status", responseWriter.response.getStatusCode(), is(200));
+                bodies.append(responseWriter.response.getBodyAsString());
+            }
+            return bodies.toString();
+        } catch (Exception e) {
+            throw new AssertionError(e);
         }
     }
 

@@ -9,6 +9,7 @@ import type {
   WebSocketMessage,
 } from '../types';
 import { ACTION_TYPES, LLM_PROVIDERS } from '../lib/clientFilters';
+import { withFullMessages, type FullMessages } from '../lib/fullBody';
 
 export type ViewMode = 'dashboard' | 'traffic' | 'sessions' | 'composer' | 'library' | 'chaos' | 'performance' | 'metrics' | 'drift' | 'verification' | 'slo' | 'async' | 'grpc' | 'breakpoints' | 'contract' | 'cluster' | 'optimise' | 'mcp-health' | 'scenarios' | 'audit' | 'get-started';
 
@@ -446,6 +447,26 @@ function reconcileByKey<T extends { key: string }>(prev: T[], next: T[], cache: 
   return result;
 }
 
+function withLoadedMessages(items: JsonListItem[], fullMessages: Record<string, FullMessages>): JsonListItem[] {
+  if (Object.keys(fullMessages).length === 0) return items;
+  return items.map((item) => {
+    const full = item.truncatedBodies ? fullMessages[item.key] : undefined;
+    return full ? withFullMessages(item, full) : item;
+  });
+}
+
+// Drop loaded messages for rows that have left the window, so they do not accumulate.
+function keepLoadedMessagesFor(
+  fullMessages: Record<string, FullMessages>,
+  ...sections: JsonListItem[][]
+): Record<string, FullMessages> {
+  const keys = Object.keys(fullMessages);
+  if (keys.length === 0) return fullMessages;
+  const present = new Set(sections.flatMap((items) => items.map((item) => item.key)));
+  if (keys.every((key) => present.has(key))) return fullMessages;
+  return Object.fromEntries(Object.entries(fullMessages).filter(([key]) => present.has(key)));
+}
+
 interface DashboardState {
   logMessages: LogMessage[];
   activeExpectations: JsonListItem[];
@@ -467,6 +488,14 @@ interface DashboardState {
   activeExpectationsIncludeLlm: boolean | undefined;
   recordedRequests: JsonListItem[];
   proxiedRequests: JsonListItem[];
+  /** The last update reached its size limit, so older log rows were left out of it. */
+  frameLimitReached: boolean;
+  /**
+   * Request and response messages loaded whole for rows whose bodies the server shortened, by row
+   * key. Applied to the row on every update until the row leaves the window, so every panel and
+   * action sees the whole body once the user has loaded it.
+   */
+  fullMessages: Record<string, FullMessages>;
 
   view: ViewMode;
   requestFilter: RequestFilter;
@@ -599,6 +628,8 @@ interface DashboardState {
   renameWorkspace: (id: string, name: string) => void;
 
   applyMessage: (message: WebSocketMessage) => void;
+  /** Keep the whole request/response loaded for the row `key` and show it in place of the shortened one. */
+  applyFullMessages: (key: string, full: FullMessages) => void;
   clearUI: () => void;
   setView: (view: ViewMode) => void;
   setRequestFilter: (filter: RequestFilter) => void;
@@ -654,6 +685,8 @@ export const useDashboardStore = create<DashboardState>()((set) => ({
   activeExpectationsIncludeLlm: undefined,
   recordedRequests: [],
   proxiedRequests: [],
+  frameLimitReached: false,
+  fullMessages: {},
 
   view: initialView,
   requestFilter: {},
@@ -814,11 +847,17 @@ export const useDashboardStore = create<DashboardState>()((set) => ({
           ? reconcileByKey(s.activeExpectations, message.activeExpectations, activeExpectationsCache)
           : s.activeExpectations,
         recordedRequests: message.recordedRequests !== undefined
-          ? reconcileByKey(s.recordedRequests, message.recordedRequests, recordedRequestsCache)
+          ? reconcileByKey(s.recordedRequests, withLoadedMessages(message.recordedRequests, s.fullMessages), recordedRequestsCache)
           : s.recordedRequests,
         proxiedRequests: message.proxiedRequests !== undefined
-          ? reconcileByKey(s.proxiedRequests, message.proxiedRequests, proxiedRequestsCache)
+          ? reconcileByKey(s.proxiedRequests, withLoadedMessages(message.proxiedRequests, s.fullMessages), proxiedRequestsCache)
           : s.proxiedRequests,
+        frameLimitReached: message.recordedRequests !== undefined
+          ? message.frameLimitReached === true
+          : s.frameLimitReached,
+        fullMessages: message.recordedRequests !== undefined && message.proxiedRequests !== undefined
+          ? keepLoadedMessagesFor(s.fullMessages, message.recordedRequests, message.proxiedRequests)
+          : s.fullMessages,
       };
       if (message.error != null) {
         // A push carried an error — record that it came from a push so a later
@@ -832,6 +871,18 @@ export const useDashboardStore = create<DashboardState>()((set) => ({
       // A user-action / connection error (set via setError) survives the push —
       // it stays until dismissed or explicitly superseded.
       return next;
+    }),
+
+  applyFullMessages: (key, full) =>
+    set((s) => {
+      const merged: FullMessages = { ...s.fullMessages[key], ...full };
+      const patch = (items: JsonListItem[]) =>
+        items.map((item) => (item.key === key ? withFullMessages(item, merged) : item));
+      return {
+        fullMessages: { ...s.fullMessages, [key]: merged },
+        recordedRequests: patch(s.recordedRequests),
+        proxiedRequests: patch(s.proxiedRequests),
+      };
     }),
 
   clearUI: () => {
@@ -849,6 +900,8 @@ export const useDashboardStore = create<DashboardState>()((set) => ({
       activeExpectations: [],
       recordedRequests: [],
       proxiedRequests: [],
+      frameLimitReached: false,
+      fullMessages: {},
       selectedTrafficKey: null,
       pendingEditExpectation: null,
       pendingBreakpointPrefill: null,

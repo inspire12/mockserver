@@ -34,7 +34,10 @@ DOCS_URL = "https://www.mock-server.com/mock_server/mockserver_clients.html"
 # Example values for path parameters ({name} etc.).
 PATH_PARAM_EXAMPLES = {"name": "checkout"}
 # Query params to enable (with value) rather than leave disabled — needed for the request to work.
-ENABLE_QUERY = {("put", "/mockserver/mode"): {"mode": "SIMULATE"}}
+ENABLE_QUERY = {
+    ("put", "/mockserver/mode"): {"mode": "SIMULATE"},
+    ("get", "/mockserver/logEntryBody"): {"id": "replace-with-a-log-entry-id", "part": "request"},
+}
 
 # Fallback auth when the OpenAPI spec declares no securitySchemes. MockServer's
 # control plane supports JWT bearer authentication

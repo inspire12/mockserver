@@ -605,6 +605,34 @@
           }
         },
         {
+          "name": "retrieve one log entry's request or response with its full body",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/mockserver/logEntryBody?id=replace-with-a-log-entry-id&part=request",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "mockserver",
+                "logEntryBody"
+              ],
+              "query": [
+                {
+                  "key": "id",
+                  "value": "replace-with-a-log-entry-id"
+                },
+                {
+                  "key": "part",
+                  "value": "request"
+                }
+              ]
+            },
+            "description": "Returns the request or the response of one log entry, by the entry's id, with its body in full. The dashboard shortens long bodies in its live updates and uses this to load a full body on demand. Secrets are redacted as in the log when redactSecretsInLog is on. Returns 404 once the entry has been cleared or evicted from the log.\n\nFull API reference: https://www.mock-server.com/mock_server/mockserver_clients.html"
+          }
+        },
+        {
           "name": "set the proxy / mock operating mode",
           "request": {
             "method": "PUT",
