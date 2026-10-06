@@ -24,9 +24,6 @@ import io.netty.util.ReferenceCountUtil;
 import org.mockserver.client.MockServerClient;
 import org.mockserver.netty.MockServer;
 
-import java.io.IOException;
-import java.io.UncheckedIOException;
-import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -377,13 +374,12 @@ public final class Http2StreamChannelBenchmark {
         return bootstrap.connect("localhost", port).sync().channel();
     }
 
-    /** A port that is bound then immediately closed — a connect there fails deterministically. */
+    /**
+     * A port a connect is refused on: port 1, as {@code ClosedPort} in mockserver-testing. A port released by
+     * {@code new ServerSocket(0)} can be one another process listens on at 127.0.0.1 (macOS), or can be taken again.
+     */
     private static int closedPort() {
-        try (ServerSocket socket = new ServerSocket(0)) {
-            return socket.getLocalPort();
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
-        }
+        return 1;
     }
 
     // --- result + gates -------------------------------------------------------

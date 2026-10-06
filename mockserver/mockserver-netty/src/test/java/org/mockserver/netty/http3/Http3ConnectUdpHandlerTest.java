@@ -1,6 +1,10 @@
 package org.mockserver.netty.http3;
 
+import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.channel.EventLoopGroup;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.handler.codec.http3.DefaultHttp3DataFrame;
 import io.netty.handler.codec.http3.DefaultHttp3HeadersFrame;
 import io.netty.handler.codec.http3.Http3DataFrame;
@@ -8,8 +12,12 @@ import io.netty.handler.codec.http3.Http3HeadersFrame;
 import org.junit.Test;
 import org.mockserver.configuration.Configuration;
 
+import java.net.Inet4Address;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.nio.channels.DatagramChannel;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -258,6 +266,40 @@ public class Http3ConnectUdpHandlerTest {
         responseBody.release();
 
         channel.finish();
+    }
+
+    // ---- relay socket family ----
+
+    @Test
+    public void shouldOpenAnIpv4RelaySocketForAnIpv4Target() throws Exception {
+        assertThat("on macOS a dual-stack relay socket can share its port with another process's IPv4 socket",
+            relaySocketAddress(InetAddress.getByName("127.0.0.1")), instanceOf(Inet4Address.class));
+        assertThat(relaySocketAddress(InetAddress.getByName("192.0.2.10")), instanceOf(Inet4Address.class));
+    }
+
+    @Test
+    public void shouldOpenADefaultRelaySocketForAnIpv6Target() throws Exception {
+        InetAddress defaultFamily;
+        try (DatagramChannel reference = DatagramChannel.open()) {
+            defaultFamily = ((InetSocketAddress) reference.bind(null).getLocalAddress()).getAddress();
+        }
+        assertThat(relaySocketAddress(InetAddress.getByName("::1")).getClass(), equalTo(defaultFamily.getClass()));
+    }
+
+    @SuppressWarnings("deprecation") // NioEventLoopGroup deprecation in Netty 4.2
+    private static InetAddress relaySocketAddress(InetAddress target) throws Exception {
+        EventLoopGroup group = new NioEventLoopGroup(1);
+        try {
+            ChannelFuture bound = Http3ConnectUdpHandler.bindRelaySocket(group.next(), target, new ChannelInboundHandlerAdapter());
+            assertTrue("relay socket bound", bound.await(10, TimeUnit.SECONDS) && bound.isSuccess());
+            try {
+                return ((InetSocketAddress) bound.channel().localAddress()).getAddress();
+            } finally {
+                bound.channel().close().await(10, TimeUnit.SECONDS);
+            }
+        } finally {
+            group.shutdownGracefully(0, 1, TimeUnit.SECONDS).await(10, TimeUnit.SECONDS);
+        }
     }
 
     // ---- matchesAllowlist tests ----

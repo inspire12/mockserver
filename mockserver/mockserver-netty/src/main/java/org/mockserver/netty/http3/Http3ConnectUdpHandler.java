@@ -4,11 +4,15 @@ import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelFactory;
 import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelOption;
+import io.netty.channel.EventLoop;
 import io.netty.channel.socket.DatagramPacket;
+import io.netty.channel.socket.SocketProtocolFamily;
 import io.netty.channel.socket.nio.NioDatagramChannel;
 import io.netty.handler.codec.http3.DefaultHttp3DataFrame;
 import io.netty.handler.codec.http3.DefaultHttp3HeadersFrame;
@@ -21,6 +25,7 @@ import org.mockserver.socket.NettyAllocator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -44,8 +49,8 @@ import static org.apache.commons.lang3.StringUtils.isBlank;
  *       {@code :method = CONNECT} and {@code :protocol = connect-udp}.</li>
  *   <li>The target authority is parsed from the {@code :authority}
  *       pseudo-header (host:port).</li>
- *   <li>A UDP {@link NioDatagramChannel} is opened and connected to the
- *       target address.</li>
+ *   <li>A UDP {@link NioDatagramChannel} is opened (IPv4 for an IPv4 target)
+ *       and connected to the target address.</li>
  *   <li>The handler responds with {@code 200 OK} to indicate the tunnel is
  *       established.</li>
  *   <li>Subsequent HTTP/3 DATA frames received on the QUIC stream are
@@ -219,15 +224,8 @@ public class Http3ConnectUdpHandler extends ChannelInboundHandlerAdapter {
 
         LOG.info("CONNECT-UDP tunnel requested to {} -- establishing UDP relay", connectAddress);
 
-        // Open a UDP channel connected to the target.
-        // Reuse the parent channel's event loop group for the UDP socket.
-        Bootstrap udpBootstrap = new Bootstrap()
-            .group(ctx.channel().eventLoop())
-            .channel(NioDatagramChannel.class)
-            .option(ChannelOption.ALLOCATOR, NettyAllocator.ALLOCATOR)
-            .handler(new UdpRelayHandler(ctx));
-
-        ChannelFuture bindFuture = udpBootstrap.bind(0);
+        // Open a UDP channel connected to the target, on the parent channel's event loop.
+        ChannelFuture bindFuture = bindRelaySocket(ctx.channel().eventLoop(), resolvedTarget, new UdpRelayHandler(ctx));
         bindFuture.addListener(future -> {
             if (!future.isSuccess()) {
                 sendRelayUnavailable(ctx, "bind failed for " + connectAddress, future.cause());
@@ -255,6 +253,20 @@ public class Http3ConnectUdpHandler extends ChannelInboundHandlerAdapter {
                 ctx.writeAndFlush(responseHeaders);
             });
         });
+    }
+
+    /**
+     * Binds the relay socket to an ephemeral port in the target's family. On macOS a dual-stack socket on port 0
+     * can be given a port another process holds on IPv4, so an IPv4 target gets an IPv4 socket.
+     */
+    static ChannelFuture bindRelaySocket(EventLoop eventLoop, InetAddress target, ChannelHandler handler) {
+        boolean ipv4 = target instanceof Inet4Address;
+        return new Bootstrap()
+            .group(eventLoop)
+            .channelFactory((ChannelFactory<NioDatagramChannel>) () -> ipv4 ? new NioDatagramChannel(SocketProtocolFamily.INET) : new NioDatagramChannel())
+            .option(ChannelOption.ALLOCATOR, NettyAllocator.ALLOCATOR)
+            .handler(handler)
+            .bind(0);
     }
 
     /**

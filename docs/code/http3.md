@@ -432,13 +432,24 @@ forked jar of `Http3NativeStartupIntegrationTest`, which throws an `UncheckedIOE
 `BindException` when the process exits with the port-could-not-be-bound line).
 
 `Http3PortFindThenBindGuardTest` (in `mockserver-core`, scanning every module's test sources and the
-main sources of the test-support modules) keeps new tests on the starter. It fails the build on a
-`findFreeUdpPort`, on an `http3Port(...)` given anything but 0 outside the arguments of a
+main sources of the test-support modules and `mockserver-benchmark`) keeps new tests on the starter.
+It fails the build on a `findFreeUdpPort`, on an `http3Port(...)` given anything but 0 outside the arguments of a
 `startWithHttp3(...)` call, and on a `mockserver.http3Port` or `MOCKSERVER_HTTP3_PORT` outside a
 comment, unless the file is in its allow-list with a reason and that exact count. The allow-list holds
 the starter, `TestPortFactory`, and the tests that need a bare port: one the server must fail to bind,
 never binds, or that the test contests itself. It is a textual check: it does not see a bare
 `Http3Server` started on a port found another way, or an `http3Port` read from a file.
+
+The CONNECT-UDP relay socket (`Http3ConnectUdpHandler.bindRelaySocket`) is bound to port 0 in the
+family of the validated target: an IPv4 socket for an IPv4 target (including an IPv4-mapped IPv6
+literal, which the JDK resolves to IPv4), the default dual-stack socket otherwise. It was dual-stack
+for every target. On a developer Mac, with another process holding 300 IPv4 UDP ports, a
+dual-stack socket bound to port 0 and connected to a `127.0.0.1` echo target was given a held port
+29 and 38 times in 2,000 (holder on `127.0.0.1`, then on `0.0.0.0`), yet lost no reply: a connected
+socket receives its peer's datagrams. Unconnected dual-stack sockets in the same runs lost the reply
+on every held port (31 of 31, 25 of 25), and IPv4 sockets were never given a held port. So the
+change is hardening: the relay no longer shares a port with another process's IPv4 socket and does
+not rely on that demultiplexing order.
 
 The server guards against the same quirk (`org.mockserver.lifecycle.Ipv4UdpPortProbe`, the UDP
 counterpart of the TCP listeners' `LoopbackShadowProbe`, shared with the DNS listener, which is
@@ -509,7 +520,9 @@ declarations are needed -- they resolve automatically.
   native QUIC availability)
 - **CONNECT-UDP (MASQUE, RFC 9298)**: when `http3ConnectUdpEnabled=true`, extended
   CONNECT requests with `:protocol=connect-udp` are intercepted and relayed. The
-  handler opens a UDP channel to the target authority parsed from `:authority`,
+  handler opens a UDP channel to the target authority parsed from `:authority`
+  (an IPv4 socket for an IPv4 target, the default socket otherwise; see
+  [Test UDP sockets](#test-udp-sockets-macos-port-shadowing)),
   relays DATA frame payloads as UDP datagrams bidirectionally, and tears down on
   stream close/error. Normal HTTP/3 requests pass through unchanged. The server
   advertises `SETTINGS_ENABLE_CONNECT_PROTOCOL=1` (RFC 9220) when the flag is on.

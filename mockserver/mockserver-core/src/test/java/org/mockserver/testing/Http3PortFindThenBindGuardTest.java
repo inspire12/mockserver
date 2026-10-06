@@ -37,7 +37,7 @@ import static org.mockserver.testing.EphemeralListenerBindGuardTest.testSources;
  * can be taken before the server binds it, and the server then refuses to start.
  * {@code Http3TestServer.startWithHttp3} starts again on another port when that happens; a test that sets
  * {@code http3Port} itself fails as often as its port is taken. So in every module's test sources, and the main
- * sources of the test-support modules, each {@code findFreeUdpPort}, each {@code http3Port(...)} given anything but
+ * sources of the test-support modules and the benchmarks, each {@code findFreeUdpPort}, each {@code http3Port(...)} given anything but
  * {@code 0} outside the arguments of a {@code startWithHttp3(...)} call, and each {@code mockserver.http3Port}
  * or {@code MOCKSERVER_HTTP3_PORT} outside a comment must be counted in {@link #ALLOWED} with a reason.
  *
