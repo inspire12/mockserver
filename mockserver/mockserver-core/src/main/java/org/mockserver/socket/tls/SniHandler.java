@@ -1,5 +1,6 @@
 package org.mockserver.socket.tls;
 
+import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.DecoderException;
 import io.netty.handler.ssl.AbstractSniHandler;
@@ -20,6 +21,7 @@ import org.slf4j.event.Level;
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.SSLSession;
+import java.nio.channels.ClosedChannelException;
 import java.security.cert.Certificate;
 import java.util.Locale;
 import java.util.concurrent.CompletableFuture;
@@ -92,6 +94,11 @@ public class SniHandler extends AbstractSniHandler<SslContext> {
 
     @Override
     protected Future<SslContext> lookup(ChannelHandlerContext ctx, String hostname) {
+        // Netty decodes the buffered ClientHello again when a connection closes before this handler is
+        // replaced (after a failed lookup); a closed connection needs no certificate
+        if (!ctx.channel().isActive()) {
+            return ctx.executor().newFailedFuture(new ClosedChannelException());
+        }
         if (isNotBlank(hostname)) {
             // add the SAN on the event loop BEFORE the (offloaded) generation runs, so the generated
             // certificate is guaranteed to contain this host's SAN
@@ -112,11 +119,16 @@ public class SniHandler extends AbstractSniHandler<SslContext> {
             return future;
         });
         Promise<SslContext> promise = ctx.executor().newPromise();
+        // Netty releases the ClientHello it holds only when this promise notifies its listeners, which a
+        // stopped event loop never does; failing the promise on close notifies them while the loop runs
+        ChannelFutureListener failOnClose = closeFuture -> promise.tryFailure(new ClosedChannelException());
+        ctx.channel().closeFuture().addListener(failOnClose);
+        promise.addListener(completed -> ctx.channel().closeFuture().removeListener(failOnClose));
         generation.whenComplete((sslContext, throwable) -> {
             if (throwable != null) {
-                promise.setFailure(throwable instanceof CompletionException && throwable.getCause() != null ? throwable.getCause() : throwable);
+                promise.tryFailure(throwable instanceof CompletionException && throwable.getCause() != null ? throwable.getCause() : throwable);
             } else {
-                promise.setSuccess(sslContext);
+                promise.trySuccess(sslContext);
             }
         });
         return promise;
@@ -128,6 +140,10 @@ public class SniHandler extends AbstractSniHandler<SslContext> {
             ctx.channel().attr(SSL_CONTEXT_PENDING).set(null);
         }
         if (!sslContextFuture.isSuccess()) {
+            if (!ctx.channel().isActive()) {
+                // the client has gone, so there is no connection left to report the failure on
+                return;
+            }
             final Throwable cause = sslContextFuture.cause();
             if (cause instanceof Error) {
                 throw (Error) cause;

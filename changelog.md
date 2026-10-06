@@ -715,6 +715,11 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **A TLS connection whose server certificate could not be provided no longer leaks memory.** When MockServer
+  failed to provide a certificate for a TLS client (for example a fixed `x509CertificatePath` not signed by the
+  configured certificate authority) and the connection then closed, or MockServer was stopped while it was still
+  generating one, the buffered TLS ClientHello could be left unreleased in direct memory. A connection closed by such a failure also no longer
+  starts a second certificate generation or reports its failure twice.
 - **A response after an `error()` that sent raw bytes, after an `error()` that sent nothing, or after a mocked final
   `1xx` response is now sent for its own request.** MockServer's HTTP/1.1 codec remembers each request's method until
   it writes that request's response, and none of those three responses passes through it, so every later response on

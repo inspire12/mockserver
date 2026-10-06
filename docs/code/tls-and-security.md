@@ -69,6 +69,16 @@ signature is read *before* a build, so a SAN added while a build is in flight fo
 than being recorded as already present. SAN sets must be changed through `Configuration`'s methods — a
 direct mutation of the set returned by `sslSubjectAlternativeNameDomains()` is not seen.
 
+**The held ClientHello.** While a lookup runs, Netty's `SslClientHelloHandler` holds a retained slice of
+the ClientHello and releases it only when the lookup future notifies its listeners on the channel's event
+loop. Two paths could leave it unreleased: a stop during certificate generation (a terminated event loop
+never runs the notification) and a failed lookup, after which Netty decodes the buffered ClientHello again
+at `channelInactive` and starts a second lookup. So `SniHandler.lookup` fails at once for a channel that
+is no longer active (no certificate is generated for it), fails a pending lookup when the channel closes,
+which happens on the event loop even while it shuts down, and `onLookupComplete` reports nothing for a
+closed channel. `SniLookupFailureLeakIntegrationTest` (mockserver-netty, under the leak detector) covers
+both paths.
+
 ### Certificate Authority
 
 MockServer maintains an in-memory CA with default DN:
