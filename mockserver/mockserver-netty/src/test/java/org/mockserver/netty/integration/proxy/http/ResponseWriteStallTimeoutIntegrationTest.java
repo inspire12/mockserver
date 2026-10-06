@@ -70,6 +70,7 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -84,6 +85,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
+import java.util.regex.Pattern;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
@@ -287,7 +289,8 @@ public class ResponseWriteStallTimeoutIntegrationTest {
         // the relay holds this client's TLS, and closing through it would leave the tunnel open, refusing the rest of
         // the response, while its close_notify waited behind the bytes not taken
         try (Socket socket = connectThroughTunnel(mockServer, "/forward/big?test=tunnel-streamed-stalled-then-reading")) {
-            TimeUnit.MILLISECONDS.sleep(2 * STALL_MILLIS);
+            // resumes as soon as the cut is logged: a fixed pause can end before a loaded host has cut the tunnel
+            awaitConnectionCut(socket);
             Received received = read(socket, 0, Received::streamedResponseComplete);
             assertThat("MockServer closed the tunnel", received.endedBy, is(Ending.CLOSED));
             assertThat("no terminating chunk made the response look complete", received.text(), not(endsWith(TERMINATING_CHUNK)));
@@ -676,6 +679,18 @@ public class ResponseWriteStallTimeoutIntegrationTest {
             TimeUnit.MILLISECONDS.sleep(10);
         }
         assertThat("the cut was counted as " + stall, Metrics.getResponseWriteStallsCount(stall), greaterThan(countedBefore));
+    }
+
+    /**
+     * Waits, without reading the socket, until MockServer has logged closing this client's connection for its stall.
+     */
+    private static void awaitConnectionCut(Socket socket) throws InterruptedException {
+        Pattern cut = Pattern.compile("closing connection from:\\s*/?127\\.0\\.0\\.1:" + socket.getLocalPort() + "\\b");
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CUT_WITHIN_MILLIS);
+        while (Arrays.stream(mockServerClient.retrieveLogMessagesArray(null)).noneMatch(message -> cut.matcher(message).find())) {
+            assertThat("MockServer cut the stalled connection within " + CUT_WITHIN_MILLIS + "ms", System.nanoTime() < deadline, is(true));
+            TimeUnit.MILLISECONDS.sleep(50);
+        }
     }
 
     private static Socket connect(MockServer server, String uri) throws IOException {
