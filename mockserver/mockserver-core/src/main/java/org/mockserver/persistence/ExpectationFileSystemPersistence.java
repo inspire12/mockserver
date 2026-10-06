@@ -10,6 +10,7 @@ import org.mockserver.mock.RequestMatchers;
 import org.mockserver.mock.listeners.MockServerMatcherListener;
 import org.mockserver.mock.listeners.MockServerMatcherNotifier;
 import org.mockserver.mock.listeners.MockServerMatcherNotifier.Cause;
+import org.mockserver.serialization.SerializationFailure;
 import org.mockserver.serialization.ExpectationSerializer;
 import org.mockserver.serialization.model.ExpectationDTO;
 import org.mockserver.serialization.serializers.response.TimeToLiveDTOPersistenceSerializer;
@@ -23,7 +24,6 @@ import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
@@ -354,14 +354,15 @@ public class ExpectationFileSystemPersistence implements MockServerMatcherListen
                 return "[]";
             }
         } catch (Exception e) {
+            String description = SerializationFailure.describe(expectations, e);
             mockServerLogger.logEvent(
                 new LogEntry()
                     .setLogLevel(Level.ERROR)
-                    .setMessageFormat("exception while serializing expectation to JSON with value:{}")
-                    .setArguments(Arrays.asList(expectations))
+                    .setMessageFormat("exception while serializing expectation to JSON:{}")
+                    .setArguments(description)
                     .setThrowable(e)
             );
-            throw new RuntimeException("Exception while serializing expectation to JSON with value " + Arrays.asList(expectations), e);
+            throw new RuntimeException("Exception while serializing expectation to JSON (" + description + ")", e);
         }
     }
 

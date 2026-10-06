@@ -70,7 +70,7 @@ public class HttpRequestAndHttpResponseSerializationErrorsTest {
         } catch (Throwable throwable) {
             // then
             assertThat(throwable, instanceOf(RuntimeException.class));
-            assertThat(throwable.getMessage(), is("Exception while serializing HttpRequestAndHttpResponse to JSON with value [{ }]"));
+            assertThat(throwable.getMessage(), is("Exception while serializing HttpRequestAndHttpResponse to JSON (1 value)"));
         }
     }
 

@@ -20,7 +20,6 @@ import org.mockserver.validator.jsonschema.JsonSchemaRequestDefinitionValidator;
 import org.slf4j.event.Level;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 import static org.apache.commons.lang3.StringUtils.isBlank;
@@ -109,15 +108,16 @@ public class RequestDefinitionSerializer implements Serializer<RequestDefinition
                 return "[]";
             }
         } catch (Exception e) {
+            String description = SerializationFailure.describe(requestDefinitions, e);
             mockServerLogger.logEvent(
                 new LogEntry()
                     .setLogLevel(Level.ERROR)
                     .setHttpRequests(LogEntry.nonNull(requestDefinitions))
-                    .setMessageFormat("exception while serializing RequestDefinition to JSON with value:{}")
-                    .setArguments(Arrays.asList(requestDefinitions))
+                    .setMessageFormat("exception while serializing RequestDefinition to JSON:{}")
+                    .setArguments(description)
                     .setThrowable(e)
             );
-            throw new RuntimeException("Exception while serializing RequestDefinition to JSON with value " + Arrays.asList(requestDefinitions), e);
+            throw new RuntimeException("Exception while serializing RequestDefinition to JSON (" + description + ")", e);
         }
     }
 
@@ -147,15 +147,16 @@ public class RequestDefinitionSerializer implements Serializer<RequestDefinition
                 return "[]";
             }
         } catch (Exception e) {
+            String description = SerializationFailure.describe(definitions, e);
             mockServerLogger.logEvent(
                 new LogEntry()
                     .setLogLevel(Level.ERROR)
                     .setHttpRequests(LogEntry.nonNull(definitions))
-                    .setMessageFormat("exception while serializing RequestDefinition to JSON with value:{}")
-                    .setArguments(Arrays.asList(definitions))
+                    .setMessageFormat("exception while serializing RequestDefinition to JSON:{}")
+                    .setArguments(description)
                     .setThrowable(e)
             );
-            throw new RuntimeException("Exception while serializing RequestDefinition to JSON with value " + Arrays.asList(definitions), e);
+            throw new RuntimeException("Exception while serializing RequestDefinition to JSON (" + description + ")", e);
         }
     }
 

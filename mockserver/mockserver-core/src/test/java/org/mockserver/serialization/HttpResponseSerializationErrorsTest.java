@@ -59,7 +59,7 @@ public class HttpResponseSerializationErrorsTest {
     public void shouldHandleExceptionWhileSerializingArray() throws IOException {
         // given
         thrown.expect(RuntimeException.class);
-        thrown.expectMessage("Exception while serializing HttpResponse to JSON with value [{ }]");
+        thrown.expectMessage("Exception while serializing HttpResponse to JSON (1 value)");
         // and
         when(objectWriter.writeValueAsString(any(HttpResponseDTO[].class))).thenThrow(new RuntimeException("TEST EXCEPTION"));
 

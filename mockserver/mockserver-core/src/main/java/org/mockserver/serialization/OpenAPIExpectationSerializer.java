@@ -14,7 +14,6 @@ import org.mockserver.validator.jsonschema.JsonSchemaOpenAPIExpectationValidator
 import org.slf4j.event.Level;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 import static org.apache.commons.lang3.StringUtils.isBlank;
@@ -84,14 +83,15 @@ public class OpenAPIExpectationSerializer implements Serializer<OpenAPIExpectati
                 return "[]";
             }
         } catch (Exception e) {
+            String description = SerializationFailure.describe(expectations, e);
             mockServerLogger.logEvent(
                 new LogEntry()
                     .setLogLevel(Level.ERROR)
-                    .setMessageFormat("exception while serializing expectation to JSON with value:{}")
-                    .setArguments(Arrays.asList(expectations))
+                    .setMessageFormat("exception while serializing expectation to JSON:{}")
+                    .setArguments(description)
                     .setThrowable(e)
             );
-            throw new RuntimeException("Exception while serializing expectation to JSON with value " + Arrays.asList(expectations), e);
+            throw new RuntimeException("Exception while serializing expectation to JSON (" + description + ")", e);
         }
     }
 

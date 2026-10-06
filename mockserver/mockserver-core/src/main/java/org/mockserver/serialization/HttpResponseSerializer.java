@@ -13,7 +13,6 @@ import org.mockserver.validator.jsonschema.JsonSchemaHttpResponseValidator;
 import org.slf4j.event.Level;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 import static org.apache.commons.lang3.StringUtils.isBlank;
@@ -76,15 +75,16 @@ public class HttpResponseSerializer implements Serializer<HttpResponse> {
                 return "[]";
             }
         } catch (Exception e) {
+            String description = SerializationFailure.describe(httpResponses, e);
             mockServerLogger.logEvent(
                 new LogEntry()
                     .setLogLevel(Level.ERROR)
                     .setHttpResponse(httpResponses != null && httpResponses.length == 1 ? httpResponses[0] : null)
-                    .setMessageFormat("exception while serializing HttpResponse to JSON with value:{}")
-                    .setArguments(Arrays.asList(httpResponses))
+                    .setMessageFormat("exception while serializing HttpResponse to JSON:{}")
+                    .setArguments(description)
                     .setThrowable(e)
             );
-            throw new RuntimeException("Exception while serializing HttpResponse to JSON with value " + Arrays.asList(httpResponses), e);
+            throw new RuntimeException("Exception while serializing HttpResponse to JSON (" + description + ")", e);
         }
     }
 

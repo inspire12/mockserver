@@ -8,7 +8,6 @@ import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.slf4j.event.Level;
 
-import java.util.Arrays;
 import java.util.List;
 
 import static org.apache.commons.lang3.StringUtils.isBlank;
@@ -54,14 +53,7 @@ public class LogEntrySerializer {
         try {
             return objectWriter.writeValueAsString(logEntry);
         } catch (Exception e) {
-            mockServerLogger.logEvent(
-                new LogEntry()
-                    .setLogLevel(Level.ERROR)
-                    .setMessageFormat("exception while serializing LogEntry to JSON with value:{}")
-                    .setArguments(logEntry)
-                    .setThrowable(e)
-            );
-            throw new RuntimeException("Exception while serializing LogEntry to JSON with value " + logEntry, e);
+            throw failure(identify(logEntry), e);
         }
     }
 
@@ -77,15 +69,24 @@ public class LogEntrySerializer {
                 return "[]";
             }
         } catch (Exception e) {
-            mockServerLogger.logEvent(
-                new LogEntry()
-                    .setLogLevel(Level.ERROR)
-                    .setMessageFormat("exception while serializing LogEntry to JSON with value:{}")
-                    .setArguments(Arrays.asList(logEntries))
-                    .setThrowable(e)
-            );
-            throw new RuntimeException("Exception while serializing LogEntry to JSON with value " + Arrays.asList(logEntries), e);
+            throw failure(SerializationFailure.describe(logEntries, e, LogEntrySerializer::identify), e);
         }
+    }
+
+    // identifies an entry without rendering it: rendering a large entry, or every entry, can exhaust the heap
+    private static String identify(LogEntry logEntry) {
+        return "type " + logEntry.getType() + ", correlationId " + logEntry.getCorrelationId();
+    }
+
+    private RuntimeException failure(String description, Exception cause) {
+        mockServerLogger.logEvent(
+            new LogEntry()
+                .setLogLevel(Level.ERROR)
+                .setMessageFormat("exception while serializing LogEntry to JSON:{}")
+                .setArguments(description)
+                .setThrowable(cause)
+        );
+        return new RuntimeException("Exception while serializing LogEntry to JSON (" + description + ")", cause);
     }
 
     public LogEntry[] deserializeArray(String jsonLogEntries) {

@@ -13,7 +13,6 @@ import org.mockserver.validator.jsonschema.JsonSchemaExpectationValidator;
 import org.slf4j.event.Level;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.function.BiFunction;
@@ -102,14 +101,15 @@ public class ExpectationSerializer implements Serializer<Expectation> {
                 return "[]";
             }
         } catch (Exception e) {
+            String description = SerializationFailure.describe(expectations, e);
             mockServerLogger.logEvent(
                 new LogEntry()
                     .setLogLevel(Level.ERROR)
-                    .setMessageFormat("exception while serializing expectation to JSON with value:{}")
-                    .setArguments(Arrays.asList(expectations))
+                    .setMessageFormat("exception while serializing expectation to JSON:{}")
+                    .setArguments(description)
                     .setThrowable(e)
             );
-            throw new RuntimeException("Exception while serializing expectation to JSON with value " + Arrays.asList(expectations), e);
+            throw new RuntimeException("Exception while serializing expectation to JSON (" + description + ")", e);
         }
     }
 

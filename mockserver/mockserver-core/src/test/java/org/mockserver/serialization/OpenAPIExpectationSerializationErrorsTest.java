@@ -59,7 +59,7 @@ public class OpenAPIExpectationSerializationErrorsTest {
     public void shouldHandleExceptionWhileSerializingArray() throws IOException {
         // given
         thrown.expect(RuntimeException.class);
-        thrown.expectMessage("Exception while serializing expectation to JSON with value [{ }]");
+        thrown.expectMessage("Exception while serializing expectation to JSON (1 value)");
         // and
         when(objectWriter.writeValueAsString(any(OpenAPIExpectationDTO[].class))).thenThrow(new RuntimeException("TEST EXCEPTION"));
 

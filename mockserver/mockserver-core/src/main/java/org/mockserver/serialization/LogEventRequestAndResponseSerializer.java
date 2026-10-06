@@ -72,15 +72,16 @@ public class LogEventRequestAndResponseSerializer {
                 return "[]";
             }
         } catch (Exception e) {
+            String description = SerializationFailure.describe(httpRequestAndHttpResponses, e);
             mockServerLogger.logEvent(
                 new LogEntry()
                     .setLogLevel(Level.ERROR)
                     .setHttpRequests(LogEntry.nonNull(httpRequestAndHttpResponses == null ? null : Arrays.stream(httpRequestAndHttpResponses).filter(java.util.Objects::nonNull).map(LogEventRequestAndResponse::getHttpRequest).toArray(org.mockserver.model.RequestDefinition[]::new)))
-                    .setMessageFormat("exception while serializing HttpRequestAndHttpResponse to JSON with value:{}")
-                    .setArguments(Arrays.asList(httpRequestAndHttpResponses))
+                    .setMessageFormat("exception while serializing HttpRequestAndHttpResponse to JSON:{}")
+                    .setArguments(description)
                     .setThrowable(e)
             );
-            throw new IllegalArgumentException("Exception while serializing HttpRequestAndHttpResponse to JSON with value " + Arrays.asList(httpRequestAndHttpResponses), e);
+            throw new IllegalArgumentException("Exception while serializing HttpRequestAndHttpResponse to JSON (" + description + ")", e);
         }
     }
 

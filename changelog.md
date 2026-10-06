@@ -640,6 +640,14 @@ This release delivers a sustained performance and memory programme alongside dat
   from 6.0.0 onwards remain there. A version removed from the HTTP repository is still installable from
   the OCI registry: `oci://ghcr.io/mock-server/charts/mockserver`.
 
+- **A failed serialisation of a log, of recorded requests or of expectations no longer renders all of
+  them a second time into its error.** When turning a list of log entries, requests, responses or
+  expectations into JSON failed (for example on a log too large to retrieve), MockServer built its
+  error message, and the `ERROR` it logged, from the full text of every item in the list. That is a
+  second copy of everything it had just failed to write, made at the moment memory was already
+  short, and the message could be returned as the response body. The error now says how many items
+  there were and which one failed (for a log entry, its type and correlation id), and still carries
+  the underlying cause.
 ### Fixed
 
 - **A gRPC bidirectional stream over HTTP/2, including a server reflection stream, now ends normally when its client

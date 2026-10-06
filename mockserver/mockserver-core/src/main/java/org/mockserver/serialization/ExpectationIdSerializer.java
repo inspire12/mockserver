@@ -12,7 +12,6 @@ import org.mockserver.validator.jsonschema.JsonSchemaExpectationIdValidator;
 import org.slf4j.event.Level;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 import static org.apache.commons.lang3.StringUtils.isBlank;
@@ -78,14 +77,15 @@ public class ExpectationIdSerializer implements Serializer<ExpectationId> {
                 return "[]";
             }
         } catch (Exception e) {
+            String description = SerializationFailure.describe(expectationIds, e);
             mockServerLogger.logEvent(
                 new LogEntry()
                     .setLogLevel(Level.ERROR)
-                    .setMessageFormat("exception while serializing ExpectationId to JSON with value:{}")
-                    .setArguments(Arrays.asList(expectationIds))
+                    .setMessageFormat("exception while serializing ExpectationId to JSON:{}")
+                    .setArguments(description)
                     .setThrowable(e)
             );
-            throw new RuntimeException("Exception while serializing ExpectationId to JSON with value " + Arrays.asList(expectationIds), e);
+            throw new RuntimeException("Exception while serializing ExpectationId to JSON (" + description + ")", e);
         }
     }
 
