@@ -15,6 +15,7 @@ import org.junit.Test;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.netty.unification.PortUnificationHandler;
 import org.mockserver.scheduler.Scheduler;
+import org.mockserver.socket.LingeringClose;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -122,10 +123,10 @@ public class RelayConnectFirstBytesTest {
                 readUntilEndOfStream(loopback.getInputStream());
                 long outputEnded = System.nanoTime();
 
-                long closedAfterMillis = millisUntilAWriteFails(loopback, outputEnded, RelayLegClose.PEER_CLOSE_WAIT_MILLIS + 10_000);
+                long closedAfterMillis = millisUntilAWriteFails(loopback, outputEnded, LingeringClose.LINGER_MILLIS + 10_000);
 
-                assertThat("not before MockServer has had time to read to the end", closedAfterMillis, greaterThanOrEqualTo(RelayLegClose.PEER_CLOSE_WAIT_MILLIS - 500));
-                assertThat("and not left open for good", closedAfterMillis, lessThan(RelayLegClose.PEER_CLOSE_WAIT_MILLIS + 10_000));
+                assertThat("not before MockServer has had time to read to the end", closedAfterMillis, greaterThanOrEqualTo(LingeringClose.LINGER_MILLIS - 500));
+                assertThat("and not left open for good", closedAfterMillis, lessThan(LingeringClose.LINGER_MILLIS + 10_000));
             }
         }
     }

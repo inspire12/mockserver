@@ -2,11 +2,23 @@ package org.mockserver.codec;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.CompositeByteBuf;
+import io.netty.buffer.Unpooled;
+import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.socket.DuplexChannel;
+import io.netty.handler.codec.http.DefaultFullHttpResponse;
 import io.netty.handler.codec.http.FullHttpMessage;
+import io.netty.handler.codec.http.FullHttpResponse;
 import io.netty.handler.codec.http.HttpContent;
+import io.netty.handler.codec.http.HttpHeaderNames;
+import io.netty.handler.codec.http.HttpHeaderValues;
 import io.netty.handler.codec.http.HttpMessage;
 import io.netty.handler.codec.http.HttpObjectAggregator;
+import io.netty.handler.codec.http.HttpRequest;
+import io.netty.handler.codec.http.HttpResponseStatus;
+import io.netty.handler.codec.http.HttpUtil;
+import io.netty.handler.codec.http.HttpVersion;
+import org.mockserver.socket.LingeringClose;
 
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
@@ -52,6 +64,13 @@ public class CoalescingHttpObjectAggregator extends HttpObjectAggregator {
     static final int SMALL_PIECE_BYTES = 1024;
     static final int RUN_PIECES = 16;
     static final int COALESCE_AFTER_COMPONENTS = 64;
+    private static final FullHttpResponse TOO_LARGE_CLOSE = new DefaultFullHttpResponse(
+        HttpVersion.HTTP_1_1, HttpResponseStatus.REQUEST_ENTITY_TOO_LARGE, Unpooled.EMPTY_BUFFER);
+
+    static {
+        TOO_LARGE_CLOSE.headers().setInt(HttpHeaderNames.CONTENT_LENGTH, 0);
+        TOO_LARGE_CLOSE.headers().set(HttpHeaderNames.CONNECTION, HttpHeaderValues.CLOSE);
+    }
 
     private boolean coalescing;
     private boolean copyingRuns;
@@ -328,10 +347,31 @@ public class CoalescingHttpObjectAggregator extends HttpObjectAggregator {
         super.finishAggregation(aggregated);
     }
 
+    /**
+     * Where Netty would answer 413 and close a socket at once, with the rest of the body unread, the connection ends
+     * with a {@link LingeringClose} instead: closed at once, the kernel resets it and the client may lose the 413.
+     * A request whose connection Netty keeps, a response, or a channel that is not a socket (an HTTP/2 stream) is left
+     * to Netty.
+     */
     @Override
     protected void handleOversizedMessage(ChannelHandlerContext ctx, HttpMessage oversized) throws Exception {
         reset(null);
+        if (oversized instanceof HttpRequest && ctx.channel() instanceof DuplexChannel && closesAfterTooLarge(ctx, oversized)) {
+            Channel channel = ctx.channel();
+            ctx.writeAndFlush(TOO_LARGE_CLOSE.retainedDuplicate()).addListener(written -> LingeringClose.close(channel));
+            return;
+        }
         super.handleOversizedMessage(ctx, oversized);
+    }
+
+    /**
+     * Netty's condition for closing after a 413: the body has started arriving, so its end cannot be found; reading
+     * is paused, so it would never resume; or the request is not keep-alive and is not waiting for a 100 Continue.
+     */
+    private static boolean closesAfterTooLarge(ChannelHandlerContext ctx, HttpMessage oversized) {
+        return oversized instanceof FullHttpMessage
+            || !ctx.channel().config().isAutoRead()
+            || !HttpUtil.is100ContinueExpected(oversized) && !HttpUtil.isKeepAlive(oversized);
     }
 
     /**

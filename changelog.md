@@ -715,6 +715,14 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **A client that sends a request body over `maxRequestBodySize` now receives the 413 response instead of a
+  connection reset.** When the connection was to close after the 413 (the request said `Connection: close`
+  or was HTTP/1.0, or its body had already started arriving), MockServer closed it at once with the rest of
+  the body unread, so the operating system reset the connection: a client such as okhttp or curl, which
+  sends its whole body before reading the response, could fail with "broken pipe" or "connection reset"
+  and never see the 413. MockServer now reads and discards the rest of the body and closes once the client
+  does or after 5 seconds, as it already does after an early response from a `respondBeforeBody`
+  expectation. A keep-alive request still keeps its connection.
 - **A proxied WebSocket upgrade no longer waits forever for an upstream server that does not answer it.** When
   MockServer relayed a WebSocket upgrade to an upstream server that accepted the connection but never answered the
   upgrade, or stopped part-way through its answer, the client's upgrade was left unanswered and both connections

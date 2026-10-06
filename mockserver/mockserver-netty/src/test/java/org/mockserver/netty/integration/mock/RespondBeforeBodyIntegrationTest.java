@@ -251,7 +251,8 @@ public class RespondBeforeBodyIntegrationTest {
             assertThat(readUntilEndOfStream(socket.getInputStream()), containsString("403"));
 
             // when the client neither closes nor stops sending
-            long deadline = System.currentTimeMillis() + 30_000;
+            long start = System.currentTimeMillis();
+            long deadline = start + 20_000;
             IOException closedByServer = null;
             while (closedByServer == null && System.currentTimeMillis() < deadline) {
                 try {
@@ -262,9 +263,11 @@ public class RespondBeforeBodyIntegrationTest {
                     closedByServer = e;
                 }
             }
+            long elapsed = System.currentTimeMillis() - start;
 
-            // then
+            // then within about its 5 s lingering limit, with headroom for a loaded machine
             assertTrue("server should end the connection within its lingering limit", closedByServer != null);
+            assertThat("cut off after " + elapsed + "ms", elapsed, lessThan(10_000L));
         }
     }
 

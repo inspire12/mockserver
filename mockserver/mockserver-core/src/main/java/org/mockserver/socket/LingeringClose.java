@@ -1,6 +1,5 @@
-package org.mockserver.netty.responsewriter;
+package org.mockserver.socket;
 
-import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandler;
@@ -20,14 +19,21 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
  * it has not read yet. So the output is ended (after a TLS {@code close_notify}), inbound bytes are discarded before any
  * decoder, and the socket is closed when the client closes or after {@link #LINGER_MILLIS}, whichever comes first.
  */
-final class LingeringClose {
+public final class LingeringClose {
 
-    static final long LINGER_MILLIS = 5_000;
+    /**
+     * How long a connection whose output has been ended waits for the other end to close before its socket is closed.
+     */
+    public static final long LINGER_MILLIS = 5_000;
 
     private LingeringClose() {
     }
 
-    static void close(Channel channel) {
+    /**
+     * Starts a lingering close; call it once the last response has been written, as nothing written after is sent.
+     * A channel that is not a socket (an HTTP/2 stream, say) or is no longer active is closed at once.
+     */
+    public static void close(Channel channel) {
         if (channel.eventLoop().inEventLoop()) {
             start(channel);
         } else {
@@ -45,11 +51,10 @@ final class LingeringClose {
         }
         channel.pipeline().addFirst(DiscardInbound.INSTANCE);
         channel.config().setAutoRead(true);
-        ScheduledFuture<?> limit = channel.eventLoop().schedule(() -> closeSocket(channel), LINGER_MILLIS, MILLISECONDS);
-        channel.closeFuture().addListener(closed -> limit.cancel(false));
+        closeSocketUnlessClosedWithinLinger(channel);
 
         SslHandler sslHandler = channel.pipeline().get(SslHandler.class);
-        ChannelFuture outputWritten = sslHandler != null ? sslHandler.closeOutbound() : channel.writeAndFlush(Unpooled.EMPTY_BUFFER);
+        ChannelFuture outputWritten = sslHandler != null ? sslHandler.closeOutbound() : channel.newSucceededFuture();
         outputWritten.addListener(written -> {
             if (written.isSuccess() && channel.isActive()) {
                 ((DuplexChannel) channel).shutdownOutput().addListener(shutdown -> {
@@ -63,8 +68,21 @@ final class LingeringClose {
         });
     }
 
-    // at the socket: through the pipeline a TLS handler would try to write its close_notify to an ended output
-    private static void closeSocket(Channel channel) {
+    /**
+     * Closes the socket after {@link #LINGER_MILLIS} unless the channel has closed by then: the bound on how long a
+     * client that never closes can hold a connection whose output has been ended.
+     */
+    public static void closeSocketUnlessClosedWithinLinger(Channel channel) {
+        ScheduledFuture<?> limit = channel.eventLoop().schedule(() -> closeSocket(channel), LINGER_MILLIS, MILLISECONDS);
+        channel.closeFuture().addListener(closed -> limit.cancel(false));
+    }
+
+    /**
+     * Closes the channel at its socket, not through its pipeline: through the pipeline a TLS handler would first try
+     * to write its {@code close_notify} (to an output that may have ended), and an HTTP/2 handler would wait for its
+     * streams. Closing the socket fails what is queued and fires {@code channelInactive}.
+     */
+    public static void closeSocket(Channel channel) {
         channel.unsafe().close(channel.unsafe().voidPromise());
     }
 
