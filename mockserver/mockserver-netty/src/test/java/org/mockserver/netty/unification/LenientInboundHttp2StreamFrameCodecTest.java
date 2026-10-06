@@ -2,9 +2,12 @@ package org.mockserver.netty.unification;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
+import io.netty.channel.ChannelFuture;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.DefaultFullHttpResponse;
 import io.netty.handler.codec.http.DefaultHttpContent;
+import io.netty.handler.codec.http.DefaultHttpResponse;
+import io.netty.handler.codec.http.DefaultLastHttpContent;
 import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.FullHttpResponse;
 import io.netty.handler.codec.http.HttpResponseStatus;
@@ -25,6 +28,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.Assert.fail;
 
 /**
@@ -47,6 +51,8 @@ import static org.junit.Assert.fail;
  *       through to a HEADERS frame.</li>
  *   <li>{@link #shouldNotValidatePerChunkHttpContent} — a plain (non-last) {@code HttpContent} carries
  *       no headers and flows through to a DATA frame untouched (the override does no per-chunk work).</li>
+ *   <li>A response to a {@code HEAD} request is sent as its header block alone, ending the stream, with
+ *       its {@code content-length}; its body and trailers are released and not sent.</li>
  * </ul>
  * The illegal name uses a space rather than an uppercase letter deliberately: Netty lower-cases header
  * names before validating, so an uppercase name would never trip the check — only an illegal token
@@ -200,6 +206,89 @@ public class LenientInboundHttp2StreamFrameCodecTest {
         } finally {
             channel.finishAndReleaseAll();
         }
+    }
+
+    @Test
+    public void shouldSendAResponseToHeadAsItsHeaderBlockAlone() {
+        EmbeddedChannel channel = streamWithRequest("HEAD");
+        ByteBuf content = Unpooled.copiedBuffer("served", StandardCharsets.UTF_8);
+        FullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK, content);
+        response.headers().set("content-length", "6");
+        response.trailingHeaders().set("x-trailer", "value");
+
+        assertThat(channel.writeOutbound(response), is(true));
+
+        Http2HeadersFrame head = channel.readOutbound();
+        assertThat("the header block ends the stream", head.isEndStream(), is(true));
+        assertThat(head.headers().status().toString(), is("200"));
+        assertThat("the length of the body a GET is sent", head.headers().get("content-length").toString(), is("6"));
+        assertThat("no DATA or trailers frame", channel.readOutbound(), nullValue());
+        assertThat("the body is released", content.refCnt(), is(0));
+        channel.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldDropTheBodyAndTrailersOfAStreamedResponseToHead() {
+        EmbeddedChannel channel = streamWithRequest("HEAD");
+        ByteBuf chunk = Unpooled.copiedBuffer("data: one\n\n", StandardCharsets.UTF_8);
+        ByteBuf last = Unpooled.copiedBuffer("data: two\n\n", StandardCharsets.UTF_8);
+        DefaultLastHttpContent lastContent = new DefaultLastHttpContent(last);
+        lastContent.trailingHeaders().set("x-trailer", "value");
+
+        channel.write(new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK));
+        ChannelFuture chunkWritten = channel.write(new DefaultHttpContent(chunk));
+        ChannelFuture lastWritten = channel.writeAndFlush(lastContent);
+
+        Http2HeadersFrame head = channel.readOutbound();
+        assertThat("the header block ends the stream", head.isEndStream(), is(true));
+        assertThat("no DATA or trailers frame", channel.readOutbound(), nullValue());
+        assertThat(chunkWritten.isSuccess(), is(true));
+        assertThat(lastWritten.isSuccess(), is(true));
+        assertThat("the body is released", chunk.refCnt(), is(0));
+        assertThat("the last content is released", last.refCnt(), is(0));
+        channel.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldSendAnInterimResponseToHeadBeforeTheFinalHeaderBlock() {
+        EmbeddedChannel channel = streamWithRequest("HEAD");
+        FullHttpResponse earlyHints = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.valueOf(103));
+        FullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK, Unpooled.copiedBuffer("served", StandardCharsets.UTF_8));
+
+        channel.writeOutbound(earlyHints, response);
+
+        Http2HeadersFrame interim = channel.readOutbound();
+        assertThat(interim.headers().status().toString(), is("103"));
+        assertThat("an interim response does not end the stream", interim.isEndStream(), is(false));
+        Http2HeadersFrame head = channel.readOutbound();
+        assertThat(head.headers().status().toString(), is("200"));
+        assertThat("the final header block ends the stream", head.isEndStream(), is(true));
+        assertThat("no DATA frame", channel.readOutbound(), nullValue());
+        channel.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldSendTheBodyOfAResponseToGet() {
+        EmbeddedChannel channel = streamWithRequest("GET");
+        FullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK, Unpooled.copiedBuffer("served", StandardCharsets.UTF_8));
+
+        channel.writeOutbound(response);
+
+        Http2HeadersFrame head = channel.readOutbound();
+        assertThat(head.isEndStream(), is(false));
+        Http2DataFrame body = channel.readOutbound();
+        assertThat(body.content().toString(StandardCharsets.UTF_8), is("served"));
+        assertThat(body.isEndStream(), is(true));
+        body.release();
+        channel.finishAndReleaseAll();
+    }
+
+    private static EmbeddedChannel streamWithRequest(String method) {
+        EmbeddedChannel channel = new EmbeddedChannel(new LenientInboundHttp2StreamFrameCodec());
+        Http2Headers headers = new DefaultHttp2Headers().method(method).scheme("http").authority("localhost").path("/served");
+        assertThat(channel.writeInbound(new DefaultHttp2HeadersFrame(headers, true)), is(true));
+        ReferenceCountUtil.release(channel.readInbound());
+        return channel;
     }
 
     private static Http2Exception rootHttp2Exception(Throwable thrown) {

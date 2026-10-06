@@ -715,6 +715,10 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **A response to `HEAD` over HTTP/2 is sent without its body.** A mocked response with a body, or a response
+  forwarded from an HTTP/2 upstream, was sent to an HTTP/2 `HEAD` request with its body, on a direct connection
+  and through a CONNECT or SOCKS tunnel; a response to `HEAD` has no content. Its headers now end the stream and
+  keep the `content-length` a `GET` is sent, as on HTTP/1.1, which was not affected.
 - **A console that is slow to drain no longer holds up stopping MockServer, or AsyncAPI requests, behind an AsyncAPI
   reset.** MockServer writes its log to standard output synchronously, so when stdout is a pipe that is read slowly (a
   CI runner, or a container log driver that has fallen behind) a thread writing a log line waits until the pipe takes

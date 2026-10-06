@@ -31,7 +31,11 @@ public final class RawHttp1Connection implements AutoCloseable {
     }
 
     public void sendGet(String path) throws IOException {
-        out.write(("GET " + path + " HTTP/1.1\r\nHost: localhost\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
+        send("GET", path);
+    }
+
+    public void send(String method, String path) throws IOException {
+        out.write((method + " " + path + " HTTP/1.1\r\nHost: localhost\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
         out.flush();
     }
 
@@ -126,7 +130,10 @@ public final class RawHttp1Connection implements AutoCloseable {
         throw new IOException("connection closed mid-line, received: " + line);
     }
 
-    private String readHead() throws IOException {
+    /**
+     * Reads a response's head and nothing after it, as for a response to {@code HEAD}.
+     */
+    public String readHead() throws IOException {
         StringBuilder head = new StringBuilder();
         int character;
         while ((character = in.read()) != -1) {
