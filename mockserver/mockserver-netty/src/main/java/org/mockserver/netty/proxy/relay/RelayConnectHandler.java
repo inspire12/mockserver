@@ -39,6 +39,7 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 
+import static org.mockserver.exception.ExceptionHandling.boundedFault;
 import static org.mockserver.exception.ExceptionHandling.closeOnFlush;
 import static org.mockserver.exception.ExceptionHandling.connectionClosedException;
 import static org.mockserver.exception.ExceptionHandling.isSslOrDecoderFault;
@@ -239,7 +240,7 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
                     new LogEntry()
                         .setLogLevel(Level.WARN)
                         .setMessageFormat("SSL or decoder fault -> " + message + sniDescription(ctx.channel()))
-                        .setThrowable(cause)
+                        .setThrowable(boundedFault(cause))
                 );
             }
         }
@@ -304,17 +305,25 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
                 boolean http2EnabledDownstream = HTTP_2.equals(negotiated);
                 configurePipelines(pipelineToMockServer, pipelineToProxyClient, mockServerCtx, proxyClientCtx, http2EnabledDownstream, false);
             } else {
-                if (mockServerLogger.isEnabledForInstance(TRACE)) {
-                    mockServerLogger.logEvent(
-                        new LogEntry()
-                            .setLogLevel(Level.TRACE)
-                            .setMessageFormat("SSL handshake failed, defaulting to HTTP/1.1")
-                            .setThrowable(handshakeFuture.cause())
-                    );
-                }
+                logFailedClientHandshake(mockServerLogger, handshakeFuture.cause());
                 configurePipelines(pipelineToMockServer, pipelineToProxyClient, mockServerCtx, proxyClientCtx, false, false);
             }
         });
+    }
+
+    /**
+     * Netty fails the handshake with the exception it throws, so bytes that are not a TLS record arrive here as a
+     * {@code NotSslRecordException} holding a hex dump of them.
+     */
+    static void logFailedClientHandshake(MockServerLogger mockServerLogger, Throwable cause) {
+        if (mockServerLogger.isEnabledForInstance(TRACE)) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.TRACE)
+                    .setMessageFormat("SSL handshake failed, defaulting to HTTP/1.1")
+                    .setThrowable(boundedFault(cause))
+            );
+        }
     }
 
     private void removeSocksCommandDecoders(ChannelPipeline pipeline) {

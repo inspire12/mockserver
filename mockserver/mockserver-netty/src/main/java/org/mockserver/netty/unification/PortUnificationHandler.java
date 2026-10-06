@@ -860,7 +860,7 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
                             .setLogLevel(Level.WARN)
                             .setMessageFormat("TLS handshake failure:" + NEW_LINE + NEW_LINE + " Client does not trust MockServer Certificate Authority for:{}See https://mock-server.com/mock_server/HTTPS_TLS.html to enable the client to trust MockServer Certificate Authority." + certInfo + NEW_LINE)
                             .setArguments(ctx.channel())
-                            .setThrowable(throwable)
+                            .setThrowable(boundedFault(throwable))
                     );
                 }
             } else if (!message.contains("close_notify during handshake")) {
@@ -879,7 +879,7 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
                         new LogEntry()
                             .setLogLevel(Level.ERROR)
                             .setMessageFormat("TLS handshake failure while a client attempted to connect to " + ctx.channel() + " - " + diagnosticHint + certInfo)
-                            .setThrowable(throwable)
+                            .setThrowable(boundedFault(throwable))
                     );
                 }
             }
@@ -892,7 +892,7 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
                     new LogEntry()
                         .setLogLevel(Level.WARN)
                         .setMessageFormat("SSL or decoder fault caught by port unification handler -> closing pipeline " + ctx.channel() + sniDescription(ctx.channel()))
-                        .setThrowable(throwable)
+                        .setThrowable(boundedFault(throwable))
                 );
             }
         }

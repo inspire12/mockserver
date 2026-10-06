@@ -1060,6 +1060,11 @@ no request is waiting (an idle pooled connection), where it is the only record. 
 `INFO` entry for a failed response future, which repeats the exception's message, is skipped for these
 reasons, so the `ERROR` is the request's one entry.
 
+With `redactSecretsInLog` on, the request's credential values are masked in each message before it is cut, for
+the reason (in the entry, the `502` body and its `INFO` entry) and for the cause the entry attaches
+(`LogEntry.credentialScrub` and the scrub overloads of the `ExceptionHandling` bound helpers). The render-time
+redaction matches whole values only, so a credential cut at character 256 would otherwise keep its first part.
+
 A configuration error or an undecodable response is not a transient failure: `ForwardRetryPolicy.isTransientFailure`
 is false for it, so it is not retried, and the circuit breaker records it as it records a header-limit refusal
 (not a failure). A

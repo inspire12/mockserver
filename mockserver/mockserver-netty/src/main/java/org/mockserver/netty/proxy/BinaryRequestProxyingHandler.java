@@ -33,6 +33,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
 
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static org.mockserver.exception.ExceptionHandling.boundedFault;
+import static org.mockserver.exception.ExceptionHandling.boundedFaultMessage;
 import static org.mockserver.exception.ExceptionHandling.closeOnFlush;
 import static org.mockserver.exception.ExceptionHandling.connectionClosedException;
 import static org.mockserver.exception.ExceptionHandling.isSslOrDecoderFault;
@@ -461,8 +463,8 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
                             .setLogLevel(Level.WARN)
                             .setCorrelationId(logCorrelationId)
                             .setMessageFormat("exception{}sending hex{}to{}closing connection")
-                            .setArguments(throwable.getMessage(), SensitiveLogValue.of(ByteBufUtil.hexDump(binaryRequest.getBytes())), remoteAddress)
-                            .setThrowable(throwable)
+                            .setArguments(boundedFaultMessage(throwable), SensitiveLogValue.of(ByteBufUtil.hexDump(binaryRequest.getBytes())), remoteAddress)
+                            .setThrowable(boundedFault(throwable))
                     );
                 }
                 ctx.close();
@@ -493,8 +495,8 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
                             .setLogLevel(Level.WARN)
                             .setCorrelationId(logCorrelationId)
                             .setMessageFormat("exception{}sending hex{}to{}closing connection")
-                            .setArguments(throwable.getMessage(), SensitiveLogValue.of(ByteBufUtil.hexDump(binaryRequest.getBytes())), remoteAddress)
-                            .setThrowable(throwable)
+                            .setArguments(boundedFaultMessage(throwable), SensitiveLogValue.of(ByteBufUtil.hexDump(binaryRequest.getBytes())), remoteAddress)
+                            .setThrowable(boundedFault(throwable))
                     );
                 }
                 ctx.close();
@@ -550,7 +552,7 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
                     new LogEntry()
                         .setLogLevel(Level.WARN)
                         .setMessageFormat("SSL or decoder fault caught by " + this.getClass() + " handler -> closing pipeline " + ctx.channel() + sniDescription(ctx.channel()))
-                        .setThrowable(cause)
+                        .setThrowable(boundedFault(cause))
                 );
             }
         }

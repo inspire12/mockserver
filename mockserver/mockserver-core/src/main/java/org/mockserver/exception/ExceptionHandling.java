@@ -36,6 +36,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
 
 import static org.slf4j.event.Level.WARN;
@@ -286,11 +287,26 @@ public class ExceptionHandling {
     }
 
     /**
+     * As {@link #boundedFaultMessage(Throwable)}, with {@code scrub} applied to the message before it is cut: a
+     * credential cut in two is no longer recognised by the redaction of a later render, so it has to be masked first.
+     */
+    public static String boundedFaultMessage(Throwable fault, UnaryOperator<String> scrub) {
+        return scrubbedAndBounded(fault.getMessage(), scrub);
+    }
+
+    /**
      * A fault's simple class name and its {@link #boundedFaultMessage(Throwable) bounded message}, such as
      * {@code NotSslRecordException: not an SSL/TLS record: 400 bytes}.
      */
     public static String boundedFaultDescription(Throwable fault) {
-        String message = boundedFaultMessage(fault);
+        return boundedFaultDescription(fault, UnaryOperator.identity());
+    }
+
+    /**
+     * As {@link #boundedFaultDescription(Throwable)}, with {@code scrub} applied to the message before it is cut.
+     */
+    public static String boundedFaultDescription(Throwable fault, UnaryOperator<String> scrub) {
+        String message = boundedFaultMessage(fault, scrub);
         return fault.getClass().getSimpleName() + (message == null || message.isEmpty() ? "" : ": " + message);
     }
 
@@ -300,10 +316,18 @@ public class ExceptionHandling {
      * such as the trust manager's, as its cause.
      */
     public static String boundedFaultDescriptionWithRootCause(Throwable fault) {
-        String description = boundedFaultDescription(fault);
+        return boundedFaultDescriptionWithRootCause(fault, UnaryOperator.identity());
+    }
+
+    /**
+     * As {@link #boundedFaultDescriptionWithRootCause(Throwable)}, with {@code scrub} applied to each message before
+     * it is cut.
+     */
+    public static String boundedFaultDescriptionWithRootCause(Throwable fault, UnaryOperator<String> scrub) {
+        String description = boundedFaultDescription(fault, scrub);
         Throwable root = ExceptionUtils.getRootCause(fault);
         if (root != null && root != fault && root.getMessage() != null && (fault.getMessage() == null || !fault.getMessage().contains(root.getMessage()))) {
-            description += "; caused by " + boundedFaultDescription(root);
+            description += "; caused by " + boundedFaultDescription(root, scrub);
         }
         return description;
     }
@@ -330,6 +354,10 @@ public class ExceptionHandling {
             }
         }
         return ssl;
+    }
+
+    private static String scrubbedAndBounded(String message, UnaryOperator<String> scrub) {
+        return message == null ? null : boundedFaultMessage(scrub.apply(message));
     }
 
     private static String boundedFaultMessage(String message) {
@@ -362,27 +390,36 @@ public class ExceptionHandling {
      * those messages, each after the name of its class, and the same stack traces. Such a copy is returned as it is.
      */
     public static Throwable boundedFault(Throwable fault) {
-        return hasUnboundedMessage(fault, Collections.newSetFromMap(new IdentityHashMap<>()))
-            ? RedactedThrowable.of(fault, ExceptionHandling::boundedFaultMessage)
+        return boundedFault(fault, UnaryOperator.identity());
+    }
+
+    /**
+     * As {@link #boundedFault(Throwable)}, with {@code scrub} applied to each message before it is cut, and a copy
+     * also when {@code scrub} changes a message that needed no cut.
+     */
+    public static Throwable boundedFault(Throwable fault, UnaryOperator<String> scrub) {
+        UnaryOperator<String> rewrite = message -> scrubbedAndBounded(message, scrub);
+        return hasUnboundedMessage(fault, rewrite, Collections.newSetFromMap(new IdentityHashMap<>()))
+            ? RedactedThrowable.of(fault, rewrite)
             : fault;
     }
 
-    private static boolean hasUnboundedMessage(Throwable throwable, Set<Throwable> visited) {
+    private static boolean hasUnboundedMessage(Throwable throwable, UnaryOperator<String> rewrite, Set<Throwable> visited) {
         // visited by identity: a cause or suppressed graph can be cyclic
         if (throwable == null || !visited.add(throwable)) {
             return false;
         }
         // a copy's message leads with a class name, which is no part of what was bounded
         String message = throwable instanceof RedactedThrowable ? ((RedactedThrowable) throwable).getRewrittenMessage() : throwable.getMessage();
-        if (message != null && !message.equals(boundedFaultMessage(message))) {
+        if (message != null && !message.equals(rewrite.apply(message))) {
             return true;
         }
         for (Throwable suppressed : throwable.getSuppressed()) {
-            if (hasUnboundedMessage(suppressed, visited)) {
+            if (hasUnboundedMessage(suppressed, rewrite, visited)) {
                 return true;
             }
         }
-        return hasUnboundedMessage(throwable.getCause(), visited);
+        return hasUnboundedMessage(throwable.getCause(), rewrite, visited);
     }
 
     private static final List<Class<? extends Exception>> SSL_HANDSHAKE_FAILURE_CLASSES = Arrays.asList(SSLException.class, SSLHandshakeException.class, CertPathValidatorException.class, SignatureException.class);

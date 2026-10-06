@@ -52,6 +52,8 @@ import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
+import static org.mockserver.exception.ExceptionHandling.boundedFault;
+import static org.mockserver.exception.ExceptionHandling.boundedFaultMessage;
 import static org.mockserver.model.HttpResponse.response;
 
 public class NettyHttpClient {
@@ -631,8 +633,9 @@ public class NettyHttpClient {
                             mockServerLogger.logEvent(
                                 new LogEntry()
                                     .setLogLevel(Level.WARN)
-                                    .setMessageFormat("exception while sending binary request - " + throwable.getMessage())
-                                    .setThrowable(throwable)
+                                    .setMessageFormat("exception while sending binary request:{}")
+                                    .setArguments(boundedFaultMessage(throwable))
+                                    .setThrowable(boundedFault(throwable))
                             );
                         }
                         binaryResponseFuture.completeExceptionally(throwable);

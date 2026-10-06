@@ -1563,11 +1563,7 @@ This release delivers a sustained performance and memory programme alongside dat
   record after its handshake was logged with every byte it had sent, in hex: as long as the read
   was, and in a form `redactSecretsInLog` could not match a credential in. The entry now says how
   many bytes there were (`not an SSL/TLS record: 2000 bytes`) and keeps its stack trace, and the
-  message of each exception in it is cut to 256 characters. This covers a connection once its
-  requests are being served, the callback WebSocket, dashboard, MCP and SOCKS handlers, a direct
-  HTTP/2 connection (which showed the start of the dump) and a connection to an upstream. An entry
-  logged while a connection's protocol is still being detected, by the tunnel relays, or for a
-  failed forward can still contain the dump.
+  message of each exception in it is cut to 256 characters. This covers every entry for such a fault: while a connection's protocol is being detected (including a failed TLS handshake), once its requests are being served, the callback WebSocket, dashboard, MCP and SOCKS handlers, the CONNECT tunnel relays (including a failed TLS handshake with the proxy client and a request or response that could not be relayed), binary proxying (including a binary forward that failed, on MockServer's side and the forward client's), a direct HTTP/2 connection (which showed the start of the dump), a connection to an upstream, a failed forward, and the callback WebSocket client. With `redactSecretsInLog` on, a failed forward's entry masks the request's credentials before a message is cut, so no part of a credential is left at the cut, and the reason in the `502` answer to that request is masked the same way.
 
 ## [8.0.0] - 2026-09-15
 

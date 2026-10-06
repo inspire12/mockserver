@@ -24,6 +24,7 @@ import java.nio.channels.ClosedSelectorException;
 
 import static io.netty.handler.codec.http2.HttpConversionUtil.ExtensionHeaderNames.STREAM_ID;
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
+import static org.mockserver.exception.ExceptionHandling.boundedFault;
 import static org.mockserver.exception.ExceptionHandling.closeOnFlush;
 import static org.mockserver.exception.ExceptionHandling.DIRECT_MEMORY_LIMIT_REACHED;
 import static org.mockserver.exception.ExceptionHandling.directMemoryLimitReached;
@@ -135,7 +136,7 @@ public class UpstreamProxyRelayHandler extends SimpleChannelInboundHandler<FullH
                             .setHttpRequest(loggedRequest)
                             .setMessageFormat("exception while returning response for request:{}")
                             .setArguments(loggedRequest)
-                            .setThrowable(future.cause())
+                            .setThrowable(boundedFault(future.cause()))
                     );
                 }
                 future.channel().close();
@@ -220,7 +221,7 @@ public class UpstreamProxyRelayHandler extends SimpleChannelInboundHandler<FullH
                     new LogEntry()
                         .setLogLevel(Level.WARN)
                         .setMessageFormat("SSL or decoder fault caught by upstream relay handler -> closing pipeline " + ctx.channel() + sniDescription(ctx.channel(), upstreamChannel, downstreamChannel))
-                        .setThrowable(cause)
+                        .setThrowable(boundedFault(cause))
                 );
             }
         }

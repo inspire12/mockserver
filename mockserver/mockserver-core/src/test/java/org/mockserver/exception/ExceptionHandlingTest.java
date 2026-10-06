@@ -220,6 +220,32 @@ public class ExceptionHandlingTest {
     }
 
     @Test
+    public void shouldScrubAMessageBeforeItIsCut() {
+        String secret = "s3cr3tCredentialValue";
+        // the secret straddles the cut
+        Throwable fault = new DecoderException("a".repeat(MAX_FAULT_MESSAGE_LENGTH - 10) + secret, new SSLException("quotes " + secret));
+        java.util.function.UnaryOperator<String> scrub = message -> message.replace(secret, "***");
+
+        Throwable attached = boundedFault(fault, scrub);
+
+        assertThat(rendered(attached), not(containsString(secret.substring(0, 6))));
+        assertThat(attached.getCause().getMessage(), is("javax.net.ssl.SSLException: quotes ***"));
+        assertThat(boundedFaultMessage(fault, scrub), is("a".repeat(MAX_FAULT_MESSAGE_LENGTH - 10) + "***"));
+        assertThat(boundedFault(attached, scrub), is(sameInstance(attached)));
+    }
+
+    @Test
+    public void shouldAttachACopyWhenTheScrubChangesAMessageWithinTheBound() {
+        Throwable fault = new DecoderException("bad frame", new SSLException("quotes secret-value"));
+
+        Throwable attached = boundedFault(fault, message -> message.replace("secret-value", "***"));
+
+        assertThat(attached, instanceOf(RedactedThrowable.class));
+        assertThat(attached.getCause().getMessage(), is("javax.net.ssl.SSLException: quotes ***"));
+        assertThat(boundedFault(fault, message -> message), is(sameInstance(fault)));
+    }
+
+    @Test
     public void shouldAttachAFaultItselfWhenEveryMessageIsWithinTheBound() {
         Throwable fault = new DecoderException("bad frame", new SSLException("bad record"));
         fault.addSuppressed(new IllegalStateException("also"));

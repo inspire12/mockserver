@@ -2512,7 +2512,7 @@ This means genuine SSL negotiation failures (e.g., client sends plain HTTP to a 
 
 ### What an entry carries of the fault
 
-**In the handlers that use the helpers below, a fault's entry does not carry the bytes a peer sent, and the message of each exception in it is cut to 256 characters.** Netty's JDK TLS handler, the one in use without the OpenSSL native, reports bytes that are not a TLS record as `NotSslRecordException: not an SSL/TLS record: <hex>`: a hex dump of every byte read, two characters a byte, with no limit, repeated in the message of the `DecoderException` that wraps it. Attached to an entry it is in the log, the event log and the dashboard once for each of those messages, and it is the peer's own bytes in a form `redactSecretsInLog` cannot match a credential against.
+**A fault's entry does not carry the bytes a peer sent, and the message of each exception in it is cut to 256 characters.** Netty's JDK TLS handler, the one in use without the OpenSSL native, reports bytes that are not a TLS record as `NotSslRecordException: not an SSL/TLS record: <hex>`: a hex dump of every byte read, two characters a byte, with no limit, repeated in the message of the `DecoderException` that wraps it. Attached to an entry it is in the log, the event log and the dashboard once for each of those messages, and it is the peer's own bytes in a form `redactSecretsInLog` cannot match a credential against.
 
 `ExceptionHandling` has the two helpers:
 
@@ -2520,18 +2520,27 @@ This means genuine SSL negotiation failures (e.g., client sends plain HTTP to a 
 |--------|-------|
 | `boundedFaultMessage(Throwable)` | the message cut to `MAX_FAULT_MESSAGE_LENGTH` (256), with the dump replaced by its size: `not an SSL/TLS record: 2000 bytes` |
 | `boundedFault(Throwable)` | the throwable itself when every message of it, its causes and its suppressed throwables is already that; otherwise a `RedactedThrowable` copy with those messages and the original stack traces. A copy's own message is the class name of what was thrown and then the bounded message, so it can be some 40 characters over 256 |
+| `boundedFaultMessage`, `boundedFaultDescription`, `boundedFaultDescriptionWithRootCause` and `boundedFault`, each with a `UnaryOperator<String> scrub` | the same, with `scrub` applied to each message before it is cut; `boundedFault` also copies when `scrub` changes a message that needed no cut |
 
 Both give back what they are given when it is already bounded: only a run of hex digits after `not an SSL/TLS record: ` is taken for a dump, and a copy is recognised as one.
 
-**Cut before redaction.** `redactSecretsInLog` scrubs a throwable when its entry is rendered, by matching the exact values of the credentials in the requests the entry attaches, so it sees a message that has already been cut. These entries attach no request, so there is nothing to match. An entry that does attach one (a failed forward's, if the helpers are extended to it) could keep the first part of a credential that straddles character 256; there the values have to be scrubbed before the message is cut.
+**Scrub, then cut.** `redactSecretsInLog` scrubs a throwable when its entry is rendered, by matching the exact values of the credentials in the requests the entry attaches, so it sees a message that has already been cut, and a credential that straddles character 256 would keep its first part. The handlers' entries attach no request, so there is nothing to match. A failed forward's entry does (`HttpActionHandler.handleExceptionDuringForwardingRequest` and `handleUnmatchedForwardFailure`): it takes `LogEntry.credentialScrub(configuration)`, which masks the entry's credential values when `redactSecretsInLog` is on and is the identity otherwise, and passes it to the scrub overloads for both the reason in its text and the throwable it attaches. The copy keeps nothing of the original, so the setting in force when the forward failed is the one applied.
 
 A handler that attaches the fault passes it through `boundedFault`, so the stack trace is kept: a decoder wraps whatever a handler's own `decode` throws, and that stack trace is how such a bug is found. A handler that logs the message alone uses `boundedFaultMessage`.
 
-| Uses the helpers | Not yet (the entry can still carry the dump) |
-|------------------|----------------------------------------------|
-| `HttpRequestHandler`, `CallbackWebSocketServerHandler`, `DashboardWebSocketHandler`, `McpStreamableHttpHandler`, `SocksProxyHandler`, `Http2ConnectionExceptionHandler`, `Http2ForwardConnectionExceptionHandler`, `HttpOrHttp2Initializer`, `Http3ExceptionHandler` | `PortUnificationHandler`, `BinaryRequestProxyingHandler`, `RelayConnectHandler`, `UpstreamProxyRelayHandler`, `DownstreamProxyRelayHandler`; and `HttpActionHandler`, which logs a failed forward with its cause |
+| Where | What uses the helpers |
+|-------|-----------------------|
+| Serving handlers | `HttpRequestHandler`, `CallbackWebSocketServerHandler`, `DashboardWebSocketHandler`, `McpStreamableHttpHandler`, `SocksProxyHandler`, `Http2ConnectionExceptionHandler`, `HttpOrHttp2Initializer`, `Http3ExceptionHandler` |
+| Protocol detection | `PortUnificationHandler`: the SSL or decoder fault entry and both failed-handshake entries |
+| Tunnels and binary proxying | `RelayConnectHandler` (its fault entry and the failed TLS handshake with the proxy client: Netty fails the handshake, and every write waiting on it, with the exception that holds the dump), `UpstreamProxyRelayHandler` and `DownstreamProxyRelayHandler` (fault entries and write failures), `BinaryRequestProxyingHandler` (its fault entry and both failed binary forward entries), `BinaryRelay`, `BinaryRelayUpstreamHandler`, `UnconfiguredTunnelLegExceptionHandler` |
+| Forward client and failed forwards | `Http2ForwardConnectionExceptionHandler`, `HttpClientInitializer`, `ForwardHeaderLimit`, `NettyHttpClient` (a failed binary request), and `HttpActionHandler` with the scrub above |
+| Callback WebSocket client | `WebSocketClientHandler`, whose TLS handler is always the JDK's |
 
-`SslFaultLogEntryBoundTest` fires a 60,000-byte dump at each of the first five and checks the entry.
+`SslFaultLogEntryBoundTest` fires a 60,000-byte dump at each handler with an `isSslOrDecoderFault` branch that attaches the fault, and a long failed-handshake message at `PortUnificationHandler`, and checks the entry; `BinaryRequestProxyingHandlerFailedForwardBoundTest` and `HttpActionHandlerForwardFailureTest` (with a fault from Netty's JDK TLS handler) check the failed-forward entries; `RelayLegFaultLogEntryBoundTest` (with a handshake Netty's TLS handler failed on a real ClientHello followed by other bytes), `NettyHttpClientBinaryFaultLogEntryBoundTest` and `WebSocketClientHandlerFaultLogEntryBoundTest` check the rest.
+
+Other entries that attach an exception were read and left: a peer's close or reset (`connectionClosedException` is false for every SSL or decoder fault), HTTP/2 connection and stream errors (Netty's preface dump is at most 24 bytes), and failures of MockServer's own code, of the DNS and HTTP/3 codecs, or of a connect.
+
+A binary forward's failure entry still carries the request it was sending as hex (`SensitiveLogValue`, so `redactSecretsInLog` masks it): that is the message the entry is about, already logged when it was received, not bytes a fault picked up.
 
 ## ByteBuf Leak Detection in Tests
 

@@ -21,6 +21,7 @@ import org.slf4j.event.Level;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static io.netty.handler.codec.http2.HttpConversionUtil.ExtensionHeaderNames.STREAM_ID;
+import static org.mockserver.exception.ExceptionHandling.boundedFault;
 import static org.mockserver.exception.ExceptionHandling.closeOnFlush;
 import static org.mockserver.exception.ExceptionHandling.DIRECT_MEMORY_LIMIT_REACHED;
 import static org.mockserver.exception.ExceptionHandling.directMemoryLimitReached;
@@ -209,7 +210,7 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
         LogEntry logEntry = new LogEntry()
             .setLogLevel(Level.ERROR)
             .setMessageFormat("exception while returning writing:{}")
-            .setThrowable(cause);
+            .setThrowable(boundedFault(cause));
         String text = String.valueOf(msg);
         org.mockserver.model.HttpResponse headersOfResponse = msg instanceof io.netty.handler.codec.http.HttpResponse ? NettyMessageForLog.response((io.netty.handler.codec.http.HttpResponse) msg) : null;
         org.mockserver.model.HttpRequest headersOfRequest = msg instanceof io.netty.handler.codec.http.HttpRequest ? NettyMessageForLog.request((io.netty.handler.codec.http.HttpRequest) msg) : null;
@@ -254,7 +255,7 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
                     new LogEntry()
                         .setLogLevel(Level.WARN)
                         .setMessageFormat("SSL or decoder fault caught by downstream relay handler -> closing pipeline " + ctx.channel() + sniDescription(ctx.channel(), upstreamChannel))
-                        .setThrowable(cause)
+                        .setThrowable(boundedFault(cause))
                 );
             }
         }

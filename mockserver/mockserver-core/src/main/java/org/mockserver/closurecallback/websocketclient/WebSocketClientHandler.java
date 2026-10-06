@@ -21,6 +21,7 @@ import static io.netty.handler.codec.http.HttpHeaderValues.WEBSOCKET;
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
 import static org.mockserver.closurecallback.websocketclient.WebSocketClient.CLIENT_REGISTRATION_ID_HEADER;
 import static org.mockserver.closurecallback.websocketclient.WebSocketClient.REGISTRATION_FUTURE;
+import static org.mockserver.exception.ExceptionHandling.boundedFault;
 import static org.slf4j.event.Level.*;
 
 @SuppressWarnings("rawtypes")
@@ -176,7 +177,7 @@ public class WebSocketClientHandler extends SimpleChannelInboundHandler<Object> 
             new LogEntry()
                 .setLogLevel(Level.ERROR)
                 .setMessageFormat("web socket client caught exception")
-                .setThrowable(cause)
+                .setThrowable(boundedFault(cause))
         );
         final CompletableFuture<String> registrationFuture = ctx.channel().attr(REGISTRATION_FUTURE).get();
         if (!registrationFuture.isDone()) {

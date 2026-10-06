@@ -1,8 +1,15 @@
 package org.mockserver.mock.action.http;
 
+import io.netty.buffer.Unpooled;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http2.Http2Error;
 import io.netty.handler.codec.http2.Http2Exception;
 import io.netty.handler.ssl.NotSslRecordException;
+import io.netty.handler.ssl.SslContextBuilder;
+import io.netty.handler.ssl.SslProvider;
+import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
@@ -18,20 +25,25 @@ import org.mockserver.responsewriter.ResponseWriter;
 import org.mockserver.uuid.UUIDService;
 import org.slf4j.event.Level;
 
+import javax.net.ssl.SSLException;
 import javax.net.ssl.SSLHandshakeException;
 import java.lang.reflect.Constructor;
 import java.net.ConnectException;
 import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.lessThan;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
@@ -186,6 +198,69 @@ public class HttpActionHandlerForwardFailureTest {
         String reason = "TLS with the upstream failed: SSLHandshakeException: PKIX path building failed";
         assertThat("not taken for an exploratory proxy's failed connect", answer().getBodyAsString(), is(reason));
         assertLoggedOnceAsAnError(reason);
+    }
+
+    @Test
+    public void shouldLogAnUpstreamThatAnsweredJdkTlsInPlainTextWithoutItsBytes() throws Exception {
+        String plainText = "HTTP/1.1 200 OK\r\ncontent-length: 4000\r\n\r\n" + "x".repeat(4000);
+        Throwable notTls = jdkTlsClientFault(plainText);
+        assertThat("Netty's JDK TLS handler dumps what it read", notTls.getCause(), instanceOf(NotSslRecordException.class));
+        String reason = "TLS with the upstream failed: NotSslRecordException: not an SSL/TLS record: " + plainText.length() + " bytes";
+
+        actionHandler.handleExceptionDuringForwardingRequest(ACTION, request, responseWriter, socketConnectionException("TLS handshake failed", notTls));
+        actionHandler.handleUnmatchedForwardFailure(socketConnectionException("TLS handshake failed", notTls), request, mock(ResponseWriter.class), UPSTREAM, false);
+
+        List<LogEntry> errors = errors();
+        assertThat(errors, hasSize(2));
+        for (LogEntry error : errors) {
+            assertThat(error.getMessage(configuration()), containsString(reason));
+            assertThat(error.getMessage(configuration()).length(), lessThan(plainText.length()));
+            Throwable attached = error.getThrowable();
+            assertThat(attached.getCause().getCause().toString(), is("io.netty.handler.ssl.NotSslRecordException: not an SSL/TLS record: " + plainText.length() + " bytes"));
+            assertThat(attached.getCause().getCause().getStackTrace(), is(notTls.getCause().getStackTrace()));
+        }
+    }
+
+    @Test
+    public void shouldMaskACredentialBeforeAFaultsMessageIsCut() {
+        HttpState httpState = mock(HttpState.class);
+        when(httpState.getMockServerLogger()).thenReturn(mockServerLogger);
+        HttpActionHandler redactingHandler = new HttpActionHandler(configuration().redactSecretsInLog(true), null, httpState, null, null);
+        String token = "zq7XkLmNpR4sT8vW2yB6dF0hJ3";
+        HttpRequest withToken = request("/some_path").withHeader("Authorization", "Bearer " + token);
+        // the token straddles the cut at 256 characters
+        SSLHandshakeException handshake = new SSLHandshakeException("p".repeat(230) + " " + token + " rejected");
+
+        redactingHandler.handleExceptionDuringForwardingRequest(ACTION, withToken, mock(ResponseWriter.class), socketConnectionException("TLS handshake failed", handshake));
+        redactingHandler.handleUnmatchedForwardFailure(socketConnectionException("TLS handshake failed", handshake), withToken, mock(ResponseWriter.class), UPSTREAM, false);
+
+        List<LogEntry> errors = errors();
+        assertThat(errors, hasSize(2));
+        for (LogEntry error : errors) {
+            org.mockserver.configuration.Configuration redacting = configuration().redactSecretsInLog(true);
+            assertThat(error.getMessage(redacting), not(containsString(token.substring(0, 6))));
+            Throwable attached = error.getThrowable(redacting);
+            assertThat(attached.getCause().toString(), not(containsString(token.substring(0, 6))));
+            assertThat(attached.getCause().toString(), containsString("***REDACTED***"));
+        }
+    }
+
+    /**
+     * What Netty's JDK TLS handler, as the forward client's, throws when the upstream answers with {@code plainText}.
+     */
+    private static Throwable jdkTlsClientFault(String plainText) throws SSLException {
+        AtomicReference<Throwable> caught = new AtomicReference<>();
+        EmbeddedChannel channel = new EmbeddedChannel();
+        channel.pipeline().addLast(SslContextBuilder.forClient().sslProvider(SslProvider.JDK).trustManager(InsecureTrustManagerFactory.INSTANCE).build().newHandler(channel.alloc(), "upstream.example", 8443));
+        channel.pipeline().addLast(new ChannelInboundHandlerAdapter() {
+            @Override
+            public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+                caught.compareAndSet(null, cause);
+            }
+        });
+        channel.writeInbound(Unpooled.copiedBuffer(plainText, StandardCharsets.US_ASCII));
+        channel.finishAndReleaseAll();
+        return caught.get();
     }
 
     private HttpResponse answer() {

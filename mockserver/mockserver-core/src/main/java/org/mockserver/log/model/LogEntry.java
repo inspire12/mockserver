@@ -21,6 +21,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.Date;
 import java.util.Locale;
+import java.util.function.UnaryOperator;
 
 import static org.apache.commons.lang3.StringUtils.isBlank;
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
@@ -788,6 +789,18 @@ public class LogEntry implements EventTranslator<LogEntry> {
     @JsonIgnore
     public Throwable getThrowable(org.mockserver.configuration.Configuration configuration) {
         return throwableFor(redaction(configuration));
+    }
+
+    /**
+     * What {@code redactSecretsInLog} makes of a text that quotes this entry's credential values under
+     * {@code configuration}: the values masked, or the text as it is when redaction is off. For a text that is cut
+     * before it is attached, since a value cut in two is no longer recognised when the entry is shown.
+     *
+     * @param configuration the effective server configuration (may be {@code null})
+     */
+    public UnaryOperator<String> credentialScrub(org.mockserver.configuration.Configuration configuration) {
+        Redaction redaction = redaction(configuration);
+        return redaction == null ? UnaryOperator.identity() : redaction::scrub;
     }
 
     private Throwable throwableFor(Redaction redaction) {

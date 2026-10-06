@@ -14,11 +14,19 @@ import org.mockserver.mock.HttpState;
 import org.mockserver.mock.action.http.HttpActionHandler;
 import org.mockserver.netty.mcp.McpSessionManager;
 import org.mockserver.netty.mcp.McpStreamableHttpHandler;
+import org.mockserver.netty.proxy.BinaryRequestProxyingHandler;
+import org.mockserver.netty.proxy.connect.HttpConnectHandler;
+import org.mockserver.netty.proxy.relay.DownstreamProxyRelayHandler;
+import org.mockserver.netty.proxy.relay.UpstreamProxyRelayHandler;
 import org.mockserver.netty.proxy.socks.Socks5ProxyHandler;
+import org.mockserver.netty.unification.PortUnificationHandler;
 import org.mockserver.netty.websocketregistry.CallbackWebSocketServerHandler;
+import org.mockserver.httpclient.NettyHttpClient;
 import org.mockserver.scheduler.Scheduler;
+import org.mockserver.socket.tls.NettySslContextFactory;
 import org.slf4j.event.Level;
 
+import javax.net.ssl.SSLHandshakeException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -70,6 +78,11 @@ public class SslFaultLogEntryBoundTest {
         handlers.put("DashboardWebSocketHandler", () -> new DashboardWebSocketHandler(httpState, false, false));
         handlers.put("McpStreamableHttpHandler", () -> new McpStreamableHttpHandler(httpState, server, mock(McpSessionManager.class)));
         handlers.put("Socks5ProxyHandler", () -> new Socks5ProxyHandler(configuration(), mockServerLogger, server));
+        handlers.put("PortUnificationHandler", () -> portUnificationHandler(httpState, server));
+        handlers.put("BinaryRequestProxyingHandler", () -> new BinaryRequestProxyingHandler(mock(Configuration.class), mockServerLogger, mock(Scheduler.class), mock(NettyHttpClient.class), httpState));
+        handlers.put("HttpConnectHandler", () -> new HttpConnectHandler(configuration(), server, mockServerLogger, "backend.example.com", 443));
+        handlers.put("UpstreamProxyRelayHandler", () -> new UpstreamProxyRelayHandler(mockServerLogger, new EmbeddedChannel(), new EmbeddedChannel(), "backend.example.com", 443, 1024));
+        handlers.put("DownstreamProxyRelayHandler", () -> new DownstreamProxyRelayHandler(mockServerLogger, new EmbeddedChannel()));
         return handlers;
     }
 
@@ -95,6 +108,39 @@ public class SslFaultLogEntryBoundTest {
             assertThat(name + " closes the connection", channel.isOpen(), is(false));
             channel.finishAndReleaseAll();
         });
+    }
+
+    @Test
+    public void shouldBoundAFailedTlsHandshakesEntryAtThePortItArrivedOn() {
+        HttpState httpState = mock(HttpState.class, RETURNS_DEEP_STUBS);
+        when(httpState.getMockServerLogger()).thenReturn(mockServerLogger);
+        // the client distrusts MockServer's CA (WARN), or the handshake failed for another reason (ERROR)
+        Map<String, Level> alerts = new LinkedHashMap<>();
+        alerts.put("Received fatal alert: certificate_unknown ", Level.WARN);
+        alerts.put("Received fatal alert: handshake_failure ", Level.ERROR);
+        alerts.forEach((alert, level) -> {
+            SSLHandshakeException handshake = new SSLHandshakeException(alert + "x".repeat(BYTES_READ));
+            Throwable fault = new DecoderException(handshake);
+            EmbeddedChannel channel = new EmbeddedChannel(portUnificationHandler(httpState, mock(LifeCycle.class)));
+            logged.clear();
+
+            channel.pipeline().fireExceptionCaught(fault);
+            channel.runPendingTasks();
+
+            assertThat(alert, logged, hasSize(1));
+            assertThat(alert, logged.get(0).getLogLevel(), is(level));
+            Throwable attached = logged.get(0).getThrowable();
+            assertThat(alert, attached.getCause().getMessage(), containsString(alert));
+            assertThat(alert, attached.toString().length(), lessThan(1_000));
+            assertThat(alert, attached.getCause().toString().length(), lessThan(1_000));
+            assertThat(alert, attached.getStackTrace(), is(fault.getStackTrace()));
+            assertThat(alert, attached.getCause().getStackTrace(), is(handshake.getStackTrace()));
+            channel.finishAndReleaseAll();
+        });
+    }
+
+    private static PortUnificationHandler portUnificationHandler(HttpState httpState, LifeCycle server) {
+        return new PortUnificationHandler(mock(Configuration.class), server, httpState, mock(HttpActionHandler.class), mock(NettySslContextFactory.class), null);
     }
 
     @Test

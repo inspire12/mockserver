@@ -54,6 +54,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
+import java.util.function.UnaryOperator;
 
 import static io.netty.handler.codec.http.HttpHeaderNames.*;
 import static io.netty.handler.codec.http.HttpResponseStatus.OK;
@@ -1290,14 +1291,17 @@ public class HttpActionHandler {
         }
         String reason = upstreamFailureReason(throwable);
         if (reason != null) {
+            LogEntry entry = new LogEntry()
+                .setLogLevel(Level.ERROR)
+                .setCorrelationId(request.getLogCorrelationId())
+                .setHttpRequest(request)
+                .setMessageFormat("failed to proxy request{}to remote address{}because:{}");
+            UnaryOperator<String> scrub = entry.credentialScrub(configuration);
+            reason = upstreamFailureReason(throwable, scrub);
             mockServerLogger.logEvent(
-                new LogEntry()
-                    .setLogLevel(Level.ERROR)
-                    .setCorrelationId(request.getLogCorrelationId())
-                    .setHttpRequest(request)
-                    .setMessageFormat("failed to proxy request{}to remote address{}because:{}")
+                entry
                     .setArguments(request, remoteAddress, reason)
-                    .setThrowable(boundedFault(throwable))
+                    .setThrowable(boundedFault(throwable, scrub))
             );
             returnBadGateway(responseWriter, request, reason, badGatewayResponse().withBody(reason));
         } else if (potentiallyHttpProxy && connectionException(throwable)) {
@@ -3050,23 +3054,30 @@ public class HttpActionHandler {
      * status line that is not HTTP can be quoted. Null for any other failure.
      */
     static String upstreamFailureReason(Throwable failure) {
+        return upstreamFailureReason(failure, UnaryOperator.identity());
+    }
+
+    /**
+     * As {@link #upstreamFailureReason(Throwable)}, with {@code scrub} applied to each message before it is cut.
+     */
+    static String upstreamFailureReason(Throwable failure, UnaryOperator<String> scrub) {
         UndecodableResponseException undecodable = UndecodableResponseException.in(failure);
         if (undecodable != null) {
-            return "response from the upstream could not be decoded: " + boundedFaultDescription(undecodable.getCause() != null ? undecodable.getCause() : undecodable);
+            return "response from the upstream could not be decoded: " + boundedFaultDescription(undecodable.getCause() != null ? undecodable.getCause() : undecodable, scrub);
         }
         ClientConfigurationException configurationError = ClientConfigurationException.in(failure);
         if (configurationError != null) {
             // only the top of the cause: one deeper may quote a configured file
             Throwable setUpFailure = configurationError.getCause() != null ? configurationError.getCause() : configurationError;
-            return "connection to the upstream could not be set up: " + boundedFaultDescription(setUpFailure);
+            return "connection to the upstream could not be set up: " + boundedFaultDescription(setUpFailure, scrub);
         }
         Http2Exception http2Error = Http2CodecUtil.getEmbeddedHttp2Exception(failure);
         if (http2Error != null) {
-            return "HTTP/2 error from the upstream: " + http2Error.error() + ": " + boundedFaultMessage(http2Error);
+            return "HTTP/2 error from the upstream: " + http2Error.error() + ": " + boundedFaultMessage(http2Error, scrub);
         }
         SSLException tlsFailure = sslCause(failure);
         if (tlsFailure != null || sslHandshakeException(failure)) {
-            return "TLS with the upstream failed: " + boundedFaultDescriptionWithRootCause(tlsFailure != null ? tlsFailure : failure);
+            return "TLS with the upstream failed: " + boundedFaultDescriptionWithRootCause(tlsFailure != null ? tlsFailure : failure, scrub);
         }
         return null;
     }
@@ -3077,14 +3088,17 @@ public class HttpActionHandler {
         }
         String reason = upstreamFailureReason(exception);
         if (reason != null) {
+            LogEntry entry = new LogEntry()
+                .setLogLevel(Level.ERROR)
+                .setCorrelationId(request.getLogCorrelationId())
+                .setHttpRequest(request)
+                .setMessageFormat("failed to forward request{}for action{}because:{}");
+            UnaryOperator<String> scrub = entry.credentialScrub(configuration);
+            reason = upstreamFailureReason(exception, scrub);
             mockServerLogger.logEvent(
-                new LogEntry()
-                    .setLogLevel(Level.ERROR)
-                    .setCorrelationId(request.getLogCorrelationId())
-                    .setHttpRequest(request)
-                    .setMessageFormat("failed to forward request{}for action{}because:{}")
+                entry
                     .setArguments(request, action, reason)
-                    .setThrowable(boundedFault(exception))
+                    .setThrowable(boundedFault(exception, scrub))
             );
             returnBadGateway(responseWriter, request, reason, badGatewayResponse().withBody(reason));
         } else if (connectionException(exception)) {
