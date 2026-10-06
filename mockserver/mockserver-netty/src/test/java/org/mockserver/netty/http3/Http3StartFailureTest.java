@@ -1,5 +1,6 @@
 package org.mockserver.netty.http3;
 
+import io.netty.buffer.ByteBufAllocator;
 import org.junit.Assume;
 import org.junit.Before;
 import org.junit.Rule;
@@ -8,9 +9,11 @@ import org.junit.rules.TemporaryFolder;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.integration.ClientAndServer;
 import org.mockserver.lifecycle.Ipv4UdpPortProbe;
+import org.mockserver.lifecycle.LeftBehind;
 import org.mockserver.lifecycle.RefusedStart.RecordingMockServer;
 import org.mockserver.lifecycle.RefusedStart.Started;
 import org.mockserver.netty.MockServer;
+import org.mockserver.test.FailOnLeakResourceLeakDetector;
 import org.mockserver.testing.socket.TestPortFactory;
 
 import java.io.File;
@@ -20,8 +23,10 @@ import java.net.StandardProtocolFamily;
 import java.nio.channels.DatagramChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -36,6 +41,7 @@ import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.sameInstance;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.Assert.fail;
 import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.lifecycle.RefusedStart.assertStopped;
 import static org.mockserver.lifecycle.RefusedStart.refusedStart;
@@ -46,6 +52,9 @@ import static org.mockserver.netty.http3.Http3TestServer.startWithHttp3;
  * for a TCP port it cannot bind, and leave nothing running: the caller gets no reference it could stop.
  */
 public class Http3StartFailureTest {
+
+    // well short of Netty's default quiet period of 2 s
+    private static final long AT_THE_THROW_MILLIS = 500;
 
     @Rule
     public TemporaryFolder temporaryFolder = new TemporaryFolder();
@@ -102,7 +111,7 @@ public class Http3StartFailureTest {
         try (DatagramChannel otherApplication = heldUdpPortOnBothStacks()) {
             int udpPort = port(otherApplication);
 
-            Throwable refused = refusedStart(() -> new MockServer(configuration().http3Port(udpPort), 0));
+            Throwable refused = refusedStart(() -> new MockServer(configuration().http3Port(udpPort), 0), Http3StartFailureTest::assertNoOtherNonDaemonThreadLeftRunning);
 
             assertThat(refused, instanceOf(Http3StartupException.class));
             // the operating system's own words for the port being in use follow
@@ -126,6 +135,75 @@ public class Http3StartFailureTest {
                 assertThat("the refused server must hold no socket on UDP port " + udpPort, Ipv4UdpPortProbe.dualStackBindSucceeds(udpPort), is(true));
             });
         }
+    }
+
+    /**
+     * Netty's default quiet period would keep the HTTP/3 event loop's thread, which is no daemon and so keeps a JVM
+     * from exiting, for about 2 s after the throw: a refusal before the bind starts that thread to shut it down. A
+     * failed bind, which has it running, is checked in {@link #shouldRefuseToStartWhenTheBindItselfFails()}.
+     */
+    @Test
+    public void shouldHaveEndedEveryNonDaemonThreadItStartedWhenTheConstructorThrows() throws Exception {
+        Configuration http3StartThrows = new Http3StartThrows(new LinkageError("the QUIC codec could not be linked"));
+
+        refusedStart(() -> startWithHttp3(udpPort -> new MockServer(http3StartThrows.http3Port(udpPort), 0)), Http3StartFailureTest::assertNoOtherNonDaemonThreadLeftRunning);
+    }
+
+    /**
+     * A start interrupted while it binds leaves a channel registered whose QUIC codec holds a direct buffer until
+     * the pipeline is torn down, which a loop shut down with no quiet period could skip. Without the tear-down the
+     * first such start in a JVM leaked it every time and later ones did not, so the start runs in a fresh JVM with
+     * the build's leak detector, which reports the leaks it counted.
+     */
+    @Test
+    public void shouldLeakNoBufferWhenTheFirstHttp3StartInAJvmIsInterruptedWhileItBinds() throws Exception {
+        List<String> command = Arrays.asList(
+            System.getProperty("java.home") + File.separator + "bin" + File.separator + "java",
+            "-Dio.netty.leakDetection.level=paranoid",
+            "-Dio.netty.customResourceLeakDetector=" + FailOnLeakResourceLeakDetector.CLASS_NAME,
+            "-cp", System.getProperty("java.class.path"),
+            InterruptedFirstStart.class.getName()
+        );
+        // to a file, so a child that hangs cannot keep this test reading its output
+        File output = temporaryFolder.newFile("interrupted-first-start.log");
+        ProcessBuilder processBuilder = new ProcessBuilder(command).redirectErrorStream(true).redirectOutput(output);
+        processBuilder.environment().remove("JAVA_TOOL_OPTIONS");
+        Process process = processBuilder.start();
+        if (!process.waitFor(60, TimeUnit.SECONDS)) {
+            process.destroyForcibly();
+            fail("the child JVM did not exit within 60s:\n" + Files.readString(output.toPath(), StandardCharsets.UTF_8));
+        }
+        String[] lines = Files.readString(output.toPath(), StandardCharsets.UTF_8).trim().split("\\R");
+
+        assertThat(String.join("\n", lines), lines[lines.length - 1], is("interrupted while binding; buffers leaked: 0"));
+    }
+
+    public static class InterruptedFirstStart {
+        public static void main(String[] arguments) throws Exception {
+            Http3Server server = new Http3Server();
+            Thread.currentThread().interrupt();
+            String outcome;
+            try {
+                server.start(0);
+                server.stop();
+                outcome = "started";
+            } catch (InterruptedException expected) {
+                outcome = "interrupted while binding";
+            }
+            Thread.interrupted();
+            // a leak is reported once the buffer has been collected and another is allocated
+            for (int i = 0; i < 5; i++) {
+                System.gc();
+                Thread.sleep(50);
+                ByteBufAllocator.DEFAULT.buffer(1).release();
+            }
+            System.out.println(outcome + "; buffers leaked: " + FailOnLeakResourceLeakDetector.leakCount());
+            System.exit(0);
+        }
+    }
+
+    private static void assertNoOtherNonDaemonThreadLeftRunning() throws InterruptedException {
+        assertThat("non-daemon threads the refused server left running when it threw", LeftBehind.otherNonDaemonThreadsStillAliveAfter(Thread.currentThread().getThreadGroup(), AT_THE_THROW_MILLIS), is(empty()));
     }
 
     @Test

@@ -31,6 +31,8 @@ public final class LeftBehind {
 
     // the JVM's common pool starts a worker in the group of whichever thread first needs one, and keeps it a while
     private static final Pattern COMMON_POOL_WORKER = Pattern.compile("ForkJoinPool\\.commonPool-worker-\\d+");
+    // DefaultThreadFactory's name for GlobalEventExecutor's thread: globalEventExecutor-<pool>-<thread>
+    private static final Pattern GLOBAL_EVENT_EXECUTOR = Pattern.compile("globalEventExecutor-\\d+-\\d+");
 
     // longer than the two seconds Netty waits before it ends the event loops of a group shut down gracefully
     private static final int SETTLED_AFTER_UNCHANGED_SAMPLES = 25;
@@ -73,7 +75,20 @@ public final class LeftBehind {
      * deadline has passed, none if all ended sooner
      */
     public static List<String> threadsStillAlive(ThreadGroup group) throws InterruptedException {
-        return stillAlive(group, thread -> !COMMON_POOL_WORKER.matcher(thread.getName()).matches(), false);
+        return stillAlive(group, thread -> !COMMON_POOL_WORKER.matcher(thread.getName()).matches(), false, TimeUnit.SECONDS.toMillis(DEADLINE_SECONDS));
+    }
+
+    /**
+     * Not counted: daemon threads, which do not keep a JVM from exiting, and the thread of Netty's process-wide
+     * {@code GlobalEventExecutor}, which any code may start, no server owns, and which ends a second after its last
+     * task.
+     *
+     * @return the other non-daemon threads of {@code group}, the calling one aside, still alive after {@code millis},
+     * none if all ended sooner
+     */
+    public static List<String> otherNonDaemonThreadsStillAliveAfter(ThreadGroup group, long millis) throws InterruptedException {
+        Thread caller = Thread.currentThread();
+        return stillAlive(group, thread -> thread != caller && !thread.isDaemon() && !GLOBAL_EVENT_EXECUTOR.matcher(thread.getName()).matches(), false, millis);
     }
 
     /**
@@ -82,11 +97,11 @@ public final class LeftBehind {
      * @return the JDK HttpClient selector threads of {@code group} still alive once the deadline has passed
      */
     public static List<String> jdkHttpClientThreadsStillAlive(ThreadGroup group) throws InterruptedException {
-        return stillAlive(group, thread -> JDK_HTTP_CLIENT_SELECTOR.matcher(thread.getName()).matches(), true);
+        return stillAlive(group, thread -> JDK_HTTP_CLIENT_SELECTOR.matcher(thread.getName()).matches(), true, TimeUnit.SECONDS.toMillis(DEADLINE_SECONDS));
     }
 
-    private static List<String> stillAlive(ThreadGroup group, Predicate<Thread> counted, boolean collectGarbage) throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(DEADLINE_SECONDS);
+    private static List<String> stillAlive(ThreadGroup group, Predicate<Thread> counted, boolean collectGarbage, long deadlineMillis) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(deadlineMillis);
         long collectAt = System.nanoTime();
         while (true) {
             if (collectGarbage && System.nanoTime() >= collectAt) {

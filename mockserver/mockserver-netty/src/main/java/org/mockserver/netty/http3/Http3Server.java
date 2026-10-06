@@ -18,6 +18,7 @@ import io.netty.handler.codec.quic.QuicSslContextBuilder;
 import io.netty.handler.codec.quic.QuicStreamChannel;
 import io.netty.handler.ssl.ClientAuth;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
+import io.netty.util.concurrent.Promise;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.configuration.ServerTlsSettings;
 import org.mockserver.lifecycle.Ipv4UdpPortProbe;
@@ -138,6 +139,7 @@ public class Http3Server {
      */
     public int start(int port) throws Exception {
         NioEventLoopGroup localGroup = new NioEventLoopGroup(1);
+        ChannelFuture bind = null;
         boolean success = false;
         try {
             // create a shared Metrics instance for all QUIC streams (avoids per-stream allocation)
@@ -233,7 +235,8 @@ public class Http3Server {
                 .channel(NioDatagramChannel.class)
                 .option(ChannelOption.ALLOCATOR, NettyAllocator.ALLOCATOR)
                 .handler(codec);
-            channel = port == 0 ? bound(bootstrap.bind(new InetSocketAddress(0))) : bindExplicitPort(bootstrap, port);
+            bind = port == 0 ? bootstrap.bind(new InetSocketAddress(0)) : bindExplicitPort(bootstrap, port);
+            channel = bound(bind);
 
             int boundPort = ((InetSocketAddress) channel.localAddress()).getPort();
             LOG.info("HTTP/3 (QUIC) server started on UDP port: {}", boundPort);
@@ -242,7 +245,13 @@ public class Http3Server {
             return boundPort;
         } finally {
             if (!success) {
-                localGroup.shutdownGracefully();
+                if (bind != null) {
+                    tearDown(bind.channel(), localGroup);
+                }
+                // no quiet period, and waited for: Netty's default would leave its thread running 2 s past the refusal
+                if (!terminated(localGroup)) {
+                    LOG.warn("HTTP/3 (QUIC) event loop of a refused start did not terminate within {}s", STOP_TIMEOUT_SECONDS);
+                }
             }
         }
     }
@@ -253,11 +262,23 @@ public class Http3Server {
      * {@link Ipv4UdpPortProbe}). The refusal is decided before Netty binds anything, so a refused port is free
      * as soon as this throws. Where the bind itself fails (Linux, or an IPv4-only stack), its own error is kept.
      */
-    private static Channel bindExplicitPort(Bootstrap bootstrap, int port) throws Exception {
+    private static ChannelFuture bindExplicitPort(Bootstrap bootstrap, int port) throws Exception {
         if (Ipv4UdpPortProbe.shadowedOnIpv4(port)) {
             throw Ipv4UdpPortProbe.ipv4WildcardConflict(port, "HTTP/3 requests", "http3Port");
         }
-        return bound(bootstrap.bind(new InetSocketAddress(port)));
+        return bootstrap.bind(new InetSocketAddress(port));
+    }
+
+    /**
+     * The QUIC codec releases the direct buffer it allocates when added only once the channel's pipeline is torn
+     * down, which Netty does on a task the close queues; a loop shut down with no quiet period can end without
+     * running it. The second task is queued from the loop, so after it.
+     */
+    private static void tearDown(Channel failed, NioEventLoopGroup group) {
+        failed.close().awaitUninterruptibly(STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        Promise<Void> tornDown = group.next().newPromise();
+        group.execute(() -> group.execute(() -> tornDown.setSuccess(null)));
+        tornDown.awaitUninterruptibly(STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS);
     }
 
     /**
@@ -314,12 +335,16 @@ public class Http3Server {
         if (group != null) {
             // a selector-registered socket is closed only when its event loop deregisters it, so the port is
             // free for a restart only once the loop has terminated
-            if (!group.shutdownGracefully(0, STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS).awaitUninterruptibly(STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+            if (!terminated(group)) {
                 LOG.warn("HTTP/3 (QUIC) event loop did not terminate within {}s, so UDP port {} may still be bound", STOP_TIMEOUT_SECONDS, port);
             }
             group = null;
         }
         LOG.info("HTTP/3 (QUIC) server stopped");
+    }
+
+    private static boolean terminated(NioEventLoopGroup group) {
+        return group.shutdownGracefully(0, STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS).awaitUninterruptibly(STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS);
     }
 
     /**

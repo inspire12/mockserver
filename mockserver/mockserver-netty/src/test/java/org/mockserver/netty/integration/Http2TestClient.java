@@ -75,6 +75,7 @@ public final class Http2TestClient implements AutoCloseable {
     private final Channel connection;
     private final CompletableFuture<Http2Settings> serverSettings = new CompletableFuture<>();
     private final CompletableFuture<Long> goAway = new CompletableFuture<>();
+    private final CompletableFuture<String> goAwayDebugData = new CompletableFuture<>();
     private final ConcurrentLinkedQueue<CompletableFuture<Void>> settingsAcks = new ConcurrentLinkedQueue<>();
     private final ConcurrentLinkedQueue<Http2StreamChannel> streamsNotReading = new ConcurrentLinkedQueue<>();
 
@@ -241,6 +242,7 @@ public final class Http2TestClient implements AutoCloseable {
                     if (msg instanceof Http2SettingsFrame) {
                         serverSettings.complete(((Http2SettingsFrame) msg).settings());
                     } else if (msg instanceof Http2GoAwayFrame) {
+                        goAwayDebugData.complete(((Http2GoAwayFrame) msg).content().toString(StandardCharsets.UTF_8));
                         goAway.complete(((Http2GoAwayFrame) msg).errorCode());
                     } else if (msg instanceof Http2SettingsAckFrame) {
                         CompletableFuture<Void> acknowledged = settingsAcks.poll();
@@ -272,6 +274,13 @@ public final class Http2TestClient implements AutoCloseable {
      */
     public long goAwayErrorCode() throws Exception {
         return goAway.get(WAIT_SECONDS, TimeUnit.SECONDS);
+    }
+
+    /**
+     * @return the debug data of the first GOAWAY the server sent
+     */
+    public String goAwayDebugData() throws Exception {
+        return goAwayDebugData.get(WAIT_SECONDS, TimeUnit.SECONDS);
     }
 
     public boolean closedWithin(long seconds) throws InterruptedException {

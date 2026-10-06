@@ -242,8 +242,11 @@ ports are bound. If `Http3Server.start` throws for any reason, it calls `stop()`
 `Http3StartupException`, so the constructor fails as it does for a TCP port that cannot be bound
 (`RuntimeException("Exception while binding MockServer to port N", cause)`). `stop()` closes the TCP
 listeners, the DNS channel and the boss and worker event loops and waits for them; `Http3Server.start`
-shuts down its own event loop when it fails, without waiting, so that one thread ends about 2 s later
-(Netty's default quiet period). The caller gets no reference, so nothing may be left for it to stop.
+shuts down its own event loop when it fails, with no quiet period, and waits for it as `stop()` does (up
+to 5 s, then a warning), so its thread, which is not a daemon, has ended when the constructor throws.
+With Netty's default 2 s quiet period it outlived the refusal, and an embedded JVM waited for it to exit. Before that shutdown, the channel of a bind that failed or was interrupted is closed and the start waits for a task queued from the loop after the close: the QUIC codec frees the direct buffer it allocates when added only when Netty tears the pipeline down, on a task the close queues, and a loop shut down with no quiet period can end without running it. Without that, the first start in a JVM that was interrupted while it bound leaked the buffer every time, and later ones did not, so `Http3StartFailureTest.shouldLeakNoBufferWhenTheFirstHttp3StartInAJvmIsInterruptedWhileItBinds` makes that start in a fresh JVM under the build's leak detector and reads the count of leaks it reports.
+`Http3StartFailureTest` checks that no non-daemon thread is left 500 ms after the throw (Netty's process-wide `globalEventExecutor` thread, which no server owns and which ends a second after its last task, is not counted), for a refusal before the bind
+and for a failed bind. The caller gets no reference, so nothing may be left for it to stop.
 The catch is for `Throwable`: an `Error` from the start (a native that will not link) refuses and stops
 as well. `stop()` does not wait on an interrupted thread, so every refusal path in `MockServer` (the
 QUIC native check, a TCP bind, DNS and HTTP/3) stops through one private method that clears the

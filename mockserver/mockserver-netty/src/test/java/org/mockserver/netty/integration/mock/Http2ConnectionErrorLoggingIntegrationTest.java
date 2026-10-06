@@ -1,6 +1,8 @@
 package org.mockserver.netty.integration.mock;
 
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioSocketChannel;
@@ -8,24 +10,30 @@ import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http2.DefaultHttp2Headers;
 import io.netty.handler.codec.http2.Http2Error;
 import io.netty.handler.codec.http2.Http2Exception;
+import io.netty.handler.codec.http2.Http2FrameCodec;
 import io.netty.handler.codec.http2.Http2Headers;
 import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.mockserver.client.MockServerClient;
+import org.mockserver.lifecycle.LifeCycle;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.netty.MockServer;
 import org.mockserver.netty.integration.Http2TestClient;
 import org.slf4j.event.Level;
 
+import java.lang.reflect.Field;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Handler;
 import java.util.logging.LogRecord;
@@ -34,8 +42,10 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.both;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.emptyArray;
 import static org.hamcrest.Matchers.hasItem;
@@ -43,7 +53,10 @@ import static org.hamcrest.Matchers.hasItems;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
+import static org.hamcrest.Matchers.sameInstance;
+import static org.hamcrest.Matchers.startsWith;
 import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
@@ -98,6 +111,8 @@ public class Http2ConnectionErrorLoggingIntegrationTest {
     private static MockServer mockServer;
     private static MockServerClient mockServerClient;
     private static EventLoopGroup clientGroup;
+    // MockServer's side of each connection open to it, by the client's port
+    private static final Map<Integer, Channel> acceptedByClientPort = new ConcurrentHashMap<>();
 
     private int reachedTheEndBeforeThisTest;
 
@@ -110,11 +125,31 @@ public class Http2ConnectionErrorLoggingIntegrationTest {
         // the test JVM defaults to ERROR, which would drop the entries this class asserts on
         mockServer = new MockServer(configuration().maxHeaderSize(LIMIT).logLevel("DEBUG"), 0);
         mockServerClient = new MockServerClient("localhost", mockServer.getLocalPort());
+        recordEachAcceptedConnection();
 
         // after the server has started: MockServer's logging set-up removes the handlers of every logger
         nettysPipelineLogger = Logger.getLogger(NETTYS_PIPELINE_LOGGER);
         nettysPipelineLogger.addHandler(nettysLogCapture);
         assertThatTheCaptureSeesWhatReachesTheEndOfAPipeline();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void recordEachAcceptedConnection() throws Exception {
+        Field listeners = LifeCycle.class.getDeclaredField("serverChannelFutures");
+        listeners.setAccessible(true);
+        for (Future<Channel> listener : (List<Future<Channel>>) listeners.get(mockServer)) {
+            // ahead of the handler that hands each accepted connection to its own pipeline
+            listener.get(10, TimeUnit.SECONDS).pipeline().addFirst(new ChannelInboundHandlerAdapter() {
+                @Override
+                public void channelRead(ChannelHandlerContext ctx, Object msg) {
+                    Channel accepted = (Channel) msg;
+                    int clientPort = ((InetSocketAddress) accepted.remoteAddress()).getPort();
+                    acceptedByClientPort.put(clientPort, accepted);
+                    accepted.closeFuture().addListener(closed -> acceptedByClientPort.remove(clientPort, accepted));
+                    ctx.fireChannelRead(msg);
+                }
+            });
+        }
     }
 
     /**
@@ -258,6 +293,72 @@ public class Http2ConnectionErrorLoggingIntegrationTest {
         assertThat(entries.get(0).getLogLevel(), is(Level.WARN));
         assertThat(entries.get(0).getMessageFormat(), containsString(" for SSL or decoder fault "));
         assertThat(entries.get(0).getThrowable(), is(nullValue()));
+    }
+
+    /**
+     * No way is known for a client to raise such an exception, so the test fires it into MockServer's side of the
+     * connection, where a handler ahead of the last one or the transport would raise it.
+     */
+    @Test
+    public void shouldLogAnUnexpectedExceptionOnceAsAnErrorAndCloseTheConnectionWithGoAway() throws Exception {
+        for (boolean tls : new boolean[]{false, true}) {
+            logged.clear();
+            IllegalStateException unexpected = new IllegalStateException("unexpected " + transport(tls));
+            InetSocketAddress client;
+            try (Http2TestClient connection = connect(tls)) {
+                client = connection.localAddress();
+                Http2TestClient.Exchange served = connection.send(pseudoHeaders(tls, HttpMethod.GET), true);
+                assertThat(transport(tls), served.status(), is(200));
+                Channel serverSide = acceptedByClientPort.get(client.getPort());
+                assertThat(transport(tls), serverSide, is(notNullValue()));
+
+                serverSide.pipeline().fireExceptionCaught(unexpected);
+
+                assertThat(transport(tls), connection.goAwayErrorCode(), is(Http2Error.INTERNAL_ERROR.code()));
+                assertThat(transport(tls), connection.closedWithin(10), is(true));
+                assertThat(transport(tls) + ": the response written before it", served.body(), is("served"));
+            }
+
+            List<LogEntry> entries = connectionEntries(client);
+            assertThat(transport(tls), thrownToTheEndOfAPipelineInThisTest(), empty());
+            assertThat(transport(tls), entries, hasSize(1));
+            assertThat(transport(tls), entries.get(0).getLogLevel(), is(Level.ERROR));
+            assertThat(transport(tls), entries.get(0).getMessageFormat(), both(startsWith("closing HTTP/2 connection ")).and(endsWith(" for unexpected exception")));
+            assertThat(transport(tls), entries.get(0).getThrowable(), is(sameInstance(unexpected)));
+            assertThat(transport(tls), warningsAndErrors(), hasSize(1));
+        }
+    }
+
+    /**
+     * Netty's codec fires an exception it caught while decoding, which is no HTTP/2 error, down the pipeline before it
+     * sends its own {@code GOAWAY} for it; the test raises one there on the connection's event loop, as a read would.
+     */
+    @Test
+    public void shouldLeaveTheGoAwayToTheCodecForAnUnexpectedExceptionItCaughtDecoding() throws Exception {
+        for (boolean tls : new boolean[]{false, true}) {
+            logged.clear();
+            IllegalStateException unexpected = new IllegalStateException("thrown while decoding " + transport(tls));
+            InetSocketAddress client;
+            try (Http2TestClient connection = connect(tls)) {
+                client = connection.localAddress();
+                assertThat(transport(tls), connection.send(pseudoHeaders(tls, HttpMethod.GET), true).status(), is(200));
+                Channel serverSide = acceptedByClientPort.get(client.getPort());
+                assertThat(transport(tls), serverSide, is(notNullValue()));
+                ChannelHandlerContext codec = serverSide.pipeline().context(Http2FrameCodec.class);
+
+                serverSide.eventLoop().execute(() -> ((Http2FrameCodec) codec.handler()).onError(codec, false, unexpected));
+
+                assertThat(transport(tls), connection.goAwayErrorCode(), is(Http2Error.INTERNAL_ERROR.code()));
+                assertThat(transport(tls) + ": the codec's GOAWAY", connection.goAwayDebugData(), is(unexpected.getMessage()));
+                assertThat(transport(tls), connection.closedWithin(10), is(true));
+            }
+
+            List<LogEntry> entries = connectionEntries(client);
+            assertThat(transport(tls), thrownToTheEndOfAPipelineInThisTest(), empty());
+            assertThat(transport(tls), entries, hasSize(1));
+            assertThat(transport(tls), entries.get(0).getLogLevel(), is(Level.ERROR));
+            assertThat(transport(tls), entries.get(0).getThrowable(), is(sameInstance(unexpected)));
+        }
     }
 
     /**

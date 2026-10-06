@@ -2,8 +2,11 @@ package org.mockserver.netty.unification;
 
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.handler.codec.http2.DefaultHttp2GoAwayFrame;
 import io.netty.handler.codec.http2.Http2CodecUtil;
+import io.netty.handler.codec.http2.Http2Error;
 import io.netty.handler.codec.http2.Http2Exception;
+import io.netty.handler.codec.http2.Http2FrameCodec;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.slf4j.event.Level;
@@ -22,9 +25,17 @@ import static org.mockserver.exception.ExceptionHandling.sniDescription;
  * <p>
  * It must stay last: {@code Http2MultiplexHandler}, before it, hands a stream's errors to that stream. It does not
  * close the connection for an HTTP/2 connection error, which Netty's codec fires here before it sends the
- * {@code GOAWAY} and closes: closing here would lose the {@code GOAWAY}.
+ * {@code GOAWAY} and closes: closing here would lose the {@code GOAWAY}. For an exception it does not recognise it
+ * closes with {@code GOAWAY(INTERNAL_ERROR)}, as the HTTP/1.1 handlers close for any exception.
  */
 public class Http2ConnectionExceptionHandler extends ChannelInboundHandlerAdapter {
+
+    /**
+     * How the connection is closed for an exception.
+     */
+    enum Close {
+        NOT_HERE, NOW, WITH_GOAWAY
+    }
 
     private final MockServerLogger mockServerLogger;
 
@@ -34,8 +45,12 @@ public class Http2ConnectionExceptionHandler extends ChannelInboundHandlerAdapte
 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-        if (log(mockServerLogger, ctx, cause)) {
+        Close close = log(mockServerLogger, ctx, cause);
+        if (close == Close.NOW) {
             ctx.close();
+        } else if (close == Close.WITH_GOAWAY) {
+            // later: the codec fires an exception it caught decoding here before it sends its own GOAWAY for it
+            ctx.channel().eventLoop().execute(() -> closeWithGoAway(ctx));
         }
     }
 
@@ -43,9 +58,10 @@ public class Http2ConnectionExceptionHandler extends ChannelInboundHandlerAdapte
      * Logs an exception on an HTTP/2 connection once, as this handler logs what reaches it; also called for a tunnel's
      * client leg, whose handler fires no connection error down its pipeline.
      *
-     * @return whether the connection is to be closed for it: an SSL or decoder fault, or the direct memory limit
+     * @return how this handler closes the connection for it: at once for an SSL or decoder fault or the direct memory
+     * limit, with {@code GOAWAY(INTERNAL_ERROR)} for an exception it does not recognise, and not at all otherwise
      */
-    static boolean log(MockServerLogger mockServerLogger, ChannelHandlerContext ctx, Throwable cause) {
+    static Close log(MockServerLogger mockServerLogger, ChannelHandlerContext ctx, Throwable cause) {
         Http2Exception connectionError = Http2CodecUtil.getEmbeddedHttp2Exception(cause);
         if (directMemoryLimitReached(cause)) {
             mockServerLogger.logEvent(
@@ -53,7 +69,7 @@ public class Http2ConnectionExceptionHandler extends ChannelInboundHandlerAdapte
                     .setLogLevel(Level.ERROR)
                     .setMessageFormat(DIRECT_MEMORY_LIMIT_REACHED + ctx.channel() + " - " + cause.getMessage())
             );
-            return true;
+            return Close.NOW;
         } else if (connectionError != null) {
             // a request refused for its header size was logged where it was refused
             if (!Http2RequestHeaderLimit.isRefusal(connectionError) && mockServerLogger.isEnabledForInstance(Level.WARN)) {
@@ -76,15 +92,16 @@ public class Http2ConnectionExceptionHandler extends ChannelInboundHandlerAdapte
                 );
             }
             // Netty's JDK TLS handler leaves the connection open after such bytes and reports every read that follows
-            return true;
+            return Close.NOW;
         } else if (connectionClosedException(cause)) {
             // despite its name, true for everything except a connection its peer closed or reset
             mockServerLogger.logEvent(
                 new LogEntry()
                     .setLogLevel(Level.ERROR)
-                    .setMessageFormat("exception caught on HTTP/2 connection " + ctx.channel())
+                    .setMessageFormat("closing HTTP/2 connection " + ctx.channel() + " for unexpected exception")
                     .setThrowable(cause)
             );
+            return Close.WITH_GOAWAY;
         } else if (mockServerLogger.isEnabledForInstance(Level.DEBUG)) {
             mockServerLogger.logEvent(
                 new LogEntry()
@@ -93,6 +110,20 @@ public class Http2ConnectionExceptionHandler extends ChannelInboundHandlerAdapte
                     .setArguments(ctx.channel().remoteAddress(), cause.getMessage())
             );
         }
-        return false;
+        return Close.NOT_HERE;
+    }
+
+    /**
+     * Through the codec, which writes the {@code GOAWAY} after the frames already written, flushes and then closes.
+     * None is written once the codec has sent one: its own, for a connection error, names a different last stream.
+     */
+    private static void closeWithGoAway(ChannelHandlerContext ctx) {
+        if (ctx.channel().isActive()) {
+            Http2FrameCodec codec = ctx.pipeline().get(Http2FrameCodec.class);
+            if (codec == null || !codec.connection().goAwaySent()) {
+                ctx.write(new DefaultHttp2GoAwayFrame(Http2Error.INTERNAL_ERROR));
+            }
+            ctx.close();
+        }
     }
 }

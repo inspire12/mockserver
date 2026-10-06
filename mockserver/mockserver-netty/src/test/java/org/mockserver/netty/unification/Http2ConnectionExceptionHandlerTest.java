@@ -12,6 +12,7 @@ import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.DecoderException;
 import io.netty.handler.codec.http2.DefaultHttp2FrameWriter;
 import io.netty.handler.codec.http2.DefaultHttp2Headers;
+import io.netty.handler.codec.http2.DefaultHttp2PingFrame;
 import io.netty.handler.codec.http2.Http2Error;
 import io.netty.handler.codec.http2.Http2Exception;
 import io.netty.handler.codec.http2.Http2FrameTypes;
@@ -56,6 +57,7 @@ import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.endsWith;
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
@@ -247,18 +249,22 @@ public class Http2ConnectionExceptionHandlerTest {
     }
 
     @Test
-    public void shouldLogAnythingElseAsAnErrorWithItsCause() {
+    public void shouldLogAnythingElseOnceAsAnErrorWithItsCauseAndCloseTheConnection() {
         logLevel = Level.ERROR;
         IllegalStateException cause = new IllegalStateException("something unexpected");
         EmbeddedChannel channel = new EmbeddedChannel(new Http2ConnectionExceptionHandler(mockServerLogger));
 
         channel.pipeline().fireExceptionCaught(cause);
+        channel.runPendingTasks();
 
         assertThat(logged, hasSize(1));
         assertThat(logged.get(0).getLogLevel(), is(Level.ERROR));
-        assertThat(logged.get(0).getMessageFormat(), startsWith("exception caught on HTTP/2 connection "));
+        assertThat(logged.get(0).getMessageFormat(), startsWith("closing HTTP/2 connection "));
+        assertThat(logged.get(0).getMessageFormat(), endsWith(" for unexpected exception"));
         assertThat(logged.get(0).getThrowable(), is(sameInstance(cause)));
-        assertHandledWithoutClosing(channel);
+        assertThat("passed on to the end of the pipeline", reachedTheEndOfThePipeline(channel), is(nullValue()));
+        assertThat("left open, to log it again each time it recurs", channel.isOpen(), is(false));
+        channel.finishAndReleaseAll();
     }
 
     @Test
@@ -319,6 +325,22 @@ public class Http2ConnectionExceptionHandlerTest {
         assertThat(connectionEntries(), contains("WARN closing HTTP/2 connection from:{}for connection error:{}"));
         assertThat(logged.stream().filter(entry -> entry.getLogLevel() == Level.WARN).findFirst().orElseThrow(AssertionError::new).getThrowable(), instanceOf(Http2Exception.class));
         assertThat(sentFrameTypes(channel), contains(Http2FrameTypes.SETTINGS, Http2FrameTypes.GO_AWAY));
+        assertThat(channel.isOpen(), is(false));
+        channel.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldCloseTheDirectHttp2ConnectionWithGoAwayForAnythingElseAfterWhatWasAlreadyWritten() throws Exception {
+        EmbeddedChannel channel = directHttp2Connection(configuration());
+        // written and not yet flushed when the exception arrives
+        channel.write(new DefaultHttp2PingFrame(42));
+
+        channel.pipeline().fireExceptionCaught(new IllegalStateException("something unexpected"));
+        channel.runPendingTasks();
+
+        assertThat(reachedTheEndOfThePipeline(channel), is(nullValue()));
+        assertThat(connectionEntries(), contains(both(startsWith("ERROR closing HTTP/2 connection ")).and(endsWith(" for unexpected exception"))));
+        assertThat(sentFrames(channel), contains("SETTINGS", "PING", "GOAWAY INTERNAL_ERROR last stream 0"));
         assertThat(channel.isOpen(), is(false));
         channel.finishAndReleaseAll();
     }
@@ -401,6 +423,40 @@ public class Http2ConnectionExceptionHandlerTest {
             part.release();
         }
         return written;
+    }
+
+    /**
+     * @return each frame the server wrote, in order: its type, and for a {@code GOAWAY} its error code, last stream
+     * and debug data
+     */
+    private static List<String> sentFrames(EmbeddedChannel channel) {
+        ByteBuf written = drainOutbound(channel);
+        try {
+            List<String> frames = new ArrayList<>();
+            String sent = ByteBufUtil.prettyHexDump(written);
+            while (written.readableBytes() >= 9) {
+                int length = written.readUnsignedMedium();
+                byte type = written.readByte();
+                written.skipBytes(5);
+                assertThat("whole frames:\n" + sent, written.readableBytes(), greaterThanOrEqualTo(length));
+                ByteBuf payload = written.readSlice(length);
+                if (type == Http2FrameTypes.GO_AWAY) {
+                    // after the last stream id and the error code
+                    String debugData = payload.toString(8, length - 8, StandardCharsets.UTF_8);
+                    frames.add(("GOAWAY " + Http2Error.valueOf(payload.getUnsignedInt(4)) + " last stream " + payload.getInt(0) + " " + debugData).trim());
+                } else if (type == Http2FrameTypes.SETTINGS) {
+                    frames.add("SETTINGS");
+                } else if (type == Http2FrameTypes.PING) {
+                    frames.add("PING");
+                } else {
+                    frames.add("type " + type);
+                }
+            }
+            assertThat("whole frames:\n" + ByteBufUtil.prettyHexDump(written), written.isReadable(), is(false));
+            return frames;
+        } finally {
+            written.release();
+        }
     }
 
     /**
