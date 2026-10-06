@@ -523,39 +523,73 @@ public class AsyncApiControlPlaneImpl implements AsyncApiControlPlane {
     }
 
     @Override
-    public synchronized void reset() {
-        resetInternal();
-        LOG.info("AsyncAPI control-plane reset");
+    public void reset() {
+        // Server stop() runs this. Closing brokers can write to the console (the orchestrator and the
+        // broker clients log), and console logging is synchronous, so the closing happens after the
+        // monitor is released: a console that drains slowly must not hold load/status/verify behind it.
+        // No log line of its own, as that would make stop() itself wait for the console.
+        Teardown teardown;
+        synchronized (this) {
+            teardown = detach();
+        }
+        teardown.close();
     }
 
     private void resetInternal() {
-        for (AsyncApiMockOrchestrator orchestrator : activeOrchestrators) {
-            try {
-                orchestrator.stop();
-            } catch (Exception e) {
-                LOG.warn("Error stopping orchestrator: {}", e.getMessage());
-            }
-        }
-        for (MessagePublisher publisher : activePublishers) {
-            try {
-                publisher.close();
-            } catch (Exception e) {
-                LOG.warn("Error closing publisher: {}", e.getMessage());
-            }
-        }
-        for (MessageSubscriber subscriber : activeSubscribers) {
-            try {
-                subscriber.close();
-            } catch (Exception e) {
-                LOG.warn("Error closing subscriber: {}", e.getMessage());
-            }
-        }
+        detach().close();
+    }
+
+    /**
+     * Must be called holding this control plane's monitor: takes the active brokers out of the
+     * control plane, so a later load starts clean, and returns them for closing.
+     */
+    private Teardown detach() {
+        Teardown teardown = new Teardown(new ArrayList<>(activeOrchestrators), new ArrayList<>(activePublishers), new ArrayList<>(activeSubscribers));
         activeOrchestrators.clear();
         activePublishers.clear();
         activeSubscribers.clear();
         validationIssues.clear();
         loadedSpec = null;
         activeBrokerConfig = null;
+        return teardown;
+    }
+
+    private static final class Teardown {
+
+        private final List<AsyncApiMockOrchestrator> orchestrators;
+        private final List<MessagePublisher> publishers;
+        private final List<MessageSubscriber> subscribers;
+
+        private Teardown(List<AsyncApiMockOrchestrator> orchestrators, List<MessagePublisher> publishers, List<MessageSubscriber> subscribers) {
+            this.orchestrators = orchestrators;
+            this.publishers = publishers;
+            this.subscribers = subscribers;
+        }
+
+        // orchestrators first: they publish through the publishers closed after them
+        private void close() {
+            for (AsyncApiMockOrchestrator orchestrator : orchestrators) {
+                try {
+                    orchestrator.stop();
+                } catch (Exception e) {
+                    LOG.warn("Error stopping orchestrator: {}", e.getMessage());
+                }
+            }
+            for (MessagePublisher publisher : publishers) {
+                try {
+                    publisher.close();
+                } catch (Exception e) {
+                    LOG.warn("Error closing publisher: {}", e.getMessage());
+                }
+            }
+            for (MessageSubscriber subscriber : subscribers) {
+                try {
+                    subscriber.close();
+                } catch (Exception e) {
+                    LOG.warn("Error closing subscriber: {}", e.getMessage());
+                }
+            }
+        }
     }
 
     /**

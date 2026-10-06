@@ -208,6 +208,8 @@ It reuses the same `AsyncApiParser` and `MessageExampleGenerator` as the broker 
 
 All async mocking state (publishers, subscribers, recorded messages) is cleared on `PUT /mockserver/reset`.
 
+Server `stop()` resets the control plane too. Console logging is synchronous, and closing brokers can log (the orchestrator does, and so can the broker client libraries), so `reset()` takes the orchestrators, publishers and subscribers out of the control plane under its monitor and closes them after releasing it: a console that drains slowly no longer holds `load`, `status` or `verify` behind a reset, and a reset closes only the brokers it took out, never ones a concurrent `load` has just created. `reset()` writes no log line of its own, since that line would make `stop()` wait for the console. The closing still runs on the caller's thread, so with brokers loaded `stop()` can still wait for a blocked console while their close logs. `AsyncApiControlPlaneResetConsoleTest` (mockserver-async) guards the monitor and the hand-over; `StopWithBlockedConsoleIntegrationTest` (mockserver-netty) stops an INFO-level server with no spec loaded and a client still connected while every line reaching the root console blocks its writer (MockServer's own loggers at every `java.util.logging` level), and fails if `stop()` does not finish. Neither covers a server at TRACE, whose per-connection wire trace logs on the event loops that `stop()` waits for.
+
 ## AsyncAPI Parsing
 
 The parser auto-detects JSON vs YAML (by leading `{` character) and supports:
@@ -550,6 +552,7 @@ The `mockserver-async` module is wired into the running server:
 | `AsyncApiSchemaValidatorTest` | Schema validation (required, type, enum, min/max, pattern) |
 | `AsyncApiFirstMessageExampleValidationTest` | Per-message first-example schema validation at load time: conforming, non-conforming, no-schema, no-example, multi-message, first-only scope, context naming |
 | `AsyncApiControlPlaneImplTest` | Control-plane load/status/reset lifecycle (no real broker) |
+| `AsyncApiControlPlaneResetConsoleTest` | `reset()` closes brokers outside the monitor (a blocked console does not hold `status()`), and only the brokers it took out |
 | `AsyncApiControlPlaneSecurityTest` | Security scheme parsing from `brokerConfig` JSON (kafkaSecurity, mqttSecurity, edge cases) |
 | `AsyncApiControlPlaneVerifyTest` | Message verification: count semantics (atLeast/atMost/exactly), payload substring, JSON path matching, error cases |
 | `AsyncApiControlPlaneRegistryTest` | SPI holder delegation (including verify) and not-available responses (in core) |

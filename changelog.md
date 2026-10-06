@@ -709,6 +709,15 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **A console that is slow to drain no longer holds up stopping MockServer, or AsyncAPI requests, behind an AsyncAPI
+  reset.** MockServer writes its log to standard output synchronously, so when stdout is a pipe that is read slowly (a
+  CI runner, or a container log driver that has fallen behind) a thread writing a log line waits until the pipe takes
+  it. Every stop and every `PUT /mockserver/reset` reset the AsyncAPI mock and wrote an INFO line, "AsyncAPI
+  control-plane reset", while holding it: `stop()` could wait for as long as stdout stayed blocked, then give up after
+  30 seconds with the server still holding its port, and AsyncAPI load, status and verify requests waited too. The
+  line is gone, and brokers are now closed after the reset lets go of the AsyncAPI mock. A server at the default log
+  level with no AsyncAPI brokers loaded now stops within a few seconds while stdout is blocked. With brokers loaded,
+  stopping can still wait while their connections log as they close.
 - **A forwarded or proxied HTTP/1.1 response MockServer cannot read is now answered `502` naming why, instead of
   being passed on in part.** When an upstream's response had a header that is not valid HTTP, a status line that is
   not HTTP or is longer than 4 KB, or a chunk size that is not a number, MockServer passed on what it had read so
