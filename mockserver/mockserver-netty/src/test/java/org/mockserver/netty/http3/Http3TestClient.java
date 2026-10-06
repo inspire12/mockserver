@@ -32,6 +32,7 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.greaterThan;
@@ -170,6 +171,7 @@ public final class Http3TestClient implements AutoCloseable {
             @Override
             protected void channelRead(ChannelHandlerContext ctx, Http3HeadersFrame frame) {
                 if (frame.headers().status() != null) {
+                    exchange.headers.complete(frame.headers());
                     exchange.status.complete(Integer.parseInt(frame.headers().status().toString()));
                 } else {
                     exchange.trailers.complete(frame.headers());
@@ -178,6 +180,7 @@ public final class Http3TestClient implements AutoCloseable {
 
             @Override
             protected void channelRead(ChannelHandlerContext ctx, Http3DataFrame frame) {
+                exchange.dataFrames.incrementAndGet();
                 exchange.received(ByteBufUtil.getBytes(frame.content()));
                 frame.release();
             }
@@ -191,6 +194,7 @@ public final class Http3TestClient implements AutoCloseable {
             @Override
             public void channelInactive(ChannelHandlerContext ctx) {
                 IllegalStateException closed = new IllegalStateException("stream closed without a response");
+                exchange.headers.completeExceptionally(closed);
                 exchange.status.completeExceptionally(closed);
                 exchange.body.completeExceptionally(closed);
                 exchange.trailers.completeExceptionally(closed);
@@ -198,6 +202,7 @@ public final class Http3TestClient implements AutoCloseable {
 
             @Override
             public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+                exchange.headers.completeExceptionally(cause);
                 exchange.status.completeExceptionally(cause);
                 exchange.body.completeExceptionally(cause);
             }
@@ -211,10 +216,12 @@ public final class Http3TestClient implements AutoCloseable {
     }
 
     public static final class Exchange {
+        private final CompletableFuture<Http3Headers> headers = new CompletableFuture<>();
         private final CompletableFuture<Integer> status = new CompletableFuture<>();
         private final CompletableFuture<String> body = new CompletableFuture<>();
         private final CompletableFuture<Http3Headers> trailers = new CompletableFuture<>();
         private final ByteArrayOutputStream received = new ByteArrayOutputStream();
+        private final AtomicInteger dataFrames = new AtomicInteger();
         private volatile QuicStreamChannel stream;
 
         /**
@@ -247,6 +254,27 @@ public final class Http3TestClient implements AutoCloseable {
         public String trailer(String name) throws Exception {
             CharSequence value = trailers.get(WAIT_SECONDS, TimeUnit.SECONDS).get(name);
             return value != null ? value.toString() : null;
+        }
+
+        /**
+         * @return the response's header section
+         */
+        public Http3Headers headers() throws Exception {
+            return headers.get(WAIT_SECONDS, TimeUnit.SECONDS);
+        }
+
+        /**
+         * @return whether a trailer section was received; reliable once {@link #body()} has returned
+         */
+        public boolean receivedTrailers() {
+            return trailers.isDone() && !trailers.isCompletedExceptionally();
+        }
+
+        /**
+         * @return the number of DATA frames received so far, empty ones included
+         */
+        public int dataFrames() {
+            return dataFrames.get();
         }
 
         /**

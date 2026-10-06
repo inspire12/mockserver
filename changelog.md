@@ -755,10 +755,11 @@ This release delivers a sustained performance and memory programme alongside dat
   than `maxFutureTimeout`, then answers the client `502` with the reason as the body, for example `upstream WebSocket
   handshake response was not received within maxSocketTimeout (20000 ms)`, logs one warning and closes the upstream
   connection. A client that gives up waiting first now has its upstream connection closed straight away.
-- **A response to `HEAD` over HTTP/2 is sent without its body.** A mocked response with a body, or a response
-  forwarded from an HTTP/2 upstream, was sent to an HTTP/2 `HEAD` request with its body, on a direct connection
-  and through a CONNECT or SOCKS tunnel; a response to `HEAD` has no content. Its headers now end the stream and
-  keep the `content-length` a `GET` is sent, as on HTTP/1.1, which was not affected.
+- **A response to `HEAD` over HTTP/2 or HTTP/3 is sent without its body.** A mocked response with a body, or a
+  response forwarded from an HTTP/2 upstream, was sent to an HTTP/2 `HEAD` request with its body, on a direct
+  connection and through a CONNECT or SOCKS tunnel; over HTTP/3 a mocked response (its trailers too), an MCP error
+  and a 413 were sent with their bodies to `HEAD`. A response to `HEAD` has no content. Its headers now end the
+  stream and keep the `content-length` a `GET` is sent, as on HTTP/1.1, which was not affected.
 - **A console that is slow to drain no longer holds up stopping MockServer, or AsyncAPI requests, behind an AsyncAPI
   reset.** MockServer writes its log to standard output synchronously, so when stdout is a pipe that is read slowly (a
   CI runner, or a container log driver that has fallen behind) a thread writing a log line waits until the pipe takes

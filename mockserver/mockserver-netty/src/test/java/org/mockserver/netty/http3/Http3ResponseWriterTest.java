@@ -401,6 +401,84 @@ public class Http3ResponseWriterTest {
     }
 
     @Test
+    public void shouldWriteAResponseToHeadAsItsHeadersAloneEndingTheStream() {
+        // given
+        ChannelHandlerContext ctx = mockCtxWithActiveChannel();
+        ChannelFuture headersWritten = ctx.writeAndFlush(null);
+        clearInvocations(ctx);
+        HttpResponse resp = response()
+            .withHeader("content-length", "5")
+            .withBody("hello")
+            .withTrailer("x-checksum", "abc123");
+
+        // when
+        new Http3ResponseWriter(CONFIGURATION, LOGGER, ctx).sendResponse(request().withMethod("HEAD").withPath("/test"), resp);
+
+        // then -- one HEADERS frame, keeping content-length, whose write ends the stream
+        ArgumentCaptor<Object> written = ArgumentCaptor.forClass(Object.class);
+        verify(ctx).writeAndFlush(written.capture());
+        verify(ctx, never()).write(any());
+        assertThat(written.getValue(), instanceOf(DefaultHttp3HeadersFrame.class));
+        DefaultHttp3HeadersFrame headers = (DefaultHttp3HeadersFrame) written.getValue();
+        assertThat(headers.headers().status().toString(), is("200"));
+        assertThat(headers.headers().get("content-length").toString(), is("5"));
+        verify(headersWritten).addListener(QuicStreamChannel.SHUTDOWN_OUTPUT);
+    }
+
+    @Test
+    public void shouldEndAStreamedResponseToHeadWithItsHeadersAndDiscardTheBody() {
+        // given
+        List<ByteBuf> writtenBufs = new ArrayList<>();
+        QuicStreamChannel stream = mock(QuicStreamChannel.class);
+        ChannelHandlerContext ctx = mockCtxWithListenerFiringChannel(writtenBufs, stream);
+        List<GenericFutureListener<ChannelFuture>> closeListeners = stubCloseFuture(stream);
+        StreamingBody streamingBody = new StreamingBody(0, false, 4096);
+        boolean[] upstreamClosed = {false};
+        streamingBody.setUpstreamCloser(() -> upstreamClosed[0] = true);
+        HttpResponse resp = response()
+            .withHeader("content-type", "text/event-stream")
+            .withStreamingBody(streamingBody)
+            .withTrailer("x-checksum", "abc123");
+
+        // when
+        new Http3ResponseWriter(CONFIGURATION, LOGGER, ctx).sendResponse(request().withMethod("HEAD").withPath("/stream"), resp);
+        for (int i = 0; i < 40; i++) {
+            ByteBuf chunk = Unpooled.buffer(1024).writeZero(1024);
+            assertThat("chunk " + i + " is taken", streamingBody.addChunk(chunk), is(true));
+            chunk.release();
+        }
+        streamingBody.complete();
+
+        // then -- the headers alone, ending the stream; each discarded chunk is reported, so the bound never fails
+        ArgumentCaptor<Object> written = ArgumentCaptor.forClass(Object.class);
+        verify(ctx).writeAndFlush(written.capture());
+        verify(ctx, never()).write(any());
+        assertThat(written.getValue(), instanceOf(DefaultHttp3HeadersFrame.class));
+        assertThat(((DefaultHttp3HeadersFrame) written.getValue()).headers().get("content-type").toString(), is("text/event-stream"));
+        verify(stream).shutdownOutput();
+        assertThat(writtenBufs.size(), is(0));
+        assertThat(streamingBody.getError(), is(nullValue()));
+        assertThat("nothing will take the stream, so the upstream is closed", upstreamClosed[0], is(true));
+        assertThat("no listener is left on the stream", closeListeners.size(), is(0));
+    }
+
+    @Test
+    public void shouldEndAStreamedResponseToHeadThatFailsWithItsHeadersAlone() {
+        // given
+        ChannelHandlerContext ctx = mockCtxWithListenerFiringChannel(new ArrayList<>());
+        StreamingBody streamingBody = new StreamingBody(8192);
+        new Http3ResponseWriter(CONFIGURATION, LOGGER, ctx).sendResponse(request().withMethod("HEAD").withPath("/stream"), response().withStreamingBody(streamingBody));
+
+        // when
+        streamingBody.error(new StreamingBody.StreamAbortedException("upstream closed mid-stream"));
+
+        // then -- the response already ended with its headers, so the stream is not reset
+        verify(ctx).writeAndFlush(any(DefaultHttp3HeadersFrame.class));
+        verify(ctx, times(1)).writeAndFlush(any());
+        verify(ctx.channel(), never()).close();
+    }
+
+    @Test
     public void shouldHandleNullResponse() {
         // given
         ChannelHandlerContext ctx = mockCtxWithActiveChannel();
@@ -450,10 +528,13 @@ public class Http3ResponseWriterTest {
      *
      * @param writtenBufs collects the ByteBuf content of each DefaultHttp3DataFrame written
      */
-    @SuppressWarnings("unchecked")
     private ChannelHandlerContext mockCtxWithListenerFiringChannel(List<ByteBuf> writtenBufs) {
+        return mockCtxWithListenerFiringChannel(writtenBufs, mock(Channel.class));
+    }
+
+    @SuppressWarnings("unchecked")
+    private ChannelHandlerContext mockCtxWithListenerFiringChannel(List<ByteBuf> writtenBufs, Channel channel) {
         ChannelHandlerContext ctx = mock(ChannelHandlerContext.class);
-        Channel channel = mock(Channel.class);
         when(channel.isActive()).thenReturn(true);
         stubCloseFuture(channel);
         when(ctx.channel()).thenReturn(channel);

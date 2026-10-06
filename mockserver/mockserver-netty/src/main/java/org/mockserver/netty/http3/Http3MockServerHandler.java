@@ -642,7 +642,7 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
                 break;
         }
 
-        writeMcpResultAsHttp3(ctx, result, origin, accessControlRequestHeaders);
+        writeMcpResultAsHttp3(ctx, result, origin, accessControlRequestHeaders, Http3ResponseWriter.isHead(method));
     }
 
     /**
@@ -716,10 +716,11 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
      *
      * @param origin the request's Origin header value (may be null/empty)
      * @param accessControlRequestHeaders the request's Access-Control-Request-Headers value (may be null)
+     * @param head whether the request was HEAD, whose response is sent without its body
      */
     private void writeMcpResultAsHttp3(
         ChannelHandlerContext ctx, McpRequestProcessor.McpResult result,
-        String origin, String accessControlRequestHeaders
+        String origin, String accessControlRequestHeaders, boolean head
     ) {
         DefaultHttp3HeadersFrame headersFrame = new DefaultHttp3HeadersFrame();
         headersFrame.headers().status(String.valueOf(result.getStatusCode()));
@@ -744,7 +745,7 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
         }
 
         ctx.write(headersFrame);
-        if (result.hasBody()) {
+        if (result.hasBody() && !head) {
             ctx.writeAndFlush(new DefaultHttp3DataFrame(Unpooled.wrappedBuffer(result.getBody())))
                 .addListener(QuicStreamChannel.SHUTDOWN_OUTPUT);
         } else {
@@ -914,7 +915,7 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
     /**
      * Write a 413 Payload Too Large response and shut down the QUIC stream output.
      * This mirrors the behaviour of Netty's {@code HttpObjectAggregator} when
-     * {@code maxContentLength} is exceeded on the HTTP/1.1 / HTTP/2 paths.
+     * {@code maxContentLength} is exceeded on the HTTP/1.1 / HTTP/2 paths. A HEAD request is sent the headers alone.
      */
     private void sendPayloadTooLarge(ChannelHandlerContext ctx) {
         byte[] body = "{\"error\":\"request body too large\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
@@ -923,6 +924,10 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
         headers.headers().add("content-type", "application/json; charset=utf-8");
         headers.headers().addInt("content-length", body.length);
         headers.headers().add("server", "mockserver-http3");
+        if (parsedHeaders != null && Http3ResponseWriter.isHead(parsedHeaders.method())) {
+            ctx.writeAndFlush(headers).addListener(QuicStreamChannel.SHUTDOWN_OUTPUT);
+            return;
+        }
         ctx.write(headers);
         ctx.writeAndFlush(new DefaultHttp3DataFrame(Unpooled.wrappedBuffer(body)))
             .addListener(QuicStreamChannel.SHUTDOWN_OUTPUT);

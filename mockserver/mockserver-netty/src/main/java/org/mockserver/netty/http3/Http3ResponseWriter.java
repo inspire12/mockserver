@@ -38,6 +38,8 @@ import java.util.List;
  * Backpressure is implemented via {@link StreamingBody#chunkWritten(int)}: each
  * chunk write completion reports its bytes, which requests the next upstream read
  * once the unwritten backlog has drained.
+ * <p>
+ * A response to {@code HEAD} is its header section alone, static or streamed, keeping {@code content-length}.
  */
 public class Http3ResponseWriter extends ResponseWriter implements StreamErrorWriter {
 
@@ -94,10 +96,45 @@ public class Http3ResponseWriter extends ResponseWriter implements StreamErrorWr
 
         warnIfConnectionOptionsIgnored(response);
 
-        if (response.getStreamingBody() != null) {
+        if (isHead(request)) {
+            writeResponseToHead(response);
+        } else if (response.getStreamingBody() != null) {
             writeStreamingResponse(request, response);
         } else {
             writeStaticResponse(response);
+        }
+    }
+
+    /**
+     * Whether a request's method is {@code HEAD}, whose response has no content (RFC 9110 section 9.3.2).
+     */
+    static boolean isHead(String method) {
+        return "HEAD".equalsIgnoreCase(method);
+    }
+
+    private static boolean isHead(HttpRequest request) {
+        return request != null && isHead(request.getMethod(""));
+    }
+
+    /**
+     * Write a response to {@code HEAD}: the header section a {@code GET} is sent, ending the stream, with no
+     * DATA frame and no trailers. A streamed body is discarded as it arrives and its upstream closed.
+     */
+    private void writeResponseToHead(HttpResponse response) {
+        StreamingBody streamingBody = response.getStreamingBody();
+        if (streamingBody == null) {
+            ctx.writeAndFlush(Http3RequestBridge.toHttp3HeadersFrame(response))
+                .addListener(QuicStreamChannel.SHUTDOWN_OUTPUT);
+            return;
+        }
+        ctx.writeAndFlush(Http3RequestBridge.toHttp3HeadersFrame(response, true))
+            .addListener(future -> shutdownQuicStreamOutput());
+        // the client's response is already whole, so neither the end of the body nor an error can change it
+        streamingBody.subscribe(chunk -> streamingBody.chunkWritten(chunk.readableBytes()), () -> {
+        }, error -> {
+        });
+        if (!streamingBody.isCompleted()) {
+            streamingBody.closeUpstream();
         }
     }
 
