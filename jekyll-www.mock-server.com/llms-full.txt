@@ -1066,7 +1066,7 @@ When no matching expectation is found and the host header does not match MockSer
 - Environment variable: MOCKSERVER_ATTEMPT_TO_PROXY_IF_NO_MATCHING_EXPECTATION
 
 **forwardBinaryRequestsUseSingleConnection**
-A proxied binary (non-HTTP) connection is given one upstream connection for its life, and bytes are relayed both ways as they arrive. New default in 9.0.0 (breaking): set to false to forward each message on an upstream connection of its own, as in 8.0.0. A connection whose client uses TLS, and every connection when an upstream proxy is configured, is forwarded one message per connection regardless.
+A proxied binary (non-HTTP) connection is given one upstream connection for its life, and bytes are relayed both ways as they arrive. New default in 9.0.0 (breaking): set to false to forward each message on an upstream connection of its own, as in 8.0.0. A client that turns TLS on part way through (PostgreSQL sslmode=require) has its upstream connection upgraded to TLS on the same connection; SCRAM channel binding then needs channelBinding=disable in the client, or MockServer given the server's own certificate, key and signing CA (privateKeyPath, x509CertificatePath, certificateAuthorityCertificate). A connection whose client starts with TLS, and every connection when an upstream proxy is configured, is forwarded one message per connection regardless.
 - Default: true
 - Environment variable: MOCKSERVER_FORWARD_BINARY_REQUESTS_USE_SINGLE_CONNECTION
 
@@ -1076,7 +1076,7 @@ On a binary connection relayed on one upstream connection (forwardBinaryRequests
 - Environment variable: MOCKSERVER_FORWARD_BINARY_REQUESTS_MATCH_EXPECTATIONS
 
 **forwardBinaryRequestsWithoutWaitingForResponse**
-Deprecated, and applies only when forwardBinaryRequestsUseSingleConnection is false (or to a connection that setting forwards one message at a time: client TLS, or an upstream proxy). Then, if true, each binary message is forwarded without waiting for the upstream's response. Has no effect on a connection with a single upstream connection. To be removed in the next major release.
+Deprecated, and applies only when forwardBinaryRequestsUseSingleConnection is false (or to a connection that setting forwards one message at a time: a client that starts with TLS, or an upstream proxy). Then, if true, each binary message is forwarded without waiting for the upstream's response. Has no effect on a connection with a single upstream connection. To be removed in the next major release.
 - Default: false
 - Environment variable: MOCKSERVER_FORWARD_BINARY_REQUESTS_WITHOUT_WAITING_FOR_RESPONSE
 

@@ -6,6 +6,7 @@ import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
+import io.netty.handler.ssl.SniCompletionEvent;
 import io.netty.util.AttributeKey;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.httpclient.NettyHttpClient;
@@ -520,6 +521,18 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
     public void channelWritabilityChanged(ChannelHandlerContext ctx) {
         BinaryRelay.clientWritabilityChanged(ctx.channel());
         ctx.fireChannelWritabilityChanged();
+    }
+
+    /**
+     * A binary client that turns TLS on part way through reaches here once its server certificate is chosen, before
+     * anything it sends over TLS is decrypted: the relay then starts TLS with the upstream on the same connection.
+     */
+    @Override
+    public void userEventTriggered(ChannelHandlerContext ctx, Object event) throws Exception {
+        if (event instanceof SniCompletionEvent && ((SniCompletionEvent) event).isSuccess()) {
+            BinaryRelay.clientStartedTls(ctx.channel());
+        }
+        super.userEventTriggered(ctx, event);
     }
 
     @Override

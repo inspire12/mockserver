@@ -303,17 +303,19 @@ public class BinaryTlsUpgradeIntegrationTest {
     }
 
     /**
-     * Proxying is as it was in 8.0.0: MockServer answers the handshake itself, and forwards each message it
-     * decrypts on a connection of its own that it opens to the upstream with TLS. What was sent in the clear went
-     * upstream in the clear. (A server that wants the request to upgrade on every connection is not served by this.)
+     * With {@code forwardBinaryRequestsUseSingleConnection=false}, proxying is as it was in 8.0.0: MockServer answers
+     * the handshake itself, and forwards each message it decrypts on a connection of its own that it opens to the
+     * upstream with TLS. What was sent in the clear went upstream in the clear. (A server that wants the request to
+     * upgrade on every connection is not served by this; the default, one upgraded connection, is in
+     * {@code BinaryInBandTlsUpgradeProxyIntegrationTest}.)
      */
     @Test
-    public void shouldForwardWhatFollowsAnUpgradeOverTlsToTheUpstream() throws Exception {
+    public void shouldForwardWhatFollowsAnUpgradeOverTlsToTheUpstreamWhenEachMessageHasAConnectionOfItsOwn() throws Exception {
         try (ClearOrTlsUpstream upstream = new ClearOrTlsUpstream()) {
             upstream.answers(SSL_REQUEST, new byte[]{'S'});
             upstream.answers(STARTUP, AUTHENTICATION_OK_AND_READY);
             upstream.answers(SYNC, READY);
-            mockServer = startClientAndServer(configuration(), "127.0.0.1", upstream.port(), PortFactory.findFreePort());
+            mockServer = startClientAndServer(configuration().forwardBinaryRequestsUseSingleConnection(false), "127.0.0.1", upstream.port(), PortFactory.findFreePort());
             Socket socket = connect();
 
             exchange(socket, SSL_REQUEST, new byte[]{'S'});

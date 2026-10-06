@@ -428,12 +428,13 @@ public class BinaryPersistentRelayIntegrationTest {
     }
 
     /**
-     * The one upstream connection is not encrypted, so what a client sends after turning TLS on is not put on it:
-     * it is forwarded as in 8.0.0, on a connection of its own that MockServer opens with TLS. (An upstream that
-     * answers such connections is in {@code BinaryTlsUpgradeIntegrationTest}; this one does not speak TLS.)
+     * What a client sends after turning TLS on goes on the same upstream connection, after MockServer's own TLS
+     * handshake with the upstream, never in the clear. This upstream does not speak TLS, so it sees a handshake
+     * begin after the {@code SSLRequest}, and nothing else. (Upstreams that answer it are in
+     * {@code BinaryInBandTlsUpgradeProxyIntegrationTest}.)
      */
     @Test
-    public void shouldNotSendUpstreamInTheClearWhatAClientSendsAfterTurningTlsOn() throws Exception {
+    public void shouldNeverSendUpstreamInTheClearWhatAClientSendsAfterTurningTlsOn() throws Exception {
         String sentOverTls = "secret startup message";
         try (Upstream upstream = new Upstream((socket, received) -> {
             InputStream input = socket.getInputStream();
@@ -453,13 +454,9 @@ public class BinaryPersistentRelayIntegrationTest {
             tls.getOutputStream().write(sentOverTls.getBytes(StandardCharsets.UTF_8));
             tls.getOutputStream().flush();
 
-            tryWaitForSuccess(() -> {
-                assertThat("a second upstream connection is opened for it", upstream.connections(), is(2));
-                assertThat("which starts with a TLS handshake", upstream.receivedBy(1).length > 0 && upstream.receivedBy(1)[0] == 22, is(true));
-            });
-            assertThat("only what was sent in the clear went on the first", upstream.receivedBy(0), is(SSL_REQUEST));
+            tryWaitForSuccess(() -> assertThat("a TLS handshake follows on the same connection", upstream.receivedBy(0).length > SSL_REQUEST.length && upstream.receivedBy(0)[SSL_REQUEST.length] == 22, is(true)));
+            assertThat("and no other connection is opened", upstream.connections(), is(1));
             assertThat(new String(upstream.received(), StandardCharsets.ISO_8859_1), not(containsString(sentOverTls)));
-            assertThat("turning TLS on is not a fault", warnings(), hasSize(0));
         }
     }
 

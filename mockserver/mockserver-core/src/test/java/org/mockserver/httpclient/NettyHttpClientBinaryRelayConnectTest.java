@@ -12,6 +12,8 @@ import io.netty.channel.EventLoop;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.handler.ssl.SslHandler;
+import io.netty.util.ReferenceCountUtil;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -19,6 +21,7 @@ import org.mockserver.configuration.Configuration;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.proxyconfiguration.ProxyConfiguration;
 import org.mockserver.socket.NettyAllocator;
+import org.mockserver.socket.tls.NettySslContextFactory;
 
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -148,6 +151,23 @@ public class NettyHttpClientBinaryRelayConnectTest {
 
             assertThat(refused.getMessage(), containsString("loopback"));
             assertThrows("nothing connects to the upstream", java.net.SocketTimeoutException.class, upstream::accept);
+        }
+    }
+
+    @Test
+    public void shouldBuildTheUpstreamTlsHandlerOfARelayAsAClientOfTheTargetWithTheConnectionTimeout() {
+        Configuration configuration = configuration().socketConnectionTimeoutInMillis(4321L);
+        NettyHttpClient httpClient = new NettyHttpClient(configuration, new MockServerLogger(), () -> clientConnections, null, true, new NettySslContextFactory(configuration, new MockServerLogger(), false));
+
+        SslHandler sslHandler = httpClient.newBinaryRelaySslHandler(NettyAllocator.ALLOCATOR, InetSocketAddress.createUnresolved("db.example.com", 5432));
+        try {
+            assertThat(sslHandler.engine().getUseClientMode(), is(true));
+            assertThat("the name, unresolved and not looked up", sslHandler.engine().getPeerHost(), is("db.example.com"));
+            assertThat(sslHandler.engine().getPeerPort(), is(5432));
+            assertThat(sslHandler.getHandshakeTimeoutMillis(), is(4321L));
+            assertThat("no ALPN offered", sslHandler.engine().getSSLParameters().getApplicationProtocols().length, is(0));
+        } finally {
+            ReferenceCountUtil.release(sslHandler.engine());
         }
     }
 }

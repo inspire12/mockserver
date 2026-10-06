@@ -62,6 +62,8 @@ public final class TestContainerImages {
     public static final String RABBITMQ = resolve("rabbitmq");
     /** {@code eclipse-mosquitto} (Docker Hub official image). */
     public static final String ECLIPSE_MOSQUITTO = resolve("eclipse-mosquitto");
+    /** {@code postgres} (Docker Hub official image). */
+    public static final String POSTGRES = resolve("postgres");
 
     private TestContainerImages() {
     }

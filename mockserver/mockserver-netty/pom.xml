@@ -240,6 +240,19 @@
             <artifactId>opentelemetry-sdk-testing</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- a real PostgreSQL behind the Docker gate (PostgresThroughMockServerIntegrationTest) -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers</artifactId>
+            <version>1.21.4</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>42.7.13</version>
+            <scope>test</scope>
+        </dependency>
         <!--
             chicory (WASM interpreter) is NOT declared here on purpose. It used to be declared
             test-scope as a workaround while mockserver-core marked it <optional>true</optional>;

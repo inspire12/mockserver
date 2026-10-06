@@ -8,7 +8,6 @@ import org.junit.Test;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.model.BinaryMessage;
 import org.mockserver.netty.unification.PortUnificationHandler;
-import org.mockserver.socket.ChannelReadPause;
 import org.slf4j.event.Level;
 
 import java.net.ConnectException;
@@ -296,9 +295,10 @@ public class BinaryRelayTest {
         relay.configuration
             .forwardBinaryRequestsWithoutWaitingForResponse(true)
             .binaryProxyListener((binaryRequest, binaryResponse, serverAddress, clientAddress) -> reported.add(text(binaryRequest)));
-        EmbeddedChannel client = relay.clientConnection();
+        relay.clientConnection();
         relay.clientSends("relayed");
-        PortUnificationHandler.enableSslUpstreamAndDownstream(client);
+        // the only hand-back after the first message: the setting is read for each message (item 284)
+        relay.configuration.forwardBinaryRequestsUseSingleConnection(false);
 
         relay.clientSends("forwarded per message");
 
@@ -310,7 +310,7 @@ public class BinaryRelayTest {
     }
 
     @Test
-    public void shouldForwardEachMessageOfAConnectionThatUsesTlsOnAnEncryptedConnectionOfItsOwn() {
+    public void shouldForwardEachMessageOfAConnectionThatStartedWithTlsOnAnEncryptedConnectionOfItsOwn() {
         relay = new BinaryRelayHarness(true);
         EmbeddedChannel client = relay.clientConnection();
         PortUnificationHandler.enableSslUpstreamAndDownstream(client);
@@ -321,36 +321,7 @@ public class BinaryRelayTest {
         assertThat(relay.forwardedPerMessage, contains("sent over TLS waiting, over TLS"));
         assertThat(client.isOpen(), is(true));
         assertThat(relay.logged(Level.DEBUG), hasSize(1));
-        assertThat(relay.logged(Level.WARN), is(empty()));
-    }
-
-    @Test
-    public void shouldNotSendInTheClearWhatAClientSendsAfterTurningTlsOnPartWayThrough() {
-        EmbeddedChannel client = relay(true);
-        relay.clientSends("in the clear");
-        assertThat(relay.receivedByUpstream(), is("in the clear"));
-        relay.upstreamFlushGate.blocked = true;
-        relay.clientSends("also in the clear");
-        PortUnificationHandler.enableSslUpstreamAndDownstream(client);
-
-        relay.clientSends("sent over TLS");
-        relay.clientSends("more over TLS");
-
-        assertThat("it goes on a connection of its own, as with the setting off", relay.forwardedPerMessage, contains("sent over TLS waiting, over TLS", "more over TLS waiting, over TLS"));
-        assertThat("the client's connection is kept", client.isOpen(), is(true));
-        assertThat("and read, though the upstream connection it has left is still full", ChannelReadPause.holds(client), is(0));
-        assertThat("the upstream connection is kept until it has taken what was sent in the clear", relay.upstream.isOpen(), is(true));
-        relay.upstreamSends("too late");
-        assertThat("what it sends now is not for a client that has moved on", relay.receivedByClient(), is(""));
-
-        relay.upstreamFlushGate.blocked = false;
-        relay.upstream.flush();
-        assertThat("only what was sent in the clear went on it", relay.receivedByUpstream(), is("also in the clear"));
-        assertThat("and then it is closed", relay.upstream.isOpen(), is(false));
-        assertThat("which does not close the client", client.isOpen(), is(true));
-        assertThat(ChannelReadPause.holds(client), is(0));
-        assertThat("said once", relay.logged(Level.DEBUG), hasSize(1));
-        assertThat(relay.logged(Level.DEBUG).get(0).getArguments()[2], is("the client's connection uses TLS"));
+        assertThat(relay.logged(Level.DEBUG).get(0).getArguments()[2], is("the client's connection started with TLS"));
         assertThat(relay.logged(Level.WARN), is(empty()));
     }
 

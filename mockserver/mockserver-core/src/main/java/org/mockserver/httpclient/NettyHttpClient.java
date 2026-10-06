@@ -3,6 +3,7 @@ package org.mockserver.httpclient;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.netty.bootstrap.Bootstrap;
+import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
@@ -13,6 +14,7 @@ import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoop;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.WriteBufferWaterMark;
+import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.timeout.ReadTimeoutHandler;
 import io.netty.util.AttributeKey;
 import org.apache.commons.lang3.StringUtils;
@@ -683,6 +685,22 @@ public class NettyHttpClient {
             mockServerLogger
         );
         return relayBootstrap.connect(target);
+    }
+
+    /**
+     * The TLS handler that upgrades a binary relay's upstream connection when its client turns TLS on part way
+     * through: the forward client's TLS context, so the upstream certificate is checked as for any forwarded TLS,
+     * and {@code socketConnectionTimeoutInMillis} as its handshake timeout. No ALPN is offered.
+     */
+    public SslHandler newBinaryRelaySslHandler(ByteBufAllocator allocator, InetSocketAddress remoteAddress) {
+        // getHostString, not getHostName: no reverse lookup on the event loop
+        String host = remoteAddress.getHostString();
+        SslHandler sslHandler = nettySslContextFactory.createClientSslContext(forwardProxyClient, false, host).newHandler(allocator, host, remoteAddress.getPort());
+        Long handshakeTimeoutMillis = configuration.socketConnectionTimeoutInMillis();
+        if (handshakeTimeoutMillis != null && handshakeTimeoutMillis > 0) {
+            sslHandler.setHandshakeTimeoutMillis(handshakeTimeoutMillis);
+        }
+        return sslHandler;
     }
 
     private static void reportRequestSent(Consumer<Throwable> onRequestSent, Throwable failure) {

@@ -85,6 +85,7 @@ public class TestContainerImagesTest {
         assertThat(TestContainerImages.CP_KAFKA, is("confluentinc/cp-kafka:7.6.1"));
         assertThat(TestContainerImages.RABBITMQ, is("rabbitmq:3.13-management"));
         assertThat(TestContainerImages.ECLIPSE_MOSQUITTO, is("eclipse-mosquitto:2.0.22"));
+        assertThat(TestContainerImages.POSTGRES, is("postgres:17.6"));
     }
 
     @Test

@@ -48,7 +48,8 @@ final class BinaryRelayUpstreamHandler extends SimpleChannelInboundHandler<ByteB
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
         if (isSslOrDecoderFault(cause)) {
-            if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+            // a fault of MockServer's handshake with the upstream is logged once, by the relay
+            if (!relay.upstreamTlsNotEstablished() && mockServerLogger.isEnabledForInstance(Level.WARN)) {
                 mockServerLogger.logEvent(
                     new LogEntry()
                         .setLogLevel(Level.WARN)

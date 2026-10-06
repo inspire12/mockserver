@@ -4,6 +4,7 @@ import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.handler.ssl.SslHandler;
 import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.ScheduledFuture;
 import org.mockserver.configuration.Configuration;
@@ -27,6 +28,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
 
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static org.mockserver.exception.ExceptionHandling.boundedFault;
+import static org.mockserver.exception.ExceptionHandling.boundedFaultMessage;
 import static org.mockserver.exception.ExceptionHandling.closeOnFlush;
 import static org.mockserver.formatting.StringFormatter.formatBytes;
 import static org.mockserver.log.model.LogEntry.LogMessageType.FORWARDED_REQUEST;
@@ -40,6 +43,10 @@ import static org.mockserver.netty.unification.PortUnificationHandler.isSslEnabl
  * <p>
  * Neither connection is read while the other cannot take what is read from it, so what is held is one read each
  * way, each connection's write buffer and the messages not yet reported to the listener.
+ * <p>
+ * When the client turns TLS on part way through (PostgreSQL's {@code SSLRequest}), MockServer answers the client's
+ * handshake as it does for any TLS connection and starts its own handshake with the upstream on the same upstream
+ * connection, so what was sent before goes up in the clear and everything after over TLS.
  * <p>
  * A connection this cannot carry is left to the caller, which forwards each of its messages on an upstream
  * connection of its own: see {@link #forwardedPerMessageBecause()}.
@@ -56,7 +63,7 @@ public final class BinaryRelay {
 
     /** Why the client connection is not being read; each is one hold on {@link ChannelReadPause}. */
     private enum ClientHold {
-        UPSTREAM_CONNECTING, UPSTREAM_NOT_WRITABLE, LISTENER_BEHIND, CLIENT_NOT_WRITABLE
+        UPSTREAM_CONNECTING, UPSTREAM_NOT_WRITABLE, LISTENER_BEHIND, UPSTREAM_HANDSHAKING, CLIENT_NOT_WRITABLE
     }
 
     private final Channel client;
@@ -68,7 +75,11 @@ public final class BinaryRelay {
     private final BinaryProxyListener listener;
     private final EnumSet<ClientHold> clientHolds = EnumSet.noneOf(ClientHold.class);
     private final Deque<Exchange> waitingForConnect = new ArrayDeque<>(1);
+    private final boolean clientStartedWithTls;
     private Channel upstream;
+    private SslHandler upstreamTls;
+    // the upgrade came before the connect completed: how many waiting messages were sent before it, in the clear
+    private int clearBeforeUpgrade = -1;
     private boolean connected;
     private boolean clientClosed;
     private boolean finished;
@@ -88,6 +99,7 @@ public final class BinaryRelay {
         this.scheduler = scheduler;
         this.httpClient = httpClient;
         this.listener = listener;
+        this.clientStartedWithTls = isSslEnabledUpstream(client);
     }
 
     /**
@@ -146,6 +158,19 @@ public final class BinaryRelay {
     }
 
     /**
+     * The client has started TLS part way through: its handshake with MockServer is under way, so the upstream
+     * connection starts its own. Called when the client's server certificate has been chosen (Netty's
+     * {@code SniCompletionEvent}), before anything the client sends over TLS is decrypted. A connection without a
+     * relay, or one that is not relayed, is left alone.
+     */
+    public static void clientStartedTls(Channel client) {
+        BinaryRelay relay = client.hasAttr(RELAY) ? client.attr(RELAY).get() : null;
+        if (relay != null && !relay.perMessage && !relay.clientStartedWithTls) {
+            relay.upgradeUpstreamToTls();
+        }
+    }
+
+    /**
      * Reads the upstream again once the client can take more. A connection without a relay is left alone.
      */
     public static void clientWritabilityChanged(Channel client) {
@@ -190,6 +215,16 @@ public final class BinaryRelay {
         if (finished || upstream == null && !connect()) {
             return true;
         }
+        if (isSslEnabledUpstream(client)) {
+            // a backstop for the event: anything the client sends over TLS goes upstream over TLS
+            upgradeUpstreamToTls();
+            if (finished) {
+                return true;
+            }
+            if (upstreamTls == null || !upstreamTls.handshakeFuture().isSuccess()) {
+                hold(ClientHold.UPSTREAM_HANDSHAKING);
+            }
+        }
         Exchange exchange = new Exchange(binaryRequest);
         if (latest != null) {
             latest.response.complete(null);
@@ -206,22 +241,23 @@ public final class BinaryRelay {
 
     /**
      * Why this connection's messages are each forwarded on an upstream connection of their own, as all are when
-     * the setting is off, or null if it is relayed on one. The upstream connection is made directly and is not
-     * encrypted, so it cannot go through an upstream proxy or carry what a client sent over TLS.
+     * the setting is off, or null if it is relayed on one. The upstream connection is made directly, so it cannot
+     * go through an upstream proxy. A client whose connection was TLS from its first byte keeps the forwarding it
+     * had in 8.0.0, where each message has a TLS upstream connection of its own.
      */
     private String forwardedPerMessageBecause() {
         if (httpClient.forwardsThroughProxy()) {
             return "an upstream proxy is configured";
         }
-        if (isSslEnabledUpstream(client)) {
-            return "the client's connection uses TLS";
+        if (clientStartedWithTls) {
+            return "the client's connection started with TLS";
         }
         return null;
     }
 
     /**
-     * A connection that turns TLS on part way through has an upstream connection by now, in the clear. It is ended
-     * once what was sent in the clear has been delivered, and the client's connection is kept.
+     * Both reasons are known at the first message, before an upstream connection is made; one that exists is
+     * ended once what was sent on it has been delivered, and the client's connection is kept.
      */
     private void forwardPerMessageFromNowOn(String reason) {
         perMessage = true;
@@ -282,8 +318,16 @@ public final class BinaryRelay {
         connected = true;
         release(ClientHold.UPSTREAM_CONNECTING);
         for (Exchange exchange; (exchange = waitingForConnect.poll()) != null; ) {
+            if (clearBeforeUpgrade-- == 0) {
+                // what was read before the upgrade goes in the clear; the handler is added only now, after it
+                startUpstreamTls();
+            }
             writeToUpstream(exchange);
         }
+        if (clearBeforeUpgrade >= 0) {
+            startUpstreamTls();
+        }
+        clearBeforeUpgrade = -1;
         if (clientClosed || perMessage) {
             RelayLegClose.afterFlush(upstream);
         }
@@ -303,6 +347,68 @@ public final class BinaryRelay {
             bytesWaitingAtLastStallCheck = upstream.bytesBeforeWritable();
         }
         upstreamWritabilityChanged();
+    }
+
+    /**
+     * Starts MockServer's TLS handshake with the upstream on the connection the relay already has. A connection
+     * still connecting starts it once what was waiting for the connect has been written in the clear.
+     */
+    private void upgradeUpstreamToTls() {
+        if (upstreamTls != null || clearBeforeUpgrade >= 0 || finished || clientClosed) {
+            return;
+        }
+        if (mockServerLogger.isEnabledForInstance(Level.DEBUG)) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.DEBUG)
+                    .setCorrelationId(latestCorrelationId)
+                    .setMessageFormat("binary connection from:{}turned TLS on, upgrading its upstream connection to:{}to TLS")
+                    .setArguments(client.remoteAddress(), target)
+            );
+        }
+        if (connected) {
+            startUpstreamTls();
+        } else {
+            clearBeforeUpgrade = waitingForConnect.size();
+        }
+    }
+
+    private void startUpstreamTls() {
+        try {
+            upstreamTls = httpClient.newBinaryRelaySslHandler(upstream.alloc(), target);
+        } catch (RuntimeException cannotCreate) {
+            upstreamTlsFailed(cannotCreate);
+            return;
+        }
+        // first: the relay's handler then only ever sees what was decrypted
+        upstream.pipeline().addFirst("binary-relay-tls", upstreamTls);
+        upstreamTls.handshakeFuture().addListener(handshake -> {
+            if (handshake.isSuccess()) {
+                release(ClientHold.UPSTREAM_HANDSHAKING);
+            } else {
+                upstreamTlsFailed(handshake.cause());
+            }
+        });
+    }
+
+    private void upstreamTlsFailed(Throwable cause) {
+        if (!clientClosed && mockServerLogger.isEnabledForInstance(Level.WARN)) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.WARN)
+                    .setCorrelationId(latestCorrelationId)
+                    .setMessageFormat("unable to upgrade the upstream connection to:{}to TLS for binary connection from:{}closing both:{}")
+                    .setArguments(target, client.remoteAddress(), boundedFaultMessage(cause))
+                    .setThrowable(boundedFault(cause))
+            );
+        }
+        // closing the upstream connection closes the client's
+        RelayLegClose.now(upstream);
+    }
+
+    /** True from the upgrade until MockServer's handshake with the upstream has succeeded; its faults are logged here. */
+    boolean upstreamTlsNotEstablished() {
+        return clearBeforeUpgrade >= 0 || upstreamTls != null && !upstreamTls.handshakeFuture().isSuccess();
     }
 
     void fromUpstream(byte[] bytesRead) {
