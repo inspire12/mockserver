@@ -14,6 +14,7 @@ import org.mockserver.log.model.LogEntry;
 import org.mockserver.log.model.SensitiveLogValue;
 import org.mockserver.mappers.NettyMessageForLog;
 import org.mockserver.responsewriter.HttpExchangeEndedEvent;
+import org.mockserver.responsewriter.ResponseWrittenBeneathCodecEvent;
 import org.mockserver.socket.ChannelReadPause;
 import org.mockserver.logging.MockServerLogger;
 import org.slf4j.event.Level;
@@ -163,8 +164,9 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
     }
 
     /**
-     * Writes raw bytes from the context of the client leg's codec, as MockServer wrote them from its own, and ends the
-     * client leg's exchange as the last of them is written: no response passes that leg's codec to end it.
+     * Writes raw bytes from the context of the client leg's codec, as MockServer wrote them from its own. With the last
+     * of them it tells that codec, which pairs each request with the next response it encodes, and ends the client
+     * leg's exchange as they are written: no response passes that leg's codec to do either.
      */
     private ChannelFuture writeBeneathCodec(RawResponseBytes rawBytes) {
         ChannelHandlerContext codec = upstreamChannel.pipeline().context(HttpServerCodec.class);
@@ -174,6 +176,7 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
         }
         ChannelFuture written = codec.writeAndFlush(rawBytes.content());
         if (rawBytes.endsResponse()) {
+            codec.fireUserEventTriggered(ResponseWrittenBeneathCodecEvent.INSTANCE);
             written.addListener(future -> codec.fireUserEventTriggered(HttpExchangeEndedEvent.RAW_RESPONSE_WRITTEN));
         }
         return written;

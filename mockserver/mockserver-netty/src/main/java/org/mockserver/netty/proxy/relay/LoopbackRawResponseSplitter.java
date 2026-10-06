@@ -16,7 +16,9 @@ import java.util.concurrent.RejectedExecutionException;
  * raw bytes out of what the codec is given and hands them on as {@link RawResponseBytes}. The codec would hold bytes
  * that are not a whole response and fail on bytes that are not HTTP; a client on a direct connection is sent both.
  * MockServer's end announces each such response, as an offset and a length in the bytes it writes, before it writes
- * it ({@link LoopbackExchangeEndedHandler}), so an announcement is here before its bytes are read. One per loopback.
+ * it ({@link LoopbackRelaySignalHandler}), so an announcement is here before its bytes are read. An exchange that
+ * ends with no response the codec decodes (no response, or a final {@code 1xx}) is announced as a response of no
+ * bytes. At the end of each, the codec is told its request was answered. One per loopback.
  */
 final class LoopbackRawResponseSplitter extends ChannelInboundHandlerAdapter {
 
@@ -24,16 +26,18 @@ final class LoopbackRawResponseSplitter extends ChannelInboundHandlerAdapter {
 
     // each a start and an end offset, in order: added on MockServer's end's event loop, taken on this one's
     private final Queue<long[]> announced = new ConcurrentLinkedQueue<>();
+    private final LoopbackHttpClientCodec codec;
     private volatile ChannelHandlerContext ctx;
     // confined to the loopback's event loop
     private long read;
 
-    private LoopbackRawResponseSplitter() {
+    private LoopbackRawResponseSplitter(LoopbackHttpClientCodec codec) {
+        this.codec = codec;
     }
 
     // kept on the proxy client's channel, which MockServer's end of the loopback can look up
-    static LoopbackRawResponseSplitter forTunnel(Channel proxyClient) {
-        LoopbackRawResponseSplitter splitter = new LoopbackRawResponseSplitter();
+    static LoopbackRawResponseSplitter forTunnel(Channel proxyClient, LoopbackHttpClientCodec codec) {
+        LoopbackRawResponseSplitter splitter = new LoopbackRawResponseSplitter(codec);
         proxyClient.attr(OF_TUNNEL).set(splitter);
         return splitter;
     }
@@ -91,6 +95,7 @@ final class LoopbackRawResponseSplitter extends ChannelInboundHandlerAdapter {
                     boolean endsResponse = read == raw[1];
                     if (endsResponse) {
                         announced.remove();
+                        codec.responseNotDecoded();
                     }
                     ctx.fireChannelRead(new RawResponseBytes(in.readRetainedSlice(length), endsResponse));
                 }
@@ -105,6 +110,7 @@ final class LoopbackRawResponseSplitter extends ChannelInboundHandlerAdapter {
     private void relayEmptyResponses(ChannelHandlerContext ctx) {
         for (long[] raw = announced.peek(); raw != null && raw[1] <= read && !ctx.isRemoved(); raw = announced.peek()) {
             announced.remove();
+            codec.responseNotDecoded();
             ctx.fireChannelRead(new RawResponseBytes(Unpooled.EMPTY_BUFFER, true));
         }
     }

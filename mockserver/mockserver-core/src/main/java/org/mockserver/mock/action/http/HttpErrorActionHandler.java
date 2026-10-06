@@ -11,6 +11,7 @@ import org.mockserver.model.HttpError;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.responsewriter.HttpExchangeEndedEvent;
 import org.mockserver.responsewriter.RawResponseBytesEvent;
+import org.mockserver.responsewriter.ResponseWrittenBeneathCodecEvent;
 
 import java.util.concurrent.RejectedExecutionException;
 
@@ -19,7 +20,8 @@ import java.util.concurrent.RejectedExecutionException;
  * resets the request stream (HTTP/2 RST_STREAM, written here; HTTP/3 RESET_STREAM, handled by the
  * HTTP/3 response writer seam in mockserver-netty), and/or drops the connection.
  * <p>
- * On HTTP/1.1 it fires {@link RawResponseBytesEvent} immediately before it writes raw bytes, then
+ * On HTTP/1.1 it fires {@link RawResponseBytesEvent} immediately before it writes raw bytes,
+ * {@link ResponseWrittenBeneathCodecEvent} immediately after, then
  * {@link HttpExchangeEndedEvent#RAW_RESPONSE_WRITTEN} as their write completes and before any stream error or drop
  * is applied, and {@link HttpExchangeEndedEvent#INSTANCE} when nothing at all is written and the connection stays
  * open. A stream error or drop with no raw bytes fires nothing: the connection's state closes with it.
@@ -50,6 +52,7 @@ public class HttpErrorActionHandler {
                 Runnable announceAndWrite = () -> {
                     httpCodecContext.fireUserEventTriggered(new RawResponseBytesEvent(responseBytes.length));
                     httpCodecContext.writeAndFlush(Unpooled.wrappedBuffer(responseBytes), written);
+                    httpCodecContext.fireUserEventTriggered(ResponseWrittenBeneathCodecEvent.INSTANCE);
                 };
                 if (httpCodecContext.executor().inEventLoop()) {
                     announceAndWrite.run();

@@ -168,7 +168,7 @@ curl_close($ch);</code></pre>
 </div>
 <button id="button_random_bytes_error" class="accordion">random bytes error</button>
 <div class="panel">
-    <p>The bytes are sent to the client exactly as given, in place of a response: they do not have to be a valid or complete HTTP response, which is useful for testing how a client copes with a corrupt or truncated reply. A client that reaches MockServer through its CONNECT or SOCKS proxy receives the same bytes as a client connected directly. Without <strong>dropConnection</strong> the connection is left open after the bytes, and is closed later like any other idle connection.</p>
+    <p>The bytes are sent to the client exactly as given, in place of a response: they do not have to be a valid or complete HTTP response, which is useful for testing how a client copes with a corrupt or truncated reply. A client that reaches MockServer through its CONNECT or SOCKS proxy receives the same bytes as a client connected directly. Without <strong>dropConnection</strong> the connection is left open after the bytes, and is closed later like any other idle connection. A later request on that connection is answered as usual, for its own method: a <strong>GET</strong> sent after a <strong>HEAD</strong> that was answered with raw bytes still receives its body.</p>
     <p>Raw bytes can only be sent over HTTP/1.1. A request that arrives over HTTP/2 is sent no bytes: its stream is left open with no response, or, with <strong>dropConnection</strong>, that stream alone is reset and the connection stays open. To reset an HTTP/2 or HTTP/3 stream with a chosen error code use <strong>streamError</strong>, below.</p>
     <button class="accordion inner">Java</button>
     <div class="panel">

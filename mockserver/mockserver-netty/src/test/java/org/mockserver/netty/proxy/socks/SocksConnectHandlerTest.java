@@ -8,6 +8,7 @@ import io.netty.handler.codec.socksx.v5.Socks5ServerEncoder;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockserver.codec.HttpChunkLineLimiter;
+import org.mockserver.netty.unification.HttpServerCodecResponsePairing;
 import org.mockserver.lifecycle.LifeCycle;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.netty.proxy.relay.RelayConnectHandler;
@@ -47,7 +48,8 @@ public class SocksConnectHandlerTest {
     private void assertCodecSupportRemoved(SocksConnectHandler<?> handler, EmbeddedChannel channel) {
         try {
             HttpChunkLineLimiter chunkLineLimiter = new HttpChunkLineLimiter(mockServerLogger);
-            channel.pipeline().addLast(chunkLineLimiter.beforeCodec(), new HttpServerCodec(), chunkLineLimiter.afterCodec(), new HttpObjectAggregator(1024), handler);
+            HttpServerCodecResponsePairing responsePairing = new HttpServerCodecResponsePairing();
+            channel.pipeline().addLast(chunkLineLimiter.beforeCodec(), responsePairing.beforeCodec(), new HttpServerCodec(), responsePairing.afterCodec(), chunkLineLimiter.afterCodec(), new HttpObjectAggregator(1024), handler);
             assertThat(channel.pipeline().names(), hasItems("HttpChunkLineLimiter$BeforeCodec#0", "HttpServerCodec#0", "HttpChunkLineLimiter$AfterCodec#0"));
 
             handler.removeCodecSupport(channel.pipeline().context(handler));
@@ -56,6 +58,7 @@ public class SocksConnectHandlerTest {
             assertThat(channel.pipeline().get(HttpObjectAggregator.class), is(nullValue()));
             assertThat(channel.pipeline().get(RelayConnectHandler.class), is(nullValue()));
             assertThat(String.valueOf(channel.pipeline().names()), channel.pipeline().names(), everyItem(not(containsString("HttpChunkLineLimiter"))));
+            assertThat(String.valueOf(channel.pipeline().names()), channel.pipeline().names(), everyItem(not(containsString("HttpServerCodecResponsePairing"))));
         } finally {
             channel.finishAndReleaseAll();
         }

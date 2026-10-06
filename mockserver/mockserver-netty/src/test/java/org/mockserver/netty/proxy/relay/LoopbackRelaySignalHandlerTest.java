@@ -6,17 +6,24 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.channel.local.LocalAddress;
+import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.DefaultFullHttpResponse;
+import io.netty.handler.codec.http.FullHttpResponse;
+import io.netty.handler.codec.http.HttpHeaderNames;
+import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http.HttpVersion;
+import io.netty.util.ReferenceCountUtil;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockserver.netty.unification.HttpServerCodecResponsePairing;
 import org.mockserver.responsewriter.HttpExchangeEndedEvent;
 import org.mockserver.responsewriter.RawResponseBytesEvent;
 
 import java.net.SocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -27,10 +34,10 @@ import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.is;
 
 /**
- * MockServer's side of a relay loopback tells the tunnel's client leg of an exchange it has ended with nothing the
- * client could read as its response, and of no other.
+ * MockServer's side of a relay loopback tells the tunnel's relay where an exchange ends with nothing the relay's codec
+ * decodes as its response, and of no other.
  */
-public class LoopbackExchangeEndedHandlerTest {
+public class LoopbackRelaySignalHandlerTest {
 
     // unique: the relay's loopback addresses are held JVM-wide and tests run in parallel
     private final SocketAddress loopbackAddress = new LocalAddress("loopback-" + UUID.randomUUID());
@@ -61,7 +68,49 @@ public class LoopbackExchangeEndedHandlerTest {
     }
 
     @Test
-    public void shouldTellTheClientLegOfAnExchangeEndedWithNoResponse() {
+    public void shouldAnnounceAnExchangeEndedWithNoResponseToTheRelayAtItsPlaceAmongTheBytesWritten() {
+        List<Object> relayed = new ArrayList<>();
+        LoopbackHttpClientCodec relayCodec = new LoopbackHttpClientCodec(8192);
+        relayLoopback.pipeline().addLast(LoopbackRawResponseSplitter.forTunnel(proxyClient, relayCodec), relayCodec, new ChannelInboundHandlerAdapter() {
+            @Override
+            public void channelRead(ChannelHandlerContext ctx, Object msg) {
+                relayed.add(msg instanceof RawResponseBytes ? msg.toString() : msg.getClass().getSimpleName());
+                ReferenceCountUtil.release(msg);
+            }
+        });
+        HttpServerCodecResponsePairing pairing = new HttpServerCodecResponsePairing();
+        EmbeddedChannel accepted = new EmbeddedChannel(pairing.beforeCodec(), new HttpServerCodec(), pairing.afterCodec(), LoopbackRelaySignalHandler.INSTANCE) {
+            @Override
+            protected SocketAddress remoteAddress0() {
+                return loopbackAddress;
+            }
+        };
+        relayLoopback.writeOutbound(new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.HEAD, "/"));
+        relayLoopback.writeOutbound(new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/"));
+        for (ByteBuf request; (request = relayLoopback.readOutbound()) != null; ) {
+            accepted.writeInbound(request);
+        }
+        for (Object decoded; (decoded = accepted.readInbound()) != null; ) {
+            ReferenceCountUtil.release(decoded);
+        }
+
+        HttpExchangeEndedEvent.fire(accepted.pipeline().lastContext());
+        FullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK, Unpooled.copiedBuffer("simple", StandardCharsets.US_ASCII));
+        response.headers().set(HttpHeaderNames.CONTENT_LENGTH, 6);
+        accepted.writeOutbound(response);
+        for (ByteBuf written; (written = accepted.readOutbound()) != null; ) {
+            relayLoopback.writeInbound(written);
+        }
+        relayLoopback.runPendingTasks();
+        proxyClient.runPendingTasks();
+
+        assertThat("not told out of band: the relay ends the client leg's exchange at its place", seenOnClientLegAfterCodec, is(empty()));
+        assertThat("the HEAD's exchange ends, then the GET's response is decoded with its body", relayed, contains("raw response bytes (0 bytes, the last)", "DefaultHttpResponse", "DefaultLastHttpContent"));
+        accepted.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldTellTheClientLegOfAnExchangeEndedWithNoResponseWhenTheTunnelHasNoSplitter() {
         acceptedLoopback.pipeline().fireUserEventTriggered(HttpExchangeEndedEvent.INSTANCE);
 
         assertThat("not on the loopback's thread: the client leg's exchange count is confined to its own event loop", seenOnClientLegAfterCodec, is(empty()));
@@ -81,8 +130,37 @@ public class LoopbackExchangeEndedHandlerTest {
     }
 
     @Test
+    public void shouldCountWhatIsWrittenFromBeneathTheCodecButNotItsStandInResponses() {
+        HttpServerCodecResponsePairing pairing = new HttpServerCodecResponsePairing();
+        EmbeddedChannel accepted = new EmbeddedChannel(new ChannelInboundHandlerAdapter(), pairing.beforeCodec(), new HttpServerCodec(), pairing.afterCodec(), LoopbackRelaySignalHandler.INSTANCE) {
+            @Override
+            protected SocketAddress remoteAddress0() {
+                return loopbackAddress;
+            }
+        };
+        ChannelHandlerContext beforeCodec = accepted.pipeline().context(pairing.beforeCodec());
+        ChannelHandlerContext counter = accepted.pipeline().context(LoopbackWrittenBytes.class);
+        List<String> names = accepted.pipeline().names();
+        assertThat(names.indexOf(counter.name()), is(names.indexOf(beforeCodec.name()) - 1));
+        accepted.writeInbound(Unpooled.copiedBuffer("GET / HTTP/1.1\r\n\r\n", StandardCharsets.US_ASCII));
+        for (Object decoded; (decoded = accepted.readInbound()) != null; ) {
+            ReferenceCountUtil.release(decoded);
+        }
+
+        HttpExchangeEndedEvent.fire(accepted.pipeline().lastContext());
+
+        long written = 0;
+        for (ByteBuf buffer; (buffer = accepted.readOutbound()) != null; buffer.release()) {
+            written += buffer.readableBytes();
+        }
+        assertThat("the stand-in response's bytes never reach the socket", written, is(0L));
+        assertThat(((LoopbackWrittenBytes) counter.handler()).count(), is(0L));
+        accepted.finishAndReleaseAll();
+    }
+
+    @Test
     public void shouldCountWhatIsWrittenFromImmediatelyBeforeTheLoopbacksCodec() {
-        EmbeddedChannel accepted = new EmbeddedChannel(new ChannelInboundHandlerAdapter(), new HttpServerCodec(), LoopbackExchangeEndedHandler.INSTANCE) {
+        EmbeddedChannel accepted = new EmbeddedChannel(new ChannelInboundHandlerAdapter(), new HttpServerCodec(), LoopbackRelaySignalHandler.INSTANCE) {
             @Override
             protected SocketAddress remoteAddress0() {
                 return loopbackAddress;
@@ -139,7 +217,7 @@ public class LoopbackExchangeEndedHandlerTest {
     }
 
     private EmbeddedChannel acceptedFrom(SocketAddress remoteAddress) {
-        return new EmbeddedChannel(LoopbackExchangeEndedHandler.INSTANCE, recorder(seenOnLoopbackAfterHandler)) {
+        return new EmbeddedChannel(LoopbackRelaySignalHandler.INSTANCE, recorder(seenOnLoopbackAfterHandler)) {
             @Override
             protected SocketAddress remoteAddress0() {
                 return remoteAddress;

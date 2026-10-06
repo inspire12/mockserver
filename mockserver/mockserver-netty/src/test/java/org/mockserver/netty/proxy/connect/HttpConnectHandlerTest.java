@@ -6,6 +6,7 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockserver.codec.HttpChunkLineLimiter;
+import org.mockserver.netty.unification.HttpServerCodecResponsePairing;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.lifecycle.LifeCycle;
 import org.mockserver.logging.MockServerLogger;
@@ -79,9 +80,12 @@ public class HttpConnectHandlerTest {
     public void shouldRemoveHttpCodecHandlersFromPipeline() {
         // given - a pipeline with HTTP codec handlers and the HttpConnectHandler
         HttpChunkLineLimiter chunkLineLimiter = new HttpChunkLineLimiter(mockServerLogger);
+        HttpServerCodecResponsePairing responsePairing = new HttpServerCodecResponsePairing();
         EmbeddedChannel channel = new EmbeddedChannel(
             chunkLineLimiter.beforeCodec(),
+            responsePairing.beforeCodec(),
             new HttpServerCodec(),
+            responsePairing.afterCodec(),
             chunkLineLimiter.afterCodec(),
             new HttpTransportTimer(),
             new HttpContentDecompressor(),
@@ -112,6 +116,8 @@ public class HttpConnectHandlerTest {
                 channel.pipeline().get(HttpTransportTimer.class), is(nullValue()));
             assertThat("the chunk-line limiter should be removed with the codec",
                 channel.pipeline().names(), everyItem(not(containsString("HttpChunkLineLimiter"))));
+            assertThat("the codec's response pairing should be removed with it",
+                channel.pipeline().names(), everyItem(not(containsString("HttpServerCodecResponsePairing"))));
             // HttpConnectHandler itself should also be removed
             assertThat("HttpConnectHandler should be removed",
                 channel.pipeline().get(HttpConnectHandler.class), is(nullValue()));

@@ -19,6 +19,7 @@ import org.junit.Test;
 import org.mockserver.model.HttpError;
 import org.mockserver.responsewriter.HttpExchangeEndedEvent;
 import org.mockserver.responsewriter.RawResponseBytesEvent;
+import org.mockserver.responsewriter.ResponseWrittenBeneathCodecEvent;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -30,6 +31,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
@@ -90,11 +92,30 @@ public class HttpErrorActionHandlerTest {
         new HttpErrorActionHandler().handle(error().withResponseBytes("some_bytes".getBytes(StandardCharsets.UTF_8)), channel.pipeline().lastContext());
 
         // then - a relay reading these bytes from a loopback must know of them before they can arrive
-        assertThat(seen.size(), is(3));
+        assertThat(seen.size(), is(4));
         assertThat(seen.get(0), instanceOf(RawResponseBytesEvent.class));
         assertThat(((RawResponseBytesEvent) seen.get(0)).length(), is("some_bytes".length()));
         assertThat(seen.get(1), is((Object) "written 10 bytes"));
-        assertThat(seen.get(2), is((Object) HttpExchangeEndedEvent.RAW_RESPONSE_WRITTEN));
+        // this write completes as it is issued
+        assertThat(seen.subList(2, 4), containsInAnyOrder((Object) HttpExchangeEndedEvent.RAW_RESPONSE_WRITTEN, ResponseWrittenBeneathCodecEvent.INSTANCE));
+        channel.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldTellTheCodecOfRawBytesAsSoonAsTheirWriteIsIssued() {
+        // given
+        List<Object> seenAfterCodec = new ArrayList<>();
+        HeldWrites heldWrites = new HeldWrites();
+        EmbeddedChannel channel = httpChannel(seenAfterCodec, heldWrites);
+
+        // when
+        new HttpErrorActionHandler().handle(error().withResponseBytes("some_bytes".getBytes(StandardCharsets.UTF_8)), channel.pipeline().lastContext());
+
+        // then - before the write completes, so a response encoded meanwhile is paired with its own request
+        assertThat(seenAfterCodec.size(), is(2));
+        assertThat(seenAfterCodec.get(0), instanceOf(RawResponseBytesEvent.class));
+        assertThat(seenAfterCodec.get(1), is((Object) ResponseWrittenBeneathCodecEvent.INSTANCE));
+        heldWrites.release();
         channel.finishAndReleaseAll();
     }
 

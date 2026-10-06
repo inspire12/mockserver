@@ -13,7 +13,6 @@ import org.mockserver.codec.HttpChunkLineLimiter;
 import org.mockserver.codec.HttpObjectAggregators;
 import org.mockserver.socket.NettyAllocator;
 import org.mockserver.socket.NettyTransport;
-import io.netty.handler.codec.http.HttpClientCodec;
 import io.netty.handler.codec.http2.*;
 import io.netty.handler.logging.LogLevel;
 import io.netty.handler.ssl.ApplicationProtocolNames;
@@ -31,6 +30,7 @@ import org.mockserver.netty.connection.HttpExchangeTracker;
 import org.mockserver.netty.connection.InboundConnectionActivity;
 import org.mockserver.netty.connection.WriteStallTimeoutHandler;
 import org.mockserver.netty.unification.Http2RequestHeaderLimit;
+import org.mockserver.netty.unification.HttpServerCodecResponsePairing;
 import org.mockserver.netty.unification.HttpServerCodecs;
 import org.mockserver.netty.unification.PortUnificationHandler;
 import org.slf4j.event.Level;
@@ -449,8 +449,11 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
             }
         } else {
             HttpChunkLineLimiter chunkLineLimiter = new HttpChunkLineLimiter(mockServerLogger);
+            HttpServerCodecResponsePairing responsePairing = new HttpServerCodecResponsePairing();
             pipelineToProxyClient.addLast(chunkLineLimiter.beforeCodec());
+            pipelineToProxyClient.addLast(responsePairing.beforeCodec());
             pipelineToProxyClient.addLast(HttpServerCodecs.httpServerCodec(configuration));
+            pipelineToProxyClient.addLast(responsePairing.afterCodec());
             pipelineToProxyClient.addLast(chunkLineLimiter.afterCodec());
             if (InboundConnectionActivity.isTracked(proxyClientCtx.channel())) {
                 // a tunnel with a request being uploaded or a response still being relayed is not idle
@@ -463,10 +466,11 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
     }
 
     private void configureHttp1LoopbackPipeline(ChannelPipeline pipelineToMockServer, ChannelHandlerContext proxyClientCtx) {
-        // before the codec, which is given none of the bytes MockServer wrote as raw bytes
-        pipelineToMockServer.addLast(LoopbackRawResponseSplitter.forTunnel(proxyClientCtx.channel()));
         // reads only responses MockServer itself wrote, so the limits on what clients send must not apply
-        pipelineToMockServer.addLast(new HttpClientCodec(Integer.MAX_VALUE, Integer.MAX_VALUE, configuration.maxChunkSize()));
+        final LoopbackHttpClientCodec codec = new LoopbackHttpClientCodec(configuration.maxChunkSize());
+        // before the codec, which is given none of the bytes MockServer wrote as raw bytes
+        pipelineToMockServer.addLast(LoopbackRawResponseSplitter.forTunnel(proxyClientCtx.channel(), codec));
+        pipelineToMockServer.addLast(codec);
         pipelineToMockServer.addLast(new BoundedZstdHttpContentDecompressor());
         pipelineToMockServer.addLast(new StreamingAwareHttpObjectAggregator(configuration.maxRequestBodySize(), configuration, mockServerLogger, true));
         pipelineToMockServer.addLast(new LoopbackHttp1ResponseErrorHandler(proxyClientCtx.channel()));

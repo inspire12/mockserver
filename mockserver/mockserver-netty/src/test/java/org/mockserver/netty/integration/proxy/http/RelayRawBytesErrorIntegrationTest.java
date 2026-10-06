@@ -42,7 +42,8 @@ import static org.mockserver.stop.Stop.stopQuietly;
 /**
  * An {@code error()} that writes raw bytes, over real sockets: a client behind an HTTP/1.1 CONNECT or SOCKS tunnel
  * must receive exactly the bytes a client on a direct connection receives, whether or not they are an HTTP response,
- * and its tunnel must then close as a direct connection does (with the bytes, or as idle).
+ * and its tunnel must then close as a direct connection does (with the bytes, or as idle). A response after one that
+ * no encoder wrote (raw bytes, or a final {@code 1xx}) must be encoded for its own request's method on every route.
  */
 public class RelayRawBytesErrorIntegrationTest {
 
@@ -217,6 +218,60 @@ public class RelayRawBytesErrorIntegrationTest {
         }
     }
 
+    @Test
+    public void shouldSendAGetItsBodyAfterAHeadAnsweredWithRawBytes() throws Exception {
+        startServer(0);
+        respondWithError("/whole", error().withResponseBytes(WHOLE));
+        respondWith("/simple", response().withBody("simple"));
+
+        for (Route route : Route.values()) {
+            try (Socket socket = route.open(port)) {
+                send(socket, "HEAD", "/whole");
+                assertThat(route + ": the raw bytes", readBytes(socket.getInputStream(), WHOLE.length, route + ": the raw bytes"), is(WHOLE));
+                send(socket, "GET", "/simple");
+                assertThat(route + ": the GET's head", readHead(socket.getInputStream()), startsWith("HTTP/1.1 200"));
+                assertThat(route + ": the GET's body", new String(readBytes(socket.getInputStream(), "simple".length(), route + ": the GET's body"), StandardCharsets.US_ASCII), is("simple"));
+            }
+        }
+    }
+
+    @Test
+    public void shouldSendAHeadNoBodyAfterAGetAnsweredWithRawBytes() throws Exception {
+        startServer(0);
+        respondWithError("/whole", error().withResponseBytes(WHOLE));
+        respondWith("/simple", response().withBody("simple"));
+
+        for (Route route : Route.values()) {
+            try (Socket socket = route.open(port)) {
+                send(socket, "GET", "/whole");
+                assertThat(route + ": the raw bytes", readBytes(socket.getInputStream(), WHOLE.length, route + ": the raw bytes"), is(WHOLE));
+                send(socket, "HEAD", "/simple");
+                assertThat(route + ": the HEAD's head", readHead(socket.getInputStream()), containsString("content-length: 6"));
+                send(socket, "GET", "/simple");
+                // a body sent after the HEAD's head would be read here, ahead of the GET's head
+                assertThat(route + ": the GET's head", readHead(socket.getInputStream()), startsWith("HTTP/1.1 200"));
+                assertThat(route + ": the GET's body", new String(readBytes(socket.getInputStream(), "simple".length(), route + ": the GET's body"), StandardCharsets.US_ASCII), is("simple"));
+            }
+        }
+    }
+
+    @Test
+    public void shouldSendAGetItsBodyAfterAHeadAnsweredWithAFinal1xx() throws Exception {
+        startServer(0);
+        respondWith("/early", response().withStatusCode(103));
+        respondWith("/simple", response().withBody("simple"));
+
+        for (Route route : Route.values()) {
+            try (Socket socket = route.open(port)) {
+                send(socket, "HEAD", "/early");
+                assertThat(route + ": the final 1xx", readHead(socket.getInputStream()), startsWith("HTTP/1.1 103"));
+                send(socket, "GET", "/simple");
+                assertThat(route + ": the GET's head", readHead(socket.getInputStream()), startsWith("HTTP/1.1 200"));
+                assertThat(route + ": the GET's body", new String(readBytes(socket.getInputStream(), "simple".length(), route + ": the GET's body"), StandardCharsets.US_ASCII), is("simple"));
+            }
+        }
+    }
+
     private void relaysRawBytesAndClosesAsIdle(byte[] bytes) throws Exception {
         if (bytes.length == 0) {
             startServer(IDLE_MILLIS, EmptyRawBytes.class.getName());
@@ -376,12 +431,20 @@ public class RelayRawBytesErrorIntegrationTest {
     }
 
     private String requestText(String path) {
-        return "GET " + path + " HTTP/1.1\r\nHost: localhost:" + port + "\r\n\r\n";
+        return requestText("GET", path);
+    }
+
+    private String requestText(String method, String path) {
+        return method + " " + path + " HTTP/1.1\r\nHost: localhost:" + port + "\r\n\r\n";
     }
 
     private void send(Socket socket, String path) throws IOException {
+        send(socket, "GET", path);
+    }
+
+    private void send(Socket socket, String method, String path) throws IOException {
         OutputStream output = socket.getOutputStream();
-        output.write(requestText(path).getBytes(StandardCharsets.US_ASCII));
+        output.write(requestText(method, path).getBytes(StandardCharsets.US_ASCII));
         output.flush();
     }
 

@@ -715,6 +715,13 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **A response after an `error()` that sent raw bytes, after an `error()` that sent nothing, or after a mocked final
+  `1xx` response is now sent for its own request.** MockServer's HTTP/1.1 codec remembers each request's method until
+  it writes that request's response, and none of those three responses passes through it, so every later response on
+  the connection was written as the answer to the request before its own: after a `HEAD` answered that way, the next
+  `GET` was sent its headers without its body, and after a `GET`, the next `HEAD` was sent a body it should not have.
+  The same happened on a direct connection and through the CONNECT and SOCKS proxy, where the tunnel could also wait
+  for a body that never came.
 - **Requests proxied through `forwardHttpsProxy` or `forwardSocksProxy` now leave the destination's host name to the
   upstream proxy.** MockServer looked the name up itself before opening the tunnel, so where only the upstream proxy
   can resolve external names (a common corporate set-up) the request failed with an unknown-host error and never

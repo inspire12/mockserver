@@ -13,9 +13,9 @@ public final class HttpServerCodecs {
     }
 
     /**
-     * Without a bound on requests awaiting their response, as on 8.0.0: the codec counts a request until it encodes
-     * the response, and a raw-bytes {@code error()} response never passes its encoder, so Netty's default of 128
-     * would close a connection on the 129th.
+     * Without a bound on requests awaiting their response, as on 8.0.0: Netty's default of 128 would close a
+     * connection whose client pipelines more requests than that before the first is answered. Add it between the
+     * handlers of an {@link HttpServerCodecResponsePairing}, which keeps its pairing of requests and responses in step.
      */
     public static HttpServerCodec httpServerCodec(Configuration configuration) {
         return new HttpServerCodec(new HttpDecoderConfig()
