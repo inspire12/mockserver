@@ -124,7 +124,7 @@ public class Http2RequestTrailerLimitTest {
 
     @Test
     public void shouldAnswerTrailersOverTheLimitInATunnelWith431() {
-        connect(Http2RequestHeaderLimit.tunnelServerHandler(configuration, mockServerLogger, new DefaultHttp2Connection(true), new Http2FrameAdapter(), null));
+        connect(Http2RequestHeaderLimit.tunnelServerHandler(configuration, mockServerLogger, new DefaultHttp2Connection(true), new Http2FrameAdapter(), null, false));
 
         sendRequestWithTrailersOfSize(LIMIT + 1);
 
@@ -146,7 +146,7 @@ public class Http2RequestTrailerLimitTest {
 
     @Test
     public void shouldLogARequestsHeadersOverTheLimitAsItsHeadersInATunnel() {
-        connect(Http2RequestHeaderLimit.tunnelServerHandler(configuration, mockServerLogger, new DefaultHttp2Connection(true), new Http2FrameAdapter(), null));
+        connect(Http2RequestHeaderLimit.tunnelServerHandler(configuration, mockServerLogger, new DefaultHttp2Connection(true), new Http2FrameAdapter(), null, false));
 
         sendRequestHeadersOverTheLimit();
 

@@ -83,18 +83,19 @@ public class Http2RequestHeaderLimitTest {
 
     @Test
     public void shouldRefuseAFarOverLimitHeaderBlockInATunnelWithoutHoldingIt() {
-        assertRefusedWithinTheAllocationBound(() -> Http2RequestHeaderLimit.tunnelServerHandler(configuration, mockServerLogger, new DefaultHttp2Connection(true), new Http2FrameAdapter(), null));
+        assertRefusedWithinTheAllocationBound(() -> Http2RequestHeaderLimit.tunnelServerHandler(configuration, mockServerLogger, new DefaultHttp2Connection(true), new Http2FrameAdapter(), null, false));
     }
 
     /**
      * The codecs are built by builders of MockServer's own, to log what they refuse. Everything else about them
      * must stay as Netty's own server builders make it: {@code Http2FrameCodecBuilder.forServer()} sets more than
      * its public constructor does, and a Netty upgrade may add a default. So every field of the builders, the
-     * decoder and encoder chains they build and the built handlers' own settings are compared with Netty's.
+     * decoder and encoder chains they build and the built handlers' own settings are compared with Netty's. The one
+     * difference is deliberate: the direct codec leaves its SETTINGS for the end of the read that adds it to flush.
      */
     @Test
     public void shouldBuildTheDirectCodecAsNettysServerBuilderDoes() {
-        Http2FrameCodecBuilder nettys = Http2FrameCodecBuilder.forServer();
+        Http2FrameCodecBuilder nettys = Http2FrameCodecBuilder.forServer().flushPreface(false);
         Http2FrameCodecBuilder mockServers = Http2RequestHeaderLimit.frameCodecBuilder(mockServerLogger);
 
         assertThat(fields(mockServers, AbstractHttp2ConnectionHandlerBuilder.class), is(fields(nettys, AbstractHttp2ConnectionHandlerBuilder.class)));
@@ -113,14 +114,18 @@ public class Http2RequestHeaderLimitTest {
         Http2RequestHeaderLimit.TunnelServerHandlerBuilder mockServers = Http2RequestHeaderLimit.tunnelServerHandlerBuilder(configuration, mockServerLogger, connection, frameListener, null);
 
         assertThat(fields(mockServers, AbstractHttp2ConnectionHandlerBuilder.class), is(fields(nettys, AbstractHttp2ConnectionHandlerBuilder.class)));
-        // each builder builds on a connection of its own: one connection takes one flow controller pair
-        HttpToHttp2ConnectionHandler nettysHandler = new HttpToHttp2ConnectionHandlerBuilder()
-            .initialSettings(Http2RequestHeaderLimit.serverSettings(configuration))
-            .connection(new DefaultHttp2Connection(true))
-            .frameListener(frameListener)
-            .build();
-        HttpToHttp2ConnectionHandler mockServersHandler = Http2RequestHeaderLimit.tunnelServerHandler(configuration, mockServerLogger, new DefaultHttp2Connection(true), frameListener, null);
-        assertBuiltAlike(mockServersHandler, nettysHandler, HttpToHttp2ConnectionHandler.class);
+        // added as a handshake completes, it flushes its SETTINGS as Netty's does; added while reading, at the read's end
+        for (boolean addedWhileReading : new boolean[]{false, true}) {
+            // each builder builds on a connection of its own: one connection takes one flow controller pair
+            HttpToHttp2ConnectionHandler nettysHandler = new HttpToHttp2ConnectionHandlerBuilder()
+                .initialSettings(Http2RequestHeaderLimit.serverSettings(configuration))
+                .connection(new DefaultHttp2Connection(true))
+                .frameListener(frameListener)
+                .flushPreface(!addedWhileReading)
+                .build();
+            HttpToHttp2ConnectionHandler mockServersHandler = Http2RequestHeaderLimit.tunnelServerHandler(configuration, mockServerLogger, new DefaultHttp2Connection(true), frameListener, null, addedWhileReading);
+            assertBuiltAlike(mockServersHandler, nettysHandler, HttpToHttp2ConnectionHandler.class);
+        }
     }
 
     @Test
@@ -161,7 +166,7 @@ public class Http2RequestHeaderLimitTest {
         };
 
         refuse(Http2RequestHeaderLimit.frameCodecBuilder(throwing).initialSettings(Http2RequestHeaderLimit.serverSettings(configuration)).build(), true);
-        refuse(Http2RequestHeaderLimit.tunnelServerHandler(configuration, throwing, new DefaultHttp2Connection(true), new Http2FrameAdapter(), null), true);
+        refuse(Http2RequestHeaderLimit.tunnelServerHandler(configuration, throwing, new DefaultHttp2Connection(true), new Http2FrameAdapter(), null, false), true);
     }
 
     private static List<String> logged(ChannelHandlerContext ctx, Http2Settings settings, boolean outbound, Throwable cause) {

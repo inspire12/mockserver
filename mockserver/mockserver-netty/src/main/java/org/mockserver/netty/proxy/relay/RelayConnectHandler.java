@@ -297,7 +297,7 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
                     }
                 }
                 boolean http2EnabledDownstream = HTTP_2.equals(negotiated);
-                configurePipelines(pipelineToMockServer, pipelineToProxyClient, mockServerCtx, proxyClientCtx, http2EnabledDownstream);
+                configurePipelines(pipelineToMockServer, pipelineToProxyClient, mockServerCtx, proxyClientCtx, http2EnabledDownstream, false);
             } else {
                 if (mockServerLogger.isEnabledForInstance(TRACE)) {
                     mockServerLogger.logEvent(
@@ -307,7 +307,7 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
                             .setThrowable(handshakeFuture.cause())
                     );
                 }
-                configurePipelines(pipelineToMockServer, pipelineToProxyClient, mockServerCtx, proxyClientCtx, false);
+                configurePipelines(pipelineToMockServer, pipelineToProxyClient, mockServerCtx, proxyClientCtx, false, false);
             }
         });
     }
@@ -375,7 +375,7 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
                     return;
                 }
                 // the codecs are added after this decoder, which hands them the buffered request bytes below.
-                configurePipelines(pipelineToMockServer, pipelineToProxyClient, mockServerCtx, ctx, stillPossibleH2c);
+                configurePipelines(pipelineToMockServer, pipelineToProxyClient, mockServerCtx, ctx, stillPossibleH2c, true);
             }
             // Handed on here, not left for handlerRemoved, which follows them with a channelReadComplete in the middle
             // of the socket's read. The tunnel's HTTP/2 handler flushes on that, and a flush to a client that has
@@ -387,7 +387,7 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
 
     private void configurePipelines(ChannelPipeline pipelineToMockServer, ChannelPipeline pipelineToProxyClient,
                                    ChannelHandlerContext mockServerCtx, ChannelHandlerContext proxyClientCtx,
-                                   boolean http2EnabledDownstream) {
+                                   boolean http2EnabledDownstream, boolean addedWhileReading) {
         if (isSslEnabledDownstream(proxyClientCtx.channel())) {
             // the loopback connection mirrors the protocol negotiated with the proxy client: it advertises
             // h2 via ALPN only when the proxy client negotiated HTTP/2, so its TLS layer and its codec
@@ -421,8 +421,9 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
             final Http2FrameLogger frameLogger = mockServerLogger.isEnabledForInstance(TRACE)
                 ? new Http2FrameLogger(LogLevel.TRACE, RelayConnectHandler.class.getName())
                 : null;
-            // the client's requests are limited here, as on a direct connection
-            pipelineToProxyClient.addLast(Http2RequestHeaderLimit.tunnelServerHandler(configuration, mockServerLogger, connection, frameListener, frameLogger));
+            // the client's requests are limited here, as on a direct connection. Added as a TLS handshake completes,
+            // the handler flushes its SETTINGS at once, for no read of the client's may follow before it waits for them
+            pipelineToProxyClient.addLast(Http2RequestHeaderLimit.tunnelServerHandler(configuration, mockServerLogger, connection, frameListener, frameLogger, addedWhileReading));
             pipelineToProxyClient.addLast(new StreamedHttp2ResponseWriter());
             // the loopback is exempt from write-stall watching, so a stream the client stops taking is cut on this leg
             final long writeStallTimeoutMillis = configuration.responseWriteStallTimeoutMillis();

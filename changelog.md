@@ -629,6 +629,15 @@ This release delivers a sustained performance and memory programme alongside dat
 
 ### Fixed
 
+- **An HTTP/2 request from a client that resets its connection as soon as it has sent it is now received.** A
+  cleartext HTTP/2 (`h2c`) request sent as a connection's first bytes, by a client that then closed the connection
+  with a reset (`SO_LINGER` 0, or with data still unread), was not recorded, matched or forwarded, on a direct
+  connection or through a SOCKS tunnel. MockServer's first write on the connection, its HTTP/2 settings, failed and
+  closed the connection before the request it had already read was handled. The settings are now sent at the end of
+  that read, once the request has been handled; a client that waits for them before sending its request still gets
+  them at once. HTTP/1.1 was not affected. A request large enough to be read in more than one pass can still be lost
+  this way.
+
 - **A dashboard that cannot keep up no longer makes MockServer queue update after update for it.**
   When captured requests have large bodies each dashboard update can be tens of megabytes, and
   MockServer sent one about every second whether or not the browser had received the last, so a

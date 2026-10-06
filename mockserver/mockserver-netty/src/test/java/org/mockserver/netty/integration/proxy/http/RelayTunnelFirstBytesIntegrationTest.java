@@ -1,5 +1,6 @@
 package org.mockserver.netty.integration.proxy.http;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -9,8 +10,11 @@ import org.mockserver.mock.Expectation;
 import org.mockserver.netty.MockServer;
 import org.mockserver.serialization.ExpectationSerializer;
 import org.mockserver.serialization.LogEntrySerializer;
+import org.mockserver.socket.tls.KeyStoreFactory;
 import org.slf4j.event.Level;
 
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.SSLSocket;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -22,6 +26,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
@@ -33,17 +38,21 @@ import static org.mockserver.model.HttpResponse.response;
 import static org.mockserver.stop.Stop.stopQuietly;
 
 /**
- * A whole request sent as the first bytes of a CONNECT or SOCKS tunnel, in one write, by a client that closes its
- * connection as soon as it has written it, over real sockets. MockServer must receive the request, as it does on a
- * direct connection, both of the tunnel's legs must close, and a client that simply leaves is not worth a warning.
+ * A whole request sent as the first bytes of a CONNECT or SOCKS tunnel, or of a direct connection, in one write, by a
+ * client that closes its connection as soon as it has written it, over real sockets. MockServer must receive the
+ * request, both of a tunnel's legs must close, and a client that simply leaves is not worth a warning.
  * <p>
- * The tunnel's protocol is only known from these bytes, so the relay's handlers are installed while they are being
- * read; and on HTTP/2 both the relay and MockServer answer the client's preface while its request is still arriving.
+ * The protocol is only known from these bytes, so the HTTP/2 handlers are installed while they are being read; and
+ * on HTTP/2 both the relay and MockServer answer the client's preface while its request is still arriving. Those
+ * answers wait for the end of the read, so a client that resets its connection does not lose its request; and they
+ * are not held back from a client that waits for the server's {@code SETTINGS}.
  */
 public class RelayTunnelFirstBytesIntegrationTest {
 
     private static final byte[] HTTP2_PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".getBytes(StandardCharsets.US_ASCII);
     private static final int HTTP2_MAX_FRAME_SIZE = 16_384;
+    private static final int HTTP2_SETTINGS = 0x4;
+    private static final int ATTEMPTS = 10;
 
     private MockServer mockServer;
     private int port;
@@ -85,6 +94,182 @@ public class RelayTunnelFirstBytesIntegrationTest {
         sendAsFirstBytesAndLeave(this::openSocks5Tunnel, http1Request(16_000));
     }
 
+    @Test
+    public void shouldReceiveAnHttp2RequestWithNoBodySentOnADirectConnectionByAClientThatResets() throws Exception {
+        sendAsFirstBytesAndResetEachTime(this::openDirect, 1, () -> http2Request(0));
+    }
+
+    @Test
+    public void shouldReceiveAnHttp2RequestSentOnADirectConnectionByAClientThatResets() throws Exception {
+        sendAsFirstBytesAndResetEachTime(this::openDirect, 1, () -> http2Request(16_000));
+    }
+
+    @Test
+    public void shouldReceiveAnHttp2RequestWithSeveralDataFramesSentOnADirectConnectionByAClientThatResets() throws Exception {
+        sendAsFirstBytesAndResetEachTime(this::openDirect, 1, () -> http2Request(60_000));
+    }
+
+    @Test
+    public void shouldReceiveAnHttp2RequestWithNoBodySentThroughAConnectTunnelByAClientThatResets() throws Exception {
+        sendAsFirstBytesAndResetEachTime(this::openConnectTunnel, 2, () -> http2Request(0));
+    }
+
+    @Test
+    public void shouldReceiveAnHttp2RequestSentThroughAConnectTunnelByAClientThatResets() throws Exception {
+        sendAsFirstBytesAndResetEachTime(this::openConnectTunnel, 2, () -> http2Request(16_000));
+    }
+
+    @Test
+    public void shouldReceiveAnHttp2RequestWithSeveralDataFramesSentThroughAConnectTunnelByAClientThatResets() throws Exception {
+        sendAsFirstBytesAndResetEachTime(this::openConnectTunnel, 2, () -> http2Request(60_000));
+    }
+
+    @Test
+    public void shouldReceiveAnHttp2RequestWithNoBodySentThroughASocksTunnelByAClientThatResets() throws Exception {
+        sendAsFirstBytesAndResetEachTime(this::openSocks5Tunnel, 2, () -> http2Request(0));
+    }
+
+    @Test
+    public void shouldReceiveAnHttp2RequestSentThroughASocksTunnelByAClientThatResets() throws Exception {
+        sendAsFirstBytesAndResetEachTime(this::openSocks5Tunnel, 2, () -> http2Request(16_000));
+    }
+
+    @Test
+    public void shouldReceiveAnHttp2RequestWithSeveralDataFramesSentThroughASocksTunnelByAClientThatResets() throws Exception {
+        sendAsFirstBytesAndResetEachTime(this::openSocks5Tunnel, 2, () -> http2Request(60_000));
+    }
+
+    @Test
+    public void shouldReceiveAnHttp1RequestSentOnADirectConnectionByAClientThatResets() throws Exception {
+        sendAsFirstBytesAndResetEachTime(this::openDirect, 1, () -> http1Request(16_000));
+    }
+
+    @Test
+    public void shouldReceiveAnHttp1RequestSentThroughAConnectTunnelByAClientThatResets() throws Exception {
+        sendAsFirstBytesAndResetEachTime(this::openConnectTunnel, 2, () -> http1Request(16_000));
+    }
+
+    @Test
+    public void shouldReceiveAnHttp1RequestSentThroughASocksTunnelByAClientThatResets() throws Exception {
+        sendAsFirstBytesAndResetEachTime(this::openSocks5Tunnel, 2, () -> http1Request(16_000));
+    }
+
+    @Test
+    public void shouldSendSettingsToAnH2cClientWaitingForThemOnADirectConnection() throws Exception {
+        try (Socket socket = new Socket("127.0.0.1", port)) {
+            socket.setSoTimeout(10_000);
+            sendPrefaceThenAwaitServerSettings(socket);
+        }
+    }
+
+    @Test
+    public void shouldSendSettingsToAnH2cClientWaitingForThemThroughAConnectTunnel() throws Exception {
+        try (Socket socket = new Socket("127.0.0.1", port)) {
+            socket.setSoTimeout(10_000);
+            openConnectTunnel(socket);
+            sendPrefaceThenAwaitServerSettings(socket);
+        }
+    }
+
+    @Test
+    public void shouldSendSettingsToAnH2cClientWaitingForThemThroughASocksTunnel() throws Exception {
+        try (Socket socket = new Socket("127.0.0.1", port)) {
+            socket.setSoTimeout(10_000);
+            openSocks5Tunnel(socket);
+            sendPrefaceThenAwaitServerSettings(socket);
+        }
+    }
+
+    @Test
+    public void shouldSendSettingsToAnH2ClientWaitingForThemOnADirectTlsConnection() throws Exception {
+        try (Socket socket = new Socket("127.0.0.1", port); SSLSocket tls = startTlsWithH2(socket)) {
+            sendPrefaceThenAwaitServerSettings(tls);
+        }
+    }
+
+    @Test
+    public void shouldSendSettingsWhenTheTlsHandshakeOfAConnectTunnelCompletesBeforeTheClientSendsAnything() throws Exception {
+        try (Socket socket = new Socket("127.0.0.1", port)) {
+            socket.setSoTimeout(10_000);
+            openConnectTunnel(socket);
+            try (SSLSocket tls = startTlsWithH2(socket)) {
+                // the tunnel's HTTP/2 handler is added as the handshake completes, before any request bytes
+                awaitServerSettings(tls.getInputStream());
+            }
+        }
+    }
+
+    private void sendPrefaceThenAwaitServerSettings(Socket socket) throws IOException {
+        ByteArrayOutputStream preface = new ByteArrayOutputStream();
+        write(preface, HTTP2_PREFACE);
+        writeFrame(preface, HTTP2_SETTINGS, 0x0, 0, new byte[0]);
+        socket.getOutputStream().write(preface.toByteArray());
+        socket.getOutputStream().flush();
+        // nothing more is sent: the server's SETTINGS must not wait for another read
+        awaitServerSettings(socket.getInputStream());
+    }
+
+    /**
+     * Reads frames until a SETTINGS frame that is not an acknowledgement, or fails on the socket's read timeout.
+     */
+    private static void awaitServerSettings(InputStream input) throws IOException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (System.nanoTime() < deadline) {
+            byte[] header = readBytes(input, 9);
+            int length = (header[0] & 0xff) << 16 | (header[1] & 0xff) << 8 | header[2] & 0xff;
+            readBytes(input, length);
+            if (header[3] == HTTP2_SETTINGS && (header[4] & 0x1) == 0) {
+                return;
+            }
+        }
+        throw new AssertionError("no SETTINGS from the server within 10 seconds");
+    }
+
+    private SSLSocket startTlsWithH2(Socket socket) throws IOException {
+        socket.setSoTimeout(10_000);
+        SSLSocket tls = (SSLSocket) new KeyStoreFactory(configuration(), new MockServerLogger()).sslContext().getSocketFactory()
+            .createSocket(socket, "127.0.0.1", port, true);
+        tls.setUseClientMode(true);
+        SSLParameters parameters = tls.getSSLParameters();
+        parameters.setApplicationProtocols(new String[]{"h2"});
+        tls.setSSLParameters(parameters);
+        tls.startHandshake();
+        assertThat("ALPN", tls.getApplicationProtocol(), is("h2"));
+        return tls;
+    }
+
+    /**
+     * Each attempt on a connection of its own, which the client closes with {@code SO_LINGER} 0, so its kernel resets
+     * the connection rather than sending a FIN. The request has been written whole before then.
+     */
+    private void sendAsFirstBytesAndResetEachTime(TunnelOpener opener, int connectionsOpen, Supplier<byte[]> request) throws Exception {
+        List<String> loggedBefore = loggedAtWarnOrAbove();
+        for (int attempt = 0; attempt < ATTEMPTS; attempt++) {
+            try (Socket socket = new Socket("127.0.0.1", port)) {
+                socket.setSoTimeout(10_000);
+                opener.open(socket);
+                await("the connection is open, with its tunnel's loopback if it has one", () -> mockServer.getInboundConnectionCount() == connectionsOpen);
+
+                socket.getOutputStream().write(request.get());
+                socket.getOutputStream().flush();
+                socket.setSoLinger(true, 0);
+            }
+            await("every leg closed", () -> mockServer.getInboundConnectionCount() == 0);
+        }
+
+        // waited for without failing, so that a failure reports how many were received
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (requestsReceived() < ATTEMPTS && System.nanoTime() < deadline) {
+            Thread.sleep(20);
+        }
+        assertThat("requests received of " + ATTEMPTS, requestsReceived(), is(ATTEMPTS));
+        assertThat("nothing logged at WARN or above for a client that reset", loggedAtWarnOrAbove(), is(loggedBefore));
+    }
+
+    private void openDirect(Socket socket) {
+        // nothing comes before the request
+    }
+
     private void sendAsFirstBytesAndLeave(TunnelOpener tunnelOpener, byte[] request) throws Exception {
         List<String> loggedBefore = loggedAtWarnOrAbove();
         try (Socket socket = new Socket("127.0.0.1", port)) {
@@ -122,8 +307,8 @@ public class RelayTunnelFirstBytesIntegrationTest {
         headers.write(0x86);
         writeLiteralHeader(headers, 0x04, "/first");
         writeLiteralHeader(headers, 0x01, "127.0.0.1:" + port);
-        // END_HEADERS
-        writeFrame(request, 0x1, 0x4, 1, headers.toByteArray());
+        // END_HEADERS, and END_STREAM when there is no body
+        writeFrame(request, 0x1, bodyBytes == 0 ? 0x5 : 0x4, 1, headers.toByteArray());
         for (int sent = 0; sent < bodyBytes; ) {
             int length = Math.min(HTTP2_MAX_FRAME_SIZE, bodyBytes - sent);
             sent += length;
@@ -214,6 +399,15 @@ public class RelayTunnelFirstBytesIntegrationTest {
 
     private boolean requestReceived() {
         return controlPlane("/mockserver/retrieve?type=REQUESTS&format=JSON", "{\"path\":\"/first\"}").contains("\"/first\"");
+    }
+
+    private int requestsReceived() {
+        String received = controlPlane("/mockserver/retrieve?type=REQUESTS&format=JSON", "{\"path\":\"/first\"}");
+        try {
+            return received.trim().isEmpty() ? 0 : new ObjectMapper().readTree(received).size();
+        } catch (IOException e) {
+            throw new AssertionError(e);
+        }
     }
 
     private List<String> loggedAtWarnOrAbove() {

@@ -76,6 +76,9 @@ public final class Http2RequestHeaderLimit {
                 // streams open waits out Netty's 30 second graceful shutdown
                 server(true);
                 gracefulShutdownTimeoutMillis(0);
+                // added while the client's first bytes are read: SETTINGS goes out with that read's
+                // channelReadComplete, so a failed flush cannot close the channel before they are decoded
+                flushPreface(false);
             }
 
             @Override
@@ -93,11 +96,16 @@ public final class Http2RequestHeaderLimit {
     }
 
     /**
+     * @param addedWhileReading whether the handler is added while the client's bytes are being read, so that the
+     *                          read's {@code channelReadComplete} flushes its {@code SETTINGS} once they are decoded;
+     *                          otherwise they are flushed as the handler is added
      * @return the server handler of a CONNECT or SOCKS tunnel carrying HTTP/2, which logs the requests it refuses
      * for their header size
      */
-    public static HttpToHttp2ConnectionHandler tunnelServerHandler(Configuration configuration, MockServerLogger mockServerLogger, Http2Connection connection, Http2FrameListener frameListener, Http2FrameLogger frameLogger) {
-        return tunnelServerHandlerBuilder(configuration, mockServerLogger, connection, frameListener, frameLogger).build();
+    public static HttpToHttp2ConnectionHandler tunnelServerHandler(Configuration configuration, MockServerLogger mockServerLogger, Http2Connection connection, Http2FrameListener frameListener, Http2FrameLogger frameLogger, boolean addedWhileReading) {
+        return tunnelServerHandlerBuilder(configuration, mockServerLogger, connection, frameListener, frameLogger)
+            .flushPreface(!addedWhileReading)
+            .build();
     }
 
     static TunnelServerHandlerBuilder tunnelServerHandlerBuilder(Configuration configuration, MockServerLogger mockServerLogger, Http2Connection connection, Http2FrameListener frameListener, Http2FrameLogger frameLogger) {
@@ -202,6 +210,11 @@ public final class Http2RequestHeaderLimit {
         @Override
         protected HttpToHttp2ConnectionHandler build() {
             return super.build();
+        }
+
+        @Override
+        protected TunnelServerHandlerBuilder flushPreface(boolean flushPreface) {
+            return super.flushPreface(flushPreface);
         }
 
         @Override

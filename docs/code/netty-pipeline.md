@@ -732,6 +732,48 @@ graph LR
 
 The stream-id mis-routing problems that affected the old shared-connection pipeline (issues #2419, #2667) are structurally impossible here: each stream is its own `Http2StreamChannel` child, so outbound writes never cross to another stream. The per-stream child pipeline is described in the [HTTP/2 Per-Stream Child Pipeline](#http2-per-stream-child-pipeline) section below.
 
+##### When the server's `SETTINGS` is sent
+
+**Outcome:** the server's `SETTINGS` frame is written as the HTTP/2 handler is added, but flushed only at the end of
+the read that added it, once the bytes read with it have been decoded. A client that sends its request as its first
+bytes and then resets the connection (closes with `SO_LINGER` 0, or with data unread) has its request received; a
+client that sends its preface and then waits for the server's `SETTINGS` gets them from that same read.
+
+Netty's `Http2ConnectionHandler` writes `SETTINGS` from `handlerAdded`, and by default (`flushPreface(true)`) flushes
+them there. MockServer adds the handler in the middle of a read (`PortUnificationHandler.switchToH2c`/`switchToHttp2`,
+from `decode`), so that flush reached the socket before the client's bytes had been decoded. On a reset connection it
+failed, Netty closed the channel (`autoClose`), and `PrefaceDecoder.decode` dropped the bytes already read because the
+channel was no longer active: the request was lost on every attempt, directly and through a tunnel. The server builders
+now pass `flushPreface(false)`; `Http2ConnectionHandler.channelReadComplete` flushes after the read, as it does every
+read.
+
+| Where the server handler is added | Flush |
+|---|---|
+| `Http2RequestHeaderLimit.frameCodecBuilder`, from `PortUnificationHandler.decode`: `h2c` by prior knowledge, `h2` once the first decrypted bytes arrive (direct connections and MockServer's side of a tunnel's loopback) | at the end of the read |
+| The tunnel's client-facing handler, added by `RelayTlsDetectionHandler.decode` for a cleartext tunnel | at the end of the read |
+| The tunnel's client-facing handler, added as the client's TLS handshake completes (`h2` through `CONNECT` or SOCKS) | as it is added: no read of the client's may follow before a client that waits for the server's `SETTINGS` |
+| The relay's loopback client handler (`RelayConnectHandler.configureHttp2LoopbackPipeline`) | as it is added (`flushPreface(true)`): a client sends first |
+
+MockServer has no HTTP/1.1 `Upgrade: h2c` path. A handler between the socket and the HTTP/2 handler must pass
+`channelReadComplete` on (see [the invariant](#invariant-a-handler-overriding-channelreadcomplete-must-propagate-it)),
+or a client waiting for the server's `SETTINGS` would wait for ever.
+
+What this does not cover:
+
+- **A request read in more than one pass.** The first pass's flush (of `SETTINGS`, an acknowledgement or a
+  `WINDOW_UPDATE`) can fail on a reset connection and close it before the next pass. On loopback a request under the
+  65,535-byte window is read in one pass.
+- **Linux epoll.** Not run locally. Reasoned from Netty's epoll event loop: when data and the reset have both arrived,
+  the event carries `EPOLLIN` and `EPOLLERR`, and `AbstractEpollChannel` calls `epollOutReady` (a flush) before `epollInReady`
+  (the read). On a connection whose first bytes these are nothing is waiting to be flushed, so the read runs and decodes
+  the request before the end-of-read flush fails; the read error that follows the data fires `channelReadComplete`
+  before the channel is closed. Something left unflushed from an earlier pass would be flushed first, fail, and close
+  the channel before the read, which is the multi-pass case above. Linux keeps data received before a reset readable,
+  and returns it before the error. `RelayTunnelFirstBytesIntegrationTest` must be green on CI's Linux agents for this
+  reasoning to hold.
+- **`h2` over TLS.** Not measured. A client that closes a TLS connection sends `close_notify` first; the tunnel case
+  whose handler is added at the handshake still flushes there.
+
 ##### Exceptions on the connection
 
 `Http2ConnectionExceptionHandler` is the last handler of this pipeline, on `h2` and `h2c` alike, and logs each exception that reaches it once in MockServer's log. Without it they reach the end of Netty's pipeline, which logs every one at `WARN` with a stack trace through Netty's own logger (`An exceptionCaught() event was fired, and it reached at the tail of the pipeline`), whatever the cause.
@@ -1547,10 +1589,11 @@ written them, is received by MockServer, as it is on a direct connection. Two th
 | Loopback | `afterFlush` closed the loopback's socket as soon as the request was flushed. MockServer's side writes while it reads (its own `SETTINGS`, then the acknowledgement of the relay's), the closed socket answered with a reset, and the next flush closed MockServer's side with the request unread | the loopback is sent a FIN and stays open until MockServer's side has read to it and closed |
 
 HTTP/1.1 was not affected: neither side writes before the response. On a TLS tunnel the client leg's handlers are
-installed when its handshake completes, not while a request is being read. What remains is what a direct connection
-has. An HTTP/2 request from a client that resets its connection (closes with data unread, or with `SO_LINGER` 0) is
-not received, because the first write, of `SETTINGS`, fails and closes the channel; and a request the event loop
-reads in more than one pass may meet a failed flush between passes (`RelayConnectFirstBytesTest`,
+installed when its handshake completes, not while a request is being read. A client that resets its connection
+(closes with data unread, or with `SO_LINGER` 0) also has its request received, directly and through either kind of
+tunnel, because the server's `SETTINGS` is flushed only once the read is over (see
+[When the server's `SETTINGS` is sent](#when-the-servers-settings-is-sent)). What remains is a request the event
+loop reads in more than one pass, which may meet a failed flush between passes (`RelayConnectFirstBytesTest`,
 `RelayTunnelFirstBytesIntegrationTest`).
 
 ### HTTP/2 loopback stream ids
