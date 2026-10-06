@@ -4,7 +4,11 @@ import io.netty.buffer.ByteBufUtil;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.socket.tls.KeyStoreFactory;
 
+import javax.net.ssl.ExtendedSSLSession;
 import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SNIHostName;
+import javax.net.ssl.SNIServerName;
+import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.SSLSocket;
@@ -23,6 +27,7 @@ import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -167,6 +172,7 @@ public class StartTlsUpstream implements AutoCloseable {
         private volatile SSLSocket tls;
         private volatile String tlsProtocol;
         private volatile Certificate[] clientCertificates;
+        private volatile List<String> serverNames;
         private volatile Exception handshakeFailure;
 
         private Connection(Socket socket) {
@@ -227,6 +233,11 @@ public class StartTlsUpstream implements AutoCloseable {
                 upgraded.setNeedClientAuth(requireClientCertificate);
                 upgraded.startHandshake();
                 tlsProtocol = upgraded.getSession().getProtocol();
+                List<String> names = new ArrayList<>();
+                for (SNIServerName name : ((ExtendedSSLSession) upgraded.getSession()).getRequestedServerNames()) {
+                    names.add(((SNIHostName) name).getAsciiName());
+                }
+                serverNames = names;
                 try {
                     clientCertificates = upgraded.getSession().getPeerCertificates();
                 } catch (SSLPeerUnverifiedException none) {
@@ -331,6 +342,11 @@ public class StartTlsUpstream implements AutoCloseable {
             return tlsProtocol;
         }
 
+        /** The server names (SNI) the TLS client asked for, or null before an upgrade. */
+        public List<String> serverNames() {
+            return serverNames;
+        }
+
         /** The client's certificate chain, or null when none was asked for or the connection is in the clear. */
         public X509Certificate[] clientCertificates() {
             Certificate[] chain = clientCertificates;
@@ -366,6 +382,11 @@ public class StartTlsUpstream implements AutoCloseable {
      * handshake that completes was with a certificate it issued. A host name, not an IP address, is sent as SNI.
      */
     public static SSLSocket startTlsAsClient(Socket socket, String host, String protocol, boolean withClientCertificate) throws Exception {
+        return startTlsAsClient(socket, host, protocol, withClientCertificate, null);
+    }
+
+    /** As above, sending {@code serverName} as SNI, which the JDK does not do by itself for a name without a dot. */
+    public static SSLSocket startTlsAsClient(Socket socket, String host, String protocol, boolean withClientCertificate, String serverName) throws Exception {
         KeyStore keyStore = new KeyStoreFactory(configuration(), new MockServerLogger()).loadOrCreateKeyStore();
         KeyStore trusted = KeyStore.getInstance(KeyStore.getDefaultType());
         trusted.load(null, null);
@@ -379,6 +400,11 @@ public class StartTlsUpstream implements AutoCloseable {
         SSLSocket tls = (SSLSocket) context.getSocketFactory().createSocket(socket, host, socket.getPort(), true);
         tls.setUseClientMode(true);
         tls.setEnabledProtocols(new String[]{protocol});
+        if (serverName != null) {
+            SSLParameters parameters = tls.getSSLParameters();
+            parameters.setServerNames(Collections.singletonList(new SNIHostName(serverName)));
+            tls.setSSLParameters(parameters);
+        }
         tls.startHandshake();
         return tls;
     }

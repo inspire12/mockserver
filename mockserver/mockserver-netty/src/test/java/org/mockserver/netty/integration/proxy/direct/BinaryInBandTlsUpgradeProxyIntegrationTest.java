@@ -30,7 +30,6 @@ import static org.mockserver.model.BinaryRequestDefinition.binaryRequest;
 import static org.mockserver.model.BinaryResponse.binaryResponse;
 import static org.mockserver.netty.integration.proxy.direct.StartTlsUpstream.SSL_REQUEST;
 import static org.mockserver.stop.Stop.stopQuietly;
-import static org.mockserver.test.Retries.tryWaitForSuccess;
 
 /**
  * Proxying a protocol that turns TLS on part way through, as PostgreSQL does, by default: the client's
@@ -290,7 +289,7 @@ public class BinaryInBandTlsUpgradeProxyIntegrationTest {
     }
 
     @Test
-    public void shouldKeepForwardingEachMessageOfAClientThatStartsWithTlsOnAConnectionOfItsOwn() throws Exception {
+    public void shouldRelayAClientThatStartsWithTlsOnOneUpstreamConnectionThatStartsWithTls() throws Exception {
         try (StartTlsUpstream upstream = session().startingWithTls()) {
             Socket client = connectThrough(configuration(), upstream);
 
@@ -298,9 +297,11 @@ public class BinaryInBandTlsUpgradeProxyIntegrationTest {
             exchange(tls, STARTUP, AUTHENTICATION_OK_AND_READY);
             exchange(tls, SYNC, READY);
 
-            tryWaitForSuccess(() -> assertThat("as in 8.0.0, one upstream connection a message", upstream.connections().size(), is(2)));
-            assertThat(upstream.connections().get(0).upgraded(), is(true));
-            assertThat(upstream.connections().get(1).upgraded(), is(true));
+            StartTlsUpstream.Connection connection = upstream.awaitConnection(1, 10_000);
+            assertThat("one upstream connection, not one a message", upstream.connections().size(), is(1));
+            assertThat(connection.upgraded(), is(true));
+            assertThat("nothing in the clear", connection.receivedInTheClear().length, is(0));
+            assertThat(connection.messages(), contains("TLS " + ByteBufUtil.hexDump(STARTUP), "TLS " + ByteBufUtil.hexDump(SYNC)));
         }
     }
 }

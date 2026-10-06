@@ -1,6 +1,11 @@
 package org.mockserver.netty.proxy.relay;
 
+import io.netty.buffer.ByteBufAllocator;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.ssl.SslContextBuilder;
+import io.netty.handler.ssl.SslHandler;
+import io.netty.handler.ssl.SslProvider;
+import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -14,6 +19,7 @@ import org.mockserver.netty.unification.PortUnificationHandler;
 import org.mockserver.socket.ChannelReadPause;
 import org.slf4j.event.Level;
 
+import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -25,6 +31,7 @@ import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -263,13 +270,32 @@ public class BinaryRelayAnsweredLocallyTest {
 
     @Test
     public void shouldNotMatchOnAConnectionHandedBackToPerMessageForwarding() {
+        when(relay.httpClient.forwardsThroughProxy()).thenReturn(true);
+        clientConnection();
+
+        relay.clientSends("mocked");
+
+        assertThat(relay.forwardedPerMessage, contains("mocked waiting"));
+        assertThat(warnings(), hasSize(1));
+        verify(httpState, never()).firstMatchingExpectation(any());
+    }
+
+    @Test
+    public void shouldAnswerAMatchedMessageOfAConnectionThatStartedWithTlsAndRelayTheRest() {
+        when(relay.httpClient.newBinaryRelaySslHandler(any(ByteBufAllocator.class), any(InetSocketAddress.class), any())).thenAnswer(invocation ->
+            SslContextBuilder.forClient().trustManager(InsecureTrustManagerFactory.INSTANCE).sslProvider(SslProvider.JDK).build().newHandler(invocation.getArgument(0)));
         EmbeddedChannel client = clientConnection();
         PortUnificationHandler.enableSslUpstreamAndDownstream(client);
 
         relay.clientSends("mocked");
+        assertThat(relay.receivedByClient(), is(CANNED));
+        assertThat("no upstream connection for a message answered here", relay.upstreamConnections, is(0));
+        relay.clientSends("one");
 
-        assertThat(relay.forwardedPerMessage, contains("mocked waiting, over TLS"));
-        assertThat(warnings(), hasSize(1));
-        verify(httpState, never()).firstMatchingExpectation(any());
+        assertThat(relay.upstreamConnections, is(1));
+        assertThat("relayed, with TLS from the start", relay.upstream.pipeline().first(), instanceOf(SslHandler.class));
+        assertThat(relay.forwardedPerMessage, is(empty()));
+        assertThat(warnings(), is(empty()));
+        verify(httpState).postProcess(mocked);
     }
 }

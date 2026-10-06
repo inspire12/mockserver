@@ -1,5 +1,6 @@
 package org.mockserver.netty.proxy.relay;
 
+import io.netty.channel.ChannelException;
 import io.netty.channel.EventLoop;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.DecoderException;
@@ -7,7 +8,7 @@ import org.junit.After;
 import org.junit.Test;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.model.BinaryMessage;
-import org.mockserver.netty.unification.PortUnificationHandler;
+import org.mockserver.socket.ChannelReadPause;
 import org.slf4j.event.Level;
 
 import java.net.ConnectException;
@@ -310,22 +311,6 @@ public class BinaryRelayTest {
     }
 
     @Test
-    public void shouldForwardEachMessageOfAConnectionThatStartedWithTlsOnAnEncryptedConnectionOfItsOwn() {
-        relay = new BinaryRelayHarness(true);
-        EmbeddedChannel client = relay.clientConnection();
-        PortUnificationHandler.enableSslUpstreamAndDownstream(client);
-
-        relay.clientSends("sent over TLS");
-
-        assertThat("no upstream connection in the clear is opened", relay.upstreamConnections, is(0));
-        assertThat(relay.forwardedPerMessage, contains("sent over TLS waiting, over TLS"));
-        assertThat(client.isOpen(), is(true));
-        assertThat(relay.logged(Level.DEBUG), hasSize(1));
-        assertThat(relay.logged(Level.DEBUG).get(0).getArguments()[2], is("the client's connection started with TLS"));
-        assertThat(relay.logged(Level.WARN), is(empty()));
-    }
-
-    @Test
     public void shouldTellTheListenerOfEachMessageInOrderWithTheUpstreamAsItsServer() {
         relayWithListener(true);
 
@@ -424,5 +409,24 @@ public class BinaryRelayTest {
         assertThat(returned.get(2).getCorrelationId(), is(received.get(1).getCorrelationId()));
         assertThat(received.get(1).getCorrelationId(), is(not(received.get(0).getCorrelationId())));
         assertThat(relay.logged(Level.WARN), is(empty()));
+    }
+
+    @Test
+    public void shouldCloseTheClientWhenItsUpstreamConnectFailsBeforeAChannelIsRegistered() throws Exception {
+        relayWithListener(true);
+        relay.connectFailsBeforeRegistration(new ChannelException("too many open files"), false);
+        EmbeddedChannel client = relay.client;
+        relay.clientSends("one");
+
+        relay.connect.setFailure(new ChannelException("too many open files"));
+        client.runPendingTasks();
+
+        assertThat("closed, though no upstream close will ever come", client.isOpen(), is(false));
+        assertThat(ChannelReadPause.holds(client), is(0));
+        List<LogEntry> warnings = relay.logged(Level.WARN);
+        assertThat(warnings, hasSize(1));
+        assertThat(warnings.get(0).getMessageFormat(), containsString("unable to connect to:{}"));
+        runListenerCalls();
+        assertThat(responses.get(0).isCompletedExceptionally(), is(true));
     }
 }

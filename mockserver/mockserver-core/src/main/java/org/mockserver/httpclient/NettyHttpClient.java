@@ -17,6 +17,7 @@ import io.netty.channel.WriteBufferWaterMark;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.timeout.ReadTimeoutHandler;
 import io.netty.util.AttributeKey;
+import io.netty.util.NetUtil;
 import org.apache.commons.lang3.StringUtils;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.filters.HopByHopHeaderFilter;
@@ -50,6 +51,7 @@ import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
 import static org.mockserver.model.HttpResponse.response;
 
 public class NettyHttpClient {
@@ -688,13 +690,23 @@ public class NettyHttpClient {
     }
 
     /**
-     * The TLS handler that upgrades a binary relay's upstream connection when its client turns TLS on part way
-     * through: the forward client's TLS context, so the upstream certificate is checked as for any forwarded TLS,
-     * and {@code socketConnectionTimeoutInMillis} as its handshake timeout. No ALPN is offered.
+     * The TLS handler of a binary relay's upstream connection, for a client that started with TLS or turned it on
+     * part way through: the forward client's TLS context, so the upstream certificate is checked as for any
+     * forwarded TLS, and {@code socketConnectionTimeoutInMillis} as its handshake timeout. No ALPN is offered.
+     * <p>
+     * The upstream is named (SNI, and the name its certificate is checked against) by the target's host name. A
+     * target given only as an address is named by the name the client sent MockServer, if any: that is the
+     * upstream's own name when MockServer learned the target from the connection (transparent proxy, PROXY
+     * protocol), whereas for a target given by name the client's name is MockServer's.
+     *
+     * @param clientServerName the name the client sent as SNI in its handshake with MockServer, or null
      */
-    public SslHandler newBinaryRelaySslHandler(ByteBufAllocator allocator, InetSocketAddress remoteAddress) {
+    public SslHandler newBinaryRelaySslHandler(ByteBufAllocator allocator, InetSocketAddress remoteAddress, String clientServerName) {
         // getHostString, not getHostName: no reverse lookup on the event loop
         String host = remoteAddress.getHostString();
+        if (isNotBlank(clientServerName) && (NetUtil.isValidIpV4Address(host) || NetUtil.isValidIpV6Address(host))) {
+            host = clientServerName;
+        }
         SslHandler sslHandler = nettySslContextFactory.createClientSslContext(forwardProxyClient, false, host).newHandler(allocator, host, remoteAddress.getPort());
         Long handshakeTimeoutMillis = configuration.socketConnectionTimeoutInMillis();
         if (handshakeTimeoutMillis != null && handshakeTimeoutMillis > 0) {

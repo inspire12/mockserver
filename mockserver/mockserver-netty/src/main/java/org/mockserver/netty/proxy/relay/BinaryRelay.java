@@ -6,6 +6,7 @@ import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.util.AttributeKey;
+import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.ScheduledFuture;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.httpclient.NettyHttpClient;
@@ -17,6 +18,7 @@ import org.mockserver.model.BinaryProxyListener;
 import org.mockserver.netty.proxy.BinaryRequestProxyingHandler;
 import org.mockserver.scheduler.Scheduler;
 import org.mockserver.socket.ChannelReadPause;
+import org.mockserver.socket.tls.SniHandler;
 import org.slf4j.event.Level;
 
 import java.net.InetSocketAddress;
@@ -46,7 +48,8 @@ import static org.mockserver.netty.unification.PortUnificationHandler.isSslEnabl
  * <p>
  * When the client turns TLS on part way through (PostgreSQL's {@code SSLRequest}), MockServer answers the client's
  * handshake as it does for any TLS connection and starts its own handshake with the upstream on the same upstream
- * connection, so what was sent before goes up in the clear and everything after over TLS.
+ * connection, so what was sent before goes up in the clear and everything after over TLS. A client whose connection
+ * was TLS from its first byte gets an upstream connection that is TLS from its first byte too.
  * <p>
  * A connection this cannot carry is left to the caller, which forwards each of its messages on an upstream
  * connection of its own: see {@link #forwardedPerMessageBecause()}.
@@ -242,22 +245,18 @@ public final class BinaryRelay {
     /**
      * Why this connection's messages are each forwarded on an upstream connection of their own, as all are when
      * the setting is off, or null if it is relayed on one. The upstream connection is made directly, so it cannot
-     * go through an upstream proxy. A client whose connection was TLS from its first byte keeps the forwarding it
-     * had in 8.0.0, where each message has a TLS upstream connection of its own.
+     * go through an upstream proxy.
      */
     private String forwardedPerMessageBecause() {
         if (httpClient.forwardsThroughProxy()) {
             return "an upstream proxy is configured";
         }
-        if (clientStartedWithTls) {
-            return "the client's connection started with TLS";
-        }
         return null;
     }
 
     /**
-     * Both reasons are known at the first message, before an upstream connection is made; one that exists is
-     * ended once what was sent on it has been delivered, and the client's connection is kept.
+     * The reason is known at the first message, before an upstream connection is made; one that exists is ended
+     * once what was sent on it has been delivered, and the client's connection is kept.
      */
     private void forwardPerMessageFromNowOn(String reason) {
         perMessage = true;
@@ -277,20 +276,37 @@ public final class BinaryRelay {
     }
 
     private boolean connect() {
+        SslHandler tlsFromTheStart = null;
+        if (clientStartedWithTls) {
+            // made before connecting, so a connection that could not be encrypted is never opened
+            tlsFromTheStart = newUpstreamTls(client);
+            if (tlsFromTheStart == null) {
+                return false;
+            }
+        }
         ChannelFuture connect;
         try {
             connect = httpClient.connectBinaryRelay(client.eventLoop(), target, new BinaryRelayUpstreamHandler(this, mockServerLogger));
         } catch (RuntimeException notPermitted) {
+            releaseUnused(tlsFromTheStart);
             refuse(notPermitted.getMessage());
             return false;
         }
         if (connect == null) {
+            releaseUnused(tlsFromTheStart);
             refuse("the forward client opened no upstream connection");
             return false;
         }
         upstream = connect.channel();
+        if (connect.isDone() && !connect.isSuccess()) {
+            // a pipeline whose channel failed already, perhaps unregistered, would never release the handler
+            releaseUnused(tlsFromTheStart);
+        } else if (tlsFromTheStart != null) {
+            // in place before the connect completes, so the first byte upstream is the handshake's
+            addUpstreamTls(tlsFromTheStart);
+        }
         hold(ClientHold.UPSTREAM_CONNECTING);
-        connect.addListener(future -> connectCompleted(future.cause()));
+        connect.addListener(future -> onClientEventLoop(() -> connectCompleted(future.cause())));
         upstream.closeFuture().addListener(future -> upstreamClosed());
         return !finished;
     }
@@ -312,7 +328,10 @@ public final class BinaryRelay {
             }
             waitingForConnect.clear();
             latest = null;
-            // the failed channel is closed by the bootstrap, which is what closes the client
+            // not left to the failed channel's close: one never registered has a close future that never completes
+            finished = true;
+            releaseEveryHold();
+            closeOnFlush(client);
             return;
         }
         connected = true;
@@ -330,6 +349,19 @@ public final class BinaryRelay {
         clearBeforeUpgrade = -1;
         if (clientClosed || perMessage) {
             RelayLegClose.afterFlush(upstream);
+        }
+    }
+
+    /** A connect that failed before its channel was registered completes on Netty's global executor, not here. */
+    private void onClientEventLoop(Runnable task) {
+        if (client.eventLoop().inEventLoop()) {
+            task.run();
+        } else {
+            try {
+                client.eventLoop().execute(task);
+            } catch (RejectedExecutionException serverStopping) {
+                // the event loop has shut down, and the client's connection with it
+            }
         }
     }
 
@@ -374,21 +406,40 @@ public final class BinaryRelay {
     }
 
     private void startUpstreamTls() {
+        SslHandler sslHandler = newUpstreamTls(upstream);
+        if (sslHandler != null) {
+            addUpstreamTls(sslHandler);
+        }
+    }
+
+    /** Null, with both connections closing and the fault logged, if it cannot be made. */
+    private SslHandler newUpstreamTls(Channel allocatingFor) {
         try {
-            upstreamTls = httpClient.newBinaryRelaySslHandler(upstream.alloc(), target);
+            return httpClient.newBinaryRelaySslHandler(allocatingFor.alloc(), target, SniHandler.getSniHostname(client));
         } catch (RuntimeException cannotCreate) {
             upstreamTlsFailed(cannotCreate);
-            return;
+            return null;
         }
+    }
+
+    private void addUpstreamTls(SslHandler sslHandler) {
+        upstreamTls = sslHandler;
         // first: the relay's handler then only ever sees what was decrypted
-        upstream.pipeline().addFirst("binary-relay-tls", upstreamTls);
-        upstreamTls.handshakeFuture().addListener(handshake -> {
+        upstream.pipeline().addFirst("binary-relay-tls", sslHandler);
+        sslHandler.handshakeFuture().addListener(handshake -> {
             if (handshake.isSuccess()) {
                 release(ClientHold.UPSTREAM_HANDSHAKING);
-            } else {
+            } else if (connected) {
                 upstreamTlsFailed(handshake.cause());
             }
+            // else the connect failed, which is what is reported, and the closed connection closes the client
         });
+    }
+
+    private static void releaseUnused(SslHandler sslHandler) {
+        if (sslHandler != null) {
+            ReferenceCountUtil.release(sslHandler.engine());
+        }
     }
 
     private void upstreamTlsFailed(Throwable cause) {
@@ -397,13 +448,18 @@ public final class BinaryRelay {
                 new LogEntry()
                     .setLogLevel(Level.WARN)
                     .setCorrelationId(latestCorrelationId)
-                    .setMessageFormat("unable to upgrade the upstream connection to:{}to TLS for binary connection from:{}closing both:{}")
+                    .setMessageFormat("unable to start TLS with upstream:{}for binary connection from:{}closing both:{}")
                     .setArguments(target, client.remoteAddress(), boundedFaultMessage(cause))
                     .setThrowable(boundedFault(cause))
             );
         }
-        // closing the upstream connection closes the client's
-        RelayLegClose.now(upstream);
+        if (upstream != null) {
+            // closing the upstream connection closes the client's
+            RelayLegClose.now(upstream);
+        } else {
+            finished = true;
+            closeOnFlush(client);
+        }
     }
 
     /** True from the upgrade until MockServer's handshake with the upstream has succeeded; its faults are logged here. */

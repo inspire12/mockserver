@@ -8,9 +8,11 @@ import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.ChannelPromise;
+import io.netty.channel.DefaultChannelPromise;
 import io.netty.channel.EventLoop;
 import io.netty.channel.WriteBufferWaterMark;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.util.concurrent.ImmediateEventExecutor;
 import org.mockito.ArgumentCaptor;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.httpclient.NettyHttpClient;
@@ -99,6 +101,24 @@ final class BinaryRelayHarness {
         });
     }
 
+    /**
+     * The next upstream connect fails before its channel is registered, as {@code Bootstrap.connect} does when no
+     * socket can be opened: its channel is closed without its close future ever completing, and the future fails
+     * at once, or, as when Netty's global executor runs the listeners, when the test fails {@link #connect}.
+     */
+    void connectFailsBeforeRegistration(Throwable cause, boolean atOnce) {
+        when(httpClient.connectBinaryRelay(any(EventLoop.class), any(InetSocketAddress.class), any(ChannelHandler.class))).thenAnswer(invocation -> {
+            upstreamConnections++;
+            upstream = new EmbeddedChannel(false, false);
+            upstream.unsafe().closeForcibly();
+            connect = new DefaultChannelPromise(upstream, ImmediateEventExecutor.INSTANCE);
+            if (atOnce) {
+                connect.setFailure(cause);
+            }
+            return connect;
+        });
+    }
+
     private static String perMessage(BinaryMessage message, String mode, boolean overTls) {
         return new String(message.getBytes(), StandardCharsets.UTF_8) + " " + mode + (overTls ? ", over TLS" : "");
     }
@@ -176,7 +196,8 @@ final class BinaryRelayHarness {
 
     void finish() {
         client.finishAndReleaseAll();
-        if (upstream != null) {
+        // one whose connect failed before registration has nothing to release, and cannot be closed again
+        if (upstream != null && upstream.isRegistered()) {
             upstream.finishAndReleaseAll();
         }
     }

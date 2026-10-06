@@ -15,7 +15,7 @@ import java.util.concurrent.CompletableFuture;
  * A listener that throws closes the client's connection. Bytes the upstream sends that follow no message are not
  * reported.
  * <p>
- * With that setting false, or for a connection it does not carry (its client uses TLS, or an upstream proxy is
+ * With that setting false, or for a connection it does not carry (any connection when an upstream proxy is
  * configured), each message is forwarded on an upstream connection of its own. The deprecated
  * {@code forwardBinaryRequestsWithoutWaitingForResponse} applies only then: with it the listener is called as
  * described above, and without it the listener is called once the upstream's response has arrived, before it is

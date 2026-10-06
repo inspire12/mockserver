@@ -23,6 +23,8 @@ import org.mockserver.proxyconfiguration.ProxyConfiguration;
 import org.mockserver.socket.NettyAllocator;
 import org.mockserver.socket.tls.NettySslContextFactory;
 
+import javax.net.ssl.SNIHostName;
+import javax.net.ssl.SNIServerName;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -34,9 +36,12 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.sameInstance;
 import static org.junit.Assert.assertThrows;
@@ -159,15 +164,60 @@ public class NettyHttpClientBinaryRelayConnectTest {
         Configuration configuration = configuration().socketConnectionTimeoutInMillis(4321L);
         NettyHttpClient httpClient = new NettyHttpClient(configuration, new MockServerLogger(), () -> clientConnections, null, true, new NettySslContextFactory(configuration, new MockServerLogger(), false));
 
-        SslHandler sslHandler = httpClient.newBinaryRelaySslHandler(NettyAllocator.ALLOCATOR, InetSocketAddress.createUnresolved("db.example.com", 5432));
+        SslHandler sslHandler = httpClient.newBinaryRelaySslHandler(NettyAllocator.ALLOCATOR, InetSocketAddress.createUnresolved("db.example.com", 5432), null);
         try {
             assertThat(sslHandler.engine().getUseClientMode(), is(true));
             assertThat("the name, unresolved and not looked up", sslHandler.engine().getPeerHost(), is("db.example.com"));
             assertThat(sslHandler.engine().getPeerPort(), is(5432));
+            assertThat(serverNames(sslHandler), contains("db.example.com"));
             assertThat(sslHandler.getHandshakeTimeoutMillis(), is(4321L));
             assertThat("no ALPN offered", sslHandler.engine().getSSLParameters().getApplicationProtocols().length, is(0));
         } finally {
             ReferenceCountUtil.release(sslHandler.engine());
         }
+    }
+
+    @Test
+    public void shouldNameATargetGivenByNameAsItselfWhateverNameTheClientAskedMockServerFor() {
+        SslHandler sslHandler = relaySslHandler(InetSocketAddress.createUnresolved("db.example.com", 5432), "localhost");
+        try {
+            assertThat("the client's name is MockServer's, not the upstream's", sslHandler.engine().getPeerHost(), is("db.example.com"));
+            assertThat(serverNames(sslHandler), contains("db.example.com"));
+        } finally {
+            ReferenceCountUtil.release(sslHandler.engine());
+        }
+    }
+
+    @Test
+    public void shouldNameATargetGivenAsAnAddressAsTheClientDid() throws Exception {
+        SslHandler sslHandler = relaySslHandler(new InetSocketAddress(InetAddress.getByAddress(new byte[]{127, 0, 0, 1}), 5432), "db.example.com");
+        try {
+            assertThat(sslHandler.engine().getPeerHost(), is("db.example.com"));
+            assertThat(serverNames(sslHandler), contains("db.example.com"));
+        } finally {
+            ReferenceCountUtil.release(sslHandler.engine());
+        }
+    }
+
+    @Test
+    public void shouldSendNoServerNameForATargetGivenAsAnAddressWhenTheClientSentNone() throws Exception {
+        SslHandler sslHandler = relaySslHandler(new InetSocketAddress(InetAddress.getByAddress(new byte[]{127, 0, 0, 1}), 5432), null);
+        try {
+            assertThat(sslHandler.engine().getPeerHost(), is("127.0.0.1"));
+            assertThat(serverNames(sslHandler), is(empty()));
+        } finally {
+            ReferenceCountUtil.release(sslHandler.engine());
+        }
+    }
+
+    private static SslHandler relaySslHandler(InetSocketAddress target, String clientServerName) {
+        Configuration configuration = configuration();
+        NettyHttpClient httpClient = new NettyHttpClient(configuration, new MockServerLogger(), () -> clientConnections, null, true, new NettySslContextFactory(configuration, new MockServerLogger(), false));
+        return httpClient.newBinaryRelaySslHandler(NettyAllocator.ALLOCATOR, target, clientServerName);
+    }
+
+    private static List<String> serverNames(SslHandler sslHandler) {
+        List<SNIServerName> serverNames = sslHandler.engine().getSSLParameters().getServerNames();
+        return serverNames == null ? Collections.emptyList() : serverNames.stream().map(name -> ((SNIHostName) name).getAsciiName()).collect(Collectors.toList());
     }
 }

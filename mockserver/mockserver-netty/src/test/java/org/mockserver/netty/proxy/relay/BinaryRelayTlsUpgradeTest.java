@@ -3,6 +3,7 @@ package org.mockserver.netty.proxy.relay;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.Unpooled;
+import io.netty.channel.ChannelException;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.channel.embedded.EmbeddedChannel;
@@ -13,6 +14,7 @@ import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.SslProvider;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.netty.util.ReferenceCountUtil;
+import io.netty.util.ReferenceCounted;
 import org.junit.After;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -21,9 +23,12 @@ import org.mockserver.logging.MockServerLogger;
 import org.mockserver.netty.unification.PortUnificationHandler;
 import org.mockserver.socket.ChannelReadPause;
 import org.mockserver.socket.tls.KeyStoreFactory;
+import org.mockserver.socket.tls.SniHandler;
 import org.slf4j.event.Level;
 
 import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SSLEngine;
+import java.net.ConnectException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
@@ -40,13 +45,18 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 import static org.mockserver.configuration.Configuration.configuration;
 
 /**
- * A relayed binary connection whose client turns TLS on part way through: MockServer's own handshake with the
- * upstream starts on the same upstream connection, the client is not read while it runs, and a handshake that fails
- * closes both connections. The upstream is an embedded TLS server the test moves bytes to and from.
+ * A relayed binary connection whose client turns TLS on part way through, or starts with it: MockServer's own
+ * handshake with the upstream runs on the one upstream connection, the client is not read while it runs, and a
+ * handshake that fails closes both connections. The upstream is an embedded TLS server the test moves bytes to and
+ * from.
  */
 public class BinaryRelayTlsUpgradeTest {
 
@@ -79,7 +89,7 @@ public class BinaryRelayTlsUpgradeTest {
 
     private EmbeddedChannel relay(boolean connectAtOnce) {
         relay = new BinaryRelayHarness(connectAtOnce);
-        when(relay.httpClient.newBinaryRelaySslHandler(any(ByteBufAllocator.class), any(InetSocketAddress.class))).thenAnswer(invocation -> {
+        when(relay.httpClient.newBinaryRelaySslHandler(any(ByteBufAllocator.class), any(InetSocketAddress.class), any())).thenAnswer(invocation -> {
             SslHandler sslHandler = forwardClient.newHandler(invocation.getArgument(0), "127.0.0.1", 1234);
             sslHandler.setHandshakeTimeoutMillis(HANDSHAKE_TIMEOUT_MILLIS);
             return sslHandler;
@@ -220,7 +230,7 @@ public class BinaryRelayTlsUpgradeTest {
         assertThat("nothing it sent reaches the client", relay.receivedByClient(), is(""));
         List<LogEntry> warnings = relay.logged(Level.WARN);
         assertThat("logged once, by the relay", warnings, hasSize(1));
-        assertThat(warnings.get(0).getMessageFormat(), containsString("unable to upgrade the upstream connection"));
+        assertThat(warnings.get(0).getMessageFormat(), containsString("unable to start TLS with upstream"));
         assertThat(warnings.get(0).getThrowable(), is(notNullValue()));
         assertThat("what the upstream sent is counted, not dumped", String.valueOf(warnings.get(0).getArguments()[2]), not(containsString("4e20616e64")));
     }
@@ -242,13 +252,13 @@ public class BinaryRelayTlsUpgradeTest {
         assertThat(client.isOpen(), is(false));
         assertThat(holds(client), is(0));
         assertThat(relay.logged(Level.WARN), hasSize(1));
-        assertThat(relay.logged(Level.WARN).get(0).getMessageFormat(), containsString("unable to upgrade the upstream connection"));
+        assertThat(relay.logged(Level.WARN).get(0).getMessageFormat(), containsString("unable to start TLS with upstream"));
     }
 
     @Test
     public void shouldCloseBothConnectionsWhenTheUpstreamTlsHandlerCannotBeMade() {
         EmbeddedChannel client = relay(true);
-        when(relay.httpClient.newBinaryRelaySslHandler(any(ByteBufAllocator.class), any(InetSocketAddress.class))).thenThrow(new IllegalStateException("no TLS context"));
+        when(relay.httpClient.newBinaryRelaySslHandler(any(ByteBufAllocator.class), any(InetSocketAddress.class), any())).thenThrow(new IllegalStateException("no TLS context"));
         relay.clientSends("SSLRequest");
         relay.receivedByUpstream();
 
@@ -312,5 +322,176 @@ public class BinaryRelayTlsUpgradeTest {
         assertThat(relay.forwardedPerMessage.get(1), is("startup waiting, over TLS"));
         assertThat(client.isOpen(), is(true));
         client.checkException();
+    }
+
+    /** A client whose connection is TLS from its first byte: its first decrypted message is what opens the relay. */
+    private EmbeddedChannel clientStartedWithTls(boolean connectAtOnce) {
+        EmbeddedChannel client = relay(connectAtOnce);
+        PortUnificationHandler.enableSslUpstreamAndDownstream(client);
+        return client;
+    }
+
+    @Test
+    public void shouldRelayAConnectionThatStartedWithTlsOnOneUpstreamConnectionThatIsTlsFromItsFirstByte() {
+        EmbeddedChannel client = clientStartedWithTls(false);
+
+        relay.clientSends("startup");
+
+        assertThat("the handshake is set up before the connection is made", relay.upstream.pipeline().first(), instanceOf(SslHandler.class));
+        assertThat("not read while connecting and handshaking", holds(client), is(2));
+        relay.connect.setSuccess();
+        relay.upstream.runPendingTasks();
+        ByteBuf first = relay.upstream.readOutbound();
+        assertThat("the first byte upstream is a TLS handshake record", first.getUnsignedByte(first.readerIndex()), is((short) 0x16));
+        tlsServer.writeInbound(first);
+        exchangeWithUpstream();
+
+        assertThat("read again once the handshake has succeeded", holds(client), is(0));
+        assertThat("nothing went in the clear: the server decrypted it all", decryptedByUpstream.toString(), is("startup"));
+        upstreamSendsOverTls("ready");
+        assertThat(relay.receivedByClient(), is("ready"));
+        relay.clientSends("query");
+        assertThat(holds(client), is(0));
+        exchangeWithUpstream();
+        assertThat(decryptedByUpstream.toString(), is("startupquery"));
+
+        assertThat(relay.upstreamConnections, is(1));
+        assertThat("nothing is forwarded on a connection of its own", relay.forwardedPerMessage, is(empty()));
+        assertThat("nor said to be", relay.logged(Level.DEBUG).stream().filter(entry -> entry.getMessageFormat().contains("on an upstream connection of its own")).count(), is(0L));
+        assertThat(relay.logged(Level.WARN), is(empty()));
+        client.checkException();
+    }
+
+    @Test
+    public void shouldNameTheUpstreamAsTheClientNamedMockServer() {
+        EmbeddedChannel client = clientStartedWithTls(true);
+        client.attr(SniHandler.SNI_HOSTNAME).set("db.example.com");
+
+        relay.clientSends("startup");
+
+        verify(relay.httpClient).newBinaryRelaySslHandler(any(ByteBufAllocator.class), eq(BinaryRelayHarness.TARGET), eq("db.example.com"));
+    }
+
+    @Test
+    public void shouldOpenNoConnectionWhenTheTlsHandlerOfAConnectionThatStartedWithTlsCannotBeMade() {
+        EmbeddedChannel client = clientStartedWithTls(true);
+        when(relay.httpClient.newBinaryRelaySslHandler(any(ByteBufAllocator.class), any(InetSocketAddress.class), any())).thenThrow(new IllegalStateException("no TLS context"));
+
+        relay.clientSends("startup");
+
+        assertThat("nothing is connected to send in the clear", relay.upstreamConnections, is(0));
+        assertThat(client.isOpen(), is(false));
+        assertThat(holds(client), is(0));
+        assertThat(relay.forwardedPerMessage, is(empty()));
+        assertThat(relay.logged(Level.WARN), hasSize(1));
+        assertThat(relay.logged(Level.WARN).get(0).getArguments()[2], is("no TLS context"));
+    }
+
+    @Test
+    public void shouldSayOnlyOnceThatAConnectionThatStartedWithTlsCouldNotBeConnected() {
+        EmbeddedChannel client = clientStartedWithTls(false);
+        relay.clientSends("startup");
+        // the client is still open when the closed channel's handshake fails, as it can be over a real socket
+        relay.clientFlushGate.blocked = true;
+
+        relay.connect.setFailure(new ConnectException("refused"));
+        relay.upstream.runPendingTasks();
+        relay.client.runPendingTasks();
+        relay.clientFlushGate.blocked = false;
+        client.flush();
+        client.runPendingTasks();
+
+        assertThat(client.isOpen(), is(false));
+        assertThat(holds(client), is(0));
+        List<LogEntry> warnings = relay.logged(Level.WARN);
+        assertThat("the failed connect, and not its handshake as well", warnings, hasSize(1));
+        assertThat(warnings.get(0).getMessageFormat(), containsString("unable to connect"));
+    }
+
+    @Test
+    public void shouldCloseBothConnectionsWhenAnUpstreamOfAConnectionThatStartedWithTlsAnswersInTheClear() {
+        EmbeddedChannel client = clientStartedWithTls(true);
+        relay.clientSends("startup");
+        ReferenceCountUtil.release(relay.upstream.readOutbound());
+
+        relay.upstreamSends("not a TLS record");
+        relay.client.runPendingTasks();
+
+        assertThat(relay.upstream.isOpen(), is(false));
+        assertThat(client.isOpen(), is(false));
+        assertThat(holds(client), is(0));
+        assertThat("nothing it sent reaches the client", relay.receivedByClient(), is(""));
+        assertThat(relay.logged(Level.WARN), hasSize(1));
+        assertThat(relay.logged(Level.WARN).get(0).getMessageFormat(), containsString("unable to start TLS with upstream"));
+    }
+
+    @Test
+    public void shouldHoldEachConnectionWhileTheOtherCannotTakeMoreWhenItStartedWithTls() {
+        EmbeddedChannel client = clientStartedWithTls(true);
+        relay.clientSends("startup");
+        exchangeWithUpstream();
+        assertThat(holds(client), is(0));
+
+        relay.upstreamFlushGate.blocked = true;
+        relay.clientSends("a message the upstream cannot take yet");
+        assertThat("the client is not read while the upstream cannot take more", holds(client), is(1));
+        relay.upstreamFlushGate.blocked = false;
+        relay.upstream.flush();
+        exchangeWithUpstream();
+        assertThat(holds(client), is(0));
+        assertThat(decryptedByUpstream.toString(), is("startupa message the upstream cannot take yet"));
+
+        BinaryRelayHarness.setWritable(client, false);
+        upstreamSendsOverTls("rows");
+        assertThat("the upstream is not read while the client cannot take more", holds(relay.upstream), is(1));
+        BinaryRelayHarness.setWritable(client, true);
+        assertThat(holds(relay.upstream), is(0));
+        assertThat(relay.receivedByClient(), is("rows"));
+    }
+
+    @Test
+    public void shouldDeliverTheLastMessageThenEndTheUpstreamWhenAClientThatStartedWithTlsCloses() {
+        EmbeddedChannel client = clientStartedWithTls(true);
+        relay.clientSends("startup");
+        exchangeWithUpstream();
+
+        relay.clientSends("terminate");
+        client.close();
+        exchangeWithUpstream();
+
+        assertThat(decryptedByUpstream.toString(), is("startupterminate"));
+        assertThat(relay.upstream.isOpen(), is(false));
+        assertThat(relay.logged(Level.WARN), is(empty()));
+    }
+
+    @Test
+    public void shouldCloseAClientThatStartedWithTlsWhenItsUpstreamCloses() {
+        EmbeddedChannel client = clientStartedWithTls(true);
+        relay.clientSends("startup");
+        exchangeWithUpstream();
+        upstreamSendsOverTls("goodbye");
+
+        relay.upstream.close();
+        relay.client.runPendingTasks();
+
+        assertThat("what it sent first is delivered", relay.receivedByClient(), is("goodbye"));
+        assertThat(client.isOpen(), is(false));
+    }
+
+    @Test
+    public void shouldReleaseTheTlsHandlerOfAConnectionThatStartedWithTlsWhenItsConnectFailsBeforeAChannelIsRegistered() {
+        EmbeddedChannel client = clientStartedWithTls(true);
+        SSLEngine engine = mock(SSLEngine.class, withSettings().extraInterfaces(ReferenceCounted.class));
+        when(relay.httpClient.newBinaryRelaySslHandler(any(ByteBufAllocator.class), any(InetSocketAddress.class), any())).thenReturn(new SslHandler(engine));
+        relay.connectFailsBeforeRegistration(new ChannelException("too many open files"), true);
+
+        relay.clientSends("startup");
+        client.runPendingTasks();
+
+        verify((ReferenceCounted) engine).release();
+        assertThat("never added to a pipeline that will not run", relay.upstream.pipeline().get(SslHandler.class), is(nullValue()));
+        assertThat(client.isOpen(), is(false));
+        assertThat(holds(client), is(0));
+        assertThat(relay.logged(Level.WARN), hasSize(1));
     }
 }

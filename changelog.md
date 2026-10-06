@@ -14,7 +14,7 @@ This release delivers a sustained performance and memory programme alongside dat
 
 **BREAKING** — for TypeScript users of the Node client's deep import `mockserver-client/llm`: its typings no longer declare a default export; everything imported from `mockserver-client` itself type-checks as in 8.0.0. See *Changed*.
 
-**BREAKING** — if you proxy a binary (non-HTTP) protocol through MockServer, a client's connection now gets one upstream connection for its whole life instead of a new one for every message (`forwardBinaryRequestsUseSingleConnection`, on by default). The upstream therefore sees one connection per client connection, held open as long as the client's is, everything it sends reaches the client, when it closes its connection the client's is closed too, and a client whose upstream never answers is no longer cut off after `maxFutureTimeout`. Set `forwardBinaryRequestsUseSingleConnection=false` to get the 8.0.0 behaviour back exactly. A client that turns TLS on part way through, such as PostgreSQL with `sslmode=require`, now has its upstream connection upgraded to TLS on the same connection, so such a database can be proxied (SCRAM channel binding needs `channelBinding=disable` in the client, or MockServer given the server's own certificate). A connection whose client starts with TLS, and every binary connection when an upstream proxy is configured, is still forwarded as in 8.0.0. `forwardBinaryRequestsWithoutWaitingForResponse` is deprecated and applies only when the new setting is `false`. If you do not proxy binary protocols nothing changes.
+**BREAKING** — if you proxy a binary (non-HTTP) protocol through MockServer, a client's connection now gets one upstream connection for its whole life instead of a new one for every message (`forwardBinaryRequestsUseSingleConnection`, on by default). The upstream therefore sees one connection per client connection, held open as long as the client's is, everything it sends reaches the client, when it closes its connection the client's is closed too, and a client whose upstream never answers is no longer cut off after `maxFutureTimeout`. Set `forwardBinaryRequestsUseSingleConnection=false` to get the 8.0.0 behaviour back exactly. A client that turns TLS on part way through, such as PostgreSQL with `sslmode=require`, now has its upstream connection upgraded to TLS on the same connection, so such a database can be proxied (SCRAM channel binding needs `channelBinding=disable` in the client, or MockServer given the server's own certificate). A client that starts with TLS from its first byte also gets one upstream connection, which MockServer opens with TLS from its first byte, where 8.0.0 opened a new TLS connection for every message. Every binary connection when an upstream proxy is configured is still forwarded as in 8.0.0. `forwardBinaryRequestsWithoutWaitingForResponse` is deprecated and applies only when the new setting is `false`. If you do not proxy binary protocols nothing changes.
 
 **BREAKING** — if you retrieve logs with `format=LOG_ENTRIES` (or through the MCP `retrieve_logs` and `raw_retrieve` tools) and read a request or response body from an entry's `message` or `arguments`, read it from the entry's `httpRequest` or `httpResponse` instead: those fields now refer to the entry's own request or response by a short form such as `"POST /orders"` or `"201"`, and the `expectation` recorded for a proxied exchange is written without its bodies. Each body is written once, so a log of large bodies retrieves at about a third of its former size. See *Changed*.
 
@@ -222,7 +222,7 @@ This release delivers a sustained performance and memory programme alongside dat
   and the server's are each kept in order, but not against each other, and MockServer logs a warning
   when one of its replies may overtake a server reply still owed. The setting has no effect on a
   connection forwarded one message per upstream connection (`forwardBinaryRequestsUseSingleConnection`
-  set to `false`, a client whose connection started with TLS, or an upstream proxy), which logs one warning saying so. While a
+  set to `false`, or an upstream proxy), which logs one warning saying so. While a
   binary expectation exists, every relayed message is matched before it is forwarded, with the usual
   match log entries.
 
@@ -564,13 +564,19 @@ This release delivers a sustained performance and memory programme alongside dat
   certificate and key (`privateKeyPath`, `x509CertificatePath`, and `certificateAuthorityCertificate`
   set to the authority that signed it); a client certificate cannot be passed through, and
   PostgreSQL 17's direct TLS (`sslnegotiation=direct`) is not supported.
-  Two kinds of connection are still forwarded exactly as in 8.0.0, one message per upstream
-  connection: a connection whose client starts with TLS from its first byte, and every binary
-  connection when an upstream proxy is configured (`forwardHttpProxy`, `forwardHttpsProxy`,
-  `forwardSocksProxy`), because the single connection is made directly. MockServer says why once
+  A client that starts with TLS from its first byte is relayed the same way, on one upstream
+  connection that MockServer opens with TLS from its first byte, with the same certificate checks,
+  client certificate and time limit; until now each of its messages went upstream on a new TLS
+  connection of its own, so a server that keeps a session over TLS could not be proxied. Over TLS
+  the upstream is named (SNI, and the name checked against its certificate) by its host name, or,
+  when it is known only by IP address (a PROXY protocol header, transparent proxying, or
+  `proxyRemoteHost` given as an address), by the name the client sent MockServer, if any.
+  Every binary connection when an upstream proxy is configured (`forwardHttpProxy`,
+  `forwardHttpsProxy`, `forwardSocksProxy`) is still forwarded exactly as in 8.0.0, one message per
+  upstream connection, because the single connection is made directly. MockServer says why once
   per connection at `DEBUG`.
   `forwardBinaryRequestsWithoutWaitingForResponse` is **deprecated**: it applies only when
-  `forwardBinaryRequestsUseSingleConnection` is `false` (or to the two kinds of connection above),
+  `forwardBinaryRequestsUseSingleConnection` is `false` (or when an upstream proxy is configured),
   has no effect otherwise, and will be removed with per-message forwarding in the next major
   release. MockServer logs one line at start-up when it is set while the new setting is on.
 - **Throughput no longer collapses past saturation.** Offered more than it could serve, MockServer used to serve *less* as load rose (26,020, then 23,463, then 19,517 req/s at 32,000, 48,000 and 64,000 offered in an earlier measurement); it now keeps serving close to the offered rate right up to a 59,905 req/s peak at 64,000 offered, with the median still under a millisecond. (The earlier 26,020 / 23,463 / 19,517 req/s figures are from a 2026-09-18 instrumented snapshot on the previous benchmark rig, not a measurement of 8.0.0.)
