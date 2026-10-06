@@ -332,7 +332,7 @@ idle-closed counter"]
 | `InboundConnectionActivity` | channel attribute, created by the idle handler | Busy when: an HTTP/1.1 exchange is in progress, an HTTP/2 stream is active (`Http2ConnectionHandler.connection().numActiveStreams()`), auto-read is off (connection delay, relay back-pressure), the server certificate is being generated off the event loop (`SniHandler.SSL_CONTEXT_PENDING`), a TLS handshake is incomplete (bounded by the handshake's own timeout), or the connection is marked long-lived |
 | `HttpExchangeTracker` | `@Sharable` singleton after `HttpServerCodec` (and the chunk-line limiter) in `switchToHttp`, and after the tunnel's own codec on the client leg of an HTTP/1.1 CONNECT/SOCKS tunnel (`RelayConnectHandler.configurePipelines`), only on tracked channels | An exchange starts at a decoded `HttpRequest` and ends when the `LastHttpContent` of its response **has been written** (promise completion), so delayed, breakpoint-paused and streaming responses count, and so does a large body `PacedLargeWriteHandler` is still slicing to a slow reader (its promise completes only when the last slice is written). Pipeline order: `inbound-idle`, `PacedLargeWriteHandler`, `HttpChunkLineLimiter$BeforeCodec`, `HttpServerCodec`, `HttpChunkLineLimiter$AfterCodec`, `HttpExchangeTracker` — the tracker must stay after the codec. `1xx` responses do not end an exchange; `101` also marks the connection long-lived |
 
-**Long-lived (exempt) connections** — marked with `InboundConnectionActivity.markLongLived(channel)`: a `101 Switching Protocols` (WebSocket: dashboard, callback, mocked and proxied), MockServer's own loopback leg of a CONNECT/SOCKS tunnel (`PortUnificationHandler.switchToProxyConnected`), and raw binary proxying (`switchToBinaryRequestProxying`). Their silences are legitimate and their traffic is not HTTP exchanges the tracker could see. Marking also removes the idle handler and the exchange tracker from the pipeline (on the event loop), so a WebSocket or tunnel stops paying their per-write cost, and `isTracked` stops a later `switchToHttp` on the loopback leg from re-installing the tracker. An exchange whose response never passes the tracker as HTTP objects — raw bytes (an `HttpError` `responseBytes`, written from `HttpServerCodec`'s context), an `HttpError` that writes nothing and keeps the connection open, or a mocked final `1xx` other than `101` — is ended by `HttpExchangeEndedEvent` (`mockserver-core`, `org.mockserver.responsewriter`). `HttpErrorActionHandler` (from a listener on the raw write, so it runs on the event loop as the write completes and any drop is chained after it) and `NettyResponseWriter` fire it from the codec's context, so it travels inbound through exactly the tracker and `HttpTransportTimer`, which each end their oldest exchange; without it the connection would count as busy for the rest of its life and never be closed as idle. The event has two instances, which those handlers treat alike: `RAW_RESPONSE_WRITTEN` for raw bytes, and `INSTANCE` for an exchange with no response or a final `1xx`. Only the relay tells them apart (see *Tunnels and the idle timeout*).
+**Long-lived (exempt) connections** — marked with `InboundConnectionActivity.markLongLived(channel)`: a `101 Switching Protocols` (WebSocket: dashboard, callback, mocked and proxied), MockServer's own loopback leg of a CONNECT/SOCKS tunnel (`PortUnificationHandler.switchToProxyConnected`), and raw binary proxying (`switchToBinaryRequestProxying`). Their silences are legitimate and their traffic is not HTTP exchanges the tracker could see. Marking also removes the idle handler and the exchange tracker from the pipeline (on the event loop), so a WebSocket or tunnel stops paying their per-write cost, and `isTracked` stops a later `switchToHttp` on the loopback leg from re-installing the tracker. An exchange whose response never passes the tracker as HTTP objects — raw bytes (an `HttpError` `responseBytes`, written from `HttpServerCodec`'s context), an `HttpError` that writes nothing and keeps the connection open, or a mocked final `1xx` other than `101` — is ended by `HttpExchangeEndedEvent` (`mockserver-core`, `org.mockserver.responsewriter`). `HttpErrorActionHandler` (from a listener on the raw write, so it runs on the event loop as the write completes and any drop is chained after it) and `NettyResponseWriter` fire it from the codec's context, so it travels inbound through exactly the tracker and `HttpTransportTimer`, which each end their oldest exchange; without it the connection would count as busy for the rest of its life and never be closed as idle. The event has two instances, which those handlers treat alike: `RAW_RESPONSE_WRITTEN` for raw bytes, and `INSTANCE` for an exchange with no response or a final `1xx`. Only the relay tells them apart (see *Tunnels and the idle timeout*). Raw bytes are also announced before they are written, by a `RawResponseBytesEvent` carrying their length, which only the relay's loopback acts on (see [Raw-bytes responses through a tunnel](#raw-bytes-responses-through-a-tunnel)).
 
 **TLS handshakes and the idle timeout.** A client has a whole idle period after its TLS handshake completes to send its first request. On a direct TLS connection `SslHandler#0` (and `SniHandler` before it) sits ahead of the idle handler, so the handshake's records never pass the idle handler and its timer does not see them. Two things stand in for them: a handshake in progress is busy, and the idle handler restarts its period on the `SslHandler`'s successful `SslHandshakeCompletionEvent`. Without the restart the period ran on from the ClientHello's first bytes, so a connection whose handshake had outlasted it was closed at the first check after the handshake, however recently it had completed. A failed handshake restarts nothing; the `SslHandler` closes the connection.
 
@@ -360,16 +360,13 @@ With the idle timeout disabled, `SniHandler`'s 10 s and the handshake timeout st
 | A `101 Switching Protocols` has passed through | no: the client leg becomes long-lived |
 | Bytes arrive that complete no request (a request head sent slowly) | no: each read restarts the timer |
 | HTTP/1.1: MockServer abandoned the request (an `error()` that writes nothing and keeps the connection open), or answered it with a final `1xx` other than `101` | yes: the loopback tells the client leg the exchange has ended |
+| HTTP/1.1: MockServer answered with raw bytes (an `error()` with `responseBytes`), whether or not they are a whole response | yes: the exchange ends when the relay has written the last of those bytes to the client |
 
 The client leg is watched, not the loopback, because only it sees an upload in progress. Closing it closes the loopback (see [Relay close](#relay-close)); the loopback leg MockServer accepts stays long-lived, so it is never closed on its own and only counts once in `mock_server_inbound_connections_idle_closed_total`. The relay carries no opaque tunnel: what cannot be read as TLS, h2c or HTTP/1.1 fails to decode and is closed. Raw binary proxying is a connection of its own, not a tunnel, and stays exempt.
 
 **An exchange MockServer ends without a response.** `HttpExchangeEndedEvent` is fired on the loopback leg MockServer accepts, which is not the leg the timer watches, and nothing the client leg could count ever crosses the loopback: no bytes for an abandoned request, and for a final `1xx` a response the client leg's own codec takes for an interim one. So `PortUnificationHandler.switchToHttp` adds `LoopbackExchangeEndedHandler` after the codec of a relay's loopback (`RelayLoopbackAddresses.isRelayLoopback`). On `HttpExchangeEndedEvent.INSTANCE` it looks up the tunnel's proxy client channel, which `RelayLoopbackAddresses` holds against the loopback's address, and fires the same event from that channel's `HttpServerCodec` on its own event loop, where the client leg's `HttpExchangeTracker` ends its oldest exchange as it would on a direct connection. The tunnel is then idle-closed on the same terms as a direct connection in that state; before, it counted as busy for the rest of its life (`InboundConnectionIdleTimeoutIntegrationTest`, `LoopbackExchangeEndedHandlerTest`).
 
-`RAW_RESPONSE_WRITTEN` is not passed on. The relay reads raw bytes as a response, and the client leg ends the exchange when it has relayed it; telling it as well would end a second, pipelined exchange early. One case therefore still differs from a direct connection:
-
-| Case | Direct connection | Through a tunnel |
-|---|---|---|
-| Raw bytes that are not a whole HTTP response (`responseBytes` cut short), connection kept open | closed as idle | stays open: the relay collects a response before relaying it, so the client receives nothing and its exchange never ends |
+`RAW_RESPONSE_WRITTEN` is not passed on: the relay hands raw bytes to the client itself and ends the client leg's exchange as the last of them is written (see [Raw-bytes responses through a tunnel](#raw-bytes-responses-through-a-tunnel)), so passing it on as well would end a second, pipelined exchange early. No case of an exchange MockServer ends now differs between a direct connection and a tunnel.
 
 Over HTTP/2 a mocked final `1xx` ends its stream with a reset on both, so both are then closed as idle (see [A mocked final `1xx`](#a-mocked-final-1xx)). An HTTP/2 stream MockServer abandons stays open on both, by design: the stream is what the client is still waiting on.
 
@@ -565,7 +562,7 @@ graph LR
 | TcpChaosHandler | `o.m.netty.unification` | (Conditional) Injects TCP-layer faults (latency, down, bandwidth, slicer, etc.) on raw bytes before HTTP decoding. Only added when `TcpChaosRegistry` has active entries |
 | PacedLargeWriteHandler | `o.m.netty.unification` | Writes an encoded buffer larger than 64 KB (in practice a response body) in 32 KB slices, only while the connection is writable, so a slow reader does not hold a direct-memory copy of the whole body. See [Outbound Buffering and Backpressure](#outbound-buffering-and-backpressure) |
 | HttpChunkLineLimiter (before codec) | `o.m.codec` | Counts the bytes handed to the codec while a chunked request body is being read, and rejects the request when more than 8 KiB is waiting with nothing decoded. See [Chunk-size line limit](#chunk-size-line-limit) |
-| HttpServerCodec | Netty built-in | HTTP/1.1 request decoding / response encoding |
+| HttpServerCodec | Netty built-in, built by `HttpServerCodecs` | HTTP/1.1 request decoding / response encoding, with no bound on requests awaiting their response (see [Raw-bytes responses through a tunnel](#raw-bytes-responses-through-a-tunnel)) |
 | HttpChunkLineLimiter (after codec) | `o.m.codec` | The other half of the limiter: resets the count on every decoded HTTP object, and tracks whether the connection is in a chunked body and whether a `400` can be written. Also refuses any request the codec could not decode, before anything after it sees it. See [Undecodable requests](#undecodable-requests) |
 | PreserveHeadersNettyRemoves | `o.m.codec` | Preserves `Content-Encoding`/`Transfer-Encoding` headers that the downstream `HttpContentDecompressor`/`HttpObjectAggregator` strip (reset per request so they cannot leak across a pooled connection — issue #2322). Also captures the original (still compressed) request body bytes before decompression, so the decompressed body and the original on-the-wire bytes are both available (issue #2326). Both are published per request as one immutable `PreservedRequest` channel attribute, read once by `NettyHttpToMockServerHttpRequestDecoder` |
 | MockServerHttpContentDecompressor | `o.m.codec` | Netty's `HttpContentDecompressor` (`gzip`, `x-gzip`, `deflate`, `x-deflate`, `snappy`, and `zstd` / `br` when their native libraries load), except that `snappy` accepts the raw block format Prometheus remote-write sends as well as the framing format (`SnappyBlockOrFrameDecoder`). The same class decompresses HTTP/2 streams and HTTP/3 request bodies. The original compressed bytes are still preserved by `PreserveHeadersNettyRemoves` above and exposed via `HttpRequest#getBodyAsOriginalRawBytes()`; a forward of an unchanged body sends them (see [request-processing.md](request-processing.md#bodies-with-a-content-encoding)) |
@@ -595,7 +592,7 @@ graph LR
 
 **Rejection.** If the rejected request is the only one awaiting a response on the connection and no response to it has started, the limiter writes `400 Bad Request` with `Connection: close` from the context after the codec, keeps reading and dropping what the client sends for one second so the client can read the response (closing with unread bytes resets the connection, which can discard it), then closes. Otherwise (an early response under way, or an earlier pipelined request unanswered) it closes at once. It logs one `WARN` entry. The limit matches Tomcat's defaults for chunk extensions and trailers; a signed upload (`aws-chunked`) uses about 100 bytes per chunk-size line.
 
-**Client codecs.** The forward client (`HttpClientInitializer`) builds `HttpClientCodec` with Netty's 4,096-byte line limit, which bounds an upstream response's status line and each of its chunk-size lines, and with `maxHeaderSize` for its headers and trailers (see [Upstream response headers](#upstream-response-headers)). The WebSocket proxy relay (`WebSocketProxyRelayHandler`) builds its codec the same way for an upstream's handshake response. The callback WebSocket client and the Java client's breakpoint WebSocket, which talk to MockServer itself, build theirs with Netty's defaults: 4,096 bytes a line and 8,192 bytes of headers. The relay's loopback `HttpClientCodec` reads only MockServer's own responses, so it is built with no line or header limit: `maxInitialLineLength` and `maxHeaderSize` limit what clients send, and a mocked response with headers over them must reach the client through a tunnel intact. A response that loopback codec still fails to decode is answered with `502` by `LoopbackHttp1ResponseErrorHandler` rather than relayed.
+**Client codecs.** The forward client (`HttpClientInitializer`) builds `HttpClientCodec` with Netty's 4,096-byte line limit, which bounds an upstream response's status line and each of its chunk-size lines, and with `maxHeaderSize` for its headers and trailers (see [Upstream response headers](#upstream-response-headers)). The WebSocket proxy relay (`WebSocketProxyRelayHandler`) builds its codec the same way for an upstream's handshake response. The callback WebSocket client and the Java client's breakpoint WebSocket, which talk to MockServer itself, build theirs with Netty's defaults: 4,096 bytes a line and 8,192 bytes of headers. The relay's loopback `HttpClientCodec` reads only MockServer's own responses, so it is built with no line or header limit: `maxInitialLineLength` and `maxHeaderSize` limit what clients send, and a mocked response with headers over them must reach the client through a tunnel intact. A response that loopback codec still fails to decode is answered with `502` by `LoopbackHttp1ResponseErrorHandler` rather than relayed. The codec is never given the bytes of an `error()` with `responseBytes`, which need not be HTTP at all (see [Raw-bytes responses through a tunnel](#raw-bytes-responses-through-a-tunnel)).
 
 ##### Request line and header limits
 
@@ -966,7 +963,7 @@ from the code that waits for writability, and each protocol has its own:
 | HTTP/2 response | Netty's `DefaultHttp2RemoteFlowController` writes at most `max(bytesBeforeUnwritable(), 32 KB)` of DATA per pass, and nothing while the connection is unwritable | About 64 KB by Netty's design (not measured here); the rest of the body waits in the flow controller as slices of the original buffer |
 | WebSocket proxy passthrough | `FrameRelayHandler` turns the peer's `autoRead` off while the channel it writes to is unwritable | What one read of the peer brought in |
 | Streaming forward (`StreamingResponseRelayHandler`) | Reads the upstream again only once the decoded bytes not yet written have drained to min(64 KiB, `maxResponseBodySize` / 4); past `maxResponseBodySize` the stream is aborted | The watermark plus one upstream read, decoded |
-| CONNECT / SOCKS tunnel | The relay aggregates each response from the loopback server before writing it to the client, except a streamed one, which it relays piece by piece. In an HTTP/1.1 tunnel the loopback's reads are stopped above min(256 KiB, `maxRequestBodySize` / 2) unwritten until the backlog halves, and the stream is aborted above `maxRequestBodySize`. In an HTTP/2 tunnel each DATA frame is handed on as it is read and its bytes are returned to the loopback stream's flow-control window only once written to the client, so MockServer may send one window (65,535 bytes) more than the client has taken (see [HTTP/2 loopback: streamed responses](#http2-loopback-streamed-responses)) | The whole response, up to `maxRequestBodySize`; a streamed one, about 256 KiB plus one read in an HTTP/1.1 tunnel and one flow-control window per stream in an HTTP/2 tunnel |
+| CONNECT / SOCKS tunnel | The relay aggregates each response from the loopback server before writing it to the client, except a streamed one and raw bytes, which it relays piece by piece. In an HTTP/1.1 tunnel the loopback's reads are stopped above min(256 KiB, `maxRequestBodySize` / 2) unwritten until the backlog halves, and a streamed response (never raw bytes) is aborted above `maxRequestBodySize`. In an HTTP/2 tunnel each DATA frame is handed on as it is read and its bytes are returned to the loopback stream's flow-control window only once written to the client, so MockServer may send one window (65,535 bytes) more than the client has taken (see [HTTP/2 loopback: streamed responses](#http2-loopback-streamed-responses)) | The whole response, up to `maxRequestBodySize`; a streamed one or raw bytes, about 256 KiB plus one read in an HTTP/1.1 tunnel; a streamed one, one flow-control window per stream in an HTTP/2 tunnel |
 
 **Why the body, and why direct memory.** An HTTP/1.1 response body is a heap buffer (usually the
 expectation's own bytes). The NIO and epoll transports copy a heap buffer into a direct buffer when it is
@@ -1345,6 +1342,96 @@ Internal Channel"]
     DPR -->|writes responses to| CLIENT[Client Channel]
 ```
 
+### Raw-bytes responses through a tunnel
+
+**Outcome:** a client behind an HTTP/1.1 CONNECT or SOCKS tunnel is sent an `error()` action's `responseBytes`
+exactly as a client on a direct connection is: the same bytes, whether they are a whole HTTP response, part of one
+or not HTTP at all, then the close if the action drops the connection, or the idle close if it does not. The relay's
+loopback codec is never given those bytes. An HTTP/2 client is sent no bytes on either route (see
+[HTTP/2](#raw-bytes-and-http2)).
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant P as Client leg
+    participant L as Loopback (relay end)
+    participant A as Loopback (MockServer end)
+    A->>A: RawResponseBytesEvent(length)
+    A-->>L: announce(offset, length), in memory
+    A->>L: the raw bytes, on the socket
+    L->>L: LoopbackRawResponseSplitter takes them out, before the codec
+    L->>P: RawResponseBytes, through DownstreamProxyRelayHandler
+    P->>C: the bytes, written beneath HttpServerCodec
+    P->>P: RAW_RESPONSE_WRITTEN ends the exchange
+```
+
+| `responseBytes` | Direct connection | Through an HTTP/1.1 tunnel |
+|---|---|---|
+| A whole response | the bytes | the bytes (before, the relay decoded and re-encoded it) |
+| Part of a response, or not HTTP | the bytes | the bytes (before, nothing, or a `502`) |
+| Empty (the REST API cannot carry an empty array, so only an expectation created in the server's JVM has one) | nothing | nothing |
+| Then, with `dropConnection` | the connection is closed after the bytes | both legs are closed after the bytes |
+| Then, with the connection kept | closed as idle | closed as idle (before, part of a response, or no bytes, left the tunnel open for good) |
+
+**Why offsets.** Both kinds of response reach the relay's end of the loopback as bytes, and it cannot tell them apart
+by reading them: raw bytes may be a valid response, half of one, or two. So MockServer's end says where they are.
+`HttpErrorActionHandler` fires a `RawResponseBytesEvent` from `HttpServerCodec`'s context immediately before it
+writes the bytes from that context, in the same event loop task. On a relay's loopback
+`LoopbackExchangeEndedHandler` hears it and calls `LoopbackRawResponseSplitter.announce` with the count
+`LoopbackWrittenBytes` holds, the bytes written so far from the codec's position, and the length. The splitter, on
+the relay's end before `HttpClientCodec`, counts what it reads at the same position, hands the announced range on as
+`RawResponseBytes` and everything else to the codec.
+
+Rejected: relaying whatever the loopback codec is holding when `RAW_RESPONSE_WRITTEN` arrives. That event and the
+bytes travel by different routes and arrive in either order, a whole raw response would still be re-encoded, and
+bytes that are not HTTP would already have failed the codec.
+
+**What makes the offsets agree.**
+
+- The announcement is made before the bytes are written, and is a plain queue the splitter reads on every read, so
+  it is always there before the bytes can be: no task has to run first on the relay's event loop.
+- `LoopbackWrittenBytes` sits immediately before `HttpServerCodec`, which `HttpErrorActionHandler` writes from, so it
+  sees encoded and raw bytes in the order they are written. The handlers nearer the socket (`PacedLargeWriteHandler`,
+  TLS) write what they are given, in order, and nothing of their own. A handler added there that wrote bytes of its
+  own would move every later offset.
+- Both ends count plaintext: each sits above its leg's TLS handler, and starts counting when the HTTP codecs are
+  installed, after the `PROXIED_` preamble.
+
+**Relaying.** `RawResponseBytes` is not an `HttpObject`, so the loopback's decompressor, aggregator and
+`LoopbackHttp1ResponseErrorHandler` pass it by. `DownstreamProxyRelayHandler` writes its content from the context of
+the client leg's `HttpServerCodec`, as MockServer wrote it from its own, and fires
+`HttpExchangeEndedEvent.RAW_RESPONSE_WRITTEN` from that context as the part that ends the response is written. That
+is the client leg's only count of the exchange, so a pipelined exchange behind it is not ended early. A response of
+no bytes has no bytes to mark its place: the splitter is prompted by a task on its event loop, and ends the exchange
+once everything written before it has been read (`LoopbackRawResponseRelayTest`; over real sockets on every route,
+`RelayRawBytesErrorIntegrationTest`).
+
+**Bound.** The splitter holds nothing between reads. Raw bytes not yet written to the client count with streamed
+content toward the pause of the loopback's reads (above min(256 KiB, `maxRequestBodySize` / 2), until half as many),
+so a slow client holds about that much plus one read. They are never cut short at `maxRequestBodySize`, as a
+streamed response is: a direct client is sent all of them. A relay that has ended releases them unwritten.
+
+**The codec's request-method queue.** `HttpServerCodec` queues each request's method and takes it off when it
+encodes the response. Raw bytes do not pass the encoder, so the entry stays, on MockServer's end as on a direct
+connection; the tunnel's two codecs are passed by as well, so all three stay in step. Netty 4.2.18 bounds that queue
+at 128 (`maxPipelineDepth`) and closes the connection on the next request: the request after 128 raw-bytes
+responses on one connection, and, through a tunnel, any client that pipelines more than 128 requests in one go
+(the client leg's codec decodes them all from one read). Both server codecs are therefore built by
+`HttpServerCodecs.httpServerCodec` with the queue unbounded, as on MockServer 8.0.0 (Netty 4.2.17); an entry
+costs a few bits (`RelayRawBytesErrorIntegrationTest`). Still open: the next
+response is encoded as the answer to the earlier request, so after a `HEAD` answered with raw bytes the response to a
+`GET` is written without its body (plan item 240). A fix has to take the entry on all three codecs.
+
+#### Raw bytes and HTTP/2
+
+Raw bytes cannot be written to an HTTP/2 stream, and `HttpErrorActionHandler` writes none where there is no
+`HttpServerCodec`. On a direct HTTP/2 connection the request's stream is left open with no response; with
+`dropConnection` it is reset with `CANCEL`, because the drop closes the stream's own channel, and the connection and
+its other streams carry on. An HTTP/2 tunnel's loopback is HTTP/2 as well, so MockServer does the same there and the
+relay passes it on: the client's stream is left open, or reset with the same code
+(`RelayRawBytesErrorHttp2IntegrationTest`: direct, and through CONNECT, SOCKS4 and SOCKS5, each over TLS and in
+cleartext).
+
 ### Relay write failure
 
 When a write to the proxy client fails because the connection has failed, `DownstreamProxyRelayHandler` ends the relay at the
@@ -1703,6 +1790,7 @@ HTTP/2 loopback one sits after its `HttpToHttp2ConnectionHandler`, and listens t
 | HTTP/2 | the response fails to decode, or passes `maxRequestBodySize` (`InboundHttp2ToHttpAdapter` resets it with `ENHANCE_YOUR_CALM`) | its stream reset with `INTERNAL_ERROR` |
 | HTTP/1.1 (`LoopbackHttp1ResponseErrorHandler`) | a decoder fault (corrupt body, over `maxRequestBodySize`, or a response the codec marked as failed) before the response head was relayed | `502` with `Connection: close` |
 | HTTP/1.1 | a decoder fault after the head (a streamed response) | the connection closed without the terminating chunk |
+| HTTP/1.1 | none: an `error()` with `responseBytes` that are not a whole response, or not HTTP | those bytes, as a direct client gets them (they never reach the codec) |
 
 The HTTP/2 handler answers the client from the loopback connection's `onStreamClosed`, and resets the client
 stream `LoopbackHttp2StreamIdRemapper` pairs with the loopback stream, so the other streams on both connections
@@ -2355,6 +2443,12 @@ flowchart LR
 | `RelayConnectHandler` | `mockserver-netty/.../netty/proxy/relay/RelayConnectHandler.java` | Abstract relay establishment |
 | `UpstreamProxyRelayHandler` | `mockserver-netty/.../netty/proxy/relay/UpstreamProxyRelayHandler.java` | Client → MockServer relay |
 | `DownstreamProxyRelayHandler` | `mockserver-netty/.../netty/proxy/relay/DownstreamProxyRelayHandler.java` | MockServer → client relay |
+| `LoopbackExchangeEndedHandler` | `mockserver-netty/.../netty/proxy/relay/LoopbackExchangeEndedHandler.java` | On MockServer's end of an HTTP/1.1 loopback: tells the relay of an exchange ended without a response, and where each raw-bytes response starts and how long it is |
+| `LoopbackWrittenBytes` | `mockserver-netty/.../netty/proxy/relay/LoopbackWrittenBytes.java` | Counts the bytes MockServer's end of an HTTP/1.1 loopback writes from its codec's position |
+| `LoopbackRawResponseSplitter` | `mockserver-netty/.../netty/proxy/relay/LoopbackRawResponseSplitter.java` | On the relay's end, before its codec: takes announced raw bytes out of what the codec reads |
+| `RawResponseBytes` | `mockserver-netty/.../netty/proxy/relay/RawResponseBytes.java` | Raw bytes on their way from the loopback to the proxy client, written beneath its codec |
+| `HttpServerCodecs` | `mockserver-netty/.../netty/unification/HttpServerCodecs.java` | Builds the `HttpServerCodec` of a client's HTTP/1.1 connection, direct or tunnelled, with no pipeline-depth bound |
+| `RawResponseBytesEvent` | `mockserver-core/.../responsewriter/RawResponseBytesEvent.java` | User event announcing raw bytes, and their length, before `HttpErrorActionHandler` writes them |
 | `LoopbackHttp2ConnectionCloseHandler` | `mockserver-netty/.../netty/proxy/relay/LoopbackHttp2ConnectionCloseHandler.java` | Answers the client's HTTP/2 streams when the loopback connection closes or receives a GOAWAY |
 | `LoopbackHttp2ResponseStreamer` | `mockserver-netty/.../netty/proxy/relay/LoopbackHttp2ResponseStreamer.java` | Relays a response of undeclared length through the HTTP/2 loopback frame by frame, returning its bytes to the loopback's flow control as the client takes them |
 | `StreamedHttp2ResponsePart` | `mockserver-netty/.../netty/proxy/relay/StreamedHttp2ResponsePart.java` | One frame of a streamed response on its way from the loopback to the proxy client, with its stream id |

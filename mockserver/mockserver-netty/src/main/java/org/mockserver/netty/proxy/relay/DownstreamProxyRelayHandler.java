@@ -6,12 +6,14 @@ import io.netty.handler.codec.http.FullHttpMessage;
 import io.netty.handler.codec.http.HttpContent;
 import io.netty.handler.codec.http.HttpMessage;
 import io.netty.handler.codec.http.HttpObject;
+import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http2.Http2CodecUtil;
 import io.netty.handler.codec.http2.Http2Exception;
 import io.netty.util.ReferenceCountUtil;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.log.model.SensitiveLogValue;
 import org.mockserver.mappers.NettyMessageForLog;
+import org.mockserver.responsewriter.HttpExchangeEndedEvent;
 import org.mockserver.socket.ChannelReadPause;
 import org.mockserver.logging.MockServerLogger;
 import org.slf4j.event.Level;
@@ -78,16 +80,32 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
     }
 
     @Override
+    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+        if (msg instanceof RawResponseBytes) {
+            relay(ctx, msg);
+        } else {
+            super.channelRead(ctx, msg);
+        }
+    }
+
+    @Override
     public void channelRead0(final ChannelHandlerContext ctx, final HttpObject msg) {
+        relay(ctx, msg);
+    }
+
+    private void relay(final ChannelHandlerContext ctx, final Object msg) {
         if (relayEnded) {
             // the rest of the read that ended the relay is still decoded, and dropped here
             ReferenceCountUtil.release(msg);
             return;
         }
+        final boolean rawBytes = msg instanceof RawResponseBytes;
         // an aggregated message is already bounded by its aggregator
-        final int streamedBytes = msg instanceof HttpContent && !(msg instanceof FullHttpMessage) ? ((HttpContent) msg).content().readableBytes() : 0;
+        final int streamedBytes = rawBytes ? ((RawResponseBytes) msg).content().readableBytes()
+            : msg instanceof HttpContent && !(msg instanceof FullHttpMessage) ? ((HttpContent) msg).content().readableBytes() : 0;
         final long unwritten = streamedBytes > 0 && bounded ? unwrittenStreamedBytes.addAndGet(streamedBytes) : 0;
-        if (unwritten > maxUnwrittenStreamedBytes) {
+        // raw bytes are never cut short, as on a direct connection: the pause below is what bounds them
+        if (unwritten > maxUnwrittenStreamedBytes && !rawBytes) {
             ReferenceCountUtil.release(msg);
             if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
                 mockServerLogger.logEvent(
@@ -108,7 +126,7 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
         // read before the write, which releases the message
         final Integer clientStreamId = msg instanceof StreamedHttp2ResponsePart ? Integer.valueOf(((StreamedHttp2ResponsePart) msg).streamId())
             : msg instanceof HttpMessage ? ((HttpMessage) msg).headers().getInt(STREAM_ID.text()) : null;
-        upstreamChannel.writeAndFlush(msg).addListener((ChannelFutureListener) future -> {
+        (rawBytes ? writeBeneathCodec((RawResponseBytes) msg) : upstreamChannel.writeAndFlush(msg)).addListener((ChannelFutureListener) future -> {
             if (unwritten > 0 && unwrittenStreamedBytes.addAndGet(-streamedBytes) <= pauseReadsAboveBytes / 2 && readsPaused) {
                 readsPaused = false;
                 ChannelReadPause.resume(ctx.channel());
@@ -144,6 +162,23 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
     }
 
     /**
+     * Writes raw bytes from the context of the client leg's codec, as MockServer wrote them from its own, and ends the
+     * client leg's exchange as the last of them is written: no response passes that leg's codec to end it.
+     */
+    private ChannelFuture writeBeneathCodec(RawResponseBytes rawBytes) {
+        ChannelHandlerContext codec = upstreamChannel.pipeline().context(HttpServerCodec.class);
+        if (codec == null) {
+            // a closed channel's pipeline is empty: the write fails as any other to it does
+            return upstreamChannel.writeAndFlush(rawBytes.content());
+        }
+        ChannelFuture written = codec.writeAndFlush(rawBytes.content());
+        if (rawBytes.endsResponse()) {
+            written.addListener(future -> codec.fireUserEventTriggered(HttpExchangeEndedEvent.RAW_RESPONSE_WRITTEN));
+        }
+        return written;
+    }
+
+    /**
      * Closes both legs and stops reading the loopback. Closing the proxy client's channel is not enough: one that stays
      * open while refusing writes (a TLS engine closed with its {@code close_notify} queued behind unread bytes) never
      * fires the {@code channelInactive} that closes the loopback, which would keep reading and relaying into it.
@@ -170,7 +205,7 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
      * to mask; a message with no headers of its own is masked whole. The text is taken now: the message may already
      * be released, and the entry must not keep it.
      */
-    static LogEntry writeFailure(HttpObject msg, Throwable cause) {
+    static LogEntry writeFailure(Object msg, Throwable cause) {
         LogEntry logEntry = new LogEntry()
             .setLogLevel(Level.ERROR)
             .setMessageFormat("exception while returning writing:{}")

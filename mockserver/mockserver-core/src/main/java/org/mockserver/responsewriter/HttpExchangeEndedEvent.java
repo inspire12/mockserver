@@ -22,8 +22,9 @@ public final class HttpExchangeEndedEvent {
     public static final HttpExchangeEndedEvent INSTANCE = new HttpExchangeEndedEvent("HttpExchangeEndedEvent");
 
     /**
-     * The response was written as raw bytes, which an HTTP client reading the connection may take as a whole response.
-     * The CONNECT/SOCKS relay is such a client, and counts the response it relays, so it is not told of this one.
+     * The response was written as raw bytes, announced by a {@link RawResponseBytesEvent} before they were written.
+     * The CONNECT/SOCKS relay ends its client leg's exchange itself, when it has relayed those bytes, so it does not
+     * pass this one on.
      */
     public static final HttpExchangeEndedEvent RAW_RESPONSE_WRITTEN = new HttpExchangeEndedEvent("HttpExchangeEndedEvent(raw response written)");
 

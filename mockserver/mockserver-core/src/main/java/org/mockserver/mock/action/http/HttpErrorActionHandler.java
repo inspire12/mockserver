@@ -10,16 +10,19 @@ import io.netty.handler.codec.http2.Http2StreamChannel;
 import org.mockserver.model.HttpError;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.responsewriter.HttpExchangeEndedEvent;
+import org.mockserver.responsewriter.RawResponseBytesEvent;
+
+import java.util.concurrent.RejectedExecutionException;
 
 /**
  * Applies an {@link HttpError} action to the underlying Netty channel: writes raw response bytes,
  * resets the request stream (HTTP/2 RST_STREAM, written here; HTTP/3 RESET_STREAM, handled by the
  * HTTP/3 response writer seam in mockserver-netty), and/or drops the connection.
  * <p>
- * On HTTP/1.1 it fires {@link HttpExchangeEndedEvent#RAW_RESPONSE_WRITTEN} when raw bytes are written, as their
- * write completes and before any stream error or drop is applied, and {@link HttpExchangeEndedEvent#INSTANCE} when
- * nothing at all is written and the connection stays open. A stream error or drop with no raw bytes fires nothing:
- * the connection's state closes with it.
+ * On HTTP/1.1 it fires {@link RawResponseBytesEvent} immediately before it writes raw bytes, then
+ * {@link HttpExchangeEndedEvent#RAW_RESPONSE_WRITTEN} as their write completes and before any stream error or drop
+ * is applied, and {@link HttpExchangeEndedEvent#INSTANCE} when nothing at all is written and the connection stays
+ * open. A stream error or drop with no raw bytes fires nothing: the connection's state closes with it.
  *
  * @author jamesdbloom
  */
@@ -42,7 +45,22 @@ public class HttpErrorActionHandler {
                     httpCodecContext.fireUserEventTriggered(HttpExchangeEndedEvent.RAW_RESPONSE_WRITTEN);
                     resetStreamOrDropConnection(httpError, request, ctx);
                 });
-                httpCodecContext.writeAndFlush(Unpooled.wrappedBuffer(httpError.getResponseBytes()), written);
+                byte[] responseBytes = httpError.getResponseBytes();
+                // announced in the task that issues the write, so no other write can come between the two
+                Runnable announceAndWrite = () -> {
+                    httpCodecContext.fireUserEventTriggered(new RawResponseBytesEvent(responseBytes.length));
+                    httpCodecContext.writeAndFlush(Unpooled.wrappedBuffer(responseBytes), written);
+                };
+                if (httpCodecContext.executor().inEventLoop()) {
+                    announceAndWrite.run();
+                } else {
+                    try {
+                        httpCodecContext.executor().execute(announceAndWrite);
+                    } catch (RejectedExecutionException eventLoopShutDown) {
+                        // as a write issued off the event loop fails when its task is refused
+                        written.tryFailure(eventLoopShutDown);
+                    }
+                }
                 return;
             }
         }

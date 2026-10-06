@@ -18,6 +18,7 @@ import io.netty.handler.codec.http.HttpServerCodec;
 import org.junit.Test;
 import org.mockserver.model.HttpError;
 import org.mockserver.responsewriter.HttpExchangeEndedEvent;
+import org.mockserver.responsewriter.RawResponseBytesEvent;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -68,8 +69,47 @@ public class HttpErrorActionHandlerTest {
         assertThat(written.toString(StandardCharsets.UTF_8), is("some_bytes"));
         written.release();
         assertThat("the handlers after the codec never see a response, so they are told the exchange ended",
-            seenAfterCodec, contains((Object) HttpExchangeEndedEvent.RAW_RESPONSE_WRITTEN));
+            seenAfterCodec, hasItem((Object) HttpExchangeEndedEvent.RAW_RESPONSE_WRITTEN));
         assertThat(channel.isOpen(), is(true));
+        channel.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldAnnounceRawBytesAndTheirLengthBeforeWritingThem() {
+        // given - one record of what the handlers after the codec are told and what reaches the socket, in order
+        List<Object> seen = new ArrayList<>();
+        EmbeddedChannel channel = new EmbeddedChannel(new ChannelOutboundHandlerAdapter() {
+            @Override
+            public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
+                seen.add("written " + ((ByteBuf) msg).readableBytes() + " bytes");
+                ctx.write(msg, promise);
+            }
+        }, new HttpServerCodec(), recorder(seen));
+
+        // when
+        new HttpErrorActionHandler().handle(error().withResponseBytes("some_bytes".getBytes(StandardCharsets.UTF_8)), channel.pipeline().lastContext());
+
+        // then - a relay reading these bytes from a loopback must know of them before they can arrive
+        assertThat(seen.size(), is(3));
+        assertThat(seen.get(0), instanceOf(RawResponseBytesEvent.class));
+        assertThat(((RawResponseBytesEvent) seen.get(0)).length(), is("some_bytes".length()));
+        assertThat(seen.get(1), is((Object) "written 10 bytes"));
+        assertThat(seen.get(2), is((Object) HttpExchangeEndedEvent.RAW_RESPONSE_WRITTEN));
+        channel.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldAnnounceNothingWhenNoRawBytesAreWritten() {
+        // given
+        List<Object> seenAfterCodec = new ArrayList<>();
+        EmbeddedChannel channel = httpChannel(seenAfterCodec);
+
+        // when
+        new HttpErrorActionHandler().handle(error(), channel.pipeline().lastContext());
+        new HttpErrorActionHandler().handle(error().withDropConnection(true), channel.pipeline().lastContext());
+
+        // then
+        assertThat(seenAfterCodec, not(hasItem(instanceOf(RawResponseBytesEvent.class))));
         channel.finishAndReleaseAll();
     }
 
@@ -115,9 +155,9 @@ public class HttpErrorActionHandlerTest {
         new HttpErrorActionHandler().handle(error().withResponseBytes(new byte[128 * 1024]), channel.pipeline().lastContext());
 
         // then
-        assertThat("the exchange is still in progress while its bytes are being written", seenAfterCodec.isEmpty(), is(true));
+        assertThat("the exchange is still in progress while its bytes are being written", seenAfterCodec, not(hasItem(instanceOf(HttpExchangeEndedEvent.class))));
         heldWrites.release();
-        assertThat(seenAfterCodec, contains((Object) HttpExchangeEndedEvent.RAW_RESPONSE_WRITTEN));
+        assertThat(seenAfterCodec, hasItem((Object) HttpExchangeEndedEvent.RAW_RESPONSE_WRITTEN));
         channel.finishAndReleaseAll();
     }
 
@@ -147,6 +187,7 @@ public class HttpErrorActionHandlerTest {
         DefaultEventLoopGroup group = new DefaultEventLoopGroup(1);
         List<Object> seenAfterCodec = new CopyOnWriteArrayList<>();
         CompletableFuture<Boolean> endedWhenWriteCompleted = new CompletableFuture<>();
+        CompletableFuture<Boolean> announcedBeforeWrite = new CompletableFuture<>();
         CompletableFuture<Channel> serverChannel = new CompletableFuture<>();
         LocalAddress address = new LocalAddress("http-error-action-" + UUID.randomUUID());
         Channel server = null;
@@ -159,6 +200,7 @@ public class HttpErrorActionHandlerTest {
                         channel.pipeline().addLast(new ChannelOutboundHandlerAdapter() {
                             @Override
                             public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
+                                announcedBeforeWrite.complete(seenAfterCodec.size() == 1 && seenAfterCodec.get(0) instanceof RawResponseBytesEvent);
                                 // anything that runs as the write completes, such as reading the client's next request
                                 promise.addListener(future -> endedWhenWriteCompleted.complete(seenAfterCodec.contains(HttpExchangeEndedEvent.RAW_RESPONSE_WRITTEN)));
                                 ctx.write(msg, promise);
@@ -174,6 +216,7 @@ public class HttpErrorActionHandlerTest {
             new HttpErrorActionHandler().handle(error().withResponseBytes("some_bytes".getBytes(StandardCharsets.UTF_8)), connection.pipeline().lastContext());
 
             // then
+            assertThat("the raw bytes are announced before they are written", announcedBeforeWrite.get(10, TimeUnit.SECONDS), is(true));
             assertThat("nothing on the event loop runs between the write completing and the exchange ending",
                 endedWhenWriteCompleted.get(10, TimeUnit.SECONDS), is(true));
         } finally {

@@ -1,14 +1,20 @@
 package org.mockserver.netty.proxy.relay;
 
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.channel.local.LocalAddress;
+import io.netty.handler.codec.http.DefaultFullHttpResponse;
+import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpServerCodec;
+import io.netty.handler.codec.http.HttpVersion;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockserver.responsewriter.HttpExchangeEndedEvent;
+import org.mockserver.responsewriter.RawResponseBytesEvent;
 
 import java.net.SocketAddress;
 import java.util.ArrayList;
@@ -66,12 +72,46 @@ public class LoopbackExchangeEndedHandlerTest {
     }
 
     @Test
-    public void shouldNotTellTheClientLegOfARawBytesResponseWhichTheRelayReadsAsAResponse() {
+    public void shouldNotTellTheClientLegOfARawBytesResponseWhichTheRelayEndsWhenItHasRelayedItsBytes() {
         acceptedLoopback.pipeline().fireUserEventTriggered(HttpExchangeEndedEvent.RAW_RESPONSE_WRITTEN);
         proxyClient.runPendingTasks();
 
         assertThat(seenOnClientLegAfterCodec, is(empty()));
         assertThat(seenOnLoopbackAfterHandler, contains((Object) HttpExchangeEndedEvent.RAW_RESPONSE_WRITTEN));
+    }
+
+    @Test
+    public void shouldCountWhatIsWrittenFromImmediatelyBeforeTheLoopbacksCodec() {
+        EmbeddedChannel accepted = new EmbeddedChannel(new ChannelInboundHandlerAdapter(), new HttpServerCodec(), LoopbackExchangeEndedHandler.INSTANCE) {
+            @Override
+            protected SocketAddress remoteAddress0() {
+                return loopbackAddress;
+            }
+        };
+        ChannelHandlerContext codec = accepted.pipeline().context(HttpServerCodec.class);
+        ChannelHandlerContext counter = accepted.pipeline().context(LoopbackWrittenBytes.class);
+        List<String> names = accepted.pipeline().names();
+        assertThat("raw bytes are written from the codec's context, and must be counted in the order they are written", names.indexOf(counter.name()), is(names.indexOf(codec.name()) - 1));
+
+        codec.writeAndFlush(Unpooled.wrappedBuffer(new byte[7]));
+        accepted.writeOutbound(new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK));
+
+        long written = 0;
+        for (ByteBuf buffer; (buffer = accepted.readOutbound()) != null; buffer.release()) {
+            written += buffer.readableBytes();
+        }
+        assertThat(((LoopbackWrittenBytes) counter.handler()).count(), is(written));
+        accepted.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldNotAnnounceRawBytesOfAConnectionThatIsNoRelaysLoopback() {
+        EmbeddedChannel direct = acceptedFrom(new LocalAddress("client-" + UUID.randomUUID()));
+
+        direct.pipeline().fireUserEventTriggered(new RawResponseBytesEvent(7));
+
+        assertThat(seenOnLoopbackAfterHandler.size(), is(1));
+        direct.finishAndReleaseAll();
     }
 
     @Test

@@ -653,7 +653,7 @@ The `FORWARD` action type (`HttpForwardActionHandler`) has always adjusted the H
 
 | Type | Handler | Description |
 |------|---------|-------------|
-| `ERROR` | `HttpErrorActionHandler` | Writes raw bytes and/or drops the connection. On HTTP/1.1, when the connection stays open, it fires `HttpExchangeEndedEvent` so the exchange tracker and transport timer end the exchange the raw bytes (or the missing response) stood in for |
+| `ERROR` | `HttpErrorActionHandler` | Writes raw bytes and/or drops the connection. On HTTP/1.1, when the connection stays open, it fires `HttpExchangeEndedEvent` so the exchange tracker and transport timer end the exchange the raw bytes (or the missing response) stood in for. Before it writes raw bytes it fires `RawResponseBytesEvent` with their length, which lets a CONNECT/SOCKS relay hand them to its client as they are (see [netty-pipeline.md](netty-pipeline.md#raw-bytes-responses-through-a-tunnel)) |
 
 ### LLM Response Action
 

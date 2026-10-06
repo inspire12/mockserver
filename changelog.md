@@ -349,7 +349,7 @@ This release delivers a sustained performance and memory programme alongside dat
   was closed, `stream` when one HTTP/2 or HTTP/3 stream was reset). An HTTP/2 client that stops reading the
   connection altogether has the connection closed, as an HTTP/1.1 client does. The value applies to
   connections accepted after it is changed.
-- **Behaviour change: idle client connections are now closed after 5 minutes by default** (`inboundConnectionIdleTimeoutMillis`); set it to `0` to restore the previous behaviour. Only a connection that has sent and received nothing for the whole timeout with nothing in progress is closed: one waiting for a delayed or breakpoint-paused response, streaming a response (SSE, chunked, gRPC), carrying an open HTTP/2 stream, or used as a WebSocket or raw binary proxy is never closed by it. A TLS handshake counts as activity: the timeout starts again when the handshake completes, so a new connection has the whole timeout to send its first request. A CONNECT or SOCKS proxy tunnel is closed on the same terms, together with MockServer's internal connection for it: once nothing has passed through it for the whole timeout and no request sent through it is in progress. A tunnel with a request still being uploaded, a delayed or streamed response, or an open HTTP/2 stream is never closed by it. An `error()` action that sends nothing and keeps the connection open is not waiting for anything, so that connection counts as idle and is closed once the timeout passes, and so is a CONNECT or SOCKS proxy tunnel that carried such a request. Mainstream HTTP clients reconnect transparently; in rare cases a request sent at the exact moment of closure may need a retry.
+- **Behaviour change: idle client connections are now closed after 5 minutes by default** (`inboundConnectionIdleTimeoutMillis`); set it to `0` to restore the previous behaviour. Only a connection that has sent and received nothing for the whole timeout with nothing in progress is closed: one waiting for a delayed or breakpoint-paused response, streaming a response (SSE, chunked, gRPC), carrying an open HTTP/2 stream, or used as a WebSocket or raw binary proxy is never closed by it. A TLS handshake counts as activity: the timeout starts again when the handshake completes, so a new connection has the whole timeout to send its first request. A CONNECT or SOCKS proxy tunnel is closed on the same terms, together with MockServer's internal connection for it: once nothing has passed through it for the whole timeout and no request sent through it is in progress. A tunnel with a request still being uploaded, a delayed or streamed response, or an open HTTP/2 stream is never closed by it. An `error()` action that keeps the connection open is not waiting for anything once it has sent its bytes, or if it sends none, so that connection counts as idle and is closed once the timeout passes, and so is a CONNECT or SOCKS proxy tunnel that carried such a request, whatever the bytes were. Mainstream HTTP clients reconnect transparently; in rare cases a request sent at the exact moment of closure may need a retry.
 - **`mock_server_evicted_log_entries_total` now counts evicted log entries rather than eviction
   episodes.** It used to go up by one when the event log started evicting (and once more after each
   reset), so it read 1 however many entries were lost; it now goes up by the number of entries evicted.
@@ -639,6 +639,18 @@ This release delivers a sustained performance and memory programme alongside dat
   types it is built from (`HarEntry`, `HarRequest`, `HarResponse` and the rest) are exported from
   `mockserver-client`. The package's tests now compare the client, and every builder reached through it, with
   its typings member by member, so a method present at run time and missing from the typings now fails them.
+- **A client behind MockServer's CONNECT or SOCKS proxy is now sent an `error()` action's raw bytes
+  (`responseBytes`) exactly as a client connected directly is.** The proxy tunnel read whatever MockServer
+  wrote as an HTTP response before passing it on, which defeats bytes that are meant to be a broken reply. A
+  truncated response (headers promising 100 bytes of body, then seven) never reached the client. Bytes that
+  are not HTTP at all did not arrive as sent. A well-formed response was decoded and written out again, so
+  its exact bytes changed: a header sent as `X-Mixed-CASE:   spaced  ` arrived as `X-Mixed-CASE: spaced`.
+  The bytes now pass through untouched, whatever they are, over HTTP/1.1 through a CONNECT, SOCKS4 or SOCKS5
+  tunnel, with or without TLS. With `dropConnection` the tunnel is then closed, as a direct connection is.
+  Over HTTP/2 nothing changes: raw bytes cannot be sent on an HTTP/2 stream, so a matching request is sent
+  none, directly or through a tunnel, and its stream is left open, or reset on its own when the action also
+  has `dropConnection`.
+
 - **A proxied WebSocket now connects when the upstream's handshake reply has more than 8 KB of headers.** MockServer
   read the upstream's reply to a proxied WebSocket handshake up to 8 KB of headers whatever `maxHeaderSize` was set
   to. With a larger reply (a large `Set-Cookie`, for example) the client was answered `502` with a reason that did

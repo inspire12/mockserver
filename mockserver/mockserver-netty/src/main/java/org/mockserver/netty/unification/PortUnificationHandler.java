@@ -4,7 +4,6 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.*;
 import io.netty.handler.codec.ReplayingDecoder;
-import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http2.*;
 import io.netty.handler.codec.socksx.v4.Socks4ServerDecoder;
 import io.netty.handler.codec.socksx.v4.Socks4ServerEncoder;
@@ -662,11 +661,7 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
             addLastIfNotPresent(pipeline, new PacedLargeWriteHandler());
             HttpChunkLineLimiter chunkLineLimiter = new HttpChunkLineLimiter(mockServerLogger);
             addLastIfNotPresent(pipeline, chunkLineLimiter.beforeCodec());
-            addLastIfNotPresent(pipeline, new HttpServerCodec(
-                configuration.maxInitialLineLength(),
-                configuration.maxHeaderSize(),
-                configuration.maxChunkSize()
-            ));
+            addLastIfNotPresent(pipeline, HttpServerCodecs.httpServerCodec(configuration));
             addLastIfNotPresent(pipeline, chunkLineLimiter.afterCodec());
             if (InboundConnectionActivity.isTracked(ctx.channel())) {
                 addLastIfNotPresent(pipeline, HttpExchangeTracker.INSTANCE);
