@@ -85,6 +85,22 @@ public class HttpClientInitializer extends ChannelInitializer<SocketChannel> {
         protocolFuture.whenComplete(action);
     }
 
+    /**
+     * The upstream proxy a connection is tunnelled through (HTTP {@code CONNECT} for a secure connection when
+     * {@code forwardHttpsProxy} is set, otherwise SOCKS5 when {@code forwardSocksProxy} is set), or null. The
+     * tunnel's handler sends the proxy the destination it was connected to, so the connection must reach it with
+     * the destination's name unresolved for the proxy to resolve it.
+     */
+    static ProxyConfiguration tunnelProxy(Map<ProxyConfiguration.Type, ProxyConfiguration> proxyConfigurations, boolean secure) {
+        if (proxyConfigurations == null) {
+            return null;
+        }
+        if (secure && proxyConfigurations.containsKey(ProxyConfiguration.Type.HTTPS)) {
+            return proxyConfigurations.get(ProxyConfiguration.Type.HTTPS);
+        }
+        return proxyConfigurations.get(ProxyConfiguration.Type.SOCKS5);
+    }
+
     @Override
     public void initChannel(SocketChannel channel) {
         try {
@@ -118,18 +134,15 @@ public class HttpClientInitializer extends ChannelInitializer<SocketChannel> {
         ChannelPipeline pipeline = channel.pipeline();
         boolean secure = channel.attr(SECURE) != null && channel.attr(SECURE).get() != null && channel.attr(SECURE).get();
 
-        if (proxyConfigurations != null) {
-            if (secure && proxyConfigurations.containsKey(ProxyConfiguration.Type.HTTPS)) {
-                ProxyConfiguration proxyConfiguration = proxyConfigurations.get(ProxyConfiguration.Type.HTTPS);
-                boolean credentials = isNotBlank(proxyConfiguration.getUsername()) && isNotBlank(proxyConfiguration.getPassword());
-                pipeline.addLast(new HttpConnectProxyHandler(proxyConfiguration.getProxyAddress(), credentials ? proxyConfiguration.getUsername() : null, credentials ? proxyConfiguration.getPassword() : null, mockServerLogger, maxHeaderSize()));
-            } else if (proxyConfigurations.containsKey(ProxyConfiguration.Type.SOCKS5)) {
-                ProxyConfiguration proxyConfiguration = proxyConfigurations.get(ProxyConfiguration.Type.SOCKS5);
-                if (isNotBlank(proxyConfiguration.getUsername()) && isNotBlank(proxyConfiguration.getPassword())) {
-                    pipeline.addLast(new Socks5ProxyHandler(proxyConfiguration.getProxyAddress(), proxyConfiguration.getUsername(), proxyConfiguration.getPassword()));
-                } else {
-                    pipeline.addLast(new Socks5ProxyHandler(proxyConfiguration.getProxyAddress()));
-                }
+        ProxyConfiguration tunnelProxy = tunnelProxy(proxyConfigurations, secure);
+        if (tunnelProxy != null) {
+            if (tunnelProxy.getType() == ProxyConfiguration.Type.HTTPS) {
+                boolean credentials = isNotBlank(tunnelProxy.getUsername()) && isNotBlank(tunnelProxy.getPassword());
+                pipeline.addLast(new HttpConnectProxyHandler(tunnelProxy.getProxyAddress(), credentials ? tunnelProxy.getUsername() : null, credentials ? tunnelProxy.getPassword() : null, mockServerLogger, maxHeaderSize()));
+            } else if (isNotBlank(tunnelProxy.getUsername()) && isNotBlank(tunnelProxy.getPassword())) {
+                pipeline.addLast(new Socks5ProxyHandler(tunnelProxy.getProxyAddress(), tunnelProxy.getUsername(), tunnelProxy.getPassword()));
+            } else {
+                pipeline.addLast(new Socks5ProxyHandler(tunnelProxy.getProxyAddress()));
             }
         }
         pipeline.addLast(httpClientConnectionHandler);

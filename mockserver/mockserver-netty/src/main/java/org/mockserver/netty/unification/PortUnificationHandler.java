@@ -53,6 +53,7 @@ import org.mockserver.netty.proxy.socks.Socks5ProxyHandler;
 import org.mockserver.netty.proxy.socks.SocksDetector;
 import org.mockserver.netty.websocketregistry.CallbackWebSocketServerHandler;
 import org.mockserver.socket.ChannelReadPause;
+import org.mockserver.socket.SocketAddresses;
 import org.mockserver.socket.tls.NettySslContextFactory;
 import org.mockserver.socket.tls.SniHandler;
 import org.slf4j.event.Level;
@@ -742,12 +743,12 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
             int port = hostParts.length > 1 ? Integer.parseInt(hostParts[1]) : 443;
             enableSslUpstreamAndDownstream(ctx.channel());
             setProxyingRequest(ctx, Boolean.TRUE);
-            setRemoteAddress(ctx, new InetSocketAddress(hostParts[0], port));
+            setRemoteAddress(ctx, SocketAddresses.unresolvedUnlessIpLiteral(hostParts[0], port));
         } else if (message.startsWith(PROXIED)) {
             String[] hostParts = HttpRequest.splitHostPort(StringUtils.substringAfter(message, PROXIED));
             int port = hostParts.length > 1 ? Integer.parseInt(hostParts[1]) : 80;
             setProxyingRequest(ctx, Boolean.TRUE);
-            setRemoteAddress(ctx, new InetSocketAddress(hostParts[0], port));
+            setRemoteAddress(ctx, SocketAddresses.unresolvedUnlessIpLiteral(hostParts[0], port));
         }
         ctx.writeAndFlush(Unpooled.copiedBuffer((PROXIED_RESPONSE + message).getBytes(StandardCharsets.UTF_8)));
     }

@@ -1289,6 +1289,16 @@ The `noProxyHosts` configuration property (comma-separated list) controls which 
 
 Patterns support exact hostnames (`example.com`), wildcard prefixes (`*.internal.corp`), and IP addresses (`192.168.1.1`). Matching is case-insensitive. The shared utility `NoProxyHostsUtils.isHostOnNoProxyList()` is used by both `HttpActionHandler` and `NettyHttpClient`.
 
+In `NettyHttpClient` the list bypasses only `forwardHttpProxy`, for clear requests. A destination named by host name matches an entry by name; it matches an IP-address entry by address only when the caller passed it already resolved.
+
+### Destination Name Resolution Through an Upstream Proxy
+
+When a connection is tunnelled through an upstream proxy (`forwardHttpsProxy` for a secure request, otherwise `forwardSocksProxy`; `HttpClientInitializer.tunnelProxy` decides, and adds the matching `HttpConnectProxyHandler` or `Socks5ProxyHandler`), `NettyHttpClient` keeps the destination unresolved (`SocketAddresses.unresolvedUnlessIpLiteral`) and connects with Netty's `NoopAddressResolverGroup`, so the tunnel handler sends the proxy the name and the proxy resolves it. Without the no-op resolver Netty's default resolver looks an unresolved address up on the event loop before the tunnel handler sees it, which fails where only the proxy can resolve external names. An IP-literal destination is sent as an address. The CONNECT tunnel's destination (`PortUnificationHandler`, `PROXIED_` message) and the circuit breaker's key are also built without a lookup. With no tunnel proxy, the destination is resolved where MockServer runs, as before.
+
+`forwardProxyBlockPrivateNetworks` is checked by four forward actions (`HttpForwardActionHandler`, `HttpForwardTemplateActionHandler`, `HttpForwardWithFallbackActionHandler`, `HttpForwardValidateActionHandler`) on the target name before the request reaches `NettyHttpClient`, by a lookup where MockServer runs, so deferring resolution does not bypass it for them: a name that does not resolve locally is refused, and a name that does is vetted by its local answer, although the proxy resolves it again to connect. `NettyHttpClient` itself makes no check, so routes that do not check before it (override-forwarded-request, the class and object forward callbacks, the unmatched-proxy route and the per-message binary forward) are not checked with or without an upstream proxy.
+
+Since the CONNECT tunnel's destination is no longer resolved, an IP-address `noProxyHosts` entry no longer matches a clear request tunnelled to MockServer by host name, so that request now goes through `forwardHttpProxy`; a host-name entry still matches.
+
 ### Validation Proxy (OpenAPI Contract Validation on Forwarded Traffic)
 
 When `validateProxyOpenAPISpec` is set (to an OpenAPI spec URL, file path, or inline JSON/YAML), MockServer validates every forwarded/proxied request and its upstream response against the spec. This applies to both the unmatched proxy forward path and the ProxyPass reverse-proxy path. Request violations are logged as `OPENAPI_REQUEST_VALIDATION_FAILED` and response violations as `OPENAPI_RESPONSE_VALIDATION_FAILED` log entries.

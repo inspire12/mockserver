@@ -715,6 +715,17 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **Requests proxied through `forwardHttpsProxy` or `forwardSocksProxy` now leave the destination's host name to the
+  upstream proxy.** MockServer looked the name up itself before opening the tunnel, so where only the upstream proxy
+  can resolve external names (a common corporate set-up) the request failed with an unknown-host error and never
+  reached the proxy, and a slow lookup delayed every proxied request. The name is now sent to the proxy in the
+  `CONNECT` request or the SOCKS5 request, and the proxy resolves it; a destination given as an IP address is still
+  sent as that address. This also applies to binary forwarding through a SOCKS proxy and to requests sent through a
+  `CONNECT` tunnel to MockServer. With `forwardProxyBlockPrivateNetworks` on, a forward action's target (a forward,
+  forward template, forward with fallback or validating forward) is still checked by looking its name up where
+  MockServer runs, and a name MockServer cannot resolve is refused. One side effect: an IP-address entry in
+  `noProxyHosts` no longer matches a plain request that a client tunnels to MockServer by host name, so with
+  `forwardHttpProxy` set that request now goes through the proxy; list the host name instead.
 - **A callback whose WebSocket could not be registered is no longer kept in memory.** When `respond(callback)` or
   `forward(callback)` failed to register its WebSocket (for example because MockServer could not be reached), the
   Java client threw a `ClientException` but left the callback in its in-JVM callback store. Each such entry kept the

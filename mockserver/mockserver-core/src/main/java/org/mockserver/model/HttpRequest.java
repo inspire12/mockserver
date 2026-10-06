@@ -2,6 +2,7 @@ package org.mockserver.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import org.mockserver.matchers.ParsedBodyCache;
+import org.mockserver.socket.SocketAddresses;
 
 import java.net.InetSocketAddress;
 import java.nio.charset.Charset;
@@ -1537,16 +1538,32 @@ public class HttpRequest extends RequestDefinition implements HttpMessage<HttpRe
     }
 
     public InetSocketAddress socketAddressFromHostHeader() {
+        return socketAddressFromHostHeader(true);
+    }
+
+    /**
+     * As {@link #socketAddressFromHostHeader()}, but the host name is not looked up: the address is unresolved
+     * unless the host is an IP literal.
+     */
+    public InetSocketAddress unresolvedSocketAddressFromHostHeader() {
+        return socketAddressFromHostHeader(false);
+    }
+
+    private InetSocketAddress socketAddressFromHostHeader(boolean resolve) {
         if (socketAddress != null && socketAddress.getHost() != null) {
             boolean isSsl = socketAddress.getScheme() != null && socketAddress.getScheme().equals(SocketAddress.Scheme.HTTPS);
-            return new InetSocketAddress(socketAddress.getHost(), socketAddress.getPort() != null ? socketAddress.getPort() : isSsl ? 443 : 80);
+            return socketAddress(socketAddress.getHost(), socketAddress.getPort() != null ? socketAddress.getPort() : isSsl ? 443 : 80, resolve);
         } else if (isNotBlank(getFirstHeader(HOST.toString()))) {
             boolean isSsl = isSecure() != null && isSecure();
             String[] hostHeaderParts = splitHostPort(getFirstHeader(HOST.toString()));
-            return new InetSocketAddress(hostHeaderParts[0], hostHeaderParts.length > 1 ? Integer.parseInt(hostHeaderParts[1]) : isSsl ? 443 : 80);
+            return socketAddress(hostHeaderParts[0], hostHeaderParts.length > 1 ? Integer.parseInt(hostHeaderParts[1]) : isSsl ? 443 : 80, resolve);
         } else {
             throw new IllegalArgumentException("Host header must be provided to determine remote socket address, the request \"" + getMethod("") + " " + getPath() + "\" does not include the \"Host\" header");
         }
+    }
+
+    private static InetSocketAddress socketAddress(String host, int port, boolean resolve) {
+        return resolve ? new InetSocketAddress(host, port) : SocketAddresses.unresolvedUnlessIpLiteral(host, port);
     }
 
     public HttpRequest shallowClone() {

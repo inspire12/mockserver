@@ -166,7 +166,8 @@ public abstract class HttpForwardAction {
 
     private static InetSocketAddress safeSocketAddressFromHostHeader(HttpRequest request) {
         try {
-            return request.socketAddressFromHostHeader();
+            // the key is the host name and port: no lookup
+            return request.unresolvedSocketAddressFromHostHeader();
         } catch (Exception ignore) {
             // No usable Host header — circuit breaker simply does not key on this request.
             return null;

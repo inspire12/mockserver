@@ -16,6 +16,7 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.WriteBufferWaterMark;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.timeout.ReadTimeoutHandler;
+import io.netty.resolver.NoopAddressResolverGroup;
 import io.netty.util.AttributeKey;
 import io.netty.util.NetUtil;
 import org.apache.commons.lang3.StringUtils;
@@ -31,6 +32,7 @@ import org.mockserver.proxyconfiguration.NoProxyHostsUtils;
 import org.mockserver.proxyconfiguration.ProxyConfiguration;
 import org.mockserver.socket.NettyAllocator;
 import org.mockserver.socket.NettyTransport;
+import org.mockserver.socket.SocketAddresses;
 import org.mockserver.socket.tls.NettySslContextFactory;
 import org.slf4j.event.Level;
 
@@ -142,7 +144,7 @@ public class NettyHttpClient {
     }
 
     public CompletableFuture<HttpResponse> sendRequest(final HttpRequest httpRequest) throws SocketConnectionException {
-        return sendRequest(httpRequest, httpRequest.socketAddressFromHostHeader());
+        return sendRequest(httpRequest, HttpClientInitializer.tunnelProxy(proxyConfigurations, Boolean.TRUE.equals(httpRequest.isSecure())) != null ? httpRequest.unresolvedSocketAddressFromHostHeader() : httpRequest.socketAddressFromHostHeader());
     }
 
     /**
@@ -191,6 +193,8 @@ public class NettyHttpClient {
                 ProxyConfiguration proxyConfiguration = proxyConfigurations.get(ProxyConfiguration.Type.HTTP);
                 remoteAddress = proxyConfiguration.getProxyAddress();
                 proxyConfiguration.addProxyAuthenticationHeader(httpRequest);
+            } else if (HttpClientInitializer.tunnelProxy(proxyConfigurations, Boolean.TRUE.equals(httpRequest.isSecure())) != null) {
+                remoteAddress = remoteAddress == null ? httpRequest.unresolvedSocketAddressFromHostHeader() : unresolvedUnlessIpLiteral(remoteAddress);
             } else if (remoteAddress == null) {
                 remoteAddress = httpRequest.socketAddressFromHostHeader();
             }
@@ -377,6 +381,7 @@ public class NettyHttpClient {
             .attr(FIRST_BYTE_MILLIS, firstByteMillis)
             .handler(clientInitializer);
         applyForwardSocketKeepAlive(bootstrap);
+        resolveAtTunnelProxy(bootstrap, secure);
         if (disableStreaming) {
             bootstrap.attr(DISABLE_RESPONSE_STREAMING, true);
         }
@@ -579,6 +584,8 @@ public class NettyHttpClient {
                 remoteAddress = proxyConfigurations.get(ProxyConfiguration.Type.HTTP).getProxyAddress();
             } else if (remoteAddress == null) {
                 throw new IllegalArgumentException("Remote address cannot be null");
+            } else if (HttpClientInitializer.tunnelProxy(proxyConfigurations, isSecure) != null) {
+                remoteAddress = unresolvedUnlessIpLiteral(remoteAddress);
             }
 
             final CompletableFuture<BinaryMessage> binaryResponseFuture = new CompletableFuture<>();
@@ -597,6 +604,7 @@ public class NettyHttpClient {
                 .attr(ERROR_IF_CHANNEL_CLOSED_WITHOUT_RESPONSE, !configuration.forwardBinaryRequestsWithoutWaitingForResponse())
                 .handler(new HttpClientInitializer(proxyConfigurations, mockServerLogger, forwardProxyClient, nettySslContextFactory, configuration.maxHeaderSize()));
             applyForwardSocketKeepAlive(binaryBootstrap);
+            resolveAtTunnelProxy(binaryBootstrap, isSecure);
             binaryBootstrap
                 .connect(remoteAddress)
                 .addListener((ChannelFutureListener) future -> {
@@ -786,6 +794,25 @@ public class NettyHttpClient {
         return false;
     }
 
+    /**
+     * A connection tunnelled through an upstream proxy leaves the destination's name to the proxy: Netty's default
+     * resolver would look it up here, before the tunnel's handler sees it, and fail where only the proxy can
+     * resolve it.
+     */
+    private void resolveAtTunnelProxy(Bootstrap bootstrap, boolean secure) {
+        if (HttpClientInitializer.tunnelProxy(proxyConfigurations, secure) != null) {
+            bootstrap.resolver(NoopAddressResolverGroup.INSTANCE);
+        }
+    }
+
+    /**
+     * The destination as a tunnel proxy is sent it: by name, unresolved, unless it is an IP literal, which is sent
+     * as an address.
+     */
+    private static InetSocketAddress unresolvedUnlessIpLiteral(InetSocketAddress address) {
+        return SocketAddresses.unresolvedUnlessIpLiteral(address.getHostString(), address.getPort());
+    }
+
     private boolean isHostNotOnNoProxyHostList(InetSocketAddress remoteAddress) {
         if (remoteAddress == null
             || StringUtils.isBlank(configuration.noProxyHosts())) {
@@ -794,11 +821,9 @@ public class NettyHttpClient {
         if (NoProxyHostsUtils.isHostOnNoProxyList(remoteAddress.getHostString(), configuration.noProxyHosts())) {
             return false;
         }
-        // Forward targets are now unresolved (DNS happens on the Netty event loop, not the calling
-        // thread), so getAddress() is null for them and this IP-literal branch is skipped: only
-        // hostname-form no_proxy entries match a hostname target; an IP-literal no_proxy entry will
-        // not match a hostname target by its resolved IP. This branch still applies when the address
-        // arrived already resolved (e.g. a literal-IP target).
+        // This check never looks a host name up, so an IP-literal entry matches a destination named by host name
+        // only when the caller passed it resolved (sendRequest(HttpRequest) resolves the Host header when no tunnel
+        // proxy applies; forward actions pass it unresolved). An IP-literal destination matches by its text above.
         if (remoteAddress.getAddress() != null) {
             String ipAddress = remoteAddress.getAddress().getHostAddress();
             return !NoProxyHostsUtils.isHostOnNoProxyList(ipAddress, configuration.noProxyHosts());
