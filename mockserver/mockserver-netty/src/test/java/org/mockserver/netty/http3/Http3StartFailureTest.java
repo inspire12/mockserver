@@ -7,40 +7,38 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.integration.ClientAndServer;
-import org.mockserver.lifecycle.LeftBehind;
+import org.mockserver.lifecycle.Ipv4UdpPortProbe;
+import org.mockserver.lifecycle.RefusedStart.RecordingMockServer;
+import org.mockserver.lifecycle.RefusedStart.Started;
 import org.mockserver.netty.MockServer;
-import org.mockserver.stop.Stoppable;
 import org.mockserver.testing.socket.TestPortFactory;
 
 import java.io.File;
 import java.net.BindException;
-import java.net.ConnectException;
 import java.net.InetSocketAddress;
-import java.net.Socket;
 import java.net.StandardProtocolFamily;
 import java.nio.channels.DatagramChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Supplier;
 
 import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.endsWith;
+import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.greaterThan;
+import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.sameInstance;
-import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.startsWith;
-import static org.junit.Assert.assertThrows;
 import static org.mockserver.configuration.Configuration.configuration;
+import static org.mockserver.lifecycle.RefusedStart.assertStopped;
+import static org.mockserver.lifecycle.RefusedStart.refusedStart;
 import static org.mockserver.netty.http3.Http3TestServer.startWithHttp3;
 
 /**
@@ -48,8 +46,6 @@ import static org.mockserver.netty.http3.Http3TestServer.startWithHttp3;
  * for a TCP port it cannot bind, and leave nothing running: the caller gets no reference it could stop.
  */
 public class Http3StartFailureTest {
-
-    private static final long DEADLINE_SECONDS = 30;
 
     @Rule
     public TemporaryFolder temporaryFolder = new TemporaryFolder();
@@ -149,9 +145,28 @@ public class Http3StartFailureTest {
     }
 
     @Test
-    public void shouldStopAndThenRestoreTheInterruptWhenTheHttp3StartIsInterrupted() throws Exception {
+    public void shouldStopAndThenRestoreTheInterruptWhenTheHttp3BindIsInterrupted() throws Exception {
         Started started = new Started();
-        Configuration http3StartThrows = new Http3StartThrows(new InterruptedException("interrupted while binding"));
+        started.interruptOnceTcpIsBound = true;
+        AtomicBoolean interruptedAtTheThrow = new AtomicBoolean();
+
+        Throwable refused = refusedStart(
+            () -> startWithHttp3(udpPort -> new RecordingMockServer(started, configuration().http3Port(udpPort))),
+            () -> {
+                interruptedAtTheThrow.set(Thread.interrupted());
+                assertStopped(started);
+            });
+
+        assertThat(refused, instanceOf(Http3StartupException.class));
+        assertThat(refused.getCause(), instanceOf(InterruptedException.class));
+        assertThat("the caller must still see the interrupt", interruptedAtTheThrow.get(), is(true));
+    }
+
+    // an InterruptedException that the starting thread's own wait did not throw says nothing about that thread
+    @Test
+    public void shouldNotInterruptTheCallerForAnInterruptedExceptionThatWasNotItsOwn() throws Exception {
+        Started started = new Started();
+        Configuration http3StartThrows = new Http3StartThrows(new InterruptedException("on another thread"));
         AtomicBoolean interruptedAtTheThrow = new AtomicBoolean();
 
         Throwable refused = refusedStart(
@@ -163,7 +178,59 @@ public class Http3StartFailureTest {
 
         assertThat(refused, instanceOf(Http3StartupException.class));
         assertThat(refused.getCause(), instanceOf(InterruptedException.class));
+        assertThat("the starting thread was never interrupted", interruptedAtTheThrow.get(), is(false));
+    }
+
+    // stop() does not wait on an interrupted thread, and a JUnit timeout interrupts the thread that is starting a server
+    @Test
+    public void shouldStopAndKeepTheInterruptWhenTheHttp3StartFailsOnAnInterruptedThread() throws Exception {
+        Started started = new Started();
+        LinkageError error = new LinkageError("the QUIC codec could not be linked");
+        Configuration http3StartThrows = new Http3StartThrows(error).interruptingFirst();
+        AtomicBoolean interruptedAtTheThrow = new AtomicBoolean();
+
+        Throwable refused = refusedStart(
+            () -> startWithHttp3(udpPort -> new RecordingMockServer(started, http3StartThrows.http3Port(udpPort))),
+            () -> {
+                interruptedAtTheThrow.set(Thread.interrupted());
+                assertStopped(started);
+            });
+
+        assertThat(refused, instanceOf(Http3StartupException.class));
+        assertThat(refused.getCause(), is(sameInstance(error)));
         assertThat("the caller must still see the interrupt", interruptedAtTheThrow.get(), is(true));
+    }
+
+    // the starter is only offered the held port, so it starts again on it until it gives up
+    @Test
+    public void shouldReleaseTheDnsPortItHadBoundWhenHttp3IsRefused() throws Exception {
+        try (DatagramChannel otherApplication = heldUdpPort()) {
+            int heldPort = port(otherApplication);
+            List<Throwable> refusals = new CopyOnWriteArrayList<>();
+            List<String> wrongAtTheThrow = new CopyOnWriteArrayList<>();
+
+            Throwable gaveUp = refusedStart(() -> startWithHttp3(() -> heldPort, udpPort -> {
+                Started started = new Started();
+                try {
+                    return new RecordingMockServer(started, new RecordsTheDnsPort(started).dnsEnabled(true).dnsPort(0).http3Port(udpPort));
+                } catch (RuntimeException refusal) {
+                    refusals.add(refusal);
+                    try {
+                        assertStopped(started);
+                        assertThat("the DNS port was bound before HTTP/3 was started", started.dnsPort, greaterThan(0));
+                        assertThat("the refused server must hold no socket on its DNS port " + started.dnsPort, Ipv4UdpPortProbe.dualStackBindSucceeds(started.dnsPort), is(true));
+                    } catch (AssertionError wrong) {
+                        wrongAtTheThrow.add(wrong.getMessage());
+                    }
+                    throw refusal;
+                }
+            }, MockServer::getHttp3Port, MockServer::stop));
+
+            assertThat(gaveUp.getMessage(), containsString("another socket held each of the UDP ports"));
+            assertThat(refusals, hasSize(greaterThan(0)));
+            assertThat(refusals, everyItem(instanceOf(Http3StartupException.class)));
+            assertThat(wrongAtTheThrow, is(empty()));
+        }
     }
 
     @Test
@@ -206,105 +273,45 @@ public class Http3StartFailureTest {
         }
     }
 
-    private static Throwable refusedStart(Supplier<? extends Stoppable> start) throws InterruptedException {
-        return refusedStart(start, () -> {
-        });
-    }
-
-    /**
-     * Runs {@code start} in a thread group of its own, so the threads that server started can be told from
-     * those of every other test in the JVM, and stops the server if it wrongly started.
-     *
-     * @param atTheThrow checks made on the starting thread as soon as {@code start} has thrown, which is when
-     *                   the caller of a refused start may rely on everything having been stopped
-     * @return what {@code start} threw, once no thread it started is left alive
-     */
-    private static Throwable refusedStart(Supplier<? extends Stoppable> start, AtTheThrow atTheThrow) throws InterruptedException {
-        ThreadGroup serverThreads = new ThreadGroup("refused-start");
-        AtomicReference<Throwable> thrown = new AtomicReference<>();
-        AtomicReference<Throwable> wrongAtTheThrow = new AtomicReference<>();
-        Thread starter = new Thread(serverThreads, () -> {
-            try {
-                start.get().stop();
-            } catch (Throwable throwable) {
-                thrown.set(throwable);
-                try {
-                    atTheThrow.check();
-                } catch (Throwable wrong) {
-                    wrongAtTheThrow.set(wrong);
-                }
-            }
-        }, "refused-start");
-        starter.start();
-        starter.join(TimeUnit.SECONDS.toMillis(DEADLINE_SECONDS));
-
-        assertThat("the start neither returned nor threw within " + DEADLINE_SECONDS + "s", starter.isAlive(), is(false));
-        assertThat("the server started without HTTP/3 on its http3Port", thrown.get() != null, is(true));
-        if (wrongAtTheThrow.get() != null) {
-            throw new AssertionError("when the start threw " + thrown.get() + ": " + wrongAtTheThrow.get().getMessage(), wrongAtTheThrow.get());
-        }
-        assertThat("threads the refused server left running", LeftBehind.threadsStillAlive(serverThreads), is(empty()));
-        return thrown.get();
-    }
-
-    @FunctionalInterface
-    private interface AtTheThrow {
-        void check() throws Exception;
-    }
-
-    private static void assertStopped(Started started) {
-        assertThat("the TCP port was bound before HTTP/3 was started", started.tcpPorts, contains(greaterThan(0)));
-        assertThat("the stop must be complete when the constructor throws, not merely begun", started.server.stopAsync().isDone(), is(true));
-        assertThrows("the TCP listener on port " + started.tcpPorts.get(0) + " must be closed", ConnectException.class, () -> connect(started.tcpPorts.get(0)));
-    }
-
-    private static void connect(int tcpPort) throws Exception {
-        try (Socket socket = new Socket()) {
-            socket.connect(new InetSocketAddress("127.0.0.1", tcpPort), 5000);
-        }
-    }
-
-    // what a refused server had started: its constructor throws, so this can only be seen from inside it
-    private static final class Started {
-        private final List<Integer> tcpPorts = new CopyOnWriteArrayList<>();
-        private volatile MockServer server;
-    }
-
-    private static final class RecordingMockServer extends MockServer {
-
-        private static final ThreadLocal<Started> RECORD_INTO = new ThreadLocal<>();
-
-        private RecordingMockServer(Started started, Configuration configuration) {
-            super(recordInto(started, configuration), 0);
-        }
-
-        private static Configuration recordInto(Started started, Configuration configuration) {
-            RECORD_INTO.set(started);
-            return configuration;
-        }
-
-        @Override
-        public List<Integer> bindServerPorts(List<Integer> requestedPortBindings) {
-            List<Integer> bound = super.bindServerPorts(requestedPortBindings);
-            Started started = RECORD_INTO.get();
-            started.server = this;
-            started.tcpPorts.addAll(bound);
-            return bound;
-        }
-    }
-
-    // the HTTP/3 server reads this while it starts, after the TCP ports are bound
+    // the HTTP/3 server reads this while it starts, after the TCP and DNS ports are bound
     private static final class Http3StartThrows extends Configuration {
 
         private final Throwable failure;
+        private boolean interruptFirst;
 
         private Http3StartThrows(Throwable failure) {
             this.failure = failure;
         }
 
+        private Http3StartThrows interruptingFirst() {
+            interruptFirst = true;
+            return this;
+        }
+
         @Override
         public Long http3MaxIdleTimeout() {
+            if (interruptFirst) {
+                Thread.currentThread().interrupt();
+            }
             return Http3StartFailureTest.<RuntimeException, Long>throwUnchecked(failure);
+        }
+    }
+
+    // records the DNS port from inside the constructor, which a refused start never returns from
+    private static final class RecordsTheDnsPort extends Configuration {
+
+        private final Started started;
+
+        private RecordsTheDnsPort(Started started) {
+            this.started = started;
+        }
+
+        @Override
+        public Long http3MaxIdleTimeout() {
+            if (started.server != null) {
+                started.dnsPort = started.server.getDnsPort();
+            }
+            return super.http3MaxIdleTimeout();
         }
     }
 

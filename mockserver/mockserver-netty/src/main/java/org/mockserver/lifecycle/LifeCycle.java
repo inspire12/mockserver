@@ -653,6 +653,10 @@ public abstract class LifeCycle implements Stoppable {
             try {
                 actualPortBindings.add(bindPort(serverBootstrap, localBoundIP, portToBind, channelFutures));
             } catch (Exception e) {
+                if (e instanceof InterruptedException) {
+                    // this thread's own wait was interrupted (a failure elsewhere arrives as an ExecutionException)
+                    Thread.currentThread().interrupt();
+                }
                 throw new RuntimeException("Exception while binding MockServer to port " + portToBind, e instanceof ExecutionException ? e.getCause() : e);
             }
         }

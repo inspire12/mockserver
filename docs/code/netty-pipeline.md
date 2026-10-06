@@ -2037,7 +2037,8 @@ bound and before HTTP/3 is started. On any failure it calls `stop()`, which clos
 the boss and worker event loops and waits for them, and throws `DnsStartupException`
 (`org.mockserver.netty.dns`) from the constructor, so the caller gets no reference and nothing is left for
 it to stop. `stop()` does not wait on an interrupted thread, so the interrupt flag is cleared for the stop
-and set again after it.
+and set again after it (the same private method serves every refusal path; see
+[http3.md](http3.md#lifecycle-integration)).
 
 | Failure | Message (one line, the cause kept as `getCause()`) | CLI output |
 |---|---|---|
@@ -2059,12 +2060,26 @@ otherwise reach. `MockServer` does not log the failure itself; the exception is 
 callers get it from `new MockServer(...)`, `ClientAndServer.startClientAndServer(...)`, `MockServerRule`,
 `MockServerExtension` and the Spring `MockServerPropertyCustomizer`, none of which catch it.
 
-A `dnsPort` of 0 asks the operating system for a port; `MockServer.getDnsPort()` returns the bound port,
-or -1 when DNS is off. `ClientAndServer` has no accessor for it.
+**A port another socket holds on IPv4.** On macOS a dual-stack bind succeeds on a port another socket
+holds on `0.0.0.0`, which then receives the queries sent to `127.0.0.1`; Linux refuses the bind. Before
+binding an explicit `dnsPort`, `MockServer` runs the HTTP/3 listener's probe
+(`org.mockserver.lifecycle.Ipv4UdpPortProbe`, see [http3.md](http3.md#test-udp-sockets-macos-port-shadowing)):
+an IPv4 bind of `0.0.0.0:port` and, if that fails, a dual-stack bind of a plain `DatagramChannel`. When the
+first fails and the second succeeds the port is refused through the first row of the table, with a
+`BindException` naming the other socket and `lsof -nP -iUDP:<port>` as the underlying error. Where the
+dual-stack bind fails as well (Linux, an IPv4-only stack) the server's own bind runs and reports the
+conflict as before, so on Linux the probe costs one IPv4 socket opened and closed for a free port.
+
+A `dnsPort` of 0 lets `MockServer` choose: it takes a port from the IPv4 allocator (an IPv4 socket bound to
+`0.0.0.0:0`, then closed), probes it as above and binds it as an explicit port. A candidate the probe
+refuses, or whose bind fails (another socket took it in between, or holds it on IPv6), is replaced, up to
+10 candidates; then the start fails through the second row. Where IPv4 is unavailable the candidate is 0
+and the operating system chooses. `MockServer.getDnsPort()` returns the bound port, or -1 when DNS is off.
+`ClientAndServer` has no accessor for it. `DnsPortChoiceTest` offers a held port as the first candidate.
 
 This replaced a path that logged `exception binding DNS port - DNS mocking disabled` at WARN and kept
 serving TCP with `getDnsPort()` returning -1. `DnsStartFailureTest` covers a port held by another
-socket, the port of another MockServer, a port above 65535, an interrupted start, `ClientAndServer`, a
+socket, a port held on the IPv4 wildcard, the port of another MockServer, a port above 65535, an interrupted start, `ClientAndServer`, a
 chosen port (which must answer a query) and DNS switched off. It runs each refused start in a thread
 group of its own and checks, as soon as the constructor has thrown, that the stop is complete and the TCP
 port refuses connections, then that no thread of the group is left alive. `MainTest` covers the exit
@@ -2072,10 +2087,6 @@ status and the CLI output, and `DnsStartupRefusalIntegrationTest` runs the real 
 on the platform's default transport. `Permission denied` is covered only as a message: macOS lets any
 process bind a low port on every address, and so does a container whose
 `net.ipv4.ip_unprivileged_port_start` is 0.
-
-Not guarded: on macOS a dual-stack bind succeeds on a port another socket holds on `0.0.0.0`, which then
-receives the queries sent to `127.0.0.1`. HTTP/3 probes for this (`Ipv4UdpPortProbe`); DNS does not, and
-on a `dnsPort` of 0 the operating system can choose such a port.
 
 ## Binary Protocol Handling
 

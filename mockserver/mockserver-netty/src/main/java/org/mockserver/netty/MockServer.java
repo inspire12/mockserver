@@ -3,6 +3,7 @@ package org.mockserver.netty;
 import com.google.common.collect.ImmutableList;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
+import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOption;
@@ -12,6 +13,7 @@ import io.netty.handler.codec.dns.DatagramDnsQueryDecoder;
 import io.netty.handler.codec.dns.DatagramDnsResponseEncoder;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.lifecycle.ExpectationsListener;
+import org.mockserver.lifecycle.Ipv4UdpPortProbe;
 import org.mockserver.lifecycle.LifeCycle;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.mock.action.http.HttpActionHandler;
@@ -47,6 +49,8 @@ import static org.mockserver.proxyconfiguration.ProxyConfiguration.proxyConfigur
 public class MockServer extends LifeCycle {
 
     static final WriteBufferWaterMark CONNECTION_WRITE_BUFFER_WATER_MARK = new WriteBufferWaterMark(8 * 1024, 32 * 1024);
+
+    private static final int DNS_PORT_CANDIDATES = 10;
 
     private InetSocketAddress remoteSocket;
     private volatile org.mockserver.netty.mcp.McpSessionManager mcpSessionManager;
@@ -181,7 +185,7 @@ public class MockServer extends LifeCycle {
             try {
                 requireQuicNative(configuredHttp3Port);
             } catch (Throwable throwable) {
-                stop();
+                stopRefusedStart();
                 throw throwable;
             }
         }
@@ -235,7 +239,7 @@ public class MockServer extends LifeCycle {
                     .setMessageFormat("exception binding to port(s) " + portBindings)
                     .setThrowable(throwable)
             );
-            stop();
+            stopRefusedStart();
             throw throwable;
         }
 
@@ -298,7 +302,7 @@ public class MockServer extends LifeCycle {
         // Http3Server.isQuicAvailable() already wraps the Netty call in catch(Throwable): loading a
         // native can fail with an Error, not just return false, and an Error escaping here would
         // replace the actionable message below with a raw UnsatisfiedLinkError.
-        if (Http3Server.isQuicAvailable()) {
+        if (quicNativeAvailable()) {
             return;
         }
         Throwable cause;
@@ -308,6 +312,24 @@ public class MockServer extends LifeCycle {
             cause = t;
         }
         throw new Http3NativeUnavailableException(http3Port, cause);
+    }
+
+    // a seam for tests, which cannot unload the QUIC native from a JVM that has loaded it
+    boolean quicNativeAvailable() {
+        return Http3Server.isQuicAvailable();
+    }
+
+    /**
+     * {@code stop()} does not wait on an interrupted thread, so the flag is cleared for the stop and set again after
+     * it. Only the flag counts, not an {@link InterruptedException} in the refusal's cause chain, which can come
+     * from another thread: a wait of the starting thread that is interrupted sets the flag again where it is caught.
+     */
+    private void stopRefusedStart() {
+        boolean interrupted = Thread.interrupted();
+        stop();
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     public InetSocketAddress getRemoteAddress() {
@@ -328,12 +350,7 @@ public class MockServer extends LifeCycle {
         try {
             bindDnsPort(dnsPort);
         } catch (Throwable throwable) {
-            // stop() does not wait on an interrupted thread
-            boolean interrupted = Thread.interrupted();
-            stop();
-            if (interrupted) {
-                Thread.currentThread().interrupt();
-            }
+            stopRefusedStart();
             throw throwable instanceof DnsStartupException ? (DnsStartupException) throwable : DnsStartupException.serverCouldNotStart(dnsPort, throwable);
         }
     }
@@ -353,12 +370,7 @@ public class MockServer extends LifeCycle {
                         .addLast(dnsHandler);
                 }
             });
-        ChannelFuture bind = dnsBootstrap.bind(dnsPort).awaitUninterruptibly();
-        if (!bind.isSuccess()) {
-            // also fails when the channel cannot be created or registered; with port 0 there is no port to free
-            throw dnsPort > 0 ? DnsStartupException.portCouldNotBeOpenedOrBound(dnsPort, bind.cause()) : DnsStartupException.serverCouldNotStart(dnsPort, bind.cause());
-        }
-        dnsChannel = bind.channel();
+        dnsChannel = dnsPort > 0 ? bindExplicitDnsPort(dnsBootstrap, dnsPort) : bindChosenDnsPort(dnsBootstrap);
         int boundPort = ((InetSocketAddress) dnsChannel.localAddress()).getPort();
         if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
             mockServerLogger.logEvent(
@@ -369,6 +381,49 @@ public class MockServer extends LifeCycle {
                     .setArguments(boundPort)
             );
         }
+    }
+
+    /**
+     * Refused before anything is bound where macOS would let the server share the port with a socket that holds it
+     * on IPv4, and that socket would get the queries sent to localhost (see {@link Ipv4UdpPortProbe}).
+     */
+    private static Channel bindExplicitDnsPort(Bootstrap dnsBootstrap, int dnsPort) {
+        if (Ipv4UdpPortProbe.shadowedOnIpv4(dnsPort)) {
+            throw DnsStartupException.portCouldNotBeOpenedOrBound(dnsPort, Ipv4UdpPortProbe.ipv4WildcardConflict(dnsPort, "DNS queries", "dnsPort"));
+        }
+        ChannelFuture bind = dnsBootstrap.bind(dnsPort).awaitUninterruptibly();
+        if (!bind.isSuccess()) {
+            // also fails when the channel cannot be created or registered
+            throw DnsStartupException.portCouldNotBeOpenedOrBound(dnsPort, bind.cause());
+        }
+        return bind.channel();
+    }
+
+    /**
+     * The dual-stack allocator on macOS can choose a port another socket holds on IPv4, so the port is taken from
+     * the IPv4 allocator and bound as an explicit one would be; a candidate refused, or taken before it is bound, is
+     * replaced.
+     */
+    private Channel bindChosenDnsPort(Bootstrap dnsBootstrap) {
+        Throwable lastFailure = null;
+        for (int attempt = 0; attempt < DNS_PORT_CANDIDATES; attempt++) {
+            int candidate = nextDnsPortCandidate();
+            if (candidate > 0 && Ipv4UdpPortProbe.shadowedOnIpv4(candidate)) {
+                lastFailure = Ipv4UdpPortProbe.ipv4WildcardConflict(candidate, "DNS queries", "dnsPort");
+                continue;
+            }
+            ChannelFuture bind = dnsBootstrap.bind(candidate).awaitUninterruptibly();
+            if (bind.isSuccess()) {
+                return bind.channel();
+            }
+            lastFailure = bind.cause();
+        }
+        throw DnsStartupException.serverCouldNotStart(0, lastFailure);
+    }
+
+    // 0, which lets the operating system choose, where IPv4 is unavailable
+    int nextDnsPortCandidate() {
+        return Ipv4UdpPortProbe.portFreeOnIpv4();
     }
 
     public int getDnsPort() {
@@ -430,11 +485,7 @@ public class MockServer extends LifeCycle {
                 );
             }
         } catch (Throwable throwable) {
-            stop();
-            // after stop(), which an interrupted thread would not wait for
-            if (throwable instanceof InterruptedException) {
-                Thread.currentThread().interrupt();
-            }
+            stopRefusedStart();
             throw new Http3StartupException(http3Port, throwable);
         }
     }

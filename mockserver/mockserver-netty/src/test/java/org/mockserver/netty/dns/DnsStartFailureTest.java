@@ -4,49 +4,32 @@ import org.junit.Test;
 import org.mockserver.client.MockServerClient;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.integration.ClientAndServer;
-import org.mockserver.lifecycle.LeftBehind;
+import org.mockserver.lifecycle.Ipv4UdpPortProbe;
+import org.mockserver.lifecycle.RefusedStart.RecordingMockServer;
+import org.mockserver.lifecycle.RefusedStart.Started;
 import org.mockserver.model.DnsRecord;
 import org.mockserver.model.DnsResponse;
 import org.mockserver.netty.MockServer;
-import org.mockserver.stop.Stoppable;
-import org.xbill.DNS.ARecord;
-import org.xbill.DNS.DClass;
-import org.xbill.DNS.Message;
-import org.xbill.DNS.Name;
-import org.xbill.DNS.Section;
-import org.xbill.DNS.Type;
 
 import java.io.IOException;
-import java.net.ConnectException;
-import java.net.DatagramPacket;
-import java.net.DatagramSocket;
 import java.net.InetSocketAddress;
-import java.net.Socket;
-import java.net.SocketTimeoutException;
 import java.net.StandardProtocolFamily;
 import java.nio.channels.DatagramChannel;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Supplier;
 
 import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
-import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
-import static org.junit.Assert.assertThrows;
 import static org.mockserver.configuration.Configuration.configuration;
+import static org.mockserver.lifecycle.RefusedStart.assertStopped;
+import static org.mockserver.lifecycle.RefusedStart.refusedStart;
 import static org.mockserver.model.DnsRequestDefinition.dnsRequest;
+import static org.mockserver.netty.dns.DnsQueries.addressAnsweredFor;
 import static org.mockserver.stop.Stop.stopQuietly;
 
 /**
@@ -55,8 +38,10 @@ import static org.mockserver.stop.Stop.stopQuietly;
  */
 public class DnsStartFailureTest {
 
-    private static final long DEADLINE_SECONDS = 30;
-    private static final int QUERY_TIMEOUT_MILLIS = 5000;
+    // only a dual-stack bind on macOS succeeds on such a port; elsewhere the bind fails with its own error
+    private static final boolean DUAL_STACK_MAC_OS = System.getProperty("os.name", "").toLowerCase().contains("mac")
+        && !Boolean.getBoolean("java.net.preferIPv4Stack");
+
     private static final String SERVED_NAME = "served.dns-start.example.";
     private static final String SERVED_ADDRESS = "10.9.8.7";
 
@@ -90,6 +75,31 @@ public class DnsStartFailureTest {
             assertThat(refused.getCause(), instanceOf(IOException.class));
             assertThat(refused.getCause().getMessage(), containsString("Address already in use"));
             assertThat(((DnsStartupException) refused).isPortUnavailable(), is(true));
+        }
+    }
+
+    // on macOS the server's own bind succeeds there, and the other socket would then get the queries sent to 127.0.0.1
+    @Test
+    public void shouldRefuseToStartWhenTheDnsPortIsHeldOnTheIpv4Wildcard() throws Exception {
+        Started started = new Started();
+        try (DatagramChannel otherApplication = DatagramChannel.open(StandardProtocolFamily.INET)) {
+            otherApplication.bind(new InetSocketAddress("0.0.0.0", 0));
+            int udpPort = port(otherApplication);
+
+            Throwable refused = refusedStart(() -> new RecordingMockServer(started, dnsOn(udpPort)), () -> {
+                assertStopped(started);
+                otherApplication.close();
+                assertThat("the refused server must hold no socket on UDP port " + udpPort, Ipv4UdpPortProbe.dualStackBindSucceeds(udpPort), is(true));
+            });
+
+            assertThat(refused, instanceOf(DnsStartupException.class));
+            assertThat(refused.getMessage(), startsWith(portCouldNotBeOpenedOrBound(udpPort)));
+            assertThat(((DnsStartupException) refused).isPortUnavailable(), is(true));
+            if (DUAL_STACK_MAC_OS) {
+                assertThat(refused.getMessage(), endsWith("BindException: UDP port " + udpPort + " is already in use by another socket listening on 0.0.0.0:" + udpPort
+                    + ", so DNS queries to localhost:" + udpPort + " would reach that socket instead of MockServer"
+                    + "; stop the application that holds it or choose a different dnsPort (to find it run: lsof -nP -iUDP:" + udpPort + "))"));
+            }
         }
     }
 
@@ -172,27 +182,17 @@ public class DnsStartFailureTest {
 
     @Test
     public void shouldServeDnsOnAPortTheOperatingSystemChoosesAndReportIt() throws Exception {
-        // on macOS the operating system can choose a port another process holds on IPv4, which then gets the query
-        List<String> unanswered = new ArrayList<>();
-        for (int attempt = 0; attempt < 3; attempt++) {
-            MockServer server = new MockServer(dnsOn(0), 0);
-            MockServerClient client = new MockServerClient("127.0.0.1", server.getLocalPort());
-            try {
-                assertThat("the port the operating system chose", server.getDnsPort(), greaterThan(0));
-                client.when(dnsRequest(SERVED_NAME)).respondWithDns(new DnsResponse().withAnswerRecords(DnsRecord.aRecord(SERVED_NAME, SERVED_ADDRESS)));
+        MockServer server = new MockServer(dnsOn(0), 0);
+        MockServerClient client = new MockServerClient("127.0.0.1", server.getLocalPort());
+        try {
+            assertThat("the port the operating system chose", server.getDnsPort(), greaterThan(0));
+            client.when(dnsRequest(SERVED_NAME)).respondWithDns(new DnsResponse().withAnswerRecords(DnsRecord.aRecord(SERVED_NAME, SERVED_ADDRESS)));
 
-                String answer = addressAnsweredFor(SERVED_NAME, server.getDnsPort());
-
-                if (SERVED_ADDRESS.equals(answer)) {
-                    return;
-                }
-                unanswered.add("UDP port " + server.getDnsPort() + " answered " + answer);
-            } finally {
-                stopQuietly(client);
-                server.stop();
-            }
+            assertThat(addressAnsweredFor(SERVED_NAME, server.getDnsPort()), is(SERVED_ADDRESS));
+        } finally {
+            stopQuietly(client);
+            server.stop();
         }
-        throw new AssertionError("no server answered a DNS query on the port it reported: " + unanswered);
     }
 
     @Test
@@ -230,114 +230,5 @@ public class DnsStartFailureTest {
         return "DNS mocking is enabled (dnsEnabled=true, dnsPort=" + udpPort + ") but UDP port " + udpPort + " could not be opened or bound, so MockServer cannot start:"
             + " free the port if another application holds it, choose a different dnsPort (0 picks a free port, and a port below 1024 can need extra privileges),"
             + " or set dnsEnabled=false to run without DNS mocking (underlying error: ";
-    }
-
-    /**
-     * @return the address in the A record answered for {@code name}, or why there was none
-     */
-    private static String addressAnsweredFor(String name, int dnsPort) throws Exception {
-        byte[] query = Message.newQuery(org.xbill.DNS.Record.newRecord(Name.fromString(name), Type.A, DClass.IN)).toWire();
-        try (DatagramSocket resolver = new DatagramSocket(new InetSocketAddress("127.0.0.1", 0))) {
-            resolver.setSoTimeout(QUERY_TIMEOUT_MILLIS);
-            resolver.connect(new InetSocketAddress("127.0.0.1", dnsPort));
-            resolver.send(new DatagramPacket(query, query.length));
-            DatagramPacket reply = new DatagramPacket(new byte[512], 512);
-            resolver.receive(reply);
-            List<org.xbill.DNS.Record> answers = new Message(Arrays.copyOf(reply.getData(), reply.getLength())).getSection(Section.ANSWER);
-            return answers.size() == 1 && answers.get(0) instanceof ARecord ? ((ARecord) answers.get(0)).getAddress().getHostAddress() : "answers " + answers;
-        } catch (SocketTimeoutException | java.net.PortUnreachableException | org.xbill.DNS.WireParseException notThisServer) {
-            return "nothing (" + notThisServer + ")";
-        }
-    }
-
-    private static Throwable refusedStart(Supplier<? extends Stoppable> start) throws InterruptedException {
-        return refusedStart(start, () -> {
-        });
-    }
-
-    /**
-     * Runs {@code start} in a thread group of its own, so the threads that server started can be told from
-     * those of every other test in the JVM, and stops the server if it wrongly started.
-     *
-     * @param atTheThrow checks made on the starting thread as soon as {@code start} has thrown, which is when
-     *                   the caller of a refused start may rely on everything having been stopped
-     * @return what {@code start} threw, once no thread it started is left alive
-     */
-    private static Throwable refusedStart(Supplier<? extends Stoppable> start, AtTheThrow atTheThrow) throws InterruptedException {
-        ThreadGroup serverThreads = new ThreadGroup("refused-dns-start");
-        AtomicReference<Throwable> thrown = new AtomicReference<>();
-        AtomicReference<Throwable> wrongAtTheThrow = new AtomicReference<>();
-        Thread starter = new Thread(serverThreads, () -> {
-            try {
-                start.get().stop();
-            } catch (Throwable throwable) {
-                thrown.set(throwable);
-                try {
-                    atTheThrow.check();
-                } catch (Throwable wrong) {
-                    wrongAtTheThrow.set(wrong);
-                }
-            }
-        }, "refused-dns-start");
-        starter.start();
-        starter.join(TimeUnit.SECONDS.toMillis(DEADLINE_SECONDS));
-
-        assertThat("the start neither returned nor threw within " + DEADLINE_SECONDS + "s", starter.isAlive(), is(false));
-        assertThat("the server started without DNS on its dnsPort", thrown.get() != null, is(true));
-        if (wrongAtTheThrow.get() != null) {
-            throw new AssertionError("when the start threw " + thrown.get() + ": " + wrongAtTheThrow.get().getMessage(), wrongAtTheThrow.get());
-        }
-        assertThat("threads the refused server left running", LeftBehind.threadsStillAlive(serverThreads), is(empty()));
-        return thrown.get();
-    }
-
-    @FunctionalInterface
-    private interface AtTheThrow {
-        void check() throws Exception;
-    }
-
-    private static void assertStopped(Started started) {
-        assertThat("the TCP port was bound before the DNS port", started.tcpPorts, contains(greaterThan(0)));
-        assertThat("the stop must be complete when the constructor throws, not merely begun", started.server.stopAsync().isDone(), is(true));
-        assertThrows("the TCP listener on port " + started.tcpPorts.get(0) + " must be closed", ConnectException.class, () -> connect(started.tcpPorts.get(0)));
-    }
-
-    private static void connect(int tcpPort) throws Exception {
-        try (Socket socket = new Socket()) {
-            socket.connect(new InetSocketAddress("127.0.0.1", tcpPort), 5000);
-        }
-    }
-
-    // what a refused server had started: its constructor throws, so this can only be seen from inside it
-    private static final class Started {
-        private final List<Integer> tcpPorts = new CopyOnWriteArrayList<>();
-        private volatile MockServer server;
-        private volatile boolean interruptOnceTcpIsBound;
-    }
-
-    private static final class RecordingMockServer extends MockServer {
-
-        private static final ThreadLocal<Started> RECORD_INTO = new ThreadLocal<>();
-
-        private RecordingMockServer(Started started, Configuration configuration) {
-            super(recordInto(started, configuration), 0);
-        }
-
-        private static Configuration recordInto(Started started, Configuration configuration) {
-            RECORD_INTO.set(started);
-            return configuration;
-        }
-
-        @Override
-        public List<Integer> bindServerPorts(List<Integer> requestedPortBindings) {
-            List<Integer> bound = super.bindServerPorts(requestedPortBindings);
-            Started started = RECORD_INTO.get();
-            started.server = this;
-            started.tcpPorts.addAll(bound);
-            if (started.interruptOnceTcpIsBound) {
-                Thread.currentThread().interrupt();
-            }
-            return bound;
-        }
     }
 }

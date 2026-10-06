@@ -245,8 +245,13 @@ listeners, the DNS channel and the boss and worker event loops and waits for the
 shuts down its own event loop when it fails, without waiting, so that one thread ends about 2 s later
 (Netty's default quiet period). The caller gets no reference, so nothing may be left for it to stop.
 The catch is for `Throwable`: an `Error` from the start (a native that will not link) refuses and stops
-as well. When the cause is an `InterruptedException` the interrupt flag is set again, after `stop()`,
-because an interrupted thread does not wait for `stop()`. The held port is most often another
+as well. `stop()` does not wait on an interrupted thread, so every refusal path in `MockServer` (the
+QUIC native check, a TCP bind, DNS and HTTP/3) stops through one private method that clears the
+interrupt flag for the stop and sets it again after it. Only the flag counts: an `InterruptedException`
+in the cause chain can come from another thread (a future's failure), so a wait of the starting thread
+that is interrupted sets the flag again where it is caught (the TCP bind in `LifeCycle.bindPorts`, the
+UDP bind in `Http3Server`, which waits with `await()` rather than `sync()` because `sync()` also rethrows
+a failed bind's cause). The held port is most often another
 MockServer given the same `http3Port`; before, the first served HTTP/3 and the rest served TCP only.
 
 | Failure | Message (one line, the cause kept as `getCause()`) | CLI output |
@@ -266,8 +271,10 @@ HTTP/3 is off, so there is no ephemeral HTTP/3 port to fail on.
 This replaced a path that logged `exception starting HTTP/3 server on port N - HTTP/3 disabled` at
 WARN and kept serving TCP with `getHttp3Port()` returning -1. `Http3StartFailureTest` covers both
 rows (a port held on IPv4, a port held by a dual-stack socket so that the bind itself fails on every
-platform, a port above 65535, an unparsable mTLS trust chain, an `Error` and an interrupt) and
-`ClientAndServer`. `Permission denied` is not exercised: macOS lets any process bind a low port. On the
+platform, a port above 65535, an unparsable mTLS trust chain, an `Error`, an interrupt, a failure on an
+interrupted thread, and a DNS port bound before the refusal, which must be free at the throw) and
+`ClientAndServer`. `RefusedStartOnAnInterruptedThreadTest` covers the TCP and QUIC native refusals on an
+interrupted thread; the shared harness is `org.mockserver.lifecycle.RefusedStart` in the test sources. `Permission denied` is not exercised: macOS lets any process bind a low port. On the
 starting thread, as soon as the constructor has thrown, it checks that the stop is complete (not merely
 begun), that the TCP port refuses connections and that the UDP port can be bound again. It runs each start in a thread group of its own and then
 waits until no thread of that group is alive, bar the JDK `HttpClient` selector thread every
@@ -433,8 +440,9 @@ the starter, `TestPortFactory`, and the tests that need a bare port: one the ser
 never binds, or that the test contests itself. It is a textual check: it does not see a bare
 `Http3Server` started on a port found another way, or an `http3Port` read from a file.
 
-The server guards against the same quirk (`Ipv4UdpPortProbe`, the UDP counterpart of the TCP
-listeners' `LoopbackShadowProbe`). On macOS a dual-stack wildcard bind succeeds on a port another
+The server guards against the same quirk (`org.mockserver.lifecycle.Ipv4UdpPortProbe`, the UDP
+counterpart of the TCP listeners' `LoopbackShadowProbe`, shared with the DNS listener, which is
+described in [netty-pipeline.md](netty-pipeline.md#dns-start-up-refusal)). On macOS a dual-stack wildcard bind succeeds on a port another
 process holds on `0.0.0.0`, and that process then receives the server's `127.0.0.1` traffic; Linux
 refuses the bind. So before binding an explicit port, `Http3Server.start` tries an IPv4 bind of
 `0.0.0.0:port` (no `SO_REUSEADDR`) and releases it. If that bind failed, it tries the dual-stack bind
@@ -738,7 +746,7 @@ bidi-streaming) work over HTTP/3, matching the TCP (HTTP/1.1 and HTTP/2) path.
   for the target platform. Missing natives will prevent the HTTP/3 server from starting.
 - **macOS port shadowing**: on macOS a dual-stack wildcard UDP bind succeeds on a port that another
   process holds on the IPv4 wildcard (`0.0.0.0`), and traffic to `127.0.0.1` then reaches that process.
-  The HTTP/3 server probes the port on IPv4 before binding and refuses it (see
+  The HTTP/3 and DNS servers probe the port on IPv4 before binding and refuse it (see
   [Test UDP sockets](#test-udp-sockets-macos-port-shadowing)); a process that takes the port between the
   probe and the bind is not detected.
 - **API stability**: `netty-codec-http3` has graduated from the incubator into

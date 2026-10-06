@@ -2,6 +2,7 @@ package org.mockserver.netty.http3;
 
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOption;
@@ -19,6 +20,7 @@ import io.netty.handler.ssl.ClientAuth;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.configuration.ServerTlsSettings;
+import org.mockserver.lifecycle.Ipv4UdpPortProbe;
 import org.mockserver.lifecycle.LifeCycle;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.metrics.Metrics;
@@ -31,7 +33,6 @@ import org.mockserver.socket.tls.KeyAndCertificateFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.net.BindException;
 import java.net.InetSocketAddress;
 import java.security.PrivateKey;
 import java.security.cert.X509Certificate;
@@ -232,7 +233,7 @@ public class Http3Server {
                 .channel(NioDatagramChannel.class)
                 .option(ChannelOption.ALLOCATOR, NettyAllocator.ALLOCATOR)
                 .handler(codec);
-            channel = port == 0 ? bootstrap.bind(new InetSocketAddress(0)).sync().channel() : bindExplicitPort(bootstrap, port);
+            channel = port == 0 ? bound(bootstrap.bind(new InetSocketAddress(0))) : bindExplicitPort(bootstrap, port);
 
             int boundPort = ((InetSocketAddress) channel.localAddress()).getPort();
             LOG.info("HTTP/3 (QUIC) server started on UDP port: {}", boundPort);
@@ -252,11 +253,32 @@ public class Http3Server {
      * {@link Ipv4UdpPortProbe}). The refusal is decided before Netty binds anything, so a refused port is free
      * as soon as this throws. Where the bind itself fails (Linux, or an IPv4-only stack), its own error is kept.
      */
-    private static Channel bindExplicitPort(Bootstrap bootstrap, int port) throws InterruptedException, BindException {
-        if (Ipv4UdpPortProbe.heldOnIpv4(port) && Ipv4UdpPortProbe.dualStackBindSucceeds(port)) {
-            throw Ipv4UdpPortProbe.ipv4WildcardConflict(port);
+    private static Channel bindExplicitPort(Bootstrap bootstrap, int port) throws Exception {
+        if (Ipv4UdpPortProbe.shadowedOnIpv4(port)) {
+            throw Ipv4UdpPortProbe.ipv4WildcardConflict(port, "HTTP/3 requests", "http3Port");
         }
-        return bootstrap.bind(new InetSocketAddress(port)).sync().channel();
+        return bound(bootstrap.bind(new InetSocketAddress(port)));
+    }
+
+    /**
+     * Not {@code sync()}, which also rethrows a failed bind's cause: an {@link InterruptedException} from here is
+     * always this thread's own wait, so the interrupt flag is set again for the caller.
+     */
+    private static Channel bound(ChannelFuture bind) throws Exception {
+        try {
+            bind.await();
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw interrupted;
+        }
+        if (!bind.isSuccess()) {
+            Throwable cause = bind.cause();
+            if (cause instanceof Error) {
+                throw (Error) cause;
+            }
+            throw cause instanceof Exception ? (Exception) cause : new Exception(cause);
+        }
+        return bind.channel();
     }
 
     /**

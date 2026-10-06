@@ -3,6 +3,7 @@ package org.mockserver.netty.http3;
 import org.junit.After;
 import org.junit.Assume;
 import org.junit.Test;
+import org.mockserver.lifecycle.Ipv4UdpPortProbe;
 
 import java.net.BindException;
 import java.net.InetSocketAddress;

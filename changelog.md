@@ -10,7 +10,7 @@ This release delivers a sustained performance and memory programme alongside dat
 
 **BREAKING** — if you set `http3Port`, HTTP/3's native library now ships separately: use the `jar-with-dependencies-http3` jar, or in containers the new `mockserver/mockserver:<version>-http3` image (Helm: `image.variant=http3`). A server configured for HTTP/3 without it now refuses to start with a message naming the exact fix, where it used to log a warning and ignore the port — which is what every published Docker image did, because none of them could load the native. It also refuses to start when the HTTP/3 port itself cannot be used, for example because another application holds that UDP port, where it used to log a warning and serve only HTTP/1.1 and HTTP/2. If you do not use HTTP/3 — the default — nothing changes except a smaller standalone jar.
 
-**BREAKING** — if you set `dnsEnabled=true`, MockServer now refuses to start when it cannot start its DNS server, where it used to log a warning and run without DNS. In practice that means a fixed `dnsPort` it cannot use: another application holds it, another MockServer was given the same port, or the process may not bind it. With `dnsPort` left at `0` the operating system chooses a free port, so a refusal is unlikely, but a DNS server that cannot start there is refused too. If you do not enable DNS mocking — the default — nothing changes.
+**BREAKING** — if you set `dnsEnabled=true`, MockServer now refuses to start when it cannot start its DNS server, where it used to log a warning and run without DNS. In practice that means a fixed `dnsPort` it cannot use: another application holds it, another MockServer was given the same port, or the process may not bind it. With `dnsPort` left at `0` the operating system chooses a free port, so a refusal is unlikely, but a DNS server that cannot start there is refused too. If you do not enable DNS mocking — the default — nothing changes. On macOS this now includes a `dnsPort` that another application holds for IPv4 only (on `0.0.0.0`): the operating system would let MockServer share it while sending the queries for `127.0.0.1` to that application, so MockServer refuses it, naming the conflict and the `lsof` command that finds the application.
 
 **BREAKING** — for TypeScript users of the Node client's deep import `mockserver-client/llm`: its typings no longer declare a default export; everything imported from `mockserver-client` itself type-checks as in 8.0.0. See *Changed*.
 
@@ -602,6 +602,14 @@ This release delivers a sustained performance and memory programme alongside dat
 
 ### Fixed
 
+- **With DNS mocking on and `dnsPort` left at `0`, MockServer on macOS no longer picks a port that another
+  application already uses for IPv4.** It used to bind such a port now and then, and queries sent to
+  `127.0.0.1` on the port it reported went to the other application. It now passes over ports held that
+  way.
+- **A start that is refused while the starting thread is interrupted, as a JUnit timeout does, now
+  finishes stopping before it throws, and leaves the thread interrupted.** An HTTP port that could not be
+  bound used to throw while the ports and threads the server had opened were still closing, and the
+  interrupt was lost. The new start-up refusals for DNS and HTTP/3 behave the same way.
 - **A mocked response with a `1xx` status and nothing after it no longer leaves an HTTP/2 client waiting.** An
   expectation that responds with `102`, `103` or another `1xx` status (other than `101`) has sent all it is going to
   send. Over HTTP/2 MockServer sent the `1xx` and left the request's stream open for as long as the connection
