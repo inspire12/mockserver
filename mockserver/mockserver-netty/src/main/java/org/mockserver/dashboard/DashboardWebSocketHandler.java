@@ -46,6 +46,7 @@ import org.mockserver.socket.tls.SniHandler;
 import org.mockserver.serialization.model.ExpectationDTO;
 import org.slf4j.event.Level;
 
+import java.nio.channels.ClosedChannelException;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -197,6 +198,16 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
     // would be inflated by retries. lastPullFilterDispatched records the filter of the most recent
     // dispatch, so a test can prove the LAST filter a client sent is the one finally served.
     private final AtomicLong pullUpdateDispatchCount = new AtomicLong();
+    private static final long UPDATE_FAILURE_LOG_INTERVAL_NANOS = TimeUnit.MINUTES.toNanos(1);
+    static final String UPDATE_OUT_OF_MEMORY_MESSAGE = "dashboard update was not sent because building or sending it ran out of memory:{}"
+        + "the dashboard keeps showing its previous state; to make room clear the log (PUT /mockserver/clear?type=log),"
+        + " close other dashboard tabs, or give MockServer more heap;"
+        + " this message is logged at most once a minute for each dashboard";
+    static final String UPDATE_FAILED_MESSAGE = "dashboard update was not sent because building or sending it failed:{}"
+        + "the dashboard keeps showing its previous state until an update succeeds;"
+        + " this message is logged at most once a minute for each dashboard";
+    private final AtomicLong lastUpdateFailureLoggedNanos = new AtomicLong();
+    private final AtomicBoolean updateFailureLogged = new AtomicBoolean();
     private volatile RequestDefinition lastPullFilterDispatched;
 
     @VisibleForTesting
@@ -519,6 +530,11 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
         return DEFAULT_LOG_UPDATE_ITEM_LIMIT;
     }
 
+    private static boolean isWritable(ChannelOutboundInvoker ctx) {
+        Channel channel = channelOf(ctx);
+        return channel == null || channel.isWritable();
+    }
+
     // The update path holds a ChannelOutboundInvoker (a ChannelHandlerContext in production, an
     // EmbeddedChannel in tests); resolve it to the Channel that carries the per-channel attributes, or
     // null when it is not channel-shaped.
@@ -836,17 +852,21 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
     // Serialise and write one frame on the CURRENT thread. Used both by writeAcquiredMessage (on the send
     // scheduler) and by the trailing flush, which serves every pending connection inside ONE scheduler task
     // so a batch of N connections cannot overrun the 1-deep DiscardOldest queue as N separate submits would.
+    // Runs as a task on the send executor, whose FutureTask would swallow anything thrown here unseen.
     private void writeMessageNow(ChannelOutboundInvoker ctx, ImmutableMap<String, Object> message) {
         try {
             String text = objectWriter.writeValueAsString(message);
-            ctx.writeAndFlush(new TextWebSocketFrame(text));
-        } catch (JsonProcessingException jpe) {
-            mockServerLogger.logEvent(
-                new LogEntry()
-                    .setLogLevel(Level.ERROR)
-                    .setMessageFormat("exception with serialising UI data " + jpe.getMessage())
-                    .setThrowable(jpe)
-            );
+            ChannelFuture written = ctx.writeAndFlush(new TextWebSocketFrame(text));
+            if (written != null) {
+                written.addListener(future -> {
+                    Throwable cause = future.cause();
+                    if (cause != null && !(cause instanceof ClosedChannelException) && connectionClosedException(cause)) {
+                        reportUpdateFailure(cause);
+                    }
+                });
+            }
+        } catch (JsonProcessingException | RuntimeException | OutOfMemoryError failure) {
+            reportUpdateFailure(failure);
         }
     }
 
@@ -920,6 +940,11 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
         if (pendingTrailingUpdates.isEmpty() || scheduler == null || scheduler.isShutdown()) {
             return;
         }
+        // Keep the permit while every pending connection is still draining, so the first update after it
+        // drains is not held back a further tick.
+        if (pendingTrailingUpdates.stream().noneMatch(DashboardWebSocketHandler::isWritable)) {
+            return;
+        }
         if (!semaphore.tryAcquire()) {
             return;
         }
@@ -927,6 +952,9 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
         try {
             scheduler.submit(() -> {
                 for (Map.Entry<ChannelOutboundInvoker, HttpRequest> registryEntry : snapshot) {
+                    if (!isWritable(registryEntry.getKey())) {
+                        continue;
+                    }
                     if (pendingTrailingUpdates.remove(registryEntry.getKey())) {
                         try {
                             walkAndSend(registryEntry.getKey(), registryEntry.getValue(), true);
@@ -958,6 +986,12 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
 
     @VisibleForTesting
     void sendUpdate(ChannelOutboundInvoker ctx, RequestDefinition httpRequest) {
+        // A frame queued for a client that is not keeping up holds its whole size until taken, and
+        // updates keep coming, so wait for the connection to drain; the refill tick then sends the latest.
+        if (!isWritable(ctx)) {
+            pendingTrailingUpdates.add(ctx);
+            return;
+        }
         // Consult the write throttle BEFORE the DTO walk. The Semaphore(1) is the ~1/second write permit;
         // with no permit this update cannot be written anyway, so building the whole DTO tree (retrieve +
         // walk + serialise the sections) only to discard it was pure waste. Acquire first; only once we hold
@@ -997,7 +1031,7 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
                     logDtoConstructionCount.incrementAndGet();
                     return new DashboardLogEntryDTO(logEntry, configuration);
                 },
-                reverseLogEventsStream -> {
+                reverseLogEventsStream -> reportingUpdateFailures(() -> {
                     // Retrieve ONCE: the dashboard needs both the capped page it renders and the
                     // TRUE total, and calling retrieveRequestMatchers twice would be two walks of
                     // the matcher store per connected dashboard per update.
@@ -1076,8 +1110,42 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
                     } else {
                         writeAcquiredMessage(ctx, message);
                     }
-                }
+                })
             );
+    }
+
+    // The walk runs on the event log's query pool, whose catch-all logs only a generic line.
+    private void reportingUpdateFailures(Runnable buildAndSend) {
+        try {
+            buildAndSend.run();
+        } catch (RuntimeException | OutOfMemoryError failure) {
+            reportUpdateFailure(failure);
+        }
+    }
+
+    /**
+     * Log that an update was not sent, at most once per {@link #UPDATE_FAILURE_LOG_INTERVAL_NANOS} for this
+     * connection: a failing update fails again on every following one, and each log entry is itself an update.
+     */
+    @VisibleForTesting
+    void reportUpdateFailure(Throwable failure) {
+        long now = System.nanoTime();
+        long last = lastUpdateFailureLoggedNanos.get();
+        if (updateFailureLogged.get() && now - last < UPDATE_FAILURE_LOG_INTERVAL_NANOS) {
+            return;
+        }
+        if (!lastUpdateFailureLoggedNanos.compareAndSet(last, now)) {
+            return;
+        }
+        updateFailureLogged.set(true);
+        boolean outOfMemory = failure instanceof OutOfMemoryError || directMemoryLimitReached(failure);
+        mockServerLogger.logEvent(
+            new LogEntry()
+                .setLogLevel(Level.ERROR)
+                .setMessageFormat(outOfMemory ? UPDATE_OUT_OF_MEMORY_MESSAGE : UPDATE_FAILED_MESSAGE)
+                .setArguments(failure)
+                .setThrowable(failure)
+        );
     }
 
     // Consume the reverse-chronological UI log stream into the three dashboard sections.

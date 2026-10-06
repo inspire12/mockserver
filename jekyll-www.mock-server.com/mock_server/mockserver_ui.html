@@ -72,7 +72,7 @@ sitemap:
     <li><strong>Disconnected</strong> — not connected to MockServer</li>
 </ul>
 
-<p>Updates are throttled to at most one per second to prevent UI flooding during high-traffic scenarios.</p>
+<p>Updates are throttled to at most one per second to prevent UI flooding during high-traffic scenarios. If the browser has not yet received the previous update (for example over a slow network, or when captured requests have large bodies), MockServer waits for it to catch up and then sends the latest state, rather than queuing updates the browser cannot keep up with.</p>
 
 <a id="ui_features_section" class="anchor" href="#ui_features_section">&nbsp;</a>
 

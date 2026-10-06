@@ -617,6 +617,18 @@ This release delivers a sustained performance and memory programme alongside dat
 
 ### Fixed
 
+- **A dashboard that cannot keep up no longer makes MockServer queue update after update for it.**
+  When captured requests have large bodies each dashboard update can be tens of megabytes, and
+  MockServer sent one about every second whether or not the browser had received the last, so a
+  browser on a slow network, or one that stopped reading, made memory grow by roughly one update
+  a second (from 21 MB to 812 MB in 18 seconds in a test with 64 KiB bodies). MockServer now waits
+  until the browser has taken the previous update and then sends the latest state.
+- **A dashboard update that fails is now logged, with what to do about it.** When building or
+  sending an update failed, most often by running out of memory on large bodies, the error was
+  silently discarded and the dashboard just stopped updating. It is now logged as an ERROR saying
+  the dashboard was not updated and how to make room (clear the log, close other dashboard tabs,
+  or give MockServer more heap), at most once a minute for each open dashboard.
+
 - **A binary expectation used up by its `Times` is now removed as soon as it is used up.** Before, it
   stayed listed as an active expectation, in retrieved active expectations and on the dashboard, until
   another binary message matched it.
