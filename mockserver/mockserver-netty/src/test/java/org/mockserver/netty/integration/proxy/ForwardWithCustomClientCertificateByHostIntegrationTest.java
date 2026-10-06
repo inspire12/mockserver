@@ -8,6 +8,7 @@ import org.junit.Test;
 import org.mockserver.client.MockServerClient;
 import org.mockserver.echo.http.EchoServer;
 import org.mockserver.model.HttpForward;
+import org.mockserver.model.HttpResponse;
 import org.mockserver.model.HttpStatusCode;
 import org.mockserver.netty.MockServer;
 import org.mockserver.testing.integration.mock.AbstractMockingIntegrationTestBase;
@@ -15,6 +16,7 @@ import org.mockserver.testing.integration.mock.AbstractMockingIntegrationTestBas
 import javax.net.ssl.SSLException;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.startsWith;
 import static org.hamcrest.core.Is.is;
 import static org.mockserver.configuration.ConfigurationProperties.forwardProxyClientCertificatesByHost;
 import static org.mockserver.model.Header.header;
@@ -190,20 +192,21 @@ public class ForwardWithCustomClientCertificateByHostIntegrationTest extends Abs
     }
 
     private void assertRejected(String path) {
-        // wrong client certificate => upstream aborts the TLS handshake => forward fails => 502
-        assertThat(makeRequest(
-                request()
-                    .withSecure(true)
-                    .withPath(calculatePath(path))
-                    .withMethod("POST")
-                    .withHeaders(
-                        header("x-test", "test_headers_and_body")
-                    )
-                    .withBody("an_example_body_http"),
-                getHeadersToRemove()
-            ), is(response()
-                .withStatusCode(HttpStatusCode.BAD_GATEWAY_502.code())
-                .withReasonPhrase(HttpStatusCode.BAD_GATEWAY_502.reasonPhrase())));
+        // wrong client certificate => upstream aborts the TLS handshake => forward fails => 502, saying why
+        HttpResponse rejected = makeRequest(
+            request()
+                .withSecure(true)
+                .withPath(calculatePath(path))
+                .withMethod("POST")
+                .withHeaders(
+                    header("x-test", "test_headers_and_body")
+                )
+                .withBody("an_example_body_http"),
+            getHeadersToRemove()
+        );
+        assertThat(rejected.getStatusCode(), is(HttpStatusCode.BAD_GATEWAY_502.code()));
+        assertThat(rejected.getReasonPhrase(), is(HttpStatusCode.BAD_GATEWAY_502.reasonPhrase()));
+        assertThat(rejected.getBodyAsString(), startsWith("TLS with the upstream failed: "));
     }
 
 }

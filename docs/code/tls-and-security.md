@@ -212,6 +212,25 @@ Selection and caching live in `NettySslContextFactory.createClientSslContext(for
   `HttpClientInitializer`, the same host already used for SNI. The `CONNECT`-tunnel loopback
   (`RelayConnectHandler`) is MockServer talking to itself, not an upstream, so it keeps the global pair.
 
+### When an Outbound TLS Connection Fails
+
+A forward whose TLS handshake fails (an untrusted certificate, a certificate for another host, an upstream
+that does not speak TLS, a handshake that outlasts `socketConnectionTimeout`), or whose client TLS context
+cannot be built (`forwardProxyPrivateKey` / `forwardProxyCertificateChain` that are not valid PEM), is answered
+`502` with the reason in the body, for example `TLS with the upstream failed: SSLHandshakeException: PKIX path
+building failed: ...` or `connection to the upstream could not be set up: RuntimeException: Exception creating
+SSL context for client`, and logged once at `ERROR` with the request and the cause. Before, each failed as a
+closed connection (`Channel handler removed before valid response has been received`), with the reason only in
+a `WARN` that named no request, or for a context that could not be built only in Netty's own log.
+
+The body is bounded as a fault's log entry is (`ExceptionHandling.boundedFaultDescription`), so a non-TLS
+answer is shown as its byte count, never as a hex dump of the upstream's bytes; for a context that could not be
+built it gives only the top-level message, because a deeper cause may quote a configured file. A client TLS
+context that cannot be built is a configuration error: it is not retried and does not count against the
+forward circuit breaker. The Java client still throws `SocketConnectionException`, now with the TLS exception
+or the initialisation error as its cause. See
+[request-processing.md](request-processing.md#how-a-failed-forward-is-answered).
+
 ### Forward Target SSRF Validation
 
 When `forwardProxyBlockPrivateNetworks` is `true` (default `false`), MockServer validates the target host before opening any outbound connection. `InetAddressValidator.validateForwardTarget` resolves the hostname and rejects addresses in these ranges:

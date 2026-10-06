@@ -32,10 +32,13 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
 
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
+import static org.mockserver.exception.ExceptionHandling.boundedFault;
+import static org.mockserver.exception.ExceptionHandling.boundedFaultDescription;
 import static org.mockserver.httpclient.NettyHttpClient.CONNECTION_POOL;
 import static org.mockserver.httpclient.NettyHttpClient.REMOTE_SOCKET;
 import static org.mockserver.httpclient.NettyHttpClient.SECURE;
 import static org.slf4j.event.Level.DEBUG;
+import static org.slf4j.event.Level.ERROR;
 import static org.slf4j.event.Level.TRACE;
 
 @ChannelHandler.Sharable
@@ -84,6 +87,34 @@ public class HttpClientInitializer extends ChannelInitializer<SocketChannel> {
 
     @Override
     public void initChannel(SocketChannel channel) {
+        try {
+            buildPipeline(channel);
+        } catch (RuntimeException failure) {
+            failToSetUp(channel, failure);
+        }
+    }
+
+    /**
+     * Fails the request the connection was opened for with why its pipeline could not be built, as a configuration
+     * error, and closes the connection. Netty would log the failure at {@code WARN} through its own logger and close
+     * the connection, and the request would fail only as a closed connection.
+     */
+    private void failToSetUp(SocketChannel channel, RuntimeException failure) {
+        InetSocketAddress upstream = channel.attr(REMOTE_SOCKET).get();
+        String message = "connection to " + (upstream != null ? upstream.getHostString() + ":" + upstream.getPort() : "upstream") + " could not be set up: " + boundedFaultDescription(failure);
+        if (!HttpClientConnectionErrorHandler.failWaitingRequest(channel, new ClientConfigurationException(message, failure))) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(ERROR)
+                    .setMessageFormat("connection to:{}could not be set up")
+                    .setArguments(upstream)
+                    .setThrowable(boundedFault(failure))
+            );
+        }
+        channel.close();
+    }
+
+    private void buildPipeline(SocketChannel channel) {
         ChannelPipeline pipeline = channel.pipeline();
         boolean secure = channel.attr(SECURE) != null && channel.attr(SECURE).get() != null && channel.attr(SECURE).get();
 

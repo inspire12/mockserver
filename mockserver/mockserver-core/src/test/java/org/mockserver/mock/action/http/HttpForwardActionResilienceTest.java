@@ -4,6 +4,7 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockserver.configuration.Configuration;
+import org.mockserver.httpclient.ClientConfigurationException;
 import org.mockserver.httpclient.HeaderLimitExceededException;
 import org.mockserver.httpclient.NettyHttpClient;
 import org.mockserver.logging.MockServerLogger;
@@ -11,6 +12,7 @@ import org.mockserver.model.HttpForward;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
 
+import java.lang.reflect.Constructor;
 import java.net.InetSocketAddress;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -188,6 +190,33 @@ public class HttpForwardActionResilienceTest {
             }
         }
         assertThat(ForwardCircuitBreaker.getInstance().isOpen("upstream.example:8080"), is(true));
+    }
+
+    @Test
+    public void shouldNotCountAConfigurationErrorAgainstTheCircuitBreakerNorRetryIt() throws Exception {
+        // given - breaker enabled with threshold 3 and two retries; the connection cannot be set up from the configuration
+        Configuration configuration = Configuration.configuration()
+            .forwardProxyCircuitBreakerEnabled(true)
+            .forwardProxyCircuitBreakerFailureThreshold(3)
+            .forwardProxyCircuitBreakerWindowMillis(60_000L)
+            .forwardProxyRetryCount(2)
+            .forwardProxyRetryBackoffMillis(0L);
+        Constructor<ClientConfigurationException> constructor = ClientConfigurationException.class.getDeclaredConstructor(String.class, Throwable.class);
+        constructor.setAccessible(true);
+        CompletableFuture<HttpResponse> notSetUp = new CompletableFuture<>();
+        notSetUp.completeExceptionally(constructor.newInstance("connection to upstream.example:8080 could not be set up: RuntimeException: Exception creating SSL context for client", new RuntimeException("Exception creating SSL context for client")));
+        when(mockHttpClient.sendRequest(any(HttpRequest.class), any(InetSocketAddress.class))).thenReturn(notSetUp);
+        HttpForwardActionHandler handler = handlerWith(configuration);
+
+        // when - more of them than the threshold
+        for (int i = 0; i < 5; i++) {
+            ExecutionException failed = org.junit.Assert.assertThrows(ExecutionException.class, () -> handler.handle(upstream(), request().withMethod("GET").withPath("/x")).getHttpResponse().get(5, TimeUnit.SECONDS));
+            assertThat(ClientConfigurationException.in(failed), is(notNullValue()));
+        }
+
+        // then - the upstream was never reached, so the breaker stays closed, and each request was sent once
+        assertThat(ForwardCircuitBreaker.getInstance().isOpen("upstream.example:8080"), is(false));
+        verify(mockHttpClient, times(5)).sendRequest(any(HttpRequest.class), any(InetSocketAddress.class));
     }
 
     @Test

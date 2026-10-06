@@ -3,6 +3,8 @@ package org.mockserver.mock.action.http;
 import org.mockserver.authentication.ProxyAuthenticationValidator;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.EventLoopGroup;
+import io.netty.handler.codec.http2.Http2CodecUtil;
+import io.netty.handler.codec.http2.Http2Exception;
 import io.netty.util.AttributeKey;
 import org.apache.commons.text.StringEscapeUtils;
 import org.mockserver.closurecallback.websocketregistry.LocalCallbackRegistry;
@@ -12,6 +14,7 @@ import org.mockserver.file.FileBodyException;
 import org.mockserver.filters.HopByHopHeaderFilter;
 import org.mockserver.grpc.GrpcForwardTranslator;
 import org.mockserver.grpc.GrpcProtoDescriptorStore;
+import org.mockserver.httpclient.ClientConfigurationException;
 import org.mockserver.httpclient.HeaderLimitExceededException;
 import org.mockserver.httpclient.NettyHttpClient;
 import org.mockserver.httpclient.SocketCommunicationException;
@@ -42,6 +45,7 @@ import org.mockserver.telemetry.TraceContextAttributes;
 import org.mockserver.telemetry.W3CTraceContext;
 import org.slf4j.event.Level;
 
+import javax.net.ssl.SSLException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -1257,13 +1261,13 @@ public class HttpActionHandler {
                         } catch (SocketCommunicationException sce) {
                             returnBadGateway(responseWriter, request, sce.getMessage());
                         } catch (Throwable throwable) {
-                            handleUnmatchedForwardFailure(throwable, request, responseWriter, ctx, remoteAddress, potentiallyHttpProxy);
+                            handleUnmatchedForwardFailure(throwable, request, responseWriter, remoteAddress, potentiallyHttpProxy);
                         }
                         }, synchronous, throwable -> false);
                     } catch (SocketCommunicationException sce) {
                         returnBadGateway(responseWriter, request, sce.getMessage());
                     } catch (Throwable throwable) {
-                        handleUnmatchedForwardFailure(throwable, request, responseWriter, ctx, remoteAddress, potentiallyHttpProxy);
+                        handleUnmatchedForwardFailure(throwable, request, responseWriter, remoteAddress, potentiallyHttpProxy);
                     }
                 }, synchronous);
 
@@ -1276,14 +1280,25 @@ public class HttpActionHandler {
      * Maps a forward/proxy failure to its bad-gateway response and matching diagnostic log entry. Shared
      * by the unmatched-proxy and breakpoint-continuation forward paths so error handling is identical
      * whether the failure is raised while issuing the request or delivered later by the response future's
-     * async continuation. {@code ctx} may be null (breakpoint continuation), in which case the TLS
-     * diagnostic omits the channel suffix.
+     * async continuation.
      */
-    private void handleUnmatchedForwardFailure(Throwable throwable, HttpRequest request, ResponseWriter responseWriter, ChannelHandlerContext ctx, InetSocketAddress remoteAddress, boolean potentiallyHttpProxy) {
+    void handleUnmatchedForwardFailure(Throwable throwable, HttpRequest request, ResponseWriter responseWriter, InetSocketAddress remoteAddress, boolean potentiallyHttpProxy) {
         if (returnedHeaderLimitFailure(responseWriter, request, throwable)) {
             return;
         }
-        if (potentiallyHttpProxy && connectionException(throwable)) {
+        String reason = upstreamFailureReason(throwable);
+        if (reason != null) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.ERROR)
+                    .setCorrelationId(request.getLogCorrelationId())
+                    .setHttpRequest(request)
+                    .setMessageFormat("failed to proxy request{}to remote address{}because:{}")
+                    .setArguments(request, remoteAddress, reason)
+                    .setThrowable(boundedFault(throwable))
+            );
+            returnBadGateway(responseWriter, request, reason, badGatewayResponse().withBody(reason));
+        } else if (potentiallyHttpProxy && connectionException(throwable)) {
             if (mockServerLogger != null && mockServerLogger.isEnabledForInstance(TRACE)) {
                 mockServerLogger.logEvent(
                     new LogEntry()
@@ -1294,17 +1309,6 @@ public class HttpActionHandler {
                 );
             }
             returnBadGateway(responseWriter, request, "failed to connect to proxied socket due to exploratory HTTP proxy");
-        } else if (sslHandshakeException(throwable)) {
-            mockServerLogger.logEvent(
-                new LogEntry()
-                    .setLogLevel(Level.ERROR)
-                    .setCorrelationId(request.getLogCorrelationId())
-                    .setHttpRequest(request)
-                    .setMessageFormat("TLS handshake exception while proxying request{}to remote address{}" + (ctx != null ? "with channel" + ctx.channel() : ""))
-                    .setArguments(request, remoteAddress)
-                    .setThrowable(throwable)
-            );
-            returnBadGateway(responseWriter, request, "TLS handshake exception while proxying request to remote address" + remoteAddress);
         } else if (!connectionClosedException(throwable)) {
             mockServerLogger.logEvent(
                 new LogEntry()
@@ -1482,13 +1486,13 @@ public class HttpActionHandler {
             } catch (SocketCommunicationException sce) {
                 returnBadGateway(responseWriter, originalRequest, sce.getMessage());
             } catch (Throwable throwable) {
-                handleUnmatchedForwardFailure(throwable, originalRequest, responseWriter, null, remoteAddress, potentiallyHttpProxy);
+                handleUnmatchedForwardFailure(throwable, originalRequest, responseWriter, remoteAddress, potentiallyHttpProxy);
             }
             }, false, throwable -> false);
         } catch (SocketCommunicationException sce) {
             returnBadGateway(responseWriter, originalRequest, sce.getMessage());
         } catch (Throwable throwable) {
-            handleUnmatchedForwardFailure(throwable, originalRequest, responseWriter, null, remoteAddress, potentiallyHttpProxy);
+            handleUnmatchedForwardFailure(throwable, originalRequest, responseWriter, remoteAddress, potentiallyHttpProxy);
         }
     }
 
@@ -2927,7 +2931,8 @@ public class HttpActionHandler {
                     postProcessor.run();
                 }
             }
-        }, synchronous, throwable -> true);
+            // a failure with a reason is logged once, with the request, by handleExceptionDuringForwardingRequest
+        }, synchronous, throwable -> upstreamFailureReason(throwable) == null);
     }
 
     private void writeStreamingForwardActionResponse(final HttpResponse response, final ResponseWriter responseWriter, final HttpRequest request, final Action action, final HttpForwardActionResult responseFuture, final Runnable postProcessor, final long forwardStartNanos) {
@@ -3034,11 +3039,48 @@ public class HttpActionHandler {
         }
     }
 
+    /**
+     * Why a forward failed, for a reason the client's {@code 502} names: the connection to the upstream could not be
+     * set up from MockServer's configuration, TLS with the upstream failed, or the upstream sent an HTTP/2 error.
+     * Each comes from the TLS, HTTP/2 or set-up code and is bounded as a fault's log entry is (256 characters a
+     * message, and a non-TLS answer as its byte count), so header values and body bytes are never quoted; an HTTP/2
+     * message can name a header. Null for any other failure.
+     */
+    static String upstreamFailureReason(Throwable failure) {
+        ClientConfigurationException configurationError = ClientConfigurationException.in(failure);
+        if (configurationError != null) {
+            // only the top of the cause: one deeper may quote a configured file
+            Throwable setUpFailure = configurationError.getCause() != null ? configurationError.getCause() : configurationError;
+            return "connection to the upstream could not be set up: " + boundedFaultDescription(setUpFailure);
+        }
+        Http2Exception http2Error = Http2CodecUtil.getEmbeddedHttp2Exception(failure);
+        if (http2Error != null) {
+            return "HTTP/2 error from the upstream: " + http2Error.error() + ": " + boundedFaultMessage(http2Error);
+        }
+        SSLException tlsFailure = sslCause(failure);
+        if (tlsFailure != null || sslHandshakeException(failure)) {
+            return "TLS with the upstream failed: " + boundedFaultDescriptionWithRootCause(tlsFailure != null ? tlsFailure : failure);
+        }
+        return null;
+    }
+
     void handleExceptionDuringForwardingRequest(Action action, HttpRequest request, ResponseWriter responseWriter, Throwable exception) {
         if (returnedHeaderLimitFailure(responseWriter, request, exception)) {
             return;
         }
-        if (connectionException(exception)) {
+        String reason = upstreamFailureReason(exception);
+        if (reason != null) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.ERROR)
+                    .setCorrelationId(request.getLogCorrelationId())
+                    .setHttpRequest(request)
+                    .setMessageFormat("failed to forward request{}for action{}because:{}")
+                    .setArguments(request, action, reason)
+                    .setThrowable(boundedFault(exception))
+            );
+            returnBadGateway(responseWriter, request, reason, badGatewayResponse().withBody(reason));
+        } else if (connectionException(exception)) {
             if (mockServerLogger != null && mockServerLogger.isEnabledForInstance(TRACE)) {
                 mockServerLogger.logEvent(
                     new LogEntry()
@@ -3050,17 +3092,6 @@ public class HttpActionHandler {
                 );
             }
             returnBadGateway(responseWriter, request, "failed to connect to remote socket while forwarding request");
-        } else if (sslHandshakeException(exception)) {
-            mockServerLogger.logEvent(
-                new LogEntry()
-                    .setLogLevel(Level.ERROR)
-                    .setCorrelationId(request.getLogCorrelationId())
-                    .setHttpRequest(request)
-                    .setMessageFormat("TLS handshake exception while forwarding request{}for action{}")
-                    .setArguments(request, action)
-                    .setThrowable(exception)
-            );
-            returnBadGateway(responseWriter, request, "TLS handshake exception while forwarding request");
         } else {
             mockServerLogger.logEvent(
                 new LogEntry()

@@ -41,9 +41,11 @@ import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpForward;
 import org.mockserver.netty.MockServer;
 import org.mockserver.netty.integration.NettyLogCapture;
+import org.mockserver.socket.tls.ForwardProxyTLSX509CertificatesTrustManager;
 import org.slf4j.event.Level;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -52,6 +54,7 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -67,8 +70,10 @@ import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.lessThan;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
 import static org.mockserver.configuration.Configuration.configuration;
@@ -77,14 +82,16 @@ import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.stop.Stop.stopQuietly;
 
 /**
- * What MockServer logs when the connection it forwards a request on fails: while TLS is being set up with the
- * upstream, and on an HTTP/2 connection once it is. There is one entry about the connection in MockServer's own log,
- * at a level that fits the cause, and nothing through Netty's loggers, which report at {@code WARN} with a stack
- * trace whatever reaches the end of a pipeline and whatever stops the protocol being negotiated. The request in
- * flight fails as it did.
+ * What MockServer logs, and answers, when the connection it forwards a request on fails: while it is set up, while TLS
+ * is being set up with the upstream, and on an HTTP/2 connection once it is. There is one entry about the connection in
+ * MockServer's own log, at a level that fits the cause, and nothing through Netty's loggers, which report at
+ * {@code WARN} with a stack trace whatever reaches the end of a pipeline, whatever stops the protocol being negotiated
+ * and whatever stops a pipeline being built. When the request in flight fails with the cause, the request is logged
+ * with it as an {@code ERROR}, its {@code 502} names it, and the connection's entry is {@code DEBUG}.
  */
 public class ForwardConnectionErrorLoggingIntegrationTest {
 
+    private static final String CHANNEL_INITIALIZER = "io.netty.channel.ChannelInitializer";
     private static final List<LogEntry> logged = new CopyOnWriteArrayList<>();
     private static final List<Channel> upstreamConnections = new CopyOnWriteArrayList<>();
     private static final AtomicInteger upstreamRequests = new AtomicInteger();
@@ -95,6 +102,14 @@ public class ForwardConnectionErrorLoggingIntegrationTest {
     private static RawUpstream notTlsUpstream;
     private static RawUpstream resettingUpstream;
     private static RawUpstream refusingProxy;
+    private static RawUpstream plainHttpUpstream;
+    private static RawUpstream silentUpstream;
+    private static SelfSignedCertificate http2UpstreamCertificate;
+    private static Channel untrustedUpstream;
+    private static MockServer validating;
+    private static MockServerClient validatingClient;
+    private static MockServer misconfigured;
+    private static MockServerClient misconfiguredClient;
     private static MockServer mockServer;
     private static MockServerClient mockServerClient;
     private static MockServer throughProxy;
@@ -104,10 +119,22 @@ public class ForwardConnectionErrorLoggingIntegrationTest {
 
     @BeforeClass
     public static void startServers() throws Exception {
-        nettysLog = new NettyLogCapture(NettyLogCapture.PIPELINE, NettyLogCapture.PROTOCOL_NEGOTIATION);
+        nettysLog = new NettyLogCapture(NettyLogCapture.PIPELINE, NettyLogCapture.PROTOCOL_NEGOTIATION, CHANNEL_INITIALIZER);
         upstreamGroup = new NioEventLoopGroup(2);
         nettysLog.ignoreThreadsOf(upstreamGroup);
+        http2UpstreamCertificate = new SelfSignedCertificate();
         http2Upstream = http2Upstream();
+        // a subject the trusted certificate does not have, so no trusted certificate is taken for its issuer
+        untrustedUpstream = tlsUpstream(new SelfSignedCertificate("untrusted.example"));
+        // a plain HTTP server, answering a TLS ClientHello as a request it cannot parse
+        plainHttpUpstream = new RawUpstream(socket -> {
+            socket.getInputStream().read();
+            socket.getOutputStream().write("HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\n\r\n".getBytes(StandardCharsets.ISO_8859_1));
+            socket.getOutputStream().flush();
+            readUntilClosed(socket.getInputStream());
+        });
+        // accepts the connection and never answers the ClientHello
+        silentUpstream = new RawUpstream(socket -> readUntilClosed(socket.getInputStream()));
         // answers a TLS ClientHello with bytes that are not TLS
         notTlsUpstream = new RawUpstream(socket -> {
             socket.getInputStream().read();
@@ -136,7 +163,24 @@ public class ForwardConnectionErrorLoggingIntegrationTest {
         mockServerClient = new MockServerClient("127.0.0.1", mockServer.getLocalPort());
         throughProxy = new MockServer(forwarding().forwardHttpsProxy(new InetSocketAddress("127.0.0.1", refusingProxy.port())), 0);
         throughProxyClient = new MockServerClient("127.0.0.1", throughProxy.getLocalPort());
+        // trusts only the HTTP/2 upstream's certificate, which is not for 127.0.0.1
+        validating = new MockServer(forwarding()
+            .forwardProxyTLSX509CertificatesTrustManagerType(ForwardProxyTLSX509CertificatesTrustManager.CUSTOM)
+            .forwardProxyTLSCustomTrustX509Certificates(http2UpstreamCertificate.certificate().getAbsolutePath())
+            .socketConnectionTimeoutInMillis(1000L), 0);
+        validatingClient = new MockServerClient("127.0.0.1", validating.getLocalPort());
+        misconfigured = new MockServer(forwarding()
+            .forwardProxyPrivateKey(notPem("forward-proxy-private-key").getAbsolutePath())
+            .forwardProxyCertificateChain(notPem("forward-proxy-certificate-chain").getAbsolutePath()), 0);
+        misconfiguredClient = new MockServerClient("127.0.0.1", misconfigured.getLocalPort());
         nettysLog.attach();
+    }
+
+    private static File notPem(String name) throws IOException {
+        File file = File.createTempFile(name, ".pem");
+        file.deleteOnExit();
+        Files.write(file.toPath(), "-----BEGIN PRIVATE KEY-----\nnot base64 at all\n-----END PRIVATE KEY-----\n".getBytes(StandardCharsets.US_ASCII));
+        return file;
     }
 
     private static Configuration forwarding() {
@@ -146,10 +190,12 @@ public class ForwardConnectionErrorLoggingIntegrationTest {
     @AfterClass
     public static void stopServers() throws Exception {
         try {
-            stopQuietly(mockServerClient);
-            stopQuietly(throughProxyClient);
-            stopQuietly(mockServer);
-            stopQuietly(throughProxy);
+            for (MockServerClient client : Arrays.asList(mockServerClient, throughProxyClient, validatingClient, misconfiguredClient)) {
+                stopQuietly(client);
+            }
+            for (MockServer server : Arrays.asList(mockServer, throughProxy, validating, misconfigured)) {
+                stopQuietly(server);
+            }
             List<String> loggedByNettyWhileThisClassRan = nettysLog.all();
             nettysLog.assertThatItSeesWhatNettyLogs();
             assertThat("logged by Netty while this class ran", loggedByNettyWhileThisClassRan, empty());
@@ -157,20 +203,25 @@ public class ForwardConnectionErrorLoggingIntegrationTest {
             MockServerLogger.setGlobalLogEventListener(null);
             nettysLog.close();
             http2Upstream.close();
-            for (RawUpstream upstream : Arrays.asList(notTlsUpstream, resettingUpstream, refusingProxy)) {
+            untrustedUpstream.close();
+            for (RawUpstream upstream : Arrays.asList(notTlsUpstream, resettingUpstream, refusingProxy, plainHttpUpstream, silentUpstream)) {
                 upstream.close();
             }
+            http2UpstreamCertificate.delete();
             upstreamGroup.shutdownGracefully(0, 1, TimeUnit.SECONDS);
         }
     }
 
     @Before
     public void forgetEarlierTests() {
-        for (MockServerClient client : Arrays.asList(mockServerClient, throughProxyClient)) {
+        for (MockServerClient client : Arrays.asList(mockServerClient, throughProxyClient, validatingClient, misconfiguredClient)) {
             client.reset();
             client.when(request().withPath("/http2/.*")).forward(forward().withHost("127.0.0.1").withPort(port(http2Upstream)).withScheme(HttpForward.Scheme.HTTPS));
             client.when(request().withPath("/not-tls")).forward(forward().withHost("127.0.0.1").withPort(notTlsUpstream.port()).withScheme(HttpForward.Scheme.HTTPS));
             client.when(request().withPath("/resetting")).forward(forward().withHost("127.0.0.1").withPort(resettingUpstream.port()).withScheme(HttpForward.Scheme.HTTPS));
+            client.when(request().withPath("/untrusted")).forward(forward().withHost("127.0.0.1").withPort(port(untrustedUpstream)).withScheme(HttpForward.Scheme.HTTPS));
+            client.when(request().withPath("/plain-http")).forward(forward().withHost("127.0.0.1").withPort(plainHttpUpstream.port()).withScheme(HttpForward.Scheme.HTTPS));
+            client.when(request().withPath("/silent")).forward(forward().withHost("127.0.0.1").withPort(silentUpstream.port()).withScheme(HttpForward.Scheme.HTTPS));
         }
         logged.clear();
         goAwaysSentToTheUpstream.clear();
@@ -209,14 +260,16 @@ public class ForwardConnectionErrorLoggingIntegrationTest {
     }
 
     @Test
-    public void shouldLogAnHttp2ConnectionErrorOnceAsAWarningAndStillSendGoAway() throws Exception {
+    public void shouldFailAForwardWithItsHttp2ConnectionErrorAndStillSendGoAway() throws Exception {
         Response response = post(mockServer, "/http2/invalid-frame");
 
         assertThat(response.toString(), response.status, is(502));
+        assertThat(response.body, is("HTTP/2 error from the upstream: PROTOCOL_ERROR: Frame of type 0 must be associated with a stream."));
+        assertForwardFailureLoggedOnceAsAnError(response.body);
         List<LogEntry> entries = awaitConnectionEntries(port(http2Upstream));
         assertThat(nettysLog.since(nettysLogBeforeThisTest), empty());
         assertThat(describe(entries), entries, hasSize(1));
-        assertThat(entries.get(0).getLogLevel(), is(Level.WARN));
+        assertThat(entries.get(0).getLogLevel(), is(Level.DEBUG));
         assertThat(entries.get(0).getMessageFormat(), is("closing HTTP/2 connection to:{}for connection error:{}:{}"));
         assertThat(Arrays.asList(entries.get(0).getArguments()), hasItem(Http2Error.PROTOCOL_ERROR));
         assertThat(Arrays.asList(entries.get(0).getArguments()), hasItem("Frame of type 0 must be associated with a stream."));
@@ -226,32 +279,97 @@ public class ForwardConnectionErrorLoggingIntegrationTest {
     }
 
     @Test
-    public void shouldCloseAnHttp2ConnectionSentBytesThatAreNotTlsAndLogItOnceWithoutTheBytes() throws Exception {
+    public void shouldCloseAnHttp2ConnectionSentBytesThatAreNotTlsAndFailTheForwardWithoutTheBytes() throws Exception {
         Response response = post(mockServer, "/http2/not-tls");
 
         assertThat(response.toString(), response.status, is(502));
+        // after the handshake OpenSSL reads them as a record of an unknown version, the JDK as no record at all
+        assertThat(response.body, startsWith("TLS with the upstream failed: "));
+        assertThat(response.body, not(containsString("0000000000")));
+        assertForwardFailureLoggedOnceAsAnError(response.body);
         List<LogEntry> entries = awaitConnectionEntries(port(http2Upstream));
         assertThat(nettysLog.since(nettysLogBeforeThisTest), empty());
         assertThat(describe(entries), entries, hasSize(1));
-        assertThat(entries.get(0).getLogLevel(), is(Level.WARN));
+        assertThat(entries.get(0).getLogLevel(), is(Level.DEBUG));
         assertThat(entries.get(0).getMessageFormat(), containsString("for SSL or decoder fault "));
         assertThat(entries.get(0).getThrowable(), is(nullValue()));
         assertThat(describe(logged), describe(logged), not(containsString("0000000000")));
     }
 
     @Test
-    public void shouldLogAnUpstreamThatAnswersTheTlsHandshakeWithOtherBytesOnceWithoutTheBytes() throws Exception {
+    public void shouldFailAForwardToAnUpstreamThatAnswersTheTlsHandshakeWithOtherBytesWithoutTheBytes() throws Exception {
         Response response = post(mockServer, "/not-tls");
 
         assertThat(response.toString(), response.status, is(502));
+        assertThat(response.body, startsWith("TLS with the upstream failed: NotSslRecordException: not an SSL/TLS record"));
+        assertThat(response.body, not(containsString("7878787878")));
+        assertForwardFailureLoggedOnceAsAnError(response.body);
         List<LogEntry> entries = awaitConnectionEntries(notTlsUpstream.port());
         assertThat(nettysLog.since(nettysLogBeforeThisTest), empty());
         assertThat(describe(entries), entries, hasSize(1));
-        assertThat(entries.get(0).getLogLevel(), is(Level.WARN));
+        assertThat(entries.get(0).getLogLevel(), is(Level.DEBUG));
         assertThat(entries.get(0).getMessageFormat(), is("TLS could not be set up on connection to:{}"));
         // as text: with Netty's JDK TLS handler the throwable is a copy that leaves the upstream's bytes out
-        assertThat("the reason, which the failed forward does not carry", String.valueOf(entries.get(0).getThrowable()), startsWith("io.netty.handler.codec.DecoderException: io.netty.handler.ssl.NotSslRecordException: not an SSL/TLS record"));
+        assertThat(String.valueOf(entries.get(0).getThrowable()), startsWith("io.netty.handler.codec.DecoderException: io.netty.handler.ssl.NotSslRecordException: not an SSL/TLS record"));
         assertThat(describe(logged), describe(logged), not(containsString("7878787878")));
+    }
+
+    @Test
+    public void shouldFailAForwardToAPlainHttpUpstreamWithTheHandshakesReason() throws Exception {
+        Response response = post(mockServer, "/plain-http");
+
+        assertThat(response.toString(), response.status, is(502));
+        assertThat(response.body, startsWith("TLS with the upstream failed: NotSslRecordException: not an SSL/TLS record"));
+        assertThat("the upstream's answer, as a hex dump", response.body, not(containsString("485454502f")));
+        assertForwardFailureLoggedOnceAsAnError(response.body);
+        assertThat(nettysLog.since(nettysLogBeforeThisTest), empty());
+    }
+
+    @Test
+    public void shouldFailAForwardToAnUntrustedUpstreamWithTheHandshakesReason() throws Exception {
+        Response response = post(validating, "/untrusted");
+
+        assertThat(response.toString(), response.status, is(502));
+        assertThat(response.body, startsWith("TLS with the upstream failed: SSLHandshakeException: "));
+        // with the JDK's TLS provider in its message, with OpenSSL's in its cause
+        assertThat(response.body, containsString("unable to find valid certification path to requested target"));
+        assertForwardFailureLoggedOnceAsAnError(response.body);
+        List<LogEntry> entries = awaitConnectionEntries(port(untrustedUpstream));
+        assertThat(nettysLog.since(nettysLogBeforeThisTest), empty());
+        assertThat(describe(entries), entries, hasSize(1));
+        assertThat(entries.get(0).getLogLevel(), is(Level.DEBUG));
+    }
+
+    @Test
+    public void shouldFailAForwardToAnUpstreamWithACertificateForAnotherHostWithTheHandshakesReason() throws Exception {
+        Response response = post(validating, "/http2/served");
+
+        assertThat(response.toString(), response.status, is(502));
+        assertThat(response.body, startsWith("TLS with the upstream failed: SSLHandshakeException: "));
+        // which, as the JDK words it, depends on whether the TLS handler was given a name or an address
+        assertThat(response.body, matchesPattern(".*No (name matching|subject alternative names).*"));
+        assertForwardFailureLoggedOnceAsAnError(response.body);
+        assertThat(nettysLog.since(nettysLogBeforeThisTest), empty());
+    }
+
+    @Test
+    public void shouldFailAForwardWhoseHandshakeTimesOutWithTheTimeout() throws Exception {
+        Response response = post(validating, "/silent");
+
+        assertThat(response.toString(), response.status, is(502));
+        assertThat(response.body, is("TLS with the upstream failed: SslHandshakeTimeoutException: handshake timed out after 1000ms"));
+        assertForwardFailureLoggedOnceAsAnError(response.body);
+        assertThat(nettysLog.since(nettysLogBeforeThisTest), empty());
+    }
+
+    @Test
+    public void shouldFailAForwardWhoseConnectionCannotBeSetUpFromTheConfigurationAsAConfigurationError() throws Exception {
+        Response response = post(misconfigured, "/http2/served");
+
+        assertThat(response.toString(), response.status, is(502));
+        assertThat(response.body, is("connection to the upstream could not be set up: RuntimeException: Exception creating SSL context for client"));
+        assertForwardFailureLoggedOnceAsAnError(response.body);
+        assertThat("logged by Netty's ChannelInitializer", nettysLog.since(nettysLogBeforeThisTest), empty());
     }
 
     @Test
@@ -280,6 +398,57 @@ public class ForwardConnectionErrorLoggingIntegrationTest {
         assertThat(entries.get(0).getMessageFormat(), is("connection to:{}failed or was closed before TLS was set up:{}"));
         assertThat(String.valueOf(entries.get(0).getArguments()[1]), containsString("407"));
         assertThat(describe(logged), describe(logged), containsString("ERROR io.netty.handler.proxy.HttpProxyHandler$HttpProxyConnectException"));
+    }
+
+    /**
+     * The forward's own entry: an {@code ERROR}, with the request, that names the reason its {@code 502} gives.
+     */
+    private static void assertForwardFailureLoggedOnceAsAnError(String reason) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (forwardFailures().isEmpty() && System.nanoTime() < deadline) {
+            TimeUnit.MILLISECONDS.sleep(20);
+        }
+        List<LogEntry> failures = forwardFailures();
+        assertThat(describe(logged), failures, hasSize(1));
+        assertThat(failures.get(0).getHttpRequest(), is(notNullValue()));
+        assertThat(Arrays.asList(failures.get(0).getArguments()), hasItem(reason));
+        assertThat(failures.get(0).getThrowable(), is(notNullValue()));
+    }
+
+    private static List<LogEntry> forwardFailures() {
+        return logged.stream()
+            .filter(entry -> entry.getLogLevel() == Level.ERROR && "failed to forward request{}for action{}because:{}".equals(entry.getMessageFormat()))
+            .collect(Collectors.toList());
+    }
+
+    private static void readUntilClosed(InputStream input) throws IOException {
+        byte[] buffer = new byte[1024];
+        while (input.read(buffer) != -1) {
+            continue;
+        }
+    }
+
+    /**
+     * A TLS listener that presents {@code certificate} and does nothing else.
+     */
+    private static Channel tlsUpstream(SelfSignedCertificate certificate) throws Exception {
+        SslContext sslContext = SslContextBuilder.forServer(certificate.certificate(), certificate.privateKey()).build();
+        return new ServerBootstrap()
+            .group(upstreamGroup)
+            .channel(NioServerSocketChannel.class)
+            .childHandler(new ChannelInitializer<SocketChannel>() {
+                @Override
+                protected void initChannel(SocketChannel ch) {
+                    ch.pipeline().addLast(sslContext.newHandler(ch.alloc()));
+                    ch.pipeline().addLast(new ChannelInboundHandlerAdapter() {
+                        @Override
+                        public void exceptionCaught(ChannelHandlerContext connection, Throwable cause) {
+                            connection.close();
+                        }
+                    });
+                }
+            })
+            .bind(new InetSocketAddress("127.0.0.1", 0)).sync().channel();
     }
 
     private static void awaitGoAway() throws InterruptedException {
@@ -378,8 +547,7 @@ public class ForwardConnectionErrorLoggingIntegrationTest {
      * An HTTP/2 upstream over TLS that does to its connection what the path of the request asks for.
      */
     private static Channel http2Upstream() throws Exception {
-        SelfSignedCertificate certificate = new SelfSignedCertificate();
-        SslContext sslContext = SslContextBuilder.forServer(certificate.certificate(), certificate.privateKey())
+        SslContext sslContext = SslContextBuilder.forServer(http2UpstreamCertificate.certificate(), http2UpstreamCertificate.privateKey())
             .ciphers(Http2SecurityUtil.CIPHERS, SupportedCipherSuiteFilter.INSTANCE)
             .applicationProtocolConfig(new ApplicationProtocolConfig(
                 ApplicationProtocolConfig.Protocol.ALPN,

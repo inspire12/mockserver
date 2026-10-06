@@ -4,33 +4,45 @@ import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.DecoderException;
 import io.netty.handler.proxy.ProxyConnectException;
 import io.netty.handler.ssl.NotSslRecordException;
+import io.netty.handler.ssl.SslHandshakeCompletionEvent;
+import io.netty.handler.ssl.SslHandshakeTimeoutException;
 import io.netty.util.internal.OutOfDirectMemoryError;
 import org.junit.Test;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
+import org.mockserver.model.Message;
 import org.slf4j.event.Level;
 
+import javax.net.ssl.SSLException;
 import javax.net.ssl.SSLHandshakeException;
 import java.io.IOException;
 import java.lang.reflect.Constructor;
 import java.net.InetSocketAddress;
 import java.net.SocketException;
+import java.nio.channels.ClosedChannelException;
+import java.security.cert.CertificateException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.sameInstance;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.Assert.assertThrows;
 import static org.mockserver.configuration.Configuration.configuration;
+import static org.mockserver.exception.ExceptionHandling.boundedFaultDescriptionWithRootCause;
 import static org.mockserver.httpclient.NettyHttpClient.REMOTE_SOCKET;
+import static org.mockserver.httpclient.NettyHttpClient.RESPONSE_FUTURE;
 
 /**
  * What the forward client logs for an exception that arrives before the protocol is negotiated with an upstream,
@@ -175,6 +187,102 @@ public class HttpOrHttp2InitializerTest {
         assertThat(logged.get(0).getMessageFormat(), startsWith("exception caught before TLS was set up on connection to upstream "));
         assertThat(logged.get(0).getThrowable(), is(sameInstance(unexpected)));
         assertHandledAndClosed(connection);
+    }
+
+    @Test
+    public void shouldFailAWaitingForwardWithEachKindOfFailedHandshakeAndLogTheConnectionOnlyAtDebug() {
+        SSLHandshakeException untrusted = new SSLHandshakeException("PKIX path building failed");
+        SSLHandshakeException hostnameMismatch = new SSLHandshakeException("No subject alternative names matching IP address 127.0.0.1 found");
+        hostnameMismatch.initCause(new CertificateException("No subject alternative names matching IP address 127.0.0.1 found"));
+        NotSslRecordException notTls = new NotSslRecordException("not an SSL/TLS record: " + "48".repeat(400));
+        // as OpenSSL reports it, with the trust manager's reason as the cause
+        SSLHandshakeException openSsl = new SSLHandshakeException("General OpenSslEngine problem");
+        openSsl.initCause(new CertificateException("No subject alternative names present"));
+        for (SSLException cause : new SSLException[]{untrusted, hostnameMismatch, notTls, openSsl}) {
+            EmbeddedChannel connection = connection();
+            CompletableFuture<Message> forward = waitingForward(connection);
+            logged.clear();
+
+            // as Netty's TLS handler reports it: the handshake's event, then the exception its decoder wraps
+            connection.pipeline().fireUserEventTriggered(new SslHandshakeCompletionEvent(cause));
+            connection.pipeline().fireExceptionCaught(new DecoderException(cause));
+
+            Throwable failure = failureOf(forward);
+            assertThat(failure, instanceOf(SocketConnectionException.class));
+            assertThat(failure.getCause(), is(sameInstance(cause)));
+            assertThat(failure.getMessage(), is("TLS handshake with upstream.example:8443 failed: " + boundedFaultDescriptionWithRootCause(cause)));
+            assertThat(failure.getMessage(), not(containsString("4848")));
+            assertThat("logged once, with the request, by what the forward fails with", logged, hasSize(1));
+            assertThat(logged.get(0).getLogLevel(), is(Level.DEBUG));
+            assertThat(logged.get(0).getMessageFormat(), is("TLS could not be set up on connection to:{}"));
+            assertHandledAndClosed(connection);
+        }
+    }
+
+    @Test
+    public void shouldFailAWaitingForwardWithAHandshakeTimeoutThatNettyReportsOnlyAsAnEvent() {
+        SslHandshakeTimeoutException timedOut = new SslHandshakeTimeoutException("handshake timed out after 1000ms");
+        EmbeddedChannel connection = connection();
+        CompletableFuture<Message> forward = waitingForward(connection);
+
+        connection.pipeline().fireUserEventTriggered(new SslHandshakeCompletionEvent(timedOut));
+
+        Throwable failure = failureOf(forward);
+        assertThat(failure, instanceOf(SocketConnectionException.class));
+        assertThat(failure.getCause(), is(sameInstance(timedOut)));
+        assertThat(logged, empty());
+        connection.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldLeaveAWaitingForwardToTheTeardownWhenTheHandshakeEndsBecauseTheConnectionClosed() {
+        // the upstream closed the connection: a connection failure, as before
+        EmbeddedChannel connection = connection();
+        CompletableFuture<Message> forward = waitingForward(connection);
+
+        connection.pipeline().fireUserEventTriggered(new SslHandshakeCompletionEvent(new ClosedChannelException()));
+
+        assertThat(forward.isDone(), is(false));
+        connection.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldLeaveAWaitingForwardToTheConnectionFailureUnderAHandshakeThatCouldNotBeWritten() {
+        // a proxy that refuses the tunnel fails the handshake's write: the refusal reaches the forward itself
+        EmbeddedChannel connection = connection();
+        CompletableFuture<Message> forward = waitingForward(connection);
+        SSLException writeFailed = new SSLException("failure when writing TLS control frames", new ProxyConnectException("http, none, proxy => upstream, status: 407 Proxy Authentication Required"));
+
+        connection.pipeline().fireUserEventTriggered(new SslHandshakeCompletionEvent(writeFailed));
+
+        assertThat(forward.isDone(), is(false));
+        connection.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldStillWarnOfAFailedHandshakeWhenNoForwardIsWaitingForIt() {
+        SSLHandshakeException untrusted = new SSLHandshakeException("PKIX path building failed");
+        EmbeddedChannel connection = connection();
+        CompletableFuture<Message> forward = waitingForward(connection);
+        forward.completeExceptionally(new SocketConnectionException("failed already"));
+
+        connection.pipeline().fireUserEventTriggered(new SslHandshakeCompletionEvent(untrusted));
+        connection.pipeline().fireExceptionCaught(new DecoderException(untrusted));
+
+        assertThat(logged, hasSize(1));
+        assertThat(logged.get(0).getLogLevel(), is(Level.WARN));
+        assertHandledAndClosed(connection);
+    }
+
+    private static CompletableFuture<Message> waitingForward(EmbeddedChannel connection) {
+        CompletableFuture<Message> forward = new CompletableFuture<>();
+        connection.attr(RESPONSE_FUTURE).set(forward);
+        return forward;
+    }
+
+    private static Throwable failureOf(CompletableFuture<Message> forward) {
+        assertThat("failed", forward.isCompletedExceptionally(), is(true));
+        return assertThrows(ExecutionException.class, forward::get).getCause();
     }
 
     private EmbeddedChannel connection() {

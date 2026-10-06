@@ -8,6 +8,7 @@ import org.junit.Test;
 import org.mockserver.client.MockServerClient;
 import org.mockserver.echo.http.EchoServer;
 import org.mockserver.model.HttpForward;
+import org.mockserver.model.HttpResponse;
 import org.mockserver.model.HttpStatusCode;
 import org.mockserver.netty.MockServer;
 import org.mockserver.testing.integration.mock.AbstractMockingIntegrationTestBase;
@@ -25,6 +26,7 @@ import static org.mockserver.socket.tls.PEMToFile.privateKeyFromPEMFile;
 import static org.mockserver.socket.tls.PEMToFile.x509FromPEMFile;
 import static org.mockserver.stop.Stop.stopQuietly;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.startsWith;
 import static org.hamcrest.core.Is.is;
 
 /**
@@ -148,21 +150,22 @@ public class ForwardWithCustomClientCertificateIntegrationTest extends AbstractM
                     .withScheme(HttpForward.Scheme.HTTPS)
             );
 
-        // then - invalid certificate returns 502 because TLS handshake fails during forwarding
-        assertThat(makeRequest(
-                request()
-                    .withSecure(true)
-                    .withPath(calculatePath("trustNone"))
-                    .withMethod("POST")
-                    .withHeaders(
-                        header("Host", "127.0.0.1:" + trustNoneTLSEchoServer.getPort()),
-                        header("x-test", "test_headers_and_body")
-                    )
-                    .withBody("an_example_body_http"),
-                getHeadersToRemove()
-            ), is(response()
-                .withStatusCode(HttpStatusCode.BAD_GATEWAY_502.code())
-                .withReasonPhrase(HttpStatusCode.BAD_GATEWAY_502.reasonPhrase())));
+        // then - invalid certificate returns 502, saying why, because TLS handshake fails during forwarding
+        HttpResponse untrusted = makeRequest(
+            request()
+                .withSecure(true)
+                .withPath(calculatePath("trustNone"))
+                .withMethod("POST")
+                .withHeaders(
+                    header("Host", "127.0.0.1:" + trustNoneTLSEchoServer.getPort()),
+                    header("x-test", "test_headers_and_body")
+                )
+                .withBody("an_example_body_http"),
+            getHeadersToRemove()
+        );
+        assertThat(untrusted.getStatusCode(), is(HttpStatusCode.BAD_GATEWAY_502.code()));
+        assertThat(untrusted.getReasonPhrase(), is(HttpStatusCode.BAD_GATEWAY_502.reasonPhrase()));
+        assertThat(untrusted.getBodyAsString(), startsWith("TLS with the upstream failed: "));
 
         // then - trusted certificate returns response
         assertThat(makeRequest(

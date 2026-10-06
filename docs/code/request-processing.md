@@ -1007,16 +1007,55 @@ completed the request's future directly the teardown would sometimes be reported
 | Case | What the request fails with |
 |---|---|
 | Connect refused, timed out, or host unresolvable | the connect cause |
-| The channel's pipeline could not be built (for example the client TLS context cannot be created from `forwardProxyPrivateKey` / `forwardProxyCertificateChain`) | the generic `Channel handler removed…` |
-| The pipeline failed before the connection error handler was added | `ClosedChannelException` |
-| TLS handshake fails on a connected channel | the generic `Channel handler removed…` |
-| Binary forward (`sendRequest(BinaryMessage, …)`) | not gated: the connect cause or the teardown, whichever completes first |
+| The channel's pipeline could not be built (for example the client TLS context cannot be created from `forwardProxyPrivateKey` / `forwardProxyCertificateChain`, or a proxy handler cannot be constructed) | `ClientConfigurationException`, a `SocketConnectionException` whose cause is the initialisation error |
+| TLS handshake fails on a connected channel (untrusted certificate, host name mismatch, an upstream that does not speak TLS, handshake timeout) | `SocketConnectionException` whose cause is the handshake's `SSLException` |
+| An HTTP/2 connection error with a request in flight | `SocketConnectionException` whose cause is the `Http2Exception` |
+| A TLS fault on an established HTTP/2 connection with a request in flight | the `DecoderException` itself, which Netty's `Http2MultiplexHandler` passes to the active streams when its cause is an `SSLException`; otherwise `SocketConnectionException` whose cause is the `SSLException` |
+| The upstream closes the connection during the handshake | the generic `Channel handler removed…` |
+| Binary forward (`sendRequest(BinaryMessage, …)`) | not gated: the connect cause or the teardown, whichever completes first; a pipeline that cannot be built fails it with `ClientConfigurationException` |
 
-The pipeline rows are the reverse order: the channel is closed while it is being initialised, and the
-connect then fails on the closed channel with a `ClosedChannelException`. That exception says nothing
-about why, so when the channel has already reported its own outcome the request takes that instead.
-The generic exception is what the forward action classifies as a connection failure (a 502 "failed to
-connect", logged at TRACE); the real initialisation or handshake error is only in Netty's own WARN log.
+`HttpClientInitializer.initChannel` catches a failure to build the pipeline, fails the channel's
+`RESPONSE_FUTURE` with a `ClientConfigurationException` and closes the channel, so Netty's
+`ChannelInitializer` no longer logs it. The connect then fails on the closed channel with a
+`ClosedChannelException`, and `connectFresh` reports the channel's outcome in its place. A failed handshake,
+an HTTP/2 connection error and a TLS fault are raised in handlers after `HttpClientConnectionErrorHandler`,
+which never sees them: `HttpOrHttp2Initializer` (from the handshake's `SslHandshakeCompletionEvent`, which is
+all Netty reports for a timeout) and `Http2ForwardConnectionExceptionHandler` fail the waiting request with
+them before the connection closes. An `SSLException` that a non-TLS I/O failure caused (Netty's `failure when writing
+TLS control frames` when a proxy refuses the tunnel or the connection closes) is left to that failure, which
+reaches the request through `HttpClientConnectionErrorHandler` as before (`ExceptionHandling.tlsFailure`).
+
+Each is wrapped in the `SocketConnectionException` the request failed with before, so a caller that catches it
+(the Java client's `hasStarted` and `isRunning`, for example) still does, and a request on a reused pooled
+connection is still sent again on a new one. The message names the upstream and the cause, bounded by
+`ExceptionHandling.boundedFaultDescription` (Netty's hex dump of a non-TLS answer becomes its byte count).
+
+### How a Failed Forward Is Answered
+
+`HttpActionHandler` asks `upstreamFailureReason` first, before its connection-failure branch, for both an
+expectation's forward (`handleExceptionDuringForwardingRequest`) and an unmatched proxied request
+(`handleUnmatchedForwardFailure`). For the three reasons it names, the request is logged once at `ERROR`, with
+the request and the bounded cause, and the client gets a `502` whose body is the reason:
+
+| Cause | `502` body |
+|---|---|
+| Configuration error | `connection to the upstream could not be set up: RuntimeException: Exception creating SSL context for client` |
+| TLS (any `SSLException` in the cause chain) | `TLS with the upstream failed: SSLHandshakeException: PKIX path building failed: …`; with OpenSSL, whose message is `General OpenSslEngine problem`, the root cause follows: `…; caused by CertificateException: No subject alternative names present` |
+| HTTP/2 error (any `Http2Exception` in the cause chain) | `HTTP/2 error from the upstream: PROTOCOL_ERROR: Frame of type 0 must be associated with a stream.` |
+| Anything else | as before: no body; a connection failure is logged at `TRACE` |
+
+The body holds only text from the TLS, HTTP/2 or set-up code, bounded as a log entry's fault is (each message
+cut at 256 characters, a non-TLS answer shown as its byte count); for a configuration error only the top-level
+message, because a deeper cause may quote a configured file. Header values and body bytes are never quoted,
+though an HTTP/2 message can name a header (`invalid header name [...]`). The connection-level entry that
+`HttpOrHttp2Initializer` or `Http2ForwardConnectionExceptionHandler` logs is then `DEBUG`; it stays `WARN` when
+no request is waiting (an idle pooled connection), where it is the only record. For an expectation's forward the scheduler's
+`INFO` entry for a failed response future, which repeats the exception's message, is skipped for these
+reasons, so the `ERROR` is the request's one entry.
+
+A configuration error is not a transient failure: `ForwardRetryPolicy.isTransientFailure` is false for it, so
+it is not retried, and the circuit breaker records it as it records a header-limit refusal (not a failure). A
+TLS or HTTP/2 failure counts as before.
 
 ### Streaming Forward Path
 

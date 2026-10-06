@@ -644,6 +644,23 @@ This release delivers a sustained performance and memory programme alongside dat
 - **A binary expectation used up by its `Times` is now removed as soon as it is used up.** Before, it
   stayed listed as an active expectation, in retrieved active expectations and on the dashboard, until
   another binary message matched it.
+- **A forward that fails on TLS, on an invalid outbound key or certificate, or on an upstream's HTTP/2
+  error now says why, in the `502` and in the log.** A forward over HTTPS to an upstream whose
+  certificate is not trusted or is for another host, that does not speak TLS, or whose handshake took
+  longer than `socketConnectionTimeout` failed as a closed connection: the client got an empty `502`,
+  the log recorded "failed to connect to remote socket" at `TRACE` (or "Channel handler removed before
+  valid response has been received"), and the reason was missing from MockServer's log. The same
+  happened when `forwardProxyPrivateKey` or `forwardProxyCertificateChain` pointed at a file that is not
+  valid PEM, with the reason only in Netty's own log, and when the upstream broke the HTTP/2 protocol.
+  The `502` body now names the reason, for example `TLS with the upstream failed:
+  SSLHandshakeException: PKIX path building failed: ...`, `HTTP/2 error from the upstream:
+  PROTOCOL_ERROR: ...` or `connection to the upstream could not be set up: RuntimeException: Exception
+  creating SSL context for client`, and the forward is logged once as an error with the request and the
+  cause. Header values and body bytes are never quoted (a non-TLS answer is shown as its length, and
+  each message is cut at 256 characters). An invalid outbound key or certificate is now treated as a
+  configuration error: it is not retried by `forwardProxyRetryCount` and does not count against the
+  forward circuit breaker. The Java client still throws `SocketConnectionException` for these, now
+  with the TLS exception or the configuration error as its cause and message.
 - **With DNS mocking on and `dnsPort` left at `0`, MockServer on macOS no longer picks a port that another
   application already uses for IPv4.** It used to bind such a port now and then, and queries sent to
   `127.0.0.1` on the port it reported went to the other application. It now passes over ports held that

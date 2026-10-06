@@ -13,6 +13,7 @@ import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.mockserver.echo.http.EchoServer;
+import org.mockserver.httpclient.ClientConfigurationException;
 import org.mockserver.httpclient.NettyHttpClient;
 import org.mockserver.httpclient.SocketConnectionException;
 import org.mockserver.logging.MockServerLogger;
@@ -27,7 +28,6 @@ import java.net.ConnectException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
-import java.nio.channels.ClosedChannelException;
 import java.util.Collections;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -42,6 +42,8 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.instanceOf;
+import static org.hamcrest.Matchers.matchesPattern;
+import static org.hamcrest.Matchers.sameInstance;
 import static org.hamcrest.core.AnyOf.anyOf;
 import static org.hamcrest.core.Is.is;
 import static org.junit.Assert.assertThrows;
@@ -143,13 +145,14 @@ public class NettyHttpClientErrorHandlingTest {
     }
 
     @Test
-    public void shouldReportTheChannelTeardownWhenTheClientTlsContextCannotBeCreated() {
+    public void shouldReportAConfigurationErrorWhenTheClientTlsContextCannotBeCreated() {
         // given - the pipeline fails to build after the connection error handler is added, so the channel is
         // closed and its handlers removed before the connect is attempted on it
+        RuntimeException cannotCreate = new RuntimeException("Exception creating SSL context for client");
         NettySslContextFactory unusableSslContextFactory = new NettySslContextFactory(configuration(), mockServerLogger, false) {
             @Override
             public SslContext createClientSslContext(boolean forwardProxyClient, boolean enableHttp2, String host) {
-                throw new RuntimeException("Exception creating SSL context for client");
+                throw cannotCreate;
             }
         };
         NettyHttpClient client = new NettyHttpClient(configuration(), mockServerLogger, clientEventLoopGroup, null, false, unusableSslContextFactory);
@@ -161,16 +164,19 @@ public class NettyHttpClientErrorHandlingTest {
         SocketConnectionException synchronous = assertThrows(SocketConnectionException.class, () -> client
             .sendRequest(request().withSecure(true).withHeader(HOST.toString(), "127.0.0.1:" + CLOSED_PORT), 10, TimeUnit.SECONDS));
 
-        // then
-        assertThat(asynchronous.getCause(), instanceOf(SocketConnectionException.class));
-        assertThat(asynchronous.getCause().getMessage(), is("Channel handler removed before valid response has been received"));
-        assertThat(synchronous.getMessage(), is("Channel handler removed before valid response has been received"));
+        // then - the reason, as a configuration error that a caller catching SocketConnectionException still catches
+        assertThat(asynchronous.getCause(), instanceOf(ClientConfigurationException.class));
+        assertThat(asynchronous.getCause().getCause(), is(sameInstance(cannotCreate)));
+        // the host as the TLS context saw it, which may be the name 127.0.0.1 resolves to
+        assertThat(asynchronous.getCause().getMessage(), matchesPattern("connection to [^ ]+:" + CLOSED_PORT + " could not be set up: RuntimeException: Exception creating SSL context for client"));
+        assertThat(synchronous, instanceOf(ClientConfigurationException.class));
+        assertThat(synchronous.getMessage(), is(asynchronous.getCause().getMessage()));
     }
 
     @Test
-    public void shouldReportTheClosedChannelWhenThePipelineFailsBeforeAnyHandlerIsAdded() {
+    public void shouldReportAConfigurationErrorWhenThePipelineFailsBeforeAnyHandlerIsAdded() {
         // given - a proxy handler that cannot be constructed fails the pipeline before the connection error
-        // handler is added, so nothing on the channel ever reports an outcome
+        // handler is added
         ProxyConfiguration proxyWithoutAddress = proxyConfiguration(ProxyConfiguration.Type.HTTPS, (InetSocketAddress) null);
         NettyHttpClient client = new NettyHttpClient(configuration(), mockServerLogger, clientEventLoopGroup, Collections.singletonList(proxyWithoutAddress), false);
 
@@ -180,7 +186,8 @@ public class NettyHttpClientErrorHandlingTest {
             .get(10, TimeUnit.SECONDS));
 
         // then
-        assertThat(exception.getCause(), instanceOf(ClosedChannelException.class));
+        assertThat(exception.getCause(), instanceOf(ClientConfigurationException.class));
+        assertThat(exception.getCause().getCause(), instanceOf(NullPointerException.class));
     }
 
     /**

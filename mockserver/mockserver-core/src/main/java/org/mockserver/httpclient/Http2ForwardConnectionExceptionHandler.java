@@ -6,19 +6,29 @@ import io.netty.handler.codec.http2.Http2CodecUtil;
 import io.netty.handler.codec.http2.Http2Exception;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
+import org.mockserver.model.Message;
 import org.slf4j.event.Level;
 
+import javax.net.ssl.SSLException;
+import java.net.InetSocketAddress;
+import java.util.concurrent.CompletableFuture;
+
 import static org.mockserver.exception.ExceptionHandling.DIRECT_MEMORY_LIMIT_REACHED;
+import static org.mockserver.exception.ExceptionHandling.boundedFaultDescriptionWithRootCause;
 import static org.mockserver.exception.ExceptionHandling.boundedFaultMessage;
 import static org.mockserver.exception.ExceptionHandling.connectionClosedException;
 import static org.mockserver.exception.ExceptionHandling.directMemoryLimitReached;
 import static org.mockserver.exception.ExceptionHandling.isSslOrDecoderFault;
+import static org.mockserver.exception.ExceptionHandling.sslCause;
+import static org.mockserver.exception.ExceptionHandling.tlsFailure;
 import static org.mockserver.httpclient.NettyHttpClient.REMOTE_SOCKET;
+import static org.mockserver.httpclient.NettyHttpClient.RESPONSE_FUTURE;
 
 /**
  * The last handler of the pipeline of an HTTP/2 connection to an upstream. It logs each exception that reaches the
  * end of that pipeline once, at the level its cause calls for, where Netty would log every one at {@code WARN} with a
- * stack trace through its own logger. A forward in flight is failed by the handlers before this one.
+ * stack trace through its own logger. A forward in flight is failed with a connection error or a TLS fault here,
+ * which the stream's handlers do not see, and the entry is then {@code DEBUG}: the forward is logged with its cause.
  * <p>
  * It does not close the connection for an HTTP/2 connection error, which Netty's codec fires here before it sends
  * the {@code GOAWAY} and closes: closing here would lose the {@code GOAWAY}.
@@ -45,19 +55,23 @@ final class Http2ForwardConnectionExceptionHandler extends ChannelInboundHandler
             ctx.close();
         } else if (connectionError != null) {
             // no throwable: the message says what the upstream sent, and the stack trace only where Netty read it
-            if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+            Level level = failWaitingRequest(ctx, "HTTP/2 connection to " + upstream(ctx) + " failed: " + connectionError.error() + ": " + boundedFaultMessage(connectionError), connectionError) ? Level.DEBUG : Level.WARN;
+            if (mockServerLogger.isEnabledForInstance(level)) {
                 mockServerLogger.logEvent(
                     new LogEntry()
-                        .setLogLevel(Level.WARN)
+                        .setLogLevel(level)
                         .setMessageFormat("closing HTTP/2 connection to:{}for connection error:{}:{}")
                         .setArguments(ctx.channel().attr(REMOTE_SOCKET).get(), connectionError.error(), boundedFaultMessage(connectionError))
                 );
             }
-        } else if (isSslOrDecoderFault(cause)) {
-            if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+        } else if (isSslOrDecoderFault(cause) || sslCause(cause) != null) {
+            SSLException tlsFault = tlsFailure(cause);
+            boolean withRequest = tlsFault != null && (failWaitingRequest(ctx, "TLS with " + upstream(ctx) + " failed: " + boundedFaultDescriptionWithRootCause(tlsFault), tlsFault) || passedToTheStream(ctx, cause));
+            Level level = withRequest ? Level.DEBUG : Level.WARN;
+            if (mockServerLogger.isEnabledForInstance(level)) {
                 mockServerLogger.logEvent(
                     new LogEntry()
-                        .setLogLevel(Level.WARN)
+                        .setLogLevel(level)
                         .setMessageFormat("closing HTTP/2 connection to:{}for SSL or decoder fault " + cause.getClass().getName() + ":{}")
                         .setArguments(ctx.channel().attr(REMOTE_SOCKET).get(), boundedFaultMessage(cause))
                 );
@@ -80,5 +94,28 @@ final class Http2ForwardConnectionExceptionHandler extends ChannelInboundHandler
                     .setArguments(ctx.channel().attr(REMOTE_SOCKET).get(), cause.getMessage())
             );
         }
+    }
+
+    /**
+     * Fails the request in flight with the cause, wrapped as the {@link SocketConnectionException} it failed with
+     * before, so a request on a reused connection is still sent again on a new one; the stream's own handlers would
+     * report only the teardown that follows.
+     */
+    private static boolean failWaitingRequest(ChannelHandlerContext ctx, String message, Throwable cause) {
+        return HttpClientConnectionErrorHandler.failWaitingRequest(ctx.channel(), new SocketConnectionException(message, cause));
+    }
+
+    /**
+     * Netty's multiplex handler passes a fault an {@link SSLException} caused to the active streams before this
+     * handler sees it, so the stream's handler has already failed the request with it.
+     */
+    private static boolean passedToTheStream(ChannelHandlerContext ctx, Throwable cause) {
+        CompletableFuture<? extends Message> responseFuture = ctx.channel().attr(RESPONSE_FUTURE).get();
+        return cause.getCause() instanceof SSLException && responseFuture != null && responseFuture.isCompletedExceptionally();
+    }
+
+    private static String upstream(ChannelHandlerContext ctx) {
+        InetSocketAddress upstream = ctx.channel().attr(REMOTE_SOCKET).get();
+        return upstream != null ? upstream.getHostString() + ":" + upstream.getPort() : "upstream";
     }
 }

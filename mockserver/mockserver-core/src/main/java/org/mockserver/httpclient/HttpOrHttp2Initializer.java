@@ -4,18 +4,24 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPipeline;
 import io.netty.handler.ssl.ApplicationProtocolNames;
 import io.netty.handler.ssl.ApplicationProtocolNegotiationHandler;
+import io.netty.handler.ssl.SslHandshakeCompletionEvent;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.slf4j.event.Level;
 
+import javax.net.ssl.SSLException;
 import java.net.ConnectException;
+import java.net.InetSocketAddress;
 import java.util.function.Consumer;
 
 import static org.mockserver.exception.ExceptionHandling.DIRECT_MEMORY_LIMIT_REACHED;
 import static org.mockserver.exception.ExceptionHandling.boundedFault;
+import static org.mockserver.exception.ExceptionHandling.boundedFaultDescriptionWithRootCause;
 import static org.mockserver.exception.ExceptionHandling.connectionClosedException;
 import static org.mockserver.exception.ExceptionHandling.directMemoryLimitReached;
 import static org.mockserver.exception.ExceptionHandling.isSslOrDecoderFault;
+import static org.mockserver.exception.ExceptionHandling.sslCause;
+import static org.mockserver.exception.ExceptionHandling.tlsFailure;
 import static org.mockserver.httpclient.NettyHttpClient.REMOTE_SOCKET;
 
 public class HttpOrHttp2Initializer extends ApplicationProtocolNegotiationHandler {
@@ -23,6 +29,8 @@ public class HttpOrHttp2Initializer extends ApplicationProtocolNegotiationHandle
     private final MockServerLogger mockServerLogger;
     private final Consumer<ChannelPipeline> http2Initializer;
     private final Consumer<ChannelPipeline> http1Initializer;
+    // one per connection: the handshake's exception the waiting request was failed with
+    private SSLException failedRequestWith;
 
     protected HttpOrHttp2Initializer(MockServerLogger mockServerLogger, Consumer<ChannelPipeline> http1Initializer, Consumer<ChannelPipeline> http2Initializer) {
         super("");
@@ -45,6 +53,37 @@ public class HttpOrHttp2Initializer extends ApplicationProtocolNegotiationHandle
     }
 
     /**
+     * A failed handshake is reported first as this event, and only as that for a timeout: the waiting request is
+     * failed with its exception here, before the connection closes and its teardown is reported in its place.
+     */
+    @Override
+    public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
+        if (evt instanceof SslHandshakeCompletionEvent && !((SslHandshakeCompletionEvent) evt).isSuccess()) {
+            SSLException handshakeFailure = tlsFailure(((SslHandshakeCompletionEvent) evt).cause());
+            if (handshakeFailure != null) {
+                failWaitingRequest(ctx, handshakeFailure);
+            }
+        }
+        super.userEventTriggered(ctx, evt);
+    }
+
+    /**
+     * @return whether the waiting request fails with {@code handshakeFailure}, and so is logged with it
+     */
+    private boolean failWaitingRequest(ChannelHandlerContext ctx, SSLException handshakeFailure) {
+        if (handshakeFailure == failedRequestWith) {
+            return true;
+        }
+        InetSocketAddress upstream = ctx.channel().attr(REMOTE_SOCKET).get();
+        String message = "TLS handshake with " + (upstream != null ? upstream.getHostString() + ":" + upstream.getPort() : "upstream") + " failed: " + boundedFaultDescriptionWithRootCause(handshakeFailure);
+        if (HttpClientConnectionErrorHandler.failWaitingRequest(ctx.channel(), new SocketConnectionException(message, handshakeFailure))) {
+            failedRequestWith = handshakeFailure;
+            return true;
+        }
+        return false;
+    }
+
+    /**
      * Until the protocol is negotiated this is the last handler of the pipeline. It logs what stopped the connection
      * being set up once and closes the connection, where Netty's handler logs it through its own logger at
      * {@code WARN} with a stack trace and, unless it is a failed TLS handshake, passes it on to be logged again.
@@ -59,12 +98,14 @@ public class HttpOrHttp2Initializer extends ApplicationProtocolNegotiationHandle
                     .setLogLevel(Level.ERROR)
                     .setMessageFormat(DIRECT_MEMORY_LIMIT_REACHED + ctx.channel() + " - " + cause.getMessage())
             );
-        } else if (isSslOrDecoderFault(cause)) {
-            // the forward fails only as a closed connection, so this entry is where the reason is
-            if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+        } else if (isSslOrDecoderFault(cause) || sslCause(cause) != null) {
+            SSLException handshakeFailure = tlsFailure(cause);
+            // a request that fails with the cause is logged with it; otherwise this entry is where the reason is
+            Level level = handshakeFailure != null && failWaitingRequest(ctx, handshakeFailure) ? Level.DEBUG : Level.WARN;
+            if (mockServerLogger.isEnabledForInstance(level)) {
                 mockServerLogger.logEvent(
                     new LogEntry()
-                        .setLogLevel(Level.WARN)
+                        .setLogLevel(level)
                         .setMessageFormat("TLS could not be set up on connection to:{}")
                         .setArguments(ctx.channel().attr(REMOTE_SOCKET).get())
                         .setThrowable(boundedFault(cause))

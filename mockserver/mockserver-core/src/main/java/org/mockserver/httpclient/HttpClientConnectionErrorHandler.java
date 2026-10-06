@@ -1,5 +1,6 @@
 package org.mockserver.httpclient;
 
+import io.netty.channel.Channel;
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
@@ -24,6 +25,17 @@ public class HttpClientConnectionErrorHandler extends ChannelDuplexHandler {
             }
         }
         super.handlerRemoved(ctx);
+    }
+
+    /**
+     * Fails the request waiting on {@code channel} with {@code failure}, for a handler after this one that sees a cause
+     * this handler does not, before the connection closes and its teardown is reported in its place.
+     *
+     * @return whether this call failed it: false when no request is waiting or it has an outcome already
+     */
+    static boolean failWaitingRequest(Channel channel, Throwable failure) {
+        CompletableFuture<? extends Message> responseFuture = channel.attr(RESPONSE_FUTURE).get();
+        return responseFuture != null && responseFuture.completeExceptionally(failure);
     }
 
     @Override

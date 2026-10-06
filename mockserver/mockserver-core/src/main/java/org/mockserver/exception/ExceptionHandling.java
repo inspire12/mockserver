@@ -18,6 +18,7 @@ import org.mockserver.socket.tls.SniHandler;
 
 import javax.net.ssl.SSLException;
 import javax.net.ssl.SSLHandshakeException;
+import java.io.IOException;
 import java.net.ConnectException;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.ClosedSelectorException;
@@ -282,6 +283,53 @@ public class ExceptionHandling {
      */
     public static String boundedFaultMessage(Throwable fault) {
         return boundedFaultMessage(fault.getMessage());
+    }
+
+    /**
+     * A fault's simple class name and its {@link #boundedFaultMessage(Throwable) bounded message}, such as
+     * {@code NotSslRecordException: not an SSL/TLS record: 400 bytes}.
+     */
+    public static String boundedFaultDescription(Throwable fault) {
+        String message = boundedFaultMessage(fault);
+        return fault.getClass().getSimpleName() + (message == null || message.isEmpty() ? "" : ": " + message);
+    }
+
+    /**
+     * As {@link #boundedFaultDescription(Throwable)}, followed by the root cause's when the fault's message does not
+     * already say it: OpenSSL reports a failed handshake as {@code General OpenSslEngine problem}, with the reason,
+     * such as the trust manager's, as its cause.
+     */
+    public static String boundedFaultDescriptionWithRootCause(Throwable fault) {
+        String description = boundedFaultDescription(fault);
+        Throwable root = ExceptionUtils.getRootCause(fault);
+        if (root != null && root != fault && root.getMessage() != null && (fault.getMessage() == null || !fault.getMessage().contains(root.getMessage()))) {
+            description += "; caused by " + boundedFaultDescription(root);
+        }
+        return description;
+    }
+
+    /**
+     * @return the {@link SSLException}, of any subtype, that {@code throwable} is or was caused by, or null
+     */
+    public static SSLException sslCause(Throwable throwable) {
+        return ExceptionUtils.throwableOfType(throwable, SSLException.class);
+    }
+
+    /**
+     * As {@link #sslCause(Throwable)}, except null when that {@link SSLException} was itself caused by an I/O failure
+     * that is not TLS's: Netty reports a write that failed under the handshake, such as a proxy refusing the tunnel
+     * or a closed connection, as {@code failure when writing TLS control frames}, and that is a connection failure.
+     */
+    public static SSLException tlsFailure(Throwable throwable) {
+        SSLException ssl = sslCause(throwable);
+        if (ssl != null) {
+            for (Throwable cause : ExceptionUtils.getThrowableList(ssl.getCause())) {
+                if (cause instanceof IOException && !(cause instanceof SSLException)) {
+                    return null;
+                }
+            }
+        }
+        return ssl;
     }
 
     private static String boundedFaultMessage(String message) {

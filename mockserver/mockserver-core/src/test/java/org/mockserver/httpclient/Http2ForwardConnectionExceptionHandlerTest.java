@@ -22,18 +22,21 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.lessThan;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.sameInstance;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.Assert.assertThrows;
 import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.httpclient.NettyHttpClient.REMOTE_SOCKET;
 import static org.mockserver.httpclient.NettyHttpClient.RESPONSE_FUTURE;
@@ -207,15 +210,77 @@ public class Http2ForwardConnectionExceptionHandlerTest {
     }
 
     @Test
-    public void shouldLeaveAForwardInFlightToTheHandlersBeforeIt() {
+    public void shouldLeaveAResetWithAForwardInFlightToTheHandlersBeforeIt() {
         CompletableFuture<Message> forward = new CompletableFuture<>();
         EmbeddedChannel connection = connection();
         connection.attr(RESPONSE_FUTURE).set(forward);
 
         connection.pipeline().fireExceptionCaught(new IOException("Connection reset"));
-        connection.pipeline().fireExceptionCaught(Http2Exception.connectionError(Http2Error.PROTOCOL_ERROR, "bad frame"));
+        connection.pipeline().fireExceptionCaught(new DecoderException("not a frame"));
 
         assertThat(forward.isDone(), is(false));
+        connection.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldFailAForwardInFlightWithAConnectionErrorAndLogTheConnectionOnlyAtDebug() {
+        Http2Exception protocolError = Http2Exception.connectionError(Http2Error.PROTOCOL_ERROR, "Frame of type %d must be associated with a stream.", 0);
+        CompletableFuture<Message> forward = new CompletableFuture<>();
+        EmbeddedChannel connection = connection();
+        connection.attr(RESPONSE_FUTURE).set(forward);
+
+        connection.pipeline().fireExceptionCaught(protocolError);
+
+        assertThat("failed", forward.isCompletedExceptionally(), is(true));
+        Throwable failure = assertThrows(ExecutionException.class, forward::get).getCause();
+        assertThat(failure, instanceOf(SocketConnectionException.class));
+        assertThat(failure.getCause(), is(sameInstance(protocolError)));
+        assertThat(failure.getMessage(), is("HTTP/2 connection to upstream.example:8443 failed: PROTOCOL_ERROR: Frame of type 0 must be associated with a stream."));
+        assertThat(logged, hasSize(1));
+        assertThat(logged.get(0).getLogLevel(), is(Level.DEBUG));
+        assertThat(logged.get(0).getMessageFormat(), is("closing HTTP/2 connection to:{}for connection error:{}:{}"));
+        assertHandledWithoutClosing(connection);
+    }
+
+    @Test
+    public void shouldLogATlsFaultAtDebugWhenTheStreamHasAlreadyFailedTheForwardWithIt() {
+        // Netty's multiplex handler passes a fault an SSLException caused to the active streams first
+        for (boolean failedByTheStream : new boolean[]{true, false}) {
+            CompletableFuture<Message> forward = new CompletableFuture<>();
+            if (failedByTheStream) {
+                forward.completeExceptionally(new DecoderException(new SSLException("bad record")));
+            } else {
+                forward.complete(null);
+            }
+            EmbeddedChannel connection = connection();
+            connection.attr(RESPONSE_FUTURE).set(forward);
+            logged.clear();
+
+            connection.pipeline().fireExceptionCaught(new DecoderException(new SSLException("bad record")));
+
+            assertThat(logged, hasSize(1));
+            assertThat(logged.get(0).getLogLevel(), is(failedByTheStream ? Level.DEBUG : Level.WARN));
+            connection.finishAndReleaseAll();
+        }
+    }
+
+    @Test
+    public void shouldFailAForwardInFlightWithATlsFaultAndCloseTheConnection() {
+        NotSslRecordException notTls = new NotSslRecordException("not an SSL/TLS record: " + "41".repeat(1000));
+        CompletableFuture<Message> forward = new CompletableFuture<>();
+        EmbeddedChannel connection = connection();
+        connection.attr(RESPONSE_FUTURE).set(forward);
+
+        connection.pipeline().fireExceptionCaught(new DecoderException(notTls));
+
+        assertThat("failed", forward.isCompletedExceptionally(), is(true));
+        Throwable failure = assertThrows(ExecutionException.class, forward::get).getCause();
+        assertThat(failure, instanceOf(SocketConnectionException.class));
+        assertThat(failure.getCause(), is(sameInstance(notTls)));
+        assertThat(failure.getMessage(), is("TLS with upstream.example:8443 failed: NotSslRecordException: not an SSL/TLS record: 1000 bytes"));
+        assertThat(logged, hasSize(1));
+        assertThat(logged.get(0).getLogLevel(), is(Level.DEBUG));
+        assertThat(connection.isOpen(), is(false));
         connection.finishAndReleaseAll();
     }
 
