@@ -208,6 +208,21 @@ This release delivers a sustained performance and memory programme alongside dat
 - **The number of open client connections can be capped** (`mockserver.maxInboundConnections`, default **0 = no limit**). Every open connection costs memory even when silent (about 4 KB of kernel socket memory each, plus per-connection state), so many clients holding keep-alive connections could push a memory-limited container towards its limit. A connection beyond the limit is reset at once instead of being accepted, a warning is logged at most every 10 seconds, and new connections are accepted again as soon as one closes. A CONNECT/SOCKS tunnel to MockServer itself uses two slots, and if its second is refused the client now gets a `502` instead of waiting forever. New metrics: `mock_server_inbound_connections_open`, `mock_server_inbound_connections_rejected_total` and `mock_server_inbound_connections_idle_closed_total`.
 - **Dashboard can request more log history per update.** Connect the dashboard WebSocket with `?logLimit=N` (e.g. `/_mockserver_ui_websocket?logLimit=250`) to receive up to `N` log rows, recorded requests and proxied requests per update instead of the fixed 100. Hard maximum of 500; invalid or missing values fall back to 100. Expectations are unaffected.
 - **Slimmer Linux-only standalone JARs.** Two new variants alongside the standard artifact: `-jar-with-dependencies-linux-x86_64.jar` and `-jar-with-dependencies-linux-aarch_64.jar`, each about **13 MB smaller** because they carry only native libraries for their own architecture. Useful on build agents or CI containers with limited disk. **The default artifact is unchanged.**
+- **A proxied binary connection can now have some of its messages answered by binary expectations.**
+  With the new `forwardBinaryRequestsMatchExpectations` setting (off by default), a message on a binary
+  connection relayed on one upstream connection whose bytes equal a binary expectation's is answered
+  with that expectation's binary response and is not sent to the upstream server; every other message is
+  forwarded as before. This lets a test use a real server for most of a session and fake one part of it,
+  for example a canned result for one PostgreSQL query, or an error for one statement with
+  `Times.once()` so that the client's retry reaches the real server. The upstream never sees an answered
+  message, so the canned reply must suit the session's real state. A message is matched only when it
+  arrives exactly as the expectation's bytes; otherwise it is forwarded unchanged. MockServer's replies
+  and the server's are each kept in order, but not against each other, and MockServer logs a warning
+  when one of its replies may overtake a server reply still owed. The setting has no effect on a
+  connection forwarded one message per upstream connection (`forwardBinaryRequestsUseSingleConnection`
+  set to `false`, a client using TLS, or an upstream proxy), which logs one warning saying so. While a
+  binary expectation exists, every relayed message is matched before it is forwarded, with the usual
+  match log entries.
 
 ### Changed
 
@@ -602,6 +617,9 @@ This release delivers a sustained performance and memory programme alongside dat
 
 ### Fixed
 
+- **A binary expectation used up by its `Times` is now removed as soon as it is used up.** Before, it
+  stayed listed as an active expectation, in retrieved active expectations and on the dashboard, until
+  another binary message matched it.
 - **With DNS mocking on and `dnsPort` left at `0`, MockServer on macOS no longer picks a port that another
   application already uses for IPv4.** It used to bind such a port now and then, and queries sent to
   `127.0.0.1` on the port it reported went to the other application. It now passes over ports held that

@@ -22,6 +22,8 @@ import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.matchers.TimeToLive;
 import org.mockserver.matchers.Times;
+import org.mockserver.model.BinaryRequestDefinition;
+import org.mockserver.model.BinaryResponse;
 import org.mockserver.model.GraphQLBody;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
@@ -4682,6 +4684,39 @@ public class HttpStateTest {
         assertThat(httpState.firstMatchingEarlyExpectation(
             request().withMethod("POST").withPath("/again")
         ), is(afterReset));
+    }
+
+    @Test
+    public void shouldKnowWhetherAnyExpectationMatchesBinaryRequests() {
+        String id = "binary-expectation-id";
+        assertThat(httpState.hasBinaryExpectations(), is(false));
+
+        httpState.add(new Expectation(request().withPath("/http")).thenRespond(response()));
+        assertThat("an HTTP expectation is not one", httpState.hasBinaryExpectations(), is(false));
+
+        httpState.add(new Expectation(BinaryRequestDefinition.binaryRequest(new byte[]{1, 2})).withId(id).thenRespondWithBinary(BinaryResponse.binaryResponse(new byte[]{3})));
+        assertThat(httpState.hasBinaryExpectations(), is(true));
+
+        httpState.add(new Expectation(request().withPath("/now-http")).withId(id).thenRespond(response()));
+        assertThat("updated in place to an HTTP request", httpState.hasBinaryExpectations(), is(false));
+
+        httpState.add(new Expectation(BinaryRequestDefinition.binaryRequest(new byte[]{1, 2})).withId(id).thenRespondWithBinary(BinaryResponse.binaryResponse(new byte[]{3})));
+        assertThat("updated in place back to a binary request", httpState.hasBinaryExpectations(), is(true));
+
+        httpState.reset();
+        assertThat(httpState.hasBinaryExpectations(), is(false));
+    }
+
+    @Test
+    public void shouldRemoveABinaryExpectationUsedUpByTimesOncePostProcessed() {
+        httpState.add(new Expectation(BinaryRequestDefinition.binaryRequest(new byte[]{1, 2}), Times.once(), TimeToLive.unlimited(), 0)
+            .thenRespondWithBinary(BinaryResponse.binaryResponse(new byte[]{3})));
+
+        Expectation matched = httpState.firstMatchingExpectation(BinaryRequestDefinition.binaryRequest(new byte[]{1, 2}));
+        httpState.postProcess(matched);
+
+        assertThat(matched, is(notNullValue()));
+        assertThat(httpState.hasBinaryExpectations(), is(false));
     }
 
     @Test

@@ -2278,7 +2278,7 @@ Both connections are on the **client connection's event loop** (as in `RelayConn
 | Event log, upstream to client | One `FORWARDED_REQUEST` entry per upstream read, with the correlation id of the latest client message. "for forwarded binary request" is left out for a read that follows no message, or follows one already answered |
 | `binaryProxyListener.onProxy` | Once per client message, at once, off the event loop, one at a time and in arrival order. The response future completes with the first upstream read after that message was written; with `null` when the next client message arrives first or the upstream connection closes; exceptionally when the message could not be connected or written |
 | Upstream bytes that answer no message | Relayed and logged, not reported to the listener (`onProxy` has no shape for them) |
-| Binary expectations | Not consulted, as for any connection with a target |
+| Binary expectations | Not consulted by default. With `forwardBinaryRequestsMatchExpectations`, matched first, and a match is answered and not relayed: see [below](#binary-expectations-on-a-relayed-connection) |
 | `forwardBinaryRequestsWithoutWaitingForResponse` | No effect. `LifeCycle.startedServer` logs one INFO entry at start-up when it is on while this setting is on |
 | A `NettyHttpClient` subclass overriding `sendRequest(BinaryMessage, ...)` | Not called: the relay connects through `connectBinaryRelay` |
 
@@ -2307,7 +2307,21 @@ Both connections are on the **client connection's event loop** (as in `RelayConn
 
 **What a relayed connection does differently from 8.0.0** (the reason the default is a BREAKING change): the upstream sees one connection per client connection, held for the client connection's life; there is no time limit on an answer (per message, `maxFutureTimeoutInMillis` closed the client), and no idle bound either, by choice: a database session may sit idle, and TCP keep-alive finds a dead upstream; the event log has one `FORWARDED_REQUEST` per upstream read rather than per message; every upstream byte is relayed, not just the first read of each per-message connection; the upstream closing closes the client (per message, the client stayed open after an answered message and its next message opened a new upstream connection); the listener is called at once rather than once the response has arrived, and its response can be `null`; an upstream that closes without answering is not an error (waiting mode raised one and closed the client with a WARN); the upstream connection is opened on the client connection's worker event loop, not the forward client's; `forwardProxyBlockPrivateNetworks` applies.
 
-**Not supported**: the in-band TLS upgrade of the upstream leg; relaying through an upstream SOCKS5 or HTTP CONNECT proxy; protocols in which the server speaks first (a connection is not known to be binary until the client sends); mixing binary expectations with the relay.
+**Not supported**: the in-band TLS upgrade of the upstream leg; relaying through an upstream SOCKS5 or HTTP CONNECT proxy; protocols in which the server speaks first (a connection is not known to be binary until the client sends).
+
+#### Binary Expectations on a Relayed Connection
+
+With `forwardBinaryRequestsMatchExpectations` (default `false`) a message on a relayed connection whose bytes match a binary expectation is **answered by MockServer and not relayed**; every other message is relayed as above. Only a connection the relay carries is matched (`BinaryRelay.relaysOnOneConnection`, which creates the relay without connecting, so a connection whose messages are all answered opens no upstream connection); a connection forwarded one message per upstream connection is not, with one WARN per connection. Matching and the reply are in `BinaryRequestProxyingHandler` ([request-processing.md](request-processing.md#binary-expectations-on-a-proxied-connection)); after a reply with data the handler calls `BinaryRelay.answeredLocally`.
+
+| Concern | Rule |
+|---------|------|
+| Order | Upstream bytes reach the client in the upstream's order, and local replies in the order of the messages they answer. Nothing orders the two against each other |
+| Overtaking | A local reply written while `latest` (a forwarded message with no upstream read since) is set logs a WARN naming that message, once per forwarded message, so a message that never gets an answer does not make every later reply warn. A reply landing between two reads of one upstream reply is not detected |
+| The relay's exchange | Untouched by an answered message: the previous forwarded message's response future still completes with the next upstream read |
+| `binaryProxyListener` | Not called for an answered message: it reports what went upstream |
+| Client faster than its replies | After a local reply that leaves the client not writable, one more hold, `CLIENT_NOT_WRITABLE`, released by `clientWritabilityChanged` and by every close, like the other holds |
+| A message boundary that differs from the expectation's bytes | No match, so the bytes are relayed intact. Prefix or partial matching would swallow pipelined messages, so none is offered |
+| The upstream's state | It never sees an answered message, so the canned reply must be true for the session's real state (PostgreSQL's `ReadyForQuery` status byte, prepared statements, portals) |
 
 ## SOCKS Protocol Detection
 

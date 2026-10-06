@@ -51,6 +51,7 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
 
     private static final AttributeKey<ForwardQueue> FORWARD_QUEUE = AttributeKey.valueOf("BINARY_FORWARD_QUEUE");
     public static final AttributeKey<CompletableFuture<Void>> PREVIOUS_LISTENER_CALL = AttributeKey.valueOf("PREVIOUS_BINARY_PROXY_LISTENER_CALL");
+    private static final AttributeKey<Boolean> EXPECTATIONS_NOT_MATCHED_WARNED = AttributeKey.valueOf("BINARY_EXPECTATIONS_NOT_MATCHED_WARNED");
     /**
      * The client connection is not read while more than either of these wait to be forwarded, and is read again
      * once no more than half of each do. The queue only has to absorb what a client sends while one message is
@@ -90,40 +91,17 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
         );
         final InetSocketAddress remoteAddress = getRemoteAddress(ctx);
         if (remoteAddress != null) {
-            sendMessage(ctx, binaryRequest, logCorrelationId, remoteAddress);
+            if (!answeredByExpectation(ctx, binaryRequest, logCorrelationId, remoteAddress)) {
+                sendMessage(ctx, binaryRequest, logCorrelationId, remoteAddress);
+            }
         } else if (httpState != null) {
-            BinaryRequestDefinition binaryRequestDefinition = BinaryRequestDefinition.binaryRequest(binaryRequest.getBytes());
-            binaryRequestDefinition.withLogCorrelationId(logCorrelationId);
-            Expectation matchedExpectation = httpState.firstMatchingExpectation(binaryRequestDefinition);
+            Expectation matchedExpectation = firstMatchingBinaryExpectation(binaryRequest, logCorrelationId);
             if (matchedExpectation != null && matchedExpectation.getBinaryResponse() != null) {
-                byte[] reply = matchedExpectation.getBinaryResponse().getBinaryData();
-                if (reply == null || reply.length == 0) {
-                    // a message that has no reply. Null and empty mean the same: an empty array is not serialised, so one
-                    // set through the Java client arrives as null, while raw JSON can still deliver it empty
-                    if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
-                        mockServerLogger.logEvent(
-                            new LogEntry()
-                                .setType(FORWARDED_REQUEST)
-                                .setLogLevel(Level.INFO)
-                                .setCorrelationId(logCorrelationId)
-                                .setMessageFormat("returning nothing, as the binary mock response is empty, for binary request:{}")
-                                .setArguments(SensitiveLogValue.of(formatBytes(binaryRequest.getBytes())))
-                        );
-                    }
-                } else {
-                    if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
-                        mockServerLogger.logEvent(
-                            new LogEntry()
-                                .setType(FORWARDED_REQUEST)
-                                .setLogLevel(Level.INFO)
-                                .setCorrelationId(logCorrelationId)
-                                .setMessageFormat("returning binary mock response:{}for binary request:{}")
-                                .setArguments(SensitiveLogValue.of(formatBytes(reply)), SensitiveLogValue.of(formatBytes(binaryRequest.getBytes())))
-                        );
-                    }
-                    ctx.writeAndFlush(Unpooled.copiedBuffer(reply));
-                }
+                replyFromExpectation(ctx, matchedExpectation, binaryRequest, logCorrelationId);
             } else {
+                if (matchedExpectation != null) {
+                    httpState.postProcess(matchedExpectation);
+                }
                 if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
                     mockServerLogger.logEvent(
                         new LogEntry()
@@ -137,6 +115,106 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
             }
         } else {
             writeUnknownFormatMessage(ctx, binaryRequest, logCorrelationId);
+        }
+    }
+
+    private Expectation firstMatchingBinaryExpectation(BinaryMessage binaryRequest, String logCorrelationId) {
+        BinaryRequestDefinition binaryRequestDefinition = BinaryRequestDefinition.binaryRequest(binaryRequest.getBytes());
+        binaryRequestDefinition.withLogCorrelationId(logCorrelationId);
+        return httpState.firstMatchingExpectation(binaryRequestDefinition);
+    }
+
+    /**
+     * Post-processes a matched expectation, which removes one that its Times have used up, and writes its binary
+     * response if that has data.
+     *
+     * @return whether anything was written
+     */
+    private boolean replyFromExpectation(ChannelHandlerContext ctx, Expectation matchedExpectation, BinaryMessage binaryRequest, String logCorrelationId) {
+        // before the write, so a client that has its reply finds the expectation's state already updated
+        httpState.postProcess(matchedExpectation);
+        byte[] reply = matchedExpectation.getBinaryResponse().getBinaryData();
+        boolean written = reply != null && reply.length > 0;
+        if (!written) {
+            // a message that has no reply. Null and empty mean the same: an empty array is not serialised, so one
+            // set through the Java client arrives as null, while raw JSON can still deliver it empty
+            if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setType(FORWARDED_REQUEST)
+                        .setLogLevel(Level.INFO)
+                        .setCorrelationId(logCorrelationId)
+                        .setMessageFormat("returning nothing, as the binary mock response is empty, for binary request:{}")
+                        .setArguments(SensitiveLogValue.of(formatBytes(binaryRequest.getBytes())))
+                );
+            }
+        } else {
+            if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setType(FORWARDED_REQUEST)
+                        .setLogLevel(Level.INFO)
+                        .setCorrelationId(logCorrelationId)
+                        .setMessageFormat("returning binary mock response:{}for binary request:{}")
+                        .setArguments(SensitiveLogValue.of(formatBytes(reply)), SensitiveLogValue.of(formatBytes(binaryRequest.getBytes())))
+                );
+            }
+            ctx.writeAndFlush(Unpooled.copiedBuffer(reply));
+        }
+        return written;
+    }
+
+    /**
+     * With forwardBinaryRequestsMatchExpectations, a message on a connection relayed on one upstream connection
+     * whose bytes match a binary expectation is answered here and not forwarded. Any other connection is forwarded
+     * as without the setting, and says so once.
+     *
+     * @return whether the message was answered, so is not to be forwarded
+     */
+    private boolean answeredByExpectation(ChannelHandlerContext ctx, BinaryMessage binaryRequest, String logCorrelationId, InetSocketAddress remoteAddress) {
+        if (httpState == null || !configuration.forwardBinaryRequestsMatchExpectations()) {
+            return false;
+        }
+        if (!configuration.forwardBinaryRequestsUseSingleConnection()
+            || !BinaryRelay.relaysOnOneConnection(ctx, remoteAddress, configuration, mockServerLogger, scheduler, httpClient, binaryExchangeCallback)) {
+            warnOnceThatExpectationsAreNotMatched(ctx, remoteAddress, logCorrelationId);
+            return false;
+        }
+        if (!httpState.hasBinaryExpectations()) {
+            return false;
+        }
+        Expectation matchedExpectation = firstMatchingBinaryExpectation(binaryRequest, logCorrelationId);
+        if (matchedExpectation == null) {
+            return false;
+        }
+        if (matchedExpectation.getBinaryResponse() == null) {
+            httpState.postProcess(matchedExpectation);
+            if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.WARN)
+                        .setCorrelationId(logCorrelationId)
+                        .setMessageFormat("forwarding binary request:{}to:{}because the expectation it matched has no binary response:{}")
+                        .setArguments(SensitiveLogValue.of(formatBytes(binaryRequest.getBytes())), remoteAddress, matchedExpectation.getId())
+                );
+            }
+            return false;
+        }
+        if (replyFromExpectation(ctx, matchedExpectation, binaryRequest, logCorrelationId)) {
+            BinaryRelay.answeredLocally(ctx.channel(), logCorrelationId);
+        }
+        return true;
+    }
+
+    private void warnOnceThatExpectationsAreNotMatched(ChannelHandlerContext ctx, InetSocketAddress remoteAddress, String logCorrelationId) {
+        if (ctx.channel().attr(EXPECTATIONS_NOT_MATCHED_WARNED).setIfAbsent(Boolean.TRUE) == null && mockServerLogger.isEnabledForInstance(Level.WARN)) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.WARN)
+                    .setCorrelationId(logCorrelationId)
+                    .setMessageFormat("binary expectations are not matched on binary connection from:{}to:{}because its messages are each forwarded on an upstream connection of their own; forwardBinaryRequestsMatchExpectations applies only to a connection relayed on one (forwardBinaryRequestsUseSingleConnection)")
+                    .setArguments(ctx.channel().remoteAddress(), remoteAddress)
+            );
         }
     }
 

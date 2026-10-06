@@ -56,7 +56,7 @@ public final class BinaryRelay {
 
     /** Why the client connection is not being read; each is one hold on {@link ChannelReadPause}. */
     private enum ClientHold {
-        UPSTREAM_CONNECTING, UPSTREAM_NOT_WRITABLE, LISTENER_BEHIND
+        UPSTREAM_CONNECTING, UPSTREAM_NOT_WRITABLE, LISTENER_BEHIND, CLIENT_NOT_WRITABLE
     }
 
     private final Channel client;
@@ -97,13 +97,39 @@ public final class BinaryRelay {
      * @return false if the message was not taken: the caller is to forward it on an upstream connection of its own
      */
     public static boolean forward(ChannelHandlerContext ctx, BinaryMessage binaryRequest, String logCorrelationId, InetSocketAddress target, Configuration configuration, MockServerLogger mockServerLogger, Scheduler scheduler, NettyHttpClient httpClient, BinaryProxyListener listener) {
+        return relayOf(ctx, target, configuration, mockServerLogger, scheduler, httpClient, listener).fromClient(binaryRequest, logCorrelationId);
+    }
+
+    /**
+     * Whether this connection's messages are relayed on one upstream connection, so that MockServer may answer one
+     * itself instead (forwardBinaryRequestsMatchExpectations). Opens no upstream connection. Must be called on the
+     * client connection's event loop.
+     */
+    public static boolean relaysOnOneConnection(ChannelHandlerContext ctx, InetSocketAddress target, Configuration configuration, MockServerLogger mockServerLogger, Scheduler scheduler, NettyHttpClient httpClient, BinaryProxyListener listener) {
+        BinaryRelay relay = relayOf(ctx, target, configuration, mockServerLogger, scheduler, httpClient, listener);
+        return !relay.perMessage && relay.forwardedPerMessageBecause() == null;
+    }
+
+    /**
+     * Called once MockServer has written its own reply to a message read from the client, which is not relayed and
+     * is not reported to the listener. Nothing orders that reply against what the upstream still owes an earlier
+     * message, so that case is logged; and the client is not read while it cannot take more.
+     */
+    public static void answeredLocally(Channel client, String logCorrelationId) {
+        BinaryRelay relay = client.hasAttr(RELAY) ? client.attr(RELAY).get() : null;
+        if (relay != null) {
+            relay.repliedLocally(logCorrelationId);
+        }
+    }
+
+    private static BinaryRelay relayOf(ChannelHandlerContext ctx, InetSocketAddress target, Configuration configuration, MockServerLogger mockServerLogger, Scheduler scheduler, NettyHttpClient httpClient, BinaryProxyListener listener) {
         Channel client = ctx.channel();
         BinaryRelay relay = client.attr(RELAY).get();
         if (relay == null) {
             relay = new BinaryRelay(client, target, configuration, mockServerLogger, scheduler, httpClient, listener);
             client.attr(RELAY).set(relay);
         }
-        return relay.fromClient(binaryRequest, logCorrelationId);
+        return relay;
     }
 
     /**
@@ -124,9 +150,29 @@ public final class BinaryRelay {
      */
     public static void clientWritabilityChanged(Channel client) {
         BinaryRelay relay = client.hasAttr(RELAY) ? client.attr(RELAY).get() : null;
-        if (relay != null && relay.upstreamHeldForClient && client.isWritable()) {
-            relay.upstreamHeldForClient = false;
-            ChannelReadPause.resume(relay.upstream);
+        if (relay != null && client.isWritable()) {
+            relay.release(ClientHold.CLIENT_NOT_WRITABLE);
+            if (relay.upstreamHeldForClient) {
+                relay.upstreamHeldForClient = false;
+                ChannelReadPause.resume(relay.upstream);
+            }
+        }
+    }
+
+    /** A forwarded message that has had no upstream read since is {@link #latest}; each is warned about once. */
+    private void repliedLocally(String logCorrelationId) {
+        if (latest != null && !latest.overtakenWarned && mockServerLogger.isEnabledForInstance(Level.WARN)) {
+            latest.overtakenWarned = true;
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.WARN)
+                    .setCorrelationId(logCorrelationId)
+                    .setMessageFormat("binary mock response written to binary connection from:{}while forwarded binary request:{}has had no response from:{}the two may reach the client out of order")
+                    .setArguments(client.remoteAddress(), SensitiveLogValue.of(formatBytes(latest.request.getBytes())), target)
+            );
+        }
+        if (!client.isWritable()) {
+            hold(ClientHold.CLIENT_NOT_WRITABLE);
         }
     }
 
@@ -470,6 +516,7 @@ public final class BinaryRelay {
         private final BinaryMessage request;
         private final CompletableFuture<BinaryMessage> response = new CompletableFuture<>();
         private boolean written;
+        private boolean overtakenWarned;
 
         private Exchange(BinaryMessage request) {
             this.request = request;

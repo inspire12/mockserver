@@ -270,6 +270,7 @@ public class ConfigurationProperties {
     // non http proxying
     private static final String MOCKSERVER_FORWARD_BINARY_REQUESTS_WITHOUT_WAITING_FOR_RESPONSE = "mockserver.forwardBinaryRequestsWithoutWaitingForResponse";
     private static final String MOCKSERVER_FORWARD_BINARY_REQUESTS_USE_SINGLE_CONNECTION = "mockserver.forwardBinaryRequestsUseSingleConnection";
+    private static final String MOCKSERVER_FORWARD_BINARY_REQUESTS_MATCH_EXPECTATIONS = "mockserver.forwardBinaryRequestsMatchExpectations";
 
     // streaming proxy
     private static final String MOCKSERVER_STREAMING_RESPONSES_ENABLED = "mockserver.streamingResponsesEnabled";
@@ -4263,6 +4264,24 @@ public class ConfigurationProperties {
 
     public static boolean forwardBinaryRequestsUseSingleConnection() {
         return Boolean.parseBoolean(readPropertyHierarchically(PROPERTIES, MOCKSERVER_FORWARD_BINARY_REQUESTS_USE_SINGLE_CONNECTION, "MOCKSERVER_FORWARD_BINARY_REQUESTS_USE_SINGLE_CONNECTION", "true"));
+    }
+
+    /**
+     * If true, a message on a proxied binary connection that forwardBinaryRequestsUseSingleConnection relays on one
+     * upstream connection is matched against binary expectations: one whose bytes match is answered by that
+     * expectation and is not forwarded, and every other message is forwarded. Has no effect on a connection whose
+     * messages are each forwarded on an upstream connection of their own.
+     * <p>
+     * The default is false
+     *
+     * @param forwardBinaryRequestsMatchExpectations target value
+     */
+    public static void forwardBinaryRequestsMatchExpectations(boolean forwardBinaryRequestsMatchExpectations) {
+        setProperty(MOCKSERVER_FORWARD_BINARY_REQUESTS_MATCH_EXPECTATIONS, "" + forwardBinaryRequestsMatchExpectations);
+    }
+
+    public static boolean forwardBinaryRequestsMatchExpectations() {
+        return Boolean.parseBoolean(readPropertyHierarchically(PROPERTIES, MOCKSERVER_FORWARD_BINARY_REQUESTS_MATCH_EXPECTATIONS, "MOCKSERVER_FORWARD_BINARY_REQUESTS_MATCH_EXPECTATIONS", "false"));
     }
 
     // CORS

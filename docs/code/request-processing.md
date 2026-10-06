@@ -1377,12 +1377,12 @@ When any list parameter is active the response adds `X-Total-Count` (total after
 
 ## Binary Mock Processing
 
-When `BinaryRequestProxyingHandler` receives raw bytes on a channel that is in proxy mode (a remote address is set on it), the bytes are forwarded to the upstream server. Otherwise it looks for a matching expectation via `HttpState.firstMatchingExpectation(BinaryRequestDefinition)`. If a match is found with a `BinaryResponse` action, the handler writes the response bytes directly to the channel; a response with no data, or an empty array, is for a message that has no reply, so nothing is written and the connection stays open (the two mean the same: an empty array is not serialised, so `binaryResponse(new byte[0])` sent by the Java client is stored with null data, while raw JSON with `"binaryData": ""` is stored as an empty array; either is retrieved without `binaryData`). If no match is found, the "unknown message format" text is written and the channel closed. What one read loop delivers is one message: see [One Read Loop Is One Message](netty-pipeline.md#one-read-loop-is-one-message). Forwarding without waiting for a response calls `NettyHttpClient`'s 5-argument `sendRequest` overload directly, which bypasses a subclass's override of the 4-argument overload — accepted and documented, see [decisions/binary-proxying-nowait-sendrequest-override.md](decisions/binary-proxying-nowait-sendrequest-override.md).
+When `BinaryRequestProxyingHandler` receives raw bytes on a channel that is in proxy mode (a remote address is set on it), the bytes are forwarded to the upstream server and, by default, expectations are not consulted (with `forwardBinaryRequestsMatchExpectations` they can be: see [Binary expectations on a proxied connection](#binary-expectations-on-a-proxied-connection)). Otherwise it looks for a matching expectation via `HttpState.firstMatchingExpectation(BinaryRequestDefinition)`. A matched expectation is post-processed (`HttpState.postProcess`), so one used up by its `Times` is removed at once; until 9.0.0 it stayed listed as active until a later message matched it again. If a match is found with a `BinaryResponse` action, the handler writes the response bytes directly to the channel; a response with no data, or an empty array, is for a message that has no reply, so nothing is written and the connection stays open (the two mean the same: an empty array is not serialised, so `binaryResponse(new byte[0])` sent by the Java client is stored with null data, while raw JSON with `"binaryData": ""` is stored as an empty array; either is retrieved without `binaryData`). If no match is found, the "unknown message format" text is written and the channel closed. What one read loop delivers is one message: see [One Read Loop Is One Message](netty-pipeline.md#one-read-loop-is-one-message). Forwarding without waiting for a response calls `NettyHttpClient`'s 5-argument `sendRequest` overload directly, which bypasses a subclass's override of the 4-argument overload — accepted and documented, see [decisions/binary-proxying-nowait-sendrequest-override.md](decisions/binary-proxying-nowait-sendrequest-override.md).
 
 ```mermaid
 flowchart TD
     RAW(["One read loop's bytes,\njoined by BinaryMessageGatherer"]) --> PROXY{"Remote address\nconfigured?"}
-    PROXY -->|Yes| FWD["Forward via\nNettyHttpClient"]
+    PROXY -->|Yes| FWD["Forward via\nNettyHttpClient\n(matched first only with\nforwardBinaryRequestsMatchExpectations)"]
     PROXY -->|No| BRD["Create BinaryRequestDefinition\nfrom byte content"]
     BRD --> MATCH["HttpState.firstMatchingExpectation()"]
     MATCH -->|Match with BinaryResponse| DATA{"binaryData\nnull or empty?"}
@@ -1392,6 +1392,21 @@ flowchart TD
 ```
 
 **Forwarding has two modes.** By default (`forwardBinaryRequestsUseSingleConnection`, on since 9.0.0) the connection's first message opens one upstream connection that is kept for the connection's life (`BinaryRelay`, connected by `NettyHttpClient.connectBinaryRelay`), every message is written to it, and whatever the upstream sends is written back as it arrives. With the setting `false`, and for a connection the relay cannot carry (its client uses TLS, or an upstream proxy is configured), each message is forwarded on an upstream connection of its own (`NettyHttpClient.sendRequest(BinaryMessage, ...)`), as in 8.0.0; `forwardBinaryRequestsWithoutWaitingForResponse`, deprecated, applies only there. The mode is chosen by the first statement of `BinaryRequestProxyingHandler.sendMessage`; see [netty-pipeline.md](netty-pipeline.md#one-upstream-connection-for-a-binary-connection) for the relay's backpressure, close and hand-back rules.
+
+### Binary expectations on a proxied connection
+
+With `forwardBinaryRequestsMatchExpectations` (default `false`), a message on a connection that `BinaryRelay` carries on one upstream connection is matched first, in `BinaryRequestProxyingHandler.answeredByExpectation`. A match with a `BinaryResponse` is answered by the same `replyFromExpectation` used without a target, and the message is **not forwarded**; anything else goes to `sendMessage` unchanged. The cost with the setting on and no binary expectation registered is one emptiness check (`HttpState.hasBinaryExpectations()`, an id set kept off the expectation store's mutation listener like the `respondBeforeBody` one). The relay's own rules for answered messages (no listener call, the ordering WARN, the client-not-writable hold) are in [netty-pipeline.md](netty-pipeline.md#binary-expectations-on-a-relayed-connection).
+
+| Case | Result |
+|------|--------|
+| Setting off | Expectations not consulted, as in 8.0.0 |
+| Setting on, connection forwarded one message per upstream connection (`forwardBinaryRequestsUseSingleConnection=false`, or the relay hands it back) | Not consulted; one WARN per connection |
+| Matched, `BinaryResponse` with data | Written to the client; event log as without a target (`FORWARDED_REQUEST`, "returning binary mock response") |
+| Matched, `BinaryResponse` without data | Nothing written, nothing forwarded |
+| Matched, any other action | Post-processed, then forwarded, with a WARN |
+| Not matched | Forwarded; the matcher pass adds its usual `EXPECTATION_NOT_MATCHED` entries |
+
+Only "answer locally, do not forward" exists: "forward too, discard or replace the upstream's reply" needs to know where that reply ends, which MockServer cannot tell without the protocol's framing.
 
 ## DNS Mock Processing
 

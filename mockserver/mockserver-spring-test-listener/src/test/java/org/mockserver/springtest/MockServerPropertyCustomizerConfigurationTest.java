@@ -58,6 +58,14 @@ public class MockServerPropertyCustomizerConfigurationTest {
     }
 
     @Test
+    public void shouldApplyForwardBinaryRequestsMatchExpectations() {
+        Configuration config = MockServerPropertyCustomizer.buildConfiguration(
+            Collections.singletonList("mockserver.forwardBinaryRequestsMatchExpectations=true")
+        );
+        assertThat(config.forwardBinaryRequestsMatchExpectations(), is(true));
+    }
+
+    @Test
     public void shouldApplyIntegerProperties() {
         Configuration config = MockServerPropertyCustomizer.buildConfiguration(
             Arrays.asList(

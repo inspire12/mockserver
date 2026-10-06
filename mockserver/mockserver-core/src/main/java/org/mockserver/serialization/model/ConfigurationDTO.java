@@ -78,6 +78,7 @@ public class ConfigurationDTO implements DTO<Configuration> {
 
     private Boolean forwardBinaryRequestsWithoutWaitingForResponse;
     private Boolean forwardBinaryRequestsUseSingleConnection;
+    private Boolean forwardBinaryRequestsMatchExpectations;
 
     private Boolean enableCORSForAPI;
     private Boolean enableCORSForAllResponses;
@@ -430,6 +431,7 @@ public class ConfigurationDTO implements DTO<Configuration> {
 
             this.forwardBinaryRequestsWithoutWaitingForResponse = configuration.forwardBinaryRequestsWithoutWaitingForResponse();
             this.forwardBinaryRequestsUseSingleConnection = configuration.forwardBinaryRequestsUseSingleConnection();
+            this.forwardBinaryRequestsMatchExpectations = configuration.forwardBinaryRequestsMatchExpectations();
 
             this.enableCORSForAPI = configuration.enableCORSForAPI();
             this.enableCORSForAllResponses = configuration.enableCORSForAllResponses();
@@ -867,6 +869,7 @@ public class ConfigurationDTO implements DTO<Configuration> {
 
         configuration.forwardBinaryRequestsWithoutWaitingForResponse(forwardBinaryRequestsWithoutWaitingForResponse);
         configuration.forwardBinaryRequestsUseSingleConnection(forwardBinaryRequestsUseSingleConnection);
+        configuration.forwardBinaryRequestsMatchExpectations(forwardBinaryRequestsMatchExpectations);
 
         configuration.enableCORSForAPI(enableCORSForAPI);
         configuration.enableCORSForAllResponses(enableCORSForAllResponses);
@@ -1448,6 +1451,9 @@ public class ConfigurationDTO implements DTO<Configuration> {
         }
         if (forwardBinaryRequestsUseSingleConnection != null) {
             target.forwardBinaryRequestsUseSingleConnection(forwardBinaryRequestsUseSingleConnection);
+        }
+        if (forwardBinaryRequestsMatchExpectations != null) {
+            target.forwardBinaryRequestsMatchExpectations(forwardBinaryRequestsMatchExpectations);
         }
         if (enableCORSForAPI != null) {
             target.enableCORSForAPI(enableCORSForAPI);
@@ -2800,6 +2806,15 @@ public class ConfigurationDTO implements DTO<Configuration> {
 
     public ConfigurationDTO setForwardBinaryRequestsUseSingleConnection(Boolean forwardBinaryRequestsUseSingleConnection) {
         this.forwardBinaryRequestsUseSingleConnection = forwardBinaryRequestsUseSingleConnection;
+        return this;
+    }
+
+    public Boolean getForwardBinaryRequestsMatchExpectations() {
+        return forwardBinaryRequestsMatchExpectations;
+    }
+
+    public ConfigurationDTO setForwardBinaryRequestsMatchExpectations(Boolean forwardBinaryRequestsMatchExpectations) {
+        this.forwardBinaryRequestsMatchExpectations = forwardBinaryRequestsMatchExpectations;
         return this;
     }
 

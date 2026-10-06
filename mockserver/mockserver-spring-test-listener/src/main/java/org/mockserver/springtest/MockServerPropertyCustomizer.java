@@ -271,6 +271,9 @@ public class MockServerPropertyCustomizer implements ContextCustomizer {
             case "forwardBinaryRequestsUseSingleConnection":
                 config.forwardBinaryRequestsUseSingleConnection(parseStrictBoolean(value, key));
                 break;
+            case "forwardBinaryRequestsMatchExpectations":
+                config.forwardBinaryRequestsMatchExpectations(parseStrictBoolean(value, key));
+                break;
             case "enableCORSForAPI":
                 config.enableCORSForAPI(parseStrictBoolean(value, key));
                 break;

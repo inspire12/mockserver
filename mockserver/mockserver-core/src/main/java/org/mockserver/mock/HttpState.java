@@ -911,6 +911,14 @@ public class HttpState {
         return requestMatchers.hasEarlyExpectations();
     }
 
+    /**
+     * True when at least one registered expectation matches binary requests. Cheap lock-free gate for matching a
+     * proxied binary message: when false no binary expectation can match it.
+     */
+    public boolean hasBinaryExpectations() {
+        return requestMatchers.hasBinaryExpectations();
+    }
+
     @VisibleForTesting
     public List<Expectation> allMatchingExpectation(HttpRequest request) {
         if (requestMatchers.isEmpty()) {

@@ -226,6 +226,7 @@ public class Configuration {
     // non http proxying
     private volatile Boolean forwardBinaryRequestsWithoutWaitingForResponse;
     private volatile Boolean forwardBinaryRequestsUseSingleConnection;
+    private volatile Boolean forwardBinaryRequestsMatchExpectations;
     private volatile BinaryProxyListener binaryProxyListener;
 
     // CORS
@@ -3333,6 +3334,28 @@ public class Configuration {
      */
     public Configuration forwardBinaryRequestsUseSingleConnection(Boolean forwardBinaryRequestsUseSingleConnection) {
         this.forwardBinaryRequestsUseSingleConnection = forwardBinaryRequestsUseSingleConnection;
+        return this;
+    }
+
+    public Boolean forwardBinaryRequestsMatchExpectations() {
+        if (forwardBinaryRequestsMatchExpectations == null) {
+            return ConfigurationProperties.forwardBinaryRequestsMatchExpectations();
+        }
+        return forwardBinaryRequestsMatchExpectations;
+    }
+
+    /**
+     * If true, a message on a proxied binary connection that forwardBinaryRequestsUseSingleConnection relays on one
+     * upstream connection is matched against binary expectations: one whose bytes match is answered by that
+     * expectation and is not forwarded, and every other message is forwarded. Has no effect on a connection whose
+     * messages are each forwarded on an upstream connection of their own.
+     * <p>
+     * The default is false
+     *
+     * @param forwardBinaryRequestsMatchExpectations target value
+     */
+    public Configuration forwardBinaryRequestsMatchExpectations(Boolean forwardBinaryRequestsMatchExpectations) {
+        this.forwardBinaryRequestsMatchExpectations = forwardBinaryRequestsMatchExpectations;
         return this;
     }
 

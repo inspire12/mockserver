@@ -147,6 +147,9 @@ public class RequestMatchers extends MockServerMatcherNotifier {
     // eviction / reset), so it tracks every structural mutation without a rebuild. ConcurrentHashMap
     // key-set: the data-plane read (isEmpty) is lock-free; the single-writer mutations need no lock.
     private final Set<String> respondBeforeBodyIds = ConcurrentHashMap.newKeySet();
+    // Expectation ids whose request is a BinaryRequestDefinition, kept exactly as respondBeforeBodyIds is: the gate
+    // that lets a proxied binary message skip the matcher pass when no binary expectation exists.
+    private final Set<String> binaryRequestIds = ConcurrentHashMap.newKeySet();
     // Monotonic control-plane modification counter. Incremented on every structural mutation of
     // httpRequestMatchers (add / remove / update-in-place / reconcile / eviction / reset). The
     // CandidateIndex no longer depends on it (it is maintained incrementally via the CPQ mutation
@@ -262,6 +265,7 @@ public class RequestMatchers extends MockServerMatcherNotifier {
             public void onAdd(HttpRequestMatcher element) {
                 candidateIndex.onAdded(element);
                 trackRespondBeforeBody(element);
+                trackBinaryRequest(element);
             }
 
             @Override
@@ -270,6 +274,7 @@ public class RequestMatchers extends MockServerMatcherNotifier {
                 String id = idOf(element);
                 if (id != null) {
                     respondBeforeBodyIds.remove(id);
+                    binaryRequestIds.remove(id);
                 }
             }
         });
@@ -671,6 +676,19 @@ public class RequestMatchers extends MockServerMatcherNotifier {
             respondBeforeBodyIds.add(id);
         } else {
             respondBeforeBodyIds.remove(id);
+        }
+    }
+
+    /** As {@link #trackRespondBeforeBody}, for {@link #binaryRequestIds}. */
+    private void trackBinaryRequest(HttpRequestMatcher element) {
+        String id = idOf(element);
+        if (id == null) {
+            return;
+        }
+        if (element.getExpectation().getHttpRequest() instanceof BinaryRequestDefinition) {
+            binaryRequestIds.add(id);
+        } else {
+            binaryRequestIds.remove(id);
         }
     }
 
@@ -1251,6 +1269,14 @@ public class RequestMatchers extends MockServerMatcherNotifier {
      */
     public boolean hasEarlyExpectations() {
         return !respondBeforeBodyIds.isEmpty();
+    }
+
+    /**
+     * True when at least one registered expectation matches binary requests, so that a binary message needs a
+     * matcher pass. Lock-free read, with the same eventual-consistency contract as {@link #hasEarlyExpectations()}.
+     */
+    public boolean hasBinaryExpectations() {
+        return !binaryRequestIds.isEmpty();
     }
 
     public Expectation firstMatchingEarlyExpectation(HttpRequest headersOnlyRequest) {

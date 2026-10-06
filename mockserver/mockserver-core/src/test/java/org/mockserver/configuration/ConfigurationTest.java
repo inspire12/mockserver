@@ -2117,6 +2117,40 @@ public class ConfigurationTest {
     }
 
     @Test
+    public void shouldSetAndGetForwardBinaryRequestsMatchExpectations() {
+        boolean original = ConfigurationProperties.forwardBinaryRequestsMatchExpectations();
+        try {
+            // then - default value
+            assertThat(configuration.forwardBinaryRequestsMatchExpectations(), equalTo(false));
+
+            // when - system property setter
+            ConfigurationProperties.forwardBinaryRequestsMatchExpectations(true);
+
+            // then - system property getter
+            assertThat(ConfigurationProperties.forwardBinaryRequestsMatchExpectations(), equalTo(true));
+            assertThat(System.getProperty("mockserver.forwardBinaryRequestsMatchExpectations"), equalTo("true"));
+            assertThat(configuration.forwardBinaryRequestsMatchExpectations(), equalTo(true));
+            ConfigurationProperties.forwardBinaryRequestsMatchExpectations(original);
+
+            // when - setter
+            configuration.forwardBinaryRequestsMatchExpectations(true);
+
+            // then - getter
+            assertThat(configuration.forwardBinaryRequestsMatchExpectations(), equalTo(true));
+
+            // then - carried by the configuration the REST API reads and writes, alone
+            Configuration roundTripped = new org.mockserver.serialization.model.ConfigurationDTO(configuration).buildObject();
+            assertThat(roundTripped.forwardBinaryRequestsMatchExpectations(), equalTo(true));
+            Configuration updated = new Configuration().forwardBinaryRequestsUseSingleConnection(false);
+            new org.mockserver.serialization.model.ConfigurationDTO().setForwardBinaryRequestsMatchExpectations(true).applyTo(updated);
+            assertThat(updated.forwardBinaryRequestsMatchExpectations(), equalTo(true));
+            assertThat("the other binary setting is a separate one", updated.forwardBinaryRequestsUseSingleConnection(), equalTo(false));
+        } finally {
+            ConfigurationProperties.forwardBinaryRequestsMatchExpectations(original);
+        }
+    }
+
+    @Test
     public void shouldSetAndGetEnableCORSForAPI() {
         boolean original = ConfigurationProperties.enableCORSForAPI();
         try {
