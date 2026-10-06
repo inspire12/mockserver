@@ -4,6 +4,7 @@ import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.handler.codec.http3.DefaultHttp3DataFrame;
@@ -127,6 +128,7 @@ public class Http3RequestDecompressionIntegrationTest {
 
         Http3Result result = sendHttp3Request("/h3_gzip", "gzip", compressed);
 
+        assertThat("the whole body was sent", result.bodyWritten, is(true));
         assertThat("body received over http3: <" + result.body + ">", result.body, is("matched_gzip"));
         HttpRequest recorded = mockServerClient.retrieveRecordedRequests(request().withPath("/h3_gzip"))[0];
         assertThat(recorded.getFirstHeader("content-encoding"), is("gzip"));
@@ -156,6 +158,7 @@ public class Http3RequestDecompressionIntegrationTest {
 
         assertThat(viaHttp1.statusCode(), is(200));
         assertThat(viaHttp3.status, is("200"));
+        assertThat("the whole body was sent", viaHttp3.bodyWritten, is(true));
         assertThat(forwardedFromHttp1, notNullValue());
         assertThat(forwardedFromHttp3, notNullValue());
         assertThat(forwardedFromHttp3.headers.get("content-encoding"), is(forwardedFromHttp1.headers.get("content-encoding")));
@@ -200,6 +203,7 @@ public class Http3RequestDecompressionIntegrationTest {
         volatile boolean receivedHeaders = false;
         volatile boolean inputClosed = false;
         volatile boolean exceptionRaised = false;
+        volatile boolean bodyWritten = false;
 
         boolean resetOrClosedWithoutResponse() {
             return !receivedHeaders && (exceptionRaised || inputClosed);
@@ -292,12 +296,13 @@ public class Http3RequestDecompressionIntegrationTest {
         requestHeaders.headers().addInt("content-length", requestBody.length);
 
         requestStream.writeAndFlush(requestHeaders).sync();
-        requestStream.writeAndFlush(new DefaultHttp3DataFrame(Unpooled.wrappedBuffer(requestBody)))
-            .addListener(QuicStreamChannel.SHUTDOWN_OUTPUT)
-            .sync();
+        // not synced: a server may answer before it has read the whole body, and the client's close then fails the write
+        ChannelFuture bodyWritten = requestStream.writeAndFlush(new DefaultHttp3DataFrame(Unpooled.wrappedBuffer(requestBody)))
+            .addListener(QuicStreamChannel.SHUTDOWN_OUTPUT);
 
         done.await(20, TimeUnit.SECONDS);
         result.body = collected.toString();
+        result.bodyWritten = bodyWritten.await(20, TimeUnit.SECONDS) && bodyWritten.isSuccess();
 
         quicChannel.close().sync();
         clientChannel.close().sync();

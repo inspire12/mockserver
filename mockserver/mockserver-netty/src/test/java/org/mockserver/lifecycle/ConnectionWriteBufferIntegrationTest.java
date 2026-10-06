@@ -19,6 +19,7 @@ import java.util.List;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
+import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.model.BinaryBody.binary;
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
@@ -55,7 +56,8 @@ public class ConnectionWriteBufferIntegrationTest {
         for (int i = 0; i < bodySize; i++) {
             body[i] = (byte) ((i * 31 + i / 251) % 251);
         }
-        MockServer mockServer = new MockServer(0);
+        // WARN: at INFO each response logs its whole body, which floods stdout and can hold up a later test's stop()
+        MockServer mockServer = new MockServer(configuration().logLevel("WARN"), 0);
         List<Socket> sockets = new ArrayList<>();
         try {
             new MockServerClient("127.0.0.1", mockServer.getLocalPort()).when(request().withPath("/large")).respond(response().withBody(binary(body)));

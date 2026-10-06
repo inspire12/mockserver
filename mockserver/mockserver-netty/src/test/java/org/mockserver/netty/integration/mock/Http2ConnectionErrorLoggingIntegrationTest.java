@@ -34,16 +34,13 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.Matchers.both;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.emptyArray;
-import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasItems;
 import static org.hamcrest.Matchers.hasSize;
-import static org.hamcrest.Matchers.lessThanOrEqualTo;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.nullValue;
@@ -407,7 +404,11 @@ public class Http2ConnectionErrorLoggingIntegrationTest {
                 assertThat(route.name(), connection.closedWithin(10), is(true));
             }
 
-            assertThat(route.name(), awaitStreamEntries(client).size(), is(both(greaterThanOrEqualTo(RESETS_NETTY_ALLOWS)).and(lessThanOrEqualTo(RESETS_NETTY_ALLOWS + 1))));
+            // each stream's entry is logged as Netty closes the stream, which can be after the client has seen the GOAWAY:
+            // one for each of the 200 resets Netty read, and one for the stream whose reset it refused
+            List<LogEntry> entries = awaitStreamEntries(client, RESETS_NETTY_ALLOWS + 1);
+            assertThat(route.name(), entries.stream().filter(entry -> entry.getMessageFormat().contains("was cancelled by its client")).count(), is((long) RESETS_NETTY_ALLOWS));
+            assertThat(route.name(), entries, hasSize(RESETS_NETTY_ALLOWS + 1));
             assertThat(route.name(), warningsAndErrors().stream().filter(entry -> entry.getLogLevel() == Level.ERROR).collect(Collectors.toList()), empty());
         }
     }
@@ -509,6 +510,14 @@ public class Http2ConnectionErrorLoggingIntegrationTest {
     private static List<LogEntry> awaitStreamEntries(InetSocketAddress client) throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
         while (streamEntries(client).isEmpty() && System.nanoTime() < deadline) {
+            TimeUnit.MILLISECONDS.sleep(20);
+        }
+        return streamEntries(client);
+    }
+
+    private static List<LogEntry> awaitStreamEntries(InetSocketAddress client, int atLeast) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (streamEntries(client).size() < atLeast && System.nanoTime() < deadline) {
             TimeUnit.MILLISECONDS.sleep(20);
         }
         return streamEntries(client);

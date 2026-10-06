@@ -129,12 +129,15 @@ public class SseClientLeavesMidStreamIntegrationTest {
             Thread.sleep(10);
         }
 
+        // awaited too: a closed connection is counted out before its pending write is failed and logged
+        deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
         List<LogEntry> entries = server.logEntries();
+        while (clientLeft(entries).isEmpty() && System.nanoTime() < deadline) {
+            Thread.sleep(10);
+            entries = server.logEntries();
+        }
         assertThat("a client that leaves is not an error", warningsAndErrors(entries), is(empty()));
-        List<String> left = entries.stream()
-            .filter(entry -> entry.getLogLevel() == Level.DEBUG && entry.getMessageFormat() != null && entry.getMessageFormat().startsWith("client left before streaming chunk"))
-            .map(LogEntry::getMessage)
-            .collect(Collectors.toList());
+        List<String> left = clientLeft(entries);
         assertThat("the write of the second event failed, and is logged at DEBUG", left.size(), is(1));
         assertThat(left.get(0), matchesPattern(Pattern.compile("client left before streaming chunk\\s+2\\s+was sent:\\s+\\w+(: [^\\n]+)?\\s+for request:.*", Pattern.DOTALL)));
     }
@@ -189,6 +192,13 @@ public class SseClientLeavesMidStreamIntegrationTest {
             read.write(next);
         }
         return read.toString(StandardCharsets.ISO_8859_1);
+    }
+
+    private static List<String> clientLeft(List<LogEntry> entries) {
+        return entries.stream()
+            .filter(entry -> entry.getLogLevel() == Level.DEBUG && entry.getMessageFormat() != null && entry.getMessageFormat().startsWith("client left before streaming chunk"))
+            .map(LogEntry::getMessage)
+            .collect(Collectors.toList());
     }
 
     /**
