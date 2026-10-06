@@ -24,6 +24,8 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.Locale;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -132,6 +134,12 @@ public class WebSocketProxyRelayHandler {
         final FrameTranscript transcript = new FrameTranscript(configuration.webSocketProxyMaxRecordedFrames());
         // read for each relay, so a change applies to the next upgrade
         final int maxHeaderSize = configuration.maxHeaderSize();
+        // a handshake response is waited for as a forward's response is: maxSocketTimeout, capped by maxFutureTimeout
+        final long maxSocketTimeout = configuration.maxSocketTimeoutInMillis();
+        final long maxFutureTimeout = configuration.maxFutureTimeoutInMillis();
+        final boolean futureTimeoutApplies = maxFutureTimeout > 0 && (maxSocketTimeout <= 0 || maxFutureTimeout < maxSocketTimeout);
+        final long handshakeTimeoutMillis = futureTimeoutApplies ? maxFutureTimeout : maxSocketTimeout;
+        final String handshakeTimeoutName = futureTimeoutApplies ? "maxFutureTimeout" : "maxSocketTimeout";
 
         Bootstrap bootstrap = new Bootstrap()
             .group(clientChannel.eventLoop())
@@ -154,7 +162,7 @@ public class WebSocketProxyRelayHandler {
                     // a status line is short, so it keeps Netty's limit; the headers follow maxHeaderSize as a forward's do
                     pipeline.addLast(new HttpClientCodec(HttpObjectDecoder.DEFAULT_MAX_INITIAL_LINE_LENGTH, maxHeaderSize, HttpObjectDecoder.DEFAULT_MAX_CHUNK_SIZE));
                     pipeline.addLast(new HttpObjectAggregator(MAX_FRAME_PAYLOAD_LENGTH));
-                    pipeline.addLast(new UpstreamHandshakeHandler(request, clientCtx, upstreamHandshaker, subprotocol, transcript, maxHeaderSize));
+                    pipeline.addLast(new UpstreamHandshakeHandler(request, clientCtx, upstreamHandshaker, subprotocol, transcript, maxHeaderSize, handshakeTimeoutMillis, handshakeTimeoutName));
                 }
             });
 
@@ -277,18 +285,24 @@ public class WebSocketProxyRelayHandler {
         private final String requestedSubprotocol;
         private final FrameTranscript transcript;
         private final int maxHeaderSize;
-        // the client has been answered 502: whatever the upstream connection reports after that is not reported again
+        private final long handshakeTimeoutMillis;
+        private final String handshakeTimeoutName;
+        // the client has been answered 502, or has gone: whatever the upstream connection reports after that is not reported
         private boolean failed;
+        private ScheduledFuture<?> handshakeTimeout;
 
         private UpstreamHandshakeHandler(HttpRequest request, ChannelHandlerContext clientCtx,
                                          WebSocketClientHandshaker handshaker, String requestedSubprotocol,
-                                         FrameTranscript transcript, int maxHeaderSize) {
+                                         FrameTranscript transcript, int maxHeaderSize, long handshakeTimeoutMillis,
+                                         String handshakeTimeoutName) {
             this.request = request;
             this.clientCtx = clientCtx;
             this.handshaker = handshaker;
             this.requestedSubprotocol = requestedSubprotocol;
             this.transcript = transcript;
             this.maxHeaderSize = maxHeaderSize;
+            this.handshakeTimeoutMillis = handshakeTimeoutMillis;
+            this.handshakeTimeoutName = handshakeTimeoutName;
         }
 
         private void fail(ChannelHandlerContext ctx, String message) {
@@ -301,7 +315,27 @@ public class WebSocketProxyRelayHandler {
 
         @Override
         public void channelActive(ChannelHandlerContext ctx) {
+            // both channels share one event loop, so these callbacks never race the handler's own
+            clientCtx.channel().closeFuture().addListener(future -> {
+                if (!handshaker.isHandshakeComplete()) {
+                    failed = true;
+                    ctx.close();
+                }
+            });
+            if (handshakeTimeoutMillis > 0) {
+                // from the TCP connection, so it covers a TLS handshake too; cancelled when this handler is removed
+                handshakeTimeout = ctx.executor().schedule(() -> fail(ctx,
+                        "upstream WebSocket handshake response was not received within " + handshakeTimeoutName + " (" + handshakeTimeoutMillis + " ms)"),
+                    handshakeTimeoutMillis, TimeUnit.MILLISECONDS);
+            }
             handshaker.handshake(ctx.channel());
+        }
+
+        @Override
+        public void handlerRemoved(ChannelHandlerContext ctx) {
+            if (handshakeTimeout != null) {
+                handshakeTimeout.cancel(false);
+            }
         }
 
         @Override

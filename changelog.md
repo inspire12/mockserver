@@ -715,6 +715,14 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **A proxied WebSocket upgrade no longer waits forever for an upstream server that does not answer it.** When
+  MockServer relayed a WebSocket upgrade to an upstream server that accepted the connection but never answered the
+  upgrade, or stopped part-way through its answer, the client's upgrade was left unanswered and both connections
+  stayed open until one side closed them; the inbound idle timeout did not end it, as the upgrade counts as a request
+  in progress. Now MockServer waits as it does for a forwarded response, at most `maxSocketTimeout` and never longer
+  than `maxFutureTimeout`, then answers the client `502` with the reason as the body, for example `upstream WebSocket
+  handshake response was not received within maxSocketTimeout (20000 ms)`, logs one warning and closes the upstream
+  connection. A client that gives up waiting first now has its upstream connection closed straight away.
 - **A response to `HEAD` over HTTP/2 is sent without its body.** A mocked response with a body, or a response
   forwarded from an HTTP/2 upstream, was sent to an HTTP/2 `HEAD` request with its body, on a direct connection
   and through a CONNECT or SOCKS tunnel; a response to `HEAD` has no content. Its headers now end the stream and
