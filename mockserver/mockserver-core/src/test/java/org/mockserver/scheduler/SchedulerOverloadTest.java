@@ -7,14 +7,21 @@ import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.Delay;
 import org.slf4j.event.Level;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.IntSupplier;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.lessThanOrEqualTo;
 import static org.hamcrest.Matchers.startsWith;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -76,6 +83,49 @@ public class SchedulerOverloadTest {
             scheduler.schedule(rejectable(secondRan::countDown, rejected::incrementAndGet), false, Delay.milliseconds(10));
             assertThat("admission reopened once the pending task fired", secondRan.await(5, TimeUnit.SECONDS), is(true));
             assertThat(rejected.get(), is(1));
+        } finally {
+            scheduler.shutdown();
+        }
+    }
+
+    @Test(timeout = 30_000)
+    public void shouldNeverCountARefusedDelayedResponseAsPending() throws Exception {
+        Scheduler scheduler = new Scheduler(configuration().maxPendingDelayedResponses(1), mockServerLogger, false);
+        try {
+            AtomicInteger ran = new AtomicInteger();
+            AtomicInteger rejected = new AtomicInteger();
+            scheduler.schedule(rejectable(ran::incrementAndGet, rejected::incrementAndGet), false, LONG_DELAY);
+
+            int peak = peakCountWhileRefusing(1, scheduler::getPendingDelayedTaskCount,
+                () -> scheduler.schedule(rejectable(ran::incrementAndGet, rejected::incrementAndGet), false, LONG_DELAY));
+
+            assertThat("the full budget refused the flood", rejected.get(), greaterThan(0));
+            assertThat("the pending count never read over the limit", peak, lessThanOrEqualTo(1));
+            assertThat(scheduler.getPendingDelayedResponseCount(), is(1));
+            assertThat(ran.get(), is(0));
+        } finally {
+            scheduler.shutdown();
+        }
+    }
+
+    @Test(timeout = 30_000)
+    public void shouldNeverCountARefusedWebSocketReplySetAsPending() throws Exception {
+        Scheduler scheduler = new Scheduler(configuration().maxPendingDelayedResponses(1), mockServerLogger, false);
+        try {
+            AtomicInteger ran = new AtomicInteger();
+            AtomicInteger refused = new AtomicInteger();
+            long[] oneDelayedFrame = {30_000};
+            assertThat(scheduler.scheduleReplySet(Collections.singletonList(ran::incrementAndGet), oneDelayedFrame, () -> false, refused::incrementAndGet, () -> {
+            }), is(true));
+
+            int peak = peakCountWhileRefusing(1, scheduler::getPendingWebSocketReplyFrameCount,
+                () -> scheduler.scheduleReplySet(Collections.singletonList(ran::incrementAndGet), oneDelayedFrame, () -> false, refused::incrementAndGet, () -> {
+                }));
+
+            assertThat("the full budget refused the flood", refused.get(), greaterThan(0));
+            assertThat("the pending frame count never read over the limit", peak, lessThanOrEqualTo(1));
+            assertThat(scheduler.getPendingWebSocketReplyFrameCount(), is(1));
+            assertThat(ran.get(), is(0));
         } finally {
             scheduler.shutdown();
         }
@@ -257,6 +307,35 @@ public class SchedulerOverloadTest {
         }
     }
 
+    @Test(timeout = 30_000)
+    public void shouldNeverCountARefusedTemplateRenderAsQueued() throws Exception {
+        Scheduler scheduler = new Scheduler(configuration().actionHandlerThreadCount(1).maxQueuedTemplateActions(1), mockServerLogger, false);
+        CountDownLatch release = new CountDownLatch(1);
+        try {
+            CountDownLatch blockerStarted = new CountDownLatch(1);
+            scheduler.scheduleTemplateAction(() -> {
+                blockerStarted.countDown();
+                awaitQuietly(release);
+            }, false);
+            assertThat(blockerStarted.await(5, TimeUnit.SECONDS), is(true));
+            AtomicInteger rejected = new AtomicInteger();
+            scheduler.scheduleTemplateAction(rejectable(() -> {
+            }, rejected::incrementAndGet), false);
+            assertThat(rejected.get(), is(0));
+
+            int peak = peakCountWhileRefusing(1, scheduler::getAdmittedTemplateActionCount,
+                () -> scheduler.scheduleTemplateAction(rejectable(() -> {
+                }, rejected::incrementAndGet), false));
+
+            assertThat("the full template queue refused the flood", rejected.get(), greaterThan(0));
+            assertThat("the admitted render count never read over the limit", peak, lessThanOrEqualTo(1));
+            assertThat(scheduler.getAdmittedTemplateActionCount(), is(1));
+        } finally {
+            release.countDown();
+            scheduler.shutdown();
+        }
+    }
+
     @Test(timeout = 10_000)
     public void shouldRejectDelayedTemplateActionWhenTemplateQueueIsFullOnceTheDelayElapses() throws Exception {
         Scheduler scheduler = new Scheduler(configuration().actionHandlerThreadCount(1).maxQueuedTemplateActions(1), mockServerLogger, false);
@@ -326,6 +405,38 @@ public class SchedulerOverloadTest {
         } finally {
             scheduler.shutdown();
         }
+    }
+
+    /**
+     * Samples {@code count} without pausing while several threads keep making attempts the full budget refuses;
+     * stops early once it reads over {@code limit}, otherwise after a fixed sampling window.
+     */
+    private static int peakCountWhileRefusing(int limit, IntSupplier count, Runnable refusedAttempt) throws InterruptedException {
+        AtomicBoolean refusing = new AtomicBoolean(true);
+        List<Thread> refusers = new ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            Thread refuser = new Thread(() -> {
+                while (refusing.get()) {
+                    refusedAttempt.run();
+                }
+            }, "overload-refuser-" + i);
+            refuser.setDaemon(true);
+            refuser.start();
+            refusers.add(refuser);
+        }
+        int peak = 0;
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(750);
+        try {
+            while (peak <= limit && System.nanoTime() < deadline) {
+                peak = Math.max(peak, count.getAsInt());
+            }
+        } finally {
+            refusing.set(false);
+            for (Thread refuser : refusers) {
+                refuser.join(5_000);
+            }
+        }
+        return peak;
     }
 
     private static void awaitPendingDelayed(Scheduler scheduler, int expected) throws InterruptedException {

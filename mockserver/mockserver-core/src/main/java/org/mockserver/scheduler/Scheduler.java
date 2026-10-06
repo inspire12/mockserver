@@ -348,6 +348,13 @@ public class Scheduler {
     }
 
     /**
+     * Template renders admitted and not yet started, as the {@code maxQueuedTemplateActions} admission counts them.
+     */
+    int getAdmittedTemplateActionCount() {
+        return queuedTemplateActions.get();
+    }
+
+    /**
      * Delayed tasks counted against the {@code maxPendingDelayedResponses} response budget.
      */
     public int getPendingDelayedResponseCount() {
@@ -370,8 +377,9 @@ public class Scheduler {
 
     private void scheduleAfterDelay(Runnable command, RejectableTask rejectable, long delayMillis, Integer port) {
         AtomicInteger pending = delayedBudgetFor(rejectable);
-        if (pending.incrementAndGet() > maxPendingDelayedResponses && rejectable != null) {
-            pending.decrementAndGet();
+        if (rejectable == null) {
+            pending.incrementAndGet();
+        } else if (!tryAdmit(pending, 1, maxPendingDelayedResponses)) {
             rejectForOverload(rejectable.reason, maxPendingDelayedResponses, rejectable.onRejected, port);
             return;
         }
@@ -387,9 +395,9 @@ public class Scheduler {
     }
 
     private void executeTemplateAction(Runnable command, RejectableTask rejectable, Integer port) {
-        int queued = queuedTemplateActions.incrementAndGet();
-        if (rejectable != null && queued > maxQueuedTemplateActions) {
-            queuedTemplateActions.decrementAndGet();
+        if (rejectable == null) {
+            queuedTemplateActions.incrementAndGet();
+        } else if (!tryAdmit(queuedTemplateActions, 1, maxQueuedTemplateActions)) {
             rejectForOverload(OverloadReason.TEMPLATE_ACTIONS, maxQueuedTemplateActions, rejectable.onRejected, port);
             return;
         }
@@ -402,6 +410,21 @@ public class Scheduler {
             queuedTemplateActions.decrementAndGet();
             throw exception;
         }
+    }
+
+    /**
+     * Adds {@code permits} to {@code budget} only while it holds fewer than {@code limit}. A refused task never
+     * raises the count, so it cannot inflate a pending count or make a free slot look full to another task.
+     */
+    private static boolean tryAdmit(AtomicInteger budget, int permits, int limit) {
+        int current;
+        do {
+            current = budget.get();
+            if (current >= limit) {
+                return false;
+            }
+        } while (!budget.compareAndSet(current, current + permits));
+        return true;
     }
 
     private void rejectForOverload(OverloadReason reason, int limit, Runnable onRejected, Integer port) {
@@ -623,8 +646,7 @@ public class Scheduler {
             }
         }
         boolean counted = scheduler != null && delayed > 0;
-        if (counted && pendingWebSocketReplyFrames.getAndAdd(delayed) >= maxPendingDelayedResponses) {
-            pendingWebSocketReplyFrames.addAndGet(-delayed);
+        if (counted && !tryAdmit(pendingWebSocketReplyFrames, delayed, maxPendingDelayedResponses)) {
             rejectForOverload(OverloadReason.WEBSOCKET_REPLIES, maxPendingDelayedResponses, onRefused, port);
             return false;
         }

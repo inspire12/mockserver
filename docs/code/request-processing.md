@@ -887,6 +887,11 @@ flowchart TD
 Defaults for both properties are the heap ceiling / 64 KB, capped at 100,000; the 1,000 floor applies only
 when the JVM reports no heap ceiling. `0` removes a limit.
 
+Admission is a compare-and-set on each budget's counter (`Scheduler.tryAdmit`): a refused task never
+raises the counter, so refusals cannot inflate `mock_server_pending_delayed_tasks` or the `get*Count`
+readers, and concurrent refusals cannot make a free slot look full. A budget's count still exceeds its
+limit by design when a multi-frame WebSocket reply set is admitted below it.
+
 **Rationale for the choices.**
 
 - *Admission control, not an event-loop timer.* Moving delays to `eventLoop().schedule` or a
