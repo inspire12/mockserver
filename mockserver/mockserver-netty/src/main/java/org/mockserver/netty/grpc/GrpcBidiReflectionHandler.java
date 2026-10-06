@@ -29,6 +29,8 @@ import java.util.List;
  *       {@link GrpcServerReflectionHandler#handleReflectionRequest(byte[])} and writes the
  *       gRPC-framed response as a DATA frame. If the frame has {@code endStream=true},
  *       calls {@link #finish(ChannelHandlerContext)}.</li>
+ *   <li>On a second {@link Http2HeadersFrame}, the request's trailers: ends the request as END_STREAM on a DATA
+ *       frame does.</li>
  *   <li>{@code finish()}: writes trailing HEADERS with grpc-status=0 and
  *       {@code endStream=true}. Guarded to run at most once.</li>
  * </ul>
@@ -47,6 +49,8 @@ public class GrpcBidiReflectionHandler extends ChannelInboundHandlerAdapter {
     private final GrpcServerReflectionHandler reflectionHandler;
     private final IncrementalGrpcFrameDecoder decoder;
     private volatile boolean finished;
+    // confined to the stream's event loop
+    private boolean requestHeadersRead;
 
     /**
      * Creates a new per-stream bidi reflection handler.
@@ -76,7 +80,10 @@ public class GrpcBidiReflectionHandler extends ChannelInboundHandlerAdapter {
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
         try {
-            if (msg instanceof Http2HeadersFrame) {
+            if (msg instanceof Http2HeadersFrame && requestHeadersRead) {
+                handleTrailers(ctx, (Http2HeadersFrame) msg);
+            } else if (msg instanceof Http2HeadersFrame) {
+                requestHeadersRead = true;
                 handleHeaders(ctx, (Http2HeadersFrame) msg);
             } else if (msg instanceof Http2DataFrame) {
                 handleData(ctx, (Http2DataFrame) msg);
@@ -97,6 +104,18 @@ public class GrpcBidiReflectionHandler extends ChannelInboundHandlerAdapter {
         ctx.writeAndFlush(new DefaultHttp2HeadersFrame(responseHeaders, false));
 
         if (headersFrame.isEndStream()) {
+            finish(ctx);
+        } else {
+            ctx.read();
+        }
+    }
+
+    /**
+     * A HEADERS frame after the request's headers is its trailers, which carry END_STREAM: they end the request as
+     * END_STREAM on a DATA frame does.
+     */
+    private void handleTrailers(ChannelHandlerContext ctx, Http2HeadersFrame trailersFrame) {
+        if (trailersFrame.isEndStream()) {
             finish(ctx);
         } else {
             ctx.read();

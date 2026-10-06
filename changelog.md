@@ -629,6 +629,13 @@ This release delivers a sustained performance and memory programme alongside dat
 
 ### Fixed
 
+- **A gRPC bidirectional stream over HTTP/2, including a server reflection stream, now ends normally when its client
+  ends the request with trailers.** The response finishes with its `grpc-status`, as it does when the request ends on
+  a DATA frame. Before, the trailers were taken for the request's headers a second time, and the whole HTTP/2
+  connection was closed with a GOAWAY (`INTERNAL_ERROR`), with nothing logged: that stream got no `grpc-status`, and
+  every other stream on the connection was cut off. gRPC clients end a request on a DATA frame, so only clients that
+  send request trailers were affected.
+
 - **A response to `HEAD` reaches an HTTP/2 client behind a CONNECT or SOCKS tunnel with the `content-length` it
   declares.** Through such a tunnel the header was rewritten to `0`, where a direct connection is sent the length
   of the body a `GET` would have had. Any response whose headers end its stream (a `HEAD` response, a `204`, a

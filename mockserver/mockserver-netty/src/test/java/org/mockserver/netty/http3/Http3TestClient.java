@@ -153,26 +153,38 @@ public final class Http3TestClient implements AutoCloseable {
         return exchange;
     }
 
+    /**
+     * Sends a request's header section and leaves the stream open, for {@link Exchange#data} and
+     * {@link Exchange#trailers} to follow.
+     */
+    public Exchange start(Http3Headers headers) throws Exception {
+        Exchange exchange = new Exchange();
+        exchange.stream = requestStream(exchange);
+        exchange.stream.writeAndFlush(new DefaultHttp3HeadersFrame(headers)).sync();
+        return exchange;
+    }
+
     private QuicStreamChannel requestStream(Exchange exchange) throws Exception {
         return Http3.newRequestStream(quicChannel, new Http3RequestStreamInboundHandler() {
-            private final ByteArrayOutputStream body = new ByteArrayOutputStream();
 
             @Override
             protected void channelRead(ChannelHandlerContext ctx, Http3HeadersFrame frame) {
                 if (frame.headers().status() != null) {
                     exchange.status.complete(Integer.parseInt(frame.headers().status().toString()));
+                } else {
+                    exchange.trailers.complete(frame.headers());
                 }
             }
 
             @Override
             protected void channelRead(ChannelHandlerContext ctx, Http3DataFrame frame) {
-                body.writeBytes(ByteBufUtil.getBytes(frame.content()));
+                exchange.received(ByteBufUtil.getBytes(frame.content()));
                 frame.release();
             }
 
             @Override
             protected void channelInputClosed(ChannelHandlerContext ctx) {
-                exchange.body.complete(body.toString(StandardCharsets.UTF_8));
+                exchange.body.complete(new String(exchange.receivedByteArray(), StandardCharsets.UTF_8));
                 ctx.close();
             }
 
@@ -181,6 +193,7 @@ public final class Http3TestClient implements AutoCloseable {
                 IllegalStateException closed = new IllegalStateException("stream closed without a response");
                 exchange.status.completeExceptionally(closed);
                 exchange.body.completeExceptionally(closed);
+                exchange.trailers.completeExceptionally(closed);
             }
 
             @Override
@@ -200,6 +213,56 @@ public final class Http3TestClient implements AutoCloseable {
     public static final class Exchange {
         private final CompletableFuture<Integer> status = new CompletableFuture<>();
         private final CompletableFuture<String> body = new CompletableFuture<>();
+        private final CompletableFuture<Http3Headers> trailers = new CompletableFuture<>();
+        private final ByteArrayOutputStream received = new ByteArrayOutputStream();
+        private volatile QuicStreamChannel stream;
+
+        /**
+         * Sends a DATA frame of the request body on a stream opened with {@link Http3TestClient#start}.
+         */
+        public Exchange data(byte[] bytes) throws Exception {
+            stream.writeAndFlush(new DefaultHttp3DataFrame(Unpooled.wrappedBuffer(bytes))).sync();
+            return this;
+        }
+
+        /**
+         * Ends the request without a trailer section.
+         */
+        public Exchange end() throws Exception {
+            stream.shutdownOutput().sync();
+            return this;
+        }
+
+        /**
+         * Sends the request's trailer section and ends the request.
+         */
+        public Exchange trailers(Http3Headers trailers) throws Exception {
+            stream.writeAndFlush(new DefaultHttp3HeadersFrame(trailers)).addListener(QuicStreamChannel.SHUTDOWN_OUTPUT).sync();
+            return this;
+        }
+
+        /**
+         * @return the value of a response trailer, or null if the trailers have none of that name
+         */
+        public String trailer(String name) throws Exception {
+            CharSequence value = trailers.get(WAIT_SECONDS, TimeUnit.SECONDS).get(name);
+            return value != null ? value.toString() : null;
+        }
+
+        /**
+         * @return the response body received so far
+         */
+        public byte[] receivedByteArray() {
+            synchronized (received) {
+                return received.toByteArray();
+            }
+        }
+
+        private void received(byte[] bytes) {
+            synchronized (received) {
+                received.writeBytes(bytes);
+            }
+        }
 
         public int status() throws Exception {
             return status.get(WAIT_SECONDS, TimeUnit.SECONDS);
