@@ -2,6 +2,7 @@ package org.mockserver.mock.action.http;
 
 import org.junit.Test;
 import org.mockserver.httpclient.HeaderLimitExceededException;
+import org.mockserver.httpclient.UndecodableResponseException;
 import org.mockserver.model.HttpResponse;
 
 import java.util.concurrent.CompletableFuture;
@@ -133,6 +134,28 @@ public class ForwardRetryPolicyTest {
             assertThat(ForwardRetryPolicy.isTransientFailure(null, failure), is(false));
         }
         assertThat(ForwardRetryPolicy.isTransientFailure(null, new java.io.IOException("Connection reset")), is(true));
+    }
+
+    @Test
+    public void shouldNotRetryAForwardWhoseResponseCouldNotBeDecoded() throws Exception {
+        // the upstream answered, and would answer the same way again
+        UndecodableResponseException undecodable = new UndecodableResponseException("response from upstream could not be decoded: IllegalArgumentException: No colon found", new IllegalArgumentException("No colon found"));
+        AtomicInteger calls = new AtomicInteger(0);
+        Supplier<CompletableFuture<HttpResponse>> attempt = () -> {
+            calls.incrementAndGet();
+            CompletableFuture<HttpResponse> failed = new CompletableFuture<>();
+            failed.completeExceptionally(undecodable);
+            return failed;
+        };
+
+        try {
+            get(ForwardRetryPolicy.execute("GET", 3, 0, attempt));
+            fail("expected the decoding failure");
+        } catch (ExecutionException e) {
+            assertThat(UndecodableResponseException.in(e), sameInstance(undecodable));
+        }
+        assertThat(calls.get(), is(1));
+        assertThat(ForwardRetryPolicy.isTransientFailure(null, new IllegalStateException("wrapped", undecodable)), is(false));
     }
 
     @Test

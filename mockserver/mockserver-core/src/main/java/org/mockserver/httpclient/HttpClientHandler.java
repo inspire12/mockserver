@@ -165,12 +165,10 @@ public class HttpClientHandler extends SimpleChannelInboundHandler<Message> {
      * clean HTTP/1.1 request/response framing, leaving the channel's {@code HttpClientCodec}
      * decoder in a pristine state ready for the next exchange.
      * <p>
-     * MockServer's {@code error()} action (HttpError) deliberately writes raw, non-HTTP bytes
-     * and/or drops the connection. When such a reply is parsed by the client codec it surfaces here
-     * as an {@link HttpResponse} whose status code is outside the valid HTTP range (the decoder
-     * marks the message as a failure and the mapper assigns a sentinel code, e.g. {@code 999}). Such
-     * a channel must never be pooled. Only a status code in the valid HTTP range [100, 599] indicates
-     * a cleanly-framed response, so only those channels are eligible for reuse.
+     * A reply the client codec could not decode, such as the raw bytes of MockServer's {@code error()}
+     * action, fails the request and closes its connection before it reaches this handler
+     * ({@link ForwardHeaderLimit.Http1Response}). Only a status code in the valid HTTP range
+     * [100, 599] indicates a cleanly-framed response, so only those channels are eligible for reuse.
      * <p>
      * This status-range guard is a cheap necessary filter but is not on its own sufficient: a reply
      * with a valid in-range status can still leave undecoded bytes on the channel (wrong

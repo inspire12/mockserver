@@ -1039,7 +1039,7 @@ connection is still sent again on a new one. The message names the upstream and 
 
 `HttpActionHandler` asks `upstreamFailureReason` first, before its connection-failure branch, for both an
 expectation's forward (`handleExceptionDuringForwardingRequest`) and an unmatched proxied request
-(`handleUnmatchedForwardFailure`). For the three reasons it names, the request is logged once at `ERROR`, with
+(`handleUnmatchedForwardFailure`). For the four reasons it names, the request is logged once at `ERROR`, with
 the request and the bounded cause, and the client gets a `502` whose body is the reason:
 
 | Cause | `502` body |
@@ -1047,19 +1047,22 @@ the request and the bounded cause, and the client gets a `502` whose body is the
 | Configuration error | `connection to the upstream could not be set up: RuntimeException: Exception creating SSL context for client` |
 | TLS (any `SSLException` in the cause chain) | `TLS with the upstream failed: SSLHandshakeException: PKIX path building failed: …`; with OpenSSL, whose message is `General OpenSslEngine problem`, the root cause follows: `…; caused by CertificateException: No subject alternative names present` |
 | HTTP/2 error (any `Http2Exception` in the cause chain) | `HTTP/2 error from the upstream: PROTOCOL_ERROR: Frame of type 0 must be associated with a stream.` |
+| HTTP/1.1 response that could not be decoded (`UndecodableResponseException`) | `response from the upstream could not be decoded: IllegalArgumentException: No colon found` |
 | Anything else | as before: no body; a connection failure is logged at `TRACE` |
 
-The body holds only text from the TLS, HTTP/2 or set-up code, bounded as a log entry's fault is (each message
-cut at 256 characters, a non-TLS answer shown as its byte count); for a configuration error only the top-level
-message, because a deeper cause may quote a configured file. Header values and body bytes are never quoted,
-though an HTTP/2 message can name a header (`invalid header name [...]`). The connection-level entry that
+The body holds only text from the TLS, HTTP/2, set-up or decoding code, bounded as a log entry's fault is (each
+message cut at 256 characters, a non-TLS answer shown as its byte count); for a configuration error only the
+top-level message, because a deeper cause may quote a configured file. Header values and body bytes are never
+quoted, though an HTTP/2 message or the decoder's can name a header (`invalid header name [...]`), and the
+decoder's can quote the first word of a status line that is not HTTP (`invalid version format: ...`). The connection-level entry that
 `HttpOrHttp2Initializer` or `Http2ForwardConnectionExceptionHandler` logs is then `DEBUG`; it stays `WARN` when
 no request is waiting (an idle pooled connection), where it is the only record. For an expectation's forward the scheduler's
 `INFO` entry for a failed response future, which repeats the exception's message, is skipped for these
 reasons, so the `ERROR` is the request's one entry.
 
-A configuration error is not a transient failure: `ForwardRetryPolicy.isTransientFailure` is false for it, so
-it is not retried, and the circuit breaker records it as it records a header-limit refusal (not a failure). A
+A configuration error or an undecodable response is not a transient failure: `ForwardRetryPolicy.isTransientFailure`
+is false for it, so it is not retried, and the circuit breaker records it as it records a header-limit refusal
+(not a failure). A
 TLS or HTTP/2 failure counts as before.
 
 ### Streaming Forward Path

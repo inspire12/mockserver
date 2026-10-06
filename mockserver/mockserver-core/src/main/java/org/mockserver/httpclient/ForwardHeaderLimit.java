@@ -14,20 +14,25 @@ import io.netty.handler.codec.http2.Http2Exception;
 import io.netty.handler.codec.http2.Http2HeadersFrame;
 import io.netty.util.AttributeKey;
 import io.netty.util.ReferenceCountUtil;
+import org.mockserver.codec.StreamedResponseDecoderResultGuard;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.Message;
 import org.slf4j.event.Level;
 
+import java.net.InetSocketAddress;
 import java.util.concurrent.CompletableFuture;
 
+import static org.mockserver.exception.ExceptionHandling.boundedFault;
+import static org.mockserver.exception.ExceptionHandling.boundedFaultDescription;
 import static org.mockserver.httpclient.NettyHttpClient.REMOTE_SOCKET;
 import static org.mockserver.httpclient.NettyHttpClient.RESPONSE_FUTURE;
 
 /**
  * Fails a forward whose upstream response has headers or trailers larger than {@code maxHeaderSize} with a
  * {@link HeaderLimitExceededException} that says which, and logs each once. Netty's codecs enforce the limit; the
- * handlers here turn what they report into that failure.
+ * handlers here turn what they report into that failure. An HTTP/1.1 response the codec could not decode for any other
+ * reason fails the forward with an {@link UndecodableResponseException}.
  * <p>
  * The size is the one each protocol counts: over HTTP/1.1 the header lines without their line ends, over HTTP/2 each
  * field's name and value plus 32 bytes after HPACK decoding (RFC 9113 section 6.5.2).
@@ -61,11 +66,12 @@ final class ForwardHeaderLimit {
     }
 
     /**
-     * Whether {@code cause} needs no log entry of its own: it is a refusal, or the aggregator reporting the part of a
-     * response it held when the connection was closed for one.
+     * Whether {@code cause} needs no log entry of its own: it is a refusal or an undecodable response, or the
+     * aggregator reporting the part of a response it held when the connection was closed for one.
      */
     static boolean isAlreadyLogged(Channel channel, Throwable cause) {
         return cause instanceof HeaderLimitExceededException
+            || cause instanceof UndecodableResponseException
             || cause instanceof PrematureChannelClosureException && (channel.hasAttr(REFUSED) || channel.parent() != null && channel.parent().hasAttr(REFUSED));
     }
 
@@ -84,6 +90,28 @@ final class ForwardHeaderLimit {
         return refusal;
     }
 
+    /**
+     * Logs a response that could not be decoded once: below a warning when a request is waiting for it, since the
+     * request is failed with the reason and logged with it, and as a warning otherwise.
+     */
+    static UndecodableResponseException undecodable(MockServerLogger mockServerLogger, Channel channel, Throwable decoderFailure) {
+        InetSocketAddress upstream = channel.attr(REMOTE_SOCKET).get();
+        UndecodableResponseException failure = new UndecodableResponseException("response from " + (upstream != null ? upstream.getHostString() + ":" + upstream.getPort() : "upstream") + " could not be decoded: " + boundedFaultDescription(decoderFailure), decoderFailure);
+        channel.attr(REFUSED).set(Boolean.TRUE);
+        CompletableFuture<Message> responseFuture = channel.attr(RESPONSE_FUTURE).get();
+        Level level = responseFuture != null && !responseFuture.isDone() ? Level.DEBUG : Level.WARN;
+        if (mockServerLogger.isEnabledForInstance(level)) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(level)
+                    .setMessageFormat("response on connection to:{}could not be decoded:{}")
+                    .setArguments(upstream, boundedFaultDescription(decoderFailure))
+                    .setThrowable(boundedFault(decoderFailure))
+            );
+        }
+        return failure;
+    }
+
     private static void failForward(Channel channel, HeaderLimitExceededException refusal) {
         CompletableFuture<Message> responseFuture = channel.attr(RESPONSE_FUTURE).get();
         if (responseFuture != null) {
@@ -94,7 +122,9 @@ final class ForwardHeaderLimit {
     /**
      * Directly after the HTTP/1.1 client codec, which hands on a response head or last content it stopped decoding
      * with the failure attached and then discards the connection's input. It counts a response's trailers on top of
-     * its headers.
+     * its headers. Any such failure fails the forward and closes the connection, so the part decoded is not relayed
+     * and the connection is not pooled; once a response is streamed, {@link StreamedResponseDecoderResultGuard} ends
+     * the stream instead.
      */
     static final class Http1Response extends ChannelInboundHandlerAdapter {
 
@@ -108,9 +138,14 @@ final class ForwardHeaderLimit {
 
         @Override
         public void channelRead(ChannelHandlerContext ctx, Object msg) {
-            if (msg instanceof HttpObject && ((HttpObject) msg).decoderResult().cause() instanceof TooLongHttpHeaderException) {
+            Throwable decoderFailure = msg instanceof HttpObject ? ((HttpObject) msg).decoderResult().cause() : null;
+            if (decoderFailure instanceof TooLongHttpHeaderException) {
                 ReferenceCountUtil.release(msg);
                 ctx.fireExceptionCaught(responseOverLimit(mockServerLogger, ctx.channel(), msg instanceof HttpResponse ? RESPONSE_HEADERS : RESPONSE_HEADERS_AND_TRAILERS, maxHeaderSize));
+                ctx.close();
+            } else if (decoderFailure != null && ctx.pipeline().get(StreamedResponseDecoderResultGuard.class) == null) {
+                ReferenceCountUtil.release(msg);
+                ctx.fireExceptionCaught(undecodable(mockServerLogger, ctx.channel(), decoderFailure));
                 ctx.close();
             } else {
                 ctx.fireChannelRead(msg);

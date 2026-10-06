@@ -43,6 +43,7 @@ import org.junit.Test;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.httpclient.NettyHttpClient;
 import org.mockserver.httpclient.SocketConnectionException;
+import org.mockserver.httpclient.UndecodableResponseException;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.model.Protocol;
@@ -51,6 +52,7 @@ import org.mockserver.socket.tls.ForwardProxyTLSX509CertificatesTrustManager;
 
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -63,9 +65,11 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
+import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.lessThan;
 import static org.hamcrest.Matchers.lessThanOrEqualTo;
+import static org.hamcrest.Matchers.startsWith;
 import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.model.HttpRequest.request;
 
@@ -374,40 +378,63 @@ public class NettyHttpClientConnectionPoolTest {
     }
 
     /**
-     * Regression for the connection-pool default-on forward callback/error desync: a malformed,
-     * non-HTTP upstream reply (as produced by MockServer's {@code error()} / HttpError action —
-     * raw bytes, not a valid HTTP response) must NEVER be returned to the pool. Such a channel's
-     * decoder is left corrupted; reusing it silently swallows the next request's response, so the
-     * caller blocks until the forward timeout. The fix keeps {@code forwardConnectionPoolEnabled}
-     * off by default and, when it IS enabled, refuses to pool a channel whose reply did not parse as
-     * a valid HTTP response (status outside 100–599). Here the upstream replies with a single garbage
-     * line on its first connection; the SECOND request must therefore open a FRESH connection (the
-     * poisoned channel was not reused) and complete normally on the upstream's now-clean responses.
+     * A malformed, non-HTTP upstream reply (the shape of MockServer's {@code error()} raw bytes) fails the request
+     * with the decoder's reason and its connection is never pooled: the codec discards whatever follows on it, so
+     * reusing it would leave the next request waiting until the read timeout. The second request is answered on a
+     * new connection.
      */
     @Test
     public void shouldNotReuseChannelAfterMalformedNonHttpResponse() throws Exception {
-        // given - the upstream returns a non-HTTP garbage line on its first connection only
-        MalformedThenValidUpstreamServer rawUpstream = new MalformedThenValidUpstreamServer();
+        MalformedThenValidUpstreamServer rawUpstream = new MalformedThenValidUpstreamServer("some_random_bytes\r\n");
         try {
             NettyHttpClient client = pooledClient();
 
-            // when - first request receives the malformed reply (surfaces as an out-of-range status)
-            HttpResponse first = client.sendRequest(request().withHeader("Host", "127.0.0.1:" + rawUpstream.port()))
-                .get(10, TimeUnit.SECONDS);
-            // the malformed reply is not a clean HTTP response - its status is outside the valid range
-            assertThat(first.getStatusCode() == null || first.getStatusCode() < 100 || first.getStatusCode() > 599, is(true));
+            Throwable first = failureOf(client.sendRequest(request().withHeader("Host", "127.0.0.1:" + rawUpstream.port())));
+            assertThat(first, instanceOf(UndecodableResponseException.class));
+            assertThat(first.getMessage(), startsWith("response from 127.0.0.1:" + rawUpstream.port() + " could not be decoded: IllegalArgumentException: "));
 
-            // and - a SECOND request must succeed; if the poisoned channel had been pooled and reused
-            // this would hang and time out (the regression). A fresh connection is opened instead.
             HttpResponse second = client.sendRequest(request().withHeader("Host", "127.0.0.1:" + rawUpstream.port()))
                 .get(10, TimeUnit.SECONDS);
 
-            // then - the second exchange completed cleanly on a fresh connection
             assertThat(second.getStatusCode(), is(200));
-            // the malformed channel was never reused, so at least two connections were opened
-            assertThat(rawUpstream.acceptedConnections(), is(greaterThanOrEqualTo(2)));
+            assertThat(rawUpstream.acceptedConnections(), is(2));
         } finally {
             rawUpstream.stop();
+        }
+    }
+
+    /**
+     * A valid status line followed by a header Netty refuses: the codec hands on the head it had read with the failure
+     * attached and discards the rest of the connection's input, so neither the partial response nor the connection may
+     * be used. The request fails with the reason, and the next one is answered at once on a new connection, where the
+     * pooled connection would have left it waiting until the read timeout.
+     */
+    @Test
+    public void shouldFailAResponseWithAnInvalidHeaderAndNotReuseItsConnection() throws Exception {
+        MalformedThenValidUpstreamServer rawUpstream = new MalformedThenValidUpstreamServer("HTTP/1.1 200 OK\r\nx-bad(header): value\r\ncontent-length: 2\r\n\r\nok");
+        try {
+            NettyHttpClient client = pooledClient();
+
+            Throwable first = failureOf(client.sendRequest(request().withHeader("Host", "127.0.0.1:" + rawUpstream.port())));
+            assertThat(first, instanceOf(UndecodableResponseException.class));
+            assertThat(first.getMessage(), startsWith("response from 127.0.0.1:" + rawUpstream.port() + " could not be decoded: IllegalArgumentException: "));
+
+            HttpResponse second = client.sendRequest(request().withHeader("Host", "127.0.0.1:" + rawUpstream.port()))
+                .get(10, TimeUnit.SECONDS);
+
+            assertThat(second.getStatusCode(), is(200));
+            assertThat(rawUpstream.acceptedConnections(), is(2));
+        } finally {
+            rawUpstream.stop();
+        }
+    }
+
+    private static Throwable failureOf(CompletableFuture<HttpResponse> response) throws Exception {
+        try {
+            HttpResponse unexpected = response.get(10, TimeUnit.SECONDS);
+            throw new AssertionError("the request did not fail, it was answered " + unexpected.getStatusCode());
+        } catch (ExecutionException failed) {
+            return failed.getCause();
         }
     }
 
@@ -857,10 +884,9 @@ public class NettyHttpClientConnectionPoolTest {
     }
 
     /**
-     * A minimal raw TCP upstream that, on its FIRST accepted connection, replies with a single
-     * non-HTTP garbage line and keeps the socket open (mimicking an {@code error()} raw-bytes reply
-     * on a keep-alive connection); on every subsequent connection it speaks valid HTTP/1.1. Counts
-     * accepted connections so the test can assert the poisoned channel was not reused.
+     * A minimal raw TCP upstream that, on its FIRST accepted connection, answers every request with
+     * the bytes it is given and keeps the socket open; on every subsequent connection it speaks valid
+     * HTTP/1.1. Counts accepted connections so the test can assert the poisoned channel was not reused.
      */
     private static final class MalformedThenValidUpstreamServer {
 
@@ -869,7 +895,7 @@ public class NettyHttpClientConnectionPoolTest {
         private final AtomicInteger accepted = new AtomicInteger();
         private final Channel serverChannel;
 
-        MalformedThenValidUpstreamServer() {
+        MalformedThenValidUpstreamServer(String firstConnectionReply) {
             ServerBootstrap bootstrap = new ServerBootstrap()
                 .group(bossGroup, workerGroup)
                 .channel(NioServerSocketChannel.class)
@@ -878,12 +904,10 @@ public class NettyHttpClientConnectionPoolTest {
                     protected void initChannel(SocketChannel ch) {
                         boolean firstConnection = accepted.incrementAndGet() == 1;
                         if (firstConnection) {
-                            // Raw, non-HTTP reply: a single garbage line, no HTTP framing, socket
-                            // stays open. This is the shape of an HttpError raw-bytes response.
                             ch.pipeline().addLast(new SimpleChannelInboundHandler<io.netty.buffer.ByteBuf>() {
                                 @Override
                                 protected void channelRead0(ChannelHandlerContext ctx, io.netty.buffer.ByteBuf msg) {
-                                    ctx.writeAndFlush(Unpooled.copiedBuffer("some_random_bytes\r\n", StandardCharsets.UTF_8));
+                                    ctx.writeAndFlush(Unpooled.copiedBuffer(firstConnectionReply, StandardCharsets.UTF_8));
                                 }
                             });
                         } else {

@@ -709,6 +709,19 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **A forwarded or proxied HTTP/1.1 response MockServer cannot read is now answered `502` naming why, instead of
+  being passed on in part.** When an upstream's response had a header that is not valid HTTP, a status line that is
+  not HTTP or is longer than 4 KB, or a chunk size that is not a number, MockServer passed on what it had read so
+  far: the status and the headers before the fault with no body, or status `999` for a status line it could not
+  read, and logged the fault as an error. When the status was a normal one the connection to the upstream was also
+  kept for reuse although it could no longer be read, so the next request forwarded on it failed with `502` after
+  `maxSocketTimeout`. Now the client gets `502` with the reason as the body, for example `response from the upstream
+  could not be decoded: IllegalArgumentException: a header name can only contain "token" characters ...`, the
+  request is logged once as an error, the connection to the upstream is closed, and the next request opens a new
+  one. The request is not sent again (`forwardProxyRetryCount` does not apply, as the upstream has already answered)
+  and does not count against the forward circuit breaker. A response already being streamed to the client still
+  ends incomplete, as before. Code that sends requests with `NettyHttpClient` directly now gets an
+  `UndecodableResponseException` for such a response rather than the partial response.
 - **A client that is still sending its request body now receives an early response from a
   `respondBeforeBody` expectation instead of a connection reset.** MockServer closed the connection
   the moment it had sent the response, with the rest of the body unread, so the operating system reset

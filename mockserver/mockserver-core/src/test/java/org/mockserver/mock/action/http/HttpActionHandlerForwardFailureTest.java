@@ -7,6 +7,7 @@ import org.junit.Before;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockserver.httpclient.SocketConnectionException;
+import org.mockserver.httpclient.UndecodableResponseException;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.mock.HttpState;
@@ -33,6 +34,7 @@ import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
+import static org.hamcrest.Matchers.startsWith;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -139,6 +141,31 @@ public class HttpActionHandlerForwardFailureTest {
         String reason = "HTTP/2 error from the upstream: PROTOCOL_ERROR: Frame of type 0 must be associated with a stream.";
         assertThat(answer().getBodyAsString(), is(reason));
         assertLoggedOnceAsAnError(reason);
+    }
+
+    @Test
+    public void shouldAnswerAResponseThatCouldNotBeDecodedWithTheDecodersReason() {
+        Throwable failure = new UndecodableResponseException("response from upstream.example:8080 could not be decoded: IllegalArgumentException: No colon found", new IllegalArgumentException("No colon found"));
+
+        actionHandler.handleExceptionDuringForwardingRequest(ACTION, request, responseWriter, new CompletionException(failure));
+
+        String reason = "response from the upstream could not be decoded: IllegalArgumentException: No colon found";
+        assertThat(answer().getStatusCode(), is(502));
+        assertThat(answer().getBodyAsString(), is(reason));
+        assertLoggedOnceAsAnError(reason);
+    }
+
+    @Test
+    public void shouldAnswerAStatusLineThatIsNotHttpWithAtMostTheBoundOfIt() {
+        String notHttp = "invalid version format: " + "A".repeat(5000);
+        Throwable failure = new UndecodableResponseException("response from upstream could not be decoded", new IllegalArgumentException(notHttp));
+
+        actionHandler.handleUnmatchedForwardFailure(failure, request, responseWriter, UPSTREAM, true);
+
+        String prefix = "response from the upstream could not be decoded: IllegalArgumentException: invalid version format: AAA";
+        assertThat(answer().getStatusCode(), is(502));
+        assertThat(answer().getBodyAsString(), startsWith(prefix));
+        assertThat(answer().getBodyAsString().length(), is("response from the upstream could not be decoded: IllegalArgumentException: ".length() + 256));
     }
 
     @Test

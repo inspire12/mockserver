@@ -12,7 +12,6 @@ import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.HttpClientCodec;
 import io.netty.handler.codec.http.HttpContent;
 import io.netty.handler.codec.http.HttpMethod;
-import io.netty.handler.codec.http.HttpObject;
 import io.netty.handler.codec.http.HttpObjectDecoder;
 import io.netty.handler.codec.http.HttpResponse;
 import io.netty.handler.codec.http.HttpVersion;
@@ -34,10 +33,12 @@ import io.netty.util.AttributeKey;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.Future;
 import org.junit.Test;
+import org.mockserver.codec.StreamedResponseDecoderResultGuard;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.Message;
+import org.mockserver.model.StreamingBody;
 import org.slf4j.event.Level;
 
 import java.io.ByteArrayOutputStream;
@@ -47,7 +48,9 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -63,6 +66,7 @@ import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.lessThan;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.sameInstance;
+import static org.hamcrest.Matchers.startsWith;
 import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.httpclient.NettyHttpClient.ERROR_IF_CHANNEL_CLOSED_WITHOUT_RESPONSE;
 import static org.mockserver.httpclient.NettyHttpClient.REMOTE_SOCKET;
@@ -220,7 +224,7 @@ public class ForwardHeaderLimitTest {
     }
 
     @Test
-    public void shouldHandOnAnHttp1ResponseWithinTheLimitAndOneThatFailsToDecodeForAnotherReason() {
+    public void shouldHandOnAnHttp1ResponseWithinTheLimit() {
         List<Throwable> failures = new ArrayList<>();
         List<Object> read = new ArrayList<>();
         EmbeddedChannel connection = http1Connection(100, failures, read);
@@ -230,18 +234,86 @@ public class ForwardHeaderLimitTest {
         assertThat(failures, empty());
         assertThat(((HttpResponse) read.get(0)).headers().get("set-cookie").length(), is("session=".length() + 100 - 37));
         assertThat(((HttpContent) read.get(1)).content().toString(StandardCharsets.US_ASCII), is("ok"));
-        read.forEach(ReferenceCountUtil::release);
-        read.clear();
-
-        connection.writeOutbound(new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/"));
-        ReferenceCountUtil.release(connection.readOutbound());
-        connection.writeInbound(ascii("HTTP/1.1 200 " + "a".repeat(HttpObjectDecoder.DEFAULT_MAX_INITIAL_LINE_LENGTH) + "\r\n\r\n"));
-
-        assertThat(failures, empty());
-        assertThat("a status line over Netty's limit is handed on as the codec reports it", ((HttpObject) read.get(0)).decoderResult().isFailure(), is(true));
         assertThat(connection.isOpen(), is(true));
         assertThat(logged, empty());
-        assertThat(ForwardHeaderLimit.isAlreadyLogged(connection, new PrematureChannelClosureException("cut short")), is(false));
+        read.forEach(ReferenceCountUtil::release);
+        connection.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldFailTheForwardForAnHttp1ResponseThatCannotBeDecodedAndCloseTheConnection() {
+        Map<String, String> undecodable = new LinkedHashMap<>();
+        undecodable.put("HTTP/1.1 200 " + "a".repeat(HttpObjectDecoder.DEFAULT_MAX_INITIAL_LINE_LENGTH) + "\r\n\r\n", "TooLongHttpLineException: An HTTP line is larger than 4096 bytes.");
+        undecodable.put("not http\r\n\r\n", "IllegalArgumentException: ");
+        undecodable.put("HTTP/1.1 200 OK\r\nx-bad(header): value\r\ncontent-length: 2\r\n\r\nok", "IllegalArgumentException: ");
+        for (Map.Entry<String, String> response : undecodable.entrySet()) {
+            List<Throwable> failures = new ArrayList<>();
+            List<Object> read = new ArrayList<>();
+            EmbeddedChannel connection = http1Connection(LIMIT, failures, read);
+
+            connection.writeInbound(ascii(response.getKey()));
+
+            assertThat(failures, hasSize(1));
+            assertThat(failures.get(0), instanceOf(UndecodableResponseException.class));
+            assertThat(failures.get(0).getMessage(), startsWith("response from upstream could not be decoded: " + response.getValue()));
+            assertThat("nothing of the response is handed on", read, empty());
+            assertThat(connection.isOpen(), is(false));
+            assertThat(ForwardHeaderLimit.isAlreadyLogged(connection, failures.get(0)), is(true));
+            connection.finishAndReleaseAll();
+        }
+        assertThat(logged, hasSize(undecodable.size()));
+        for (String entry : logged) {
+            assertThat("no request was waiting", entry, startsWith("WARN response on connection to:{}could not be decoded:{} "));
+        }
+    }
+
+    @Test
+    public void shouldFailTheForwardForAnHttp1ChunkSizeThatIsNotANumberAfterHandingOnTheHead() {
+        List<Throwable> failures = new ArrayList<>();
+        List<Object> read = new ArrayList<>();
+        EmbeddedChannel connection = http1Connection(LIMIT, failures, read);
+
+        connection.writeInbound(ascii("HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\nzz\r\nok\r\n0\r\n\r\n"));
+
+        assertThat(failures, hasSize(1));
+        assertThat(failures.get(0).getMessage(), startsWith("response from upstream could not be decoded: NumberFormatException: "));
+        assertThat("only the head, which the aggregator holds until the response is complete", read, hasSize(1));
+        assertThat(read.get(0), instanceOf(HttpResponse.class));
+        assertThat(connection.isOpen(), is(false));
+        assertThat("the aggregator's report of the head it held", ForwardHeaderLimit.isAlreadyLogged(connection, new PrematureChannelClosureException("Channel closed while still aggregating message")), is(true));
+        read.forEach(ReferenceCountUtil::release);
+        connection.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldLogAnUndecodableHttp1ResponseBelowAWarningWhenARequestIsWaitingForIt() {
+        List<Throwable> failures = new ArrayList<>();
+        EmbeddedChannel connection = http1Connection(LIMIT, failures, new ArrayList<>());
+        CompletableFuture<Message> forward = new CompletableFuture<>();
+        connection.attr(RESPONSE_FUTURE).set(forward);
+        connection.attr(REMOTE_SOCKET).set(InetSocketAddress.createUnresolved("upstream.example", 8080));
+
+        connection.writeInbound(ascii("not http\r\n\r\n"));
+
+        assertThat(failures, hasSize(1));
+        assertThat(failures.get(0).getMessage(), startsWith("response from upstream.example:8080 could not be decoded: IllegalArgumentException: "));
+        assertThat(logged, hasSize(1));
+        assertThat(logged.get(0), startsWith("DEBUG response on connection to:{}could not be decoded:{} IllegalArgumentException: "));
+        connection.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldLeaveAnUndecodableHttp1ResponseThatIsStreamedToTheStreamsGuard() {
+        List<Throwable> failures = new ArrayList<>();
+        List<Object> read = new ArrayList<>();
+        EmbeddedChannel connection = http1Connection(LIMIT, failures, read);
+        connection.pipeline().addAfter(connection.pipeline().context(ForwardHeaderLimit.Http1Response.class).name(), "guard", new StreamedResponseDecoderResultGuard());
+
+        connection.writeInbound(ascii("HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\nzz\r\n"));
+
+        assertThat(failures, hasSize(1));
+        assertThat(failures.get(0), instanceOf(StreamingBody.StreamAbortedException.class));
+        assertThat(logged, empty());
         read.forEach(ReferenceCountUtil::release);
         connection.finishAndReleaseAll();
     }

@@ -16,6 +16,7 @@ import org.mockserver.grpc.GrpcForwardTranslator;
 import org.mockserver.grpc.GrpcProtoDescriptorStore;
 import org.mockserver.httpclient.ClientConfigurationException;
 import org.mockserver.httpclient.HeaderLimitExceededException;
+import org.mockserver.httpclient.UndecodableResponseException;
 import org.mockserver.httpclient.NettyHttpClient;
 import org.mockserver.httpclient.SocketCommunicationException;
 import org.mockserver.log.model.DeferredLogArgument;
@@ -3042,12 +3043,17 @@ public class HttpActionHandler {
 
     /**
      * Why a forward failed, for a reason the client's {@code 502} names: the connection to the upstream could not be
-     * set up from MockServer's configuration, TLS with the upstream failed, or the upstream sent an HTTP/2 error.
-     * Each comes from the TLS, HTTP/2 or set-up code and is bounded as a fault's log entry is (256 characters a
-     * message, and a non-TLS answer as its byte count), so header values and body bytes are never quoted; an HTTP/2
-     * message can name a header. Null for any other failure.
+     * set up from MockServer's configuration, TLS with the upstream failed, the upstream sent an HTTP/2 error, or its
+     * HTTP/1.1 response could not be decoded. Each comes from the TLS, HTTP/2, set-up or decoding code and is bounded
+     * as a fault's log entry is (256 characters a message, and a non-TLS answer as its byte count), so header values
+     * and body bytes are never quoted; an HTTP/2 message or a header the decoder refused can name a header, and a
+     * status line that is not HTTP can be quoted. Null for any other failure.
      */
     static String upstreamFailureReason(Throwable failure) {
+        UndecodableResponseException undecodable = UndecodableResponseException.in(failure);
+        if (undecodable != null) {
+            return "response from the upstream could not be decoded: " + boundedFaultDescription(undecodable.getCause() != null ? undecodable.getCause() : undecodable);
+        }
         ClientConfigurationException configurationError = ClientConfigurationException.in(failure);
         if (configurationError != null) {
             // only the top of the cause: one deeper may quote a configured file
