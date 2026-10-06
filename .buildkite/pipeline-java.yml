@@ -191,6 +191,21 @@ steps:
         - exit_status: 255  # agent forced shutdown
           limit: 2
 
+  # PostgresThroughMockServerIntegrationTest (mockserver-netty): a real PostgreSQL
+  # server proxied through MockServer. Docker-gated, so it skips in the socket-free
+  # main build; this step gives it a socket and fails if it skipped.
+  - label: ":elephant: binary proxy real-PostgreSQL test"
+    command: ".buildkite/scripts/steps/java-binary-proxy-docker-test.sh"
+    env:
+      MOCKSERVER_ECR_PULL_THROUGH: "true"
+    timeout_in_minutes: 30
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
   # Transparent-proxy original-destination end-to-end suites (SO_ORIGINAL_DST,
   # TPROXY, eBPF). These were named *EndToEndIT, matching NEITHER Surefire
   # (**/*Test.java) NOR Failsafe (**/*IntegrationTest.java), so they never ran on

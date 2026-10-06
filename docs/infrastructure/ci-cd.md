@@ -110,6 +110,7 @@ indistinguishable from a pass, so these gates now fail loudly instead:
 | Gate | Failure mode removed | Mechanism |
 |------|---------------------|-----------|
 | Cloud blob-store contract suites | `Assume` Docker guard skipped them on 100% of builds (`java-build.sh` never passed `-s`) | Own socket-enabled step (`java-cloud-store-test.sh`) + `assert-suite-ran.sh` asserts non-skipped tests actually ran |
+| Real-PostgreSQL binary proxying (`PostgresThroughMockServerIntegrationTest`, `mockserver-netty`) | Its `Assume` Docker guard skipped it in the socket-free `:maven: build` on every build | Own socket-enabled step (`java-binary-proxy-docker-test.sh`) runs only that Failsafe class and `assert-suite-ran.sh` fails the step if it skipped; the main build is unchanged and still skips it |
 | `container_integration_tests` | A test script crashing before `logTestResult` left no record; `EXIT_CODE` is only set from a non-empty fail log, so a total harness crash exited 0 | `test()` records unaccounted-for non-zero exits; the summary fails when nothing at all was recorded |
 | Go / .NET / PHP client integration | Skipped silently without `MOCKSERVER_URL` (never set in CI) | Dedicated steps run a live server built from HEAD (`with-mockserver.sh`); `MOCKSERVER_REQUIRE_SERVER=true` turns any skip into a hard failure |
 | Rust client integration | Entirely `#[ignore]`d; CI never passed `-- --ignored` | `rust-integration-test.sh` passes `-- --ignored` against a live server |
@@ -1260,8 +1261,8 @@ flowchart LR
 
 ### Container Image Pre-Pull
 
-The two Docker-gated Java steps — `:cloud: cloud blob-store contract tests` and
-`:envelope: asyncapi live-broker tests` — pre-pull their Testcontainers backing images via
+The Docker-gated Java steps that start third-party images — `:cloud: cloud blob-store contract tests`,
+`:envelope: asyncapi live-broker tests` and `:elephant: binary proxy real-PostgreSQL test` — pre-pull their Testcontainers backing images via
 `.buildkite/scripts/lib/pre-pull-images.sh` before Maven runs.
 
 The reason is failure attribution, not speed. When MinIO moved to `quay.io` (Docker Hub stopped
@@ -1275,6 +1276,7 @@ same shape as the GCS and Azure suites, which always used emulators.
 |------|--------|
 | cloud blob-store | `adobe/s3mock`, `fsouza/fake-gcs-server`, `mcr.microsoft.com/azure-storage/azurite` |
 | asyncapi live-broker | `confluentinc/cp-kafka`, `rabbitmq`, `eclipse-mosquitto` |
+| binary proxy real-PostgreSQL | `postgres` |
 
 The image names and tags are **no longer duplicated**. They live once, in
 `mockserver/mockserver-testing/src/main/resources/org/mockserver/test/test-container-images.properties`,
