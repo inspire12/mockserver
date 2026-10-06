@@ -709,6 +709,14 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **A client that is still sending its request body now receives an early response from a
+  `respondBeforeBody` expectation instead of a connection reset.** MockServer closed the connection
+  the moment it had sent the response, with the rest of the body unread, so the operating system reset
+  the connection: a client such as okhttp, which sends its whole body before reading the response,
+  could fail with "broken pipe" or "connection reset" before reading the response. MockServer now ends
+  its side of the connection after the response, keeps reading and discarding the body, and closes once
+  the client does or after 5 seconds. The response also says `Connection: close` unless its connection
+  options set that header, where it used to say `keep-alive` for a keep-alive request.
 - **A stopped MockServer no longer stays in memory.** A server registers itself in places shared by the whole
   JVM as it starts and serves (its live metrics gauges, its scenario state, and the sender used by load scenarios
   and drift alerts), and stopping it never removed them, so the most recently started server kept its whole event

@@ -10,6 +10,7 @@ import org.mockserver.logging.MockServerLogger;
 import org.mockserver.mappers.MockServerHttpResponseToFullHttpResponse;
 import org.mockserver.model.ConnectionOptions;
 import org.mockserver.model.Delay;
+import org.mockserver.model.Header;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.responsewriter.ResponseWriter;
@@ -17,8 +18,10 @@ import org.mockserver.scheduler.Scheduler;
 
 import java.util.List;
 
+import static io.netty.handler.codec.http.HttpHeaderNames.CONNECTION;
+import static io.netty.handler.codec.http.HttpHeaderValues.CLOSE;
+import static org.mockserver.model.Header.header;
 import static org.slf4j.event.Level.TRACE;
-import static org.slf4j.event.Level.WARN;
 
 /**
  * Response writer for the early-dispatch path. Writes the response upstream of
@@ -26,6 +29,8 @@ import static org.slf4j.event.Level.WARN;
  * MockServer HttpResponse can be sent before the request body has been aggregated.
  */
 public class EarlyNettyResponseWriter extends ResponseWriter {
+
+    private static final Header CLOSE_CONNECTION_HEADER = header(CONNECTION.toString(), CLOSE.toString());
 
     private final ChannelHandlerContext ctx;
     private final Scheduler scheduler;
@@ -70,40 +75,27 @@ public class EarlyNettyResponseWriter extends ResponseWriter {
     }
 
     private void disconnectAndCloseChannel(ChannelFuture future) {
-        future
-            .channel()
-            .disconnect()
-            .addListener(disconnectFuture -> {
-                if (disconnectFuture.isSuccess()) {
-                    future
-                        .channel()
-                        .close()
-                        .addListener(closeFuture -> {
-                            if (closeFuture.isSuccess()) {
-                                if (mockServerLogger != null && mockServerLogger.isEnabledForInstance(TRACE)) {
-                                    mockServerLogger
-                                        .logEvent(new LogEntry()
-                                            .setLogLevel(TRACE)
-                                            .setMessageFormat("disconnected and closed socket " + future.channel().localAddress() + " after early response")
-                                        );
-                                }
-                            } else if (mockServerLogger != null && mockServerLogger.isEnabledForInstance(WARN)) {
-                                mockServerLogger
-                                    .logEvent(new LogEntry()
-                                        .setLogLevel(WARN)
-                                        .setMessageFormat("exception closing socket " + future.channel().localAddress() + " after early response")
-                                        .setThrowable(closeFuture.cause())
-                                    );
-                            }
-                        });
-                } else if (mockServerLogger != null && mockServerLogger.isEnabledForInstance(WARN)) {
-                    mockServerLogger
-                        .logEvent(new LogEntry()
-                            .setLogLevel(WARN)
-                            .setMessageFormat("exception disconnecting socket " + future.channel().localAddress())
-                            .setThrowable(disconnectFuture.cause())
-                        );
-                }
-            });
+        if (mockServerLogger != null && mockServerLogger.isEnabledForInstance(TRACE)) {
+            mockServerLogger
+                .logEvent(new LogEntry()
+                    .setLogLevel(TRACE)
+                    .setMessageFormat("closing socket {} after early response")
+                    .setArguments(future.channel().localAddress())
+                );
+        }
+        LingeringClose.close(future.channel());
+    }
+
+    /**
+     * The connection always closes after an early response, so unless the response sets the
+     * Connection header explicitly it says so, whatever the request asked for.
+     */
+    @Override
+    protected HttpResponse addConnectionHeader(HttpRequest request, HttpResponse response) {
+        ConnectionOptions connectionOptions = response.getConnectionOptions();
+        if (connectionOptions != null && (connectionOptions.getSuppressConnectionHeader() != null || connectionOptions.getKeepAliveOverride() != null)) {
+            return super.addConnectionHeader(request, response);
+        }
+        return response.cloneWithHeaders().replaceHeader(CLOSE_CONNECTION_HEADER);
     }
 }
