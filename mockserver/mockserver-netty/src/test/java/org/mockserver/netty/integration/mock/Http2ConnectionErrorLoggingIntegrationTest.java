@@ -200,28 +200,34 @@ public class Http2ConnectionErrorLoggingIntegrationTest {
         }
     }
 
+    /**
+     * A tunnel's client leg logs it as a direct connection does: its handler fires no connection error down the
+     * pipeline, as the direct connection's codec does, so it is logged where Netty raises it.
+     */
     @Test
     public void shouldLogAConnectionErrorOnceAsAWarningWithItsCauseAndStillSendGoAway() throws Exception {
-        for (boolean tls : new boolean[]{false, true}) {
+        for (Route route : Route.values()) {
+            logged.clear();
             InetSocketAddress client;
-            try (Http2TestClient connection = connect(tls)) {
+            try (Http2TestClient connection = connect(route)) {
                 client = connection.localAddress();
-                assertThat(transport(tls), connection.send(pseudoHeaders(tls, HttpMethod.GET), true).status(), is(200));
+                assertThat(route.name(), connection.send(pseudoHeaders(route, HttpMethod.GET, "/served"), true).status(), is(200));
 
                 // a DATA frame on stream 0, which no stream can be blamed for
                 connection.sendRaw(new byte[]{0, 0, 0, 0, 0, 0, 0, 0, 0});
 
-                assertThat(transport(tls), connection.goAwayErrorCode(), is(Http2Error.PROTOCOL_ERROR.code()));
-                assertThat(transport(tls), connection.closedWithin(10), is(true));
+                assertThat(route.name(), connection.goAwayErrorCode(), is(Http2Error.PROTOCOL_ERROR.code()));
+                assertThat(route.name(), connection.closedWithin(10), is(true));
             }
 
-            List<LogEntry> entries = connectionEntries(client);
-            assertThat(transport(tls), thrownToTheEndOfAPipelineInThisTest(), empty());
-            assertThat(transport(tls), entries, hasSize(1));
-            assertThat(transport(tls), entries.get(0).getLogLevel(), is(Level.WARN));
-            assertThat(transport(tls), entries.get(0).getMessageFormat(), is("closing HTTP/2 connection from:{}for connection error:{}"));
-            assertThat(transport(tls), Arrays.asList(entries.get(0).getArguments()), hasItem(Http2Error.PROTOCOL_ERROR));
-            assertThat(transport(tls), entries.get(0).getThrowable(), instanceOf(Http2Exception.class));
+            List<LogEntry> entries = awaitConnectionEntries(client);
+            assertThat(route.name(), thrownToTheEndOfAPipelineInThisTest(), empty());
+            assertThat(route.name(), entries, hasSize(1));
+            assertThat(route.name(), entries.get(0).getLogLevel(), is(Level.WARN));
+            assertThat(route.name(), entries.get(0).getMessageFormat(), is("closing HTTP/2 connection from:{}for connection error:{}"));
+            assertThat(route.name(), Arrays.asList(entries.get(0).getArguments()), hasItem(Http2Error.PROTOCOL_ERROR));
+            assertThat(route.name(), entries.get(0).getThrowable(), instanceOf(Http2Exception.class));
+            assertThat(route.name(), warningsAndErrors(), hasSize(1));
         }
     }
 
@@ -410,6 +416,11 @@ public class Http2ConnectionErrorLoggingIntegrationTest {
             assertThat(route.name(), entries.stream().filter(entry -> entry.getMessageFormat().contains("was cancelled by its client")).count(), is((long) RESETS_NETTY_ALLOWS));
             assertThat(route.name(), entries, hasSize(RESETS_NETTY_ALLOWS + 1));
             assertThat(route.name(), warningsAndErrors().stream().filter(entry -> entry.getLogLevel() == Level.ERROR).collect(Collectors.toList()), empty());
+            List<LogEntry> closing = awaitConnectionEntries(client);
+            assertThat(route.name(), closing, hasSize(1));
+            assertThat(route.name(), closing.get(0).getLogLevel(), is(Level.WARN));
+            assertThat(route.name(), closing.get(0).getMessageFormat(), is("closing HTTP/2 connection from:{}for connection error:{}"));
+            assertThat(route.name(), Arrays.asList(closing.get(0).getArguments()), hasItem(Http2Error.ENHANCE_YOUR_CALM));
         }
     }
 

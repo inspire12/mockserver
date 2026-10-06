@@ -629,6 +629,18 @@ This release delivers a sustained performance and memory programme alongside dat
 
 ### Fixed
 
+- **A response to `HEAD` reaches an HTTP/2 client behind a CONNECT or SOCKS tunnel with the `content-length` it
+  declares.** Through such a tunnel the header was rewritten to `0`, where a direct connection is sent the length
+  of the body a `GET` would have had. Any response whose headers end its stream (a `HEAD` response, a `204`, a
+  `304`) now reaches a tunnelled HTTP/2 client with exactly the headers a direct connection is sent.
+- **CONNECT and SOCKS tunnels no longer leave exceptions to Netty's own log.** A SOCKS client that reset its
+  tunnel before sending anything, or a tunnel's loopback connection reset in that interval, was logged by Netty
+  at `WARN` with a stack trace (`An exceptionCaught() event was fired, and it reached at the tail of the
+  pipeline`); it is now one `DEBUG` entry in MockServer's log. A compressed response cut short on an HTTP/2
+  tunnel no longer makes Netty log a `NullPointerException` at `ERROR`; the client was never affected. And an
+  HTTP/2 tunnel whose client breaks the protocol badly enough to have its connection closed (for example, more
+  than 200 cancelled requests in 30 seconds) is now logged once at `WARN`, as it is on a direct connection,
+  where before the tunnel logged nothing.
 - **An HTTP/2 request from a client that resets its connection as soon as it has sent it is now received.** A
   cleartext HTTP/2 (`h2c`) request sent as a connection's first bytes, by a client that then closed the connection
   with a reset (`SO_LINGER` 0, or with data still unread), was not recorded, matched or forwarded, on a direct

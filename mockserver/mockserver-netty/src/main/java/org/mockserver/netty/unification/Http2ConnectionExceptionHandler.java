@@ -34,6 +34,18 @@ public class Http2ConnectionExceptionHandler extends ChannelInboundHandlerAdapte
 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+        if (log(mockServerLogger, ctx, cause)) {
+            ctx.close();
+        }
+    }
+
+    /**
+     * Logs an exception on an HTTP/2 connection once, as this handler logs what reaches it; also called for a tunnel's
+     * client leg, whose handler fires no connection error down its pipeline.
+     *
+     * @return whether the connection is to be closed for it: an SSL or decoder fault, or the direct memory limit
+     */
+    static boolean log(MockServerLogger mockServerLogger, ChannelHandlerContext ctx, Throwable cause) {
         Http2Exception connectionError = Http2CodecUtil.getEmbeddedHttp2Exception(cause);
         if (directMemoryLimitReached(cause)) {
             mockServerLogger.logEvent(
@@ -41,7 +53,7 @@ public class Http2ConnectionExceptionHandler extends ChannelInboundHandlerAdapte
                     .setLogLevel(Level.ERROR)
                     .setMessageFormat(DIRECT_MEMORY_LIMIT_REACHED + ctx.channel() + " - " + cause.getMessage())
             );
-            ctx.close();
+            return true;
         } else if (connectionError != null) {
             // a request refused for its header size was logged where it was refused
             if (!Http2RequestHeaderLimit.isRefusal(connectionError) && mockServerLogger.isEnabledForInstance(Level.WARN)) {
@@ -64,7 +76,7 @@ public class Http2ConnectionExceptionHandler extends ChannelInboundHandlerAdapte
                 );
             }
             // Netty's JDK TLS handler leaves the connection open after such bytes and reports every read that follows
-            ctx.close();
+            return true;
         } else if (connectionClosedException(cause)) {
             // despite its name, true for everything except a connection its peer closed or reset
             mockServerLogger.logEvent(
@@ -81,5 +93,6 @@ public class Http2ConnectionExceptionHandler extends ChannelInboundHandlerAdapte
                     .setArguments(ctx.channel().remoteAddress(), cause.getMessage())
             );
         }
+        return false;
     }
 }

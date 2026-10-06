@@ -492,6 +492,13 @@ public final class Http2TestClient implements AutoCloseable {
             return value != null ? value.toString() : null;
         }
 
+        /**
+         * @return the response's header block as it arrived, pseudo-headers included
+         */
+        public Http2Headers headers() throws Exception {
+            return headers.get(WAIT_SECONDS, TimeUnit.SECONDS);
+        }
+
         public int status() throws Exception {
             return status.get(WAIT_SECONDS, TimeUnit.SECONDS);
         }

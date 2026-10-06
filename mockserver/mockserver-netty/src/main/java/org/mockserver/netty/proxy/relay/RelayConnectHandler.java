@@ -8,7 +8,6 @@ import io.netty.channel.*;
 import io.netty.handler.codec.ByteToMessageDecoder;
 import io.netty.handler.codec.socksx.v4.Socks4ServerDecoder;
 import io.netty.handler.codec.socksx.v5.Socks5CommandRequestDecoder;
-import org.mockserver.codec.BoundedZstdDecompressorFrameListener;
 import org.mockserver.codec.BoundedZstdHttpContentDecompressor;
 import org.mockserver.codec.HttpChunkLineLimiter;
 import org.mockserver.codec.HttpObjectAggregators;
@@ -56,6 +55,8 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
     public static final String PROXIED = "PROXIED_";
     public static final String PROXIED_SECURE = PROXIED + "SECURE_";
     public static final String PROXIED_RESPONSE = "PROXIED_RESPONSE_";
+    private static final String CLIENT_LEG = "client";
+    private static final String LOOPBACK_LEG = "loopback";
     private final Configuration configuration;
     private final LifeCycle server;
     private final MockServerLogger mockServerLogger;
@@ -96,6 +97,7 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
                 public void channelRead(ChannelHandlerContext mockServerCtx, Object msg) {
                     if (msg instanceof ByteBuf && new String(ByteBufUtil.getBytes((ByteBuf) msg), StandardCharsets.UTF_8).startsWith(PROXIED_RESPONSE)) {
                         tunnelEstablished = true;
+                        mockServerCtx.pipeline().addLast(new UnconfiguredTunnelLegExceptionHandler(mockServerLogger, LOOPBACK_LEG));
                         // this branch consumes the message (it does not forward it via fireChannelRead), so the
                         // inbound ByteBuf must be released here to avoid leaking one pooled buffer per tunnel setup
                         try {
@@ -128,6 +130,7 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
                                         removeHandler(pipelineToProxyClient, PortUnificationHandler.class);
                                         removeSocksCommandDecoders(pipelineToProxyClient);
                                         pipelineToProxyClient.addLast(new RelayTlsDetectionHandler(mockServerCtx));
+                                        pipelineToProxyClient.addLast(new UnconfiguredTunnelLegExceptionHandler(mockServerLogger, CLIENT_LEG));
                                     } else {
                                         // Unreachable by construction. Every RelayConnectHandler subclass is installed on
                                         // exactly two paths - HttpRequestHandler CONNECT and SocksProxyHandler.forwardConnection
@@ -191,7 +194,8 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
                 public void exceptionCaught(ChannelHandlerContext mockServerCtx, Throwable cause) {
                     // Before set-up the only handler here is this one, so an I/O error (typically a reset
                     // from a refused loopback) would otherwise reach the pipeline tail as a Netty WARN;
-                    // channelInactive answers the client. Afterwards the relay handlers own errors.
+                    // channelInactive answers the client. Afterwards UnconfiguredTunnelLegExceptionHandler,
+                    // then the relay handlers, own errors.
                     if (tunnelEstablished) {
                         mockServerCtx.fireExceptionCaught(cause);
                     } else {
@@ -285,6 +289,7 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
                 sslHandler.setHandshakeTimeoutMillis(handshakeTimeoutMillis);
             }
         }
+        // after the leg's exception handler: a failed handshake installs the relay's handlers before it is fired on
         pipelineToProxyClient.addLast(sslHandler);
 
         sslHandler.handshakeFuture().addListener(handshakeFuture -> {
@@ -388,6 +393,9 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
     private void configurePipelines(ChannelPipeline pipelineToMockServer, ChannelPipeline pipelineToProxyClient,
                                    ChannelHandlerContext mockServerCtx, ChannelHandlerContext proxyClientCtx,
                                    boolean http2EnabledDownstream, boolean addedWhileReading) {
+        // the relay's handlers, added last below, take each leg's exceptions from here on
+        removeHandler(pipelineToMockServer, UnconfiguredTunnelLegExceptionHandler.class);
+        removeHandler(pipelineToProxyClient, UnconfiguredTunnelLegExceptionHandler.class);
         if (isSslEnabledDownstream(proxyClientCtx.channel())) {
             // the loopback connection mirrors the protocol negotiated with the proxy client: it advertises
             // h2 via ALPN only when the proxy client negotiated HTTP/2, so its TLS layer and its codec
@@ -465,14 +473,7 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
         final LoopbackHttp2ResponseStreamer responseStreamer = new LoopbackHttp2ResponseStreamer(connection);
         final HttpToHttp2ConnectionHandlerBuilder http2ConnectionHandlerBuilder = new HttpToHttp2ConnectionHandlerBuilder()
             .frameListener(streamErrorHandler.frameListener(responseStreamer.relaying(
-                new BoundedZstdDecompressorFrameListener(
-                    connection,
-                    new InboundHttp2ToHttpAdapterBuilder(connection)
-                        .maxContentLength(configuration.maxRequestBodySize())
-                        .propagateSettings(true)
-                        .validateHttpHeaders(false)
-                        .build()
-                )
+                LoopbackAggregatingListener.of(connection, configuration.maxRequestBodySize())
             )))
             .connection(connection)
             // reads only responses MockServer itself wrote, so no limit on their headers, as on the HTTP/1.1 loopback

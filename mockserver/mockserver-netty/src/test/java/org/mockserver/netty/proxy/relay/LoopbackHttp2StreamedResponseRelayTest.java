@@ -27,11 +27,10 @@ import io.netty.handler.codec.http2.Http2RemoteFlowController;
 import io.netty.handler.codec.http2.Http2Stream;
 import io.netty.handler.codec.http2.HttpToHttp2ConnectionHandler;
 import io.netty.handler.codec.http2.HttpToHttp2ConnectionHandlerBuilder;
-import io.netty.handler.codec.http2.InboundHttp2ToHttpAdapterBuilder;
+import io.netty.util.internal.logging.InternalLoggerFactory;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
-import org.mockserver.codec.BoundedZstdDecompressorFrameListener;
 import org.mockserver.logging.MockServerLogger;
 
 import java.nio.charset.StandardCharsets;
@@ -39,6 +38,11 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 
 import static io.netty.handler.codec.http2.HttpConversionUtil.ExtensionHeaderNames.SCHEME;
 import static io.netty.handler.codec.http2.HttpConversionUtil.ExtensionHeaderNames.STREAM_ID;
@@ -92,10 +96,7 @@ public class LoopbackHttp2StreamedResponseRelayTest {
         LoopbackHttp2ResponseStreamer streamer = new LoopbackHttp2ResponseStreamer(loopbackConnection);
         HttpToHttp2ConnectionHandler loopbackHandler = new HttpToHttp2ConnectionHandlerBuilder()
             .frameListener(errorHandler.frameListener(
-                streamer.relaying(
-                    new BoundedZstdDecompressorFrameListener(
-                        loopbackConnection,
-                        new InboundHttp2ToHttpAdapterBuilder(loopbackConnection).maxContentLength(MAX_AGGREGATED_BYTES).build()))))
+                streamer.relaying(LoopbackAggregatingListener.of(loopbackConnection, MAX_AGGREGATED_BYTES))))
             .connection(loopbackConnection)
             .build();
         loopback = new EmbeddedChannel(
@@ -178,14 +179,76 @@ public class LoopbackHttp2StreamedResponseRelayTest {
     }
 
     @Test
-    public void shouldRelayAResponseItsHeadersEndAsBefore() throws Exception {
+    public void shouldRelayAResponseItsHeadersEndAsItsHeaderBlock() throws Exception {
         relay(3, "/empty");
 
         serverWritesHeaders(1, new DefaultHttp2Headers().status("204"), true);
 
         assertThat(writtenToProxyClient.frames, contains("3 HEADERS 204 END"));
+        assertThat("no length is added", writtenToProxyClient.headers.get(3).get("content-length"), is(nullValue()));
+        assertThat(parts.size(), is(1));
+        assertExchangeEndedCleanly(3);
+    }
+
+    /**
+     * A response to {@code HEAD} declares the length of the body a {@code GET} would have had, and has none. Held whole,
+     * it was given the length of the body it came with: 0.
+     */
+    @Test
+    public void shouldKeepTheDeclaredLengthOfAResponseItsHeadersEnd() throws Exception {
+        relay(3, "/head");
+
+        serverWritesHeaders(1, new DefaultHttp2Headers().status("200").setInt("content-length", 6).set("content-type", "text/plain"), true);
+
+        assertThat(writtenToProxyClient.frames, contains("3 HEADERS 200 END"));
+        assertThat(writtenToProxyClient.headers.get(3).get("content-length").toString(), is("6"));
+        assertThat(writtenToProxyClient.headers.get(3).get("content-type").toString(), is("text/plain"));
+        assertThat(writtenToProxyClient.dataBytes(3), is(0));
+        assertExchangeEndedCleanly(3);
+    }
+
+    /**
+     * Trailers end a response held whole as they end it on a direct connection: with the response, not before it.
+     */
+    @Test
+    public void shouldHoldTheTrailersOfAResponseOfDeclaredLengthWithIt() throws Exception {
+        relay(3, "/declared-with-trailers");
+
+        serverWritesHeaders(1, new DefaultHttp2Headers().status("200").setInt("content-length", 4), false);
+        serverWritesData(1, "body", false);
+        serverWritesHeaders(1, new DefaultHttp2Headers().set("x-checksum", "abc"), true);
+
+        assertThat(writtenToProxyClient.frames, contains("3 HEADERS 200", "3 DATA 4", "3 TRAILERS END"));
+        assertThat(writtenToProxyClient.trailers.get(3).get("x-checksum").toString(), is("abc"));
         assertThat(parts, is(empty()));
         assertExchangeEndedCleanly(3);
+    }
+
+    /**
+     * Netty empties the decompressor of a removed stream into the listener after it, which then has no stream to add
+     * the last of it to; that must not reach Netty's own log as an error.
+     */
+    @Test
+    public void shouldLogNothingWhenACompressedResponseIsCutShort() throws Exception {
+        byte[] compressed = gzip("z".repeat(5000).getBytes(StandardCharsets.UTF_8));
+        try (NettyErrorCapture nettyErrors = NettyErrorCapture.of(DefaultHttp2Connection.class)) {
+            relay(3, "/compressed/reset");
+            serverWritesHeaders(1, new DefaultHttp2Headers().status("200").set("content-encoding", "gzip"), false);
+            serverWritesData(1, Unpooled.wrappedBuffer(compressed, 0, compressed.length / 2), false);
+            serverHandler.resetStream(serverCtx, 1, Http2Error.CANCEL.code(), serverCtx.newPromise());
+            server.flush();
+            pump();
+
+            relay(5, "/compressed/corrupt");
+            serverWritesHeaders(3, new DefaultHttp2Headers().status("200").set("content-encoding", "gzip"), false);
+            // a gzip header, then a deflate block of the reserved type 3
+            serverWritesData(3, Unpooled.wrappedBuffer(new byte[]{0x1f, (byte) 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, (byte) 0xff, (byte) 0xff, (byte) 0xff, (byte) 0xff, (byte) 0xff}), true);
+
+            assertThat(writtenToProxyClient.resets, contains("3:" + Http2Error.CANCEL.code(), "5:" + Http2Error.INTERNAL_ERROR.code()));
+            assertThat(nettyErrors.logged(), is(empty()));
+        }
+        assertThat(loopbackErrors, is(empty()));
+        assertTunnelOpen();
     }
 
     /**
@@ -613,6 +676,49 @@ public class LoopbackHttp2StreamedResponseRelayTest {
             proxyClient.runPendingTasks();
             loopback.runPendingTasks();
         } while (moved);
+    }
+
+    /**
+     * What one Netty class logs through Netty's own logger at {@code WARN} or above on this thread, which is the event
+     * loop of every channel here. Checked to see such an entry when made, so it cannot pass by looking elsewhere.
+     */
+    private static final class NettyErrorCapture extends Handler implements AutoCloseable {
+        private final Logger logger;
+        private final Thread thread = Thread.currentThread();
+        private final List<String> logged = new CopyOnWriteArrayList<>();
+
+        private NettyErrorCapture(Class<?> nettyClass) {
+            logger = Logger.getLogger(nettyClass.getName());
+            logger.addHandler(this);
+        }
+
+        static NettyErrorCapture of(Class<?> nettyClass) {
+            NettyErrorCapture capture = new NettyErrorCapture(nettyClass);
+            InternalLoggerFactory.getInstance(nettyClass).error("capture check");
+            assertThat("the capture sees what Netty logs", capture.logged(), contains("capture check"));
+            capture.logged.clear();
+            return capture;
+        }
+
+        List<String> logged() {
+            return logged;
+        }
+
+        @Override
+        public void publish(LogRecord record) {
+            if (Thread.currentThread() == thread && record.getLevel().intValue() >= Level.WARNING.intValue()) {
+                logged.add(record.getThrown() != null ? record.getMessage() + " " + record.getThrown() : record.getMessage());
+            }
+        }
+
+        @Override
+        public void flush() {
+        }
+
+        @Override
+        public void close() {
+            logger.removeHandler(this);
+        }
     }
 
     /**

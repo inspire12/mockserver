@@ -80,8 +80,9 @@ final class LoopbackHttp2ResponseStreamer {
     }
 
     /**
-     * Whether a header block is handed on as it is read: a streamed response's headers and trailers. A response is
-     * found to be streamed at its first header block (the decoder refuses a second that does not end the stream).
+     * Whether a header block is handed on as it is read: a streamed response's headers and trailers, and a response
+     * its headers end. A response is found to be streamed at its first header block (the decoder refuses a second that
+     * does not end the stream).
      */
     private boolean relayedAsRead(int streamId, Http2Headers headers, boolean endOfStream) {
         Http2Stream stream = connection.stream(streamId);
@@ -91,9 +92,10 @@ final class LoopbackHttp2ResponseStreamer {
         if (isStreamed(stream)) {
             return true;
         }
-        // a whole response, or an aggregated one's trailers
+        // A response its headers end is relayed as its header block, which the adapter would give the content-length of
+        // the body it aggregated: 0, also for a HEAD response's. An aggregated response's trailers go to the adapter.
         if (endOfStream) {
-            return false;
+            return !stream.isTrailersReceived();
         }
         // an interim response, handed on without ending the client's stream: MockServer resets the stream of a 1xx it mocks
         if (HttpStatusClass.valueOf(headers.status()) == HttpStatusClass.INFORMATIONAL) {

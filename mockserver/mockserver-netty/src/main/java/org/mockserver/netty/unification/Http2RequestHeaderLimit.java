@@ -185,6 +185,15 @@ public final class Http2RequestHeaderLimit {
         return isHeaderListOverLimit(failure) || isHeaderBlockTooLarge(failure);
     }
 
+    /**
+     * @return whether Netty's {@code Http2ConnectionHandler.onError} handles {@code cause} as an error of the whole
+     * connection, which it answers with a {@code GOAWAY} and a close
+     */
+    static boolean isConnectionError(Throwable cause) {
+        Http2Exception failure = Http2CodecUtil.getEmbeddedHttp2Exception(cause);
+        return !Http2Exception.isStreamError(failure) && !(failure instanceof Http2Exception.CompositeStreamException);
+    }
+
     private static boolean isHeaderBlockTooLarge(Http2Exception failure) {
         return failure != null
             && !Http2Exception.isStreamError(failure)
@@ -224,7 +233,16 @@ public final class Http2RequestHeaderLimit {
             return new HttpToHttp2ConnectionHandler(decoder, encoder, initialSettings, isValidateHeaders(), decoupleCloseAndGoAway(), flushPreface(), null) {
                 @Override
                 public void onError(ChannelHandlerContext ctx, boolean outbound, Throwable cause) {
-                    logRefusalThen(mockServerLogger, ctx, initialSettings, outbound, cause, () -> super.onError(ctx, outbound, cause));
+                    logRefusalThen(mockServerLogger, ctx, initialSettings, outbound, cause, () -> {
+                        try {
+                            // logged here: unlike Http2FrameCodec, this handler fires no connection error down the pipeline
+                            if (!outbound && isConnectionError(cause)) {
+                                Http2ConnectionExceptionHandler.log(mockServerLogger, ctx, cause);
+                            }
+                        } finally {
+                            super.onError(ctx, outbound, cause);
+                        }
+                    });
                 }
 
                 @Override
