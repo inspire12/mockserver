@@ -24,9 +24,17 @@ public class KeyStoreFactoryTest {
     private static final String LEAF_KEY_PKCS8_PATH = "org/mockserver/authentication/mtls/leaf-key-pkcs8.pem";
 
     private KeyStoreFactory keyStoreFactory;
+    private final String trustStoreBefore = System.getProperty("javax.net.ssl.trustStore");
 
     @After
     public void cleanup() {
+        // loadOrCreateKeyStore points the JVM trust store at the file deleted below, which tests running
+        // in parallel read when they build a client SSL context
+        if (trustStoreBefore == null) {
+            System.clearProperty("javax.net.ssl.trustStore");
+        } else {
+            System.setProperty("javax.net.ssl.trustStore", trustStoreBefore);
+        }
         if (keyStoreFactory != null) {
             File keyStoreFile = new File(keyStoreFactory.keyStoreFileName);
             if (keyStoreFile.exists()) {

@@ -668,6 +668,8 @@
                        - ConfigurationProperties system-property config (ConfigurationTest,
                          ProxyConfigurationTest, ExceptionHandlingTest, CustomJsonUnitMatcherLoaderTest)
                        - static Prometheus Metrics gauges (MockServerMatcherNotificationAndMetricsTest)
+                       - the javax.net.ssl.trustStore system property, which KeyStoreFactory sets to a
+                         keystore file the test then deletes (KeyStoreFactoryTest)
                        - globally-fixed time for assertions on timestamps produced on the event-log
                          disruptor thread (HttpStateTest, MockServerEventLogTest)
                        - timing-sensitive file-watcher polling tests kept sequential as conservative
@@ -694,6 +696,7 @@
                              assert cache identity, so they must run single-threaded: otherwise one class
                              flips the global cache-enabled flag mid-run of a cache-dependent class. -->
                         <exclude>**/LRUCacheTest.java</exclude>
+                        <exclude>**/KeyStoreFactoryTest.java</exclude>
                         <exclude>**/JsonSchemaValidatorCacheTest.java</exclude>
                         <exclude>**/ConfigurationTest.java</exclude>
                         <exclude>**/PortFactoryTest.java</exclude>
@@ -975,6 +978,7 @@
                             </excludes>
                             <includes combine.self="override">
                                 <include>**/LRUCacheTest.java</include>
+                                <include>**/KeyStoreFactoryTest.java</include>
                                 <include>**/JsonSchemaValidatorCacheTest.java</include>
                                 <include>**/ConfigurationTest.java</include>
                                 <include>**/PortFactoryTest.java</include>
