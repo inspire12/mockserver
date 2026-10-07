@@ -484,18 +484,14 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
         final LoopbackHttp2StreamErrorHandler streamErrorHandler = new LoopbackHttp2StreamErrorHandler(mockServerLogger, connection, streamIdRemapper, proxyClientCtx.channel());
         // a response of undeclared length is relayed as MockServer writes it, any other once it is whole
         final LoopbackHttp2ResponseStreamer responseStreamer = new LoopbackHttp2ResponseStreamer(connection);
-        final HttpToHttp2ConnectionHandlerBuilder http2ConnectionHandlerBuilder = new HttpToHttp2ConnectionHandlerBuilder()
-            .frameListener(streamErrorHandler.frameListener(responseStreamer.relaying(
+        // reads only responses MockServer itself wrote, so no limit on their headers, as on the HTTP/1.1 loopback
+        final HttpToHttp2ConnectionHandler http2ConnectionHandler = Http2RequestHeaderLimit.relayLoopbackHandler(
+            connection,
+            streamErrorHandler.frameListener(responseStreamer.relaying(
                 LoopbackAggregatingListener.of(connection, configuration.maxRequestBodySize())
-            )))
-            .connection(connection)
-            // reads only responses MockServer itself wrote, so no limit on their headers, as on the HTTP/1.1 loopback
-            .initialSettings(Http2RequestHeaderLimit.relayLoopbackSettings())
-            .flushPreface(true);
-        if (mockServerLogger.isEnabledForInstance(TRACE)) {
-            http2ConnectionHandlerBuilder.frameLogger(new Http2FrameLogger(LogLevel.TRACE, RelayConnectHandler.class.getName()));
-        }
-        final HttpToHttp2ConnectionHandler http2ConnectionHandler = http2ConnectionHandlerBuilder.build();
+            )),
+            mockServerLogger.isEnabledForInstance(TRACE) ? new Http2FrameLogger(LogLevel.TRACE, RelayConnectHandler.class.getName()) : null
+        );
         pipelineToMockServer.addLast(http2ConnectionHandler);
         responseStreamer.widenConnectionWindow(pipelineToMockServer.context(http2ConnectionHandler));
         pipelineToMockServer.addLast(streamErrorHandler);

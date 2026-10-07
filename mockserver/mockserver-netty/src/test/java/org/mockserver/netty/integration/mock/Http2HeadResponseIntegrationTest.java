@@ -150,18 +150,9 @@ public class Http2HeadResponseIntegrationTest {
             .path(path);
     }
 
-    /**
-     * The header block without the {@code x-http2-} extension headers Netty uses inside a process: a tunnel relays the
-     * stream weight on an aggregated response, which is not what this test is about.
-     */
     private static Map<String, String> headerBlock(Http2TestClient.Exchange exchange) throws Exception {
         Map<String, String> headers = new TreeMap<>();
-        exchange.headers().forEach(header -> {
-            String name = header.getKey().toString();
-            if (!name.startsWith("x-http2-")) {
-                headers.merge(name, header.getValue().toString(), (first, second) -> first + ", " + second);
-            }
-        });
+        exchange.headers().forEach(header -> headers.merge(header.getKey().toString(), header.getValue().toString(), (first, second) -> first + ", " + second));
         return headers;
     }
 }

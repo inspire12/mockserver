@@ -715,6 +715,11 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **A response relayed through an HTTP/2 tunnel no longer carries an `x-http2-stream-weight` header.** A response
+  sent to an HTTP/2 client through MockServer as a CONNECT or SOCKS5 proxy (TLS or h2c), whether mocked or
+  forwarded, arrived with an extra `x-http2-stream-weight: 16` header that the same request on a direct connection
+  did not get, and each request the tunnel relayed to MockServer carried it too. Netty's internal `x-http2-` headers
+  are no longer sent on either side of the tunnel; the stream priority is still relayed in the frame itself.
 - **An HTTP/3 client that abandons a request no longer causes a warning with a stack trace.** When a client
   reset an HTTP/3 request stream, for example by cancelling a request part-way through its body, MockServer
   logged `exception in HTTP/3 request handler` at `WARN` with a stack trace. It now logs one `DEBUG` entry

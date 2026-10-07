@@ -11,6 +11,7 @@ import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.DecoderException;
 import io.netty.handler.codec.http2.AbstractHttp2ConnectionHandlerBuilder;
+import io.netty.handler.codec.http2.DecoratingHttp2ConnectionEncoder;
 import io.netty.handler.codec.http2.DefaultHttp2Connection;
 import io.netty.handler.codec.http2.DefaultHttp2Headers;
 import io.netty.handler.codec.http2.Http2Connection;
@@ -128,6 +129,31 @@ public class Http2RequestHeaderLimitTest {
         }
     }
 
+    /**
+     * The loopback's handler is built by a builder of MockServer's own too, to send no {@code x-http2-} extension
+     * header; everything else about it must stay as Netty's {@code HttpToHttp2ConnectionHandlerBuilder} makes it.
+     */
+    @Test
+    public void shouldBuildTheLoopbackHandlerAsNettysBuilderDoes() {
+        Http2Connection connection = new DefaultHttp2Connection(false);
+        Http2FrameListener frameListener = new Http2FrameAdapter();
+        HttpToHttp2ConnectionHandlerBuilder nettys = new HttpToHttp2ConnectionHandlerBuilder()
+            .initialSettings(Http2RequestHeaderLimit.relayLoopbackSettings())
+            .connection(connection)
+            .frameListener(frameListener)
+            .flushPreface(true);
+        Http2RequestHeaderLimit.RelayLoopbackHandlerBuilder mockServers = Http2RequestHeaderLimit.relayLoopbackHandlerBuilder(connection, frameListener, null);
+
+        assertThat(fields(mockServers, AbstractHttp2ConnectionHandlerBuilder.class), is(fields(nettys, AbstractHttp2ConnectionHandlerBuilder.class)));
+        HttpToHttp2ConnectionHandler nettysHandler = new HttpToHttp2ConnectionHandlerBuilder()
+            .initialSettings(Http2RequestHeaderLimit.relayLoopbackSettings())
+            .connection(new DefaultHttp2Connection(false))
+            .frameListener(frameListener)
+            .flushPreface(true)
+            .build();
+        assertBuiltAlike(Http2RequestHeaderLimit.relayLoopbackHandler(new DefaultHttp2Connection(false), frameListener, null), nettysHandler, HttpToHttp2ConnectionHandler.class);
+    }
+
     @Test
     public void shouldLogOnlyARefusalForTheSizeOfARequestsHeaders() throws Exception {
         Http2Settings settings = Http2RequestHeaderLimit.serverSettings(configuration);
@@ -188,15 +214,26 @@ public class Http2RequestHeaderLimitTest {
 
     /**
      * Compares two built handlers: their own settings, and each decoder and encoder in the chains wrapped around
-     * Netty's default ones, class by class with the limits each holds.
+     * Netty's default ones, class by class with the limits each holds. A tunnel's handlers ({@code HttpToHttp2ConnectionHandler})
+     * differ in one deliberate way: their encoder is wrapped in {@link ExtensionHeaderStrippingHttp2ConnectionEncoder}.
      */
     private static void assertBuiltAlike(Http2ConnectionHandler mockServers, Http2ConnectionHandler nettys, Class<?> handlerType) {
+        boolean tunnelHandler = handlerType == HttpToHttp2ConnectionHandler.class;
         try {
             for (Class<?> type = handlerType; type != null && type.getName().startsWith("io.netty.handler.codec.http2."); type = type.getSuperclass()) {
-                assertThat(type.getSimpleName(), fields(mockServers, type), is(fields(nettys, type)));
+                Map<String, String> expected = fields(nettys, type);
+                if (tunnelHandler && type == Http2ConnectionHandler.class) {
+                    expected.put("encoder", DecoratingHttp2ConnectionEncoder.class.getName());
+                }
+                assertThat(type.getSimpleName(), fields(mockServers, type), is(expected));
             }
             assertThat("decoder chain", chain(mockServers.decoder()), is(chain(nettys.decoder())));
-            assertThat("encoder chain", chain(mockServers.encoder()), is(chain(nettys.encoder())));
+            List<String> encoderChain = chain(mockServers.encoder());
+            if (tunnelHandler) {
+                assertThat("the encoder strips extension headers", mockServers.encoder().getClass(), is(ExtensionHeaderStrippingHttp2ConnectionEncoder.class));
+                encoderChain.remove(0);
+            }
+            assertThat("encoder chain", encoderChain, is(chain(nettys.encoder())));
             assertThat("frame writer chain", chain(mockServers.encoder().frameWriter()), is(chain(nettys.encoder().frameWriter())));
         } finally {
             new EmbeddedChannel(mockServers).finishAndReleaseAll();

@@ -67,6 +67,19 @@ public final class Http2RequestHeaderLimit {
     }
 
     /**
+     * @return the client handler of the loopback leg of a CONNECT or SOCKS tunnel carrying HTTP/2, built as Netty's
+     * {@code HttpToHttp2ConnectionHandlerBuilder} builds it with {@link #relayLoopbackSettings()}, except that it sends
+     * no {@code x-http2-} extension header a request read from the proxy client carries
+     */
+    public static HttpToHttp2ConnectionHandler relayLoopbackHandler(Http2Connection connection, Http2FrameListener frameListener, Http2FrameLogger frameLogger) {
+        return relayLoopbackHandlerBuilder(connection, frameListener, frameLogger).build();
+    }
+
+    static RelayLoopbackHandlerBuilder relayLoopbackHandlerBuilder(Http2Connection connection, Http2FrameListener frameListener, Http2FrameLogger frameLogger) {
+        return new RelayLoopbackHandlerBuilder(connection, frameListener, frameLogger);
+    }
+
+    /**
      * @return a server {@link Http2FrameCodecBuilder} whose codec logs the requests it refuses for their header size
      */
     public static Http2FrameCodecBuilder frameCodecBuilder(MockServerLogger mockServerLogger) {
@@ -202,6 +215,32 @@ public final class Http2RequestHeaderLimit {
             && failure.getMessage().startsWith(HEADER_BLOCK_TOO_LARGE);
     }
 
+    /**
+     * Netty's {@code HttpToHttp2ConnectionHandlerBuilder}, which is final, with the handler's encoder wrapped.
+     */
+    static final class RelayLoopbackHandlerBuilder extends AbstractHttp2ConnectionHandlerBuilder<HttpToHttp2ConnectionHandler, RelayLoopbackHandlerBuilder> {
+
+        private RelayLoopbackHandlerBuilder(Http2Connection connection, Http2FrameListener frameListener, Http2FrameLogger frameLogger) {
+            initialSettings(relayLoopbackSettings());
+            connection(connection);
+            frameListener(frameListener);
+            if (frameLogger != null) {
+                frameLogger(frameLogger);
+            }
+        }
+
+        @Override
+        protected HttpToHttp2ConnectionHandler build() {
+            return super.build();
+        }
+
+        @Override
+        protected HttpToHttp2ConnectionHandler build(Http2ConnectionDecoder decoder, Http2ConnectionEncoder encoder, Http2Settings initialSettings) {
+            return new HttpToHttp2ConnectionHandler(decoder, new ExtensionHeaderStrippingHttp2ConnectionEncoder(encoder), initialSettings, isValidateHeaders(), decoupleCloseAndGoAway(), flushPreface(), null) {
+            };
+        }
+    }
+
     static final class TunnelServerHandlerBuilder extends AbstractHttp2ConnectionHandlerBuilder<HttpToHttp2ConnectionHandler, TunnelServerHandlerBuilder> {
 
         private final MockServerLogger mockServerLogger;
@@ -230,7 +269,8 @@ public final class Http2RequestHeaderLimit {
         protected HttpToHttp2ConnectionHandler build(Http2ConnectionDecoder decoder, Http2ConnectionEncoder encoder, Http2Settings initialSettings) {
             // set here, which the superclass then leaves alone, so that the builder's own fields stay as Netty's builder has them
             decoder.frameListener(Http2StreamFaults.tunnelFrameListener(mockServerLogger, encoder.connection(), frameListener()));
-            return new HttpToHttp2ConnectionHandler(decoder, encoder, initialSettings, isValidateHeaders(), decoupleCloseAndGoAway(), flushPreface(), null) {
+            // a response read from the loopback carries the x-http2- headers its adapter set, which are not sent to the client
+            return new HttpToHttp2ConnectionHandler(decoder, new ExtensionHeaderStrippingHttp2ConnectionEncoder(encoder), initialSettings, isValidateHeaders(), decoupleCloseAndGoAway(), flushPreface(), null) {
                 @Override
                 public void onError(ChannelHandlerContext ctx, boolean outbound, Throwable cause) {
                     logRefusalThen(mockServerLogger, ctx, initialSettings, outbound, cause, () -> {

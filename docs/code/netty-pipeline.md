@@ -1138,6 +1138,10 @@ Netty's `InboundHttp2ToHttpAdapter` injects synthetic `x-http2-*` headers — `x
 
 On the **inbound request** side, `FullHttpRequestToMockServerHttpRequest` does not strip `x-http2-stream-id` during header iteration — instead it reads the value with `headers().getInt(STREAM_ID.text())` and places it in the trusted `HttpRequest.streamId` field only when `request.getProtocol() == HTTP_2` (preventing an HTTP/1.1 client from forging it). Forwarded requests never carry `x-http2-*` into upstream headers because `MockServerHttpRequestToFullHttpRequest` re-derives the outbound stream id from `request.getStreamId()` directly, not from the header map.
 
+### CONNECT/SOCKS tunnel legs
+
+An HTTP/2 tunnel reads each message with an `InboundHttp2ToHttpAdapter`, which sets `x-http2-stream-weight` on every message (and the dependency id when the frame names one), and writes it on the other leg with an `HttpToHttp2ConnectionHandler`. That handler reads the stream's priority from those headers, but `HttpConversionUtil.toHttp2Headers` drops only the stream id, scheme, path and protocol, so the weight was sent as a header field: an aggregated response reached the client with `x-http2-stream-weight: 16`, and each relayed request reached MockServer with it (where MockServer's own codec dropped it). Both legs' handlers (`Http2RequestHeaderLimit.tunnelServerHandler` and `relayLoopbackHandler`) now wrap their encoder in `ExtensionHeaderStrippingHttp2ConnectionEncoder`, which removes every `ExtensionHeaderNames` value from a header block as it is written; the priority is still sent in the frame's priority fields. A response streamed as it is read (`StreamedHttp2ResponsePart`) carries MockServer's own header block and never had them. `Http2TunnelResponseHeadersIntegrationTest` compares a tunnelled response's header block with a direct connection's on the four tunnel routes.
+
 ## Connection-Lifecycle Response-Path Faults
 
 These faults fire at response/dispatch time (not connect time) and are distinct from
