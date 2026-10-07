@@ -39,11 +39,15 @@ public class HttpRequestHandlerControlPlaneFailureTest {
 
     private final List<LogEntry> logged = new CopyOnWriteArrayList<>();
     private EmbeddedChannel embeddedChannel;
+    private HttpState httpState;
 
     @After
     public void closeChannel() {
         if (embeddedChannel != null) {
             embeddedChannel.finishAndReleaseAll();
+        }
+        if (httpState != null) {
+            httpState.stop();
         }
     }
 
@@ -128,12 +132,13 @@ public class HttpRequestHandlerControlPlaneFailureTest {
     @Test
     public void shouldNotReportAnEmptyOptimisationReportWhenRetrievingTheRecordedTrafficFailed() {
         // given - the retrieve behind the report fails rather than finding nothing
-        build(new HttpState(configuration(), capturingLogger(), synchronousScheduler()) {
+        httpState = new HttpState(configuration(), capturingLogger(), synchronousScheduler()) {
             @Override
             public HttpResponse retrieve(HttpRequest request) {
                 return response().withStatusCode(500).withBody("the retrieve response is too large to build in memory");
             }
-        });
+        };
+        build(httpState);
 
         // when
         embeddedChannel.writeInbound(request("/mockserver/llm/optimisationReport").withMethod("GET"));
@@ -145,7 +150,7 @@ public class HttpRequestHandlerControlPlaneFailureTest {
     }
 
     private void givenAddingAnExpectationThrows(Supplier<Throwable> fault) {
-        build(new HttpState(configuration(), capturingLogger(), synchronousScheduler()) {
+        httpState = new HttpState(configuration(), capturingLogger(), synchronousScheduler()) {
             @Override
             public List<Expectation> add(Expectation... expectations) {
                 if (fault == null) {
@@ -157,7 +162,8 @@ public class HttpRequestHandlerControlPlaneFailureTest {
                 }
                 throw (RuntimeException) throwable;
             }
-        });
+        };
+        build(httpState);
     }
 
     private void build(HttpState httpState) {

@@ -39,6 +39,7 @@ public class ProxyServletControlPlaneFailureTest {
 
     private RuntimeException fault;
     private HttpState httpStateHandler;
+    private HttpState realHttpState;
     private MockServerLogger mockServerLogger;
 
     @InjectMocks
@@ -46,7 +47,7 @@ public class ProxyServletControlPlaneFailureTest {
 
     @Before
     public void setupFixture() {
-        httpStateHandler = spy(new HttpState(configuration(), new MockServerLogger(), mock(Scheduler.class)) {
+        realHttpState = new HttpState(configuration(), new MockServerLogger(), mock(Scheduler.class)) {
             @Override
             public List<Expectation> add(Expectation... expectations) {
                 if (fault != null) {
@@ -54,7 +55,8 @@ public class ProxyServletControlPlaneFailureTest {
                 }
                 return super.add(expectations);
             }
-        });
+        };
+        httpStateHandler = spy(realHttpState);
         mockServerLogger = mock(MockServerLogger.class);
         servlet = new ProxyServlet();
         openMocks(this);
@@ -62,6 +64,7 @@ public class ProxyServletControlPlaneFailureTest {
 
     @After
     public void shutdown() {
+        realHttpState.stop();
         servlet.destroy();
     }
 
