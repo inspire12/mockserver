@@ -1286,25 +1286,11 @@ public class HttpActionHandler {
      * async continuation.
      */
     void handleUnmatchedForwardFailure(Throwable throwable, HttpRequest request, ResponseWriter responseWriter, InetSocketAddress remoteAddress, boolean potentiallyHttpProxy) {
-        if (returnedHeaderLimitFailure(responseWriter, request, throwable)) {
+        if (returnedHeaderLimitFailure(responseWriter, request, throwable)
+            || returnedUpstreamFailureReason(throwable, request, responseWriter, new LogEntry().setMessageFormat("failed to proxy request{}to remote address{}because:{}"), remoteAddress)) {
             return;
         }
-        String reason = upstreamFailureReason(throwable);
-        if (reason != null) {
-            LogEntry entry = new LogEntry()
-                .setLogLevel(Level.ERROR)
-                .setCorrelationId(request.getLogCorrelationId())
-                .setHttpRequest(request)
-                .setMessageFormat("failed to proxy request{}to remote address{}because:{}");
-            UnaryOperator<String> scrub = entry.credentialScrub(configuration);
-            reason = upstreamFailureReason(throwable, scrub);
-            mockServerLogger.logEvent(
-                entry
-                    .setArguments(request, remoteAddress, reason)
-                    .setThrowable(boundedFault(throwable, scrub))
-            );
-            returnBadGateway(responseWriter, request, reason, badGatewayResponse().withBody(reason));
-        } else if (potentiallyHttpProxy && connectionException(throwable)) {
+        if (potentiallyHttpProxy && connectionException(throwable)) {
             if (mockServerLogger != null && mockServerLogger.isEnabledForInstance(TRACE)) {
                 mockServerLogger.logEvent(
                     new LogEntry()
@@ -1502,6 +1488,14 @@ public class HttpActionHandler {
         }
     }
 
+    private void handleProxyPassFailure(Throwable throwable, HttpRequest request, ResponseWriter responseWriter, String targetUri) {
+        if (returnedHeaderLimitFailure(responseWriter, request, throwable)
+            || returnedUpstreamFailureReason(throwable, request, responseWriter, new LogEntry().setMessageFormat("failed to proxy pass request{}to{}because:{}"), targetUri)) {
+            return;
+        }
+        returnBadGateway(responseWriter, request, "proxy pass forwarding failed for " + targetUri + ": " + throwable.getMessage());
+    }
+
     private boolean handleProxyPass(final HttpRequest request, final ResponseWriter responseWriter, final boolean synchronous) {
         List<ProxyPassMapping> mappings = configuration.proxyPassMappings();
         if (mappings == null || mappings.isEmpty() || request.getPath() == null) {
@@ -1637,13 +1631,11 @@ public class HttpActionHandler {
                             responseWriter.writeResponse(request, response, false);
                         }
                         } catch (Throwable throwable) {
-                            if (!returnedHeaderLimitFailure(responseWriter, request, throwable)) {
-                                returnBadGateway(responseWriter, request, "proxy pass forwarding failed for " + mapping.getTargetUri() + ": " + throwable.getMessage());
-                            }
+                            handleProxyPassFailure(throwable, request, responseWriter, mapping.getTargetUri());
                         }
                         }, synchronous, throwable -> false);
                     } catch (Throwable throwable) {
-                        returnBadGateway(responseWriter, request, "proxy pass forwarding failed for " + mapping.getTargetUri() + ": " + throwable.getMessage());
+                        handleProxyPassFailure(throwable, request, responseWriter, mapping.getTargetUri());
                     }
                 }, synchronous);
                 return true;
@@ -3083,25 +3075,11 @@ public class HttpActionHandler {
     }
 
     void handleExceptionDuringForwardingRequest(Action action, HttpRequest request, ResponseWriter responseWriter, Throwable exception) {
-        if (returnedHeaderLimitFailure(responseWriter, request, exception)) {
+        if (returnedHeaderLimitFailure(responseWriter, request, exception)
+            || returnedUpstreamFailureReason(exception, request, responseWriter, new LogEntry().setMessageFormat("failed to forward request{}for action{}because:{}"), action)) {
             return;
         }
-        String reason = upstreamFailureReason(exception);
-        if (reason != null) {
-            LogEntry entry = new LogEntry()
-                .setLogLevel(Level.ERROR)
-                .setCorrelationId(request.getLogCorrelationId())
-                .setHttpRequest(request)
-                .setMessageFormat("failed to forward request{}for action{}because:{}");
-            UnaryOperator<String> scrub = entry.credentialScrub(configuration);
-            reason = upstreamFailureReason(exception, scrub);
-            mockServerLogger.logEvent(
-                entry
-                    .setArguments(request, action, reason)
-                    .setThrowable(boundedFault(exception, scrub))
-            );
-            returnBadGateway(responseWriter, request, reason, badGatewayResponse().withBody(reason));
-        } else if (connectionException(exception)) {
+        if (connectionException(exception)) {
             if (mockServerLogger != null && mockServerLogger.isEnabledForInstance(TRACE)) {
                 mockServerLogger.logEvent(
                     new LogEntry()
@@ -3339,6 +3317,31 @@ public class HttpActionHandler {
             return;
         }
         writeResponseActionResponse(responder.apply(request), responseWriter, request, action, synchronous, requestDefinition, expectationPostProcessor, effectiveChaos, capturedMatchCount, ctx, rateLimit);
+    }
+
+    /**
+     * Answers a forward that failed for a reason {@link #upstreamFailureReason} names with a 502 whose body is the
+     * reason, logged once at ERROR as {@code entry}, whose format takes the request, {@code target} and the reason.
+     *
+     * @return whether {@code failure} had such a reason and has been answered
+     */
+    private boolean returnedUpstreamFailureReason(Throwable failure, HttpRequest request, ResponseWriter responseWriter, LogEntry entry, Object target) {
+        if (upstreamFailureReason(failure) == null) {
+            return false;
+        }
+        entry
+            .setLogLevel(Level.ERROR)
+            .setCorrelationId(request.getLogCorrelationId())
+            .setHttpRequest(request);
+        UnaryOperator<String> scrub = entry.credentialScrub(configuration);
+        String reason = upstreamFailureReason(failure, scrub);
+        mockServerLogger.logEvent(
+            entry
+                .setArguments(request, target, reason)
+                .setThrowable(boundedFault(failure, scrub))
+        );
+        returnBadGateway(responseWriter, request, reason, badGatewayResponse().withBody(reason));
+        return true;
     }
 
     /**

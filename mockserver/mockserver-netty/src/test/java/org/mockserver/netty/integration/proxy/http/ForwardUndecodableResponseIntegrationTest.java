@@ -18,6 +18,7 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.mockserver.client.MockServerClient;
+import org.mockserver.model.ProxyPassMapping;
 import org.mockserver.netty.MockServer;
 
 import java.io.ByteArrayOutputStream;
@@ -46,7 +47,7 @@ import static org.mockserver.stop.Stop.stopQuietly;
 /**
  * An upstream HTTP/1.1 response the forward client cannot decode fails the forward with a {@code 502} that names why,
  * is logged once, and leaves its connection closed: nothing of it is relayed and the next forward is answered at once
- * on a new connection.
+ * on a new connection. A forward by expectation, by Host header and by proxy-pass mapping are answered alike.
  */
 public class ForwardUndecodableResponseIntegrationTest {
 
@@ -75,7 +76,7 @@ public class ForwardUndecodableResponseIntegrationTest {
             })
             .bind(new InetSocketAddress("127.0.0.1", 0)).sync().channel();
         // the test JVM defaults to ERROR, which would drop the WARN entries this class asserts there are none of
-        mockServer = new MockServer(configuration().logLevel("WARN"), 0);
+        mockServer = new MockServer(configuration().logLevel("WARN").proxyPassMappings(List.of(ProxyPassMapping.proxyPass("/pass", "http://127.0.0.1:" + upstreamPort()))), 0);
         client = new MockServerClient("127.0.0.1", mockServer.getLocalPort());
     }
 
@@ -137,6 +138,18 @@ public class ForwardUndecodableResponseIntegrationTest {
         List<String> entries = decodingEntries();
         assertThat(entries.toString(), entries.size(), is(1));
         assertThat(entries.get(0), containsString("failed to proxy request"));
+    }
+
+    @Test
+    public void shouldAnswer502AsTheForwardRouteDoesForAProxyPassMapping() throws Exception {
+        Response response = get("/pass/invalid-header");
+
+        assertThat(response.toString(), response.status, is(502));
+        assertThat(response.body, startsWith(REASON + "IllegalArgumentException: "));
+        List<String> entries = decodingEntries();
+        assertThat(entries.toString(), entries.size(), is(1));
+        assertThat(entries.get(0), containsString("failed to proxy pass request"));
+        assertThat(entries.get(0), containsString(response.body));
     }
 
     private static void assertFailedOnce(Response response, String cause) {

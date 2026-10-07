@@ -13,25 +13,33 @@ import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockserver.configuration.Configuration;
+import org.mockserver.httpclient.NettyHttpClient;
 import org.mockserver.httpclient.SocketConnectionException;
 import org.mockserver.httpclient.UndecodableResponseException;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.mock.HttpState;
+import org.mockserver.mock.crud.CrudDispatcher;
 import org.mockserver.model.HttpForward;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
+import org.mockserver.model.ProxyPassMapping;
 import org.mockserver.responsewriter.ResponseWriter;
+import org.mockserver.scheduler.Scheduler;
 import org.mockserver.uuid.UUIDService;
 import org.slf4j.event.Level;
 
 import javax.net.ssl.SSLException;
 import javax.net.ssl.SSLHandshakeException;
 import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
 import java.net.ConnectException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.HashSet;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
@@ -47,6 +55,7 @@ import static org.hamcrest.Matchers.lessThan;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -58,7 +67,8 @@ import static org.mockserver.model.HttpRequest.request;
 /**
  * The {@code 502} a failed forward is answered with, and the entry it is logged with, for each reason the forward
  * client can name: a connection it could not set up from MockServer's configuration, TLS with the upstream, and an
- * HTTP/2 error from the upstream. A connection that could not be made is answered as before.
+ * HTTP/2 error from the upstream, and an HTTP/1.1 response that could not be decoded. The matched forward, unmatched
+ * proxy and proxy-pass routes answer each alike. A connection that could not be made is answered as before.
  */
 public class HttpActionHandlerForwardFailureTest {
 
@@ -198,6 +208,67 @@ public class HttpActionHandlerForwardFailureTest {
         String reason = "TLS with the upstream failed: SSLHandshakeException: PKIX path building failed";
         assertThat("not taken for an exploratory proxy's failed connect", answer().getBodyAsString(), is(reason));
         assertLoggedOnceAsAnError(reason);
+    }
+
+    @Test
+    public void shouldAnswerAProxyPassResponseThatCouldNotBeDecodedAsTheForwardRouteDoes() throws Exception {
+        Throwable failure = new UndecodableResponseException("response from upstream.example:8080 could not be decoded: IllegalArgumentException: No colon found", new IllegalArgumentException("No colon found"));
+
+        HttpResponse answer = proxyPass(CompletableFuture.failedFuture(failure));
+
+        String reason = "response from the upstream could not be decoded: IllegalArgumentException: No colon found";
+        assertThat(answer.getStatusCode(), is(502));
+        assertThat(answer.getBodyAsString(), is(reason));
+        assertLoggedOnceAsAnError(reason);
+        assertThat(errors().get(0).getMessage(configuration()), containsString("http://upstream.example:8080/api"));
+    }
+
+    @Test
+    public void shouldAnswerAProxyPassTlsFailureAsTheForwardRouteDoes() throws Exception {
+        Throwable failure = socketConnectionException("TLS handshake failed", new SSLHandshakeException("PKIX path building failed"));
+
+        HttpResponse answer = proxyPass(CompletableFuture.failedFuture(failure));
+
+        String reason = "TLS with the upstream failed: SSLHandshakeException: PKIX path building failed";
+        assertThat(answer.getBodyAsString(), is(reason));
+        assertLoggedOnceAsAnError(reason);
+    }
+
+    @Test
+    public void shouldAnswerAProxyPassFailureWithoutAReasonAsBefore() throws Exception {
+        HttpResponse answer = proxyPass(CompletableFuture.failedFuture(new ConnectException("Connection refused: upstream.example/127.0.0.1:8080")));
+
+        assertThat(answer.getStatusCode(), is(502));
+        assertThat(answer.getBodyAsString(), is(nullValue()));
+        assertThat(errors(), empty());
+    }
+
+    /**
+     * Sends {@link #request} through a proxy-pass mapping whose upstream answers with {@code upstream}.
+     */
+    private HttpResponse proxyPass(CompletableFuture<HttpResponse> upstream) throws Exception {
+        Configuration configuration = configuration().proxyPassMappings(List.of(ProxyPassMapping.proxyPass("/some_path", "http://upstream.example:8080/api")));
+        Scheduler scheduler = new Scheduler(configuration, mockServerLogger);
+        try {
+            HttpState httpState = mock(HttpState.class);
+            when(httpState.getMockServerLogger()).thenReturn(mockServerLogger);
+            when(httpState.getScheduler()).thenReturn(scheduler);
+            when(httpState.getUniqueLoopPreventionHeaderValue()).thenReturn("MockServer_" + UUIDService.getUUID());
+            when(httpState.getCrudDispatcher()).thenReturn(new CrudDispatcher());
+            HttpActionHandler proxyPassHandler = new HttpActionHandler(configuration, null, httpState, null, null);
+            NettyHttpClient httpClient = mock(NettyHttpClient.class);
+            when(httpClient.sendRequest(any(HttpRequest.class), any(InetSocketAddress.class))).thenReturn(upstream);
+            Field httpClientField = HttpActionHandler.class.getDeclaredField("httpClient");
+            httpClientField.setAccessible(true);
+            httpClientField.set(proxyPassHandler, httpClient);
+
+            proxyPassHandler.processAction(request, responseWriter, null, new HashSet<>(), false, true);
+
+            verify(httpClient).sendRequest(any(HttpRequest.class), any(InetSocketAddress.class));
+            return answer();
+        } finally {
+            scheduler.shutdown();
+        }
     }
 
     @Test
