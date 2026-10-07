@@ -29,6 +29,7 @@ import io.netty.handler.codec.http2.Http2MultiplexHandler;
 import io.netty.handler.codec.http2.Http2Settings;
 import io.netty.handler.codec.http2.Http2StreamChannel;
 import io.netty.handler.codec.http2.Http2StreamChannelBootstrap;
+import io.netty.handler.proxy.ProxyConnectException;
 import io.netty.util.AttributeKey;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.Future;
@@ -328,6 +329,9 @@ public class ForwardHeaderLimitTest {
         assertThat(HeaderLimitExceededException.in(null), nullValue());
         assertThat(ForwardHeaderLimit.isAlreadyLogged(new EmbeddedChannel(), refusal), is(true));
         assertThat(ForwardHeaderLimit.isAlreadyLogged(new EmbeddedChannel(), new IOException("reset")), is(false));
+        // an upstream proxy's handler fails the connection with the refusal of its CONNECT response as the cause
+        assertThat(ForwardHeaderLimit.isAlreadyLogged(new EmbeddedChannel(), new ProxyConnectException("http, none, /127.0.0.1:1 => /127.0.0.1:2, too large", refusal)), is(true));
+        assertThat(ForwardHeaderLimit.isAlreadyLogged(new EmbeddedChannel(), new ProxyConnectException("http, none, /127.0.0.1:1 => /127.0.0.1:2, status: 407", null)), is(false));
     }
 
     @Test

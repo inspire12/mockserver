@@ -23,7 +23,6 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
-import java.util.stream.Collectors;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
@@ -54,6 +53,8 @@ public class BinaryForwardConnectHeaderLimitIntegrationTest {
     private static MockServerClient smallClient;
     private static MockServer large;
     private static MockServerClient largeClient;
+    private static MockServer notWaiting;
+    private static MockServerClient notWaitingClient;
 
     @BeforeClass
     public static void startServers() throws Exception {
@@ -63,6 +64,8 @@ public class BinaryForwardConnectHeaderLimitIntegrationTest {
         smallClient = new MockServerClient("127.0.0.1", small.getLocalPort());
         large = new MockServer(throughTheProxy().maxHeaderSize(LARGE_LIMIT), upstream.port(), "127.0.0.1", 0);
         largeClient = new MockServerClient("127.0.0.1", large.getLocalPort());
+        notWaiting = new MockServer(throughTheProxy().maxHeaderSize(SMALL_LIMIT).forwardBinaryRequestsWithoutWaitingForResponse(true), upstream.port(), "127.0.0.1", 0);
+        notWaitingClient = new MockServerClient("127.0.0.1", notWaiting.getLocalPort());
     }
 
     private static Configuration throughTheProxy() {
@@ -74,8 +77,10 @@ public class BinaryForwardConnectHeaderLimitIntegrationTest {
     public static void stopServers() throws Exception {
         stopQuietly(smallClient);
         stopQuietly(largeClient);
+        stopQuietly(notWaitingClient);
         stopQuietly(small);
         stopQuietly(large);
+        stopQuietly(notWaiting);
         if (connectProxy != null) {
             connectProxy.close();
         }
@@ -89,6 +94,7 @@ public class BinaryForwardConnectHeaderLimitIntegrationTest {
         upstream.messages.clear();
         smallClient.reset();
         largeClient.reset();
+        notWaitingClient.reset();
     }
 
     @Test
@@ -127,12 +133,32 @@ public class BinaryForwardConnectHeaderLimitIntegrationTest {
         assertThat("nothing was forwarded", upstream.messages, is(empty()));
     }
 
+    @Test
+    public void shouldLogARefusedConnectResponseOnceWithoutWaitingForResponses() throws Exception {
+        connectProxy.responseHeaderBytes = SMALL_LIMIT + 1;
+
+        assertThat("closed with no answer", send(notWaiting), is(""));
+
+        assertRefusedOnce(notWaitingClient, SMALL_LIMIT);
+        assertThat("nothing was forwarded", upstream.messages, is(empty()));
+    }
+
+    /**
+     * The servers log at WARN, so after the refused message's own record (received requests are recorded at any
+     * level) the refusal is the only entry: the connection it closes is logged below WARN, and nothing logs it again.
+     */
     private static void assertRefusedOnce(MockServerClient client, int limit) {
-        List<String> refusals = Arrays.stream(client.retrieveLogMessagesArray(null))
-            .filter(entry -> entry.contains("failing forward"))
-            .collect(Collectors.toList());
-        assertThat(refusals.toString(), refusals.size(), is(1));
-        assertThat(refusals.get(0), containsString("the upstream proxy's CONNECT response headers are larger than maxHeaderSize (" + limit + " bytes)"));
+        List<String> logged = Arrays.asList(client.retrieveLogMessagesArray(null));
+        int lastReceived = -1;
+        for (int i = 0; i < logged.size(); i++) {
+            if (logged.get(i).contains("received binary request")) {
+                lastReceived = i;
+            }
+        }
+        List<String> entries = logged.subList(lastReceived + 1, logged.size());
+        assertThat(logged.toString(), entries.size(), is(1));
+        assertThat(entries.get(0), containsString("failing forward"));
+        assertThat(entries.get(0), containsString("the upstream proxy's CONNECT response headers are larger than maxHeaderSize (" + limit + " bytes)"));
     }
 
     /**

@@ -590,6 +590,8 @@ public class NettyHttpClient {
 
             final CompletableFuture<BinaryMessage> binaryResponseFuture = new CompletableFuture<>();
             final CompletableFuture<Message> responseFuture = new CompletableFuture<>();
+            // as in connectFresh: the teardown of a channel that failed to connect is not the request's outcome
+            final CompletableFuture<Message> channelResponseFuture = new CompletableFuture<>();
 
             Bootstrap binaryBootstrap = new Bootstrap()
                 .group(eventLoopGroup)
@@ -600,7 +602,7 @@ public class NettyHttpClient {
                 .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, connectionTimeoutMillis != null ? (int) Math.min(connectionTimeoutMillis, Integer.MAX_VALUE) : null)
                 .attr(SECURE, isSecure)
                 .attr(REMOTE_SOCKET, remoteAddress)
-                .attr(RESPONSE_FUTURE, responseFuture)
+                .attr(RESPONSE_FUTURE, channelResponseFuture)
                 .attr(ERROR_IF_CHANNEL_CLOSED_WITHOUT_RESPONSE, !configuration.forwardBinaryRequestsWithoutWaitingForResponse())
                 .handler(new HttpClientInitializer(proxyConfigurations, mockServerLogger, forwardProxyClient, nettySslContextFactory, configuration.maxHeaderSize()));
             applyForwardSocketKeepAlive(binaryBootstrap);
@@ -609,6 +611,7 @@ public class NettyHttpClient {
                 .connect(remoteAddress)
                 .addListener((ChannelFutureListener) future -> {
                     if (future.isSuccess()) {
+                        relay(channelResponseFuture, responseFuture);
                         try {
                             if (mockServerLogger.isEnabledForInstance(Level.DEBUG)) {
                                 mockServerLogger.logEvent(
@@ -626,6 +629,12 @@ public class NettyHttpClient {
                             reportRequestSent(onRequestSent, notWritten);
                             future.channel().close();
                         }
+                    } else if (future.cause() instanceof ClosedChannelException && channelResponseFuture.isCompletedExceptionally()) {
+                        // the channel was closed first, its pipeline not built, so its outcome is the cause
+                        channelResponseFuture.whenComplete((notSet, setUpFailure) -> {
+                            binaryResponseFuture.completeExceptionally(setUpFailure);
+                            reportRequestSent(onRequestSent, setUpFailure);
+                        });
                     } else {
                         binaryResponseFuture.completeExceptionally(future.cause());
                         reportRequestSent(onRequestSent, future.cause());
@@ -637,7 +646,8 @@ public class NettyHttpClient {
                     if (throwable == null) {
                         binaryResponseFuture.complete((BinaryMessage) message);
                     } else {
-                        if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+                        // a header limit refusal was logged as it was raised
+                        if (HeaderLimitExceededException.in(throwable) == null && mockServerLogger.isEnabledForInstance(Level.WARN)) {
                             mockServerLogger.logEvent(
                                 new LogEntry()
                                     .setLogLevel(Level.WARN)

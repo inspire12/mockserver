@@ -996,8 +996,9 @@ sequenceDiagram
 
 ### How a Failed Connect Is Reported
 
-An HTTP request sent through `NettyHttpClient.connectFresh` (every HTTP forward, and the Java client)
-whose connect attempt fails (`Connection refused: …`, `connection timed out after … ms`,
+An HTTP request sent through `NettyHttpClient.connectFresh` (every HTTP forward, and the Java client), or a
+binary message forwarded on a connection of its own (`sendRequest(BinaryMessage, …)`, which gates its channel
+the same way), whose connect attempt fails (`Connection refused: …`, `connection timed out after … ms`,
 `UnknownHostException`) fails with that reason, and not with the generic `Channel handler removed
 before valid response has been received` that the failed channel's teardown produces. The generic
 exception is still what a channel reports when it is the channel itself that failed: the table below.
@@ -1017,7 +1018,7 @@ completed the request's future directly the teardown would sometimes be reported
 | An HTTP/2 connection error with a request in flight | `SocketConnectionException` whose cause is the `Http2Exception` |
 | A TLS fault on an established HTTP/2 connection with a request in flight | the `DecoderException` itself, which Netty's `Http2MultiplexHandler` passes to the active streams when its cause is an `SSLException`; otherwise `SocketConnectionException` whose cause is the `SSLException` |
 | The upstream closes the connection during the handshake | the generic `Channel handler removed…` |
-| Binary forward (`sendRequest(BinaryMessage, …)`) | not gated: the connect cause or the teardown, whichever completes first; a pipeline that cannot be built fails it with `ClientConfigurationException` |
+| Binary forward (`sendRequest(BinaryMessage, …)`) | as above, and so does its `onRequestSent` callback: the connect cause, or `ClientConfigurationException` for a pipeline that cannot be built; with `forwardBinaryRequestsWithoutWaitingForResponse` a message that was never sent fails instead of completing empty |
 
 `HttpClientInitializer.initChannel` catches a failure to build the pipeline, fails the channel's
 `RESPONSE_FUTURE` with a `ClientConfigurationException` and closes the channel, so Netty's

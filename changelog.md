@@ -706,6 +706,14 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **A binary message that cannot be forwarded because its upstream connection failed is now reported with
+  the reason the connection failed.** A binary (non-HTTP) message forwarded on an upstream connection of its
+  own (with `forwardBinaryRequestsUseSingleConnection` off, or through an upstream proxy) whose connection
+  was refused, timed out or could not be resolved could fail as `Channel handler removed before valid
+  response has been received`, the closing of the connection that had failed, and that was logged as a
+  second warning even when the reason was reported. With `forwardBinaryRequestsWithoutWaitingForResponse`
+  on, such a message could instead be treated as sent with an empty response. The one warning logged before
+  MockServer closes the client's connection now names the reason, for example `Connection refused`.
 - **Named imports of the Node client now work from an ES module.** In an `.mjs` or `.mts` file, or a package with `"type": "module"`, `import { mockServerClient, llm } from 'mockserver-client'` type-checked and then failed when the module loaded with `SyntaxError: Named export ... not found`, and `import * as` gave an object without the members; only the default import worked. Every module of the package now exposes its names to an ES module importer, so named imports, `import * as` and the default import all work, from the package and from its other modules (`import { llmMock, completion } from 'mockserver-client/llm.js'`; a deep import from an ES module still needs its `.js` extension). Nothing changes for CommonJS or for the TypeScript typings.
 - **A response relayed through an HTTP/2 tunnel no longer carries an `x-http2-stream-weight` header.** A response
   sent to an HTTP/2 client through MockServer as a CONNECT or SOCKS5 proxy (TLS or h2c), whether mocked or

@@ -66,11 +66,12 @@ final class ForwardHeaderLimit {
     }
 
     /**
-     * Whether {@code cause} needs no log entry of its own: it is a refusal or an undecodable response, or the
-     * aggregator reporting the part of a response it held when the connection was closed for one.
+     * Whether {@code cause} needs no log entry of its own: it is or wraps a refusal (an upstream proxy's handler
+     * wraps one in its connect failure), is an undecodable response, or is the aggregator reporting the part of a
+     * response it held when the connection was closed for one.
      */
     static boolean isAlreadyLogged(Channel channel, Throwable cause) {
-        return cause instanceof HeaderLimitExceededException
+        return HeaderLimitExceededException.in(cause) != null
             || cause instanceof UndecodableResponseException
             || cause instanceof PrematureChannelClosureException && (channel.hasAttr(REFUSED) || channel.parent() != null && channel.parent().hasAttr(REFUSED));
     }

@@ -9,6 +9,7 @@ import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.handler.ssl.SniCompletionEvent;
 import io.netty.util.AttributeKey;
 import org.mockserver.configuration.Configuration;
+import org.mockserver.httpclient.HeaderLimitExceededException;
 import org.mockserver.httpclient.NettyHttpClient;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.log.model.SensitiveLogValue;
@@ -457,15 +458,8 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
                 }
             } catch (Throwable throwable) {
                 // messages not attempted behind a failed forward are logged once, together, when they are failed
-                if (!(throwable.getCause() instanceof NotForwardedException) && mockServerLogger.isEnabledForInstance(Level.WARN)) {
-                    mockServerLogger.logEvent(
-                        new LogEntry()
-                            .setLogLevel(Level.WARN)
-                            .setCorrelationId(logCorrelationId)
-                            .setMessageFormat("exception{}sending hex{}to{}closing connection")
-                            .setArguments(boundedFaultMessage(throwable), SensitiveLogValue.of(ByteBufUtil.hexDump(binaryRequest.getBytes())), remoteAddress)
-                            .setThrowable(boundedFault(throwable))
-                    );
+                if (!(throwable.getCause() instanceof NotForwardedException)) {
+                    logFailedForward(binaryRequest, logCorrelationId, remoteAddress, throwable);
                 }
                 ctx.close();
             }
@@ -489,19 +483,29 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
                 }
                 ctx.writeAndFlush(Unpooled.copiedBuffer(binaryResponse.getBytes()));
             } catch (Throwable throwable) {
-                if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
-                    mockServerLogger.logEvent(
-                        new LogEntry()
-                            .setLogLevel(Level.WARN)
-                            .setCorrelationId(logCorrelationId)
-                            .setMessageFormat("exception{}sending hex{}to{}closing connection")
-                            .setArguments(boundedFaultMessage(throwable), SensitiveLogValue.of(ByteBufUtil.hexDump(binaryRequest.getBytes())), remoteAddress)
-                            .setThrowable(boundedFault(throwable))
-                    );
-                }
+                logFailedForward(binaryRequest, logCorrelationId, remoteAddress, throwable);
                 ctx.close();
             }
         }, false);
+    }
+
+    /**
+     * A forward refused for a header limit was logged as a warning, with its reason, as it was refused, so the
+     * connection it closes is logged below that, without a stack trace, as an HTTP forward's 502 is.
+     */
+    private void logFailedForward(BinaryMessage binaryRequest, String logCorrelationId, InetSocketAddress remoteAddress, Throwable throwable) {
+        HeaderLimitExceededException headerLimit = HeaderLimitExceededException.in(throwable);
+        Level level = headerLimit != null ? Level.INFO : Level.WARN;
+        if (mockServerLogger.isEnabledForInstance(level)) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(level)
+                    .setCorrelationId(logCorrelationId)
+                    .setMessageFormat("exception{}sending hex{}to{}closing connection")
+                    .setArguments(headerLimit != null ? headerLimit.getMessage() : boundedFaultMessage(throwable), SensitiveLogValue.of(ByteBufUtil.hexDump(binaryRequest.getBytes())), remoteAddress)
+                    .setThrowable(headerLimit != null ? null : boundedFault(throwable))
+            );
+        }
     }
 
     @Override
