@@ -5,6 +5,7 @@ import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
@@ -27,6 +28,7 @@ import io.netty.resolver.NoopAddressResolverGroup;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.mockserver.codec.HttpLineEndSplitGuard;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.slf4j.event.Level;
@@ -39,6 +41,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -206,6 +209,27 @@ public class HttpConnectProxyHandlerTest {
     }
 
     @Test
+    public void shouldLimitTheProxysResponseHeadersExactlyWhenTheLastLineEndArrivesSplitAndLeaveNoGuardBehind() throws Exception {
+        InetSocketAddress destination = InetSocketAddress.createUnresolved("upstream.example", 443);
+        for (int size : new int[]{LIMIT, LIMIT + 1}) {
+            String response = "HTTP/1.1 200 Connection established\r\nx-proxy: " + "a".repeat(size - 9) + "\r\n\r\n";
+            int afterLastCr = response.length() - 3;
+
+            Exchange exchange = connect(destination, Arrays.asList(response.substring(0, afterLastCr), response.substring(afterLastCr)), proxy -> new HttpConnectProxyHandler(proxy, null, null, mockServerLogger, LIMIT));
+
+            if (size == LIMIT) {
+                assertThat(exchange.failure, nullValue());
+                assertThat(exchange.read, is(TUNNELLED));
+                assertThat(exchange.tunnelledToProxy, is("bytes to the destination"));
+                assertThat(exchange.codecLeftInPipeline, is(false));
+                assertThat(exchange.guardLeftInPipeline, is(false));
+            } else {
+                assertThat(HeaderLimitExceededException.in(exchange.failure).getMessage(), is("the upstream proxy's CONNECT response headers are larger than maxHeaderSize (" + LIMIT + " bytes)"));
+            }
+        }
+    }
+
+    @Test
     public void shouldFailTheConnectionWhenTheProxysResponseHeadersAreOverTheLimit() throws Exception {
         InetSocketAddress destination = InetSocketAddress.createUnresolved("upstream.example", 443);
         String response = "HTTP/1.1 200 Connection established\r\nx-proxy: " + "a".repeat(LIMIT - 9 + 1) + "\r\n\r\n";
@@ -230,6 +254,14 @@ public class HttpConnectProxyHandlerTest {
      * {@code proxyResponse} followed by {@link #TUNNELLED}; if the tunnel opens, the client writes to it.
      */
     private Exchange connect(InetSocketAddress destination, String proxyResponse, Function<LocalAddress, ProxyHandler> proxyHandler) throws Exception {
+        return connect(destination, List.of(proxyResponse), proxyHandler);
+    }
+
+    /**
+     * As {@link #connect(InetSocketAddress, String, Function)}, with the response written in parts, each of which the
+     * client reads apart from the others.
+     */
+    private Exchange connect(InetSocketAddress destination, List<String> proxyResponseParts, Function<LocalAddress, ProxyHandler> proxyHandler) throws Exception {
         Exchange exchange = new Exchange();
         exchange.proxyAddress = new LocalAddress("connect-proxy-" + UUID.randomUUID());
         CompletableFuture<String> connectRequest = new CompletableFuture<>();
@@ -248,7 +280,10 @@ public class HttpConnectProxyHandlerTest {
                     if (endOfRequest >= 0 && !connectRequest.isDone()) {
                         connectRequest.complete(received.substring(0, endOfRequest + 4));
                         received.delete(0, endOfRequest + 4);
-                        ctx.writeAndFlush(Unpooled.copiedBuffer(proxyResponse + TUNNELLED, StandardCharsets.ISO_8859_1));
+                        for (int part = 0; part < proxyResponseParts.size(); part++) {
+                            String last = part == proxyResponseParts.size() - 1 ? TUNNELLED : "";
+                            ctx.writeAndFlush(Unpooled.copiedBuffer(proxyResponseParts.get(part) + last, StandardCharsets.ISO_8859_1));
+                        }
                     }
                     if (connectRequest.isDone() && received.length() > 0) {
                         tunnelledToProxy.complete(received.toString());
@@ -304,6 +339,7 @@ public class HttpConnectProxyHandlerTest {
                 client.closeFuture().get(10, TimeUnit.SECONDS);
             }
             exchange.codecLeftInPipeline = client.eventLoop().submit(() -> client.pipeline().get(HttpClientCodec.class) != null).get(10, TimeUnit.SECONDS);
+            exchange.guardLeftInPipeline = client.eventLoop().submit(() -> guardIn(client)).get(10, TimeUnit.SECONDS);
             exchange.read = read.toString();
             exchange.channelFailures = new ArrayList<>(channelFailures);
             return exchange;
@@ -311,6 +347,15 @@ public class HttpConnectProxyHandlerTest {
             client.close().sync();
             proxy.close().sync();
         }
+    }
+
+    private static boolean guardIn(Channel channel) {
+        for (Map.Entry<String, ChannelHandler> entry : channel.pipeline()) {
+            if (entry.getValue().getClass().getName().startsWith(HttpLineEndSplitGuard.class.getName())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static final class Exchange {
@@ -321,6 +366,7 @@ public class HttpConnectProxyHandlerTest {
         private String read;
         private String tunnelledToProxy;
         private boolean codecLeftInPipeline;
+        private boolean guardLeftInPipeline;
         private List<Throwable> channelFailures;
     }
 }

@@ -127,6 +127,26 @@ public class HttpParserLimitsIntegrationTest {
     }
 
     @Test
+    public void shouldAcceptAHeaderSectionOfExactlyMaxHeaderSizeWhenItsLastLineEndArrivesSplitAndRefuseOneByteMore() throws Exception {
+        String host = "Host: localhost:" + mockServer.getLocalPort();
+        // the header lines without their line ends: "X-Filler: " is 10 bytes, the other two 17 each
+        int fillerAtLimit = MAX_HEADER_SIZE - host.length() - 17 - 17 - 10;
+        for (int filler : new int[]{fillerAtLimit, fillerAtLimit + 1}) {
+            String head = "GET /limits HTTP/1.1\r\n" + host + "\r\nConnection: close\r\nX-Marker: present\r\nX-Filler: " + repeat('a', filler) + "\r\n\r\n";
+            int afterLastCr = head.length() - 3;
+
+            String response = sendRawRequestInTwoReadsAndReadResponse(head.substring(0, afterLastCr), head.substring(afterLastCr));
+
+            if (filler == fillerAtLimit) {
+                assertThat("a header section of exactly maxHeaderSize is accepted, actual response:\n" + response, response, startsWith("HTTP/1.1 200 OK\r\n"));
+                assertThat(response, containsString("marker-seen"));
+            } else {
+                assertThat("one byte more is refused, actual response:\n" + response, response, startsWith("HTTP/1.1 431 Request Header Fields Too Large\r\n"));
+            }
+        }
+    }
+
+    @Test
     public void shouldMatchRequestWhoseInitialLineIsUnderTheConfiguredMaxInitialLineLength() throws Exception {
         // request line (with a short query string) well within the 250-byte limit -> parsed -> matches
         String rawRequest = "GET /limits?ok=1 HTTP/1.1\r\n"
@@ -165,13 +185,26 @@ public class HttpParserLimitsIntegrationTest {
         assertThat(mockServerClient.retrieveRecordedRequests(request()), emptyArray());
     }
 
-    private String sendRawRequestAndReadResponse(String rawRequest) throws IOException {
+    private String sendRawRequestAndReadResponse(String rawRequest) throws IOException, InterruptedException {
+        return sendRawRequestInTwoReadsAndReadResponse(rawRequest, "");
+    }
+
+    /**
+     * Writes {@code second} long enough after {@code first} that MockServer reads them apart.
+     */
+    private String sendRawRequestInTwoReadsAndReadResponse(String first, String second) throws IOException, InterruptedException {
         try (Socket socket = new Socket()) {
             socket.connect(new InetSocketAddress("localhost", mockServer.getLocalPort()), 2_000);
             socket.setSoTimeout((int) READ_TIMEOUT_MILLIS);
+            socket.setTcpNoDelay(true);
             OutputStream out = socket.getOutputStream();
-            out.write(rawRequest.getBytes(StandardCharsets.US_ASCII));
+            out.write(first.getBytes(StandardCharsets.US_ASCII));
             out.flush();
+            if (!second.isEmpty()) {
+                Thread.sleep(300);
+                out.write(second.getBytes(StandardCharsets.US_ASCII));
+                out.flush();
+            }
 
             StringBuilder response = new StringBuilder();
             try (BufferedReader reader = new BufferedReader(

@@ -6,10 +6,12 @@ import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.*;
 import io.netty.handler.codec.ByteToMessageDecoder;
+import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.socksx.v4.Socks4ServerDecoder;
 import io.netty.handler.codec.socksx.v5.Socks5CommandRequestDecoder;
 import org.mockserver.codec.BoundedZstdHttpContentDecompressor;
 import org.mockserver.codec.HttpChunkLineLimiter;
+import org.mockserver.codec.HttpLineEndSplitGuard;
 import org.mockserver.codec.HttpObjectAggregators;
 import org.mockserver.socket.NettyAllocator;
 import org.mockserver.socket.NettyTransport;
@@ -477,9 +479,13 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
         } else {
             HttpChunkLineLimiter chunkLineLimiter = new HttpChunkLineLimiter(mockServerLogger);
             HttpServerCodecResponsePairing responsePairing = new HttpServerCodecResponsePairing();
+            HttpServerCodec httpServerCodec = HttpServerCodecs.httpServerCodec(configuration);
+            HttpLineEndSplitGuard lineEndSplitGuard = new HttpLineEndSplitGuard(httpServerCodec);
             pipelineToProxyClient.addLast(chunkLineLimiter.beforeCodec());
             pipelineToProxyClient.addLast(responsePairing.beforeCodec());
-            pipelineToProxyClient.addLast(HttpServerCodecs.httpServerCodec(configuration));
+            pipelineToProxyClient.addLast(lineEndSplitGuard.beforeCodec());
+            pipelineToProxyClient.addLast(httpServerCodec);
+            pipelineToProxyClient.addLast(lineEndSplitGuard.afterCodec());
             pipelineToProxyClient.addLast(responsePairing.afterCodec());
             pipelineToProxyClient.addLast(chunkLineLimiter.afterCodec());
             if (InboundConnectionActivity.isTracked(proxyClientCtx.channel())) {

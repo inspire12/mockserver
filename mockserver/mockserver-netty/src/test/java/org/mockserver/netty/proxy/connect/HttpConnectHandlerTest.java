@@ -6,6 +6,7 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockserver.codec.HttpChunkLineLimiter;
+import org.mockserver.codec.HttpLineEndSplitGuard;
 import org.mockserver.netty.unification.HttpServerCodecResponsePairing;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.lifecycle.LifeCycle;
@@ -81,10 +82,14 @@ public class HttpConnectHandlerTest {
         // given - a pipeline with HTTP codec handlers and the HttpConnectHandler
         HttpChunkLineLimiter chunkLineLimiter = new HttpChunkLineLimiter(mockServerLogger);
         HttpServerCodecResponsePairing responsePairing = new HttpServerCodecResponsePairing();
+        HttpServerCodec codec = new HttpServerCodec();
+        HttpLineEndSplitGuard lineEndSplitGuard = new HttpLineEndSplitGuard(codec);
         EmbeddedChannel channel = new EmbeddedChannel(
             chunkLineLimiter.beforeCodec(),
             responsePairing.beforeCodec(),
-            new HttpServerCodec(),
+            lineEndSplitGuard.beforeCodec(),
+            codec,
+            lineEndSplitGuard.afterCodec(),
             responsePairing.afterCodec(),
             chunkLineLimiter.afterCodec(),
             new HttpTransportTimer(),
@@ -100,7 +105,7 @@ public class HttpConnectHandlerTest {
                 channel.pipeline().get(HttpContentDecompressor.class), is(notNullValue()));
             assertThat("HttpObjectAggregator should be present",
                 channel.pipeline().get(HttpObjectAggregator.class), is(notNullValue()));
-            assertThat(channel.pipeline().names(), hasItems("HttpChunkLineLimiter$BeforeCodec#0", "HttpChunkLineLimiter$AfterCodec#0"));
+            assertThat(channel.pipeline().names(), hasItems("HttpChunkLineLimiter$BeforeCodec#0", "HttpChunkLineLimiter$AfterCodec#0", "HttpLineEndSplitGuard$BeforeCodec#0", "HttpLineEndSplitGuard$AfterCodec#0"));
 
             // when
             handler.removeCodecSupport(channel.pipeline().context(handler));
@@ -118,6 +123,8 @@ public class HttpConnectHandlerTest {
                 channel.pipeline().names(), everyItem(not(containsString("HttpChunkLineLimiter"))));
             assertThat("the codec's response pairing should be removed with it",
                 channel.pipeline().names(), everyItem(not(containsString("HttpServerCodecResponsePairing"))));
+            assertThat("the codec's line-end guard should be removed with it",
+                channel.pipeline().names(), everyItem(not(containsString("HttpLineEndSplitGuard"))));
             // HttpConnectHandler itself should also be removed
             assertThat("HttpConnectHandler should be removed",
                 channel.pipeline().get(HttpConnectHandler.class), is(nullValue()));

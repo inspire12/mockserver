@@ -117,14 +117,14 @@ public class WebSocketProxyHandshakeHeaderLimitIntegrationTest {
 
     @Test
     public void shouldRelayAHandshakeResponseWithHeadersOfExactlyMaxHeaderSizeAndFailLargerOnes() throws Exception {
-        for (String path : new String[]{"/first/" + (LIMIT - 1), "/first/" + LIMIT, "/last/" + LIMIT}) {
+        for (String path : new String[]{"/first/" + (LIMIT - 1), "/first/" + LIMIT, "/last/" + LIMIT, "/split/" + LIMIT}) {
             Exchange within = upgrade(limited, path);
 
             assertThat(path + " " + within, within.status, is(101));
             assertThat(path, within.echo, is("echo:hello"));
         }
 
-        for (String order : new String[]{"first", "last", "paused"}) {
+        for (String order : new String[]{"first", "last", "paused", "split"}) {
             String path = "/" + order + "/" + (LIMIT + 1);
             limitedClient.reset();
 
@@ -422,10 +422,11 @@ public class WebSocketProxyHandshakeHeaderLimitIntegrationTest {
     }
 
     /**
-     * Answers the upgrade for {@code /first/<size>}, {@code /last/<size>} or {@code /paused/<size>} with a
+     * Answers the upgrade for {@code /first/<size>}, {@code /last/<size>}, {@code /paused/<size>} or {@code /split/<size>} with a
      * {@code 101} whose header section is {@code size} bytes as Netty's HTTP/1.1 decoder counts it (the header lines
      * without their line ends), the large header before or after the handshake's own, then echoes text frames.
-     * {@code /paused/} is {@code /last/} written in two parts and {@code /status-line/<size>} has a status line of
+     * {@code /paused/} is {@code /last/} written in two parts, {@code /split/} is {@code /last/} with its last header
+     * line's LF written apart from its CR, and {@code /status-line/<size>} has a status line of
      * that size instead. {@code /refused/...} is answered {@code 403}, {@code /reset/...} with a connection reset,
      * and {@code /bare-line-feed/...} and {@code /closed-in-headers/...} with a head Netty cannot decode. It records
      * how each connection ended.
@@ -524,6 +525,13 @@ public class WebSocketProxyHandshakeHeaderLimitIntegrationTest {
                         output.flush();
                         pause();
                         output.write(response, 12 * 1024, response.length - 12 * 1024);
+                    } else if (path.startsWith("/split/")) {
+                        // the last header line's LF, and the blank line, arrive after its CR
+                        int afterLastCr = response.length - 3;
+                        output.write(response, 0, afterLastCr);
+                        output.flush();
+                        pause();
+                        output.write(response, afterLastCr, 3);
                     } else {
                         output.write(response);
                     }

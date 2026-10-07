@@ -25,6 +25,7 @@ import io.netty.handler.proxy.HttpProxyHandler.HttpProxyConnectException;
 import io.netty.handler.proxy.ProxyHandler;
 import io.netty.util.AsciiString;
 import io.netty.util.CharsetUtil;
+import org.mockserver.codec.HttpLineEndSplitGuard;
 import org.mockserver.logging.MockServerLogger;
 
 import java.net.InetSocketAddress;
@@ -44,6 +45,7 @@ final class HttpConnectProxyHandler extends ProxyHandler {
     private final MockServerLogger mockServerLogger;
     private final int maxHeaderSize;
     private final HttpClientCodec codec;
+    private final HttpLineEndSplitGuard lineEndSplitGuard;
     private final CharSequence authorization;
     private HttpResponseStatus status;
     private HttpHeaders inboundHeaders;
@@ -53,6 +55,7 @@ final class HttpConnectProxyHandler extends ProxyHandler {
         this.mockServerLogger = mockServerLogger;
         this.maxHeaderSize = maxHeaderSize;
         this.codec = new HttpClientCodec(HttpObjectDecoder.DEFAULT_MAX_INITIAL_LINE_LENGTH, maxHeaderSize, HttpObjectDecoder.DEFAULT_MAX_CHUNK_SIZE);
+        this.lineEndSplitGuard = new HttpLineEndSplitGuard(codec);
         this.authorization = username != null && password != null ? basic(username, password) : null;
     }
 
@@ -82,11 +85,16 @@ final class HttpConnectProxyHandler extends ProxyHandler {
 
     @Override
     protected void addCodec(ChannelHandlerContext ctx) {
+        ctx.pipeline().addBefore(ctx.name(), null, lineEndSplitGuard.beforeCodec());
         ctx.pipeline().addBefore(ctx.name(), null, codec);
+        ctx.pipeline().addBefore(ctx.name(), null, lineEndSplitGuard.afterCodec());
         // once the tunnel is open the codec is an empty shell; a look-up of the forward codec by type must not find it
         connectFuture().addListener(connected -> {
             if (connected.isSuccess() && ctx.pipeline().context(codec) != null) {
                 ctx.pipeline().remove(codec);
+            }
+            if (connected.isSuccess()) {
+                lineEndSplitGuard.remove(ctx.pipeline());
             }
         });
     }

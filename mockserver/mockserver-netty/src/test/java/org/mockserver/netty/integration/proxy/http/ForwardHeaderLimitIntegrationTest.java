@@ -177,6 +177,7 @@ public class ForwardHeaderLimitIntegrationTest {
     public void forgetEarlierTests() {
         HTTP2_EVENTS.clear();
         connectProxy.responseHeaderBytes = 0;
+        connectProxy.splitAtLastCr = false;
         for (MockServerClient client : Arrays.asList(limitedClient, defaultsClient, unlimitedClient, throughProxyClient)) {
             forgetLogAndForward(client);
         }
@@ -234,6 +235,24 @@ public class ForwardHeaderLimitIntegrationTest {
 
         assertFailedWithOneWarning(limitedClient, overLimit, "upstream response headers and trailers are together larger than maxHeaderSize (" + LIMIT + " bytes)");
         assertThat("the next forward is served at once, on a new connection", get(limited, "/http1/headers/1000").status, is(200));
+    }
+
+    @Test
+    public void shouldLimitHttp1ResponseHeadersAndTrailersExactlyWhenTheirLastLineEndArrivesSplit() throws Exception {
+        Response headersAtLimit = get(limited, "/http1/split-headers/" + LIMIT);
+
+        assertThat(headersAtLimit.toString(), headersAtLimit.status, is(200));
+        assertThat(headersAtLimit.header("set-cookie").length(), is("session=".length() + LIMIT - 37));
+        assertThat(headersAtLimit.body, is("ok"));
+        assertFailedWithOneWarning(limitedClient, get(limited, "/http1/split-headers/" + (LIMIT + 1)), "upstream response headers are larger than maxHeaderSize (" + LIMIT + " bytes)");
+
+        forgetLogAndForward(limitedClient);
+        int headers = "transfer-encoding: chunked".length();
+        Response trailersAtLimit = get(limited, "/http1/split-trailers/" + (LIMIT - headers));
+
+        assertThat(trailersAtLimit.toString(), trailersAtLimit.status, is(200));
+        assertThat(trailersAtLimit.body, is("ok"));
+        assertFailedWithOneWarning(limitedClient, get(limited, "/http1/split-trailers/" + (LIMIT - headers + 1)), "upstream response headers and trailers are together larger than maxHeaderSize (" + LIMIT + " bytes)");
     }
 
     @Test
@@ -353,6 +372,21 @@ public class ForwardHeaderLimitIntegrationTest {
         assertThat(response.header("set-cookie").length(), is("session=".length() + 20 * 1024 - 92));
         assertThat(response.body, is("ok"));
         assertThat(connectProxy.tunnels.get() - before, is(1));
+    }
+
+    @Test
+    public void shouldLimitTheUpstreamProxysConnectResponseHeadersExactlyWhenTheirLastLineEndArrivesSplit() throws Exception {
+        connectProxy.splitAtLastCr = true;
+        connectProxy.responseHeaderBytes = LIMIT;
+
+        Response response = get(throughProxy, "/http2/headers/1000");
+
+        assertThat(response.toString(), response.status, is(200));
+        assertThat(response.body, is("ok"));
+
+        connectProxy.responseHeaderBytes = LIMIT + 1;
+
+        assertFailedWithOneWarning(throughProxyClient, get(throughProxy, "/http2/headers/1000"), "the upstream proxy's CONNECT response headers are larger than maxHeaderSize (" + LIMIT + " bytes)");
     }
 
     @Test
@@ -542,14 +576,21 @@ public class ForwardHeaderLimitIntegrationTest {
         protected void channelRead0(ChannelHandlerContext ctx, FullHttpRequest request) {
             int size = sizeIn(request.uri());
             String response;
-            if (request.uri().startsWith("/http1/trailers/")) {
+            if (request.uri().startsWith("/http1/trailers/") || request.uri().startsWith("/http1/split-trailers/")) {
                 // "x-trailer: " is 11 bytes
                 response = "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2\r\nok\r\n0\r\nx-trailer: " + "a".repeat(size - 11) + "\r\n\r\n";
             } else {
                 // "content-length: 2" is 17 bytes and "set-cookie: session=" 20
                 response = "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nset-cookie: session=" + "a".repeat(size - 37) + "\r\n\r\nok";
             }
-            ctx.writeAndFlush(Unpooled.copiedBuffer(response, StandardCharsets.ISO_8859_1));
+            if (request.uri().startsWith("/http1/split-")) {
+                // the last header or trailer line's LF, and what follows it, arrive after its CR
+                int afterLastCr = response.lastIndexOf("\r\n\r\n") + 1;
+                ctx.writeAndFlush(Unpooled.copiedBuffer(response.substring(0, afterLastCr), StandardCharsets.ISO_8859_1));
+                ctx.executor().schedule(() -> ctx.writeAndFlush(Unpooled.copiedBuffer(response.substring(afterLastCr), StandardCharsets.ISO_8859_1)), 300, TimeUnit.MILLISECONDS);
+            } else {
+                ctx.writeAndFlush(Unpooled.copiedBuffer(response, StandardCharsets.ISO_8859_1));
+            }
         }
     }
 
@@ -668,6 +709,7 @@ public class ForwardHeaderLimitIntegrationTest {
         private final List<Socket> sockets = new CopyOnWriteArrayList<>();
         private final AtomicInteger tunnels = new AtomicInteger();
         private volatile int responseHeaderBytes;
+        private volatile boolean splitAtLastCr;
 
         private ConnectProxy() throws IOException {
             daemon(() -> {
@@ -700,10 +742,26 @@ public class ForwardHeaderLimitIntegrationTest {
             tunnels.incrementAndGet();
             // "x-proxy: " is 9 bytes
             String filler = responseHeaderBytes > 9 ? "x-proxy: " + "a".repeat(responseHeaderBytes - 9) + "\r\n" : "";
-            client.getOutputStream().write(("HTTP/1.1 200 Connection established\r\n" + filler + "\r\n").getBytes(StandardCharsets.ISO_8859_1));
+            byte[] response = ("HTTP/1.1 200 Connection established\r\n" + filler + "\r\n").getBytes(StandardCharsets.ISO_8859_1);
+            // with splitAtLastCr the last header line's LF, and the blank line, arrive after its CR
+            int firstWrite = splitAtLastCr ? response.length - 3 : response.length;
+            client.getOutputStream().write(response, 0, firstWrite);
             client.getOutputStream().flush();
+            if (firstWrite < response.length) {
+                pause();
+                client.getOutputStream().write(response, firstWrite, response.length - firstWrite);
+                client.getOutputStream().flush();
+            }
             daemon(() -> copy(upstream, client));
             copy(client, upstream);
+        }
+
+        private static void pause() {
+            try {
+                Thread.sleep(300);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
         }
 
         private static void copy(Socket from, Socket to) throws IOException {

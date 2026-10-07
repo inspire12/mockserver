@@ -6,6 +6,7 @@ import io.netty.handler.codec.http.*;
 import io.netty.handler.codec.http.websocketx.*;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.SslHandshakeCompletionEvent;
+import org.mockserver.codec.HttpLineEndSplitGuard;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
@@ -175,7 +176,11 @@ public class WebSocketProxyRelayHandler {
                         pipeline.addLast(sslHandler);
                     }
                     // a status line is short, so it keeps Netty's limit; the headers follow maxHeaderSize as a forward's do
-                    pipeline.addLast(new HttpClientCodec(HttpObjectDecoder.DEFAULT_MAX_INITIAL_LINE_LENGTH, maxHeaderSize, HttpObjectDecoder.DEFAULT_MAX_CHUNK_SIZE));
+                    HttpClientCodec codec = new HttpClientCodec(HttpObjectDecoder.DEFAULT_MAX_INITIAL_LINE_LENGTH, maxHeaderSize, HttpObjectDecoder.DEFAULT_MAX_CHUNK_SIZE);
+                    HttpLineEndSplitGuard lineEndSplitGuard = new HttpLineEndSplitGuard(codec);
+                    pipeline.addLast(lineEndSplitGuard.beforeCodec());
+                    pipeline.addLast(codec);
+                    pipeline.addLast(lineEndSplitGuard.afterCodec());
                     pipeline.addLast(new HttpObjectAggregator(MAX_FRAME_PAYLOAD_LENGTH));
                     pipeline.addLast(new UpstreamHandshakeHandler(request, clientCtx, upstreamHandshaker, subprotocol, transcript, maxHeaderSize, handshakeTimeoutMillis, handshakeTimeoutName));
                 }

@@ -10,6 +10,7 @@ import org.mockserver.netty.connection.HttpTransportTimer;
 import org.mockserver.netty.unification.HttpServerCodecResponsePairing;
 import org.mockserver.netty.unification.PacedLargeWriteHandler;
 import org.mockserver.codec.HttpChunkLineLimiter;
+import org.mockserver.codec.HttpLineEndSplitGuard;
 import org.mockserver.codec.MockServerHttpServerCodec;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.lifecycle.LifeCycle;
@@ -27,6 +28,7 @@ public abstract class SocksConnectHandler<T> extends RelayConnectHandler<T> {
         ChannelPipeline pipeline = ctx.pipeline();
         removeHandler(pipeline, HttpServerCodec.class);
         HttpChunkLineLimiter.removeFrom(pipeline);
+        HttpLineEndSplitGuard.removeFrom(pipeline);
         HttpServerCodecResponsePairing.removeFrom(pipeline);
         removeHandler(pipeline, HttpContentDecompressor.class);
         removeHandler(pipeline, HttpObjectAggregator.class);

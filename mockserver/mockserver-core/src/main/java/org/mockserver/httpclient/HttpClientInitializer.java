@@ -12,6 +12,7 @@ import io.netty.handler.proxy.Socks5ProxyHandler;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.timeout.ReadTimeoutHandler;
 import org.mockserver.codec.BoundedZstdHttpContentDecompressor;
+import org.mockserver.codec.HttpLineEndSplitGuard;
 import org.mockserver.codec.MockServerBinaryClientCodec;
 import org.mockserver.codec.MockServerHttpClientCodec;
 import org.mockserver.codec.StreamingAwareHttpObjectAggregator;
@@ -201,7 +202,11 @@ public class HttpClientInitializer extends ChannelInitializer<SocketChannel> {
         addReadTimeoutHandlerIfNotPooled(pipeline);
         int maxHeaderSize = maxHeaderSize();
         // a status line is short, so it and each chunk-size line keep Netty's limit
-        pipeline.addLast(new HttpClientCodec(HttpObjectDecoder.DEFAULT_MAX_INITIAL_LINE_LENGTH, maxHeaderSize, HttpObjectDecoder.DEFAULT_MAX_CHUNK_SIZE));
+        HttpClientCodec codec = new HttpClientCodec(HttpObjectDecoder.DEFAULT_MAX_INITIAL_LINE_LENGTH, maxHeaderSize, HttpObjectDecoder.DEFAULT_MAX_CHUNK_SIZE);
+        HttpLineEndSplitGuard lineEndSplitGuard = new HttpLineEndSplitGuard(codec);
+        pipeline.addLast(lineEndSplitGuard.beforeCodec());
+        pipeline.addLast(codec);
+        pipeline.addLast(lineEndSplitGuard.afterCodec());
         pipeline.addLast(new ForwardHeaderLimit.Http1Response(mockServerLogger, maxHeaderSize));
         pipeline.addLast(new BoundedZstdHttpContentDecompressor());
         pipeline.addLast(new TimeToFirstByteHandler());
