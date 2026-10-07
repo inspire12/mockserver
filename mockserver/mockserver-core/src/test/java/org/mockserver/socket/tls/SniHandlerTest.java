@@ -46,6 +46,40 @@ public class SniHandlerTest {
         return channel.pipeline().firstContext();
     }
 
+    // ---- ClientHello timeout ----
+
+    @Test
+    public void shouldCloseAConnectionWhoseClientHelloIsIncompleteAtSocketConnectionTimeout() {
+        // longer than Netty's fixed 10 s as well as shorter, so neither bound can stand in for the other
+        for (long timeoutMillis : new long[]{1_500L, 25_000L}) {
+            assertClosedAt(configuration().socketConnectionTimeoutInMillis(timeoutMillis), timeoutMillis);
+        }
+    }
+
+    @Test
+    public void shouldKeepNettysTimeoutForAClientHelloWhenSocketConnectionTimeoutIsNotPositive() {
+        assertClosedAt(configuration().socketConnectionTimeoutInMillis(0L), 10_000L);
+        assertClosedAt(configuration().socketConnectionTimeoutInMillis(-1L), 10_000L);
+        assertClosedAt(null, 10_000L);
+    }
+
+    private static void assertClosedAt(Configuration configuration, long timeoutMillis) {
+        EmbeddedChannel channel = new EmbeddedChannel();
+        channel.freezeTime();
+        channel.pipeline().addLast(new SniHandler(configuration, new NettySslContextFactory(configuration(), new MockServerLogger(), true)));
+        // the first bytes of a TLS handshake record holding a ClientHello, and nothing more
+        channel.writeInbound(io.netty.buffer.Unpooled.wrappedBuffer(new byte[]{0x16, 0x03, 0x01, 0x02, 0x00, 0x01, 0x00, 0x01}));
+
+        channel.advanceTimeBy(timeoutMillis - 1, java.util.concurrent.TimeUnit.MILLISECONDS);
+        channel.runScheduledPendingTasks();
+        assertThat("open 1 ms before " + timeoutMillis + " ms", channel.isOpen(), is(true));
+
+        channel.advanceTimeBy(1, java.util.concurrent.TimeUnit.MILLISECONDS);
+        channel.runScheduledPendingTasks();
+        assertThat("closed at " + timeoutMillis + " ms", channel.isOpen(), is(false));
+        channel.finishAndReleaseAll();
+    }
+
     // ---- lookup ----
 
     @Test

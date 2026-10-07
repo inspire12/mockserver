@@ -17,6 +17,7 @@ import org.mockserver.codec.HttpChunkLineLimiter;
 import org.mockserver.codec.StreamingAwareHttpObjectAggregator;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
+import org.mockserver.netty.unification.Http1RequestCutShort;
 import org.slf4j.event.Level;
 
 import java.nio.channels.ClosedChannelException;
@@ -202,6 +203,8 @@ public class UpstreamProxyRelayHandler extends SimpleChannelInboundHandler<FullH
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
         if (HttpChunkLineLimiter.isRejectedRequestCutShort(ctx.channel(), cause)) {
             // already logged as the rejection that closed the connection
+        } else if (Http1RequestCutShort.isRequestCutShort(mockServerLogger, ctx, cause)) {
+            // a request cut short by the client leg's end: logged as that
         } else if (directMemoryLimitReached(cause)) {
             mockServerLogger.logEvent(
                 new LogEntry()

@@ -773,6 +773,8 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **An HTTP/1.1 upload its client gives up on is logged as a client close, not an error.** When a connection closed or was reset while a request's body was still arriving, MockServer logged an `ERROR` with a stack trace (`web socket server caught exception`, or `exception caught by upstream relay handler` through a CONNECT tunnel). It now logs one `INFO` entry, `HTTP/1.1 request from: ... ended with its connection before it was complete`, naming the request's method, path, query string and headers and with no stack trace, as an HTTP/2 upload cut short is logged.
+- **`socketConnectionTimeoutInMillis` now also bounds the first stage of an inbound TLS handshake.** Waiting for a client's complete ClientHello and generating a certificate for it was always limited to a fixed 10 seconds, so lowering the setting did not shorten how long a client could hold that stage open, and a certificate generation slower than 10 seconds closed the connection whatever it was set to. That stage is now limited by `socketConnectionTimeoutInMillis` (default 20 seconds), as the rest of the handshake already was; a value of 0 or less keeps the 10 seconds. It now follows the setting, so with the default (20 seconds) that stage can take up to 20 seconds rather than 10.
 - **Hosts on `noProxyHosts` are now connected to directly whichever upstream proxy is set, as `no_proxy`
   works for curl and Java.** The list was applied only to `forwardHttpProxy`, and only when the forward
   named its target: a request to a listed host still went through `forwardHttpsProxy` (secure requests)

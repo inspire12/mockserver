@@ -87,6 +87,7 @@ public class CoalescingHttpObjectAggregator extends HttpObjectAggregator {
     private boolean tracking;
     private ByteBuf lastRoot;
     private Use lastUse;
+    private HttpRequest requestBeingAggregated;
 
     public CoalescingHttpObjectAggregator(int maxContentLength) {
         super(maxContentLength);
@@ -127,18 +128,42 @@ public class CoalescingHttpObjectAggregator extends HttpObjectAggregator {
     @Override
     protected FullHttpMessage beginAggregation(HttpMessage start, ByteBuf content) throws Exception {
         reset(null);
+        requestBeingAggregated = null;
         if (!coalescing || !(content instanceof CompositeByteBuf) || ((CompositeByteBuf) content).numComponents() != 0) {
-            return super.beginAggregation(start, content);
+            return begun(start, super.beginAggregation(start, content));
         }
         CompositeByteBuf unlimited = content.alloc().compositeBuffer(Integer.MAX_VALUE);
         content.release();
         try {
             FullHttpMessage aggregated = super.beginAggregation(start, unlimited);
             reset(unlimited);
-            return aggregated;
+            return begun(start, aggregated);
         } catch (Exception | Error e) {
             unlimited.release();
             throw e;
+        }
+    }
+
+    private FullHttpMessage begun(HttpMessage start, FullHttpMessage aggregated) {
+        requestBeingAggregated = start instanceof HttpRequest ? (HttpRequest) start : null;
+        return aggregated;
+    }
+
+    /**
+     * @return the head of the request whose body this aggregator is still waiting for, or {@code null}: Netty reports
+     * such a request as a {@link io.netty.handler.codec.PrematureChannelClosureException} when the channel closes, and
+     * this still answers while that exception is handled
+     */
+    public HttpRequest requestBeingAggregated() {
+        return requestBeingAggregated;
+    }
+
+    @Override
+    public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+        try {
+            super.channelInactive(ctx);
+        } finally {
+            requestBeingAggregated = null;
         }
     }
 
@@ -344,6 +369,7 @@ public class CoalescingHttpObjectAggregator extends HttpObjectAggregator {
     @Override
     protected void finishAggregation(FullHttpMessage aggregated) throws Exception {
         reset(null);
+        requestBeingAggregated = null;
         super.finishAggregation(aggregated);
     }
 
@@ -356,6 +382,7 @@ public class CoalescingHttpObjectAggregator extends HttpObjectAggregator {
     @Override
     protected void handleOversizedMessage(ChannelHandlerContext ctx, HttpMessage oversized) throws Exception {
         reset(null);
+        requestBeingAggregated = null;
         if (oversized instanceof HttpRequest && ctx.channel() instanceof DuplexChannel && closesAfterTooLarge(ctx, oversized)) {
             Channel channel = ctx.channel();
             ctx.writeAndFlush(TOO_LARGE_CLOSE.retainedDuplicate()).addListener(written -> LingeringClose.close(channel));

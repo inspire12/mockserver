@@ -71,6 +71,35 @@ public class TlsHandshakeTimeoutIntegrationTest {
         }
     }
 
+    /**
+     * The ClientHello stage: until the whole ClientHello has arrived and the server certificate is chosen, the
+     * handshake is held by {@code SniHandler}, which Netty bounds by a fixed 10 s unless told otherwise. The idle
+     * timeout is turned off so it cannot be what ends the connection.
+     */
+    @Test
+    public void shouldBoundAnIncompleteClientHelloByConfiguredConnectionTimeout() throws Exception {
+        MockServer mockServer = new MockServer(configuration()
+            .socketConnectionTimeoutInMillis(CONFIGURED_BOUND_MILLIS)
+            .inboundConnectionIdleTimeoutMillis(0L), 0);
+        try (Socket socket = new Socket("127.0.0.1", mockServer.getLocalPort())) {
+            socket.setSoTimeout(READ_CEILING_MILLIS);
+
+            // enough of a real ClientHello for port unification to detect TLS, then stall
+            byte[] clientHello = clientHello();
+            socket.getOutputStream().write(clientHello, 0, clientHello.length / 2);
+            socket.getOutputStream().flush();
+
+            long elapsedMillis = timeUntilServerClosesHandshake(socket);
+
+            assertThat("ClientHello stage ended no earlier than the configured connection timeout (proves the timeout drove it)",
+                elapsedMillis, greaterThanOrEqualTo(CONFIGURED_BOUND_MILLIS - 300));
+            assertThat("ClientHello stage was bounded by the configured connection timeout, not Netty's fixed 10,000ms default (elapsed " + elapsedMillis + "ms)",
+                elapsedMillis, lessThan((long) READ_CEILING_MILLIS));
+        } finally {
+            stopQuietly(mockServer);
+        }
+    }
+
     @Test
     public void shouldBoundConnectTunnelInboundTlsHandshakeByConfiguredConnectionTimeout() throws Exception {
         MockServer mockServer = new MockServer(configuration().socketConnectionTimeoutInMillis(CONFIGURED_BOUND_MILLIS), 0);

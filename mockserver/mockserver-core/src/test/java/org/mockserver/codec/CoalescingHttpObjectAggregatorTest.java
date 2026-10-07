@@ -583,6 +583,73 @@ public class CoalescingHttpObjectAggregatorTest {
     }
 
     /**
+     * The head of a request whose body is still arriving is what a handler logging the request cut short by a closed
+     * connection names, so it must be the one Netty reports as that, and only while Netty would.
+     */
+    @Test
+    public void shouldHoldTheHeadOfARequestOnlyWhileItsBodyIsStillArriving() {
+        CoalescingHttpObjectAggregator aggregator = HttpObjectAggregators.httpObjectAggregator(TEN_MIB);
+        List<Object> seenWithThePrematureClose = new ArrayList<>();
+        EmbeddedChannel channel = new EmbeddedChannel(aggregator, new io.netty.channel.ChannelInboundHandlerAdapter() {
+            @Override
+            public void exceptionCaught(io.netty.channel.ChannelHandlerContext ctx, Throwable cause) {
+                seenWithThePrematureClose.add(cause);
+                seenWithThePrematureClose.add(aggregator.requestBeingAggregated());
+            }
+        });
+        assertThat(aggregator.requestBeingAggregated(), is(nullValue()));
+
+        HttpRequest complete = upload("/complete", 4);
+        channel.writeInbound(complete);
+        assertThat(aggregator.requestBeingAggregated(), sameInstance(complete));
+        channel.writeInbound(new DefaultLastHttpContent(channel.alloc().buffer().writeZero(4)));
+        assertThat("not once the request is complete", aggregator.requestBeingAggregated(), is(nullValue()));
+        ReferenceCountUtil.release(channel.readInbound());
+
+        HttpRequest cutShort = upload("/cut-short?part=1", 100);
+        channel.writeInbound(cutShort);
+        channel.writeInbound(new DefaultHttpContent(channel.alloc().buffer().writeZero(4)));
+        assertThat(aggregator.requestBeingAggregated(), sameInstance(cutShort));
+        channel.close();
+
+        assertThat(seenWithThePrematureClose, hasSize(2));
+        assertThat(seenWithThePrematureClose.get(0), instanceOf(io.netty.handler.codec.PrematureChannelClosureException.class));
+        assertThat("still held while the premature close is reported", seenWithThePrematureClose.get(1), sameInstance(cutShort));
+        assertThat("not once the channel has closed", aggregator.requestBeingAggregated(), is(nullValue()));
+        assertThat(channel.finishAndReleaseAll(), is(false));
+    }
+
+    @Test
+    public void shouldHoldNoHeadForARequestRefusedAsTooLarge() {
+        CoalescingHttpObjectAggregator aggregator = HttpObjectAggregators.httpObjectAggregator(SMALL_LIMIT);
+        List<Object> heldWhenTheRefusalIsWritten = new ArrayList<>();
+        EmbeddedChannel channel = new EmbeddedChannel(new io.netty.channel.ChannelOutboundHandlerAdapter() {
+            @Override
+            public void write(io.netty.channel.ChannelHandlerContext ctx, Object msg, io.netty.channel.ChannelPromise promise) {
+                heldWhenTheRefusalIsWritten.add(aggregator.requestBeingAggregated());
+                ctx.write(msg, promise);
+            }
+        }, aggregator);
+
+        HttpRequest chunked = new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, "/chunked");
+        chunked.headers().set(HttpHeaderNames.TRANSFER_ENCODING, HttpHeaderValues.CHUNKED);
+        channel.writeInbound(chunked);
+        assertThat(aggregator.requestBeingAggregated(), sameInstance(chunked));
+        channel.writeInbound(new DefaultHttpContent(channel.alloc().buffer().writeZero(SMALL_LIMIT + 1)));
+        // the 413 is written before the channel closes, and the close would clear the head anyway
+        assertThat("not once its body passed the limit", heldWhenTheRefusalIsWritten, contains(nullValue()));
+        assertThat(aggregator.requestBeingAggregated(), is(nullValue()));
+
+        channel.finishAndReleaseAll();
+    }
+
+    private static HttpRequest upload(String uri, int contentLength) {
+        HttpRequest request = new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, uri);
+        request.headers().set(HttpHeaderNames.CONTENT_LENGTH, contentLength);
+        return request;
+    }
+
+    /**
      * Runs {@code test}, then finishes the channel; when the test failed mid-body, finishing it raises
      * {@code PrematureChannelClosureException}, which is added to the test's failure rather than replacing it.
      */

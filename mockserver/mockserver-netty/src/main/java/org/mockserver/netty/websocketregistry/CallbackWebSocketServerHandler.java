@@ -19,6 +19,7 @@ import org.mockserver.logging.MockServerLogger;
 import org.mockserver.mappers.Http2StreamIds;
 import org.mockserver.mock.HttpState;
 import org.mockserver.netty.HttpRequestHandler;
+import org.mockserver.netty.unification.Http1RequestCutShort;
 import org.mockserver.netty.unification.Http2RequestHeaderLimit;
 import org.mockserver.netty.unification.Http2StreamFaults;
 import org.mockserver.uuid.UUIDService;
@@ -181,6 +182,8 @@ public class CallbackWebSocketServerHandler extends ChannelInboundHandlerAdapter
             // already logged as the refusal that reset the stream
         } else if (Http2StreamFaults.isRequestCutShort(mockServerLogger, ctx.channel(), cause)) {
             // an HTTP/2 request cut short by its stream's error, its client's cancel or its connection's end: logged as that
+        } else if (Http1RequestCutShort.isRequestCutShort(mockServerLogger, ctx, cause)) {
+            // an HTTP/1.1 request cut short by its connection's end: logged as that
         } else if (directMemoryLimitReached(cause)) {
             mockServerLogger.logEvent(
                 new LogEntry()
