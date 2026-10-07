@@ -206,7 +206,7 @@ Integration tests use JUnit 4 and run via the Maven Failsafe plugin during the `
 | Locale | `en-GB` |
 | Test listener | `org.mockserver.test.PrintOutCurrentTestRunListener` |
 | XML reports | Controlled by `${disableXmlReport}` (default: `true`) |
-| Forked process timeout | 1800 seconds |
+| Forked process timeout | 1800 seconds; 2400 seconds in `mockserver-netty`, whose integration tests all share one fork (see [build-system.md](operations/build-system.md#test-configuration)) |
 
 ### Running Integration Tests
 
@@ -474,6 +474,7 @@ Supports three output modes controlled by `-Dmockserver.testOutput`:
         </systemPropertyVariables>
         <argLine>@{argLine} -Duser.language=en -Duser.country=GB
                  -Dmockserver.testOutput=${mockserver.testOutput}
+                 -Dmockserver.maxLogEntries=1000
                  ${mockserver.leakArgLine} ${mockserver.testArgLine}</argLine>
         <disableXmlReport>${disableXmlReport}</disableXmlReport>
         <redirectTestOutputToFile>${redirectTestOutputToFile}</redirectTestOutputToFile>
@@ -506,6 +507,7 @@ Supports three output modes controlled by `-Dmockserver.testOutput`:
         </systemPropertyVariables>
         <argLine>@{argLine} -Duser.language=en -Duser.country=GB
                  -Dmockserver.testOutput=${mockserver.testOutput}
+                 -Dmockserver.maxLogEntries=1000
                  ${mockserver.leakArgLine} ${mockserver.testArgLine}</argLine>
         <disableXmlReport>${disableXmlReport}</disableXmlReport>
         <redirectTestOutputToFile>${redirectTestOutputToFile}</redirectTestOutputToFile>
@@ -609,6 +611,7 @@ The `scripts/buildkite_quick_build.sh` script runs the full build inside a `mock
 | XML reports | Enabled (`-DdisableXmlReport=false`) |
 | Test output redirection | Enabled (`-DredirectTestOutputToFile=true`) |
 | Test log level | `INFO` (`-Dmockserver.testLogLevel=INFO`) |
+| Event log and expectation caps | 10,000 log entries and 5,000 expectations per test server, through `-Dmockserver.testArgLine`, which overrides the poms' `-Dmockserver.maxLogEntries=1000` |
 | Netty leak gate | On: `mockserver-netty`'s forks run the leak detector at `paranoid` and `check-netty-leaks` fails the build on a leaked buffer. `-Dmockserver.testArgLine` does not remove it (see [ByteBuf Leak Detection in Tests](code/netty-pipeline.md#bytebuf-leak-detection-in-tests)) |
 | Timeout | 90 minutes |
 | Build artefacts | `**/*.log` files collected |

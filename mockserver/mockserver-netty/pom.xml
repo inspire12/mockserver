@@ -357,13 +357,23 @@
                                  an inherited file.encoding=UTF-8 would win and silently disable the
                                  guard. On Java 17 this forces Charset.defaultCharset() to ISO-8859-1;
                                  on any JVM that ignores the override (JEP 400) the test skips itself. -->
-                            <argLine>@{argLine} -Dfile.encoding=ISO-8859-1 -Dsun.jnu.encoding=ISO-8859-1 -Duser.language=en -Duser.country=GB -Dmockserver.testOutput=${mockserver.testOutput} ${mockserver.leakArgLine} ${mockserver.testArgLine}</argLine>
+                            <argLine>@{argLine} -Dfile.encoding=ISO-8859-1 -Dsun.jnu.encoding=ISO-8859-1 -Duser.language=en -Duser.country=GB -Dmockserver.testOutput=${mockserver.testOutput} -Dmockserver.maxLogEntries=1000 ${mockserver.leakArgLine} ${mockserver.testArgLine}</argLine>
                             <!-- never fail the build if this is the only execution targeted (e.g. a
                                  developer running -Dtest pointed elsewhere) -->
                             <failIfNoTests>false</failIfNoTests>
                         </configuration>
                     </execution>
                 </executions>
+            </plugin>
+            <!-- All of this module's integration tests share one failsafe fork, which under the paranoid
+                 leak detector runs close to the parent's 1800 s limit. 2400 s still ends a hung fork
+                 well inside the CI build step's 90-minute timeout. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <configuration>
+                    <forkedProcessTimeoutInSeconds>2400</forkedProcessTimeoutInSeconds>
+                </configuration>
             </plugin>
             <!-- ByteBuf leak gate. The custom detector (org.mockserver.test.FailOnLeakResourceLeakDetector,
                  installed via ${mockserver.leakArgLine}) writes one file per leak to
