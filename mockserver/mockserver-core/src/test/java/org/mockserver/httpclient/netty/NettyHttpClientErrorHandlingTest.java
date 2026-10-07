@@ -425,7 +425,7 @@ public class NettyHttpClientErrorHandlingTest {
             assertThat(exception.getMessage(), anyOf(
                 containsString("Connection reset"),
                 containsString("Channel set as inactive before valid response has been received"),
-                containsString("Channel handler removed before valid response has been received")
+                containsString("upstream closed the connection during the TLS handshake")
             ));
         } finally {
             stopQuietly(echoServer);
