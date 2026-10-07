@@ -205,8 +205,10 @@ public class Http3ConnectionErrorLoggingIntegrationTest {
 
             List<LogEntry> entries = awaitConnectionEntries(connection.localPort());
             assertThat(nettysLog.since(nettysLogBeforeThisTest), empty());
+            // about HTTP/3 only: at INFO the JVM's log also holds notices such as the client's TLS warning on first use
             List<LogEntry> warnings = logged.stream()
                 .filter(entry -> entry.getLogLevel().toInt() >= Level.WARN.toInt())
+                .filter(entry -> String.valueOf(entry.getMessageFormat()).contains("HTTP/3"))
                 .collect(Collectors.toList());
             assertThat(warnings.toString(), warnings, empty());
             assertThat(entries.toString(), entries, hasSize(1));
