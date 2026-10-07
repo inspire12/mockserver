@@ -124,7 +124,7 @@ public class HttpResponseActionHandler {
      */
     private void synthesizeSchemaResponse(HttpResponse response) {
         try {
-            String generated = new JsonSchemaResponseSynthesizer(mockServerLogger).synthesizeResponse(response.getGenerateFromSchema());
+            String generated = new JsonSchemaResponseSynthesizer(mockServerLogger, configuration).synthesizeResponse(response.getGenerateFromSchema());
             if (isNotBlank(generated)) {
                 response.withBody(new StringBody(generated, MediaType.APPLICATION_JSON));
             }

@@ -28,7 +28,35 @@ public final class InetAddressValidator {
     // RFC 6052 IPv4-mapped IPv6 for the same address
     private static final String AWS_IPV6_METADATA = "fd00:ec2::254";
 
+    private static final ThreadLocal<HostLookup> LOOKUP_ON_THIS_THREAD = new ThreadLocal<>();
+
     private InetAddressValidator() {
+    }
+
+    /**
+     * How a host name is looked up for the check.
+     */
+    @FunctionalInterface
+    interface HostLookup {
+        InetAddress lookup(String host) throws UnknownHostException;
+    }
+
+    /**
+     * Replaces the lookup on the calling thread only, so a test can give a name different answers on successive
+     * lookups; {@code null} restores {@link InetAddress#getByName}.
+     */
+    static void lookupOnThisThread(@Nullable HostLookup lookup) {
+        if (lookup == null) {
+            LOOKUP_ON_THIS_THREAD.remove();
+        } else {
+            LOOKUP_ON_THIS_THREAD.set(lookup);
+        }
+    }
+
+    private static InetAddress lookup(String host) throws UnknownHostException {
+        HostLookup lookup = LOOKUP_ON_THIS_THREAD.get();
+        String name = stripBrackets(host);
+        return lookup != null ? lookup.lookup(name) : InetAddress.getByName(name);
     }
 
     /**
@@ -46,10 +74,9 @@ public final class InetAddressValidator {
         if (isBlank(host)) {
             return;
         }
-        String trimmed = stripBrackets(host);
         InetAddress address;
         try {
-            address = InetAddress.getByName(trimmed);
+            address = lookup(host);
         } catch (UnknownHostException e) {
             throw new ForwardTargetBlockedException("Forward target host \"" + host + "\" could not be resolved", e);
         }
@@ -80,8 +107,9 @@ public final class InetAddressValidator {
 
     /**
      * Validate a socket target and return the address to connect to. When the check is on a name not yet resolved
-     * is resolved once, here, and the result returned, so the address checked is the address connected to. When it
-     * is off the target is returned as it was given.
+     * is resolved once, here, and the result returned, so the address checked is the address connected to: connect
+     * to it without looking the name up again. The returned address still carries the name, for SNI and the
+     * certificate check. When the check is off the target is returned as it was given.
      *
      * @param configuration MockServer configuration (may be null to fall back to global properties)
      * @param target        the target (null is treated as nothing to check)
@@ -91,12 +119,19 @@ public final class InetAddressValidator {
         if (target == null || !isEnabled(configuration)) {
             return target;
         }
-        InetSocketAddress resolved = target.isUnresolved() ? new InetSocketAddress(target.getHostString(), target.getPort()) : target;
-        if (resolved.isUnresolved()) {
-            throw new ForwardTargetBlockedException("Forward target host \"" + target.getHostString() + "\" could not be resolved");
+        if (!target.isUnresolved()) {
+            rejectIfBlocked(target.getHostString(), target.getAddress());
+            return target;
         }
-        rejectIfBlocked(target.getHostString(), resolved.getAddress());
-        return resolved;
+        String host = target.getHostString();
+        InetAddress address;
+        try {
+            address = InetAddress.getByAddress(host, lookup(host).getAddress());
+        } catch (UnknownHostException e) {
+            throw new ForwardTargetBlockedException("Forward target host \"" + host + "\" could not be resolved", e);
+        }
+        rejectIfBlocked(host, address);
+        return new InetSocketAddress(address, target.getPort());
     }
 
     /**
@@ -137,7 +172,11 @@ public final class InetAddressValidator {
         }
     }
 
-    private static boolean isEnabled(Configuration configuration) {
+    /**
+     * @param configuration MockServer configuration (may be null to fall back to global properties)
+     * @return whether forwardProxyBlockPrivateNetworks is on
+     */
+    public static boolean isEnabled(@Nullable Configuration configuration) {
         return configuration != null
             ? Boolean.TRUE.equals(configuration.forwardProxyBlockPrivateNetworks())
             : ConfigurationProperties.forwardProxyBlockPrivateNetworks();

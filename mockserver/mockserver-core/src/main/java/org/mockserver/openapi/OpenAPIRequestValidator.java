@@ -8,6 +8,7 @@ import io.swagger.v3.oas.models.media.Schema;
 import io.swagger.v3.oas.models.parameters.Parameter;
 import io.swagger.v3.oas.models.parameters.RequestBody;
 import org.apache.commons.lang3.tuple.Pair;
+import org.mockserver.configuration.Configuration;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.Cookie;
 import org.mockserver.model.HttpRequest;
@@ -37,9 +38,16 @@ public class OpenAPIRequestValidator {
      * extraction; otherwise the template is resolved here.
      */
     public static List<String> validate(String specUrlOrPayload, HttpRequest request, MockServerLogger logger, String matchedPathTemplate) {
+        return validate(specUrlOrPayload, request, logger, matchedPathTemplate, null);
+    }
+
+    /**
+     * @param configuration whose forwardProxyBlockPrivateNetworks applies to fetching the spec; null for the global properties
+     */
+    public static List<String> validate(String specUrlOrPayload, HttpRequest request, MockServerLogger logger, String matchedPathTemplate, Configuration configuration) {
         List<String> errors = new ArrayList<>();
         try {
-            OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, logger);
+            OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, logger, configuration);
             String requestPath = request.getPath() != null ? request.getPath().getValue() : "/";
             String requestMethod = request.getMethod() != null ? request.getMethod().getValue().toLowerCase() : "get";
 

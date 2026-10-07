@@ -12,8 +12,10 @@ import io.swagger.v3.parser.core.models.SwaggerParseResult;
 import org.apache.commons.lang3.tuple.ImmutablePair;
 import org.apache.commons.lang3.tuple.Pair;
 import org.mockserver.cache.LRUCache;
+import org.mockserver.configuration.Configuration;
 import org.mockserver.logging.MockServerLogger;
 
+import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -48,11 +50,19 @@ public class OpenAPIParser {
     }
 
     public static OpenAPI buildOpenAPI(String specUrlOrPayload, MockServerLogger mockServerLogger) {
+        return buildOpenAPI(specUrlOrPayload, mockServerLogger, null);
+    }
+
+    /**
+     * @param configuration whose forwardProxyBlockPrivateNetworks applies to the spec URL, each remote $ref and each
+     *                      redirect fetched; null for the global properties
+     */
+    public static OpenAPI buildOpenAPI(String specUrlOrPayload, MockServerLogger mockServerLogger, @Nullable Configuration configuration) {
         // getOrCompute is atomic (ConcurrentHashMap.computeIfAbsent semantics): for an absent key the
         // parse + addMissingOperationIds runs at most once and the single resulting OpenAPI is shared by
         // all racing callers. A previous get-then-put allowed two threads to each parse and then mutate
         // (operationId dedup) their own copy and clobber the cache, racing on the shared instance.
-        return openAPILRUCache.getOrCompute(specUrlOrPayload, key -> parseOpenAPI(key, mockServerLogger));
+        return openAPILRUCache.getOrCompute(specUrlOrPayload, key -> SpecFetchGuard.whileParsing(configuration, () -> parseOpenAPI(key, mockServerLogger)));
     }
 
     private static OpenAPI parseOpenAPI(String specUrlOrPayload, MockServerLogger mockServerLogger) {

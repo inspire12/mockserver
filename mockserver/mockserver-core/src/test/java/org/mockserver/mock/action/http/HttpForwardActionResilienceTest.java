@@ -11,6 +11,7 @@ import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpForward;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
+import org.mockserver.proxyconfiguration.ForwardTargetBlockedException;
 
 import java.lang.reflect.Constructor;
 import java.net.InetSocketAddress;
@@ -217,6 +218,36 @@ public class HttpForwardActionResilienceTest {
         // then - the upstream was never reached, so the breaker stays closed, and each request was sent once
         assertThat(ForwardCircuitBreaker.getInstance().isOpen("upstream.example:8080"), is(false));
         verify(mockHttpClient, times(5)).sendRequest(any(HttpRequest.class), any(InetSocketAddress.class));
+    }
+
+    @Test
+    public void shouldNotCountATargetTheForwardClientRefusedAgainstTheCircuitBreakerNorRetryIt() throws Exception {
+        // given - breaker enabled with threshold 3 and two retries; the forward client refuses the address it looked up
+        Configuration configuration = Configuration.configuration()
+            .forwardProxyCircuitBreakerEnabled(true)
+            .forwardProxyCircuitBreakerFailureThreshold(3)
+            .forwardProxyCircuitBreakerWindowMillis(60_000L)
+            .forwardProxyRetryCount(2)
+            .forwardProxyRetryBackoffMillis(0L);
+        CompletableFuture<HttpResponse> refused = new CompletableFuture<>();
+        refused.completeExceptionally(new ForwardTargetBlockedException("Forward to loopback address blocked: upstream.example"));
+        when(mockHttpClient.sendRequest(any(HttpRequest.class), any(InetSocketAddress.class))).thenReturn(refused);
+        HttpForwardActionHandler handler = handlerWith(configuration);
+
+        // when - more refusals than the threshold
+        for (int i = 0; i < 5; i++) {
+            ExecutionException failed = org.junit.Assert.assertThrows(ExecutionException.class, () -> handler.handle(upstream(), request().withMethod("GET").withPath("/x")).getHttpResponse().get(5, TimeUnit.SECONDS));
+            assertThat(ForwardTargetBlockedException.in(failed), is(notNullValue()));
+        }
+
+        // then - nothing was sent to the upstream, so the breaker stays closed, and no request was retried
+        assertThat(ForwardCircuitBreaker.getInstance().isOpen("upstream.example:8080"), is(false));
+        verify(mockHttpClient, times(5)).sendRequest(any(HttpRequest.class), any(InetSocketAddress.class));
+    }
+
+    @Test
+    public void shouldNotResetTheFailureCountForATargetTheForwardClientRefused() throws Exception {
+        assertARunOfNeutralOutcomesDoesNotResetTheFailureCount(new ForwardTargetBlockedException("Forward to loopback address blocked: upstream.example"));
     }
 
     @Test

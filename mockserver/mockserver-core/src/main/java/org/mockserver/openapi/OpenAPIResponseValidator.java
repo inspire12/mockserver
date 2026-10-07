@@ -8,6 +8,7 @@ import io.swagger.v3.oas.models.media.MediaType;
 import io.swagger.v3.oas.models.media.Schema;
 import io.swagger.v3.oas.models.responses.ApiResponse;
 import org.apache.commons.lang3.tuple.Pair;
+import org.mockserver.configuration.Configuration;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.serialization.ObjectMapperFactory;
@@ -26,9 +27,16 @@ public class OpenAPIResponseValidator {
     private static final ObjectMapper OBJECT_MAPPER = ObjectMapperFactory.createObjectMapper();
 
     public static List<String> validate(String specUrlOrPayload, String operationId, HttpResponse response, MockServerLogger logger) {
+        return validate(specUrlOrPayload, operationId, response, logger, null);
+    }
+
+    /**
+     * @param configuration whose forwardProxyBlockPrivateNetworks applies to fetching the spec; null for the global properties
+     */
+    public static List<String> validate(String specUrlOrPayload, String operationId, HttpResponse response, MockServerLogger logger, Configuration configuration) {
         List<String> errors = new ArrayList<>();
         try {
-            OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, logger);
+            OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, logger, configuration);
             // Search paths first, then webhooks (OAS 3.1). A valid OAS 3.1 document may omit paths
             // entirely (webhooks-only / components-only), so getPaths() can be null — treat it as an
             // empty stream rather than NPE-ing.

@@ -491,7 +491,7 @@ public class HttpActionHandler {
      */
     private HttpResponse validateMockRequest(final OpenAPIDefinition openAPIDefinition, final HttpRequest request) {
         try {
-            List<String> requestErrors = OpenAPIRequestValidator.validate(openAPIDefinition.getSpecUrlOrPayload(), request, mockServerLogger);
+            List<String> requestErrors = OpenAPIRequestValidator.validate(openAPIDefinition.getSpecUrlOrPayload(), request, mockServerLogger, null, configuration);
             if (!requestErrors.isEmpty()) {
                 if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
                     mockServerLogger.logEvent(
@@ -1298,7 +1298,8 @@ public class HttpActionHandler {
      * async continuation.
      */
     void handleUnmatchedForwardFailure(Throwable throwable, HttpRequest request, ResponseWriter responseWriter, InetSocketAddress remoteAddress, boolean potentiallyHttpProxy) {
-        if (returnedHeaderLimitFailure(responseWriter, request, throwable)
+        if (returnedBlockedTarget(responseWriter, request, throwable, "proxied request")
+            || returnedHeaderLimitFailure(responseWriter, request, throwable)
             || returnedUpstreamFailureReason(throwable, request, responseWriter, new LogEntry().setMessageFormat("failed to proxy request{}to remote address{}because:{}"), remoteAddress)) {
             return;
         }
@@ -2745,7 +2746,8 @@ public class HttpActionHandler {
                     openAPIDefinition.getSpecUrlOrPayload(),
                     openAPIDefinition.getOperationId(),
                     response,
-                    mockServerLogger
+                    mockServerLogger,
+                    configuration
                 );
                 if (!validationErrors.isEmpty()) {
                     if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
@@ -3133,7 +3135,8 @@ public class HttpActionHandler {
     }
 
     void handleExceptionDuringForwardingRequest(Action action, HttpRequest request, ResponseWriter responseWriter, Throwable exception) {
-        if (returnedHeaderLimitFailure(responseWriter, request, exception)
+        if (returnedBlockedTarget(responseWriter, request, exception, "forward")
+            || returnedHeaderLimitFailure(responseWriter, request, exception)
             || returnedUpstreamFailureReason(exception, request, responseWriter, new LogEntry().setMessageFormat("failed to forward request{}for action{}because:{}"), action)) {
             return;
         }
@@ -3414,6 +3417,32 @@ public class HttpActionHandler {
             return false;
         }
         returnBadGateway(responseWriter, request, headerLimit.getMessage(), badGatewayResponse().withBody(headerLimit.getMessage()));
+        return true;
+    }
+
+    /**
+     * Answers with 502 a forward the forward client refused for forwardProxyBlockPrivateNetworks: the address it
+     * looked up to connect to was blocked although the name passed the check made before sending. Logged once, at
+     * WARN, as a refusal made before sending is.
+     *
+     * @return whether {@code failure} was such a refusal and has been answered
+     */
+    private boolean returnedBlockedTarget(ResponseWriter responseWriter, HttpRequest request, Throwable failure, String label) {
+        ForwardTargetBlockedException blocked = ForwardTargetBlockedException.in(failure);
+        if (blocked == null) {
+            return false;
+        }
+        if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.WARN)
+                    .setCorrelationId(request.getLogCorrelationId())
+                    .setHttpRequest(request)
+                    .setMessageFormat(label + " blocked by SSRF policy:{}")
+                    .setArguments(blocked.getMessage())
+            );
+        }
+        returnBadGateway(responseWriter, request, blocked.getMessage());
         return true;
     }
 
@@ -4178,7 +4207,7 @@ public class HttpActionHandler {
             return null;
         }
         try {
-            List<String> requestErrors = OpenAPIRequestValidator.validate(spec, request, mockServerLogger);
+            List<String> requestErrors = OpenAPIRequestValidator.validate(spec, request, mockServerLogger, null, configuration);
             if (!requestErrors.isEmpty()) {
                 if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
                     mockServerLogger.logEvent(
@@ -4241,7 +4270,7 @@ public class HttpActionHandler {
                 // could not match the request to a spec operation — skip response validation
                 return response;
             }
-            List<String> responseErrors = OpenAPIResponseValidator.validate(spec, operationId, response, mockServerLogger);
+            List<String> responseErrors = OpenAPIResponseValidator.validate(spec, operationId, response, mockServerLogger, configuration);
             if (!responseErrors.isEmpty()) {
                 if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
                     mockServerLogger.logEvent(
@@ -4281,7 +4310,7 @@ public class HttpActionHandler {
      */
     private String resolveOperationId(String specUrlOrPayload, HttpRequest request) {
         try {
-            io.swagger.v3.oas.models.OpenAPI openAPI = org.mockserver.openapi.OpenAPIParser.buildOpenAPI(specUrlOrPayload, mockServerLogger);
+            io.swagger.v3.oas.models.OpenAPI openAPI = org.mockserver.openapi.OpenAPIParser.buildOpenAPI(specUrlOrPayload, mockServerLogger, configuration);
             String requestPath = request.getPath() != null ? request.getPath().getValue() : "/";
             String requestMethod = request.getMethod() != null ? request.getMethod().getValue().toLowerCase() : "get";
             for (java.util.Map.Entry<String, io.swagger.v3.oas.models.PathItem> entry : openAPI.getPaths().entrySet()) {

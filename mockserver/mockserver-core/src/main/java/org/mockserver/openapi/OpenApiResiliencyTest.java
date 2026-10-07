@@ -10,6 +10,7 @@ import io.swagger.v3.oas.models.media.Schema;
 import io.swagger.v3.oas.models.parameters.Parameter;
 import io.swagger.v3.oas.models.parameters.RequestBody;
 import org.apache.commons.lang3.tuple.Pair;
+import org.mockserver.configuration.Configuration;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
@@ -37,10 +38,19 @@ public class OpenApiResiliencyTest {
     private final MockServerLogger mockServerLogger;
     private final OpenApiContractTest contractTest;
     private final ObjectMapper objectMapper;
+    private final Configuration configuration;
 
     public OpenApiResiliencyTest(MockServerLogger mockServerLogger) {
+        this(mockServerLogger, null);
+    }
+
+    /**
+     * @param configuration whose forwardProxyBlockPrivateNetworks applies to fetching the spec; null for the global properties
+     */
+    public OpenApiResiliencyTest(MockServerLogger mockServerLogger, Configuration configuration) {
         this.mockServerLogger = mockServerLogger;
-        this.contractTest = new OpenApiContractTest(mockServerLogger);
+        this.configuration = configuration;
+        this.contractTest = new OpenApiContractTest(mockServerLogger, configuration);
         this.objectMapper = ObjectMapperFactory.createObjectMapper(new JsonNodeExampleSerializer());
     }
 
@@ -60,7 +70,7 @@ public class OpenApiResiliencyTest {
         Function<HttpRequest, HttpResponse> httpSender
     ) {
         List<MutationResult> allResults = new ArrayList<>();
-        OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, mockServerLogger);
+        OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, mockServerLogger, configuration);
 
         for (Map.Entry<String, io.swagger.v3.oas.models.PathItem> pathEntry : openAPI.getPaths().entrySet()) {
             String pathTemplate = pathEntry.getKey();

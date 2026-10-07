@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectWriter;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.media.Schema;
+import org.mockserver.configuration.Configuration;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.openapi.examples.ExampleBuilder;
 import org.mockserver.openapi.examples.JsonNodeExampleSerializer;
@@ -48,9 +49,18 @@ public class JsonSchemaResponseSynthesizer {
         ObjectMapperFactory.createObjectMapper(new JsonNodeExampleSerializer()).writer();
 
     private final MockServerLogger mockServerLogger;
+    private final Configuration configuration;
 
     public JsonSchemaResponseSynthesizer(MockServerLogger mockServerLogger) {
+        this(mockServerLogger, null);
+    }
+
+    /**
+     * @param configuration whose forwardProxyBlockPrivateNetworks applies to a schema's remote $refs; null for the global properties
+     */
+    public JsonSchemaResponseSynthesizer(MockServerLogger mockServerLogger, Configuration configuration) {
         this.mockServerLogger = mockServerLogger;
+        this.configuration = configuration;
     }
 
     /**
@@ -65,7 +75,7 @@ public class JsonSchemaResponseSynthesizer {
             return null;
         }
         try {
-            OpenAPI openAPI = OpenAPIParser.buildOpenAPI(wrapInOpenAPIDocument(jsonSchema), mockServerLogger);
+            OpenAPI openAPI = OpenAPIParser.buildOpenAPI(wrapInOpenAPIDocument(jsonSchema), mockServerLogger, configuration);
             Map<String, Schema> schemas = openAPI.getComponents() != null ? openAPI.getComponents().getSchemas() : null;
             if (schemas == null || !schemas.containsKey(ROOT_SCHEMA_NAME)) {
                 return null;

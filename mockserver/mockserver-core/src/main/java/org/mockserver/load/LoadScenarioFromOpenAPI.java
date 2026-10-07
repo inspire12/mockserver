@@ -7,6 +7,7 @@ import io.swagger.v3.oas.models.media.MediaType;
 import io.swagger.v3.oas.models.media.Schema;
 import io.swagger.v3.oas.models.servers.Server;
 import org.apache.commons.lang3.tuple.Pair;
+import org.mockserver.configuration.Configuration;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.openapi.OpenAPISerialiser;
@@ -103,11 +104,18 @@ public class LoadScenarioFromOpenAPI {
      * @throws IllegalArgumentException if the spec cannot be parsed or contains no operations
      */
     public static LoadScenario generate(String name, String specUrlOrPayload, Target target, LoadProfile profile, MockServerLogger mockServerLogger) {
+        return generate(name, specUrlOrPayload, target, profile, mockServerLogger, null);
+    }
+
+    /**
+     * @param configuration whose forwardProxyBlockPrivateNetworks applies to fetching the spec; null for the global properties
+     */
+    public static LoadScenario generate(String name, String specUrlOrPayload, Target target, LoadProfile profile, MockServerLogger mockServerLogger, Configuration configuration) {
         // Reuse the shared OpenAPI parse (the same buildOpenAPI the expectation converter uses) — do not
         // parse OpenAPI here. retrieveOperations resolves per-operation server-path prefixes and yields a
         // stable path-then-method ordering.
-        OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, mockServerLogger);
-        OpenAPISerialiser serialiser = new OpenAPISerialiser(mockServerLogger);
+        OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, mockServerLogger, configuration);
+        OpenAPISerialiser serialiser = new OpenAPISerialiser(mockServerLogger, configuration);
         Map<String, List<Pair<String, Operation>>> operations = serialiser.retrieveOperations(openAPI, null);
 
         Target effectiveTarget = resolveTarget(target, openAPI);

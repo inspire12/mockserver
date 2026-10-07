@@ -8,6 +8,7 @@ import io.swagger.v3.oas.models.servers.ServerVariables;
 import org.apache.commons.lang3.Strings;
 import org.apache.commons.lang3.tuple.Pair;
 import org.mockserver.log.model.LogEntry;
+import org.mockserver.configuration.Configuration;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.OpenAPIDefinition;
 import org.mockserver.openapi.examples.JsonNodeExampleSerializer;
@@ -26,15 +27,24 @@ public class OpenAPISerialiser {
 
     private static final ObjectWriter OBJECT_WRITER = ObjectMapperFactory.createObjectMapper(new JsonNodeExampleSerializer()).writerWithDefaultPrettyPrinter();
     private final MockServerLogger mockServerLogger;
+    private final Configuration configuration;
 
     public OpenAPISerialiser(MockServerLogger mockServerLogger) {
+        this(mockServerLogger, null);
+    }
+
+    /**
+     * @param configuration whose forwardProxyBlockPrivateNetworks applies to fetching the spec; null for the global properties
+     */
+    public OpenAPISerialiser(MockServerLogger mockServerLogger, Configuration configuration) {
         this.mockServerLogger = mockServerLogger;
+        this.configuration = configuration;
     }
 
     public String asString(OpenAPIDefinition openAPIDefinition) {
         try {
             if (isBlank(openAPIDefinition.getOperationId())) {
-                return OBJECT_WRITER.writeValueAsString(buildOpenAPI(openAPIDefinition.getSpecUrlOrPayload(), mockServerLogger));
+                return OBJECT_WRITER.writeValueAsString(buildOpenAPI(openAPIDefinition.getSpecUrlOrPayload(), mockServerLogger, configuration));
             } else {
                 Optional<Pair<String, Operation>> operation = retrieveOperation(openAPIDefinition.getSpecUrlOrPayload(), openAPIDefinition.getOperationId());
                 if (operation.isPresent()) {
@@ -81,7 +91,7 @@ public class OpenAPISerialiser {
     }
 
     public Optional<Pair<String, Operation>> retrieveOperation(String specUrlOrPayload, String operationId) {
-        OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, mockServerLogger);
+        OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, mockServerLogger, configuration);
         // Search paths first, then webhooks (OAS 3.1). A valid 3.1 spec may omit paths entirely.
         java.util.stream.Stream<Pair<String, Operation>> pathOps = openAPI.getPaths() == null
             ? java.util.stream.Stream.empty()

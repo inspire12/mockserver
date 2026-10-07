@@ -1910,7 +1910,7 @@ public class McpToolRegistry {
             }
 
             // Validate
-            OpenApiTrafficValidator validator = new OpenApiTrafficValidator(mockServerLogger);
+            OpenApiTrafficValidator validator = new OpenApiTrafficValidator(mockServerLogger, httpState.getConfiguration());
             List<OpenApiTrafficValidator.TrafficValidationResult> results = validator.validate(specUrlOrPayload, pairs);
 
             // Build response
@@ -2034,7 +2034,7 @@ public class McpToolRegistry {
             final java.net.InetSocketAddress remoteAddress = new java.net.InetSocketAddress(host, port);
             final boolean isSecure = secure;
 
-            OpenApiContractTest contractTest = new OpenApiContractTest(mockServerLogger);
+            OpenApiContractTest contractTest = new OpenApiContractTest(mockServerLogger, httpState.getConfiguration());
             List<OpenApiContractTest.ContractTestResult> results = contractTest.runContractTests(
                 specUrlOrPayload,
                 baseUrl,
@@ -2172,7 +2172,7 @@ public class McpToolRegistry {
             final java.net.InetSocketAddress remoteAddress = new java.net.InetSocketAddress(host, port);
             final boolean isSecure = secure;
 
-            OpenApiResiliencyTest resiliencyTest = new OpenApiResiliencyTest(mockServerLogger);
+            OpenApiResiliencyTest resiliencyTest = new OpenApiResiliencyTest(mockServerLogger, httpState.getConfiguration());
             OpenApiResiliencyTest.ResiliencyTestReport report = resiliencyTest.runResiliencyTests(
                 specUrlOrPayload,
                 baseUrl,

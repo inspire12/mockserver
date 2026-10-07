@@ -14,12 +14,14 @@ import org.mockserver.model.Header;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.model.NottableString;
+import org.mockserver.proxyconfiguration.InetAddressValidator;
 import org.mockserver.socket.ChannelReadPause;
 import org.mockserver.socket.NettyAllocator;
 import org.mockserver.socket.NettyTransport;
 import org.mockserver.socket.tls.NettySslContextFactory;
 import org.slf4j.event.Level;
 
+import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
@@ -108,11 +110,11 @@ public class WebSocketProxyRelayHandler {
     public void relay(final HttpRequest request, final ChannelHandlerContext clientCtx,
                       final String upstreamHost, final int upstreamPort, final boolean tlsUpstream) {
         final Channel clientChannel = clientCtx.channel();
-        // SSRF guard: apply the SAME block checks every matched-forward handler enforces
-        // (forwardProxyBlockPrivateNetworks) so a WS upgrade cannot relay to loopback / link-local (169.254.169.254
-        // cloud metadata) / RFC1918 targets. No-op when the feature is disabled (the default).
+        // forwardProxyBlockPrivateNetworks, as for any forward; connecting to the address checked means a second
+        // DNS answer for the name cannot reach a blocked address. Unchanged (connect by name) when the setting is off.
+        final InetSocketAddress upstreamAddress;
         try {
-            org.mockserver.proxyconfiguration.InetAddressValidator.validateForwardTarget(configuration, upstreamHost);
+            upstreamAddress = InetAddressValidator.validateForwardTarget(configuration, InetSocketAddress.createUnresolved(upstreamHost, upstreamPort));
         } catch (IllegalArgumentException e) {
             failClient(clientChannel, request, e.getMessage());
             return;
@@ -169,7 +171,7 @@ public class WebSocketProxyRelayHandler {
                 }
             });
 
-        bootstrap.connect(upstreamHost, upstreamPort).addListener((ChannelFutureListener) future -> {
+        bootstrap.connect(upstreamAddress).addListener((ChannelFutureListener) future -> {
             if (!future.isSuccess()) {
                 failClient(clientChannel, request, "unable to connect to upstream WebSocket server " + upstreamHost + ":" + upstreamPort
                     + (future.cause() != null ? " - " + future.cause().getMessage() : ""));

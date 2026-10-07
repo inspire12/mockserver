@@ -4,6 +4,7 @@ import org.mockserver.httpclient.ClientConfigurationException;
 import org.mockserver.httpclient.HeaderLimitExceededException;
 import org.mockserver.httpclient.UndecodableResponseException;
 import org.mockserver.model.HttpResponse;
+import org.mockserver.proxyconfiguration.ForwardTargetBlockedException;
 
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -51,14 +52,16 @@ public final class ForwardRetryPolicy {
      * Whether a completed attempt (response or throwable) should be retried. A non-null throwable is
      * transient unless it is a refusal for a header limit, or a response that could not be decoded,
      * which the upstream's next answer would meet again, or a connection that could not be set up from
-     * the configuration, which never reached the upstream and would fail again the same way; a non-null
+     * the configuration, which never reached the upstream and would fail again the same way, or a target
+     * forwardProxyBlockPrivateNetworks refused, which was never sent; a non-null
      * response is transient only when its status code is 502/503/504.
      */
     public static boolean isTransientFailure(HttpResponse response, Throwable throwable) {
         if (throwable != null) {
             return HeaderLimitExceededException.in(throwable) == null
                 && UndecodableResponseException.in(throwable) == null
-                && ClientConfigurationException.in(throwable) == null;
+                && ClientConfigurationException.in(throwable) == null
+                && ForwardTargetBlockedException.in(throwable) == null;
         }
         return response != null
             && response.getStatusCode() != null

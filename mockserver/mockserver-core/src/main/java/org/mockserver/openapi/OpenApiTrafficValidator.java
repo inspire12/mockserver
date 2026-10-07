@@ -3,6 +3,7 @@ package org.mockserver.openapi;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.Operation;
 import org.apache.commons.lang3.tuple.Pair;
+import org.mockserver.configuration.Configuration;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
@@ -21,9 +22,18 @@ import static org.mockserver.openapi.OpenAPIParser.mapOperations;
 public class OpenApiTrafficValidator {
 
     private final MockServerLogger mockServerLogger;
+    private final Configuration configuration;
 
     public OpenApiTrafficValidator(MockServerLogger mockServerLogger) {
+        this(mockServerLogger, null);
+    }
+
+    /**
+     * @param configuration whose forwardProxyBlockPrivateNetworks applies to fetching the spec; null for the global properties
+     */
+    public OpenApiTrafficValidator(MockServerLogger mockServerLogger, Configuration configuration) {
         this.mockServerLogger = mockServerLogger;
+        this.configuration = configuration;
     }
 
     /**
@@ -35,7 +45,7 @@ public class OpenApiTrafficValidator {
      */
     public List<TrafficValidationResult> validate(String specUrlOrPayload, List<Pair<HttpRequest, HttpResponse>> requestResponsePairs) {
         List<TrafficValidationResult> results = new ArrayList<>();
-        OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, mockServerLogger);
+        OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, mockServerLogger, configuration);
 
         for (Pair<HttpRequest, HttpResponse> pair : requestResponsePairs) {
             HttpRequest request = pair.getLeft();
@@ -83,10 +93,10 @@ public class OpenApiTrafficValidator {
 
         // Validate request — thread the already-resolved matched path template through so path
         // parameter presence/schema validation maps the concrete path onto the right template
-        List<String> requestErrors = OpenAPIRequestValidator.validate(specUrlOrPayload, request, mockServerLogger, matchedPath);
+        List<String> requestErrors = OpenAPIRequestValidator.validate(specUrlOrPayload, request, mockServerLogger, matchedPath, configuration);
 
         // Validate response
-        List<String> responseErrors = OpenAPIResponseValidator.validate(specUrlOrPayload, operationId, response, mockServerLogger);
+        List<String> responseErrors = OpenAPIResponseValidator.validate(specUrlOrPayload, operationId, response, mockServerLogger, configuration);
 
         boolean passed = requestErrors.isEmpty() && responseErrors.isEmpty();
 

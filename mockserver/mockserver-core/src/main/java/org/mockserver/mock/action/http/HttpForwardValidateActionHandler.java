@@ -29,7 +29,7 @@ public class HttpForwardValidateActionHandler extends HttpForwardAction {
             boolean strict = action.getValidationMode() == HttpForwardValidateAction.ValidationMode.STRICT;
 
             if (Boolean.TRUE.equals(action.getValidateRequest())) {
-                List<String> requestErrors = OpenAPIRequestValidator.validate(action.getSpecUrlOrPayload(), request, mockServerLogger);
+                List<String> requestErrors = OpenAPIRequestValidator.validate(action.getSpecUrlOrPayload(), request, mockServerLogger, null, configuration);
                 if (!requestErrors.isEmpty()) {
                     if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
                         mockServerLogger.logEvent(
@@ -53,7 +53,8 @@ public class HttpForwardValidateActionHandler extends HttpForwardAction {
                         action.getSpecUrlOrPayload(),
                         findOperationId(action, request),
                         httpResponse,
-                        mockServerLogger
+                        mockServerLogger,
+                        configuration
                     );
                     if (!responseErrors.isEmpty()) {
                         if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
@@ -101,7 +102,7 @@ public class HttpForwardValidateActionHandler extends HttpForwardAction {
         try {
             String requestPath = request.getPath() != null ? request.getPath().getValue() : "/";
             String requestMethod = request.getMethod() != null ? request.getMethod().getValue().toLowerCase() : "get";
-            io.swagger.v3.oas.models.OpenAPI openAPI = org.mockserver.openapi.OpenAPIParser.buildOpenAPI(action.getSpecUrlOrPayload(), mockServerLogger);
+            io.swagger.v3.oas.models.OpenAPI openAPI = org.mockserver.openapi.OpenAPIParser.buildOpenAPI(action.getSpecUrlOrPayload(), mockServerLogger, configuration);
             return openAPI
                 .getPaths()
                 .entrySet()

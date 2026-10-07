@@ -7,6 +7,7 @@ import io.swagger.v3.oas.models.media.MediaType;
 import io.swagger.v3.oas.models.media.Schema;
 import io.swagger.v3.oas.models.parameters.RequestBody;
 import org.apache.commons.lang3.tuple.Pair;
+import org.mockserver.configuration.Configuration;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
@@ -34,9 +35,18 @@ public class OpenApiContractTest {
 
     private static final ObjectWriter OBJECT_WRITER = ObjectMapperFactory.createObjectMapper(new JsonNodeExampleSerializer()).writerWithDefaultPrettyPrinter();
     private final MockServerLogger mockServerLogger;
+    private final Configuration configuration;
 
     public OpenApiContractTest(MockServerLogger mockServerLogger) {
+        this(mockServerLogger, null);
+    }
+
+    /**
+     * @param configuration whose forwardProxyBlockPrivateNetworks applies to fetching the spec; null for the global properties
+     */
+    public OpenApiContractTest(MockServerLogger mockServerLogger, Configuration configuration) {
         this.mockServerLogger = mockServerLogger;
+        this.configuration = configuration;
     }
 
     /**
@@ -55,7 +65,7 @@ public class OpenApiContractTest {
         Function<HttpRequest, HttpResponse> httpSender
     ) {
         List<ContractTestResult> results = new ArrayList<>();
-        OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, mockServerLogger);
+        OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, mockServerLogger, configuration);
 
         // A valid OpenAPI document may have no paths (e.g. a webhooks-only or components-only spec)
         if (openAPI.getPaths() == null) {
@@ -83,7 +93,7 @@ public class OpenApiContractTest {
 
                     // Validate the response
                     List<String> responseErrors = OpenAPIResponseValidator.validate(
-                        specUrlOrPayload, operationId, response, mockServerLogger
+                        specUrlOrPayload, operationId, response, mockServerLogger, configuration
                     );
 
                     int statusCode = response.getStatusCode() != null ? response.getStatusCode() : 0;

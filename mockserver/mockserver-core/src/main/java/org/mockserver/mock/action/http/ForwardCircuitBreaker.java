@@ -3,6 +3,7 @@ package org.mockserver.mock.action.http;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.httpclient.ClientConfigurationException;
 import org.mockserver.httpclient.HeaderLimitExceededException;
+import org.mockserver.proxyconfiguration.ForwardTargetBlockedException;
 import org.mockserver.time.TimeService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -198,7 +199,8 @@ public class ForwardCircuitBreaker {
      */
     public static boolean isNeutral(Throwable throwable) {
         return throwable != null
-            && (ClientConfigurationException.in(throwable) != null || HeaderLimitExceededException.in(throwable) != null);
+            && (ClientConfigurationException.in(throwable) != null || HeaderLimitExceededException.in(throwable) != null
+            || ForwardTargetBlockedException.in(throwable) != null);
     }
 
     /**

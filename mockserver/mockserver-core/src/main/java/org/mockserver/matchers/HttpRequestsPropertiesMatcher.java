@@ -76,9 +76,9 @@ public class HttpRequestsPropertiesMatcher extends AbstractHttpRequestMatcher {
             if (openAPIDefinition != null && isNotBlank(openAPIDefinition.getSpecUrlOrPayload())) {
                 httpRequestPropertiesMatchers = new ArrayList<>();
                 httpRequests = new ArrayList<>();
-                OpenAPISerialiser openAPISerialiser = new OpenAPISerialiser(mockServerLogger);
+                OpenAPISerialiser openAPISerialiser = new OpenAPISerialiser(mockServerLogger, configuration);
                 try {
-                    OpenAPI openAPI = buildOpenAPI(openAPIDefinition.getSpecUrlOrPayload(), mockServerLogger);
+                    OpenAPI openAPI = buildOpenAPI(openAPIDefinition.getSpecUrlOrPayload(), mockServerLogger, configuration);
                     try {
                         String contextPathPrefix = isNotBlank(openAPIDefinition.getContextPathPrefix()) ? openAPIDefinition.getContextPathPrefix() : configuration.openAPIContextPathPrefix();
                         final Map<String, List<Pair<String, Operation>>> stringListMap = openAPISerialiser.retrieveOperations(openAPI, openAPIDefinition.getOperationId(), contextPathPrefix);

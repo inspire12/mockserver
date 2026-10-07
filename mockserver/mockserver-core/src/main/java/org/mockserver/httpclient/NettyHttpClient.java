@@ -196,14 +196,29 @@ public class NettyHttpClient {
         if (!eventLoopGroup.isShuttingDown()) {
             final boolean secure = Boolean.TRUE.equals(httpRequest.isSecure());
             final Map<ProxyConfiguration.Type, ProxyConfiguration> upstreamProxies = upstreamProxiesFor(httpRequest, remoteAddress);
+            // where the connection is made; differs from remoteAddress only when a direct forward is checked
+            InetSocketAddress connectAddress;
             if (!secure && upstreamProxies.containsKey(ProxyConfiguration.Type.HTTP)) {
                 ProxyConfiguration proxyConfiguration = upstreamProxies.get(ProxyConfiguration.Type.HTTP);
                 remoteAddress = proxyConfiguration.getProxyAddress();
                 proxyConfiguration.addProxyAuthenticationHeader(httpRequest);
+                connectAddress = remoteAddress;
             } else if (HttpClientInitializer.tunnelProxy(upstreamProxies, secure) != null) {
                 remoteAddress = remoteAddress == null ? httpRequest.unresolvedSocketAddressFromHostHeader() : unresolvedUnlessIpLiteral(remoteAddress);
-            } else if (remoteAddress == null) {
-                remoteAddress = httpRequest.socketAddressFromHostHeader();
+                connectAddress = remoteAddress;
+            } else {
+                if (remoteAddress == null) {
+                    remoteAddress = httpRequest.socketAddressFromHostHeader();
+                }
+                try {
+                    // forwardProxyBlockPrivateNetworks: the address checked is the address connected to, so a name
+                    // whose DNS answer changes after the caller's check cannot reach a blocked address
+                    connectAddress = forwardProxyClient ? InetAddressValidator.validateForwardTarget(configuration, remoteAddress) : remoteAddress;
+                } catch (ForwardTargetBlockedException blocked) {
+                    CompletableFuture<HttpResponse> refused = new CompletableFuture<>();
+                    refused.completeExceptionally(blocked);
+                    return refused;
+                }
             }
             if (Protocol.HTTP_3.equals(httpRequest.getProtocol())) {
                 if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
@@ -239,6 +254,7 @@ public class NettyHttpClient {
             // backend) is not buffered to completion before its headers reach the client.
             final boolean expectStreaming = !disableStreaming && requestExpectsStreamingResponse(httpRequest);
             final InetSocketAddress effectiveRemoteAddress = remoteAddress;
+            final InetSocketAddress effectiveConnectAddress = connectAddress;
             // HTTP/1.1 keep-alive connections and HTTP/2 parent connections are pooled and reused
             // (a new stream per request for HTTP/2), keyed by host/port/secure/protocol so the two
             // never mix. HTTP/3, binary forwarding and any connection through an upstream proxy bypass the pool.
@@ -265,7 +281,7 @@ public class NettyHttpClient {
                     if (reuseThrowable == null) {
                         responseFuture.complete(reuseMessage);
                     } else if (firstByteMillis.get() == 0 && isRetryableReusedConnectionFailure(reuseThrowable) && isIdempotent(httpRequest)) {
-                        connectFresh(httpRequest, effectiveRemoteAddress, upstreamProxies, connectionTimeoutMillis, disableStreaming, secure, httpProtocol, poolKey, responseFuture, firstByteMillis, connectionEstablishedMillis, httpResponseFuture);
+                        connectFresh(httpRequest, effectiveRemoteAddress, effectiveConnectAddress, upstreamProxies, connectionTimeoutMillis, disableStreaming, secure, httpProtocol, poolKey, responseFuture, firstByteMillis, connectionEstablishedMillis, httpResponseFuture);
                     } else {
                         responseFuture.completeExceptionally(reuseThrowable);
                     }
@@ -300,11 +316,11 @@ public class NettyHttpClient {
                         // bootstrap.connect() is non-blocking.
                         reused.attr(RESPONSE_FUTURE).set(null);
                         reused.close();
-                        connectFresh(httpRequest, effectiveRemoteAddress, upstreamProxies, connectionTimeoutMillis, disableStreaming, secure, httpProtocol, poolKey, responseFuture, firstByteMillis, connectionEstablishedMillis, httpResponseFuture);
+                        connectFresh(httpRequest, effectiveRemoteAddress, effectiveConnectAddress, upstreamProxies, connectionTimeoutMillis, disableStreaming, secure, httpProtocol, poolKey, responseFuture, firstByteMillis, connectionEstablishedMillis, httpResponseFuture);
                     }
                 });
             } else {
-                connectFresh(httpRequest, remoteAddress, upstreamProxies, connectionTimeoutMillis, disableStreaming, secure, httpProtocol, poolKey, responseFuture, firstByteMillis, connectionEstablishedMillis, httpResponseFuture);
+                connectFresh(httpRequest, remoteAddress, connectAddress, upstreamProxies, connectionTimeoutMillis, disableStreaming, secure, httpProtocol, poolKey, responseFuture, firstByteMillis, connectionEstablishedMillis, httpResponseFuture);
             }
 
             responseFuture
@@ -366,7 +382,7 @@ public class NettyHttpClient {
      * of closing it. This is the only connection path when pooling is disabled, so that path remains
      * byte-identical to the historical behaviour.
      */
-    private void connectFresh(HttpRequest httpRequest, InetSocketAddress remoteAddress, Map<ProxyConfiguration.Type, ProxyConfiguration> upstreamProxies, Long connectionTimeoutMillis, boolean disableStreaming, boolean secure, Protocol httpProtocol, String poolKey, CompletableFuture<Message> responseFuture, AtomicLong firstByteMillis, AtomicLong connectionEstablishedMillis, CompletableFuture<HttpResponse> httpResponseFuture) {
+    private void connectFresh(HttpRequest httpRequest, InetSocketAddress remoteAddress, InetSocketAddress connectAddress, Map<ProxyConfiguration.Type, ProxyConfiguration> upstreamProxies, Long connectionTimeoutMillis, boolean disableStreaming, boolean secure, Protocol httpProtocol, String poolKey, CompletableFuture<Message> responseFuture, AtomicLong firstByteMillis, AtomicLong connectionEstablishedMillis, CompletableFuture<HttpResponse> httpResponseFuture) {
         final HttpClientInitializer clientInitializer = new HttpClientInitializer(upstreamProxies, mockServerLogger, forwardProxyClient, nettySslContextFactory, httpProtocol, configuration);
         final EventLoopGroup eventLoopGroup = eventLoopGroup();
         // What the channel's handlers complete. It only becomes the request's outcome once the connection
@@ -400,7 +416,7 @@ public class NettyHttpClient {
             bootstrap.attr(CONNECTION_POOL, connectionPool);
             bootstrap.attr(POOL_KEY, poolKey);
         }
-        bootstrap.connect(remoteAddress)
+        bootstrap.connect(connectAddress)
             .addListener((ChannelFutureListener) future -> {
                 if (future.isSuccess()) {
                     connectionEstablishedMillis.set(System.currentTimeMillis());

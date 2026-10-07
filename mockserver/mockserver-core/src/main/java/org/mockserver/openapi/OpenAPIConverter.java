@@ -86,7 +86,7 @@ public class OpenAPIConverter {
     }
 
     public Map<String, org.mockserver.model.HttpRequest> buildExampleRequests(String specUrlOrPayload, Map<String, Object> operationsAndResponses) {
-        OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, mockServerLogger);
+        OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, mockServerLogger, configuration);
         GenerationOptions generationOptions = GenerationOptions.fromOperationsMap(operationsAndResponses);
         Map<String, org.mockserver.model.HttpRequest> exampleRequests = new LinkedHashMap<>();
         if (openAPI.getPaths() == null) {
@@ -148,7 +148,7 @@ public class OpenAPIConverter {
     }
 
     public List<Expectation> buildExpectations(String specUrlOrPayload, Map<String, Object> operationsAndResponses, String contextPathPrefix) {
-        OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, mockServerLogger);
+        OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, mockServerLogger, configuration);
         String specKey = deriveSpecKey(openAPI, specUrlOrPayload);
         // Optional per-run example-generation options (seed + per-field overrides) embedded under a
         // reserved namespaced key in operationsAndResponses; null when neither is supplied.

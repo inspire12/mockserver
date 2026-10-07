@@ -4468,7 +4468,7 @@ public class HttpState {
 
             org.mockserver.load.LoadScenario scenario;
             try {
-                scenario = org.mockserver.load.LoadScenarioFromOpenAPI.generate(name, specUrlOrPayload, target, profile, mockServerLogger);
+                scenario = org.mockserver.load.LoadScenarioFromOpenAPI.generate(name, specUrlOrPayload, target, profile, mockServerLogger, configuration);
             } catch (IllegalArgumentException e) {
                 return loadScenarioError(objectMapper, "failed to generate load scenario from OpenAPI: " + e.getMessage());
             }
@@ -7237,7 +7237,7 @@ public class HttpState {
                     };
 
                     List<org.mockserver.openapi.OpenApiContractTest.ContractTestResult> results =
-                        new org.mockserver.openapi.OpenApiContractTest(mockServerLogger)
+                        new org.mockserver.openapi.OpenApiContractTest(mockServerLogger, configuration)
                             .runContractTests(specRef, baseUrl, operationIdFilter, httpSender);
 
                     int passed = 0;
@@ -7410,7 +7410,7 @@ public class HttpState {
                     }
 
                     List<org.mockserver.openapi.OpenApiTrafficValidator.TrafficValidationResult> results =
-                        new org.mockserver.openapi.OpenApiTrafficValidator(mockServerLogger)
+                        new org.mockserver.openapi.OpenApiTrafficValidator(mockServerLogger, configuration)
                             .validate(specRef, requestResponsePairs);
 
                     int passed = 0;
