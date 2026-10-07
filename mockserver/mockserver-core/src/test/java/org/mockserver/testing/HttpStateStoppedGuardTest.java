@@ -6,24 +6,23 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.greaterThan;
+import static org.hamcrest.Matchers.hasItems;
 import static org.hamcrest.Matchers.is;
 
 /**
- * Build-time guard: a core test that constructs an {@code HttpState} must stop it.
+ * Build-time guard: a test, in any module, that constructs an {@code HttpState} must stop it.
  *
  * <h2>Why</h2>
  * <p>Only {@code HttpState.stop()} ends the event-log thread an {@code HttpState} starts, and that thread keeps the
@@ -31,15 +30,15 @@ import static org.hamcrest.Matchers.is;
  * until the fork ends.
  *
  * <h2>Limits</h2>
- * <p>A textual check of {@code src/test/java}. Each {@code new HttpState(} must be assigned to a name, and the file
- * must call {@code name.stop()} (or {@code this.name.stop()}), or add the name to a collection it stops with {@code forEach(HttpState::stop)}.
+ * <p>A textual check of every module's {@code src/test/java}, and of the main sources of the test-support modules, as
+ * {@link EphemeralListenerBindGuardTest#testSources()} lists them. Each {@code new HttpState(} must be assigned to a
+ * name, and the file must call {@code name.stop()} (or {@code this.name.stop()}), or add the name to a collection it
+ * stops with {@code forEach(HttpState::stop)}.
  * Whether that call runs in an {@code @After} or a {@code finally} is not checked, and a name reused for another
  * object is not told apart. A construction that is not assigned (returned, passed on, or dropped) is reported unless
  * it is listed in {@link #ALLOWED} with a reason.
  */
 public class HttpStateStoppedGuardTest {
-
-    private static final Path TEST_ROOT = Paths.get("src", "test", "java");
 
     private static final Pattern CONSTRUCTION = Pattern.compile("\\bnew\\s+(?:org\\.mockserver\\.mock\\.)?HttpState\\s*\\(");
 
@@ -51,28 +50,32 @@ public class HttpStateStoppedGuardTest {
     private static final Pattern COMMENT = Pattern.compile("/\\*.*?\\*/|//[^\\n]*", Pattern.DOTALL);
 
     /**
-     * Constructions that are not assigned to a name and are meant, keyed by file name, with how many the file has.
+     * Constructions that are not assigned to a name and are meant, keyed by {@code module/File.java}, with how many the
+     * file has.
      */
     private static final Map<String, Allowed> ALLOWED = Map.of(
-        "AbandonedHttpStateIsCollectedTest.java", new Allowed(1,
+        "mockserver-core/AbandonedHttpStateIsCollectedTest.java", new Allowed(1,
             "drops an HttpState without stop() on purpose, to show what is left once its event log has stopped"),
-        "ClusterPeerClientLifecycleTest.java", new Allowed(1,
+        "mockserver-core/ClusterPeerClientLifecycleTest.java", new Allowed(1,
             "returned by a helper; each test stops the HttpState it gets from it"),
-        "HttpStateFailedConstructionTest.java", new Allowed(1,
+        "mockserver-core/HttpStateFailedConstructionTest.java", new Allowed(1,
             "the constructor throws, so there is nothing to stop"),
-        "HttpStateReadinessTest.java", new Allowed(1,
-            "constructs on another thread into an AtomicReference, whose HttpState the @After method stops")
+        "mockserver-core/HttpStateReadinessTest.java", new Allowed(1,
+            "constructs on another thread into an AtomicReference, whose HttpState the @After method stops"),
+        "mockserver-netty/DashboardWebSocketHandlerTest.java", new Allowed(8,
+            "each is passed to track(), which adds it to trackedHttpStates; the @After method stops every one"),
+        "mockserver-war/MockServerServletTest.java", new Allowed(1,
+            "spied, and the spy injected into the servlet, whose destroy() in the @After method stops it"),
+        "mockserver-proxy-war/ProxyServletTest.java", new Allowed(1,
+            "spied, and the spy injected into the servlet, whose destroy() in the @After method stops it")
     );
 
     @Test
-    public void shouldStopEveryHttpStateACoreTestConstructs() throws IOException {
-        assertThat("expected to find src/test/java at " + TEST_ROOT.toAbsolutePath(), Files.isDirectory(TEST_ROOT), is(true));
-        List<Path> sources;
-        try (Stream<Path> walk = Files.walk(TEST_ROOT)) {
-            sources = walk.filter(path -> path.toString().endsWith(".java")).sorted().collect(Collectors.toList());
-        }
+    public void shouldStopEveryHttpStateATestConstructs() throws IOException {
+        List<Path> sources = EphemeralListenerBindGuardTest.testSources();
+        Collections.sort(sources);
 
-        int constructing = 0;
+        Map<String, Integer> constructingByModule = new TreeMap<>();
         Map<String, List<String>> offendersByFile = new TreeMap<>();
         for (Path source : sources) {
             String fileName = source.getFileName().toString();
@@ -83,20 +86,24 @@ public class HttpStateStoppedGuardTest {
             if (!CONSTRUCTION.matcher(content).find()) {
                 continue;
             }
-            constructing++;
+            String module = EphemeralListenerBindGuardTest.module(source);
+            constructingByModule.merge(module, 1, Integer::sum);
             List<String> offences = offences(content);
-            Allowed allowed = ALLOWED.get(fileName);
+            Allowed allowed = ALLOWED.get(module + "/" + fileName);
             long unassigned = offences.stream().filter(offence -> offence.startsWith(UNASSIGNED)).count();
             if (allowed != null && unassigned == allowed.count) {
                 offences.removeIf(offence -> offence.startsWith(UNASSIGNED));
             }
             if (!offences.isEmpty()) {
-                offendersByFile.put(TEST_ROOT.relativize(source).toString(), offences);
+                offendersByFile.put(EphemeralListenerBindGuardTest.MODULES_ROOT.relativize(source).toString(), offences);
             }
         }
 
-        assertThat("must find the core tests that construct an HttpState", constructing, greaterThan(40));
-        assertThat("a core test constructs an HttpState it never stops; the thread of its event log keeps it, and"
+        assertThat("must find the tests that construct an HttpState in core, netty, war and proxy-war: " + constructingByModule,
+            constructingByModule.keySet(), hasItems("mockserver-core", "mockserver-netty", "mockserver-war", "mockserver-proxy-war"));
+        assertThat("must find the core tests that construct an HttpState", constructingByModule.get("mockserver-core"), greaterThan(40));
+        assertThat("must find the netty tests that construct an HttpState", constructingByModule.get("mockserver-netty"), greaterThan(40));
+        assertThat("a test constructs an HttpState it never stops; the thread of its event log keeps it, and"
                 + " everything it holds, for the rest of the test JVM. Stop it in an @After method or a finally block:\n"
                 + describe(offendersByFile),
             offendersByFile.keySet(), is(empty()));

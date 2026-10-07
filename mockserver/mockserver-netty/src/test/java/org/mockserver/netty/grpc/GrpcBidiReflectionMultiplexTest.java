@@ -17,6 +17,7 @@ import io.netty.handler.codec.http2.Http2DataFrame;
 import io.netty.handler.codec.http2.Http2HeadersFrame;
 import io.netty.handler.codec.http2.Http2StreamFrame;
 import io.netty.handler.codec.http2.Http2StreamFrameToHttpObjectCodec;
+import org.junit.After;
 import org.junit.Test;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.dashboard.DashboardWebSocketHandler;
@@ -70,6 +71,13 @@ import static org.mockserver.configuration.Configuration.configuration;
  * {@code greeting.dsc} descriptor which defines {@code com.example.grpc.GreetingService}.
  */
 public class GrpcBidiReflectionMultiplexTest {
+
+    private final List<HttpState> httpStates = new ArrayList<>();
+
+    @After
+    public void stopHttpStates() {
+        httpStates.forEach(HttpState::stop);
+    }
 
     private static GrpcProtoDescriptorStore loadDescriptorStore() {
         GrpcProtoDescriptorStore store = new GrpcProtoDescriptorStore(new MockServerLogger());
@@ -230,6 +238,7 @@ public class GrpcBidiReflectionMultiplexTest {
         Configuration config = configuration();
         MockServerLogger logger = new MockServerLogger();
         HttpState httpState = new HttpState(config, logger, mock(Scheduler.class));
+        httpStates.add(httpState);
 
         CallbackWebSocketServerHandler wsHandler = new CallbackWebSocketServerHandler(httpState);
         DashboardWebSocketHandler dashHandler = new DashboardWebSocketHandler(httpState, false, false);
@@ -280,6 +289,7 @@ public class GrpcBidiReflectionMultiplexTest {
         Configuration config = configuration();
         MockServerLogger logger = new MockServerLogger();
         HttpState httpState = new HttpState(config, logger, mock(Scheduler.class));
+        httpStates.add(httpState);
 
         CallbackWebSocketServerHandler wsHandler = new CallbackWebSocketServerHandler(httpState);
         DashboardWebSocketHandler dashHandler = new DashboardWebSocketHandler(httpState, false, false);
@@ -465,6 +475,7 @@ public class GrpcBidiReflectionMultiplexTest {
         Configuration config = configuration();
         MockServerLogger logger = new MockServerLogger();
         HttpState httpState = new HttpState(config, logger, mock(Scheduler.class));
+        httpStates.add(httpState);
 
         CallbackWebSocketServerHandler wsHandler = new CallbackWebSocketServerHandler(httpState);
         DashboardWebSocketHandler dashHandler = new DashboardWebSocketHandler(httpState, false, false);
@@ -506,6 +517,7 @@ public class GrpcBidiReflectionMultiplexTest {
         Configuration config = configuration();
         MockServerLogger logger = new MockServerLogger();
         HttpState httpState = new HttpState(config, logger, mock(Scheduler.class));
+        httpStates.add(httpState);
 
         CallbackWebSocketServerHandler wsHandler = new CallbackWebSocketServerHandler(httpState);
         DashboardWebSocketHandler dashHandler = new DashboardWebSocketHandler(httpState, false, false);

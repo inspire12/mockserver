@@ -2,6 +2,7 @@ package org.mockserver.dashboard;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.After;
 import org.junit.Test;
 import org.mockserver.dashboard.DashboardWebSocketHandlerTest.MockChannelHandlerContext;
 import org.mockserver.log.MockServerEventLog;
@@ -65,6 +66,13 @@ import static org.mockserver.model.HttpResponse.response;
  */
 public class DashboardWebSocketFrameContractTest {
 
+    private final List<HttpState> httpStates = new ArrayList<>();
+
+    @After
+    public void stopHttpStates() {
+        httpStates.forEach(HttpState::stop);
+    }
+
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String CONTRACT_RELATIVE_PATH = "mockserver-ui/src/__fixtures__/dashboardFrameContract.json";
 
@@ -113,6 +121,7 @@ public class DashboardWebSocketFrameContractTest {
         MockServerLogger mockServerLogger = new MockServerLogger(DashboardWebSocketFrameContractTest.class);
         Scheduler scheduler = new Scheduler(configuration(), mockServerLogger, true);
         HttpState httpState = new HttpState(configuration(), mockServerLogger, scheduler);
+        httpStates.add(httpState);
 
         String sharedCorrelationId = UUIDService.getUUID();
         List<LogEntry> logEntries = Arrays.asList(

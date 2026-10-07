@@ -55,6 +55,7 @@ public class ExportOptimisationReportIntegrationTest {
     @After
     public void resetConfig() {
         ConfigurationProperties.fixtureBodyRedactFields("");
+        httpState.stop();
     }
 
     private void seedOpenAiForward(String userText, int inTok, int outTok) {

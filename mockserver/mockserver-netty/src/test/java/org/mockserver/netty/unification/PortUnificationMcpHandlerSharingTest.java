@@ -8,6 +8,7 @@ import io.netty.handler.codec.http2.Http2FrameCodecBuilder;
 import io.netty.handler.codec.http2.Http2MultiplexHandler;
 import io.netty.handler.codec.http2.Http2StreamChannel;
 import io.netty.handler.codec.http2.Http2StreamChannelBootstrap;
+import org.junit.After;
 import org.junit.Test;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.lifecycle.LifeCycle;
@@ -22,6 +23,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.Set;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
@@ -37,6 +40,13 @@ import static org.mockserver.configuration.Configuration.configuration;
  * for the life of every connection.
  */
 public class PortUnificationMcpHandlerSharingTest {
+
+    private final List<HttpState> httpStates = new ArrayList<>();
+
+    @After
+    public void stopHttpStates() {
+        httpStates.forEach(HttpState::stop);
+    }
 
     private static final int CONNECTION_COUNT = 20;
 
@@ -54,6 +64,7 @@ public class PortUnificationMcpHandlerSharingTest {
         assertThat("test requires MCP enabled (the default)", configuration.mcpEnabled(), is(true));
 
         HttpState httpState = new HttpState(configuration, new MockServerLogger(), mock(Scheduler.class));
+        httpStates.add(httpState);
         MockServerUnificationInitializer initializer = new MockServerUnificationInitializer(
             configuration,
             mock(LifeCycle.class),
@@ -92,6 +103,7 @@ public class PortUnificationMcpHandlerSharingTest {
         assertThat("test requires MCP enabled (the default)", configuration.mcpEnabled(), is(true));
 
         HttpState httpState = new HttpState(configuration, new MockServerLogger(), mock(Scheduler.class));
+        httpStates.add(httpState);
         MockServerUnificationInitializer initializer = new MockServerUnificationInitializer(
             configuration,
             mock(LifeCycle.class),

@@ -29,6 +29,7 @@ import static org.mockserver.configuration.Configuration.configuration;
 
 public class DnsRequestHandlerTest {
 
+    private Scheduler scheduler;
     private HttpState httpState;
     private EmbeddedChannel channel;
 
@@ -37,7 +38,7 @@ public class DnsRequestHandlerTest {
         DnsIntentRegistry.getInstance().clear();
         Configuration configuration = configuration();
         MockServerLogger logger = new MockServerLogger(configuration, DnsRequestHandlerTest.class);
-        Scheduler scheduler = new Scheduler(configuration, logger);
+        scheduler = new Scheduler(configuration, logger);
         httpState = new HttpState(configuration, logger, scheduler);
         DnsRequestHandler handler = new DnsRequestHandler(logger, httpState);
         channel = new EmbeddedChannel(new DatagramDnsResponseEncoder(), handler);
@@ -49,6 +50,8 @@ public class DnsRequestHandlerTest {
         if (channel != null) {
             channel.finishAndReleaseAll();
         }
+        httpState.stop();
+        scheduler.shutdown();
     }
 
     @Test

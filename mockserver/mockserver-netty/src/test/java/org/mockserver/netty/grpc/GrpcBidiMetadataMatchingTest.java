@@ -7,6 +7,7 @@ import io.netty.handler.codec.http2.DefaultHttp2DataFrame;
 import io.netty.handler.codec.http2.DefaultHttp2Headers;
 import io.netty.handler.codec.http2.DefaultHttp2HeadersFrame;
 import io.netty.handler.codec.http2.Http2StreamFrameToHttpObjectCodec;
+import org.junit.After;
 import org.junit.Test;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.dashboard.DashboardWebSocketHandler;
@@ -31,6 +32,8 @@ import org.mockserver.scheduler.Scheduler;
 import java.nio.file.Paths;
 import java.util.Base64;
 import java.util.EnumSet;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
@@ -57,6 +60,13 @@ import static org.mockserver.configuration.Configuration.configuration;
  */
 public class GrpcBidiMetadataMatchingTest {
 
+    private final List<HttpState> httpStates = new ArrayList<>();
+
+    @After
+    public void stopHttpStates() {
+        httpStates.forEach(HttpState::stop);
+    }
+
     private static final String CHAT_PATH = "/com.example.grpc.GreetingService/Chat";
     private static final String CLIENT_ID = "test-h2-bidi-inbound-client";
 
@@ -70,11 +80,12 @@ public class GrpcBidiMetadataMatchingTest {
      * Builds a router primed with the given expectation, on its own {@link HttpState}, and returns
      * the channel it is installed on together with that state.
      */
-    private static Router newRouter(Expectation expectation) {
+    private Router newRouter(Expectation expectation) {
         GrpcProtoDescriptorStore store = loadDescriptorStore();
         Configuration config = configuration();
         MockServerLogger logger = new MockServerLogger();
         HttpState httpState = new HttpState(config, logger, mock(Scheduler.class));
+        httpStates.add(httpState);
         httpState.add(expectation);
 
         CallbackWebSocketServerHandler wsHandler = new CallbackWebSocketServerHandler(httpState);

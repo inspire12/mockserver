@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.*;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockserver.lifecycle.LifeCycle;
@@ -15,6 +16,8 @@ import org.mockserver.serialization.ObjectMapperFactory;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.is;
@@ -33,6 +36,13 @@ import static org.mockserver.configuration.Configuration.configuration;
  * {@code -32603 Internal error} envelope JSON-RPC requires.
  */
 public class McpToolFailureTest {
+
+    private final List<HttpState> httpStates = new ArrayList<>();
+
+    @After
+    public void stopHttpStates() {
+        httpStates.forEach(HttpState::stop);
+    }
 
     private EmbeddedChannel channel;
     private ObjectMapper objectMapper;
@@ -57,6 +67,7 @@ public class McpToolFailureTest {
         when(server.isRunning()).thenReturn(true);
 
         HttpState httpState = new HttpState(configuration(), new MockServerLogger(), mock(Scheduler.class));
+        httpStates.add(httpState);
         McpSessionManager sessionManager = new McpSessionManager(httpState.getMockServerLogger());
         McpRequestProcessor processor = new McpRequestProcessor(
             httpState, server, sessionManager, new ThrowingToolRegistry(httpState, server));
@@ -166,6 +177,7 @@ public class McpToolFailureTest {
         when(server.getLocalPorts()).thenReturn(Arrays.asList(1080));
         when(server.isRunning()).thenReturn(true);
         HttpState httpState = new HttpState(configuration(), new MockServerLogger(), mock(Scheduler.class));
+        httpStates.add(httpState);
         McpSessionManager sessionManager = new McpSessionManager(httpState.getMockServerLogger());
         McpRequestProcessor exploding = new McpRequestProcessor(httpState, server, sessionManager) {
             @Override

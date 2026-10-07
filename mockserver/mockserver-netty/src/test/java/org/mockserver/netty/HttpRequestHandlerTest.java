@@ -5,6 +5,7 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.FullHttpResponse;
 import io.netty.util.CharsetUtil;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Rule;
@@ -36,9 +37,11 @@ import org.slf4j.event.Level;
 
 import java.net.BindException;
 import java.net.InetSocketAddress;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import static org.hamcrest.CoreMatchers.containsString;
@@ -68,6 +71,7 @@ public class HttpRequestHandlerTest {
     @Rule
     public ExpectedException exception = ExpectedException.none();
     private HttpState httpStateHandler;
+    private final List<HttpState> httpStates = new ArrayList<>();
     protected LifeCycle server;
     private HttpActionHandler mockActionHandler;
     private EmbeddedChannel embeddedChannel;
@@ -90,11 +94,18 @@ public class HttpRequestHandlerTest {
         mockActionHandler = mock(HttpActionHandler.class);
 
         httpStateHandler = new HttpState(configuration(), new MockServerLogger(), synchronousScheduler());
+
+        httpStates.add(httpStateHandler);
         mockServerHandler = new HttpRequestHandler(configuration(), server, httpStateHandler, null);
 
         openMocks(this);
 
         embeddedChannel = new EmbeddedChannel(mockServerHandler);
+    }
+
+    @After
+    public void stopHttpStates() {
+        httpStates.forEach(HttpState::stop);
     }
 
     @Test
@@ -310,6 +321,7 @@ public class HttpRequestHandlerTest {
     private void rebuildWithMetricsEnabled() {
         org.mockserver.configuration.Configuration configuration = configuration().metricsEnabled(true);
         httpStateHandler = new HttpState(configuration, new MockServerLogger(), synchronousScheduler());
+        httpStates.add(httpStateHandler);
         mockServerHandler = new HttpRequestHandler(configuration, server, httpStateHandler, null);
         embeddedChannel = new EmbeddedChannel(mockServerHandler);
     }
@@ -970,6 +982,7 @@ public class HttpRequestHandlerTest {
     private org.mockserver.configuration.Configuration rebuildWithSharedConfiguration() {
         org.mockserver.configuration.Configuration configuration = configuration();
         httpStateHandler = new HttpState(configuration, new MockServerLogger(), synchronousScheduler());
+        httpStates.add(httpStateHandler);
         mockServerHandler = new HttpRequestHandler(configuration, server, httpStateHandler, null);
         embeddedChannel = new EmbeddedChannel(mockServerHandler);
         return configuration;
@@ -1272,6 +1285,7 @@ public class HttpRequestHandlerTest {
             .controlPlaneAuthorizationEnabled(authorizationEnabled)
             .controlPlaneScopeMapping(mapping);
         httpStateHandler = new HttpState(configuration, new MockServerLogger(), synchronousScheduler());
+        httpStates.add(httpStateHandler);
         mockServerHandler = new HttpRequestHandler(configuration, server, httpStateHandler, null);
         embeddedChannel = new EmbeddedChannel(mockServerHandler);
     }

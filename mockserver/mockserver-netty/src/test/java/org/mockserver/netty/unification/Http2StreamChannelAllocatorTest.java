@@ -9,6 +9,7 @@ import io.netty.handler.codec.http2.DefaultHttp2FrameWriter;
 import io.netty.handler.codec.http2.DefaultHttp2Headers;
 import io.netty.handler.codec.http2.Http2Settings;
 import io.netty.handler.codec.http2.Http2StreamChannel;
+import org.junit.After;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockserver.configuration.Configuration;
@@ -21,6 +22,8 @@ import org.mockserver.scheduler.Scheduler;
 import org.mockserver.socket.NettyAllocator;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.instanceOf;
@@ -40,6 +43,13 @@ import static org.mockserver.configuration.Configuration.configuration;
  */
 public class Http2StreamChannelAllocatorTest {
 
+    private final List<HttpState> httpStates = new ArrayList<>();
+
+    @After
+    public void stopHttpStates() {
+        httpStates.forEach(HttpState::stop);
+    }
+
     private static final String H2C_PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
     @Test
@@ -49,10 +59,12 @@ public class Http2StreamChannelAllocatorTest {
         EmbeddedChannel connection = new EmbeddedChannel();
         // mirror MockServer's childOption: the connection channel itself is pooled
         connection.config().setAllocator(NettyAllocator.ALLOCATOR);
+        HttpState httpState = new HttpState(config, new MockServerLogger(), mock(Scheduler.class));
+        httpStates.add(httpState);
         connection.pipeline().addLast(new MockServerUnificationInitializer(
             config,
             mock(LifeCycle.class),
-            new HttpState(config, new MockServerLogger(), mock(Scheduler.class)),
+            httpState,
             actionHandler,
             null
         ));

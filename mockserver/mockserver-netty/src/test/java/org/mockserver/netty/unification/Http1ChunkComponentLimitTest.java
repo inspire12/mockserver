@@ -273,16 +273,18 @@ public class Http1ChunkComponentLimitTest {
     private static final class Chain {
         private final EmbeddedChannel channel = new EmbeddedChannel();
         private final CapturingHandler capture = new CapturingHandler();
+        private final HttpState httpState;
         private boolean switched;
 
         Chain(Configuration configuration, ByteBufAllocator allocator) {
             if (allocator != null) {
                 channel.config().setAllocator(allocator);
             }
+            httpState = new HttpState(configuration, new MockServerLogger(), mock(Scheduler.class));
             channel.pipeline().addLast(new MockServerUnificationInitializer(
                 configuration,
                 mock(LifeCycle.class),
-                new HttpState(configuration, new MockServerLogger(), mock(Scheduler.class)),
+                httpState,
                 mock(HttpActionHandler.class),
                 null
             ));
@@ -335,6 +337,7 @@ public class Http1ChunkComponentLimitTest {
                 }
             }
             channel.finishAndReleaseAll();
+            httpState.stop();
         }
     }
 

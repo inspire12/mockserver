@@ -14,6 +14,7 @@ import io.netty.handler.codec.http2.Http2DataFrame;
 import io.netty.handler.codec.http2.Http2HeadersFrame;
 import io.netty.handler.codec.http2.Http2StreamFrame;
 import io.netty.handler.codec.http2.Http2StreamFrameToHttpObjectCodec;
+import org.junit.After;
 import org.junit.Test;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.dashboard.DashboardWebSocketHandler;
@@ -73,6 +74,13 @@ import static org.mockserver.configuration.Configuration.configuration;
  * is designed to FAIL if responses are buffered until END_STREAM.
  */
 public class GrpcBidiInterleavingMultiplexTest {
+
+    private final List<HttpState> httpStates = new ArrayList<>();
+
+    @After
+    public void stopHttpStates() {
+        httpStates.forEach(HttpState::stop);
+    }
 
     private static GrpcProtoDescriptorStore loadDescriptorStore() {
         GrpcProtoDescriptorStore store = new GrpcProtoDescriptorStore(new MockServerLogger());
@@ -292,6 +300,7 @@ public class GrpcBidiInterleavingMultiplexTest {
 
         MockServerLogger logger = new MockServerLogger();
         HttpState httpState = new HttpState(config, logger, mock(Scheduler.class));
+        httpStates.add(httpState);
 
         // Build sharable handlers (minimal mocks/instances for pipeline assembly)
         CallbackWebSocketServerHandler wsHandler = new CallbackWebSocketServerHandler(httpState);
@@ -351,6 +360,7 @@ public class GrpcBidiInterleavingMultiplexTest {
 
         MockServerLogger logger = new MockServerLogger();
         HttpState httpState = new HttpState(config, logger, mock(Scheduler.class));
+        httpStates.add(httpState);
 
         CallbackWebSocketServerHandler wsHandler = new CallbackWebSocketServerHandler(httpState);
         DashboardWebSocketHandler dashHandler = new DashboardWebSocketHandler(httpState, false, false);
@@ -402,6 +412,7 @@ public class GrpcBidiInterleavingMultiplexTest {
 
         MockServerLogger logger = new MockServerLogger();
         HttpState httpState = new HttpState(config, logger, mock(Scheduler.class));
+        httpStates.add(httpState);
 
         CallbackWebSocketServerHandler wsHandler = new CallbackWebSocketServerHandler(httpState);
         DashboardWebSocketHandler dashHandler = new DashboardWebSocketHandler(httpState, false, false);
@@ -769,6 +780,7 @@ public class GrpcBidiInterleavingMultiplexTest {
         Configuration config = configuration();
         MockServerLogger logger = new MockServerLogger();
         HttpState httpState = new HttpState(config, logger, mock(Scheduler.class));
+        httpStates.add(httpState);
 
         // Add a times(1) HttpResponse expectation on the bidi Chat method path
         Expectation timesOneExpectation = new Expectation(
@@ -1081,6 +1093,7 @@ public class GrpcBidiInterleavingMultiplexTest {
         Configuration config = configuration();
         MockServerLogger logger = new MockServerLogger();
         HttpState httpState = new HttpState(config, logger, mock(Scheduler.class));
+        httpStates.add(httpState);
 
         // Add a times(1) GrpcBidiResponse expectation on the Chat bidi method
         GrpcBidiResponse bidiResponse = GrpcBidiResponse.grpcBidiResponse()
@@ -1152,6 +1165,7 @@ public class GrpcBidiInterleavingMultiplexTest {
         Configuration config = configuration();
         MockServerLogger logger = new MockServerLogger();
         HttpState httpState = new HttpState(config, logger, mock(Scheduler.class));
+        httpStates.add(httpState);
 
         GrpcBidiResponse bidiResponse = GrpcBidiResponse.grpcBidiResponse()
             .withRule(GrpcBidiRule.grpcBidiRule(".*")

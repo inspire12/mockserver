@@ -51,6 +51,7 @@ public class McpToolRegistryTest {
     public void resetServiceChaos() {
         org.mockserver.mock.action.http.ServiceChaosRegistry.getInstance().reset();
         org.mockserver.mock.CassetteRegistry.getInstance().reset();
+        httpState.stop();
     }
 
     @Test

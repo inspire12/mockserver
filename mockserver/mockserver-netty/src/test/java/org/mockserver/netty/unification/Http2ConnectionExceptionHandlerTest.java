@@ -28,6 +28,7 @@ import io.netty.handler.ssl.SslProvider;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.netty.handler.ssl.util.SelfSignedCertificate;
 import io.netty.util.internal.OutOfDirectMemoryError;
+import org.junit.After;
 import org.junit.Test;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.exception.ExceptionHandling;
@@ -76,6 +77,13 @@ import static org.mockserver.configuration.Configuration.configuration;
  * connection error.
  */
 public class Http2ConnectionExceptionHandlerTest {
+
+    private final List<HttpState> httpStates = new ArrayList<>();
+
+    @After
+    public void stopHttpStates() {
+        httpStates.forEach(HttpState::stop);
+    }
 
     private static final String H2C_PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
     private static final int LIMIT = 1024;
@@ -387,10 +395,12 @@ public class Http2ConnectionExceptionHandlerTest {
      */
     private EmbeddedChannel directHttp2Connection(Configuration configuration) {
         EmbeddedChannel channel = new EmbeddedChannel();
+        HttpState httpState = new HttpState(configuration, mockServerLogger, mock(Scheduler.class));
+        httpStates.add(httpState);
         channel.pipeline().addLast(new MockServerUnificationInitializer(
             configuration,
             mock(LifeCycle.class),
-            new HttpState(configuration, mockServerLogger, mock(Scheduler.class)),
+            httpState,
             mock(HttpActionHandler.class),
             null
         ));

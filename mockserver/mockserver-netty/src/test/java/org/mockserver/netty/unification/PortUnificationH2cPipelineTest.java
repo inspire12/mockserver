@@ -5,6 +5,7 @@ import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http2.Http2FrameCodec;
 import io.netty.handler.codec.http2.Http2MultiplexHandler;
 import io.netty.handler.codec.http2.HttpToHttp2ConnectionHandler;
+import org.junit.After;
 import org.junit.Test;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.configuration.ConfigurationProperties;
@@ -16,6 +17,8 @@ import org.mockserver.netty.MockServerUnificationInitializer;
 import org.mockserver.scheduler.Scheduler;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
@@ -34,6 +37,13 @@ import static org.mockserver.configuration.Configuration.configuration;
  * effect even with the flag off (its default).
  */
 public class PortUnificationH2cPipelineTest {
+
+    private final List<HttpState> httpStates = new ArrayList<>();
+
+    @After
+    public void stopHttpStates() {
+        httpStates.forEach(HttpState::stop);
+    }
 
     // Deliberately a literal, NOT PortUnificationHandler.H2C_PREFACE. This test feeds the preface in
     // and asserts the pipeline switches to h2c; if it read the same constant the production code
@@ -61,10 +71,12 @@ public class PortUnificationH2cPipelineTest {
             Configuration config = configuration();
 
             EmbeddedChannel channel = new EmbeddedChannel();
+            HttpState httpState = new HttpState(config, new MockServerLogger(), mock(Scheduler.class));
+            httpStates.add(httpState);
             channel.pipeline().addLast(new MockServerUnificationInitializer(
                 config,
                 mock(LifeCycle.class),
-                new HttpState(config, new MockServerLogger(), mock(Scheduler.class)),
+                httpState,
                 mock(HttpActionHandler.class),
                 null
             ));
@@ -106,10 +118,12 @@ public class PortUnificationH2cPipelineTest {
             Configuration config = configuration();
 
             EmbeddedChannel channel = new EmbeddedChannel();
+            HttpState httpState = new HttpState(config, new MockServerLogger(), mock(Scheduler.class));
+            httpStates.add(httpState);
             channel.pipeline().addLast(new MockServerUnificationInitializer(
                 config,
                 mock(LifeCycle.class),
-                new HttpState(config, new MockServerLogger(), mock(Scheduler.class)),
+                httpState,
                 mock(HttpActionHandler.class),
                 null
             ));

@@ -14,6 +14,9 @@ import org.mockserver.mock.HttpState;
 import org.mockserver.mock.action.http.HttpActionHandler;
 import org.mockserver.scheduler.Scheduler;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
@@ -24,6 +27,9 @@ import static org.mockserver.model.HttpResponse.response;
 
 public class EarlyMatchingHandlerTest {
 
+    private final List<HttpState> httpStates = new ArrayList<>();
+    private final List<Scheduler> schedulers = new ArrayList<>();
+
     private EmbeddedChannel channel;
 
     @After
@@ -31,6 +37,8 @@ public class EarlyMatchingHandlerTest {
         if (channel != null) {
             channel.finishAndReleaseAll();
         }
+        httpStates.forEach(HttpState::stop);
+        schedulers.forEach(Scheduler::shutdown);
     }
 
     @Test
@@ -39,7 +47,9 @@ public class EarlyMatchingHandlerTest {
         Configuration configuration = configuration();
         MockServerLogger logger = new MockServerLogger(configuration, EarlyMatchingHandlerTest.class);
         Scheduler scheduler = new Scheduler(configuration, logger);
+        schedulers.add(scheduler);
         HttpState httpState = new HttpState(configuration, logger, scheduler);
+        httpStates.add(httpState);
         HttpActionHandler actionHandler = new HttpActionHandler(configuration, null, httpState, null, null);
         httpState.add(new Expectation(
             request().withMethod("POST").withPath("/upload").withRespondBeforeBody(true)
@@ -67,7 +77,9 @@ public class EarlyMatchingHandlerTest {
         Configuration configuration = configuration();
         MockServerLogger logger = new MockServerLogger(configuration, EarlyMatchingHandlerTest.class);
         Scheduler scheduler = new Scheduler(configuration, logger);
+        schedulers.add(scheduler);
         HttpState httpState = new HttpState(configuration, logger, scheduler);
+        httpStates.add(httpState);
         HttpActionHandler actionHandler = new HttpActionHandler(configuration, null, httpState, null, null);
         // no expectations with respondBeforeBody=true
 
@@ -94,7 +106,9 @@ public class EarlyMatchingHandlerTest {
         Configuration configuration = configuration();
         MockServerLogger logger = new MockServerLogger(configuration, EarlyMatchingHandlerTest.class);
         Scheduler scheduler = new Scheduler(configuration, logger);
+        schedulers.add(scheduler);
         HttpState httpState = new HttpState(configuration, logger, scheduler);
+        httpStates.add(httpState);
         HttpActionHandler actionHandler = new HttpActionHandler(configuration, null, httpState, null, null);
         httpState.add(new Expectation(
             request().withMethod("POST").withPath("/upload").withRespondBeforeBody(true)
@@ -124,7 +138,9 @@ public class EarlyMatchingHandlerTest {
         Configuration configuration = configuration();
         MockServerLogger logger = new MockServerLogger(configuration, EarlyMatchingHandlerTest.class);
         Scheduler scheduler = new Scheduler(configuration, logger);
+        schedulers.add(scheduler);
         HttpState httpState = new HttpState(configuration, logger, scheduler);
+        httpStates.add(httpState);
         HttpActionHandler actionHandler = new HttpActionHandler(configuration, null, httpState, null, null);
         httpState.add(new Expectation(
             request().withRespondBeforeBody(true)
@@ -152,7 +168,9 @@ public class EarlyMatchingHandlerTest {
         Configuration configuration = configuration();
         MockServerLogger logger = new MockServerLogger(configuration, EarlyMatchingHandlerTest.class);
         Scheduler scheduler = new Scheduler(configuration, logger);
+        schedulers.add(scheduler);
         HttpState httpState = new HttpState(configuration, logger, scheduler);
+        httpStates.add(httpState);
         HttpActionHandler actionHandler = new HttpActionHandler(configuration, null, httpState, null, null);
         httpState.add(new Expectation(
             request().withRespondBeforeBody(true)

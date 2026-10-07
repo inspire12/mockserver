@@ -3,6 +3,7 @@ package org.mockserver.netty.mcp;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
@@ -58,6 +59,11 @@ public class RecordLlmFixturesIntegrationTest {
         httpState = new HttpState(configuration(), new MockServerLogger(), mock(Scheduler.class));
         toolRegistry = new McpToolRegistry(httpState, server);
         objectMapper = ObjectMapperFactory.buildObjectMapperWithoutRemovingEmptyValues();
+    }
+
+    @After
+    public void stopHttpState() {
+        httpState.stop();
     }
 
     /**

@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.*;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockserver.lifecycle.LifeCycle;
@@ -39,6 +40,13 @@ import static org.mockserver.configuration.Configuration.configuration;
  */
 public class McpContractTestAgainstMockServerTest {
 
+    private final List<HttpState> httpStates = new ArrayList<>();
+
+    @After
+    public void stopHttpStates() {
+        httpStates.forEach(HttpState::stop);
+    }
+
     private EmbeddedChannel channel;
     private ObjectMapper objectMapper;
 
@@ -50,6 +58,7 @@ public class McpContractTestAgainstMockServerTest {
         when(server.isRunning()).thenReturn(true);
 
         HttpState httpState = new HttpState(configuration(), new MockServerLogger(), mock(Scheduler.class));
+        httpStates.add(httpState);
         McpSessionManager sessionManager = new McpSessionManager(httpState.getMockServerLogger());
         channel = new EmbeddedChannel(new McpStreamableHttpHandler(httpState, server, sessionManager));
         objectMapper = ObjectMapperFactory.buildObjectMapperWithoutRemovingEmptyValues();
@@ -200,6 +209,7 @@ public class McpContractTestAgainstMockServerTest {
         when(server.getLocalPorts()).thenReturn(Arrays.asList(1080));
         when(server.isRunning()).thenReturn(true);
         HttpState httpState = new HttpState(configuration(), new MockServerLogger(), mock(Scheduler.class));
+        httpStates.add(httpState);
         McpRequestProcessor processor = new McpRequestProcessor(
             httpState, server, new McpSessionManager(httpState.getMockServerLogger()));
 

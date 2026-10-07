@@ -53,6 +53,8 @@ import static org.mockserver.configuration.Configuration.configuration;
  */
 public class Http2MultiplexPerConnectionCodecTest {
 
+    private final List<HttpState> httpStates = new ArrayList<>();
+
     private static final InetSocketAddress SERVER_ADDRESS = new InetSocketAddress("127.0.0.1", 1080);
 
     private final List<EmbeddedChannel> connections = new ArrayList<>();
@@ -63,6 +65,7 @@ public class Http2MultiplexPerConnectionCodecTest {
     public void setUp() {
         Configuration configuration = configuration();
         HttpState httpState = new HttpState(configuration, new MockServerLogger(), mock(Scheduler.class));
+        httpStates.add(httpState);
         // one initializer per connection, as PortUnificationHandler.switchToHttp2Multiplex builds them
         initializerA = initializer(configuration, httpState);
         initializerB = initializer(configuration, httpState);
@@ -73,6 +76,7 @@ public class Http2MultiplexPerConnectionCodecTest {
         for (EmbeddedChannel connection : connections) {
             connection.finishAndReleaseAll();
         }
+        httpStates.forEach(HttpState::stop);
     }
 
     @Test

@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.*;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockserver.authentication.AuthenticationException;
@@ -20,6 +21,8 @@ import org.mockserver.serialization.ObjectMapperFactory;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.is;
@@ -31,6 +34,8 @@ import static org.mockito.Mockito.when;
 import static org.mockserver.configuration.Configuration.configuration;
 
 public class McpStreamableHttpHandlerTest {
+
+    private final List<HttpState> httpStates = new ArrayList<>();
 
     private EmbeddedChannel channel;
     private HttpState httpState;
@@ -50,6 +55,12 @@ public class McpStreamableHttpHandlerTest {
         McpStreamableHttpHandler handler = new McpStreamableHttpHandler(httpState, server, sessionManager);
         channel = new EmbeddedChannel(handler);
         objectMapper = ObjectMapperFactory.buildObjectMapperWithoutRemovingEmptyValues();
+    }
+
+    @After
+    public void stopHttpStates() {
+        httpState.stop();
+        httpStates.forEach(HttpState::stop);
     }
 
     private FullHttpResponse sendPost(String body) {
@@ -1507,6 +1518,7 @@ public class McpStreamableHttpHandlerTest {
             .controlPlaneAuthorizationEnabled(authorizationEnabled)
             .controlPlaneScopeMapping(mapping);
         HttpState authzState = new HttpState(cfg, new MockServerLogger(), mock(Scheduler.class));
+        httpStates.add(authzState);
         authzState.setControlPlaneAuthenticationHandler(new AuthenticationHandler() {
             @Override
             public boolean controlPlaneRequestAuthenticated(HttpRequest request) {

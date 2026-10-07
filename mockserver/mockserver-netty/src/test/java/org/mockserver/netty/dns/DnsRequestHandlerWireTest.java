@@ -51,6 +51,7 @@ import static org.mockserver.configuration.Configuration.configuration;
  */
 public class DnsRequestHandlerWireTest {
 
+    private Scheduler scheduler;
     private HttpState httpState;
     private EmbeddedChannel channel;
     private int queryId = 1;
@@ -60,7 +61,7 @@ public class DnsRequestHandlerWireTest {
         DnsIntentRegistry.getInstance().clear();
         Configuration configuration = configuration();
         MockServerLogger logger = new MockServerLogger(configuration, DnsRequestHandlerWireTest.class);
-        Scheduler scheduler = new Scheduler(configuration, logger);
+        scheduler = new Scheduler(configuration, logger);
         httpState = new HttpState(configuration, logger, scheduler);
         DnsRequestHandler handler = new DnsRequestHandler(logger, httpState);
         // decoder -> encoder -> handler, matching MockServer#bindDnsPort. The decoder is omitted
@@ -74,6 +75,8 @@ public class DnsRequestHandlerWireTest {
         if (channel != null) {
             channel.finishAndReleaseAll();
         }
+        httpState.stop();
+        scheduler.shutdown();
     }
 
     // ---------------------------------------------------------------- helpers

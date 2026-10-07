@@ -84,6 +84,7 @@ public class McpToolAuthorizationSnapshotTest {
     @After
     public void tearDown() {
         channel.close();
+        httpState.stop();
     }
 
     @Test

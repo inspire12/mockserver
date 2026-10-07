@@ -1,6 +1,7 @@
 package org.mockserver.mockservlet;
 
 import com.google.common.collect.ImmutableSet;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.InjectMocks;
@@ -24,6 +25,7 @@ import org.mockserver.uuid.UUIDService;
 import org.slf4j.event.Level;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.Collections;
 
@@ -55,6 +57,7 @@ public class MockServerServletTest {
     private final PortBindingSerializer portBindingSerializer = new PortBindingSerializer(new MockServerLogger());
 
     private HttpState httpStateHandler;
+    private HttpState servletHttpState;
     private HttpActionHandler mockActionHandler;
 
     @InjectMocks
@@ -69,9 +72,18 @@ public class MockServerServletTest {
         httpStateHandler = spy(new HttpState(configuration(), new MockServerLogger(), scheduler));
         response = new MockHttpServletResponse();
         mockServerServlet = new MockServerServlet();
+        // the servlet's own state, which openMocks replaces with httpStateHandler
+        servletHttpState = (HttpState) ReflectionTestUtils.getField(mockServerServlet, "httpStateHandler");
 
 
         openMocks(this);
+    }
+
+    @After
+    public void destroyServlet() {
+        // shuts the servlet's scheduler and event loops, and stops the state it holds: httpStateHandler
+        mockServerServlet.destroy();
+        servletHttpState.stop();
     }
 
     private MockHttpServletRequest buildHttpServletRequest(String method, String requestURI, String body) {

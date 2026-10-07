@@ -54,6 +54,7 @@ public class McpToolsAllProvidersTest {
     private static MockServerClient mockServerClient;
     private static McpToolRegistry toolRegistry;
     private static MockServer mockServer;
+    private static HttpState httpState;
 
     @BeforeClass
     public static void startServer() {
@@ -71,13 +72,16 @@ public class McpToolsAllProvidersTest {
         when(server.getScheduler()).thenReturn(mock(Scheduler.class));
         when(server.getLocalPorts()).thenReturn(Arrays.asList(mockServerPort));
         when(server.isRunning()).thenReturn(true);
-        HttpState httpState = new HttpState(configuration(), new MockServerLogger(), mock(Scheduler.class));
+        httpState = new HttpState(configuration(), new MockServerLogger(), mock(Scheduler.class));
         toolRegistry = new McpToolRegistry(httpState, server);
     }
 
     @AfterClass
     public static void stopServer() {
         stopQuietly(mockServerClient);
+        if (httpState != null) {
+            httpState.stop();
+        }
     }
 
     @Before

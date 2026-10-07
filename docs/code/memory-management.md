@@ -1002,8 +1002,8 @@ checks that, once that thread has ended, no process-wide registration keeps it.)
 part way leaves its caller nothing to stop, so it does the same release itself before rethrowing: it ends
 the event-log thread, removes the registrations it had made and closes what it had opened, but does not
 reset the process-wide AsyncAPI connections, which it never started (`HttpStateFailedConstructionTest`).
-Core tests stop every `HttpState` they construct, and `HttpStateStoppedGuardTest` fails the build when one
-does not. The in-flight reader given to `PreemptionSimulator` reads a counter, not the server, so
+Tests in every module stop each `HttpState` they construct, and `HttpStateStoppedGuardTest` (in core,
+scanning every module's test sources) fails the build when one does not. The in-flight reader given to `PreemptionSimulator` reads a counter, not the server, so
 it holds nothing. `StoppedServerIsCollectedTest` guards this for the default in-memory state backend; with
 a clustered backend the chaos registries and the cross-protocol bus also keep a store of that backend after
 a stop, which has not been checked for references back to the server.

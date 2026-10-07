@@ -2,6 +2,7 @@ package org.mockserver.netty.mcp;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockserver.configuration.Configuration;
@@ -12,6 +13,8 @@ import org.mockserver.scheduler.Scheduler;
 import org.mockserver.serialization.ObjectMapperFactory;
 
 import java.util.Map;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.not;
@@ -23,6 +26,8 @@ import static org.mockserver.configuration.Configuration.configuration;
 
 public class McpResourceRegistryTest {
 
+    private final List<HttpState> httpStates = new ArrayList<>();
+
     private McpResourceRegistry resourceRegistry;
     private HttpState httpState;
 
@@ -30,6 +35,12 @@ public class McpResourceRegistryTest {
     public void setUp() {
         httpState = new HttpState(configuration(), new MockServerLogger(), mock(Scheduler.class));
         resourceRegistry = new McpResourceRegistry(httpState);
+    }
+
+    @After
+    public void stopHttpStates() {
+        httpState.stop();
+        httpStates.forEach(HttpState::stop);
     }
 
     @Test
@@ -92,6 +103,7 @@ public class McpResourceRegistryTest {
     public void shouldReadConfigurationResourceFromConfigurationInstanceNotStaticStore() {
         Configuration configuration = configuration();
         HttpState state = new HttpState(configuration, new MockServerLogger(), mock(Scheduler.class));
+        httpStates.add(state);
         McpResourceRegistry registry = new McpResourceRegistry(state);
 
         // set values on the instance only — deliberately different from the static-store values, so the

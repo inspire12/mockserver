@@ -140,6 +140,7 @@ public class PlainTextUpgradeRequiredSnapshotTest {
             return written.toString();
         } finally {
             channel.finishAndReleaseAll();
+            httpState.stop();
         }
     }
 }

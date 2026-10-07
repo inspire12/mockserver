@@ -66,6 +66,7 @@ public class ControlPlaneAuthenticationRuntimePutTest {
 
     @After
     public void tearDown() {
+        httpState.stop();
         resetStaticControlPlaneProperties();
     }
 
