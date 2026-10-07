@@ -26,6 +26,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
@@ -34,15 +35,16 @@ import static org.hamcrest.Matchers.startsWith;
 import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.integration.ClientAndServer.startClientAndServer;
 import static org.mockserver.model.HttpRequest.request;
+import static org.mockserver.model.HttpResponse.response;
 import static org.mockserver.model.HttpTemplate.template;
 import static org.mockserver.stop.Stop.stopQuietly;
 import static org.mockserver.test.Retries.tryWaitForSuccess;
 
 /**
  * A connection that opens with a PROXY protocol header (v1 text or v2 binary) is, once the header is taken off,
- * detected like any other: HTTP is mocked, TLS is terminated and binary is forwarded. CONNECT is handled by
- * MockServer, which tunnels to the header's destination (here a MockServer, the only kind that answers its tunnel
- * handshake). The client address the header carries is the remote address of the requests that follow it.
+ * detected like any other: HTTP is mocked, TLS is terminated and binary is forwarded. A CONNECT tunnel goes to
+ * MockServer itself, not to the header's destination, so the requests in it are mocked or forwarded to the CONNECT
+ * target. The client address the header carries is the remote address of the requests that follow it.
  */
 public class ProxyProtocolProtocolDetectionIntegrationTest {
 
@@ -59,6 +61,11 @@ public class ProxyProtocolProtocolDetectionIntegrationTest {
     private static final String PROXY_PASSWORD = "proxy-password";
     private static ClientAndServer proxyAuthenticatingServer;
     private static ServerSocket binaryUpstream;
+    // a header destination that is not a MockServer, and that a tunnel must never reach
+    private static CountingListener headerDestination;
+    private static ClientAndServer connectTarget;
+    private static final String FORWARDED_PATH = "/proxy-protocol-forwarded";
+    private static final String FORWARDED_BODY = "from the CONNECT target";
     private static final List<SocketAddress> binaryClientAddresses = new CopyOnWriteArrayList<>();
 
     @BeforeClass
@@ -71,6 +78,9 @@ public class ProxyProtocolProtocolDetectionIntegrationTest {
         perMessageServer = startClientAndServer(transparentProxyConfiguration().forwardBinaryRequestsUseSingleConnection(false), PortFactory.findFreePort());
         perMessageNotWaitingServer = startClientAndServer(transparentProxyConfiguration().forwardBinaryRequestsUseSingleConnection(false).forwardBinaryRequestsWithoutWaitingForResponse(true), PortFactory.findFreePort());
         proxyAuthenticatingServer = startClientAndServer(transparentProxyConfiguration().proxyAuthenticationUsername(PROXY_USERNAME).proxyAuthenticationPassword(PROXY_PASSWORD), PortFactory.findFreePort());
+        headerDestination = new CountingListener();
+        connectTarget = startClientAndServer(PortFactory.findFreePort());
+        connectTarget.when(request().withPath(FORWARDED_PATH)).respond(response().withBody(FORWARDED_BODY));
     }
 
     private static Configuration transparentProxyConfiguration() {
@@ -85,7 +95,9 @@ public class ProxyProtocolProtocolDetectionIntegrationTest {
         stopQuietly(perMessageServer);
         stopQuietly(perMessageNotWaitingServer);
         stopQuietly(proxyAuthenticatingServer);
+        stopQuietly(connectTarget);
         binaryUpstream.close();
+        headerDestination.close();
     }
 
     @Before
@@ -133,22 +145,20 @@ public class ProxyProtocolProtocolDetectionIntegrationTest {
         }
     }
 
-    // A CONNECT on a connection whose destination is known is tunnelled to that destination: here the MockServer
-    // that has the expectation. The server the client connects to requires proxy credentials, which the destination
-    // does not, so a CONNECT relayed to the destination as raw bytes would be accepted without them.
+    // A CONNECT is handled by the server the client connected to, which requires proxy credentials, and its tunnel
+    // goes to that MockServer, not to the header's destination, which is not a MockServer.
     @Test
     public void shouldOpenConnectTunnelAfterProxyV1Header() throws Exception {
-        shouldOpenConnectTunnelAfter(proxyV1Header(mockServer.getLocalPort()));
+        shouldOpenConnectTunnelAfter(proxyV1Header(headerDestination.port()));
     }
 
     @Test
     public void shouldOpenConnectTunnelAfterProxyV2Header() throws Exception {
-        shouldOpenConnectTunnelAfter(proxyV2Header(mockServer.getLocalPort()));
+        shouldOpenConnectTunnelAfter(proxyV2Header(headerDestination.port()));
     }
 
     private void shouldOpenConnectTunnelAfter(byte[] proxyHeader) throws Exception {
-        String target = "127.0.0.1:" + PortFactory.findFreePort();
-        String connect = "CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\n";
+        String connect = connectRequest("127.0.0.1:" + PortFactory.findFreePort());
         try (Socket socket = connect(proxyAuthenticatingServer)) {
             send(socket, proxyHeader, (connect + "\r\n").getBytes(StandardCharsets.US_ASCII));
             assertThat(readHttpResponse(socket.getInputStream()), startsWith("HTTP/1.1 407"));
@@ -157,6 +167,24 @@ public class ProxyProtocolProtocolDetectionIntegrationTest {
             String credentials = Base64.getEncoder().encodeToString((PROXY_USERNAME + ":" + PROXY_PASSWORD).getBytes(StandardCharsets.UTF_8));
             send(socket, proxyHeader, (connect + "Proxy-Authorization: Basic " + credentials + "\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
             assertThat(readHttpResponse(socket.getInputStream()), startsWith("HTTP/1.1 200"));
+        }
+        assertThat(headerDestination.connections(), is(0));
+    }
+
+    @Test
+    public void shouldMockRequestInConnectTunnelAfterProxyV1Header() throws Exception {
+        shouldMockRequestInConnectTunnelAfter(proxyV1Header(headerDestination.port()));
+    }
+
+    @Test
+    public void shouldMockRequestInConnectTunnelAfterProxyV2Header() throws Exception {
+        shouldMockRequestInConnectTunnelAfter(proxyV2Header(headerDestination.port()));
+    }
+
+    private void shouldMockRequestInConnectTunnelAfter(byte[] proxyHeader) throws Exception {
+        try (Socket socket = connect()) {
+            send(socket, proxyHeader, (connectRequest("127.0.0.1:" + PortFactory.findFreePort()) + "\r\n").getBytes(StandardCharsets.US_ASCII));
+            assertThat(readHttpResponse(socket.getInputStream()), startsWith("HTTP/1.1 200"));
 
             send(socket, getRequest());
 
@@ -164,6 +192,36 @@ public class ProxyProtocolProtocolDetectionIntegrationTest {
             assertThat(response, startsWith("HTTP/1.1 200"));
             assertThat(response.substring(response.indexOf("\r\n\r\n") + 4), startsWith(MOCKED_BODY));
         }
+        assertThat(headerDestination.connections(), is(0));
+    }
+
+    @Test
+    public void shouldForwardRequestInConnectTunnelToConnectTargetAfterProxyV1Header() throws Exception {
+        shouldForwardRequestInConnectTunnelToConnectTargetAfter(proxyV1Header(headerDestination.port()));
+    }
+
+    @Test
+    public void shouldForwardRequestInConnectTunnelToConnectTargetAfterProxyV2Header() throws Exception {
+        shouldForwardRequestInConnectTunnelToConnectTargetAfter(proxyV2Header(headerDestination.port()));
+    }
+
+    private void shouldForwardRequestInConnectTunnelToConnectTargetAfter(byte[] proxyHeader) throws Exception {
+        String target = "127.0.0.1:" + connectTarget.getLocalPort();
+        try (Socket socket = connect()) {
+            send(socket, proxyHeader, (connectRequest(target) + "\r\n").getBytes(StandardCharsets.US_ASCII));
+            assertThat(readHttpResponse(socket.getInputStream()), startsWith("HTTP/1.1 200"));
+
+            send(socket, ("GET " + FORWARDED_PATH + " HTTP/1.1\r\nHost: " + target + "\r\nContent-Length: 0\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
+
+            String response = readHttpResponse(socket.getInputStream());
+            assertThat(response, startsWith("HTTP/1.1 200"));
+            assertThat(response.substring(response.indexOf("\r\n\r\n") + 4), is(FORWARDED_BODY));
+        }
+        assertThat(headerDestination.connections(), is(0));
+    }
+
+    private static String connectRequest(String target) {
+        return "CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\n";
     }
 
     @Test
@@ -351,6 +409,44 @@ public class ProxyProtocolProtocolDetectionIntegrationTest {
                 echo.start();
             } catch (IOException closed) {
                 return;
+            }
+        }
+    }
+
+    /** Accepts connections and counts them, reading nothing. */
+    private static final class CountingListener implements AutoCloseable {
+        private final ServerSocket serverSocket = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
+        private final AtomicInteger connections = new AtomicInteger();
+        private final List<Socket> accepted = new CopyOnWriteArrayList<>();
+
+        CountingListener() throws IOException {
+            Thread acceptor = new Thread(() -> {
+                while (!serverSocket.isClosed()) {
+                    try {
+                        accepted.add(serverSocket.accept());
+                        connections.incrementAndGet();
+                    } catch (IOException closed) {
+                        // close() ends the accept
+                    }
+                }
+            }, "proxy-protocol-header-destination");
+            acceptor.setDaemon(true);
+            acceptor.start();
+        }
+
+        int port() {
+            return serverSocket.getLocalPort();
+        }
+
+        int connections() {
+            return connections.get();
+        }
+
+        @Override
+        public void close() throws IOException {
+            serverSocket.close();
+            for (Socket socket : accepted) {
+                socket.close();
             }
         }
     }

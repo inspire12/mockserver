@@ -89,8 +89,8 @@ import static org.mockserver.test.Http2FlowControlBodies.Size.OVER_WINDOW;
  * never reached the loopback's server is refused ({@code REFUSED_STREAM}), one that may have is reset with
  * {@code INTERNAL_ERROR}, and a write that fails for one stream resets only that stream. A stream whose whole response
  * was relayed is not cut short: it is written out in full. The loopback's server is
- * either a second MockServer (the relaying one's {@code proxyRemotePort}) or a Netty HTTP/2 server answering the relay's
- * {@code PROXIED_} handshake, so the tests control how the loopback fails.
+ * either a second MockServer or a Netty HTTP/2 server answering the relay's {@code PROXIED_} handshake, so the tests
+ * control how the loopback fails; {@link RelayingMockServer} points the relay's loopback at it.
  */
 public class ConnectRelayLoopbackCloseIntegrationTest {
 
@@ -143,12 +143,12 @@ public class ConnectRelayLoopbackCloseIntegrationTest {
     @Test(timeout = 30_000)
     public void shouldEndInFlightStreamsPromptlyWhenTheMockServerBehindTheLoopbackStops() throws Exception {
         MockServer loopbackServer = new MockServer(configuration().stopDrainMillis(0L));
-        MockServer proxy = null;
+        RelayingMockServer proxy = null;
         try {
             MockServerClient loopbackServerClient = new MockServerClient("localhost", loopbackServer.getLocalPort());
             loopbackServerClient.when(request().withPath("/slow")).respond(response().withBody(HEALTHY).withDelay(TimeUnit.SECONDS, 20));
-            proxy = new MockServer(configuration(), loopbackServer.getLocalPort(), "127.0.0.1");
-            try (RelayClient client = RelayClient.connect(proxy.getLocalPort())) {
+            proxy = new RelayingMockServer(loopbackServer.getLocalPort());
+            try (RelayClient client = RelayClient.connect(proxy.listeningPort())) {
                 RelayStream inFlight = client.get("/slow");
                 awaitRecorded(loopbackServerClient, "/slow");
                 RelayStream uploading = client.startUpload("/upload");
@@ -363,24 +363,47 @@ public class ConnectRelayLoopbackCloseIntegrationTest {
     }
 
     /**
-     * A relaying MockServer whose CONNECT/SOCKS loopback goes to {@link Upstream} ({@code proxyRemotePort}).
+     * A relaying MockServer whose CONNECT/SOCKS loopback goes to another server: the relay connects to the port
+     * {@link #getLocalPort()} names, which, once the server has started, is that server's.
+     */
+    private static final class RelayingMockServer extends MockServer {
+        private final int loopbackPort;
+
+        RelayingMockServer(int loopbackPort) {
+            super(configuration());
+            this.loopbackPort = loopbackPort;
+        }
+
+        @Override
+        public int getLocalPort() {
+            // zero while the constructor waits for the server to start
+            return loopbackPort != 0 ? loopbackPort : super.getLocalPort();
+        }
+
+        int listeningPort() {
+            return getLocalPorts().get(0);
+        }
+    }
+
+    /**
+     * A relaying MockServer whose CONNECT/SOCKS loopback goes to {@link Upstream}.
      */
     private static final class Tunnel implements AutoCloseable {
         private final Upstream upstream;
-        private final MockServer proxy;
+        private final RelayingMockServer proxy;
 
-        private Tunnel(Upstream upstream, MockServer proxy) {
+        private Tunnel(Upstream upstream, RelayingMockServer proxy) {
             this.upstream = upstream;
             this.proxy = proxy;
         }
 
         static Tunnel open(Long maxConcurrentStreams) throws Exception {
             Upstream upstream = Upstream.start(maxConcurrentStreams);
-            return new Tunnel(upstream, new MockServer(configuration(), upstream.port(), "127.0.0.1"));
+            return new Tunnel(upstream, new RelayingMockServer(upstream.port()));
         }
 
         int proxyPort() {
-            return proxy.getLocalPort();
+            return proxy.listeningPort();
         }
 
         @Override

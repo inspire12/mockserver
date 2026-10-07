@@ -46,7 +46,6 @@ import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.nullValue;
 import static org.mockserver.configuration.Configuration.configuration;
-import static org.mockserver.mock.action.http.HttpActionHandler.REMOTE_SOCKET;
 
 /**
  * A CONNECT/SOCKS tunnel that has been established but has carried nothing yet has no relay handlers: they are added
@@ -294,14 +293,12 @@ public class RelayConnectUnconfiguredTunnelCloseTest {
     }
 
     private void startProxy(ServerSocket loopbackServer) {
-        InetSocketAddress loopbackAddress = new InetSocketAddress(InetAddress.getLoopbackAddress(), loopbackServer.getLocalPort());
         proxyServerChannel = new ServerBootstrap()
             .group(eventLoopGroup)
             .channel(NioServerSocketChannel.class)
             .childHandler(new ChannelInitializer<Channel>() {
                 @Override
                 protected void initChannel(Channel ch) {
-                    ch.attr(REMOTE_SOCKET).set(loopbackAddress);
                     PortUnificationHandler.deferTlsDetection(ch);
                     ch.pipeline().addLast(new ChannelInboundHandlerAdapter() {
                         @Override
@@ -311,7 +308,7 @@ public class RelayConnectUnconfiguredTunnelCloseTest {
                             ctx.fireChannelRead("CONNECT");
                         }
                     });
-                    ch.pipeline().addLast(new TestRelayConnectHandler(mockServerLogger, "localhost", loopbackAddress.getPort()));
+                    ch.pipeline().addLast(new TestRelayConnectHandler(mockServerLogger, "localhost", loopbackServer.getLocalPort()));
                 }
             })
             .bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0))
@@ -350,7 +347,7 @@ public class RelayConnectUnconfiguredTunnelCloseTest {
     private static class TestRelayConnectHandler extends RelayConnectHandler<String> {
 
         TestRelayConnectHandler(MockServerLogger mockServerLogger, String host, int port) {
-            super(configuration(), null, mockServerLogger, host, port);
+            super(configuration(), RelayLoopbackServer.listeningOn(port), mockServerLogger, host, port);
         }
 
         @Override

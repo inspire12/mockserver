@@ -64,8 +64,8 @@ import static org.mockserver.verify.VerificationTimes.exactly;
 
 /**
  * forwardProxyBlockPrivateNetworks refuses a loopback destination for every request MockServer sends itself (webhooks
- * and load scenarios) and for a CONNECT tunnel MockServer connects directly to proxyRemoteHost, and allows each with
- * the setting off. Drift alerts share the load scenarios' sender, and are covered by unit tests.
+ * and load scenarios) and for a request in a CONNECT tunnel, also on a server with proxyRemoteHost set, and allows
+ * each with the setting off. Drift alerts share the load scenarios' sender, and are covered by unit tests.
  *
  * @author jamesdbloom
  */
@@ -222,33 +222,39 @@ public class OutboundRequestsBlockPrivateNetworksIntegrationTest {
         }
     }
 
+    // the tunnel goes to MockServer itself, never to proxyRemoteHost, and the request in it is proxied to the CONNECT target
     @Test
-    public void shouldApplyTheSettingToATunnelToProxyRemoteHost() throws Exception {
+    public void shouldApplyTheSettingToARequestInATunnelOnAServerWithProxyRemoteHost() throws Exception {
         for (boolean block : new boolean[]{true, false}) {
             try (CountingUpstream upstream = new CountingUpstream()) {
+                resetDestination();
                 logged.clear();
                 server = new ClientAndServer(blockingPrivateNetworks(block), "127.0.0.1", upstream.port(), 0);
                 try (Socket client = new Socket("127.0.0.1", server.getLocalPort())) {
                     client.setSoTimeout((int) TimeUnit.SECONDS.toMillis(TIMEOUT_SECONDS));
-                    write(client, "CONNECT www.example.com:443 HTTP/1.1\r\nHost: www.example.com:443\r\n\r\n");
+                    String target = "127.0.0.1:" + destinationPort;
+                    write(client, "CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\n\r\n");
+                    assertThat(String.valueOf(logMessages()), readHead(client.getInputStream()), startsWith("HTTP/1.1 200"));
 
-                    assertTunnelRefusedOnlyWhenBlocking(block, client, upstream);
+                    write(client, "GET /target HTTP/1.1\r\nHost: " + target + "\r\nContent-Length: 0\r\n\r\n");
+
+                    assertTunnelledRequestRefusedOnlyWhenBlocking(block, readHead(client.getInputStream()));
+                    assertThat(upstream.connections(), is(0));
                 }
                 stopQuietly(server);
             }
         }
     }
 
-    private void assertTunnelRefusedOnlyWhenBlocking(boolean block, Socket client, CountingUpstream upstream) throws Exception {
+    private void assertTunnelledRequestRefusedOnlyWhenBlocking(boolean block, String responseHead) {
         if (block) {
-            assertThat(String.valueOf(logMessages()), readLine(client.getInputStream()), startsWith("HTTP/1.1 502"));
-            assertThat(upstream.connections(), is(0));
-            tryWaitForSuccess(() -> assertThat(blockedWarnings("tunnel blocked by SSRF policy"), hasSize(1)));
+            assertThat(responseHead, startsWith("HTTP/1.1 502"));
+            destination.verify(request().withPath("/target"), exactly(0));
+            tryWaitForSuccess(() -> assertThat(blockedWarnings("proxied request blocked by SSRF policy"), hasSize(1)));
         } else {
-            // the tunnel's first bytes, which name its destination to the MockServer it expects there
-            tryWaitForSuccess(() -> assertThat(upstream.received(), startsWith("PROXIED_")));
-            assertThat(upstream.connections(), is(1));
-            assertThat(blockedWarnings("tunnel blocked by SSRF policy"), hasSize(0));
+            assertThat(responseHead, startsWith("HTTP/1.1 200"));
+            destination.verify(request().withPath("/target"), exactly(1));
+            assertThat(blockedWarnings("proxied request blocked by SSRF policy"), hasSize(0));
         }
     }
 
@@ -321,45 +327,31 @@ public class OutboundRequestsBlockPrivateNetworksIntegrationTest {
         socket.getOutputStream().flush();
     }
 
-    private static String readLine(InputStream input) throws IOException {
-        ByteArrayOutputStream line = new ByteArrayOutputStream();
-        for (int read; (read = input.read()) != -1; ) {
-            line.write(read);
-            if (read == '\n') {
+    /** Reads a response's status line and headers, leaving any body unread. */
+    private static String readHead(InputStream input) throws IOException {
+        ByteArrayOutputStream head = new ByteArrayOutputStream();
+        while (!head.toString(StandardCharsets.UTF_8.name()).endsWith("\r\n\r\n")) {
+            int read = input.read();
+            if (read == -1) {
                 break;
             }
+            head.write(read);
         }
-        return line.toString(StandardCharsets.UTF_8.name());
+        return head.toString(StandardCharsets.UTF_8.name());
     }
 
-    /** An upstream on 127.0.0.1 that counts its connections and keeps the bytes it reads. */
+    /** An upstream on 127.0.0.1 that counts its connections. */
     private static final class CountingUpstream implements AutoCloseable {
         private final ServerSocket serverSocket = new ServerSocket(0, 50, InetAddress.getByAddress(new byte[]{127, 0, 0, 1}));
         private final AtomicInteger connections = new AtomicInteger();
         private final List<Socket> sockets = new CopyOnWriteArrayList<>();
-        private final ByteArrayOutputStream received = new ByteArrayOutputStream();
 
         CountingUpstream() throws IOException {
             Thread accept = new Thread(() -> {
                 while (!serverSocket.isClosed()) {
                     try {
-                        Socket socket = serverSocket.accept();
+                        sockets.add(serverSocket.accept());
                         connections.incrementAndGet();
-                        sockets.add(socket);
-                        Thread serve = new Thread(() -> {
-                            try {
-                                byte[] buffer = new byte[1024];
-                                for (int read; (read = socket.getInputStream().read(buffer)) != -1; ) {
-                                    synchronized (received) {
-                                        received.write(buffer, 0, read);
-                                    }
-                                }
-                            } catch (IOException closed) {
-                                // the connection was closed
-                            }
-                        }, "counting-upstream-serve");
-                        serve.setDaemon(true);
-                        serve.start();
                     } catch (IOException closed) {
                         // close() ends the accept
                     }
@@ -375,12 +367,6 @@ public class OutboundRequestsBlockPrivateNetworksIntegrationTest {
 
         int connections() {
             return connections.get();
-        }
-
-        String received() {
-            synchronized (received) {
-                return received.toString(StandardCharsets.UTF_8);
-            }
         }
 
         @Override

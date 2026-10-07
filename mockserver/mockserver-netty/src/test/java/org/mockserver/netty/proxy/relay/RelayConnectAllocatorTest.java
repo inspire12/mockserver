@@ -39,7 +39,6 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.sameInstance;
 import static org.mockserver.configuration.Configuration.configuration;
-import static org.mockserver.mock.action.http.HttpActionHandler.REMOTE_SOCKET;
 
 /**
  * The CONNECT/SOCKS relay opens its own outbound connection to the loopback, and every byte the
@@ -74,7 +73,6 @@ public class RelayConnectAllocatorTest {
     public void shouldReadUpstreamBytesWithSharedPooledAllocator() throws Exception {
         try (ServerSocket upstream = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
             CompletableFuture<Void> upstreamDone = CompletableFuture.runAsync(() -> serveLoopback(upstream));
-            InetSocketAddress upstreamAddress = new InetSocketAddress(InetAddress.getLoopbackAddress(), upstream.getLocalPort());
             CompletableFuture<ByteBufAllocator> relayedResponseAllocator = new CompletableFuture<>();
 
             proxyServerChannel = new ServerBootstrap()
@@ -84,10 +82,9 @@ public class RelayConnectAllocatorTest {
                 .childHandler(new ChannelInitializer<Channel>() {
                     @Override
                     protected void initChannel(Channel ch) {
-                        ch.attr(REMOTE_SOCKET).set(upstreamAddress);
                         PortUnificationHandler.deferTlsDetection(ch);
                         ch.pipeline().addLast(new ConnectTriggerAndCapture(relayedResponseAllocator));
-                        ch.pipeline().addLast(new TestRelayConnectHandler("localhost", upstreamAddress.getPort()));
+                        ch.pipeline().addLast(new TestRelayConnectHandler("localhost", upstream.getLocalPort()));
                     }
                 })
                 .bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0))
@@ -182,7 +179,7 @@ public class RelayConnectAllocatorTest {
     private static class TestRelayConnectHandler extends RelayConnectHandler<String> {
 
         TestRelayConnectHandler(String host, int port) {
-            super(configuration(), null, new MockServerLogger(), host, port);
+            super(configuration(), RelayLoopbackServer.listeningOn(port), new MockServerLogger(), host, port);
         }
 
         @Override

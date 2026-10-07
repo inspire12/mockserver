@@ -30,6 +30,8 @@ This works with Linux iptables REDIRECT rules that redirect outbound traffic to 
 3. If an expectation matches, MockServer returns the mock response
 4. Otherwise, MockServer forwards the request to the original target
 
+**CONNECT and SOCKS on an intercepted connection.** A client that sends a CONNECT (or SOCKS) request on an intercepted connection, for example one with `HTTPS_PROXY` pointing at the port the traffic is redirected to, gets a tunnel to MockServer itself, as on any other connection: the original destination (from the resolver chain, a PROXY protocol header or `proxyRemoteHost`) is not used for the tunnel. The requests inside it are matched against expectations and, when none matches, forwarded to the host and port the CONNECT names. (Only MockServer answers the `PROXIED_` preamble that opens a tunnel's loopback leg, so the tunnel cannot go to any other destination.) Requests that are not tunnelled are unchanged: unmatched ones still go to the original destination.
+
 ### Configuration
 
 | Property | Default | Description |

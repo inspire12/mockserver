@@ -371,7 +371,7 @@ The client leg is watched, not the loopback, because only it sees an upload in p
 
 Over HTTP/2 a mocked final `1xx` ends its stream with a reset on both, so both are then closed as idle (see [A mocked final `1xx`](#a-mocked-final-1xx)). An HTTP/2 stream MockServer abandons stays open on both, by design: the stream is what the client is still waiting on.
 
-**Tunnels and the cap.** A CONNECT/SOCKS tunnel whose target is MockServer itself holds two slots: the client's connection and the internal loopback connection `RelayConnectHandler` opens. If the loopback is refused by the cap, the loopback channel closes before `PROXIED_RESPONSE_` arrives; `RelayConnectHandler`'s `channelInactive` then answers the client with the failure response (`502` for CONNECT) and closes, where it previously waited forever.
+**Tunnels and the cap.** A CONNECT/SOCKS tunnel, which always goes to MockServer itself, holds two slots: the client's connection and the internal loopback connection `RelayConnectHandler` opens. If the loopback is refused by the cap, the loopback channel closes before `PROXIED_RESPONSE_` arrives; `RelayConnectHandler`'s `channelInactive` then answers the client with the failure response (`502` for CONNECT) and closes, where it previously waited forever.
 
 **Start-up warm-up.** `startupWarmup`'s `HttpURLConnection` request to the server leaves a JDK keep-alive connection open for about 5 seconds, which counts against the cap; tests with a very small cap set `startupWarmup(false)`.
 
@@ -1354,7 +1354,7 @@ connection intact.
 
 ## Relay Connect Pattern
 
-When HTTP CONNECT or SOCKS tunneling is established, MockServer uses a **self-loopback relay** rather than connecting directly to the target:
+When HTTP CONNECT or SOCKS tunneling is established, MockServer uses a **self-loopback relay** rather than connecting directly to the target. It does so on every connection, also one whose original destination is known (`REMOTE_SOCKET` set by `proxyRemoteHost`, the transparent-proxy resolver chain or a PROXY protocol header): `RelayConnectHandler` connects to MockServer's own port, never to `REMOTE_SOCKET`, because only MockServer answers the `PROXIED_` preamble. The loopback's `REMOTE_SOCKET` is then the CONNECT/SOCKS target, so requests in the tunnel that match no expectation are forwarded there, not to the client connection's original destination. Requests that are not in a tunnel still go to the original destination.
 
 ```mermaid
 sequenceDiagram
