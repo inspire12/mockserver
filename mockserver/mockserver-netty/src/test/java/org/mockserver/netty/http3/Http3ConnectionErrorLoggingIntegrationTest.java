@@ -30,7 +30,9 @@ import org.mockserver.netty.integration.NettyLogCapture;
 import org.mockserver.testing.socket.Ipv4DatagramChannelFactory;
 import org.slf4j.event.Level;
 
+import javax.net.ssl.TrustManagerFactory;
 import java.net.InetSocketAddress;
+import java.security.KeyStore;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -118,19 +120,42 @@ public class Http3ConnectionErrorLoggingIntegrationTest {
     }
 
     @Test
-    public void shouldLogAHandshakeThatOffersNoProtocolMockServerServesOnceAsATlsHandshakeFailure() throws Exception {
-        try (RawQuicClient client = new RawQuicClient("not-http3")) {
-            assertThrows(ExecutionException.class, client::connect);
+    public void shouldLogAClientAddresssFirstFailedHandshakeAsAWarningAndItsLaterOnesAtDebug() throws Exception {
+        // the only test of this class whose handshakes fail, so the first is the first from this address
+        TrustManagerFactory jdkDefaultTrust = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+        jdkDefaultTrust.init((KeyStore) null);
+        try (RawQuicClient client = new RawQuicClient(jdkDefaultTrust, Http3.supportedApplicationProtocols())) {
+            assertThrows("the client does not trust MockServer's Certificate Authority", ExecutionException.class, client::connect);
 
-            List<LogEntry> entries = awaitConnectionEntries(client.localPort());
-            assertThat(nettysLog.since(nettysLogBeforeThisTest), empty());
-            assertThat(entries.toString(), entries, hasSize(1));
-            assertThat(entries.get(0).getLogLevel(), is(Level.ERROR));
-            assertThat(entries.get(0).getMessageFormat(), is("TLS handshake failure on HTTP/3 connection from:{}:{}"));
-            assertThat(String.valueOf(entries.get(0).getArguments()[1]), containsString("NO_APPLICATION_PROTOCOL"));
-            assertThat(entries.get(0).getThrowable(), is(nullValue()));
+            LogEntry entry = theOnlyEntryOf(client);
+            assertThat(entry.getLogLevel(), is(Level.WARN));
+            String message = entry.getMessage(configuration());
+            assertThat(message, containsString("TLS handshake failed on HTTP/3 connection from"));
+            assertThat(message, containsString("the client closed the connection with TLS alert"));
+            assertThat(message, containsString("https://mock-server.com/mock_server/HTTPS_TLS.html"));
+            assertThat(message, containsString("later failed handshakes from this client address are logged at DEBUG"));
+        }
+        for (int i = 0; i < 2; i++) {
+            try (RawQuicClient client = new RawQuicClient(InsecureTrustManagerFactory.INSTANCE, "not-http3")) {
+                assertThrows(ExecutionException.class, client::connect);
+
+                LogEntry entry = theOnlyEntryOf(client);
+                assertThat(entry.getLogLevel(), is(Level.DEBUG));
+                String message = entry.getMessage(configuration());
+                assertThat(message, containsString("TLS handshake failed on HTTP/3 connection from"));
+                assertThat(message, containsString("NO_APPLICATION_PROTOCOL"));
+                assertThat(message, containsString("no application protocol (ALPN)"));
+            }
         }
         assertThatHttp3IsStillServed();
+    }
+
+    private LogEntry theOnlyEntryOf(RawQuicClient client) throws InterruptedException {
+        List<LogEntry> entries = awaitConnectionEntries(client.localPort());
+        assertThat(nettysLog.since(nettysLogBeforeThisTest), empty());
+        assertThat(entries.toString(), entries, hasSize(1));
+        assertThat(entries.get(0).getThrowable(), is(nullValue()));
+        return entries.get(0);
     }
 
     @Test
@@ -262,12 +287,16 @@ public class Http3ConnectionErrorLoggingIntegrationTest {
         private QuicChannel quicChannel;
 
         private RawQuicClient(String... applicationProtocols) throws Exception {
+            this(InsecureTrustManagerFactory.INSTANCE, applicationProtocols);
+        }
+
+        private RawQuicClient(TrustManagerFactory trustManagerFactory, String... applicationProtocols) throws Exception {
             datagramChannel = new Bootstrap()
                 .group(clientGroup)
                 .channelFactory(Ipv4DatagramChannelFactory.INSTANCE)
                 .handler(Http3.newQuicClientCodecBuilder()
                     .sslContext(QuicSslContextBuilder.forClient()
-                        .trustManager(InsecureTrustManagerFactory.INSTANCE)
+                        .trustManager(trustManagerFactory)
                         .applicationProtocols(applicationProtocols)
                         .build())
                     .maxIdleTimeout(30000, TimeUnit.MILLISECONDS)

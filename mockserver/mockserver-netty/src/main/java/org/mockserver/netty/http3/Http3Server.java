@@ -23,6 +23,7 @@ import org.mockserver.configuration.Configuration;
 import org.mockserver.configuration.ServerTlsSettings;
 import org.mockserver.lifecycle.Ipv4UdpPortProbe;
 import org.mockserver.lifecycle.LifeCycle;
+import org.mockserver.netty.unification.ClientTlsHandshakeFailureLog;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.metrics.Metrics;
 import org.mockserver.mock.HttpState;
@@ -82,6 +83,7 @@ public class Http3Server {
     private final HttpActionHandler httpActionHandler;
     /** Null when MCP is not wired (legacy/test constructors). */
     private final McpRequestProcessor mcpRequestProcessor;
+    private final ClientTlsHandshakeFailureLog clientTlsHandshakeFailureLog;
 
     /**
      * Create an HTTP/3 server wired into MockServer's request pipeline, with MCP support.
@@ -103,6 +105,8 @@ public class Http3Server {
         this.mcpRequestProcessor = mcpSessionManager != null
             ? new McpRequestProcessor(httpState, server, mcpSessionManager)
             : null;
+        ClientTlsHandshakeFailureLog serversLog = server != null ? server.getClientTlsHandshakeFailureLog() : null;
+        this.clientTlsHandshakeFailureLog = serversLog != null ? serversLog : new ClientTlsHandshakeFailureLog();
     }
 
     /**
@@ -128,6 +132,7 @@ public class Http3Server {
         this.httpState = null;
         this.httpActionHandler = null;
         this.mcpRequestProcessor = null;
+        this.clientTlsHandshakeFailureLog = new ClientTlsHandshakeFailureLog();
     }
 
     /**
@@ -171,9 +176,9 @@ public class Http3Server {
             }
 
             AtomicInteger connectionCounter = this.activeHttp3Connections;
-            // stateless, so one serves every connection; the legacy echo mode has no logger of its own
+            // one serves every connection; the legacy echo mode has no logger of its own
             MockServerLogger handlerLogger = mockServerLogger != null ? mockServerLogger : new MockServerLogger(Http3Server.class);
-            Http3ExceptionHandler exceptionHandler = Http3ExceptionHandler.forConnection(handlerLogger);
+            Http3ExceptionHandler exceptionHandler = Http3ExceptionHandler.forConnection(handlerLogger, configuration, clientTlsHandshakeFailureLog);
 
             ChannelHandler codec = Http3.newQuicServerCodecBuilder()
                 .sslContext(sslContext)

@@ -904,6 +904,8 @@ apk add --no-cache ca-certificates java-cacerts</code></pre>
 
 <p>If your HTTP client rejects MockServer's certificate, ensure the MockServer CA certificate is trusted. See <a href="#verify_trust_chain">Ensure MockServer Certificates Are Trusted</a> above for multiple approaches (OS trust store, JVM keytool, programmatic SSLContext).</p>
 
+<p>MockServer logs a client's failed TLS handshake as a warning, over HTTPS and over HTTP/3, with the client's address, the reason the handshake failed and its probable cause, for example <span class="inline_code">the client does not trust MockServer's Certificate Authority</span>. It warns once for each client address; later failed handshakes from the same address are logged at <span class="inline_code">DEBUG</span>, so a client that keeps retrying does not fill the log. To see every failure, set <a href="/mock_server/configuration_properties.html#button_configuration_log_level">logLevel</a> to <span class="inline_code">DEBUG</span>.</p>
+
 <h3>First Request Fails with New Hostname</h3>
 
 <p>When MockServer receives a request with a Host header for a hostname it has not seen before, the first request may fail TLS hostname validation. This is because the TLS handshake completes before MockServer can read the Host header and regenerate its certificate. Subsequent requests with that hostname will succeed. To avoid this, pre-configure the expected hostnames using the <a href="#button_configuration_ssl_subject_alternative_name_domains">sslSubjectAlternativeNameDomains</a> configuration property.</p>

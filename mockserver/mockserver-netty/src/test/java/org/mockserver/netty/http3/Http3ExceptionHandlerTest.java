@@ -6,6 +6,7 @@ import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.DecoderException;
 import io.netty.handler.codec.http3.Http3ErrorCode;
 import io.netty.handler.codec.http3.Http3Exception;
+import io.netty.handler.codec.quic.QuicConnectionCloseEvent;
 import io.netty.handler.codec.quic.QuicException;
 import io.netty.handler.codec.quic.QuicStreamChannel;
 import io.netty.handler.codec.quic.QuicStreamResetException;
@@ -15,6 +16,7 @@ import io.netty.util.internal.OutOfDirectMemoryError;
 import org.junit.Test;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
+import org.mockserver.netty.unification.ClientTlsHandshakeFailureLog;
 import org.slf4j.event.Level;
 
 import javax.net.ssl.SSLException;
@@ -48,6 +50,7 @@ import static org.mockserver.exception.ExceptionHandling.boundedFaultMessage;
 public class Http3ExceptionHandlerTest {
 
     private final List<LogEntry> logged = new ArrayList<>();
+    private final ClientTlsHandshakeFailureLog clientTlsHandshakeFailureLog = new ClientTlsHandshakeFailureLog();
     private Level logLevel = Level.DEBUG;
     private final MockServerLogger mockServerLogger = new MockServerLogger(Http3ExceptionHandlerTest.class) {
         @Override
@@ -64,20 +67,24 @@ public class Http3ExceptionHandlerTest {
     };
 
     @Test
-    public void shouldLogAFailedTlsHandshakeAsAnErrorWithItsMessageAndNoStackTrace() {
+    public void shouldLogAClientAddresssFirstFailedTlsHandshakeAsAWarningAndItsLaterOnesAtDebugWithTheirMessageAndNoStackTrace() {
         // as Netty builds them from quiche's TLS and crypto failures
         SSLHandshakeException tlsFailure = new SSLHandshakeException("error:10000133:SSL routines:OPENSSL_internal:NO_APPLICATION_PROTOCOL");
         tlsFailure.initCause(new QuicException("QUICHE_ERR_TLS_FAIL", QuicTransportError.INTERNAL_ERROR));
         Throwable cryptoFailure = new SSLException("x".repeat(MAX_FAULT_MESSAGE_LENGTH + 1));
-        for (Throwable cause : new Throwable[]{tlsFailure, cryptoFailure}) {
+        Level[] levels = {Level.WARN, Level.DEBUG};
+        Throwable[] causes = {tlsFailure, cryptoFailure};
+        for (int i = 0; i < causes.length; i++) {
+            Throwable cause = causes[i];
+            // a connection of its own, from the same address
             EmbeddedChannel connection = connection();
             logged.clear();
 
             connection.pipeline().fireExceptionCaught(cause);
 
             assertThat(logged, hasSize(1));
-            assertThat(logged.get(0).getLogLevel(), is(Level.ERROR));
-            assertThat(logged.get(0).getMessageFormat(), is("TLS handshake failure on HTTP/3 connection from:{}:{}"));
+            assertThat(logged.get(0).getLogLevel(), is(levels[i]));
+            assertThat(logged.get(0).getMessageFormat(), startsWith("TLS handshake failed on HTTP/3 connection from:{}reason:{}"));
             assertThat(logged.get(0).getArguments()[0], is(connection.remoteAddress()));
             String message = (String) logged.get(0).getArguments()[1];
             assertThat(message.length(), lessThanOrEqualTo(MAX_FAULT_MESSAGE_LENGTH));
@@ -85,6 +92,45 @@ public class Http3ExceptionHandlerTest {
             assertThat(logged.get(0).getThrowable(), is(nullValue()));
             assertHandledWithoutClosing(connection);
         }
+    }
+
+    @Test
+    public void shouldLogAClientThatClosedTheConnectionWithATlsAlertAsAFailedHandshakeAndPassTheEventOn() throws Exception {
+        List<Object> passedOn = new ArrayList<>();
+        EmbeddedChannel connection = new EmbeddedChannel(Http3ExceptionHandler.forConnection(mockServerLogger, null, clientTlsHandshakeFailureLog), eventRecorder(passedOn));
+        // a CRYPTO_ERROR, 0x100 plus the alert: unknown_ca (48)
+        Object unknownCa = closeEvent(false, 0x100 + 48);
+        Object noError = closeEvent(false, 0x0);
+        Object applicationClose = closeEvent(true, 0x100 + 48);
+
+        connection.pipeline().fireUserEventTriggered(unknownCa);
+        connection.pipeline().fireUserEventTriggered(noError);
+        connection.pipeline().fireUserEventTriggered(applicationClose);
+
+        assertThat(logged, hasSize(1));
+        assertThat(logged.get(0).getLogLevel(), is(Level.WARN));
+        assertThat(logged.get(0).getMessageFormat(), startsWith("TLS handshake failed on HTTP/3 connection from:{}reason:{}probable cause:{}"));
+        assertThat(logged.get(0).getArguments()[2], is("the client does not trust MockServer's Certificate Authority"));
+        assertThat(logged.get(0).getArguments()[0], is(connection.remoteAddress()));
+        assertThat(logged.get(0).getArguments()[1], is("the client closed the connection with TLS alert 48 (unknown_ca)"));
+        assertThat(logged.get(0).getThrowable(), is(nullValue()));
+        assertThat(passedOn, contains(sameInstance(unknownCa), sameInstance(noError), sameInstance(applicationClose)));
+        assertHandledWithoutClosing(connection);
+    }
+
+    private static Object closeEvent(boolean applicationClose, int error) throws Exception {
+        Constructor<QuicConnectionCloseEvent> constructor = QuicConnectionCloseEvent.class.getDeclaredConstructor(boolean.class, int.class, byte[].class);
+        constructor.setAccessible(true);
+        return constructor.newInstance(applicationClose, error, new byte[0]);
+    }
+
+    private static ChannelInboundHandlerAdapter eventRecorder(List<Object> passedOn) {
+        return new ChannelInboundHandlerAdapter() {
+            @Override
+            public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
+                passedOn.add(evt);
+            }
+        };
     }
 
     @Test
@@ -218,7 +264,7 @@ public class Http3ExceptionHandlerTest {
         when(unidirectional.type()).thenReturn(QuicStreamType.UNIDIRECTIONAL);
         when(unidirectional.pipeline()).thenReturn(stream.pipeline());
         List<Object> passedOn = new ArrayList<>();
-        EmbeddedChannel connection = new EmbeddedChannel(Http3ExceptionHandler.forConnection(mockServerLogger), recorder(passedOn));
+        EmbeddedChannel connection = new EmbeddedChannel(Http3ExceptionHandler.forConnection(mockServerLogger, null, clientTlsHandshakeFailureLog), recorder(passedOn));
 
         connection.pipeline().fireChannelRead(unidirectional);
 
@@ -244,7 +290,7 @@ public class Http3ExceptionHandlerTest {
         when(bidirectional.type()).thenReturn(QuicStreamType.BIDIRECTIONAL);
         when(bidirectional.pipeline()).thenReturn(stream.pipeline());
         List<Object> passedOn = new ArrayList<>();
-        EmbeddedChannel connection = new EmbeddedChannel(Http3ExceptionHandler.forConnection(mockServerLogger), recorder(passedOn));
+        EmbeddedChannel connection = new EmbeddedChannel(Http3ExceptionHandler.forConnection(mockServerLogger, null, clientTlsHandshakeFailureLog), recorder(passedOn));
 
         connection.pipeline().fireChannelRead(bidirectional);
 
@@ -255,7 +301,7 @@ public class Http3ExceptionHandlerTest {
     }
 
     private EmbeddedChannel connection() {
-        return new EmbeddedChannel(Http3ExceptionHandler.forConnection(mockServerLogger));
+        return new EmbeddedChannel(Http3ExceptionHandler.forConnection(mockServerLogger, null, clientTlsHandshakeFailureLog));
     }
 
     /**

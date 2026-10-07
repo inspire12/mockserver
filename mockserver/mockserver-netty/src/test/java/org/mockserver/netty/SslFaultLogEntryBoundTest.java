@@ -39,6 +39,7 @@ import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.lessThan;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.sameInstance;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
@@ -111,14 +112,11 @@ public class SslFaultLogEntryBoundTest {
     }
 
     @Test
-    public void shouldBoundAFailedTlsHandshakesEntryAtThePortItArrivedOn() {
+    public void shouldBoundAFailedTlsHandshakesEntryAtThePortItArrivedOnAndAttachNoStackTrace() {
         HttpState httpState = mock(HttpState.class, RETURNS_DEEP_STUBS);
         when(httpState.getMockServerLogger()).thenReturn(mockServerLogger);
-        // the client distrusts MockServer's CA (WARN), or the handshake failed for another reason (ERROR)
-        Map<String, Level> alerts = new LinkedHashMap<>();
-        alerts.put("Received fatal alert: certificate_unknown ", Level.WARN);
-        alerts.put("Received fatal alert: handshake_failure ", Level.ERROR);
-        alerts.forEach((alert, level) -> {
+        // the client distrusts MockServer's CA, or the handshake failed for another reason
+        for (String alert : new String[]{"Received fatal alert: certificate_unknown ", "Received fatal alert: handshake_failure "}) {
             SSLHandshakeException handshake = new SSLHandshakeException(alert + "x".repeat(BYTES_READ));
             Throwable fault = new DecoderException(handshake);
             EmbeddedChannel channel = new EmbeddedChannel(portUnificationHandler(httpState, mock(LifeCycle.class)));
@@ -128,15 +126,14 @@ public class SslFaultLogEntryBoundTest {
             channel.runPendingTasks();
 
             assertThat(alert, logged, hasSize(1));
-            assertThat(alert, logged.get(0).getLogLevel(), is(level));
-            Throwable attached = logged.get(0).getThrowable();
-            assertThat(alert, attached.getCause().getMessage(), containsString(alert));
-            assertThat(alert, attached.toString().length(), lessThan(1_000));
-            assertThat(alert, attached.getCause().toString().length(), lessThan(1_000));
-            assertThat(alert, attached.getStackTrace(), is(fault.getStackTrace()));
-            assertThat(alert, attached.getCause().getStackTrace(), is(handshake.getStackTrace()));
+            assertThat(alert, logged.get(0).getLogLevel(), is(Level.WARN));
+            String entry = logged.get(0).getMessage(configuration());
+            assertThat(alert, entry, containsString(alert));
+            assertThat(alert, entry.length(), lessThan(1_500));
+            assertThat(alert, logged.get(0).getThrowable(), is(nullValue()));
+            assertThat(alert + " closes the connection", channel.isOpen(), is(false));
             channel.finishAndReleaseAll();
-        });
+        }
     }
 
     private static PortUnificationHandler portUnificationHandler(HttpState httpState, LifeCycle server) {

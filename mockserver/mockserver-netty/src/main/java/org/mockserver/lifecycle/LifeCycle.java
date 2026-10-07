@@ -10,6 +10,7 @@ import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.mock.HttpState;
 import org.mockserver.mock.listeners.MockServerMatcherNotifier;
+import org.mockserver.netty.unification.ClientTlsHandshakeFailureLog;
 import org.mockserver.scheduler.Scheduler;
 import org.mockserver.stop.Stoppable;
 
@@ -110,6 +111,7 @@ public abstract class LifeCycle implements Stoppable {
     private final java.util.concurrent.atomic.AtomicInteger requestsInFlight = new java.util.concurrent.atomic.AtomicInteger(0);
     private final java.util.function.IntSupplier requestsInFlightSupplier = requestsInFlight::get;
     private final Scheduler scheduler;
+    private final ClientTlsHandshakeFailureLog clientTlsHandshakeFailureLog = new ClientTlsHandshakeFailureLog();
     // optional OTel exporters — null unless the corresponding config is enabled
     private final org.mockserver.metrics.OtelMetricsExporter otelMetricsExporter;
     private final org.mockserver.telemetry.GenAiSpanExporter genAiSpanExporter;
@@ -581,6 +583,14 @@ public abstract class LifeCycle implements Stoppable {
 
     public Scheduler getScheduler() {
         return scheduler;
+    }
+
+    /**
+     * Shared by every TCP and HTTP/3 port of this server, so a client's failed handshake is logged at {@code WARN}
+     * once per client address and transport.
+     */
+    public ClientTlsHandshakeFailureLog getClientTlsHandshakeFailureLog() {
+        return clientTlsHandshakeFailureLog;
     }
 
     /**

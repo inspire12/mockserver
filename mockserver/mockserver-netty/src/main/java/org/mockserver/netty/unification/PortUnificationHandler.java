@@ -66,7 +66,6 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static java.util.Collections.unmodifiableSet;
-import static org.mockserver.character.Character.NEW_LINE;
 import static org.mockserver.exception.ExceptionHandling.*;
 import static org.mockserver.mock.action.http.HttpActionHandler.setRemoteAddress;
 import static org.mockserver.model.HttpResponse.response;
@@ -76,7 +75,6 @@ import static org.mockserver.netty.HttpRequestHandler.setProxyingRequest;
 import static org.mockserver.netty.proxy.relay.RelayConnectHandler.*;
 import static org.mockserver.socket.tls.SniHandler.getALPNProtocol;
 import static org.slf4j.event.Level.TRACE;
-import static org.slf4j.event.Level.WARN;
 
 /**
  * @author jamesdbloom
@@ -148,6 +146,7 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
     // Shared server-wide instance (null when MCP is disabled) owned by MockServerUnificationInitializer.
     private final McpStreamableHttpHandler mcpStreamableHttpHandler;
     private final MockServerHttpResponseToFullHttpResponse mockServerHttpResponseToFullHttpResponse;
+    private final ClientTlsHandshakeFailureLog clientTlsHandshakeFailureLog;
     private ScheduledFuture<?> undecidedProtocolWait;
     private boolean takeBytesReceivedAsTheyAre;
     // the connection is binary and in the clear: only a TLS handshake beginning on it is still looked for
@@ -164,6 +163,8 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
         this.nettySslContextFactory = nettySslContextFactory;
         this.mcpStreamableHttpHandler = mcpStreamableHttpHandler;
         this.mockServerHttpResponseToFullHttpResponse = new MockServerHttpResponseToFullHttpResponse(mockServerLogger);
+        ClientTlsHandshakeFailureLog serversLog = server != null ? server.getClientTlsHandshakeFailureLog() : null;
+        this.clientTlsHandshakeFailureLog = serversLog != null ? serversLog : new ClientTlsHandshakeFailureLog();
     }
 
     public static NettySslContextFactory nettySslContextFactory(Channel channel) {
@@ -852,44 +853,13 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
                     .setMessageFormat("exception caught by port unification handler -> closing pipeline " + ctx.channel())
                     .setThrowable(throwable)
             );
-        } else if (sslHandshakeException(throwable)) {
+        } else if (sslHandshakeException(throwable) || ClientTlsHandshakeFailureLog.isFailedHandshake(throwable)) {
             String message = throwable.getMessage() != null ? throwable.getMessage() : "";
-            String messageLower = message.toLowerCase();
-            String certInfo = " Configured x509CertificatePath=\"" + configuration.x509CertificatePath()
-                + "\" certificateAuthorityCertificate=\"" + configuration.certificateAuthorityCertificate() + "\".";
-            if (messageLower.contains("certificate_unknown") || messageLower.contains("unknown_ca")) {
-                if (mockServerLogger != null && mockServerLogger.isEnabledForInstance(WARN)) {
-                    mockServerLogger.logEvent(
-                        new LogEntry()
-                            .setLogLevel(Level.WARN)
-                            .setMessageFormat("TLS handshake failure:" + NEW_LINE + NEW_LINE + " Client does not trust MockServer Certificate Authority for:{}See https://mock-server.com/mock_server/HTTPS_TLS.html to enable the client to trust MockServer Certificate Authority." + certInfo + NEW_LINE)
-                            .setArguments(ctx.channel())
-                            .setThrowable(boundedFault(throwable))
-                    );
-                }
-            } else if (!message.contains("close_notify during handshake")) {
-                String diagnosticHint;
-                if (messageLower.contains("bad_certificate")) {
-                    diagnosticHint = "the certificate was rejected by the client - check expiry and chain.";
-                } else if (messageLower.contains("handshake_failure")) {
-                    diagnosticHint = "TLS protocol or cipher mismatch.";
-                } else if (messageLower.contains("no_certificate")) {
-                    diagnosticHint = "client did not send a certificate (mTLS may be required).";
-                } else {
-                    diagnosticHint = "unknown cause.";
-                }
-                if (mockServerLogger != null) {
-                    mockServerLogger.logEvent(
-                        new LogEntry()
-                            .setLogLevel(Level.ERROR)
-                            .setMessageFormat("TLS handshake failure while a client attempted to connect to " + ctx.channel() + " - " + diagnosticHint + certInfo)
-                            .setThrowable(boundedFault(throwable))
-                    );
-                }
+            if (!message.contains("close_notify during handshake")) {
+                clientTlsHandshakeFailureLog.log(mockServerLogger, configuration, ClientTlsHandshakeFailureLog.TCP, ctx.channel().remoteAddress(), throwable);
             }
-            // The sslHandshakeException branch above covers SSLException-family faults (incl.
-            // NotSslRecordException, a subclass of SSLException) but NOT a plain DecoderException;
-            // the branch below catches that residual so a decoder fault is not silently dropped.
+            // bytes that are not TLS (NotSslRecordException) and a plain DecoderException are no failed
+            // handshake: the branch below logs them, so a decoder fault is not silently dropped
         } else if (isSslOrDecoderFault(throwable)) {
             if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
                 mockServerLogger.logEvent(

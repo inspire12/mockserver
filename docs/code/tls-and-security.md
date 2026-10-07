@@ -241,6 +241,28 @@ forward circuit breaker. The Java client still throws `SocketConnectionException
 or the initialisation error as its cause. See
 [request-processing.md](request-processing.md#how-a-failed-forward-is-answered).
 
+### A Client's Failed TLS Handshake
+
+**A client's failed handshake is logged at `WARN` once for each client address and transport, and at `DEBUG` after
+that, with a probable cause and no stack trace.** `PortUnificationHandler` (TCP) and `Http3ExceptionHandler`
+(HTTP/3) hand the failure to `ClientTlsHandshakeFailureLog`, one per server, held by `LifeCycle` and shared by
+every port. Over TCP a failure is any `SSLHandshakeException` in the cause chain, including OpenSSL's subclass,
+which `ExceptionHandling.sslHandshakeException` (exact classes only) does not match, so an OpenSSL engine's
+failed handshake used to be logged as an SSL fault with a stack trace. Over HTTP/3 a client that rejects
+MockServer's certificate fires no exception: it closes the connection with the TLS alert as its error, so the
+handler also logs a `QuicConnectionCloseEvent` whose `isTlsError()` is true, naming the alert. The entry
+names the transport, the client's address, the failure's message bounded by
+`ExceptionHandling.boundedFaultMessage` (so no peer bytes), a probable cause read from the TLS alert
+(`certificate_unknown` or `unknown_ca`: the client does not trust MockServer's Certificate Authority;
+`bad_certificate` (and `unsupported_certificate`, `certificate_revoked`, `certificate_expired`),
+`no_application_protocol`, `handshake_failure`, `no_certificate` / `certificate_required`),
+the link to the trust instructions and the configured certificate paths. A client that closes during the handshake
+(`close_notify during handshake`) logs nothing.
+
+The addresses are kept in an access-ordered map of at most 1,024 entries (`MAX_CLIENT_ADDRESSES`), keyed by
+transport and host without the port, so a scan from many addresses costs bounded memory; an address forgotten
+that way is warned about again. An address is remembered even when the log level drops its `WARN`.
+
 ### Forward Target SSRF Validation
 
 When `forwardProxyBlockPrivateNetworks` is `true` (default `false`), MockServer validates the target host before opening any outbound connection. `InetAddressValidator.validateForwardTarget` resolves the hostname and rejects addresses in these ranges:

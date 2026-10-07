@@ -6,15 +6,19 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.handler.codec.http3.Http3Exception;
 import io.netty.handler.codec.quic.QuicChannel;
+import io.netty.handler.codec.quic.QuicConnectionCloseEvent;
 import io.netty.handler.codec.quic.QuicException;
 import io.netty.handler.codec.quic.QuicStreamChannel;
 import io.netty.handler.codec.quic.QuicStreamResetException;
 import io.netty.handler.codec.quic.QuicStreamType;
+import org.mockserver.configuration.Configuration;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
+import org.mockserver.netty.unification.ClientTlsHandshakeFailureLog;
 import org.slf4j.event.Level;
 
 import javax.net.ssl.SSLException;
+import java.net.SocketAddress;
 import java.nio.channels.ClosedChannelException;
 
 import static org.mockserver.exception.ExceptionHandling.DIRECT_MEMORY_LIMIT_REACHED;
@@ -37,18 +41,22 @@ import static org.mockserver.exception.ExceptionHandling.isSslOrDecoderFault;
 public class Http3ExceptionHandler extends ChannelInboundHandlerAdapter {
 
     private final MockServerLogger mockServerLogger;
+    private final Configuration configuration;
+    private final ClientTlsHandshakeFailureLog clientTlsHandshakeFailureLog;
     // null on the handler of a stream
     private final Http3ExceptionHandler unidirectionalStreamHandler;
 
     /**
      * @return the handler for a QUIC connection's pipeline, where it must stay last
      */
-    public static Http3ExceptionHandler forConnection(MockServerLogger mockServerLogger) {
-        return new Http3ExceptionHandler(mockServerLogger, new Http3ExceptionHandler(mockServerLogger, null));
+    public static Http3ExceptionHandler forConnection(MockServerLogger mockServerLogger, Configuration configuration, ClientTlsHandshakeFailureLog clientTlsHandshakeFailureLog) {
+        return new Http3ExceptionHandler(mockServerLogger, configuration, clientTlsHandshakeFailureLog, new Http3ExceptionHandler(mockServerLogger, configuration, clientTlsHandshakeFailureLog, null));
     }
 
-    private Http3ExceptionHandler(MockServerLogger mockServerLogger, Http3ExceptionHandler unidirectionalStreamHandler) {
+    private Http3ExceptionHandler(MockServerLogger mockServerLogger, Configuration configuration, ClientTlsHandshakeFailureLog clientTlsHandshakeFailureLog, Http3ExceptionHandler unidirectionalStreamHandler) {
         this.mockServerLogger = mockServerLogger;
+        this.configuration = configuration;
+        this.clientTlsHandshakeFailureLog = clientTlsHandshakeFailureLog;
         this.unidirectionalStreamHandler = unidirectionalStreamHandler;
     }
 
@@ -60,6 +68,16 @@ public class Http3ExceptionHandler extends ChannelInboundHandlerAdapter {
         }
         // the end of the pipeline is where Netty registers a new stream
         ctx.fireChannelRead(msg);
+    }
+
+    @Override
+    public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
+        // a client that rejects the handshake closes the connection with the TLS alert as its error, and fires no exception
+        if (unidirectionalStreamHandler != null && evt instanceof QuicConnectionCloseEvent && ((QuicConnectionCloseEvent) evt).isTlsError()) {
+            int alert = QuicConnectionCloseEvent.extractTlsError(((QuicConnectionCloseEvent) evt).error());
+            clientTlsHandshakeFailureLog.logClientAlert(mockServerLogger, configuration, ClientTlsHandshakeFailureLog.HTTP3, peerAddress(ctx.channel()), alert);
+        }
+        ctx.fireUserEventTriggered(evt);
     }
 
     @Override
@@ -82,13 +100,7 @@ public class Http3ExceptionHandler extends ChannelInboundHandlerAdapter {
                 );
             }
         } else if (cause instanceof SSLException) {
-            // no throwable: Netty builds the exception from an error code, so its stack trace says nothing
-            mockServerLogger.logEvent(
-                new LogEntry()
-                    .setLogLevel(Level.ERROR)
-                    .setMessageFormat("TLS handshake failure on HTTP/3 connection from:{}:{}")
-                    .setArguments(peerAddress(ctx.channel()), boundedFaultMessage(cause))
-            );
+            clientTlsHandshakeFailureLog.log(mockServerLogger, configuration, ClientTlsHandshakeFailureLog.HTTP3, peerAddress(ctx.channel()), cause);
         } else if (isSslOrDecoderFault(cause)) {
             // ahead of the next branch, whose check takes every decoder fault for a closed connection
             if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
@@ -134,7 +146,7 @@ public class Http3ExceptionHandler extends ChannelInboundHandlerAdapter {
     /**
      * The client's socket address: a QUIC channel's {@code remoteAddress()} is its connection id.
      */
-    static Object peerAddress(Channel channel) {
+    static SocketAddress peerAddress(Channel channel) {
         Channel connection = channel instanceof QuicStreamChannel ? channel.parent() : channel;
         return connection instanceof QuicChannel ? ((QuicChannel) connection).remoteSocketAddress() : connection.remoteAddress();
     }
