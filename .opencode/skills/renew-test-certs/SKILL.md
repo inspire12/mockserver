@@ -2,8 +2,8 @@
 name: renew-test-certs
 description: >
   Renews expiring TLS test certificates used by MockServer integration tests.
-  Use when TLS tests fail with "Channel handler removed before valid response
-  has been received", "Broken pipe", certificate expired errors, when the
+  Use when TLS tests fail with "TLS with the upstream failed" (before 9.0.0,
+  "Channel handler removed before valid response has been received"), "Broken pipe", certificate expired errors, when the
   ":lock: certificate expiry guard" CI step fails or warns, or when a user says
   "renew certs", "certificates expired", "TLS tests failing".
 ---
