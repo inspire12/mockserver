@@ -167,6 +167,9 @@ public class ClientTlsHandshakeFailureLog {
             return "default";
         }
         ServerTlsSettings tlsSettings = ServerTlsSettings.of(configuration);
+        if (tlsSettings == null) {
+            return "default";
+        }
         return "x509CertificatePath=\"" + tlsSettings.x509CertificatePath()
             + "\" certificateAuthorityCertificate=\"" + tlsSettings.certificateAuthorityCertificate() + "\"";
     }
