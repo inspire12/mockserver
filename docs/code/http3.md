@@ -166,6 +166,18 @@ It closes nothing except for the direct memory limit: Netty closes the connectio
 
 **Request streams.** `Http3MockServerHandler` logs a request stream its client reset (`QuicStreamResetException`) or a closed stream channel at `DEBUG`, with the client's address and the message, and closes the stream, as the row above does for any other stream; a client that abandons a request part-way through its body is an ordinary event. Over TCP a reset connection logs nothing. Any other exception on a request stream except an oversized header section is still `WARN` with its stack trace.
 
+**CONNECT-UDP streams.** `Http3ConnectUdpHandler` takes the server's `MockServerLogger`, so each of its entries reaches MockServer's log, its level and the event log the dashboard shows. A reason that can hold the client's `:authority` is cut to 256 characters, and an exception's message is bounded as the other handlers bound it.
+
+| Entry | Logged |
+|-------|--------|
+| A tunnel requested, then established | `DEBUG`, then `INFO`, with the client's address and the target |
+| A refused request (a missing or malformed `:authority`, `400`) or target (allowlist, private-network block, unresolvable, `403`) | `WARN`, the client's address and the reason; the client sees only the generic body |
+| The relay socket failed to bind or connect (`502`) | `ERROR` and the cause |
+| The relay socket failed later, such as the target's ICMP port unreachable | `WARN`, the target, the client's address and the exception's class and message; a stack trace only for an exception that is not a `SocketException`. The socket is closed |
+| A DATA frame after that, which is dropped; a datagram that could not be sent; the relay socket closed | `DEBUG` |
+| The client reset its CONNECT-UDP stream (`QuicStreamResetException`) or a closed stream channel | `DEBUG`, the client's address and the message; the stream is closed, as for a request stream |
+| Any other exception on a CONNECT-UDP stream | `WARN`, the client's address, the bounded description and the cause |
+
 **The UDP listener.** The listener's pipeline holds Netty's QUIC codec, which takes no exception, followed by `Http3ListenerExceptionHandler`, one per listener. It closes nothing itself, and logs by what Netty's NIO datagram channel (`Http3Server` uses it on every platform) does after a read error (`NioDatagramChannel.closeOnReadError`):
 
 | What reached it | Netty after a read error | Logged |
@@ -177,9 +189,9 @@ It closes nothing except for the direct memory limit: Netty closes the connectio
 
 Netty's epoll datagram channel closes on no read error, but `Http3Server` does not use it. The codec still catches a packet it cannot process and logs it through Netty's logger at `DEBUG`.
 
-**Not covered.** The streams MockServer's side opens (its own control and QPACK streams): Netty creates each with its handler in place and registers and activates it in the same call, without passing it down the connection's pipeline, so Netty 4.2.18 offers no point at which to add a handler before the stream can fire an exception. From reading, the only exception one fires is the QPACK encoder stream's `QPACK_ENCODER_STREAM_ERROR` when its dynamic table cannot be configured from the client's settings, which needs `http3QpackMaxTableCapacity` above 0. The legacy echo mode's request streams (the no-argument `Http3Server` constructor, which only tests use) are left as they were. `Http3ConnectUdpHandler` logs a CONNECT-UDP stream's exception, including its client's reset, through SLF4J directly at `WARN`.
+**Not covered.** The streams MockServer's side opens (its own control and QPACK streams): Netty creates each with its handler in place and registers and activates it in the same call, without passing it down the connection's pipeline, so Netty 4.2.18 offers no point at which to add a handler before the stream can fire an exception. From reading, the only exception one fires is the QPACK encoder stream's `QPACK_ENCODER_STREAM_ERROR` when its dynamic table cannot be configured from the client's settings, which needs `http3QpackMaxTableCapacity` above 0. The legacy echo mode's request streams (the no-argument `Http3Server` constructor, which only tests use) are left as they were.
 
-`Http3ConnectionErrorLoggingIntegrationTest` checks, with a QUIC client that has no HTTP/3 codec, that nothing reaches Netty's logger for a handshake that offers another ALPN protocol, a frame type reserved for HTTP/2 on the control stream (the connection is still closed with `H3_FRAME_UNEXPECTED`), a `SETTINGS` frame whose `ENABLE_CONNECT_PROTOCOL` is 2, which Netty's codec throws on (the connection carries on), a reset unidirectional stream (the connection carries on), and a request stream its client resets part-way through its body (one `DEBUG` entry, no `WARN`, and the connection still serves the next request). `Http3ExceptionHandlerTest` checks each row, `Http3MockServerHandlerTest` the request stream's levels, and `Http3ListenerExceptionHandlerTest` and `Http3ListenerExceptionLoggingIntegrationTest` (an exception fired on a real listener reaches MockServer's log, not Netty's, a repeated socket error is one `WARN`, and the listener stays open) the listener's.
+`Http3ConnectionErrorLoggingIntegrationTest` checks, with a QUIC client that has no HTTP/3 codec, that nothing reaches Netty's logger for a handshake that offers another ALPN protocol, a frame type reserved for HTTP/2 on the control stream (the connection is still closed with `H3_FRAME_UNEXPECTED`), a `SETTINGS` frame whose `ENABLE_CONNECT_PROTOCOL` is 2, which Netty's codec throws on (the connection carries on), a reset unidirectional stream (the connection carries on), and a request stream its client resets part-way through its body (one `DEBUG` entry, no `WARN`, and the connection still serves the next request). `Http3ExceptionHandlerTest` checks each row, `Http3MockServerHandlerTest` the request stream's levels, and `Http3ListenerExceptionHandlerTest` and `Http3ListenerExceptionLoggingIntegrationTest` (an exception fired on a real listener reaches MockServer's log, not Netty's, a repeated socket error is one `WARN`, and the listener stays open) the listener's. `Http3ConnectUdpLoggingIntegrationTest` checks with a real client that a tunnel's entries reach MockServer's log and event log, that a client's reset of its tunnel is `DEBUG` with no `WARN`, that a refused target is `WARN`, and that a target with nothing listening fails the relay socket with one `WARN` and no stack trace, after which a frame is dropped at `DEBUG`; `Http3ConnectUdpHandlerTest` checks each row and the bounds.
 
 ### Streaming Response Path
 
@@ -819,7 +831,7 @@ bidi-streaming) work over HTTP/3, matching the TCP (HTTP/1.1 and HTTP/2) path.
   Refusals return a **generic** `403` body (`"CONNECT-UDP target not permitted"`) —
   identical for allowlist misses, private-network blocks, and unresolvable targets — so
   the relay cannot be used as a recon oracle to probe which internal hosts exist; the
-  specific reason and host are logged server-side only. With both controls at their
+  specific reason and host are logged server-side only, at `WARN` in MockServer's log. With both controls at their
   defaults (empty allowlist, `forwardProxyBlockPrivateNetworks=false`) the relay is
   unrestricted, so existing experimental users are unaffected unless they opt in. It
   remains intended for controlled test environments; never expose a CONNECT-UDP–enabled

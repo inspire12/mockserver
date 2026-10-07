@@ -9,14 +9,24 @@ import io.netty.handler.codec.http3.DefaultHttp3DataFrame;
 import io.netty.handler.codec.http3.DefaultHttp3HeadersFrame;
 import io.netty.handler.codec.http3.Http3DataFrame;
 import io.netty.handler.codec.http3.Http3HeadersFrame;
+import io.netty.handler.codec.DecoderException;
+import io.netty.handler.codec.http3.Http3ErrorCode;
+import io.netty.handler.codec.quic.QuicStreamResetException;
 import org.junit.Test;
 import org.mockserver.configuration.Configuration;
+import org.mockserver.log.model.LogEntry;
+import org.mockserver.logging.MockServerLogger;
+import org.slf4j.event.Level;
 
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.PortUnreachableException;
+import java.nio.channels.ClosedChannelException;
 import java.nio.channels.DatagramChannel;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.Assert.assertFalse;
@@ -38,7 +48,7 @@ public class Http3ConnectUdpHandlerTest {
 
     @Test
     public void shouldPassThroughNonConnectRequests() {
-        EmbeddedChannel channel = new EmbeddedChannel(new Http3ConnectUdpHandler());
+        EmbeddedChannel channel = new EmbeddedChannel(new Http3ConnectUdpHandler(configuration(), new CapturingLogger(Level.INFO)));
 
         // Send a normal GET request
         DefaultHttp3HeadersFrame getHeaders = new DefaultHttp3HeadersFrame();
@@ -63,7 +73,7 @@ public class Http3ConnectUdpHandlerTest {
 
     @Test
     public void shouldPassThroughPostRequests() {
-        EmbeddedChannel channel = new EmbeddedChannel(new Http3ConnectUdpHandler());
+        EmbeddedChannel channel = new EmbeddedChannel(new Http3ConnectUdpHandler(configuration(), new CapturingLogger(Level.INFO)));
 
         DefaultHttp3HeadersFrame postHeaders = new DefaultHttp3HeadersFrame();
         postHeaders.headers().method("POST");
@@ -84,7 +94,7 @@ public class Http3ConnectUdpHandlerTest {
 
     @Test
     public void shouldPassThroughPlainConnectWithoutProtocol() {
-        EmbeddedChannel channel = new EmbeddedChannel(new Http3ConnectUdpHandler());
+        EmbeddedChannel channel = new EmbeddedChannel(new Http3ConnectUdpHandler(configuration(), new CapturingLogger(Level.INFO)));
 
         // Plain CONNECT (no :protocol) -- should pass through to mock handler
         DefaultHttp3HeadersFrame connectHeaders = new DefaultHttp3HeadersFrame();
@@ -104,7 +114,7 @@ public class Http3ConnectUdpHandlerTest {
 
     @Test
     public void shouldPassThroughDataFrames() {
-        EmbeddedChannel channel = new EmbeddedChannel(new Http3ConnectUdpHandler());
+        EmbeddedChannel channel = new EmbeddedChannel(new Http3ConnectUdpHandler(configuration(), new CapturingLogger(Level.INFO)));
 
         // Data frames before tunnel is established should pass through
         DefaultHttp3DataFrame dataFrame = new DefaultHttp3DataFrame(
@@ -125,7 +135,7 @@ public class Http3ConnectUdpHandlerTest {
 
     @Test
     public void shouldRejectConnectUdpWithMissingAuthority() {
-        EmbeddedChannel channel = new EmbeddedChannel(new Http3ConnectUdpHandler());
+        EmbeddedChannel channel = new EmbeddedChannel(new Http3ConnectUdpHandler(configuration(), new CapturingLogger(Level.INFO)));
 
         // Extended CONNECT with :protocol=connect-udp but no :authority
         DefaultHttp3HeadersFrame connectHeaders = new DefaultHttp3HeadersFrame();
@@ -153,7 +163,7 @@ public class Http3ConnectUdpHandlerTest {
 
     @Test
     public void shouldRejectConnectUdpWithInvalidAuthority() {
-        EmbeddedChannel channel = new EmbeddedChannel(new Http3ConnectUdpHandler());
+        EmbeddedChannel channel = new EmbeddedChannel(new Http3ConnectUdpHandler(configuration(), new CapturingLogger(Level.INFO)));
 
         // Extended CONNECT with invalid authority (no port)
         DefaultHttp3HeadersFrame connectHeaders = new DefaultHttp3HeadersFrame();
@@ -185,7 +195,7 @@ public class Http3ConnectUdpHandlerTest {
     public void shouldRejectConnectUdpTargetNotInAllowlist() {
         Configuration config = configuration()
             .http3ConnectUdpAllowedTargets("allowed.example.com:443");
-        EmbeddedChannel channel = new EmbeddedChannel(new Http3ConnectUdpHandler(config));
+        EmbeddedChannel channel = new EmbeddedChannel(new Http3ConnectUdpHandler(config, new CapturingLogger(Level.INFO)));
 
         DefaultHttp3HeadersFrame connectHeaders = new DefaultHttp3HeadersFrame();
         connectHeaders.headers().method("CONNECT");
@@ -213,7 +223,7 @@ public class Http3ConnectUdpHandlerTest {
 
     @Test
     public void shouldRejectUnresolvableConnectUdpTarget() {
-        EmbeddedChannel channel = new EmbeddedChannel(new Http3ConnectUdpHandler(configuration()));
+        EmbeddedChannel channel = new EmbeddedChannel(new Http3ConnectUdpHandler(configuration(), new CapturingLogger(Level.INFO)));
 
         DefaultHttp3HeadersFrame connectHeaders = new DefaultHttp3HeadersFrame();
         connectHeaders.headers().method("CONNECT");
@@ -242,7 +252,7 @@ public class Http3ConnectUdpHandlerTest {
     public void shouldRejectConnectUdpToLoopbackWhenSsrfBlockingEnabled() {
         Configuration config = configuration()
             .forwardProxyBlockPrivateNetworks(true);
-        EmbeddedChannel channel = new EmbeddedChannel(new Http3ConnectUdpHandler(config));
+        EmbeddedChannel channel = new EmbeddedChannel(new Http3ConnectUdpHandler(config, new CapturingLogger(Level.INFO)));
 
         DefaultHttp3HeadersFrame connectHeaders = new DefaultHttp3HeadersFrame();
         connectHeaders.headers().method("CONNECT");
@@ -451,5 +461,175 @@ public class Http3ConnectUdpHandlerTest {
         String input = "Connection refused: \"target\" at C:\\path\\host";
         String expected = "Connection refused: \\\"target\\\" at C:\\\\path\\\\host";
         assertThat(Http3ConnectUdpHandler.escapeJsonString(input), is(expected));
+    }
+    // ---- logging ----
+
+    @Test
+    public void shouldLogAClientsResetOfAConnectUdpStreamAtDebugWithoutAStackTraceAndCloseTheStream() {
+        for (Throwable cause : new Throwable[]{new QuicStreamResetException("STREAM_RESET", Http3ErrorCode.H3_REQUEST_CANCELLED.code()), new ClosedChannelException()}) {
+            CapturingLogger logger = new CapturingLogger(Level.DEBUG);
+            EmbeddedChannel channel = connectUdpStream(configuration(), logger);
+            logger.logged.clear();
+
+            channel.pipeline().fireExceptionCaught(cause);
+
+            assertThat(cause.toString(), logger.logged, hasSize(1));
+            assertThat(logger.logged.get(0).getLogLevel(), is(Level.DEBUG));
+            assertThat(logger.logged.get(0).getMessageFormat(), is("CONNECT-UDP stream of HTTP/3 connection from:{}closed or reset by its client:{}"));
+            assertThat(logger.logged.get(0).getThrowable(), is(nullValue()));
+            assertFalse("the stream is closed", channel.isOpen());
+
+            CapturingLogger atInfo = new CapturingLogger(Level.INFO);
+            EmbeddedChannel quiet = connectUdpStream(configuration(), atInfo);
+            atInfo.logged.clear();
+            quiet.pipeline().fireExceptionCaught(cause);
+            assertThat("nothing at the default level", atInfo.logged, empty());
+            assertFalse("the stream is closed", quiet.isOpen());
+        }
+    }
+
+    @Test
+    public void shouldLogAnyOtherExceptionOnAConnectUdpStreamAsAWarningWithItsMessageBounded() {
+        CapturingLogger logger = new CapturingLogger(Level.INFO);
+        EmbeddedChannel channel = connectUdpStream(configuration(), logger);
+        logger.logged.clear();
+        String peerBytes = "x".repeat(4000);
+
+        channel.pipeline().fireExceptionCaught(new DecoderException(peerBytes));
+
+        assertThat(logger.logged, hasSize(1));
+        LogEntry entry = logger.logged.get(0);
+        assertThat(entry.getLogLevel(), is(Level.WARN));
+        assertThat(entry.getMessageFormat(), is("exception on CONNECT-UDP stream of HTTP/3 connection from:{}:{}"));
+        assertThat(String.valueOf(entry.getArguments()[1]), startsWith("DecoderException: xxx"));
+        assertThat(String.valueOf(entry.getArguments()[1]).length(), lessThan(300));
+        assertThat(entry.getThrowable(), is(notNullValue()));
+        assertThat(entry.getThrowable().getMessage().length(), lessThan(300));
+        assertFalse("the stream is closed", channel.isOpen());
+    }
+
+    @Test
+    public void shouldPassOnAnExceptionOfAStreamThatDidNotAskForConnectUdpWithoutLoggingIt() {
+        CapturingLogger logger = new CapturingLogger(Level.TRACE);
+        List<Throwable> passedOn = new CopyOnWriteArrayList<>();
+        EmbeddedChannel channel = new EmbeddedChannel(new Http3ConnectUdpHandler(configuration(), logger), new ChannelInboundHandlerAdapter() {
+            @Override
+            public void exceptionCaught(io.netty.channel.ChannelHandlerContext ctx, Throwable cause) {
+                passedOn.add(cause);
+            }
+        });
+        QuicStreamResetException reset = new QuicStreamResetException("STREAM_RESET", Http3ErrorCode.H3_REQUEST_CANCELLED.code());
+
+        channel.pipeline().fireExceptionCaught(reset);
+
+        assertThat(logger.logged, empty());
+        assertThat(passedOn, contains(reset));
+        assertTrue("the request handler after it closes the stream", channel.isOpen());
+        channel.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldLogARefusedRequestAsAWarningInMockServersLogWithTheAuthorityBounded() {
+        CapturingLogger logger = new CapturingLogger(Level.INFO);
+        EmbeddedChannel channel = new EmbeddedChannel(new Http3ConnectUdpHandler(configuration(), logger));
+        String authority = "h".repeat(4000);
+        DefaultHttp3HeadersFrame connectHeaders = new DefaultHttp3HeadersFrame();
+        connectHeaders.headers().method("CONNECT");
+        connectHeaders.headers().protocol("connect-udp");
+        connectHeaders.headers().authority(authority);
+
+        channel.writeInbound(connectHeaders);
+
+        assertThat(logger.logged, hasSize(1));
+        LogEntry entry = logger.logged.get(0);
+        assertThat(entry.getLogLevel(), is(Level.WARN));
+        assertThat(entry.getMessageFormat(), is("CONNECT-UDP request from:{}refused with status:{}because:{}"));
+        assertThat(entry.getArguments()[1], is("400"));
+        assertThat(String.valueOf(entry.getArguments()[2]), startsWith("Invalid :authority for CONNECT-UDP: hhh"));
+        assertThat(String.valueOf(entry.getArguments()[2]).length(), lessThan(300));
+        channel.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldLogARefusedTargetAsAWarningInMockServersLog() {
+        CapturingLogger logger = new CapturingLogger(Level.INFO);
+        EmbeddedChannel channel = new EmbeddedChannel(new Http3ConnectUdpHandler(configuration().http3ConnectUdpAllowedTargets("allowed.example.com:443"), logger));
+        DefaultHttp3HeadersFrame connectHeaders = new DefaultHttp3HeadersFrame();
+        connectHeaders.headers().method("CONNECT");
+        connectHeaders.headers().protocol("connect-udp");
+        connectHeaders.headers().authority("127.0.0.1:443");
+
+        channel.writeInbound(connectHeaders);
+
+        assertThat(logger.logged, hasSize(1));
+        LogEntry entry = logger.logged.get(0);
+        assertThat(entry.getLogLevel(), is(Level.WARN));
+        assertThat(entry.getMessageFormat(), is("CONNECT-UDP target from:{}refused:{}"));
+        assertThat(String.valueOf(entry.getArguments()[1]), is("not in http3ConnectUdpAllowedTargets: 127.0.0.1:443"));
+        channel.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldLogAFailedRelaySocketAsAWarningWithoutTheStackTraceOfAnIoErrorAndCloseIt() {
+        EmbeddedChannel quicStream = new EmbeddedChannel(new ChannelInboundHandlerAdapter());
+        for (Throwable cause : new Throwable[]{new PortUnreachableException("ICMP Port Unreachable"), new IllegalStateException("relay failed")}) {
+            CapturingLogger logger = new CapturingLogger(Level.INFO);
+            EmbeddedChannel relaySocket = new EmbeddedChannel(new Http3ConnectUdpHandler.UdpRelayHandler(quicStream.pipeline().firstContext(), logger));
+
+            relaySocket.pipeline().fireExceptionCaught(cause);
+
+            assertThat(cause.toString(), logger.logged, hasSize(1));
+            LogEntry entry = logger.logged.get(0);
+            assertThat(entry.getLogLevel(), is(Level.WARN));
+            assertThat(entry.getMessageFormat(), is("CONNECT-UDP relay socket to:{}for HTTP/3 connection from:{}failed and is closed:{}"));
+            assertThat(String.valueOf(entry.getArguments()[2]), is(cause.getClass().getSimpleName() + ": " + cause.getMessage()));
+            if (cause instanceof PortUnreachableException) {
+                assertThat(entry.getThrowable(), is(nullValue()));
+            } else {
+                assertThat(entry.getThrowable(), sameInstance(cause));
+            }
+            assertFalse("the relay socket is closed", relaySocket.isOpen());
+        }
+        quicStream.finishAndReleaseAll();
+    }
+
+    /**
+     * A stream on which the client asked for CONNECT-UDP; it is refused for its missing authority, which needs no
+     * relay socket, and stays open as a QUIC stream whose output is shut down would.
+     */
+    private static EmbeddedChannel connectUdpStream(Configuration configuration, CapturingLogger logger) {
+        EmbeddedChannel channel = new EmbeddedChannel(new Http3ConnectUdpHandler(configuration, logger));
+        DefaultHttp3HeadersFrame connectHeaders = new DefaultHttp3HeadersFrame();
+        connectHeaders.headers().method("CONNECT");
+        connectHeaders.headers().protocol("connect-udp");
+        channel.writeInbound(connectHeaders);
+        Object response;
+        while ((response = channel.readOutbound()) != null) {
+            io.netty.util.ReferenceCountUtil.release(response);
+        }
+        assertTrue("the stream is still open", channel.isOpen());
+        return channel;
+    }
+
+    private static final class CapturingLogger extends MockServerLogger {
+        private final Level level;
+        private final List<LogEntry> logged = new CopyOnWriteArrayList<>();
+
+        private CapturingLogger(Level level) {
+            super(Http3ConnectUdpHandlerTest.class);
+            this.level = level;
+        }
+
+        @Override
+        public boolean isEnabledForInstance(Level level) {
+            return isEnabled(level, this.level);
+        }
+
+        @Override
+        public void logEvent(LogEntry logEntry) {
+            if (isEnabledForInstance(logEntry.getLogLevel())) {
+                logged.add(logEntry);
+            }
+        }
     }
 }

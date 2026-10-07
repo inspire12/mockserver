@@ -134,7 +134,7 @@ public class Http3ExceptionHandler extends ChannelInboundHandlerAdapter {
     /**
      * The client's socket address: a QUIC channel's {@code remoteAddress()} is its connection id.
      */
-    private static Object peerAddress(Channel channel) {
+    static Object peerAddress(Channel channel) {
         Channel connection = channel instanceof QuicStreamChannel ? channel.parent() : channel;
         return connection instanceof QuicChannel ? ((QuicChannel) connection).remoteSocketAddress() : connection.remoteAddress();
     }

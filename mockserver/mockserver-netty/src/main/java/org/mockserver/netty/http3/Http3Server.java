@@ -212,7 +212,7 @@ public class Http3Server {
                                     }
                                     if (httpState != null && httpActionHandler != null && configuration != null) {
                                         if (connectUdpEnabled) {
-                                            streamCh.pipeline().addLast(new Http3ConnectUdpHandler(configuration));
+                                            streamCh.pipeline().addLast(new Http3ConnectUdpHandler(configuration, handlerLogger));
                                         }
                                         streamCh.pipeline().addLast(new Http3MockServerHandler(
                                             configuration, mockServerLogger, httpState, httpActionHandler, sharedMetrics,

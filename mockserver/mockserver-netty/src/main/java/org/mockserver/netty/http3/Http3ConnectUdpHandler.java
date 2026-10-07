@@ -19,19 +19,29 @@ import io.netty.handler.codec.http3.DefaultHttp3HeadersFrame;
 import io.netty.handler.codec.http3.Http3DataFrame;
 import io.netty.handler.codec.http3.Http3HeadersFrame;
 import io.netty.handler.codec.quic.QuicStreamChannel;
+import io.netty.handler.codec.quic.QuicStreamResetException;
+import org.apache.commons.lang3.StringUtils;
 import org.mockserver.configuration.Configuration;
+import org.mockserver.log.model.LogEntry;
+import org.mockserver.logging.MockServerLogger;
 import org.mockserver.proxyconfiguration.InetAddressValidator;
 import org.mockserver.socket.NettyAllocator;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.slf4j.event.Level;
 
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.SocketException;
+import java.nio.channels.ClosedChannelException;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 
 import static org.apache.commons.lang3.StringUtils.isBlank;
+import static org.mockserver.exception.ExceptionHandling.MAX_FAULT_MESSAGE_LENGTH;
+import static org.mockserver.exception.ExceptionHandling.boundedFault;
+import static org.mockserver.exception.ExceptionHandling.boundedFaultDescription;
+import static org.mockserver.exception.ExceptionHandling.boundedFaultMessage;
+import static org.mockserver.netty.http3.Http3ExceptionHandler.peerAddress;
 
 /**
  * HTTP/3 CONNECT-UDP (MASQUE, RFC 9298) relay handler.
@@ -94,16 +104,16 @@ import static org.apache.commons.lang3.StringUtils.isBlank;
  */
 public class Http3ConnectUdpHandler extends ChannelInboundHandlerAdapter {
 
-    private static final Logger LOG = LoggerFactory.getLogger(Http3ConnectUdpHandler.class);
-
     /**
      * MockServer configuration used to resolve the CONNECT-UDP allowlist
      * ({@code http3ConnectUdpAllowedTargets}) and the SSRF private-network block
-     * ({@code forwardProxyBlockPrivateNetworks}). May be null in legacy/test
-     * constructions, in which case no allowlist is enforced and the SSRF block
+     * ({@code forwardProxyBlockPrivateNetworks}). May be null, in which case no
+     * allowlist is enforced and the SSRF block
      * falls back to the global {@code ConfigurationProperties} (default off).
      */
     private final Configuration configuration;
+
+    private final MockServerLogger mockServerLogger;
 
     /**
      * The UDP channel connected to the relay target. Null until a CONNECT-UDP
@@ -122,19 +132,13 @@ public class Http3ConnectUdpHandler extends ChannelInboundHandlerAdapter {
     private boolean connectUdpRequested;
 
     /**
-     * Legacy/test constructor: no configuration, so no allowlist is enforced and
-     * the SSRF block falls back to global {@code ConfigurationProperties} (default off).
+     * @param configuration    the MockServer configuration used to resolve the
+     *                         CONNECT-UDP allowlist and the SSRF private-network block
+     * @param mockServerLogger the server's logger, so the relay's entries reach its log and event log
      */
-    public Http3ConnectUdpHandler() {
-        this(null);
-    }
-
-    /**
-     * @param configuration the MockServer configuration used to resolve the
-     *                      CONNECT-UDP allowlist and the SSRF private-network block
-     */
-    public Http3ConnectUdpHandler(Configuration configuration) {
+    public Http3ConnectUdpHandler(Configuration configuration, MockServerLogger mockServerLogger) {
         this.configuration = configuration;
+        this.mockServerLogger = mockServerLogger;
     }
 
     @Override
@@ -222,10 +226,17 @@ public class Http3ConnectUdpHandler extends ChannelInboundHandlerAdapter {
         // InetSocketAddress does NOT re-resolve), guaranteeing validated == connected.
         InetSocketAddress connectAddress = new InetSocketAddress(resolvedTarget, targetPort);
 
-        LOG.info("CONNECT-UDP tunnel requested to {} -- establishing UDP relay", connectAddress);
+        if (mockServerLogger.isEnabledForInstance(Level.DEBUG)) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.DEBUG)
+                    .setMessageFormat("CONNECT-UDP tunnel from:{}requested to:{}")
+                    .setArguments(peerAddress(ctx.channel()), connectAddress)
+            );
+        }
 
         // Open a UDP channel connected to the target, on the parent channel's event loop.
-        ChannelFuture bindFuture = bindRelaySocket(ctx.channel().eventLoop(), resolvedTarget, new UdpRelayHandler(ctx));
+        ChannelFuture bindFuture = bindRelaySocket(ctx.channel().eventLoop(), resolvedTarget, new UdpRelayHandler(ctx, mockServerLogger));
         bindFuture.addListener(future -> {
             if (!future.isSuccess()) {
                 sendRelayUnavailable(ctx, "bind failed for " + connectAddress, future.cause());
@@ -244,7 +255,14 @@ public class Http3ConnectUdpHandler extends ChannelInboundHandlerAdapter {
                 this.udpChannel = boundChannel;
                 this.tunnelEstablished = true;
 
-                LOG.info("CONNECT-UDP tunnel established to {} -- relaying datagrams", connectAddress);
+                if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
+                    mockServerLogger.logEvent(
+                        new LogEntry()
+                            .setLogLevel(Level.INFO)
+                            .setMessageFormat("CONNECT-UDP tunnel from:{}established to:{}")
+                            .setArguments(peerAddress(ctx.channel()), connectAddress)
+                    );
+                }
 
                 // Respond 200 OK to the client to indicate the tunnel is up
                 DefaultHttp3HeadersFrame responseHeaders = new DefaultHttp3HeadersFrame();
@@ -275,7 +293,15 @@ public class Http3ConnectUdpHandler extends ChannelInboundHandlerAdapter {
     private void relayToTarget(ChannelHandlerContext ctx, Http3DataFrame dataFrame) {
         Channel target = this.udpChannel;
         if (target == null || !target.isActive()) {
-            LOG.warn("CONNECT-UDP relay: UDP channel not active, dropping data frame");
+            // the relay socket's failure, if any, was logged once when it closed
+            if (mockServerLogger.isEnabledForInstance(Level.DEBUG)) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.DEBUG)
+                        .setMessageFormat("CONNECT-UDP relay socket for tunnel from:{}is closed, dropping a DATA frame of:{}bytes")
+                        .setArguments(peerAddress(ctx.channel()), dataFrame.content().readableBytes())
+                );
+            }
             dataFrame.release();
             return;
         }
@@ -286,8 +312,14 @@ public class Http3ConnectUdpHandler extends ChannelInboundHandlerAdapter {
             InetSocketAddress remoteAddr = (InetSocketAddress) target.remoteAddress();
             DatagramPacket packet = new DatagramPacket(content.retain(), remoteAddr);
             target.writeAndFlush(packet).addListener(f -> {
-                if (!f.isSuccess()) {
-                    LOG.debug("CONNECT-UDP relay: failed to send datagram to {}", remoteAddr, f.cause());
+                if (!f.isSuccess() && mockServerLogger.isEnabledForInstance(Level.DEBUG)) {
+                    mockServerLogger.logEvent(
+                        new LogEntry()
+                            .setLogLevel(Level.DEBUG)
+                            .setMessageFormat("CONNECT-UDP relay failed to send a datagram to:{}")
+                            .setArguments(remoteAddr)
+                            .setThrowable(boundedFault(f.cause()))
+                    );
                 }
             });
         }
@@ -302,7 +334,14 @@ public class Http3ConnectUdpHandler extends ChannelInboundHandlerAdapter {
      * and SSRF paths return the identical body so they are indistinguishable.
      */
     private void sendTargetNotPermitted(ChannelHandlerContext ctx, String serverSideReason) {
-        LOG.warn("CONNECT-UDP target refused ({})", serverSideReason);
+        if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.WARN)
+                    .setMessageFormat("CONNECT-UDP target from:{}refused:{}")
+                    .setArguments(peerAddress(ctx.channel()), bounded(serverSideReason))
+            );
+        }
         writeErrorResponse(ctx, "403", "CONNECT-UDP target not permitted");
     }
 
@@ -311,7 +350,13 @@ public class Http3ConnectUdpHandler extends ChannelInboundHandlerAdapter {
      * logging the concrete cause server-side only.
      */
     private void sendRelayUnavailable(ChannelHandlerContext ctx, String serverSideReason, Throwable cause) {
-        LOG.error("CONNECT-UDP relay unavailable ({})", serverSideReason, cause);
+        mockServerLogger.logEvent(
+            new LogEntry()
+                .setLogLevel(Level.ERROR)
+                .setMessageFormat("CONNECT-UDP relay for tunnel from:{}unavailable:{}")
+                .setArguments(peerAddress(ctx.channel()), serverSideReason)
+                .setThrowable(boundedFault(cause))
+        );
         writeErrorResponse(ctx, "502", "CONNECT-UDP relay unavailable");
     }
 
@@ -322,7 +367,14 @@ public class Http3ConnectUdpHandler extends ChannelInboundHandlerAdapter {
      * malformed {@code :authority}) -- never to echo internal host/topology detail.
      */
     private void sendErrorResponse(ChannelHandlerContext ctx, String status, String message) {
-        LOG.warn("CONNECT-UDP error: {} -- {}", status, message);
+        if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.WARN)
+                    .setMessageFormat("CONNECT-UDP request from:{}refused with status:{}because:{}")
+                    .setArguments(peerAddress(ctx.channel()), status, bounded(message))
+            );
+        }
         writeErrorResponse(ctx, status, message);
     }
 
@@ -481,9 +533,35 @@ public class Http3ConnectUdpHandler extends ChannelInboundHandlerAdapter {
             ctx.fireExceptionCaught(cause);
             return;
         }
-        LOG.warn("CONNECT-UDP handler exception: {}", cause.getMessage(), cause);
+        if (cause instanceof QuicStreamResetException || cause instanceof ClosedChannelException) {
+            // a client ending its tunnel, as Http3MockServerHandler logs it on a request stream
+            if (mockServerLogger.isEnabledForInstance(Level.DEBUG)) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.DEBUG)
+                        .setMessageFormat("CONNECT-UDP stream of HTTP/3 connection from:{}closed or reset by its client:{}")
+                        .setArguments(peerAddress(ctx.channel()), boundedFaultMessage(cause))
+                );
+            }
+        } else if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.WARN)
+                    .setMessageFormat("exception on CONNECT-UDP stream of HTTP/3 connection from:{}:{}")
+                    .setArguments(peerAddress(ctx.channel()), boundedFaultDescription(cause))
+                    .setThrowable(boundedFault(cause))
+            );
+        }
         closeUdpChannel();
         ctx.close();
+    }
+
+    /**
+     * A reason as a log entry may carry it: it can hold the client's {@code :authority}, which is as long as
+     * {@code maxHeaderSize} allows.
+     */
+    private static String bounded(String reason) {
+        return StringUtils.abbreviate(reason, MAX_FAULT_MESSAGE_LENGTH);
     }
 
     /**
@@ -541,7 +619,14 @@ public class Http3ConnectUdpHandler extends ChannelInboundHandlerAdapter {
         if (ch != null) {
             this.udpChannel = null;
             ch.close();
-            LOG.debug("CONNECT-UDP relay: UDP channel closed");
+            if (mockServerLogger.isEnabledForInstance(Level.DEBUG)) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.DEBUG)
+                        .setMessageFormat("CONNECT-UDP relay socket to:{}closed")
+                        .setArguments(ch.remoteAddress())
+                );
+            }
         }
     }
 
@@ -549,12 +634,14 @@ public class Http3ConnectUdpHandler extends ChannelInboundHandlerAdapter {
      * Inbound handler on the UDP channel that relays received datagrams back to
      * the client as HTTP/3 DATA frames on the QUIC stream.
      */
-    private static class UdpRelayHandler extends ChannelInboundHandlerAdapter {
+    static class UdpRelayHandler extends ChannelInboundHandlerAdapter {
 
         private final ChannelHandlerContext quicStreamCtx;
+        private final MockServerLogger mockServerLogger;
 
-        UdpRelayHandler(ChannelHandlerContext quicStreamCtx) {
+        UdpRelayHandler(ChannelHandlerContext quicStreamCtx, MockServerLogger mockServerLogger) {
             this.quicStreamCtx = quicStreamCtx;
+            this.mockServerLogger = mockServerLogger;
         }
 
         @Override
@@ -572,7 +659,16 @@ public class Http3ConnectUdpHandler extends ChannelInboundHandlerAdapter {
 
         @Override
         public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-            LOG.warn("CONNECT-UDP relay UDP handler exception: {}", cause.getMessage(), cause);
+            if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.WARN)
+                        .setMessageFormat("CONNECT-UDP relay socket to:{}for HTTP/3 connection from:{}failed and is closed:{}")
+                        .setArguments(ctx.channel().remoteAddress(), peerAddress(quicStreamCtx.channel()), boundedFaultDescription(cause))
+                        // an I/O error's stack trace, such as an ICMP port unreachable's, says nothing
+                        .setThrowable(cause instanceof SocketException ? null : boundedFault(cause))
+                );
+            }
             ctx.close();
         }
     }
