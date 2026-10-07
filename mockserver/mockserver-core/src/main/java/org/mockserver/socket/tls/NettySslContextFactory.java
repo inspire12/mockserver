@@ -5,6 +5,7 @@ import io.netty.handler.ssl.*;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.configuration.ConfigurationProperties;
+import org.mockserver.configuration.ControlPlaneAuthenticationSettings;
 import org.mockserver.configuration.ServerTlsSettings;
 import org.mockserver.file.FileReader;
 import org.mockserver.log.model.LogEntry;
@@ -68,6 +69,7 @@ public class NettySslContextFactory {
     private final Object sslContextLock = new Object();
     private Function<SslContextBuilder, SslContext> instanceClientSslContextBuilderFunction = clientSslContextBuilderFunction;
     private final boolean forServer;
+    private final boolean forMockServerClient;
 
     /**
      * Logged at most once per JVM (see {@link #warnIfBundledCertificateAuthorityInUse()}): the publicly
@@ -105,6 +107,7 @@ public class NettySslContextFactory {
         this.configuration = configuration();
         this.mockServerLogger = mockServerLogger;
         this.forServer = true;
+        this.forMockServerClient = false;
         keyAndCertificateFactory = createKeyAndCertificateFactory(configuration, mockServerLogger);
         warnIfInsecureTlsProfileConfigured();
         warnIfBundledCertificateAuthorityInUse();
@@ -115,9 +118,22 @@ public class NettySslContextFactory {
     }
 
     public NettySslContextFactory(Configuration configuration, MockServerLogger mockServerLogger, boolean forServer) {
+        this(configuration, mockServerLogger, forServer, false);
+    }
+
+    /**
+     * The factory {@code MockServerClient} uses for its own connections to MockServer. It logs what the
+     * client trusts instead of the server's forward-proxy notice, which describes a setting a client never makes.
+     */
+    public static NettySslContextFactory forMockServerClient(Configuration configuration, MockServerLogger mockServerLogger) {
+        return new NettySslContextFactory(configuration, mockServerLogger, false, true);
+    }
+
+    private NettySslContextFactory(Configuration configuration, MockServerLogger mockServerLogger, boolean forServer, boolean forMockServerClient) {
         this.configuration = configuration;
         this.mockServerLogger = mockServerLogger;
         this.forServer = forServer;
+        this.forMockServerClient = forMockServerClient;
         keyAndCertificateFactory = createKeyAndCertificateFactory(configuration, mockServerLogger, forServer);
         warnIfInsecureTlsProfileConfigured();
         warnIfBundledCertificateAuthorityInUse();
@@ -161,13 +177,33 @@ public class NettySslContextFactory {
                     .setMessageFormat("TLS protocol list includes deprecated TLSv1 / TLSv1.1 (RFC 8996; vulnerable to BEAST and POODLE). Set mockserver.tlsAllowInsecureProtocols=false to drop them, or remove the entries from mockserver.tlsProtocols.")
             );
         }
-        if (forwardProxyTrustsEverything() && mockServerLogger.isEnabledForInstance(Level.WARN)) {
+        if (forMockServerClient) {
+            logMockServerClientTrust();
+        } else if (forwardProxyTrustsEverything() && mockServerLogger.isEnabledForInstance(Level.WARN)) {
             mockServerLogger.logEvent(
                 new LogEntry()
                     .setLogLevel(Level.WARN)
                     .setMessageFormat("Forward proxy is configured to trust ALL X.509 certificates (mockserver.forwardProxyTLSX509CertificatesTrustManagerType=ANY). Certificate validation is disabled — this should be used only in development; prefer JVM or CUSTOM in production.")
             );
         }
+    }
+
+    private void logMockServerClientTrust() {
+        if (!mockServerLogger.isEnabledForInstance(Level.INFO)) {
+            return;
+        }
+        ControlPlaneAuthenticationSettings controlPlane = ControlPlaneAuthenticationSettings.of(configuration);
+        LogEntry logEntry = new LogEntry().setLogLevel(Level.INFO);
+        if (Boolean.TRUE.equals(controlPlane.controlPlaneTLSMutualAuthenticationRequired())) {
+            logEntry
+                .setMessageFormat("MockServerClient verifies MockServer's TLS certificate against the certificate authorities in controlPlaneTLSMutualAuthenticationCAChain plus MockServer's CA certificate (mockserver.certificateAuthorityCertificate); to change them set controlPlaneTLSMutualAuthenticationCAChain on the client's ClientConfiguration or mockserver.controlPlaneTLSMutualAuthenticationCAChain, and mockserver.certificateAuthorityCertificate, in the client JVM. Server forwarding settings such as mockserver.forwardProxyTLSX509CertificatesTrustManagerType do not apply to MockServerClient. controlPlaneTLSMutualAuthenticationCAChain is:{}")
+                .setArguments(controlPlane.controlPlaneTLSMutualAuthenticationCAChain());
+        } else {
+            logEntry
+                .setMessageFormat("MockServerClient verifies MockServer's TLS certificate against the JVM's default trusted certificate authorities plus MockServer's CA certificate, which is mockserver.certificateAuthorityCertificate, or the CA created in mockserver.directoryToSaveDynamicSSLCertificate when mockserver.dynamicallyCreateCertificateAuthorityCertificate is true. To connect to a MockServer signed by another CA set mockserver.certificateAuthorityCertificate in the client JVM, or require mutual TLS with controlPlaneTLSMutualAuthenticationRequired and controlPlaneTLSMutualAuthenticationCAChain on the client's ClientConfiguration. Server forwarding settings such as mockserver.forwardProxyTLSX509CertificatesTrustManagerType do not apply to MockServerClient. mockserver.certificateAuthorityCertificate is:{}")
+                .setArguments(ServerTlsSettings.of(configuration).certificateAuthorityCertificate());
+        }
+        mockServerLogger.logEvent(logEntry);
     }
 
     /**

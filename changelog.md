@@ -782,6 +782,7 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **The Java client no longer warns about a forward-proxy setting it never made.** The first request a `MockServerClient` sent logged the server's `WARN` "Forward proxy is configured to trust ALL X.509 certificates", which describes how a MockServer forwards requests, not how the client connects. The client now logs one `INFO` line saying what it actually trusts when it connects to MockServer over TLS: the JVM's default certificate authorities plus MockServer's CA certificate (`mockserver.certificateAuthorityCertificate`), or, with control-plane mTLS, `controlPlaneTLSMutualAuthenticationCAChain` plus MockServer's CA certificate (`mockserver.certificateAuthorityCertificate`), and how to change it. MockServer itself still logs the forward-proxy warning.
 - **A binary forward or a proxied `wss` WebSocket now ends a stalled TLS handshake with the upstream
   after `socketConnectionTimeoutInMillis`, and says why it failed.** A binary (non-HTTP) message
   forwarded on a TLS connection of its own (`forwardBinaryRequestsUseSingleConnection` off, or through

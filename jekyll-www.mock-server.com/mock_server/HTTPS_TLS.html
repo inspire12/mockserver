@@ -498,6 +498,14 @@ curl --cacert certs/ca.pem \
      -H "Content-Type: application/json" \
      -d '[{"httpRequest": {"path": "/test"}, "httpResponse": {"body": "ok"}}]'</code></pre>
 
+<a id="java_client_trust" class="anchor" href="#java_client_trust">&nbsp;</a>
+
+<h3>Which Certificates the Java Client Trusts</h3>
+
+<p>When <code class="inline_code">MockServerClient</code> connects over TLS (<code class="inline_code">withSecure(true)</code>) it checks MockServer's certificate against the JVM's default trusted certificate authorities plus MockServer's own CA certificate (<code class="inline_code">mockserver.certificateAuthorityCertificate</code>). To connect to a MockServer that uses a different CA, set <code class="inline_code">mockserver.certificateAuthorityCertificate</code> to that CA's PEM file in the JVM running the client. With control-plane mTLS (below) the client trusts the CAs in <code class="inline_code">controlPlaneTLSMutualAuthenticationCAChain</code> plus MockServer's CA certificate (<code class="inline_code">mockserver.certificateAuthorityCertificate</code>).</p>
+
+<p>The client logs this at INFO the first time it sends a request. Server forwarding settings, such as <code class="inline_code">mockserver.forwardProxyTLSX509CertificatesTrustManagerType</code>, do not affect the client.</p>
+
 <a id="mtls_java_client" class="anchor" href="#mtls_java_client">&nbsp;</a>
 
 <h3>Java Client with mTLS</h3>
