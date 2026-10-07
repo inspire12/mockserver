@@ -809,8 +809,6 @@ public class ConfigurationCallSiteGuardTest {
         allow("org.mockserver.netty.unification.PortUnificationHandler#decode",
             "chooses the HTTP/2 or HTTP/1.1 pipeline; a mismatch with the context's ALPN fails the connection, "
                 + "it skips no authentication", "http2Enabled");
-        allow("org.mockserver.netty.unification.PortUnificationHandler#exceptionCaught",
-            "log message", "x509CertificatePath", "certificateAuthorityCertificate");
         allow("org.mockserver.netty.proxy.relay.RelayConnectHandler$RelayTlsDetectionHandler#decode",
             "chooses h2c or HTTP/1.1 for a relayed cleartext connection, matching PortUnificationHandler#decode",
             "http2Enabled");

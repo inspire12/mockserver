@@ -1,6 +1,7 @@
 package org.mockserver.netty.unification;
 
 import org.mockserver.configuration.Configuration;
+import org.mockserver.configuration.ServerTlsSettings;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.slf4j.event.Level;
@@ -162,7 +163,11 @@ public class ClientTlsHandshakeFailureLog {
     }
 
     private static String configuredCertificates(Configuration configuration) {
-        return configuration == null ? "default" : "x509CertificatePath=\"" + configuration.x509CertificatePath()
-            + "\" certificateAuthorityCertificate=\"" + configuration.certificateAuthorityCertificate() + "\"";
+        if (configuration == null) {
+            return "default";
+        }
+        ServerTlsSettings tlsSettings = ServerTlsSettings.of(configuration);
+        return "x509CertificatePath=\"" + tlsSettings.x509CertificatePath()
+            + "\" certificateAuthorityCertificate=\"" + tlsSettings.certificateAuthorityCertificate() + "\"";
     }
 }
