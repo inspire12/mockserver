@@ -2354,7 +2354,9 @@ var mockServerClient;
          * report body is returned in BOTH cases. This method RESOLVES with the
          * parsed report for both pass and fail (mirroring the Java client, which
          * does not throw on a FAIL verdict) — inspect the report's `verified`
-         * boolean to tell them apart. A malformed request (400) REJECTS.
+         * boolean to tell them apart. Any other status (400 for a malformed
+         * request, 401/403, 500) or a report that is not JSON REJECTS, with the
+         * server's `error` message or the response body.
          *
          * @param pactJson  the Pact v3 contract (object or JSON string)
          * @return promise resolving to the parsed verification report
@@ -2368,12 +2370,18 @@ var mockServerClient;
                 then: function (sucess, error) {
                     makeRawRequest(host, port, "/mockserver/pact/verify", pactJson)
                         .then(function (result) {
-                            var parsed = result.body ? JSON.parse(result.body) : {};
-                            // 202 = pass, 406 = fail (both carry the report);
-                            // 400 = bad input, carries {error}.
-                            if (result.statusCode === 400) {
+                            var parsed;
+                            try {
+                                parsed = result.body ? JSON.parse(result.body) : {};
+                            } catch (e) {
+                                parsed = null;
+                            }
+                            // 2xx = pass, 406 = fail (both carry the report); any
+                            // other status rejects with its {error} or its body.
+                            var isReport = (result.statusCode >= 200 && result.statusCode < 300) || result.statusCode === 406;
+                            if (!isReport || parsed === null) {
                                 if (error) {
-                                    error(parsed.error || result.body);
+                                    error((parsed && parsed.error) || result.body || ("pactVerify failed with status " + result.statusCode));
                                 }
                                 return;
                             }

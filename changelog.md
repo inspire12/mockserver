@@ -782,6 +782,8 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **The Node launcher's `stop_mockserver` now rejects when MockServer refuses or fails the stop request.** An answer such as `401`, `403` or `500` used to resolve as if MockServer had stopped; it now rejects with the status code (a `404`, meaning nothing to stop, still resolves), and a MockServer the launcher started is still stopped.
+- **The Node client's `pactVerify` now rejects when MockServer answers with an error instead of never settling.** A plain-text answer such as a `500` or `401` made the promise hang with neither callback called; it now rejects with the error message or the response body, and resolves only with a verification report.
 - **A request a client sends just before it resets its connection is no longer lost when a write to that client
   fails first.** When a client sent a request and then reset the connection (closed it with `SO_LINGER` 0, or with
   data still unread) while MockServer still had something to write to it, such as the rest of a large response the

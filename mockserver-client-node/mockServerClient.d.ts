@@ -480,7 +480,8 @@ export interface MockServerClient {
      * Verify a Pact v3 contract against the active expectations
      * (PUT /mockserver/pact/verify). The server replies 202 on pass and 406 on
      * fail; the report body is returned in BOTH cases, so this RESOLVES with the
-     * report for both (inspect `verified`). A malformed request (400) rejects.
+     * report for both (inspect `verified`). Any other status (400 for a malformed
+     * request, 401/403, 500) or a report that is not JSON rejects.
      */
     pactVerify(pactJson: object | string): Promise<PactVerificationReport>;
 

@@ -385,7 +385,7 @@
       var callback = function (response) {
         var body = '';
   
-        if (response.statusCode === 400 || response.statusCode === 404) {
+        if (response.statusCode < 200 || response.statusCode >= 300) {
           deferred.reject(response.statusCode);
         }
   

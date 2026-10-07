@@ -100,6 +100,50 @@ test('should stop the launched MockServer when the stop request is answered 400'
     }
 });
 
+function answering(statusCode) {
+    return http.createServer(function (request, response) {
+        var body = 'failed with ' + statusCode;
+        response.writeHead(statusCode, {'Connection': 'close', 'Content-Type': 'text/plain', 'Content-Length': body.length});
+        response.end(body);
+    });
+}
+
+test('should reject when the stop request is answered with any status that is not 2xx', async function () {
+    var port = 1089;
+    var answering500 = answering(500);
+    var answering403 = answering(403);
+    var answering302 = answering(302);
+    var stub500Port = await listen(answering500);
+    var stub403Port = await listen(answering403);
+    var stub302Port = await listen(answering302);
+
+    try {
+        await mockserver.start_mockserver({serverPort: port});
+        var exited = exitOf(mockserver.getMockServerProcess(), 10000);
+
+        for (var stub of [{port: stub500Port, status: 500}, {port: stub403Port, status: 403}, {port: stub302Port, status: 302}]) {
+            var outcome = await new Promise(function (resolve) {
+                var timer = setTimeout(resolve, 20000, 'still pending');
+                mockserver.stop_mockserver({serverPort: stub.port}).then(function () {
+                    clearTimeout(timer);
+                    resolve('resolved');
+                }, function (error) {
+                    clearTimeout(timer);
+                    resolve(error);
+                });
+            });
+            assert.strictEqual(outcome, stub.status, 'stop answered ' + stub.status + ' rejects with that status');
+        }
+
+        assert.strictEqual(await exited, 'exited', "the launched MockServer is stopped");
+    } finally {
+        answering500.close();
+        answering403.close();
+        answering302.close();
+        killLaunched();
+    }
+});
+
 test('should stop the launched MockServer when the stop request is never answered', async function () {
     var port = 1087;
     var sockets = [];

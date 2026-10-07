@@ -76,6 +76,11 @@ declare namespace mockserverNode {
    * a string.
    */
   function start_mockserver(options: StartServerOptions): Promise<ReadinessResponse>;
+  /**
+   * Asks the MockServer on `serverPort` to stop and resolves once it no longer answers. Resolves when
+   * nothing is listening or the answer is 404. Any other answer that is not 2xx rejects with its status
+   * code; the MockServer this process launched, if any, is stopped whatever the answer.
+   */
   function stop_mockserver(options: StopServerOptions): Promise<void>;
   /** The launched MockServer java child process, or undefined before the first start. */
   function getMockServerProcess(): ChildProcess | undefined;

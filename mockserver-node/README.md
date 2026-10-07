@@ -97,6 +97,8 @@ The MockServer uses port unification to support HTTP, HTTPS, SOCKS, HTTP CONNECT
 
 A failed start never ends the calling process, and leaves it free to carry on or to exit (unless a JVM was left waiting for a debugger, see `javaDebugPort`).  Handle the rejection to fail your own script, and call `stop_mockserver` afterwards if you wish: it resolves when nothing is running.
 
+`stop_mockserver` rejects with the status code when MockServer answers the stop request with a status other than 2xx or 404, for example `401` when control-plane authentication is on or `500` when the stop fails inside MockServer. A MockServer this process launched is stopped whatever the answer.
+
 ```js
 mockserver.start_mockserver({serverPort: 1080}).then(function () {
     // MockServer is ready
