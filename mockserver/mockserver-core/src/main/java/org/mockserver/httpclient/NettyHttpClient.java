@@ -39,11 +39,15 @@ import javax.annotation.Nullable;
 import java.io.IOException;
 import java.net.ConnectException;
 import java.net.InetSocketAddress;
+import java.net.SocketException;
 import java.net.UnknownHostException;
 import java.nio.channels.ClosedChannelException;
+import java.nio.channels.UnresolvedAddressException;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -53,6 +57,7 @@ import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
+import static org.mockserver.exception.ExceptionHandling.boundedFaultDescription;
 import static org.mockserver.formatting.StringFormatter.hexDumpForLog;
 import static org.mockserver.model.HttpResponse.response;
 
@@ -98,6 +103,8 @@ public class NettyHttpClient {
     private final boolean forwardProxyClient;
     private final NettySslContextFactory nettySslContextFactory;
     private final HttpForwardConnectionPool connectionPool;
+    // upstream proxies already reported as unreachable, so each is logged once
+    private final Set<InetSocketAddress> unreachableProxiesReported = ConcurrentHashMap.newKeySet();
 
     public NettyHttpClient(Configuration configuration, MockServerLogger mockServerLogger, EventLoopGroup eventLoopGroup, List<ProxyConfiguration> proxyConfigurations, boolean forwardProxyClient) {
         this(configuration, mockServerLogger, eventLoopGroup, proxyConfigurations, forwardProxyClient, new NettySslContextFactory(configuration, mockServerLogger, false));
@@ -438,9 +445,51 @@ public class NettyHttpClient {
                     // the connect then failed on the closed channel, so the channel's outcome is the cause.
                     relay(channelResponseFuture, responseFuture);
                 } else {
-                    httpResponseFuture.completeExceptionally(future.cause());
+                    httpResponseFuture.completeExceptionally(proxyFailure(upstreamProxies, secure, future.cause()));
                 }
             });
+    }
+
+    /**
+     * The failure to connect, as an {@link UpstreamProxyUnreachableException} when the forward client's connection was
+     * to an upstream proxy, which it is for {@code forwardHttpProxy} and, through the tunnel's handler, for
+     * {@code forwardHttpsProxy} and {@code forwardSocksProxy}: the target behind the proxy was not contacted. A failure
+     * the proxy reports once connected, such as a target it could not reach, is not a failure to connect.
+     */
+    private Throwable proxyFailure(Map<ProxyConfiguration.Type, ProxyConfiguration> upstreamProxies, boolean secure, Throwable cause) {
+        ProxyConfiguration proxy = !secure && upstreamProxies.containsKey(ProxyConfiguration.Type.HTTP)
+            ? upstreamProxies.get(ProxyConfiguration.Type.HTTP)
+            : HttpClientInitializer.tunnelProxy(upstreamProxies, secure);
+        if (!forwardProxyClient || proxy == null
+            || !(cause instanceof SocketException || cause instanceof UnknownHostException || cause instanceof UnresolvedAddressException)) {
+            return cause;
+        }
+        InetSocketAddress proxyAddress = proxy.getProxyAddress();
+        if (unreachableProxiesReported.add(proxyAddress) && mockServerLogger.isEnabledForInstance(Level.WARN)) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.WARN)
+                    .setMessageFormat("upstream proxy{}set by{}could not be reached, so forwards through it fail and are neither retried nor counted against their target's circuit breaker; check the proxy is running and its address is correct (logged once per proxy):{}")
+                    .setArguments(hostAndPort(proxyAddress), propertyFor(proxy.getType()), boundedFaultDescription(cause))
+            );
+        }
+        return new UpstreamProxyUnreachableException(proxyAddress, cause);
+    }
+
+    // as configured, without the "/<unresolved>" an unresolved address's toString adds
+    private static String hostAndPort(InetSocketAddress address) {
+        return address.getHostString() + ":" + address.getPort();
+    }
+
+    private static String propertyFor(ProxyConfiguration.Type type) {
+        switch (type) {
+            case HTTP:
+                return "forwardHttpProxy";
+            case HTTPS:
+                return "forwardHttpsProxy";
+            default:
+                return "forwardSocksProxy";
+        }
     }
 
     private static void relay(CompletableFuture<Message> channelResponseFuture, CompletableFuture<Message> responseFuture) {
@@ -791,7 +840,7 @@ public class NettyHttpClient {
             }
         } catch (InterruptedException | ExecutionException ex) {
             if (!ignoreErrors) {
-                Throwable cause = ex.getCause();
+                Throwable cause = ex.getCause() instanceof UpstreamProxyUnreachableException ? ex.getCause().getCause() : ex.getCause();
                 if (cause instanceof SocketConnectionException) {
                     throw (SocketConnectionException) cause;
                 } else if (cause instanceof ConnectException) {

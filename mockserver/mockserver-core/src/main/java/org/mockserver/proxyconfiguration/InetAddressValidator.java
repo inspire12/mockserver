@@ -13,7 +13,8 @@ import static org.apache.commons.lang3.StringUtils.isBlank;
 
 /**
  * Validates that the destination host of a forward or proxy action is not a
- * loopback, link-local, RFC 1918 private, or cloud metadata address. This
+ * loopback, link-local, RFC 1918 private, RFC 4193 unique-local, RFC 6598
+ * carrier-grade NAT, wildcard or cloud metadata address. This
  * blocks server-side request forgery (SSRF) where an attacker registers an
  * expectation that forwards through MockServer to internal infrastructure.
  * <p>
@@ -207,11 +208,25 @@ public final class InetAddressValidator {
                 "Forward to private network blocked: " + requestedHost
                     + " (set mockserver.forwardProxyBlockPrivateNetworks=false to allow)");
         }
+        if (isCarrierGradeNat(address)) {
+            throw new ForwardTargetBlockedException(
+                "Forward to carrier-grade NAT address blocked: " + requestedHost
+                    + " (set mockserver.forwardProxyBlockPrivateNetworks=false to allow)");
+        }
         if (address.isAnyLocalAddress()) {
             throw new ForwardTargetBlockedException(
                 "Forward to wildcard address blocked: " + requestedHost
                     + " (set mockserver.forwardProxyBlockPrivateNetworks=false to allow)");
         }
+    }
+
+    /**
+     * RFC 6598 shared address space, {@code 100.64.0.0/10}, used by carrier-grade NAT and by overlay networks such as
+     * Tailscale. An IPv4-mapped IPv6 address is already an {@link java.net.Inet4Address} here: the JDK converts it.
+     */
+    private static boolean isCarrierGradeNat(InetAddress address) {
+        byte[] bytes = address.getAddress();
+        return bytes.length == 4 && (bytes[0] & 0xFF) == 100 && (bytes[1] & 0xC0) == 64;
     }
 
     private static boolean isIpv6UniqueLocal(InetAddress address) {

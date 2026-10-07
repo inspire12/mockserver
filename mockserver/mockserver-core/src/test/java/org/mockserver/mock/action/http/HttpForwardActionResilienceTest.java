@@ -7,6 +7,7 @@ import org.mockserver.configuration.Configuration;
 import org.mockserver.httpclient.ClientConfigurationException;
 import org.mockserver.httpclient.HeaderLimitExceededException;
 import org.mockserver.httpclient.NettyHttpClient;
+import org.mockserver.httpclient.UpstreamProxyUnreachableException;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpForward;
 import org.mockserver.model.HttpRequest;
@@ -246,6 +247,83 @@ public class HttpForwardActionResilienceTest {
     }
 
     @Test
+    public void shouldNotCountAnUnreachableUpstreamProxyAgainstTheCircuitBreakerNorRetryIt() throws Exception {
+        // given - breaker enabled with threshold 3 and two retries; the configured upstream proxy cannot be reached
+        Configuration configuration = Configuration.configuration()
+            .forwardProxyCircuitBreakerEnabled(true)
+            .forwardProxyCircuitBreakerFailureThreshold(3)
+            .forwardProxyCircuitBreakerWindowMillis(60_000L)
+            .forwardProxyRetryCount(2)
+            .forwardProxyRetryBackoffMillis(0L);
+        Throwable unreachable = upstreamProxyUnreachable();
+        CompletableFuture<HttpResponse> failed = new CompletableFuture<>();
+        failed.completeExceptionally(unreachable);
+        when(mockHttpClient.sendRequest(any(HttpRequest.class), any(InetSocketAddress.class))).thenReturn(failed);
+        HttpForwardActionHandler handler = handlerWith(configuration);
+
+        // when - more of them than the threshold
+        for (int i = 0; i < 5; i++) {
+            ExecutionException thrown = org.junit.Assert.assertThrows(ExecutionException.class, () -> handler.handle(upstream(), request().withMethod("GET").withPath("/x")).getHttpResponse().get(5, TimeUnit.SECONDS));
+            assertThat(thrown.getCause(), is(sameInstance(unreachable)));
+        }
+
+        // then - the target behind the proxy was never reached, so its breaker stays closed, and no request was retried
+        assertThat(ForwardCircuitBreaker.getInstance().isOpen("upstream.example:8080"), is(false));
+        verify(mockHttpClient, times(5)).sendRequest(any(HttpRequest.class), any(InetSocketAddress.class));
+    }
+
+    @Test
+    public void shouldNotCountAForwardHttpProxyTheForwardClientCannotReachAgainstTheTargetNorRetryIt() throws Exception {
+        // given - breaker enabled with threshold 1 and two retries; forwardHttpProxy names a port nothing listens on
+        Configuration configuration = Configuration.configuration()
+            .forwardProxyCircuitBreakerEnabled(true)
+            .forwardProxyCircuitBreakerFailureThreshold(1)
+            .forwardProxyCircuitBreakerWindowMillis(60_000L)
+            .forwardProxyRetryCount(2)
+            .forwardProxyRetryBackoffMillis(0L)
+            .socketConnectionTimeoutInMillis(5_000L)
+            .forwardConnectionPoolEnabled(false);
+        InetSocketAddress refusingProxy;
+        try (java.net.ServerSocket closed = new java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress())) {
+            refusingProxy = new InetSocketAddress(java.net.InetAddress.getLoopbackAddress(), closed.getLocalPort());
+        }
+        io.netty.channel.EventLoopGroup group = new io.netty.channel.nio.NioEventLoopGroup(1);
+        try {
+            java.util.concurrent.atomic.AtomicInteger sends = new java.util.concurrent.atomic.AtomicInteger();
+            NettyHttpClient throughProxy = new NettyHttpClient(configuration, mock(MockServerLogger.class), group, java.util.Collections.singletonList(org.mockserver.proxyconfiguration.ProxyConfiguration.proxyConfiguration(org.mockserver.proxyconfiguration.ProxyConfiguration.Type.HTTP, refusingProxy)), true) {
+                @Override
+                public CompletableFuture<HttpResponse> sendRequest(HttpRequest httpRequest, InetSocketAddress remoteAddress) {
+                    sends.incrementAndGet();
+                    return super.sendRequest(httpRequest, remoteAddress);
+                }
+            };
+            HttpForwardActionHandler handler = new HttpForwardActionHandler(mock(MockServerLogger.class), configuration, throughProxy);
+
+            // when - three forwards, each failing to reach the proxy
+            for (int i = 0; i < 3; i++) {
+                ExecutionException thrown = org.junit.Assert.assertThrows(ExecutionException.class, () -> handler.handle(upstream(), request().withMethod("GET").withPath("/x")).getHttpResponse().get(30, TimeUnit.SECONDS));
+                assertThat(UpstreamProxyUnreachableException.in(thrown), is(notNullValue()));
+            }
+
+            // then - the target's breaker never opened, and each forward was sent once
+            assertThat(ForwardCircuitBreaker.getInstance().isOpen("upstream.example:8080"), is(false));
+            assertThat(sends.get(), is(3));
+        } finally {
+            group.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).syncUninterruptibly();
+        }
+    }
+
+    @Test
+    public void shouldNotResetTheFailureCountForAnUnreachableUpstreamProxy() throws Exception {
+        assertARunOfNeutralOutcomesDoesNotResetTheFailureCount(upstreamProxyUnreachable());
+    }
+
+    @Test
+    public void shouldNeitherCloseNorStrandAHalfOpenBreakerForAnUnreachableUpstreamProxy() throws Exception {
+        assertANeutralHalfOpenTrialLeavesTheBreakerOpenAndReleasesTheTrial(upstreamProxyUnreachable());
+    }
+
+    @Test
     public void shouldNotResetTheFailureCountForATargetTheForwardClientRefused() throws Exception {
         assertARunOfNeutralOutcomesDoesNotResetTheFailureCount(new ForwardTargetBlockedException("Forward to loopback address blocked: upstream.example"));
     }
@@ -358,6 +436,12 @@ public class HttpForwardActionResilienceTest {
 
     private static Throwable headerLimitRefusal() {
         return new HeaderLimitExceededException("upstream response headers are larger than maxHeaderSize (262144 bytes)");
+    }
+
+    private static Throwable upstreamProxyUnreachable() throws Exception {
+        Constructor<UpstreamProxyUnreachableException> constructor = UpstreamProxyUnreachableException.class.getDeclaredConstructor(InetSocketAddress.class, Throwable.class);
+        constructor.setAccessible(true);
+        return constructor.newInstance(InetSocketAddress.createUnresolved("proxy.example", 3128), new java.net.ConnectException("Connection refused"));
     }
 
     private static Throwable configurationError() throws Exception {

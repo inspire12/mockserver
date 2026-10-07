@@ -6250,8 +6250,8 @@ public class Configuration {
 
     /**
      * When set to true, MockServer rejects forward and proxy targets that resolve to
-     * loopback, link-local, RFC 1918 private, or cloud metadata addresses
-     * (such as 169.254.169.254), blocking server-side request forgery (SSRF) via
+     * loopback, link-local, RFC 1918 private, RFC 6598 carrier-grade NAT, or cloud
+     * metadata addresses (such as 169.254.169.254), blocking server-side request forgery (SSRF) via
      * malicious expectations.
      * <p>
      * The default is false so that the common case of forwarding to localhost / Docker

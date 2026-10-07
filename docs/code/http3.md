@@ -823,7 +823,7 @@ bidi-streaming) work over HTTP/3, matching the TCP (HTTP/1.1 and HTTP/2) path.
   - **Private-network block** — the relay honours the same
     `forwardProxyBlockPrivateNetworks` policy the forward proxy uses (via
     `InetAddressValidator`): when that flag is enabled, a CONNECT-UDP target resolving
-    to a loopback, link-local, RFC 1918 / RFC 4193 private, wildcard, or cloud-metadata
+    to a loopback, link-local, RFC 1918 / RFC 4193 private, RFC 6598 carrier-grade NAT, wildcard, or cloud-metadata
     address (e.g. `169.254.169.254`) is refused with `403`. The authority is resolved
     exactly **once**; the *same* resolved `InetAddress` is both validated and connected
     (and an unresolvable target is refused), so there is no DNS-rebinding / TOCTOU

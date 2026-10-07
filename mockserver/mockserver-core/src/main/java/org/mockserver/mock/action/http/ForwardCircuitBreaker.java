@@ -3,6 +3,7 @@ package org.mockserver.mock.action.http;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.httpclient.ClientConfigurationException;
 import org.mockserver.httpclient.HeaderLimitExceededException;
+import org.mockserver.httpclient.UpstreamProxyUnreachableException;
 import org.mockserver.proxyconfiguration.ForwardTargetBlockedException;
 import org.mockserver.time.TimeService;
 import org.slf4j.Logger;
@@ -195,12 +196,13 @@ public class ForwardCircuitBreaker {
 
     /**
      * Whether a forward that failed with {@code throwable} says nothing about the upstream's health, so is recorded
-     * with {@link #recordNeutral}.
+     * with {@link #recordNeutral}: a configuration error, a header-limit refusal, a target
+     * forwardProxyBlockPrivateNetworks refused, or an upstream proxy that could not be reached.
      */
     public static boolean isNeutral(Throwable throwable) {
         return throwable != null
             && (ClientConfigurationException.in(throwable) != null || HeaderLimitExceededException.in(throwable) != null
-            || ForwardTargetBlockedException.in(throwable) != null);
+            || ForwardTargetBlockedException.in(throwable) != null || UpstreamProxyUnreachableException.in(throwable) != null);
     }
 
     /**

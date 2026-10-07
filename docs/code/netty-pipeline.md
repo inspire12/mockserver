@@ -2136,7 +2136,7 @@ only MockServer's own CA and fail `wss` to any real upstream.)
 
 **SSRF guard.** Before connecting, `relay()` calls `InetAddressValidator.validateForwardTarget(configuration,
 InetSocketAddress)` — the same check every forward makes — so with `forwardProxyBlockPrivateNetworks=true` a WS upgrade
-to a loopback / link-local / RFC1918 / cloud-metadata (`169.254.169.254`) target is rejected with a `502` instead of
+to a loopback / link-local / RFC1918 / carrier-grade NAT / cloud-metadata (`169.254.169.254`) target is rejected with a `502` instead of
 being relayed, and an allowed one is connected to at the address checked, not looked up again. With the feature
 disabled (the default) the upstream is connected to by name, as before.
 

@@ -266,7 +266,7 @@ that way is warned about again. An address is remembered even when the log level
 
 ### Forward Target SSRF Validation
 
-When `forwardProxyBlockPrivateNetworks` is `true` (default `false`), MockServer validates the target host before opening any outbound connection. `InetAddressValidator.validateForwardTarget` resolves the hostname and rejects addresses in these ranges:
+When `forwardProxyBlockPrivateNetworks` is `true` (default `false`), MockServer validates the target host before opening any outbound connection. `InetAddressValidator.validateForwardTarget` resolves the hostname and rejects addresses in these ranges (an IPv4-mapped IPv6 address such as `::ffff:100.64.0.1` is checked as the IPv4 address it carries, because the JDK resolves it to one):
 
 | Blocked range | Reason |
 |--------------|--------|
@@ -274,6 +274,7 @@ When `forwardProxyBlockPrivateNetworks` is `true` (default `false`), MockServer 
 | Loopback (`127.0.0.0/8`, `::1`) | Localhost |
 | Link-local (`169.254.0.0/16`, `fe80::/10`) | Link-local |
 | RFC 1918 private / RFC 4193 unique-local (`fc00::/7`) | Private network |
+| RFC 6598 shared address space (`100.64.0.0/10`) | Carrier-grade NAT, Tailscale and similar overlay networks |
 | Wildcard / any-local | Bind-all addresses |
 
 The validation runs on every route that forwards or proxies a request:

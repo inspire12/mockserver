@@ -86,7 +86,8 @@ import static org.mockserver.netty.http3.Http3ExceptionHandler.peerAddress;
  *   <li>the same private-network / metadata block the forward proxy uses
  *       ({@code forwardProxyBlockPrivateNetworks} via {@link InetAddressValidator})
  *       — when enabled, a target resolving to a loopback, link-local, RFC 1918 /
- *       RFC 4193 private, wildcard, or cloud-metadata address is refused with 403.</li>
+ *       RFC 4193 private, RFC 6598 carrier-grade NAT, wildcard, or cloud-metadata address
+ *       is refused with 403.</li>
  * </ol>
  * With an empty allowlist and {@code forwardProxyBlockPrivateNetworks=false}
  * (both defaults) behaviour is unchanged — the relay is unrestricted — so existing
@@ -213,7 +214,7 @@ public class Http3ConnectUdpHandler extends ChannelInboundHandlerAdapter {
 
         // (2) SSRF private-network block: reuse the forward-proxy policy on the SAME
         // resolved address we will connect to, so a target resolving to loopback /
-        // RFC1918 / link-local / ULA / wildcard / metadata is refused when
+        // RFC1918 / link-local / ULA / CGNAT / wildcard / metadata is refused when
         // forwardProxyBlockPrivateNetworks is enabled (no-op when disabled)
         try {
             InetAddressValidator.validateForwardTarget(configuration, resolvedTarget);

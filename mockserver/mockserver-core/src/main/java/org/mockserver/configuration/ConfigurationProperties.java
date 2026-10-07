@@ -6440,8 +6440,8 @@ public class ConfigurationProperties {
 
     /**
      * When set to true, MockServer rejects forward and proxy targets that resolve to
-     * loopback, link-local, RFC 1918 private, or cloud metadata addresses
-     * (such as 169.254.169.254). This blocks server-side request forgery (SSRF) attacks
+     * loopback, link-local, RFC 1918 private, RFC 6598 carrier-grade NAT, or cloud
+     * metadata addresses (such as 169.254.169.254). This blocks server-side request forgery (SSRF) attacks
      * where a malicious expectation forwards through MockServer to internal infrastructure.
      * <p>
      * The default is false because MockServer is primarily used to mock services in

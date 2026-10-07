@@ -180,7 +180,7 @@ ConfigurationProperties.controlPlaneScopeMapping(Map.of(
 
 <h3>Forwarding &amp; proxying</h3>
 <ul>
-    <li><code class="inline_code">mockserver.forwardProxyBlockPrivateNetworks=true</code> &mdash; reject forward and proxy targets that resolve to loopback, link-local, RFC&nbsp;1918 private, or cloud-metadata addresses (e.g. <code class="inline_code">169.254.169.254</code>), keeping forwarded requests off internal networks (SSRF protection).</li>
+    <li><code class="inline_code">mockserver.forwardProxyBlockPrivateNetworks=true</code> &mdash; reject forward and proxy targets that resolve to loopback, link-local, RFC&nbsp;1918 private, carrier-grade NAT (<code class="inline_code">100.64.0.0/10</code>), or cloud-metadata addresses (e.g. <code class="inline_code">169.254.169.254</code>), keeping forwarded requests off internal networks (SSRF protection).</li>
     <li><code class="inline_code">mockserver.forwardProxyTLSX509CertificatesTrustManagerType=JVM</code> &mdash; validate upstream HTTPS certificates against the JDK trust store, exactly as a standard Java HTTPS client would. To trust a specific private CA, use <code class="inline_code">=CUSTOM</code> together with <code class="inline_code">mockserver.forwardProxyTLSCustomTrustX509Certificates</code> pointing at your CA bundle.</li>
 </ul>
 

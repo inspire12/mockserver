@@ -113,6 +113,32 @@ public class InetAddressValidatorTest {
     }
 
     @Test
+    public void shouldBlockCarrierGradeNatAddressesWhenEnabled() throws UnknownHostException {
+        // RFC 6598 shared address space 100.64.0.0/10, used by carrier-grade NAT and Tailscale
+        for (String address : new String[]{"100.64.0.0", "100.64.0.1", "100.100.100.100", "100.127.255.255", "::ffff:100.64.0.1", "[::ffff:100.127.0.1]"}) {
+            ForwardTargetBlockedException ex = assertThrows(address, ForwardTargetBlockedException.class,
+                () -> InetAddressValidator.validateForwardTarget(enabled, address));
+            assertThat(ex.getMessage(), containsString("carrier-grade NAT"));
+        }
+        assertThrows(ForwardTargetBlockedException.class,
+            () -> InetAddressValidator.validateForwardTarget(enabled, InetAddress.getByName("100.64.0.1")));
+        assertThrows(ForwardTargetBlockedException.class,
+            () -> InetAddressValidator.validateForwardTarget(enabled, new InetSocketAddress("100.64.0.1", 443)));
+    }
+
+    @Test
+    public void shouldAllowAddressesEitherSideOfTheCarrierGradeNatRangeWhenEnabled() {
+        for (String address : new String[]{"100.63.255.255", "100.128.0.0", "100.0.0.1", "100.255.255.255", "36.64.0.1", "::ffff:100.128.0.1"}) {
+            InetAddressValidator.validateForwardTarget(enabled, address);
+        }
+    }
+
+    @Test
+    public void shouldAllowCarrierGradeNatAddressesWhenDisabled() {
+        InetAddressValidator.validateForwardTarget(disabled, "100.64.0.1");
+    }
+
+    @Test
     public void shouldBlockWildcardAddressWhenEnabled() {
         IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
             () -> InetAddressValidator.validateForwardTarget(enabled, "0.0.0.0"));

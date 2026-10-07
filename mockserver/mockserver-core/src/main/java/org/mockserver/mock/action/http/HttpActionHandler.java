@@ -17,6 +17,7 @@ import org.mockserver.grpc.GrpcProtoDescriptorStore;
 import org.mockserver.httpclient.ClientConfigurationException;
 import org.mockserver.httpclient.HeaderLimitExceededException;
 import org.mockserver.httpclient.UndecodableResponseException;
+import org.mockserver.httpclient.UpstreamProxyUnreachableException;
 import org.mockserver.httpclient.NettyHttpClient;
 import org.mockserver.httpclient.SocketCommunicationException;
 import org.mockserver.log.model.DeferredLogArgument;
@@ -1299,6 +1300,7 @@ public class HttpActionHandler {
      * async continuation.
      */
     void handleUnmatchedForwardFailure(Throwable throwable, HttpRequest request, ResponseWriter responseWriter, InetSocketAddress remoteAddress, boolean potentiallyHttpProxy) {
+        throwable = answeredAsItsCause(throwable);
         if (returnedBlockedTarget(responseWriter, request, throwable, "proxied request")
             || returnedHeaderLimitFailure(responseWriter, request, throwable)
             || returnedUpstreamFailureReason(throwable, request, responseWriter, new LogEntry().setMessageFormat("failed to proxy request{}to remote address{}because:{}"), remoteAddress)) {
@@ -3101,6 +3103,14 @@ public class HttpActionHandler {
     }
 
     /**
+     * An unreachable upstream proxy reads as its cause inside a future's exception, but not on its own where its class
+     * name stands in for a missing message, so it is answered as its cause.
+     */
+    private static Throwable answeredAsItsCause(Throwable failure) {
+        return failure instanceof UpstreamProxyUnreachableException ? failure.getCause() : failure;
+    }
+
+    /**
      * Why a forward failed, for a reason the client's {@code 502} names: the connection to the upstream could not be
      * set up from MockServer's configuration, TLS with the upstream failed, the upstream sent an HTTP/2 error, or its
      * HTTP/1.1 response could not be decoded. Each comes from the TLS, HTTP/2, set-up or decoding code and is bounded
@@ -3138,6 +3148,7 @@ public class HttpActionHandler {
     }
 
     void handleExceptionDuringForwardingRequest(Action action, HttpRequest request, ResponseWriter responseWriter, Throwable exception) {
+        exception = answeredAsItsCause(exception);
         if (returnedBlockedTarget(responseWriter, request, exception, "forward")
             || returnedHeaderLimitFailure(responseWriter, request, exception)
             || returnedUpstreamFailureReason(exception, request, responseWriter, new LogEntry().setMessageFormat("failed to forward request{}for action{}because:{}"), action)) {
