@@ -110,6 +110,67 @@ public class ExtendedNoDependenciesJarMockingIntegrationTest {
     }
 
     /**
+     * Issue #2772: JSON body matching runs json-unit, whose Diff references opentest4j; both are relocated.
+     */
+    @Test
+    public void shouldMatchJsonBodiesOnlyWhenTheyAreEquivalent() throws Exception {
+        HttpRequest createExpectation = HttpRequest.newBuilder()
+            .uri(URI.create("http://localhost:" + port + "/mockserver/expectation"))
+            .timeout(Duration.ofSeconds(10))
+            .PUT(HttpRequest.BodyPublishers.ofString("{" +
+                "  \"httpRequest\": { \"method\": \"POST\", \"path\": \"/smoke-test/json\"," +
+                "    \"body\": { \"type\": \"JSON\", \"json\": { \"name\": \"smoke\", \"size\": 2 }, \"matchType\": \"STRICT\" } }," +
+                "  \"httpResponse\": { \"statusCode\": 200, \"body\": \"json-matched\" }" +
+                "}"))
+            .build();
+        HttpResponse<String> created = HTTP.send(createExpectation, HttpResponse.BodyHandlers.ofString());
+        assertTrue("PUT /mockserver/expectation returned " + created.statusCode() + " body=" + created.body(),
+            created.statusCode() == 201 || created.statusCode() == 200);
+
+        HttpResponse<String> equivalent = HTTP.send(jsonPost("{ \"size\": 2, \"name\": \"smoke\" }"), HttpResponse.BodyHandlers.ofString());
+        assertEquals("an equivalent JSON body (other field order) must match: " + equivalent.body(), 200, equivalent.statusCode());
+        assertEquals("json-matched", equivalent.body());
+
+        HttpResponse<String> different = HTTP.send(jsonPost("{ \"name\": \"smoke\", \"size\": 3 }"), HttpResponse.BodyHandlers.ofString());
+        assertEquals("a JSON body with a different value must not match: " + different.body(), 404, different.statusCode());
+    }
+
+    private static HttpRequest jsonPost(String body) {
+        return HttpRequest.newBuilder()
+            .uri(URI.create("http://localhost:" + port + "/smoke-test/json"))
+            .timeout(Duration.ofSeconds(10))
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(body))
+            .build();
+    }
+
+    /**
+     * Issue #2772: relocating GraphQL Java with a one-segment pattern also rewrote MockServer's own
+     * "/graphql" endpoint literal (and its "graphql-ws" subprotocols) to "shaded_package/graphql".
+     */
+    @Test
+    public void shouldServeGraphQLResponsesGeneratedFromASchema() throws Exception {
+        HttpRequest importSchema = HttpRequest.newBuilder()
+            .uri(URI.create("http://localhost:" + port + "/mockserver/graphql"))
+            .timeout(Duration.ofSeconds(10))
+            .PUT(HttpRequest.BodyPublishers.ofString("type Query { smokeTest: String }"))
+            .build();
+        HttpResponse<String> importResponse = HTTP.send(importSchema, HttpResponse.BodyHandlers.ofString());
+        assertEquals("PUT /mockserver/graphql body=" + importResponse.body(), 201, importResponse.statusCode());
+
+        HttpRequest query = HttpRequest.newBuilder()
+            .uri(URI.create("http://localhost:" + port + "/graphql"))
+            .timeout(Duration.ofSeconds(10))
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString("{\"query\": \"{ smokeTest }\"}"))
+            .build();
+        HttpResponse<String> response = HTTP.send(query, HttpResponse.BodyHandlers.ofString());
+        assertEquals("POST /graphql body=" + response.body(), 200, response.statusCode());
+        assertTrue("expected a synthesised smokeTest field, got: " + response.body(),
+            response.body().contains("\"smokeTest\""));
+    }
+
+    /**
      * Regression test for issue #2097: the shaded no-dependencies jar must
      * bundle an SLF4J logging backend. Without one, SLF4J silently falls back
      * to a no-op logger — the server runs but produces no logs at all, which
@@ -127,10 +188,11 @@ public class ExtendedNoDependenciesJarMockingIntegrationTest {
         boolean loggedStartupBanner = runner.awaitOutputContaining("started on port", Duration.ofSeconds(20));
         String output = runner.getOutput();
 
+        // any SLF4J(...) line means the bundled provider was not selected quietly: missing (#2097), or found
+        // by ServiceLoader beside another, or reported at INFO when chosen through slf4j.provider (#2772)
         assertFalse(
-            "SLF4J reported a provider failure while booting the no-dependencies jar — "
-                + "the shaded jar is missing a logging backend (issue #2097):\n" + output,
-            output.contains("SLF4J(W)") || output.contains("SLF4J(E)"));
+            "SLF4J reported on its provider while booting the no-dependencies jar (issues #2097, #2772):\n" + output,
+            output.contains("SLF4J("));
 
         assertTrue(
             "The no-dependencies jar logged no startup banner — expected an INFO "

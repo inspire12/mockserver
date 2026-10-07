@@ -54,6 +54,14 @@
             <optional>true</optional>
             <scope>compile</scope>
         </dependency>
+        <!-- provided: JUnit 4 is the API this integration is written against, and the project using it
+             already has it. Bundled, it clashed with the project's own copy (issue #2772), so the shade
+             leaves it out; provided is not passed on to consumers, so they still inherit no dependencies. -->
+        <dependency>
+            <groupId>junit</groupId>
+            <artifactId>junit</artifactId>
+            <scope>provided</scope>
+        </dependency>
     </dependencies>
 
     <build>
@@ -61,6 +69,40 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-shade-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>shade-no-dependencies</id>
+                        <configuration>
+                            <artifactSet>
+                                <excludes>
+                                    <exclude>junit:junit</exclude>
+                                </excludes>
+                            </artifactSet>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- Fail the build if a bundled dependency is left unrelocated (issue #2772); the script
+                 holds the shared allow-list and why each entry stays. -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.6.4</version>
+                <executions>
+                    <execution>
+                        <id>assert-only-relocated-classes</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>exec</goal>
+                        </goals>
+                        <configuration>
+                            <executable>${project.basedir}/../mockserver-netty-no-dependencies/src/packaging/assert-only-relocated-classes.sh</executable>
+                            <arguments>
+                                <argument>${project.build.directory}/${project.build.finalName}.jar</argument>
+                            </arguments>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

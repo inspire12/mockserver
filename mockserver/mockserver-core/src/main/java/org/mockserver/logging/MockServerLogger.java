@@ -38,6 +38,7 @@ public class MockServerLogger {
         // level is applied separately by configureLogger(), invoked from ConfigurationProperties'
         // static initializer (once its properties are loaded) and from its log-level / system-out
         // setters.
+        Slf4jProviderFallback.selectBundledProviderIfNoneRegistered();
         installDefaultJavaLoggingFormat();
     }
 

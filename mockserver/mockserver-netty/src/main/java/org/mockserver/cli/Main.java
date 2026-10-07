@@ -8,6 +8,7 @@ import org.mockserver.mock.Expectation;
 import org.mockserver.configuration.IntegerStringListParser;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
+import org.mockserver.logging.Slf4jProviderFallback;
 import org.mockserver.netty.MockServer;
 import org.mockserver.netty.dns.DnsStartupException;
 import org.mockserver.netty.http3.Http3NativeUnavailableException;
@@ -65,8 +66,10 @@ import static org.slf4j.event.Level.*;
 )
 public class Main {
 
-    // Must stay the first static initialiser: Netty reads the limit once, when it first initialises.
+    // Must stay the first static initialiser: Netty reads the limit once, when it first initialises, and
+    // SLF4J chooses its provider once, when it first initialises (which Netty can trigger).
     static {
+        Slf4jProviderFallback.selectBundledProviderIfNoneRegistered();
         NettyDirectMemoryLimit.applyDefault();
     }
 

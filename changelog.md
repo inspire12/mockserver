@@ -766,6 +766,27 @@ This release delivers a sustained performance and memory programme alongside dat
   connection and through a CONNECT or SOCKS tunnel; over HTTP/3 a mocked response (its trailers too), an MCP error
   and a 413 were sent with their bodies to `HEAD`. A response to `HEAD` has no content. Its headers now end the
   stream and keep the `content-length` a `GET` is sent, as on HTTP/1.1, which was not affected.
+- **`mockserver-netty-no-dependencies` no longer makes SLF4J warn "Class path contains multiple SLF4J providers" in a
+  project that has its own SLF4J provider.** The jar bundles the Java Logger provider so that it logs when run on its
+  own; that provider is now relocated and no longer registered, so SLF4J only ever finds your provider, and MockServer
+  logs through it. When your project has no SLF4J provider, MockServer selects the bundled one itself (by setting the
+  `slf4j.provider` system property, never when you have set it or have a provider of your own), so the CLI, the Docker
+  image and embedded MockServer still log (#2772).
+- **The `-no-dependencies` jars no longer ship GraphQL Java, picocli, Chicory, the RabbitMQ and Eclipse Paho clients,
+  HdrHistogram, jopt-simple, the JSR-305 and `javax.validation` annotations, Reactive Streams, java-dataloader,
+  JSpecify, Angus Activation and opentest4j under their original package names**, where they could clash with the
+  copies in your own project. They are now relocated under `shaded_package`, and the build fails if a bundled library
+  is left unrelocated without a documented reason. The few packages that stay unrelocated, and why, are listed on the
+  Maven Central page (#2772).
+- **POM change: the JUnit and Spring `-no-dependencies` integrations now use your project's JUnit or Spring instead of
+  bundling their own copy.** `mockserver-junit-rule-no-dependencies` and
+  `mockserver-integration-testing-no-dependencies` no longer contain JUnit 4,
+  `mockserver-junit-jupiter-no-dependencies` no longer contains JUnit Jupiter and the JUnit Platform, and
+  `mockserver-spring-test-listener-no-dependencies` no longer contains Spring and Micrometer; each POM now declares
+  that framework as a `provided` dependency. The bundled copies were unrelocated, so they clashed with your own JUnit
+  or Spring version. This is not a breaking change for a project that uses these integrations, since it already has the
+  framework, but it now needs `spring-test` and `spring-context` for the Spring listener, and JUnit 4.13 or later for
+  the integration-testing base classes (#2772).
 - **A console that is slow to drain no longer holds up stopping MockServer, or AsyncAPI requests, behind an AsyncAPI
   reset.** MockServer writes its log to standard output synchronously, so when stdout is a pipe that is read slowly (a
   CI runner, or a container log driver that has fallen behind) a thread writing a log line waits until the pipe takes

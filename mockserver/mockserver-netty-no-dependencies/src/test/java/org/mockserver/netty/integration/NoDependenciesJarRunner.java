@@ -235,7 +235,7 @@ public class NoDependenciesJarRunner {
             + READY_TIMEOUT + ". Forked jar output:\n" + getOutput());
     }
 
-    private static File locateShadedJar() {
+    public static File locateShadedJar() {
         String version = System.getProperty("project.version", "");
         String basedir = System.getProperty("project.basedir", ".");
         if (version.isEmpty()) {
@@ -260,7 +260,7 @@ public class NoDependenciesJarRunner {
             Arrays.asList(jarFile.getAbsolutePath(), alt.getAbsolutePath()));
     }
 
-    private static String getJavaBin() {
+    public static String getJavaBin() {
         File javaHomeDirectory = new File(System.getProperty("java.home"));
         for (String javaExecutable : new String[]{"java", "java.exe"}) {
             File javaExeLocation = new File(javaHomeDirectory, "bin" + File.separator + javaExecutable);

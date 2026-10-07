@@ -1209,7 +1209,8 @@
                      filters (to strip the bundled netty-tcnative native libraries,
                      which the other five modules deliberately keep). Child list
                      elements replace rather than append in the pluginManagement merge,
-                     so those overrides use combine.self="override". -->
+                     so those overrides use combine.self="override". A bundled package missing from
+                     the relocations below fails each module's assert-only-relocated-classes.sh. -->
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-shade-plugin</artifactId>
@@ -1244,6 +1245,10 @@
                                 <keepDependenciesWithProvidedScope>false</keepDependenciesWithProvidedScope>
                                 <minimizeJar>false</minimizeJar>
                                 <relocations>
+                                    <relocation>
+                                        <pattern>com.dylibso</pattern>
+                                        <shadedPattern>shaded_package.com.dylibso</shadedPattern>
+                                    </relocation>
                                     <relocation>
                                         <pattern>com.ethlo</pattern>
                                         <shadedPattern>shaded_package.com.ethlo</shadedPattern>
@@ -1281,6 +1286,10 @@
                                         <shadedPattern>shaded_package.com.nimbusds</shadedPattern>
                                     </relocation>
                                     <relocation>
+                                        <pattern>com.rabbitmq</pattern>
+                                        <shadedPattern>shaded_package.com.rabbitmq</shadedPattern>
+                                    </relocation>
+                                    <relocation>
                                         <pattern>com.samskivert</pattern>
                                         <shadedPattern>shaded_package.com.samskivert</shadedPattern>
                                     </relocation>
@@ -1298,6 +1307,12 @@
                                             <exclude>com.sun.net.httpserver.**</exclude> <!-- jdk.httpserver -->
                                             <exclude>com.sun.nio.sctp.**</exclude>     <!-- jdk.sctp -->
                                         </excludes>
+                                    </relocation>
+                                    <relocation>
+                                        <!-- A one-segment pattern also matches path strings: without the trailing dot
+                                             MockServer's "/graphql" endpoint literal became "/shaded_package/graphql". -->
+                                        <pattern>graphql.</pattern>
+                                        <shadedPattern>shaded_package.graphql.</shadedPattern>
                                     </relocation>
                                     <relocation>
                                         <pattern>io.github</pattern>
@@ -1332,8 +1347,19 @@
                                         <shadedPattern>shaded_package.jakarta.annotation</shadedPattern>
                                     </relocation>
                                     <relocation>
+                                        <pattern>javax.annotation</pattern>
+                                        <shadedPattern>shaded_package.javax.annotation</shadedPattern>
+                                        <excludes>
+                                            <exclude>javax.annotation.processing.**</exclude> <!-- java.compiler -->
+                                        </excludes>
+                                    </relocation>
+                                    <relocation>
                                         <pattern>javax.mail</pattern>
                                         <shadedPattern>shaded_package.javax.mail</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>javax.validation</pattern>
+                                        <shadedPattern>shaded_package.javax.validation</shadedPattern>
                                     </relocation>
                                     <relocation>
                                         <pattern>jakarta.servlet</pattern>
@@ -1344,12 +1370,8 @@
                                         <shadedPattern>shaded_package.jakarta.validation</shadedPattern>
                                     </relocation>
                                     <relocation>
-                                        <pattern>joptsimple.internal</pattern>
-                                        <shadedPattern>shaded_package.joptsimple.internal</shadedPattern>
-                                    </relocation>
-                                    <relocation>
-                                        <pattern>joptsimple.util</pattern>
-                                        <shadedPattern>shaded_package.joptsimple.util</shadedPattern>
+                                        <pattern>joptsimple.</pattern>
+                                        <shadedPattern>shaded_package.joptsimple.</shadedPattern>
                                     </relocation>
                                     <relocation>
                                         <pattern>net.datafaker</pattern>
@@ -1387,12 +1409,38 @@
                                         <shadedPattern>shaded_package.org.checkerframework</shadedPattern>
                                     </relocation>
                                     <relocation>
+                                        <pattern>org.dataloader</pattern>
+                                        <shadedPattern>shaded_package.org.dataloader</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>org.eclipse.angus</pattern>
+                                        <shadedPattern>shaded_package.org.eclipse.angus</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>org.eclipse.paho</pattern>
+                                        <shadedPattern>shaded_package.org.eclipse.paho</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <!-- the slf4j-jdk14 provider the netty jar bundles; the SLF4J API stays unrelocated
+                                             (MockServer logs through the user's provider). Slf4jProviderFallback names it. -->
+                                        <pattern>org.slf4j.jul</pattern>
+                                        <shadedPattern>shaded_package.org.slf4j.jul</shadedPattern>
+                                    </relocation>
+                                    <relocation>
                                         <pattern>org.glassfish</pattern>
                                         <shadedPattern>shaded_package.org.glassfish</shadedPattern>
                                     </relocation>
                                     <relocation>
+                                        <pattern>org.HdrHistogram</pattern>
+                                        <shadedPattern>shaded_package.org.HdrHistogram</shadedPattern>
+                                    </relocation>
+                                    <relocation>
                                         <pattern>org.hamcrest</pattern>
                                         <shadedPattern>shaded_package.org.hamcrest</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>org.jspecify</pattern>
+                                        <shadedPattern>shaded_package.org.jspecify</shadedPattern>
                                     </relocation>
                                     <relocation>
                                         <pattern>org.joda</pattern>
@@ -1403,12 +1451,25 @@
                                         <shadedPattern>shaded_package.org.objectweb</shadedPattern>
                                     </relocation>
                                     <relocation>
+                                        <!-- json-unit's Diff throws opentest4j's AssertionFailedError; MockServer only calls similar() -->
+                                        <pattern>org.opentest4j</pattern>
+                                        <shadedPattern>shaded_package.org.opentest4j</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>org.reactivestreams</pattern>
+                                        <shadedPattern>shaded_package.org.reactivestreams</shadedPattern>
+                                    </relocation>
+                                    <relocation>
                                         <pattern>org.xmlunit</pattern>
                                         <shadedPattern>shaded_package.org.xmlunit</shadedPattern>
                                     </relocation>
                                     <relocation>
                                         <pattern>org.yaml</pattern>
                                         <shadedPattern>shaded_package.org.yaml</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>picocli.</pattern>
+                                        <shadedPattern>shaded_package.picocli.</shadedPattern>
                                     </relocation>
                                     <relocation>
                                         <!-- Jackson 3.x (tools.jackson) used internally by json-schema-validator 3.x -->

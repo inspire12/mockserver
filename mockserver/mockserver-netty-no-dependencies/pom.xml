@@ -39,18 +39,12 @@
             <optional>true</optional>
         </dependency>
 
-        <!-- This shaded jar is a standalone runnable artifact — the CLI and the
-             Docker image both run it directly — so unlike the mockserver-netty
-             library it must bundle an SLF4J logging backend. mockserver-netty
-             declares slf4j-jdk14 optional, and optional dependencies are not
-             transitive, so the binding never reached this module's shade
-             classpath and the jar shipped with no SLF4J provider — logging
-             silently fell back to a no-op logger (issue #2097). Declaring it
-             directly here puts it on the shade classpath so the provider is
-             bundled into the uber jar. It stays optional: the shade plugin
-             bundles a module's own optional dependencies anyway, and optional
-             keeps slf4j-jdk14 from leaking onto the classpath of anything that
-             consumes this artifact as a Maven dependency. -->
+        <!-- This jar is also run on its own (the CLI, and the Docker image jar derived from it), so it
+             bundles an SLF4J provider (issue #2097): slf4j-jdk14, declared here because mockserver-netty
+             declares it optional. The shade relocates it and drops its META-INF/services registration, so
+             it never competes with an embedding project's own provider (issue #2772);
+             Slf4jProviderFallback selects it only when no other provider is registered. Optional keeps it
+             off the classpath of anything that consumes this artifact as a Maven dependency. -->
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-jdk14</artifactId>
@@ -73,6 +67,12 @@
         <dependency>
             <groupId>${project.groupId}</groupId>
             <artifactId>mockserver-testing</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- test scope only: the "project with its own SLF4J provider" in NoDependenciesJarSlf4jProviderIntegrationTest -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>
@@ -144,6 +144,13 @@
                                     </excludes>
                                 </filter>
                                 <filter>
+                                    <!-- the provider is selected by Slf4jProviderFallback, never by ServiceLoader (issue #2772) -->
+                                    <artifact>org.slf4j:slf4j-jdk14</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/services/org.slf4j.spi.SLF4JServiceProvider</exclude>
+                                    </excludes>
+                                </filter>
+                                <filter>
                                     <artifact>io.netty:netty-tcnative-boringssl-static</artifact>
                                     <excludes>
                                         <exclude>META-INF/native/**</exclude>
@@ -177,6 +184,17 @@
                         </configuration>
                     </execution>
                 </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <configuration>
+                    <systemPropertyVariables combine.children="append">
+                        <!-- paths resolved by the expose-dependency-paths execution above -->
+                        <slf4jApiJar>${org.slf4j:slf4j-api:jar}</slf4jApiJar>
+                        <slf4jSimpleJar>${org.slf4j:slf4j-simple:jar}</slf4jSimpleJar>
+                    </systemPropertyVariables>
+                </configuration>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -314,6 +332,22 @@
                         <configuration>
                             <skip>false</skip>
                             <executable>src/packaging/assert-shaded-epoll-natives.sh</executable>
+                            <arguments>
+                                <argument>${project.build.directory}/${project.build.finalName}.jar</argument>
+                            </arguments>
+                        </configuration>
+                    </execution>
+                    <!-- Fail the build if a bundled dependency is left unrelocated (issue #2772); the script
+                         holds the shared allow-list and why each entry stays. -->
+                    <execution>
+                        <id>assert-only-relocated-classes</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>exec</goal>
+                        </goals>
+                        <configuration>
+                            <skip>false</skip>
+                            <executable>src/packaging/assert-only-relocated-classes.sh</executable>
                             <arguments>
                                 <argument>${project.build.directory}/${project.build.finalName}.jar</argument>
                             </arguments>

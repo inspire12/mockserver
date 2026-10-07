@@ -161,6 +161,21 @@ The project comprises 26 Maven reactor modules (the table also lists the standal
 | `mockserver-blob-azure` | jar | Azure blob storage backend |
 | `mockserver-k8s-webhook` | jar (+fat) | Kubernetes admission webhook for sidecar injection |
 
+#### What the `-no-dependencies` jars leave unrelocated
+
+The six `-no-dependencies` jars share one shade configuration (`mockserver/pom.xml` pluginManagement), whose relocations are an explicit list of package prefixes. A dependency whose package is not on the list is bundled **unrelocated** and clashes with the user's own copy (issue #2772: GraphQL Java, picocli, Chicory, the RabbitMQ and Paho clients, HdrHistogram and others shipped that way in 8.0.0). `mockserver-netty-no-dependencies/src/packaging/assert-only-relocated-classes.sh` runs at `package` in all six modules and fails the build on any class outside `org/mockserver/` and `shaded_package/`, or any `META-INF/services` file for an unrelocated interface, that is not on its allow-list. **Adding a dependency to `mockserver-core`/`mockserver-netty` therefore means adding a relocation**, or an allow-list entry with its reason.
+
+Shade applies a relocation to string constants as well as class references, in MockServer's own classes too. Write a one-segment package with a trailing dot (`<pattern>graphql.</pattern>`): a bare `graphql` matched every string starting with `graphql` or `/graphql`, and turned MockServer's `/graphql` endpoint, its `graphql-ws` subprotocols and its metric labels into `shaded_package...` strings. A relocation that compiles and passes the guard can still break a feature this way, so exercise the feature from the shaded jar (`ExtendedNoDependenciesJarMockingIntegrationTest` forks it with `java -jar`).
+
+| Left unrelocated | Where | Why |
+|---|---|---|
+| `org.slf4j` (the API only) | all | MockServer logs through the user's SLF4J provider. The netty jar's `slf4j-jdk14` provider (issue #2097) is relocated to `shaded_package.org.slf4j.jul` with its `META-INF/services` file dropped, so SLF4J never finds it beside the user's; `Slf4jProviderFallback` (called first by `Main` and by `MockServerLogger`'s static init) sets `slf4j.provider` to it only when no provider is registered and the property is unset. The guard denies unrelocated provider packages |
+| `org.apache.velocity` | all but client | its bundled `.properties` files name its classes and shade does not rewrite resource contents |
+| `org.mozilla` (Rhino) | all but client | its compiler generates classes at runtime that name Rhino's own classes (relocated, `evaluateString` fails with `NoClassDefFoundError: org/mozilla/javascript/Context`) |
+| `org.xerial.snappy`, `net.jpountz` | snappy all, lz4 netty | JNI natives bind to the unrelocated class names |
+
+The JUnit and Spring integration jars do **not** bundle their framework: `artifactSet` excludes in `mockserver-junit-rule-no-dependencies` and `mockserver-integration-testing-no-dependencies` (JUnit 4), `mockserver-junit-jupiter-no-dependencies` (JUnit Jupiter / Platform, apiguardian) and `mockserver-spring-test-listener-no-dependencies` (Spring, Micrometer) leave it out, and each POM declares it `provided`, which consumers do not inherit. Bundled unrelocated it clashed with the user's own copy; relocated it would not work, because the user's test engine or Spring container drives these classes. MockServer's own classes in those jars call the framework only with JDK or framework types (checked with `javap`: no reference to a framework member carries a `shaded_package` type), so the relocated Hamcrest, opentest4j and `jakarta.annotation` they bundle do not leak into those calls.
+
 ### Dependency management and the BOM
 
 MockServer pins all of its third-party transitive versions in the **parent POM's `<dependencyManagement>`**, and the reactor's own Enforcer `dependencyConvergence` rule guards that everything resolves to a single version. That management is, by design, **not inherited by downstream consumers**.
