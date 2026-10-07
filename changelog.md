@@ -795,11 +795,6 @@ This release delivers a sustained performance and memory programme alongside dat
   matches it (its response cannot be delivered), and closes the connection when the client's input ends, or 5 seconds
   later at the latest.
 
-Also, in the existing unreleased `### Fixed` entry "An HTTP/2 request from a client that resets its connection as soon
-as it has sent it is now received.", delete its last sentence ("A request large enough to be read in more than one
-pass can still be lost this way."). The same change covers that case: the flush at the end of the first pass no
-longer closes the connection. That is reasoned, not measured: the tests make a write fail before a read, not between
-two passes of one request.
 - **`localBoundIP` now keeps the DNS and HTTP/3 ports on that address too.** It applied to the HTTP(S) ports only:
   the DNS port and the experimental HTTP/3 port, which use UDP, listened on every address of the host even when
   `localBoundIP` was set, so a user who set `localBoundIP=127.0.0.1` to keep MockServer off the network still exposed
