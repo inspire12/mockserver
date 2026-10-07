@@ -32,6 +32,7 @@ import org.mockserver.model.StreamingBody;
 import org.mockserver.openapi.OpenAPIRequestValidator;
 import org.mockserver.openapi.OpenAPIResponseValidator;
 import org.mockserver.openapi.OpenApiRuntimeExpressionResolver;
+import org.mockserver.proxyconfiguration.InetAddressValidator;
 import org.mockserver.proxyconfiguration.NoProxyHostsUtils;
 import org.mockserver.proxyconfiguration.ProxyConfiguration;
 import org.mockserver.responsewriter.GrpcStreamResponseWriter;
@@ -1141,6 +1142,9 @@ public class HttpActionHandler {
                         // then re-encode the JSON body to protobuf frames for the upstream gRPC call.
                         final java.util.function.Function<HttpResponse, HttpResponse> grpcDecode = grpcDecodeOverride(clonedRequest);
                         final HttpRequest requestToSend = grpcEncodeForForward(clonedRequest);
+                        if (refusedByPrivateNetworkBlock(requestToSend, remoteAddress, request, responseWriter)) {
+                            return;
+                        }
                         final HttpForwardActionResult responseFuture = new HttpForwardActionResult(clonedRequest, httpClient.sendRequest(requestToSend, remoteAddress, potentiallyHttpProxy ? 1000 : configuration.socketConnectionTimeoutInMillis()), grpcDecode, remoteAddress);
                         // Consume the upstream response via the scheduler continuation (as the matched path
                         // does) instead of a blocking get, so the pool thread is freed during the round trip
@@ -1361,6 +1365,9 @@ public class HttpActionHandler {
             // gRPC forward-proxy: capture the decode override then re-encode to protobuf for upstream.
             final java.util.function.Function<HttpResponse, HttpResponse> grpcDecode = grpcDecodeOverride(requestToForward);
             final HttpRequest requestToSend = grpcEncodeForForward(requestToForward);
+            if (refusedByPrivateNetworkBlock(requestToSend, remoteAddress, originalRequest, responseWriter)) {
+                return;
+            }
             final HttpForwardActionResult responseFuture = new HttpForwardActionResult(
                 requestToForward,
                 httpClient.sendRequest(requestToSend, remoteAddress,
@@ -1569,6 +1576,9 @@ public class HttpActionHandler {
                         // gRPC forward-proxy: capture the decode override then re-encode to protobuf for upstream.
                         final java.util.function.Function<HttpResponse, HttpResponse> grpcDecode = grpcDecodeOverride(clonedRequest);
                         final HttpRequest requestToSend = grpcEncodeForForward(clonedRequest);
+                        if (refusedByPrivateNetworkBlock(requestToSend, targetAddress, request, responseWriter)) {
+                            return;
+                        }
                         final HttpForwardActionResult responseFuture = new HttpForwardActionResult(clonedRequest, httpClient.sendRequest(requestToSend, targetAddress), grpcDecode, targetAddress);
                         // Consume the upstream response via the scheduler continuation (as the matched path
                         // does) instead of a blocking get, so the pool thread is freed during the round trip.
@@ -1712,20 +1722,8 @@ public class HttpActionHandler {
                         if (LocalCallbackRegistry.forwardClientExists(clientId)) {
                             HttpRequest callbackRequest = LocalCallbackRegistry.retrieveForwardCallback(clientId).handle(request);
                             if (callbackRequest != null) {
-                                httpClient.sendRequest(callbackRequest)
-                                    .whenComplete((response, throwable) -> {
-                                        if (throwable != null && mockServerLogger.isEnabledForInstance(Level.INFO)) {
-                                            mockServerLogger.logEvent(
-                                                new LogEntry()
-                                                    .setType(WARN)
-                                                    .setLogLevel(Level.INFO)
-                                                    .setCorrelationId(request.getLogCorrelationId())
-                                                    .setHttpRequest(request)
-                                                    .setMessageFormat("secondary forward object callback failed - " + throwable.getMessage())
-                                                    .setThrowable(throwable)
-                                            );
-                                        }
-                                    });
+                                HttpForwardActionResult result = getHttpForwardObjectCallbackActionHandler().forward(callbackRequest);
+                                logForwardResultAsync(result, request, secondaryAction);
                             }
                         }
                     }
@@ -3357,6 +3355,33 @@ public class HttpActionHandler {
         }
         returnBadGateway(responseWriter, request, headerLimit.getMessage(), badGatewayResponse().withBody(headerLimit.getMessage()));
         return true;
+    }
+
+    /**
+     * Applies forwardProxyBlockPrivateNetworks to a request that matched no expectation, which goes to the
+     * destination the client proxied it to, or to proxyRemoteHost or a proxyPassMappings target: every target is
+     * checked, as for a forward action. A refused request is answered with 502.
+     *
+     * @return whether the request was refused and answered
+     */
+    private boolean refusedByPrivateNetworkBlock(HttpRequest requestToSend, InetSocketAddress remoteAddress, HttpRequest request, ResponseWriter responseWriter) {
+        try {
+            InetAddressValidator.validateForwardTarget(configuration, requestToSend, remoteAddress, httpClient.sendsThroughHttpProxy(requestToSend, remoteAddress));
+            return false;
+        } catch (IllegalArgumentException blocked) {
+            if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.WARN)
+                        .setCorrelationId(request.getLogCorrelationId())
+                        .setHttpRequest(request)
+                        .setMessageFormat("proxied request blocked by SSRF policy:{}")
+                        .setArguments(blocked.getMessage())
+                );
+            }
+            returnBadGateway(responseWriter, request, blocked.getMessage());
+            return true;
+        }
     }
 
     private void returnBadGateway(ResponseWriter responseWriter, HttpRequest request, String error) {

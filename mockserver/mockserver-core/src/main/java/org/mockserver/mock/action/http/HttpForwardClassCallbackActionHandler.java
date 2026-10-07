@@ -107,4 +107,9 @@ public class HttpForwardClassCallbackActionHandler extends HttpForwardAction {
             return badGatewayFuture(null);
         }
     }
+
+    @Override
+    protected String actionName() {
+        return "forward class callback action";
+    }
 }

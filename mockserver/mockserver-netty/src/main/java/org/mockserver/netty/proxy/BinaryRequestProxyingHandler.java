@@ -20,6 +20,7 @@ import org.mockserver.model.BinaryMessage;
 import org.mockserver.model.BinaryProxyListener;
 import org.mockserver.model.BinaryRequestDefinition;
 import org.mockserver.netty.proxy.relay.BinaryRelay;
+import org.mockserver.proxyconfiguration.ForwardTargetBlockedException;
 import org.mockserver.scheduler.Scheduler;
 import org.mockserver.socket.ChannelReadPause;
 import org.mockserver.uuid.UUIDService;
@@ -494,6 +495,10 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
      * connection it closes is logged below that, without a stack trace, as an HTTP forward's 502 is.
      */
     private void logFailedForward(BinaryMessage binaryRequest, String logCorrelationId, InetSocketAddress remoteAddress, Throwable throwable) {
+        if (throwable.getCause() instanceof ForwardTargetBlockedException) {
+            // a refused target was logged where it was refused
+            return;
+        }
         HeaderLimitExceededException headerLimit = HeaderLimitExceededException.in(throwable);
         Level level = headerLimit != null ? Level.INFO : Level.WARN;
         if (mockServerLogger.isEnabledForInstance(level)) {

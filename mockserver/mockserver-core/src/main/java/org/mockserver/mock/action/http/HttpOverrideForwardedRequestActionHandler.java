@@ -175,4 +175,8 @@ public class HttpOverrideForwardedRequestActionHandler extends HttpForwardAction
         return engine;
     }
 
+    @Override
+    protected String actionName() {
+        return "override forwarded request action";
+    }
 }

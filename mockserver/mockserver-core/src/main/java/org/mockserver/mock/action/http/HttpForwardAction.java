@@ -11,6 +11,7 @@ import org.mockserver.model.Header;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.model.SocketAddress;
+import org.mockserver.proxyconfiguration.InetAddressValidator;
 import org.slf4j.event.Level;
 
 import javax.annotation.Nullable;
@@ -49,11 +50,35 @@ public abstract class HttpForwardAction {
         this.grpcDescriptorStore = grpcDescriptorStore;
     }
 
+    /**
+     * How the action is named in the warning logged when forwardProxyBlockPrivateNetworks refuses its target.
+     */
+    protected String actionName() {
+        return "forward action";
+    }
+
     protected HttpForwardActionResult sendRequest(HttpRequest request, @Nullable InetSocketAddress remoteAddress, Function<HttpResponse, HttpResponse> overrideHttpResponse) {
         return sendRequest(request, remoteAddress, overrideHttpResponse, false);
     }
 
     protected HttpForwardActionResult sendRequest(HttpRequest request, @Nullable InetSocketAddress remoteAddress, Function<HttpResponse, HttpResponse> overrideHttpResponse, boolean disableStreaming) {
+        // every forward action sends through here, so this is where forwardProxyBlockPrivateNetworks is applied
+        try {
+            InetAddressValidator.validateForwardTarget(configuration, request, remoteAddress, httpClient != null && httpClient.sendsThroughHttpProxy(request, remoteAddress));
+        } catch (IllegalArgumentException blocked) {
+            if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+                // a literal per action
+                final String label = actionName();
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.WARN)
+                        .setHttpRequest(request)
+                        .setMessageFormat(label + " blocked by SSRF policy:{}")
+                        .setArguments(blocked.getMessage())
+                );
+            }
+            return badGatewayFuture(request);
+        }
         // Resolved once outside the try so the catch block can feed a synchronous failure back into
         // the circuit breaker (otherwise a half-open trial that throws synchronously would never
         // release its trial slot and the breaker would be stranded open). Null when the breaker is

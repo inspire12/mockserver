@@ -30,6 +30,25 @@ This release delivers a sustained performance and memory programme alongside dat
 
 ### Security
 
+- **`forwardProxyBlockPrivateNetworks` now applies to every forwarded and proxied request.** With
+  the setting enabled, 8.0.0 checked only `httpForward` actions (including forward templates,
+  forwards with a fallback and validating forwards). Overridden forwarded requests
+  (`forwardOverriddenRequest`), class and object forward callbacks, binary forwarding, and requests
+  that matched no expectation and were proxied on (to the destination the client named, to
+  `proxyRemoteHost`, or to a `proxyPassMappings` target) did not apply the check, so an expectation,
+  or an unmatched proxied request, could reach loopback, private-network and cloud-metadata
+  addresses. All of them now apply it, as forward actions do: an HTTP request gets
+  `502 Bad Gateway`, a binary connection is closed, and a warning names the blocked address. Targets
+  set in configuration, such as `proxyRemoteHost`, are checked too. A request sent through
+  `forwardHttpProxy` also has its Host header checked, as that proxy is sent it as the address to
+  go to.
+
+  With the setting enabled, a request that matches no expectation and whose Host header names
+  MockServer itself by a name it does not recognise as its own (a Docker Compose or Kubernetes
+  service name, for example) now gets `502 Bad Gateway` and a warning instead of `404 Not Found`,
+  because that name resolves to a private address. Add the name to `noProxyHosts`, or set
+  `attemptToProxyIfNoMatchingExpectation` to `false` if MockServer is not used as a proxy, to get
+  the `404` back.
 - **Configuration changes made through the REST API now take effect on a server started from the
   command line or Docker.** A server started without a configuration object (the command line, the
   Docker images and the Maven plugin) held two copies of its configuration. `PUT

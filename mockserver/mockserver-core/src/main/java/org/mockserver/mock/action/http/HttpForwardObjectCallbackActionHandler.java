@@ -261,4 +261,16 @@ public class HttpForwardObjectCallbackActionHandler extends HttpForwardAction {
         }, synchronous);
     }
 
+    /**
+     * Forwards a request a local forward callback returned, as a secondary action does, through the same checks as
+     * any forward action.
+     */
+    HttpForwardActionResult forward(HttpRequest callbackRequest) {
+        return sendRequest(callbackRequest, null, null);
+    }
+
+    @Override
+    protected String actionName() {
+        return "forward object callback action";
+    }
 }

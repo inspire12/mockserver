@@ -150,4 +150,9 @@ public class HttpForwardWithFallbackActionHandler extends HttpForwardAction {
         future.complete(response);
         return new HttpForwardActionResult(httpRequest, future, null);
     }
+
+    @Override
+    protected String actionName() {
+        return "forward-with-fallback action";
+    }
 }

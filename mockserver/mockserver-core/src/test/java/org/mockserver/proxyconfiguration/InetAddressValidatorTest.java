@@ -5,6 +5,8 @@ import org.junit.Before;
 import org.junit.Test;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.configuration.ConfigurationProperties;
+import org.mockserver.model.HttpRequest;
+import org.mockserver.model.SocketAddress;
 
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -16,6 +18,7 @@ import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.sameInstance;
 import static org.junit.Assert.assertThrows;
+import static org.mockserver.model.HttpRequest.request;
 
 /**
  * Behaviour: the validator blocks SSRF-suspect targets when
@@ -223,5 +226,48 @@ public class InetAddressValidatorTest {
         assertThat(InetAddressValidator.validateForwardTarget(disabled, loopback), is(sameInstance(loopback)));
         assertThat("and no name is looked up", InetAddressValidator.validateForwardTarget(disabled, unresolved), is(sameInstance(unresolved)));
         assertThat(InetAddressValidator.validateForwardTarget(enabled, (InetSocketAddress) null), is(nullValue()));
+    }
+
+    @Test
+    public void shouldCheckTheAddressAForwardedRequestIsSentToWhenThereIsOne() {
+        HttpRequest publicHost = request().withHeader("Host", "8.8.8.8");
+
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+            () -> InetAddressValidator.validateForwardTarget(enabled, publicHost, InetSocketAddress.createUnresolved("127.0.0.1", 80), false));
+        assertThat(ex.getMessage(), containsString("Forward to loopback address blocked: 127.0.0.1"));
+        InetAddressValidator.validateForwardTarget(enabled, request().withHeader("Host", "127.0.0.1"), InetSocketAddress.createUnresolved("8.8.8.8", 80), false);
+    }
+
+    @Test
+    public void shouldCheckTheSocketAddressOrHostHeaderOfAForwardedRequestWithNoAddress() {
+        IllegalArgumentException byHostHeader = assertThrows(IllegalArgumentException.class,
+            () -> InetAddressValidator.validateForwardTarget(enabled, request().withHeader("Host", "localhost:1080"), null, false));
+        assertThat(byHostHeader.getMessage(), containsString("Forward to loopback address blocked: localhost"));
+        IllegalArgumentException bySocketAddress = assertThrows(IllegalArgumentException.class,
+            () -> InetAddressValidator.validateForwardTarget(enabled, request().withHeader("Host", "8.8.8.8").withSocketAddress("169.254.169.254", 80, SocketAddress.Scheme.HTTP), null, false));
+        assertThat(bySocketAddress.getMessage(), containsString("cloud metadata"));
+        InetAddressValidator.validateForwardTarget(enabled, request().withHeader("Host", "8.8.8.8:80"), null, false);
+    }
+
+    @Test
+    public void shouldAlsoCheckTheHostHeaderOfARequestSentThroughForwardHttpProxy() {
+        HttpRequest privateHostHeader = request().withHeader("Host", "10.0.0.1:8080");
+        InetSocketAddress publicAddress = InetSocketAddress.createUnresolved("8.8.8.8", 80);
+
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+            () -> InetAddressValidator.validateForwardTarget(enabled, privateHostHeader, publicAddress, true));
+        assertThat(ex.getMessage(), containsString("Forward to private network blocked: 10.0.0.1"));
+        InetAddressValidator.validateForwardTarget(enabled, privateHostHeader, publicAddress, false);
+    }
+
+    @Test
+    public void shouldLeaveAForwardedRequestThatNamesNoDestinationToFailWhereItIsSent() {
+        InetAddressValidator.validateForwardTarget(enabled, request(), null, true);
+        InetAddressValidator.validateForwardTarget(enabled, request().withHeader("Host", ":::"), null, true);
+    }
+
+    @Test
+    public void shouldNotCheckAForwardedRequestWhenDisabled() {
+        InetAddressValidator.validateForwardTarget(disabled, request().withHeader("Host", "127.0.0.1"), InetSocketAddress.createUnresolved("127.0.0.1", 80), true);
     }
 }

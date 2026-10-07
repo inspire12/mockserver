@@ -27,6 +27,7 @@ import org.mockserver.log.model.SensitiveLogValue;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.metrics.Metrics;
 import org.mockserver.model.*;
+import org.mockserver.proxyconfiguration.ForwardTargetBlockedException;
 import org.mockserver.proxyconfiguration.InetAddressValidator;
 import org.mockserver.proxyconfiguration.NoProxyHostsUtils;
 import org.mockserver.proxyconfiguration.ProxyConfiguration;
@@ -179,6 +180,16 @@ public class NettyHttpClient {
         return sendRequest(httpRequest, remoteAddress, configuration.socketConnectionTimeoutInMillis());
     }
 
+    /**
+     * Whether {@link #sendRequest(HttpRequest, InetSocketAddress)} sends the request to {@code forwardHttpProxy}, which
+     * is then sent the destination as an absolute URI made from the request's Host header.
+     */
+    public boolean sendsThroughHttpProxy(HttpRequest httpRequest, @Nullable InetSocketAddress remoteAddress) {
+        return proxyConfigurations != null && !Boolean.TRUE.equals(httpRequest.isSecure())
+            && proxyConfigurations.containsKey(ProxyConfiguration.Type.HTTP)
+            && isHostNotOnNoProxyHostList(remoteAddress);
+    }
+
     public CompletableFuture<HttpResponse> sendRequest(final HttpRequest httpRequest, @Nullable InetSocketAddress remoteAddress, Long connectionTimeoutMillis) throws SocketConnectionException {
         return sendRequest(httpRequest, remoteAddress, connectionTimeoutMillis, false);
     }
@@ -187,9 +198,7 @@ public class NettyHttpClient {
         // Resolve (lazily creating on first forward) once per request so the whole request uses one group.
         final EventLoopGroup eventLoopGroup = eventLoopGroup();
         if (!eventLoopGroup.isShuttingDown()) {
-            if (proxyConfigurations != null && !Boolean.TRUE.equals(httpRequest.isSecure())
-                && proxyConfigurations.containsKey(ProxyConfiguration.Type.HTTP)
-                && isHostNotOnNoProxyHostList(remoteAddress)) {
+            if (sendsThroughHttpProxy(httpRequest, remoteAddress)) {
                 ProxyConfiguration proxyConfiguration = proxyConfigurations.get(ProxyConfiguration.Type.HTTP);
                 remoteAddress = proxyConfiguration.getProxyAddress();
                 proxyConfiguration.addProxyAuthenticationHeader(httpRequest);
@@ -580,12 +589,22 @@ public class NettyHttpClient {
     public CompletableFuture<BinaryMessage> sendRequest(final BinaryMessage binaryRequest, final boolean isSecure, InetSocketAddress remoteAddress, Long connectionTimeoutMillis, final Consumer<Throwable> onRequestSent) throws SocketConnectionException {
         final EventLoopGroup eventLoopGroup = eventLoopGroup();
         if (!eventLoopGroup.isShuttingDown()) {
+            InetSocketAddress vetted;
+            try {
+                // a name is checked by a lookup here even when an upstream proxy will resolve it again
+                vetted = InetAddressValidator.validateForwardTarget(configuration, remoteAddress);
+            } catch (ForwardTargetBlockedException blocked) {
+                return refusedBinaryForward(blocked, onRequestSent);
+            }
             if (proxyConfigurations != null && !isSecure && proxyConfigurations.containsKey(ProxyConfiguration.Type.HTTP)) {
                 remoteAddress = proxyConfigurations.get(ProxyConfiguration.Type.HTTP).getProxyAddress();
             } else if (remoteAddress == null) {
                 throw new IllegalArgumentException("Remote address cannot be null");
             } else if (HttpClientInitializer.tunnelProxy(proxyConfigurations, isSecure) != null) {
                 remoteAddress = unresolvedUnlessIpLiteral(remoteAddress);
+            } else {
+                // the address checked is the address connected to
+                remoteAddress = vetted;
             }
 
             final CompletableFuture<BinaryMessage> binaryResponseFuture = new CompletableFuture<>();
@@ -734,6 +753,21 @@ public class NettyHttpClient {
             sslHandler.setHandshakeTimeoutMillis(handshakeTimeoutMillis);
         }
         return sslHandler;
+    }
+
+    private CompletableFuture<BinaryMessage> refusedBinaryForward(ForwardTargetBlockedException blocked, Consumer<Throwable> onRequestSent) {
+        if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.WARN)
+                    .setMessageFormat("binary forward blocked by SSRF policy:{}")
+                    .setArguments(blocked.getMessage())
+            );
+        }
+        CompletableFuture<BinaryMessage> refused = new CompletableFuture<>();
+        refused.completeExceptionally(blocked);
+        reportRequestSent(onRequestSent, blocked);
+        return refused;
     }
 
     private static void reportRequestSent(Consumer<Throwable> onRequestSent, Throwable failure) {

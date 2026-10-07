@@ -577,13 +577,15 @@ Each `Expectation` binds a request matcher to exactly one action. There are 19 a
 
 | Type | Handler | Description |
 |------|---------|-------------|
-| `FORWARD` | `HttpForwardActionHandler` | Forwards to a specified host:port:scheme. SSRF validation (`InetAddressValidator.validateForwardTarget`) resolves and rejects the host before the connect attempt; the connect path then receives an `InetSocketAddress.createUnresolved` address so Netty's event-loop resolver performs DNS lookup off the calling thread rather than blocking it. |
+| `FORWARD` | `HttpForwardActionHandler` | Forwards to a specified host:port:scheme. The connect path receives an `InetSocketAddress.createUnresolved` address so Netty's event-loop resolver performs DNS lookup off the calling thread rather than blocking it. |
 | `FORWARD_TEMPLATE` | `HttpForwardTemplateActionHandler` | Template generates the forwarding request |
 | `FORWARD_CLASS_CALLBACK` | `HttpForwardClassCallbackActionHandler` | Java class modifies the request before forwarding |
 | `FORWARD_OBJECT_CALLBACK` | `HttpForwardObjectCallbackActionHandler` | WebSocket client modifies request before forwarding |
 | `FORWARD_REPLACE` | `HttpOverrideForwardedRequestActionHandler` | Applies request/response overrides and modifiers |
 | `FORWARD_VALIDATE` | `HttpForwardValidateActionHandler` | Forwards and validates request/response against an OpenAPI spec |
 | `FORWARD_WITH_FALLBACK` | `HttpForwardWithFallbackActionHandler` | Forwards to upstream; returns a fallback mock response on 5xx or timeout |
+
+Every forward action sends through `HttpForwardAction.sendRequest`, which first applies `forwardProxyBlockPrivateNetworks` (`InetAddressValidator.validateForwardTarget`) to the destination and answers a refused one with `502` (see [tls-and-security.md](tls-and-security.md#forward-target-ssrf-validation)).
 
 ### Forward with Fallback
 
@@ -1297,7 +1299,7 @@ In `NettyHttpClient` the list bypasses only `forwardHttpProxy`, for clear reques
 
 When a connection is tunnelled through an upstream proxy (`forwardHttpsProxy` for a secure request, otherwise `forwardSocksProxy`; `HttpClientInitializer.tunnelProxy` decides, and adds the matching `HttpConnectProxyHandler` or `Socks5ProxyHandler`), `NettyHttpClient` keeps the destination unresolved (`SocketAddresses.unresolvedUnlessIpLiteral`) and connects with Netty's `NoopAddressResolverGroup`, so the tunnel handler sends the proxy the name and the proxy resolves it. Without the no-op resolver Netty's default resolver looks an unresolved address up on the event loop before the tunnel handler sees it, which fails where only the proxy can resolve external names. An IP-literal destination is sent as an address. The CONNECT tunnel's destination (`PortUnificationHandler`, `PROXIED_` message) and the circuit breaker's key are also built without a lookup. With no tunnel proxy, the destination is resolved where MockServer runs, as before.
 
-`forwardProxyBlockPrivateNetworks` is checked by four forward actions (`HttpForwardActionHandler`, `HttpForwardTemplateActionHandler`, `HttpForwardWithFallbackActionHandler`, `HttpForwardValidateActionHandler`) on the target name before the request reaches `NettyHttpClient`, by a lookup where MockServer runs, so deferring resolution does not bypass it for them: a name that does not resolve locally is refused, and a name that does is vetted by its local answer, although the proxy resolves it again to connect. `NettyHttpClient` itself makes no check, so routes that do not check before it (override-forwarded-request, the class and object forward callbacks, the unmatched-proxy route and the per-message binary forward) are not checked with or without an upstream proxy.
+`forwardProxyBlockPrivateNetworks` is checked on every forward and proxy route (every forward action, the unmatched-proxy route including `proxyRemoteHost` and `proxyPassMappings`, per-message and single-connection binary forwarding, the WebSocket relay) on the target name before the request reaches `NettyHttpClient`'s connect, by a lookup where MockServer runs, so deferring resolution does not bypass it: a name that does not resolve locally is refused, and a name that does is vetted by its local answer, although the proxy resolves it again to connect. A request sent through `forwardHttpProxy` also has its Host header checked, as that proxy is sent it as the URI. See [tls-and-security.md](tls-and-security.md#forward-target-ssrf-validation).
 
 Since the CONNECT tunnel's destination is no longer resolved, an IP-address `noProxyHosts` entry no longer matches a clear request tunnelled to MockServer by host name, so that request now goes through `forwardHttpProxy`; a host-name entry still matches.
 

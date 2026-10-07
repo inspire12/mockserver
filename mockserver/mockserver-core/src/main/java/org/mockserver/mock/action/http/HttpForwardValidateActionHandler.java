@@ -9,7 +9,6 @@ import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.openapi.OpenAPIRequestValidator;
 import org.mockserver.openapi.OpenAPIResponseValidator;
-import org.mockserver.proxyconfiguration.InetAddressValidator;
 import org.slf4j.event.Level;
 
 import java.net.InetSocketAddress;
@@ -80,23 +79,8 @@ public class HttpForwardValidateActionHandler extends HttpForwardAction {
 
             HttpRequest requestToSend = request.clone();
             if (action.getHost() != null) {
-                try {
-                    InetAddressValidator.validateForwardTarget(configuration, action.getHost());
-                } catch (IllegalArgumentException blocked) {
-                    if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
-                        mockServerLogger.logEvent(
-                            new LogEntry()
-                                .setLogLevel(Level.WARN)
-                                .setHttpRequest(request)
-                                .setMessageFormat("forward-validate action blocked by SSRF policy:{}")
-                                .setArguments(blocked.getMessage())
-                        );
-                    }
-                    return badGatewayFuture(request);
-                }
-                // SSRF validation above has already resolved and vetted the host. Unresolved so Netty's
-                // event-loop resolver performs the (blocking) DNS lookup off the calling thread rather
-                // than resolving synchronously in the InetSocketAddress constructor.
+                // Unresolved so Netty's event-loop resolver performs the (blocking) DNS lookup off the
+                // calling thread; sendRequest applies forwardProxyBlockPrivateNetworks first.
                 InetSocketAddress remoteAddress = InetSocketAddress.createUnresolved(action.getHost(), action.getPort() != null ? action.getPort() : 80);
                 requestToSend
                     .withSocketAddress(action.getHost(), action.getPort() != null ? action.getPort() : 80,
@@ -148,5 +132,10 @@ public class HttpForwardValidateActionHandler extends HttpForwardAction {
         java.util.concurrent.CompletableFuture<HttpResponse> future = new java.util.concurrent.CompletableFuture<>();
         future.complete(response().withStatusCode(statusCode).withBody(message));
         return new HttpForwardActionResult(request, future, null);
+    }
+
+    @Override
+    protected String actionName() {
+        return "forward-validate action";
     }
 }

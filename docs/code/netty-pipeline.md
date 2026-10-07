@@ -2465,7 +2465,7 @@ sequenceDiagram
 | Stalled upstream | A timer runs while the upstream is not writable. If it took none of the bytes waiting for it for `responseWriteStallTimeoutMillis`, WARN and both are closed. Without it a stalled upstream would hold a client that is never timed out (it is marked long-lived) |
 | Stalled client | The existing `WriteStallTimeoutHandler` closes the client connection, which closes the upstream |
 | Idle | No read timeout on the upstream leg: a database session may sit idle. TCP keep-alive as for other forwards (`forwardSocketKeepAlive`) |
-| `forwardProxyBlockPrivateNetworks` | `InetAddressValidator.validateForwardTarget(Configuration, InetSocketAddress)` runs before the connect and returns the address to connect to, so the address checked is the one connected to. A blocked target: WARN, the client is closed. Per-message binary forwarding does not make this check, so with that setting on, a binary target it blocks worked in 8.0.0 and is refused now |
+| `forwardProxyBlockPrivateNetworks` | `InetAddressValidator.validateForwardTarget(Configuration, InetSocketAddress)` runs before the connect and returns the address to connect to, so the address checked is the one connected to. A blocked target: WARN, the client is closed. Per-message binary forwarding makes the same check (`NettyHttpClient.sendRequest(BinaryMessage, ...)`); in 8.0.0 it did not |
 | The setting changed while a connection is open | It is read for each message. Turned off, later messages are forwarded one per connection while the relay's upstream connection stays open until either end closes |
 | Server stop | The upstream channels are on the worker group and close with it |
 
