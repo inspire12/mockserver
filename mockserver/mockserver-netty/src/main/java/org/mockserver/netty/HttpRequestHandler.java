@@ -281,12 +281,10 @@ public class HttpRequestHandler extends SimpleChannelInboundHandler<HttpRequest>
                             List<Integer> actualPortBindings = server.bindServerPorts(requestedPortBindings.getPorts());
                             responseWriter.writeResponse(request, OK, portBindingSerializer.serialize(portBinding(actualPortBindings)), "application/json");
                         } catch (RuntimeException e) {
-                            if (e.getCause() instanceof BindException) {
-                                String detail = e.getCause().getMessage() != null ? ": " + e.getCause().getMessage() : "";
-                                responseWriter.writeResponse(request, BAD_REQUEST, e.getMessage() + " port already in use" + detail, MediaType.create("text", "plain").toString());
-                            } else {
-                                throw e;
-                            }
+                            // a port that cannot be bound is the caller's to correct, whatever wraps the cause
+                            Throwable bindFailure = bindExceptionIn(e);
+                            String detail = bindFailure != null && bindFailure.getMessage() != null ? " port already in use: " + bindFailure.getMessage() : "";
+                            responseWriter.writeResponse(request, BAD_REQUEST, e.getMessage() + detail, MediaType.create("text", "plain").toString());
                         }
                     } else {
                         // null-body path writes no response via responseWriter, so complete the
@@ -851,5 +849,14 @@ public class HttpRequestHandler extends SimpleChannelInboundHandler<HttpRequest>
             }
         }
         closeOnFlush(ctx.channel());
+    }
+
+    private static Throwable bindExceptionIn(Throwable throwable) {
+        for (Throwable cause = throwable; cause != null; cause = cause.getCause() == cause ? null : cause.getCause()) {
+            if (cause instanceof BindException) {
+                return cause;
+            }
+        }
+        return null;
     }
 }
