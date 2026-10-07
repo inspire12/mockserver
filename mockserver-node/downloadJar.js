@@ -305,18 +305,20 @@
       return deferred.promise;
     }
 
+    var internal = {
+      startsWithZipHeader: startsWithZipHeader,
+      downloadDirectory: downloadDirectory,
+      sweepAbandonedPartials: sweepAbandonedPartials,
+      idleTimeoutMillis: idleTimeoutMillis,
+      DEFAULT_IDLE_TIMEOUT_MILLIS: DEFAULT_IDLE_TIMEOUT_MILLIS,
+      MINIMUM_JAR_BYTES: MINIMUM_JAR_BYTES,
+      ABANDONED_PARTIAL_MILLIS: ABANDONED_PARTIAL_MILLIS
+    };
+
     module.exports = {
       downloadJar: downloadJar,
 
       // Exported for testing only (not part of the public contract)
-      _internal: {
-        startsWithZipHeader: startsWithZipHeader,
-        downloadDirectory: downloadDirectory,
-        sweepAbandonedPartials: sweepAbandonedPartials,
-        idleTimeoutMillis: idleTimeoutMillis,
-        DEFAULT_IDLE_TIMEOUT_MILLIS: DEFAULT_IDLE_TIMEOUT_MILLIS,
-        MINIMUM_JAR_BYTES: MINIMUM_JAR_BYTES,
-        ABANDONED_PARTIAL_MILLIS: ABANDONED_PARTIAL_MILLIS
-      }
+      _internal: internal
     };
   })();

@@ -38,7 +38,7 @@
  * environment-dependent gate this wrapper exists to remove.
  */
 
-const { spawn, spawnSync } = require('child_process');
+const { spawn } = require('child_process');
 const path = require('path');
 const { discoverTestFiles } = require('./discover_test_files.js');
 
@@ -56,17 +56,9 @@ if (explicitFiles.length === 0) {
     console.log('Discovered ' + testFiles.length + ' test file(s)');
 }
 
-// The client has no way to close a callback's WebSocket, so a file that registers one never exits
-// on its own; Node before 20.14 has no --test-force-exit and would hang there, or reject the flag.
-if (spawnSync(process.execPath, ['--test-force-exit', '-e', '0'], { stdio: 'ignore' }).status !== 0) {
-    console.error('ERROR: the client test suite needs Node 22, or 20.14 or later, for --test-force-exit; ' +
-        'this is Node ' + process.version + '.');
-    process.exit(1);
-}
-
 const child = spawn(
     process.execPath,
-    ['--test', '--test-reporter=tap', '--test-force-exit', '--test-concurrency=1', ...testFiles],
+    ['--test', '--test-reporter=tap', '--test-concurrency=1', ...testFiles],
     { cwd: PACKAGE_ROOT, stdio: ['inherit', 'pipe', 'inherit'] }
 );
 

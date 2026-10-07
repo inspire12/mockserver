@@ -6,7 +6,7 @@
  * Licensed under the Apache License, Version 2.0
  */
 
-module.exports = (function () {
+(function () {
 
     var mockServer;
     // Bounded ring buffer of the launched MockServer's stdout+stderr, and its exit status once it dies.
@@ -668,20 +668,28 @@ module.exports = (function () {
       return deferred.promise;
     }
   
-    return {
+    // Diagnostics for readiness probes (e.g. test/waitForTlsReady.js): the launched child process, its
+    // exit status once it has died (undefined while running), and the captured stdout+stderr tail.
+    function getMockServerProcess() {
+      return mockServer;
+    }
+
+    function getMockServerExit() {
+      return mockServerExit;
+    }
+
+    function getMockServerOutput(maxLines) {
+      return capturedOutputTail(maxLines);
+    }
+
+    // values are identifiers only: Node reads an ES module importer's names from this literal and
+    // stops at the first value that is not one
+    module.exports = {
       start_mockserver: start_mockserver,
       stop_mockserver: stop_mockserver,
-      // Diagnostics for readiness probes (e.g. test/waitForTlsReady.js): the launched child process, its
-      // exit status once it has died (undefined while running), and the captured stdout+stderr tail.
-      getMockServerProcess: function () {
-        return mockServer;
-      },
-      getMockServerExit: function () {
-        return mockServerExit;
-      },
-      getMockServerOutput: function (maxLines) {
-        return capturedOutputTail(maxLines);
-      }
+      getMockServerProcess: getMockServerProcess,
+      getMockServerExit: getMockServerExit,
+      getMockServerOutput: getMockServerOutput
     };
   })();
   

@@ -632,6 +632,49 @@ test.describe('mockServerClient browser client', () => {
     }
   });
 
+  test('should close the callback WebSocket on close()', async ({ browser }) => {
+    const { page, context, uuid } = await setupPage(browser);
+    try {
+      const result = await page.evaluate(([host, port, uuid]) => {
+        var send = function (path) {
+          return new Promise(function (resolve) {
+            var xhr = new XMLHttpRequest();
+            xhr.onload = function () {
+              resolve(this.status);
+            };
+            xhr.open("GET", "http://" + host + ":" + port + path);
+            xhr.setRequestHeader("Vary", uuid);
+            xhr.send();
+          });
+        };
+        var client = mockServerClient(host, parseInt(port)).setDefaultHeaders(undefined, [
+          {"name": "Vary", "values": [uuid]}
+        ]);
+        var statuses = [];
+        return new Promise(function (resolve, reject) {
+          client.mockWithCallback({'path': '/closedCallback'}, function () {
+            return {'statusCode': 202};
+          }, {'unlimited': true}).then(resolve, reject);
+        }).then(function () {
+          return send('/closedCallback');
+        }).then(function (status) {
+          statuses.push(status);
+          return client.close();
+        }).then(function () {
+          return send('/closedCallback');
+        }).then(function (status) {
+          statuses.push(status);
+          return statuses;
+        });
+      }, [MOCKSERVER_HOST, MOCKSERVER_PORT, uuid]);
+
+      expect(result[0]).toBe(202);
+      expect(result[1]).not.toBe(202);
+    } finally {
+      await context.close();
+    }
+  });
+
   test('should create expectation with method callback over tls', async ({ browser }) => {
     // For the TLS callback test we need the page on the HTTPS origin so the
     // WSS WebSocket connection (used by mockWithCallback) is same-origin and

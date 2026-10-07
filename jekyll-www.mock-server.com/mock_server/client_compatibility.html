@@ -185,7 +185,7 @@ class PaymentServiceTest {
 
 <h3>Node / TypeScript &mdash; <code class="code inline">await using</code> (<code class="code inline">Symbol.asyncDispose</code>)</h3>
 
-<p>The Node client implements <code class="code inline">Symbol.asyncDispose</code>, so any runtime that supports the TC39 Explicit Resource Management proposal (Node.js 20+, TypeScript 5.2+) can use <code class="code inline">await using</code> to reset the server automatically when the test scope exits:</p>
+<p>The Node client implements <code class="code inline">Symbol.asyncDispose</code>, so any runtime that supports the TC39 Explicit Resource Management proposal (Node.js 20+, TypeScript 5.2+) can use <code class="code inline">await using</code> to reset the server automatically when the test scope exits. Disposing the client also closes the WebSockets its callbacks and breakpoints opened, so the test process can exit when it is done:</p>
 
 <pre class="prettyprint lang-javascript code"><code class="code">import { mockServerClient } from 'mockserver-client';
 
@@ -203,7 +203,7 @@ describe('payment service', () => {
     });
 });</code></pre>
 
-<p>On runtimes that do not yet support <code class="code inline">Symbol.asyncDispose</code>, call <code class="code inline">client.stop()</code> (which also resets) in an <code class="code inline">afterEach</code> hook instead.</p>
+<p>On runtimes that do not yet support <code class="code inline">Symbol.asyncDispose</code>, call <code class="code inline">client.reset()</code> in an <code class="code inline">afterEach</code> hook instead; it also closes those WebSockets. To close them without resetting the server, call <code class="code inline">client.close()</code>.</p>
 
 <a id="python" class="anchor" href="#python">&nbsp;</a>
 

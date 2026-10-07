@@ -405,6 +405,18 @@ const client = mockServerClient('localhost', 1080);
 afterEach(() => client.reset());
 ```
 
+A callback (`mockWithCallback`, the `callback` and `forwardCallback` actions) or a
+breakpoint opens a WebSocket to MockServer, and an open WebSocket keeps the Node
+process running. `reset()` and disposing the client close every such WebSocket the
+clients of that MockServer opened in this process, so the process can exit when the
+tests are done. To close them without resetting MockServer, call `close()`, which
+resolves once they have closed; the expectations and breakpoints that used them stop
+working, and a later callback or breakpoint opens a new WebSocket:
+
+```js
+after(() => client.close());
+```
+
 ## Start / Launch MockServer
 
 This package (`mockserver-client`) is the REST/WebSocket client for communicating with a running MockServer. To **download and launch** a local MockServer instance (no Java or Docker required), use the companion [`mockserver-node`](https://www.npmjs.org/package/mockserver-node) package:

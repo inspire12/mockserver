@@ -407,7 +407,19 @@ export interface MockServerClient {
 
     verifyZeroInteractions(): Promise<void | string>;
 
+    /**
+     * Resets MockServer, clearing its expectations, recorded requests and logs, and closes the callback
+     * WebSockets the clients of this MockServer have opened in this process, as close() does.
+     */
     reset(): Promise<RequestResponse>;
+
+    /**
+     * Closes the callback WebSockets the clients of this MockServer have opened in this process, for
+     * mockWithCallback, the callback and forwardCallback actions and breakpoints, so they no longer keep
+     * the process running. Sends nothing to MockServer: its expectations and breakpoints that use them
+     * stop working. A later callback or breakpoint opens a new WebSocket. Resolves once they have closed.
+     */
+    close(): Promise<void>;
 
     clear(pathOrRequestDefinition: PathOrRequestDefinition, type: ClearType): Promise<RequestResponse>;
 
@@ -740,8 +752,9 @@ export interface MockServerClient {
 
     /**
      * Explicit resource management support (TC39 `await using`). Resets the
-     * MockServer when the client goes out of scope, so tests do not need a
-     * manual `afterEach(() => client.reset())`.
+     * MockServer and closes the callback WebSockets, as reset() does, when the
+     * client goes out of scope, so tests do not need a manual
+     * `afterEach(() => client.reset())`. Resolves once both are done.
      *
      * Present only on runtimes that define `Symbol.asyncDispose`.
      */

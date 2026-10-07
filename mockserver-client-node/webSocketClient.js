@@ -265,6 +265,9 @@
                     var breakpointStreamFrameHandlers = {};
                     var hasConnectedOnce = false;
                     var reconnectAttempts = 0;
+                    var closed = false;
+                    var currentConnection = null;
+                    var reconnectTimer = null;
                     var webSocketLocation = (tls ? "wss" : "ws") + "://" + host + ":" + port + contextPath + "/_mockserver_callback_websocket";
 
                     var client = new WebSocketClient({
@@ -285,12 +288,16 @@
                         }
                         var delayMs = Math.min(Math.pow(2, reconnectAttempts), 8) * 1000;
                         console.warn('WebSocket disconnected, reconnecting (attempt ' + reconnectAttempts + '/' + MAX_RECONNECT_ATTEMPTS + ') in ' + (delayMs / 1000) + 's');
-                        setTimeout(function () {
+                        reconnectTimer = setTimeout(function () {
+                            reconnectTimer = null;
                             client.connect(webSocketLocation, []);
                         }, delayMs);
                     };
 
                     client.on('connectFailed', function (error) {
+                        if (closed) {
+                            return;
+                        }
                         if (!hasConnectedOnce) {
                             if (error.code && error.code === "ECONNREFUSED") {
                                 deferred.reject("Can't connect to MockServer running on host: \"" + host + "\" and port: \"" + port + "\"");
@@ -307,8 +314,13 @@
                     });
 
                     client.on('connect', function (connection) {
+                        if (closed) {
+                            connection.close();
+                            return;
+                        }
                         hasConnectedOnce = true;
                         reconnectAttempts = 0;
+                        currentConnection = connection;
                         connection.on('error', function (error) {
                             if (error.code && error.code === "ECONNREFUSED") {
                                 deferred.reject("Can't connect to MockServer running on host: \"" + host + "\" and port: \"" + port + "\"");
@@ -321,7 +333,9 @@
                             }
                         });
                         connection.on('close', function () {
-                            scheduleReconnect();
+                            if (!closed) {
+                                scheduleReconnect();
+                            }
                         });
                         connection.on('message', function (message) {
                             if (message.type === 'utf8') {
@@ -397,6 +411,25 @@
                             breakpointRequestHandlers = {};
                             breakpointResponseHandlers = {};
                             breakpointStreamFrameHandlers = {};
+                        },
+                        // closes the connection for good: no reconnect follows; resolves once it has closed
+                        close: function () {
+                            closed = true;
+                            if (reconnectTimer) {
+                                clearTimeout(reconnectTimer);
+                                reconnectTimer = null;
+                            }
+                            client.abort();
+                            var connection = currentConnection;
+                            if (!connection || connection.state === 'closed') {
+                                return Promise.resolve();
+                            }
+                            return new Promise(function (resolve) {
+                                connection.once('close', function () {
+                                    resolve();
+                                });
+                                connection.close();
+                            });
                         }
                     });
                 });

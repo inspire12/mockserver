@@ -293,6 +293,8 @@ async function test() {
     string = await client.verifySequence(requestDefinition, requestDefinition);
 
     requestResponse = await client.reset();
+    const closed: Promise<void> = client.close();
+    await closed;
 
     requestResponse = await client.clear('some/path', 'ALL');
     requestResponse = await client.clear('some/path', 'LOG');

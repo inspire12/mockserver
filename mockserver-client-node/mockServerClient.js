@@ -211,6 +211,9 @@ var mockServerClient;
         return null;
     };
 
+    // the callback WebSockets the clients of each MockServer have opened in this process, by its address
+    var callbackWebSockets = {};
+
     /**
      * Start the client communicating at the specified host and port
      *, for example:
@@ -722,6 +725,17 @@ var mockServerClient;
                                 breakpointRequestHandlers = {};
                                 breakpointResponseHandlers = {};
                                 breakpointStreamFrameHandlers = {};
+                            },
+                            close: function () {
+                                if (!socket || socket.readyState === socket.CLOSED) {
+                                    return Promise.resolve();
+                                }
+                                return new Promise(function (resolve) {
+                                    socket.addEventListener('close', function () {
+                                        resolve();
+                                    });
+                                    socket.close();
+                                });
                             }
                         });
                     } catch (e) {
@@ -732,6 +746,56 @@ var mockServerClient;
                 }
             };
         });
+
+        var callbackWebSocketKey = host + ":" + port + cleanedContextPath;
+
+        /*
+         * Opens a callback WebSocket and records it, so close() and reset() can close it. One that is
+         * closed before it has opened is closed as it opens, and is not handed to the caller.
+         */
+        var openCallbackWebSocket = function () {
+            var opening = new WebSocketClient(host, port, cleanedContextPath);
+            var entry = {closed: false, handle: null, settled: null};
+            (callbackWebSockets[callbackWebSocketKey] = callbackWebSockets[callbackWebSocketKey] || []).push(entry);
+            return {
+                isClosed: function () {
+                    return entry.closed;
+                },
+                then: function (success, error) {
+                    var settle;
+                    entry.settled = new Promise(function (resolve) {
+                        settle = resolve;
+                    });
+                    opening.then(function (handle) {
+                        entry.handle = handle;
+                        settle();
+                        if (!entry.closed) {
+                            success(handle);
+                        } else if (error) {
+                            error("the callback WebSocket was closed before it opened");
+                        }
+                    }, function (reason) {
+                        settle();
+                        if (error) {
+                            error(reason);
+                        }
+                    });
+                }
+            };
+        };
+
+        var closeCallbackWebSockets = function () {
+            var entries = callbackWebSockets[callbackWebSocketKey] || [];
+            delete callbackWebSockets[callbackWebSocketKey];
+            return Promise.all(entries.map(function (entry) {
+                entry.closed = true;
+                var closeHandle = function () {
+                    return entry.handle ? entry.handle.close() : undefined;
+                };
+                return Promise.resolve(entry.settled).then(closeHandle, closeHandle);
+            })).then(function () {
+            });
+        };
 
 
         /**
@@ -946,7 +1010,7 @@ var mockServerClient;
             return {
                 then: function (sucess, error) {
                     try {
-                        var webSocketClientPromise = new WebSocketClient(host, port, cleanedContextPath);
+                        var webSocketClientPromise = openCallbackWebSocket();
                         webSocketClientPromise.then(function (webSocketClient) {
                             webSocketClient.requestCallback(function (request) {
                                 var response = requestHandler(request);
@@ -977,7 +1041,7 @@ var mockServerClient;
             return {
                 then: function (sucess, error) {
                     try {
-                        var webSocketClientPromise = new WebSocketClient(host, port, cleanedContextPath);
+                        var webSocketClientPromise = openCallbackWebSocket();
                         webSocketClientPromise.then(function (webSocketClient) {
                             webSocketClient.requestCallback(function (request) {
                                 var forwardRequest = forwardHandler(request);
@@ -1008,7 +1072,7 @@ var mockServerClient;
             return {
                 then: function (sucess, error) {
                     try {
-                        var webSocketClientPromise = new WebSocketClient(host, port, cleanedContextPath);
+                        var webSocketClientPromise = openCallbackWebSocket();
                         webSocketClientPromise.then(function (webSocketClient) {
                             webSocketClient.requestCallback(function (request) {
                                 var forwardRequest = forwardHandler(request);
@@ -1669,9 +1733,23 @@ var mockServerClient;
             return verify({}, 0, 0);
         };
         /**
-         * Reset by clearing all recorded requests
+         * Close the callback WebSockets the clients of this MockServer have opened in this process (for
+         * mockWithCallback, the callback and forwardCallback actions, and breakpoints), so they no longer
+         * keep the process running. Sends nothing to MockServer, whose expectations and breakpoints that
+         * use them stop working. A later callback or breakpoint opens a new WebSocket.
+         *
+         * @return a promise resolved once the WebSockets have closed
+         */
+        var close = function () {
+            return closeCallbackWebSockets();
+        };
+        /**
+         * Reset by clearing all recorded requests, expectations and breakpoints, and close the callback
+         * WebSockets the clients of this MockServer have opened in this process, as close() does
          */
         var reset = function () {
+            closeCallbackWebSockets().then(undefined, function () {
+            });
             return makeRequest(host, port, "/mockserver/reset");
         };
         /**
@@ -3044,6 +3122,7 @@ var mockServerClient;
 
         var _breakpointWebSocketClient = null;
         var _breakpointWebSocketClientId = null;
+        var _breakpointWebSocketOpening = null;
 
         /**
          * Ensure the breakpoint callback WebSocket is connected.
@@ -3053,6 +3132,11 @@ var mockServerClient;
          * @return promise resolving to the webSocketClient
          */
         var ensureBreakpointWebSocket = function () {
+            if (_breakpointWebSocketOpening && _breakpointWebSocketOpening.isClosed()) {
+                _breakpointWebSocketClient = null;
+                _breakpointWebSocketClientId = null;
+                _breakpointWebSocketOpening = null;
+            }
             if (_breakpointWebSocketClient) {
                 return {
                     then: function (success) {
@@ -3060,7 +3144,8 @@ var mockServerClient;
                     }
                 };
             }
-            var webSocketClientPromise = new WebSocketClient(host, port, cleanedContextPath);
+            var webSocketClientPromise = openCallbackWebSocket();
+            _breakpointWebSocketOpening = webSocketClientPromise;
             return {
                 then: function (success, error) {
                     webSocketClientPromise.then(function (webSocketClient) {
@@ -3350,6 +3435,7 @@ var mockServerClient;
             verifySequenceById: verifySequenceById,
             verifyZeroInteractions: verifyZeroInteractions,
             reset: reset,
+            close: close,
             clear: clear,
             clearById: clearById,
             freezeClock: freezeClock,
@@ -3423,14 +3509,18 @@ var mockServerClient;
         };
         // Explicit resource management support (TC39 `using`/`await using`).
         // Calling `await using client = mockServerClient(...)` will reset the
-        // MockServer when the client goes out of scope, so tests do not need a
-        // manual `afterEach(() => client.reset())`. Symbols are guarded so the
+        // MockServer, and close the callback WebSockets, when the client goes
+        // out of scope, so tests do not need a manual
+        // `afterEach(() => client.reset())`. Symbols are guarded so the
         // client still works on runtimes that predate explicit resource
         // management.
         if (typeof Symbol !== 'undefined') {
             if (Symbol.asyncDispose) {
                 _this[Symbol.asyncDispose] = function () {
-                    return reset();
+                    var closing = closeCallbackWebSockets();
+                    return Promise.all([makeRequest(host, port, "/mockserver/reset"), closing]).then(function (results) {
+                        return results[0];
+                    });
                 };
             }
             if (Symbol.dispose) {

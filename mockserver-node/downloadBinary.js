@@ -595,6 +595,18 @@ function runBinary(version, args, opts) {
   });
 }
 
+var internal = {
+  validateVersion: validateVersion,
+  compareVersions: compareVersions,
+  parseVersionSegments: parseVersionSegments,
+  assertWithinBase: assertWithinBase,
+  escapeCmdArg: escapeCmdArg,
+  isSnapshot: isSnapshot,
+  download: download,
+  sha256: sha256,
+  VERSION_PATTERN: VERSION_PATTERN
+};
+
 module.exports = {
   // Public API
   resolvePlatform: resolvePlatform,
@@ -606,15 +618,5 @@ module.exports = {
   pruneOldVersions: pruneOldVersions,
 
   // Exported for testing only (not part of the public contract)
-  _internal: {
-    validateVersion: validateVersion,
-    compareVersions: compareVersions,
-    parseVersionSegments: parseVersionSegments,
-    assertWithinBase: assertWithinBase,
-    escapeCmdArg: escapeCmdArg,
-    isSnapshot: isSnapshot,
-    download: download,
-    sha256: sha256,
-    VERSION_PATTERN: VERSION_PATTERN
-  }
+  _internal: internal
 };
