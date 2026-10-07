@@ -773,6 +773,7 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **An HTTP/2 connection to an upstream is closed after an unexpected error on it, instead of being left open.** MockServer logs the error once, with its cause, fails a forward still waiting on that connection, sends the upstream `GOAWAY(INTERNAL_ERROR)` and closes it at once rather than waiting for the forward's stream, and no later forward reuses it from the connection pool.
 - **A request sent over HTTP/2 no longer gains `x-http2-scheme` and `x-http2-stream-id` headers.** A request an
   HTTP/2 client sent MockServer (TLS or h2c, directly or through a CONNECT or SOCKS5 tunnel) was recorded,
   logged and matched with two headers the client never sent, `x-http2-scheme` and `x-http2-stream-id`, and a
