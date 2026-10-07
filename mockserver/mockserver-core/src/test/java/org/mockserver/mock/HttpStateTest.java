@@ -2322,9 +2322,9 @@ public class HttpStateTest {
         final java.util.concurrent.atomic.AtomicReference<String> serializeThreadName = new java.util.concurrent.atomic.AtomicReference<>();
         LogEventRequestAndResponseSerializer recordingSerializer = new LogEventRequestAndResponseSerializer(new MockServerLogger()) {
             @Override
-            public String serialize(java.util.List<org.mockserver.model.LogEventRequestAndResponse> httpRequestAndHttpResponses) {
+            public void serialize(java.util.List<org.mockserver.model.LogEventRequestAndResponse> httpRequestAndHttpResponses, java.io.Writer writer) {
                 serializeThreadName.set(Thread.currentThread().getName());
-                return super.serialize(httpRequestAndHttpResponses);
+                super.serialize(httpRequestAndHttpResponses, writer);
             }
         };
         java.lang.reflect.Field field = HttpState.class.getDeclaredField("httpRequestResponseSerializer");

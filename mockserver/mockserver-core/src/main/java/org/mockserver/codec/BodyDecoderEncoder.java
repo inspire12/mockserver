@@ -19,6 +19,10 @@ import static org.mockserver.model.JsonBody.DEFAULT_MATCH_TYPE;
 public class BodyDecoderEncoder {
 
     public ByteBuf bodyToByteBuf(Body body, String contentTypeHeader) {
+        SegmentedBytes segmentedBytes = wireSegments(body);
+        if (segmentedBytes != null) {
+            return segmentsToByteBuf(segmentedBytes);
+        }
         byte[] bytes = bodyToBytes(body, contentTypeHeader);
         if (bytes != null) {
             return Unpooled.wrappedBuffer(bytes);
@@ -66,10 +70,33 @@ public class BodyDecoderEncoder {
         }
     }
 
+    /**
+     * The segments of a body built from segmented bytes, wrapped in order without a copy.
+     */
+    public static ByteBuf segmentsToByteBuf(SegmentedBytes segmentedBytes) {
+        if (segmentedBytes.size() == 0) {
+            return Unpooled.EMPTY_BUFFER;
+        }
+        return Unpooled.wrappedBuffer(segmentedBytes.asByteBuffers());
+    }
+
+    /**
+     * The segments a body built from segmented bytes holds. They are its bytes on the wire whatever the
+     * header says: they are encoded in the body's declared charset, which wins over the header's, as
+     * {@link #bodyToBytes} reuses a materialised body's bytes.
+     */
+    static SegmentedBytes wireSegments(Body body) {
+        return body instanceof StringBody ? ((StringBody) body).getSegmentedBytes() : null;
+    }
+
     byte[] bodyToBytes(Body body, String contentTypeHeader) {
         if (body != null) {
             if (body instanceof BinaryBody) {
                 return body.getRawBytes();
+            }
+            SegmentedBytes segmentedBytes = wireSegments(body);
+            if (segmentedBytes != null) {
+                return segmentedBytes.toByteArray();
             }
             // Not getValue(): a response is logged before it is written, so its log entry may already be
             // retained and released; a caching read would re-attach the decoded String to it, uncounted.

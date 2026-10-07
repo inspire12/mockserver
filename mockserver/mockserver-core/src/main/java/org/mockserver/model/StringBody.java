@@ -20,6 +20,8 @@ public class StringBody extends BodyWithContentType<String> {
     // benign: a reader either sees the cached String or null, and null re-derives the identical String.
     private transient String value;
     private final byte[] rawBytes;
+    // set instead of rawBytes for a body built from bytes held in segments, which are never joined to be written
+    private final SegmentedBytes segmentedBytes;
 
     public StringBody(String value) {
         this(value, null, false, null);
@@ -37,12 +39,32 @@ public class StringBody extends BodyWithContentType<String> {
         super(Type.STRING, contentType);
         this.value = isNotBlank(value) ? value : "";
         this.subString = subString;
+        this.segmentedBytes = null;
 
         if (rawBytes == null && value != null) {
             this.rawBytes = encodeToRawBytes(value);
         } else {
             this.rawBytes = rawBytes;
         }
+    }
+
+    private StringBody(SegmentedBytes segmentedBytes, MediaType contentType) {
+        super(Type.STRING, contentType);
+        this.subString = false;
+        this.rawBytes = null;
+        this.segmentedBytes = segmentedBytes;
+    }
+
+    /**
+     * A body of text already encoded in the charset of {@code contentType}, held in the segments it was
+     * written to, so writing it needs no further copy. It equals the body built from the same text with
+     * {@link #StringBody(String, MediaType)}.
+     */
+    public static StringBody fromSegmentedBytes(SegmentedBytes segmentedBytes, MediaType contentType) {
+        if (segmentedBytes == null || contentType == null || contentType.getCharset() == null) {
+            throw new IllegalArgumentException("segmented bytes need a content type with the charset they are encoded in");
+        }
+        return new StringBody(segmentedBytes, contentType);
     }
 
     public static StringBody exact(String body) {
@@ -71,8 +93,8 @@ public class StringBody extends BodyWithContentType<String> {
 
     public String getValue() {
         String v = value;
-        if (v == null && rawBytes != null) {
-            v = decodeRawBytes(rawBytes);
+        if (v == null && (rawBytes != null || segmentedBytes != null)) {
+            v = decodeCanonicalBytes();
             value = v;
         }
         return v;
@@ -81,7 +103,16 @@ public class StringBody extends BodyWithContentType<String> {
     @Override
     public String getValueWithoutCaching() {
         String v = value;
-        return v != null ? v : decodeRawBytes(rawBytes);
+        return v != null ? v : decodeCanonicalBytes();
+    }
+
+    private String decodeCanonicalBytes() {
+        if (segmentedBytes != null) {
+            // blank text reads as "", as it does for a body built from that text
+            String decoded = decodeRawBytes(canonicalBytes());
+            return isNotBlank(decoded) ? decoded : "";
+        }
+        return decodeRawBytes(rawBytes);
     }
 
     @Override
@@ -103,9 +134,24 @@ public class StringBody extends BodyWithContentType<String> {
         return v == null ? 0L : (long) v.length() * 2;
     }
 
+    /**
+     * For a body built {@link #fromSegmentedBytes from segmented bytes}, a copy of them in one array.
+     */
     @JsonIgnore
     public byte[] getRawBytes() {
-        return rawBytes;
+        return canonicalBytes();
+    }
+
+    private byte[] canonicalBytes() {
+        return segmentedBytes != null ? segmentedBytes.toByteArray() : rawBytes;
+    }
+
+    /**
+     * The bytes a body built {@link #fromSegmentedBytes from segmented bytes} holds, or null for any other body.
+     */
+    @JsonIgnore
+    public SegmentedBytes getSegmentedBytes() {
+        return segmentedBytes;
     }
 
     public boolean isSubString() {
@@ -134,7 +180,7 @@ public class StringBody extends BodyWithContentType<String> {
         StringBody that = (StringBody) o;
         return subString == that.subString &&
             Objects.equals(getValue(), that.getValue()) &&
-            Arrays.equals(rawBytes, that.rawBytes);
+            Arrays.equals(canonicalBytes(), that.canonicalBytes());
     }
 
     @Override
@@ -143,7 +189,7 @@ public class StringBody extends BodyWithContentType<String> {
             // keyed on the canonical rawBytes, not the releasable value view, so the hash is stable
             // across a release and never re-materialises the String
             int result = Objects.hash(super.hashCode(), subString);
-            hashCode = 31 * result + Arrays.hashCode(rawBytes);
+            hashCode = 31 * result + Arrays.hashCode(canonicalBytes());
         }
         return hashCode;
     }

@@ -12,6 +12,7 @@ import org.mockserver.serialization.model.ExpectationDTO;
 import org.mockserver.validator.jsonschema.JsonSchemaExpectationValidator;
 import org.slf4j.event.Level;
 
+import java.io.Writer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -91,26 +92,50 @@ public class ExpectationSerializer implements Serializer<Expectation> {
     public String serialize(Expectation... expectations) {
         try {
             if (expectations != null && expectations.length > 0) {
-                ExpectationDTO[] expectationDTOs = new ExpectationDTO[expectations.length];
-                for (int i = 0; i < expectations.length; i++) {
-                    expectationDTOs[i] = new ExpectationDTO(expectations[i]);
-                }
                 return objectWriter
-                    .writeValueAsString(expectationDTOs);
+                    .writeValueAsString(toDTOs(expectations));
             } else {
                 return "[]";
             }
         } catch (Exception e) {
-            String description = SerializationFailure.describe(expectations, e);
-            mockServerLogger.logEvent(
-                new LogEntry()
-                    .setLogLevel(Level.ERROR)
-                    .setMessageFormat("exception while serializing expectation to JSON:{}")
-                    .setArguments(description)
-                    .setThrowable(e)
-            );
-            throw new RuntimeException("Exception while serializing expectation to JSON (" + description + ")", e);
+            throw failure(expectations, e);
         }
+    }
+
+    /**
+     * As {@link #serialize(List)}, writing the same text to {@code writer} rather than building it as one String.
+     */
+    public void serialize(List<Expectation> expectations, Writer writer) {
+        Expectation[] array = expectations.toArray(new Expectation[0]);
+        try {
+            if (array.length > 0) {
+                objectWriter.writeValue(writer, toDTOs(array));
+            } else {
+                writer.write("[]");
+            }
+        } catch (Exception e) {
+            throw failure(array, e);
+        }
+    }
+
+    private static ExpectationDTO[] toDTOs(Expectation[] expectations) {
+        ExpectationDTO[] expectationDTOs = new ExpectationDTO[expectations.length];
+        for (int i = 0; i < expectations.length; i++) {
+            expectationDTOs[i] = new ExpectationDTO(expectations[i]);
+        }
+        return expectationDTOs;
+    }
+
+    private RuntimeException failure(Expectation[] expectations, Exception e) {
+        String description = SerializationFailure.describe(expectations, e);
+        mockServerLogger.logEvent(
+            new LogEntry()
+                .setLogLevel(Level.ERROR)
+                .setMessageFormat("exception while serializing expectation to JSON:{}")
+                .setArguments(description)
+                .setThrowable(e)
+        );
+        return new RuntimeException("Exception while serializing expectation to JSON (" + description + ")", e);
     }
 
     public Expectation deserialize(String jsonExpectation) {

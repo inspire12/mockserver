@@ -3,6 +3,7 @@ package org.mockserver.serialization.code;
 import org.mockserver.mock.Expectation;
 import org.mockserver.serialization.ExpectationSerializer;
 
+import java.io.Writer;
 import java.util.List;
 
 /**
@@ -59,6 +60,13 @@ public class ExpectationToGoSerializer {
     }
 
     public String serialize(List<Expectation> expectations) {
+        return GeneratedCode.toString(writer -> serialize(expectations, writer));
+    }
+
+    /**
+     * As {@link #serialize(List)}, writing the code for one expectation at a time to {@code writer}.
+     */
+    public void serialize(List<Expectation> expectations, Writer writer) {
         StringBuilder output = new StringBuilder();
         output.append("package main").append(NEW_LINE).append(NEW_LINE);
         output.append("import (").append(NEW_LINE);
@@ -69,6 +77,7 @@ public class ExpectationToGoSerializer {
         output.append(TAB).append("client := mockserver.New(\"localhost\", 1080)").append(NEW_LINE);
         if (expectations != null) {
             for (Expectation expectation : expectations) {
+                GeneratedCode.flush(output, writer);
                 if (expectation == null) {
                     continue;
                 }
@@ -80,7 +89,7 @@ public class ExpectationToGoSerializer {
             }
         }
         output.append("}").append(NEW_LINE);
-        return output.toString();
+        GeneratedCode.flush(output, writer);
     }
 
     /**

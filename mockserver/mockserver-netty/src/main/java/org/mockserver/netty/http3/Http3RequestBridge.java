@@ -12,6 +12,8 @@ import org.mockserver.codec.BodyDecoderEncoder;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.model.Protocol;
+import org.mockserver.model.SegmentedBytes;
+import org.mockserver.model.StringBody;
 
 import java.util.AbstractMap;
 import java.util.ArrayList;
@@ -351,6 +353,10 @@ public final class Http3RequestBridge {
      * Returns null if the response has no body.
      */
     public static DefaultHttp3DataFrame toHttp3DataFrame(HttpResponse response) {
+        if (response.getBody() instanceof StringBody && ((StringBody) response.getBody()).getSegmentedBytes() != null) {
+            SegmentedBytes segmentedBytes = ((StringBody) response.getBody()).getSegmentedBytes();
+            return segmentedBytes.size() == 0 ? null : new DefaultHttp3DataFrame(BodyDecoderEncoder.segmentsToByteBuf(segmentedBytes));
+        }
         byte[] bodyBytes = response.getBodyAsRawBytes();
         if (bodyBytes == null || bodyBytes.length == 0) {
             return null;

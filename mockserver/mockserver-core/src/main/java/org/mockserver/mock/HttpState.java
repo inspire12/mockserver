@@ -54,6 +54,9 @@ import org.mockserver.verify.Verification;
 import org.mockserver.verify.VerificationSequence;
 import org.slf4j.event.Level;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.io.Writer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -1392,10 +1395,7 @@ public class HttpState {
                             logCorrelationId, request
                         );
                         if (format == Format.LOG_ENTRIES) {
-                            response.withBody(
-                                getLogEntrySerializer().serialize(logEntries),
-                                MediaType.JSON_UTF_8
-                            );
+                            response.withBody(writtenBody(MediaType.JSON_UTF_8, writer -> getLogEntrySerializer().serialize(logEntries, writer)));
                             if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
                                 mockServerLogger.logEvent(
                                     new LogEntry()
@@ -1408,19 +1408,19 @@ public class HttpState {
                                 );
                             }
                         } else {
-                            StringBuilder stringBuffer = new StringBuilder();
-                            for (int i = 0; i < logEntries.size(); i++) {
-                                LogEntry messageLogEntry = logEntries.get(i);
-                                stringBuffer
-                                    .append(messageLogEntry.getTimestamp())
-                                    .append(" - ")
-                                    .append(messageLogEntry.getMessage(configuration));
-                                if (i < logEntries.size() - 1) {
-                                    stringBuffer.append(LOG_SEPARATOR);
+                            response.withBody(writtenBody(MediaType.PLAIN_TEXT_UTF_8, writer -> {
+                                for (int i = 0; i < logEntries.size(); i++) {
+                                    LogEntry messageLogEntry = logEntries.get(i);
+                                    writer
+                                        .append(messageLogEntry.getTimestamp())
+                                        .append(" - ")
+                                        .append(messageLogEntry.getMessage(configuration));
+                                    if (i < logEntries.size() - 1) {
+                                        writer.append(LOG_SEPARATOR);
+                                    }
                                 }
-                            }
-                            stringBuffer.append(NEW_LINE);
-                            response.withBody(stringBuffer.toString(), MediaType.PLAIN_TEXT_UTF_8);
+                                writer.append(NEW_LINE);
+                            }));
                             if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
                                 mockServerLogger.logEvent(
                                     new LogEntry()
@@ -1449,10 +1449,7 @@ public class HttpState {
                         switch (format) {
                             case JAVA: {
                                 List<RequestDefinition> requests = retrieveRequestsPossiblyFanIn(requestDefinition, logCorrelationId, request, applyFanIn);
-                                response.withBody(
-                                    getRequestDefinitionSerializer().serialize(requests),
-                                    MediaType.create("application", "java").withCharset(UTF_8)
-                                );
+                                response.withBody(writtenBody(MediaType.create("application", "java").withCharset(UTF_8), writer -> getRequestDefinitionSerializer().serialize(requests, writer)));
                                 if (logEntry != null) {
                                     mockServerLogger.logEvent(logEntry);
                                 }
@@ -1461,10 +1458,7 @@ public class HttpState {
                             }
                             case JSON: {
                                 List<RequestDefinition> requests = retrieveRequestsPossiblyFanIn(requestDefinition, logCorrelationId, request, applyFanIn);
-                                response.withBody(
-                                    getRequestDefinitionSerializer().serializeRecordedRequests(true, requests),
-                                    MediaType.JSON_UTF_8
-                                );
+                                response.withBody(writtenBody(MediaType.JSON_UTF_8, writer -> getRequestDefinitionSerializer().serializeRecordedRequests(true, requests, writer)));
                                 if (logEntry != null) {
                                     mockServerLogger.logEvent(logEntry);
                                 }
@@ -1476,10 +1470,7 @@ public class HttpState {
                                     consumer -> mockServerLog.retrieveRequestLogEntries(requestDefinition, consumer),
                                     logCorrelationId, request
                                 );
-                                response.withBody(
-                                    getLogEntrySerializer().serialize(logEntries),
-                                    MediaType.JSON_UTF_8
-                                );
+                                response.withBody(writtenBody(MediaType.JSON_UTF_8, writer -> getLogEntrySerializer().serialize(logEntries, writer)));
                                 if (logEntry != null) {
                                     mockServerLogger.logEvent(logEntry);
                                 }
@@ -1531,7 +1522,7 @@ public class HttpState {
                                             .withHttpRequest((org.mockserver.model.HttpRequest) r));
                                     }
                                 }
-                                response.withBody(getHarConverter().serialize(pairs), MediaType.JSON_UTF_8);
+                                response.withBody(writtenBody(MediaType.JSON_UTF_8, writer -> getHarConverter().serialize(pairs, writer)));
                                 if (logEntry != null) {
                                     mockServerLogger.logEvent(logEntry);
                                 }
@@ -1546,7 +1537,7 @@ public class HttpState {
                                         httpRequests.add((HttpRequest) r);
                                     }
                                 }
-                                response.withBody(toCurlCommands(httpRequests), MediaType.PLAIN_TEXT_UTF_8);
+                                response.withBody(writtenBody(MediaType.PLAIN_TEXT_UTF_8, writer -> writeCurlCommands(httpRequests, writer)));
                                 if (logEntry != null) {
                                     mockServerLogger.logEvent(logEntry);
                                 }
@@ -1600,10 +1591,7 @@ public class HttpState {
                                 // bodies inside the single log-consumer callback raced the retrieve future timeout
                                 // and stalled all further logging (#3).
                                 List<LogEventRequestAndResponse> pairs = retrieveRequestResponsesPossiblyFanIn(requestDefinition, logCorrelationId, request, applyFanIn);
-                                response.withBody(
-                                    getHttpRequestResponseSerializer().serialize(pairs),
-                                    MediaType.JSON_UTF_8
-                                );
+                                response.withBody(writtenBody(MediaType.JSON_UTF_8, writer -> getHttpRequestResponseSerializer().serialize(pairs, writer)));
                                 if (logEntry != null) {
                                     mockServerLogger.logEvent(logEntry);
                                 }
@@ -1615,10 +1603,7 @@ public class HttpState {
                                     consumer -> mockServerLog.retrieveRequestResponseMessageLogEntries(requestDefinition, consumer),
                                     logCorrelationId, request
                                 );
-                                response.withBody(
-                                    getLogEntrySerializer().serialize(logEntries),
-                                    MediaType.JSON_UTF_8
-                                );
+                                response.withBody(writtenBody(MediaType.JSON_UTF_8, writer -> getLogEntrySerializer().serialize(logEntries, writer)));
                                 if (logEntry != null) {
                                     mockServerLogger.logEvent(logEntry);
                                 }
@@ -1627,10 +1612,7 @@ public class HttpState {
                             }
                             case HAR: {
                                 List<LogEventRequestAndResponse> pairs = retrieveRequestResponsesPossiblyFanIn(requestDefinition, logCorrelationId, request, applyFanIn);
-                                response.withBody(
-                                    getHarConverter().serialize(pairs),
-                                    MediaType.JSON_UTF_8
-                                );
+                                response.withBody(writtenBody(MediaType.JSON_UTF_8, writer -> getHarConverter().serialize(pairs, writer)));
                                 if (logEntry != null) {
                                     mockServerLogger.logEvent(logEntry);
                                 }
@@ -1681,7 +1663,7 @@ public class HttpState {
                                         httpRequests.add((HttpRequest) pair.getHttpRequest());
                                     }
                                 }
-                                response.withBody(toCurlCommands(httpRequests), MediaType.PLAIN_TEXT_UTF_8);
+                                response.withBody(writtenBody(MediaType.PLAIN_TEXT_UTF_8, writer -> writeCurlCommands(httpRequests, writer)));
                                 if (logEntry != null) {
                                     mockServerLogger.logEvent(logEntry);
                                 }
@@ -1707,10 +1689,7 @@ public class HttpState {
                                     consumer -> mockServerLog.retrieveRecordedExpectations(requestDefinition, consumer),
                                     logCorrelationId, request
                                 ), request);
-                                response.withBody(
-                                    getExpectationToJavaSerializer().serialize(requests),
-                                    MediaType.create("application", "java").withCharset(UTF_8)
-                                );
+                                response.withBody(writtenBody(MediaType.create("application", "java").withCharset(UTF_8), writer -> getExpectationToJavaSerializer().serialize(requests, writer)));
                                 if (logEntry != null) {
                                     mockServerLogger.logEvent(logEntry);
                                 }
@@ -1722,10 +1701,7 @@ public class HttpState {
                                     consumer -> mockServerLog.retrieveRecordedExpectations(requestDefinition, consumer),
                                     logCorrelationId, request
                                 ), request);
-                                response.withBody(
-                                    getExpectationToJavaScriptSerializer().serialize(requests),
-                                    MediaType.create("application", "javascript").withCharset(UTF_8)
-                                );
+                                response.withBody(writtenBody(MediaType.create("application", "javascript").withCharset(UTF_8), writer -> getExpectationToJavaScriptSerializer().serialize(requests, writer)));
                                 if (logEntry != null) {
                                     mockServerLogger.logEvent(logEntry);
                                 }
@@ -1737,10 +1713,7 @@ public class HttpState {
                                     consumer -> mockServerLog.retrieveRecordedExpectations(requestDefinition, consumer),
                                     logCorrelationId, request
                                 ), request);
-                                response.withBody(
-                                    getExpectationToPythonSerializer().serialize(requests),
-                                    MediaType.create("text", "x-python").withCharset(UTF_8)
-                                );
+                                response.withBody(writtenBody(MediaType.create("text", "x-python").withCharset(UTF_8), writer -> getExpectationToPythonSerializer().serialize(requests, writer)));
                                 if (logEntry != null) {
                                     mockServerLogger.logEvent(logEntry);
                                 }
@@ -1752,10 +1725,7 @@ public class HttpState {
                                     consumer -> mockServerLog.retrieveRecordedExpectations(requestDefinition, consumer),
                                     logCorrelationId, request
                                 ), request);
-                                response.withBody(
-                                    getExpectationToGoSerializer().serialize(requests),
-                                    MediaType.create("text", "x-go").withCharset(UTF_8)
-                                );
+                                response.withBody(writtenBody(MediaType.create("text", "x-go").withCharset(UTF_8), writer -> getExpectationToGoSerializer().serialize(requests, writer)));
                                 if (logEntry != null) {
                                     mockServerLogger.logEvent(logEntry);
                                 }
@@ -1767,10 +1737,7 @@ public class HttpState {
                                     consumer -> mockServerLog.retrieveRecordedExpectations(requestDefinition, consumer),
                                     logCorrelationId, request
                                 ), request);
-                                response.withBody(
-                                    getExpectationToCSharpSerializer().serialize(requests),
-                                    MediaType.create("text", "x-csharp").withCharset(UTF_8)
-                                );
+                                response.withBody(writtenBody(MediaType.create("text", "x-csharp").withCharset(UTF_8), writer -> getExpectationToCSharpSerializer().serialize(requests, writer)));
                                 if (logEntry != null) {
                                     mockServerLogger.logEvent(logEntry);
                                 }
@@ -1782,10 +1749,7 @@ public class HttpState {
                                     consumer -> mockServerLog.retrieveRecordedExpectations(requestDefinition, consumer),
                                     logCorrelationId, request
                                 ), request);
-                                response.withBody(
-                                    getExpectationToRubySerializer().serialize(requests),
-                                    MediaType.create("text", "x-ruby").withCharset(UTF_8)
-                                );
+                                response.withBody(writtenBody(MediaType.create("text", "x-ruby").withCharset(UTF_8), writer -> getExpectationToRubySerializer().serialize(requests, writer)));
                                 if (logEntry != null) {
                                     mockServerLogger.logEvent(logEntry);
                                 }
@@ -1797,10 +1761,7 @@ public class HttpState {
                                     consumer -> mockServerLog.retrieveRecordedExpectations(requestDefinition, consumer),
                                     logCorrelationId, request
                                 ), request);
-                                response.withBody(
-                                    getExpectationToRustSerializer().serialize(requests),
-                                    MediaType.create("text", "x-rust").withCharset(UTF_8)
-                                );
+                                response.withBody(writtenBody(MediaType.create("text", "x-rust").withCharset(UTF_8), writer -> getExpectationToRustSerializer().serialize(requests, writer)));
                                 if (logEntry != null) {
                                     mockServerLogger.logEvent(logEntry);
                                 }
@@ -1812,10 +1773,7 @@ public class HttpState {
                                     consumer -> mockServerLog.retrieveRecordedExpectations(requestDefinition, consumer),
                                     logCorrelationId, request
                                 ), request);
-                                response.withBody(
-                                    getExpectationToPhpSerializer().serialize(requests),
-                                    MediaType.create("application", "x-httpd-php").withCharset(UTF_8)
-                                );
+                                response.withBody(writtenBody(MediaType.create("application", "x-httpd-php").withCharset(UTF_8), writer -> getExpectationToPhpSerializer().serialize(requests, writer)));
                                 if (logEntry != null) {
                                     mockServerLogger.logEvent(logEntry);
                                 }
@@ -1827,10 +1785,7 @@ public class HttpState {
                                     consumer -> mockServerLog.retrieveRecordedExpectations(requestDefinition, consumer),
                                     logCorrelationId, request
                                 ), request);
-                                response.withBody(
-                                    getExpectationSerializerThatSerializesBodyDefault().serialize(requests),
-                                    MediaType.JSON_UTF_8
-                                );
+                                response.withBody(writtenBody(MediaType.JSON_UTF_8, writer -> getExpectationSerializerThatSerializesBodyDefault().serialize(requests, writer)));
                                 if (logEntry != null) {
                                     mockServerLogger.logEvent(logEntry);
                                 }
@@ -1842,10 +1797,7 @@ public class HttpState {
                                     consumer -> mockServerLog.retrieveRecordedExpectationLogEntries(requestDefinition, consumer),
                                     logCorrelationId, request
                                 );
-                                response.withBody(
-                                    getLogEntrySerializer().serialize(logEntries),
-                                    MediaType.JSON_UTF_8
-                                );
+                                response.withBody(writtenBody(MediaType.JSON_UTF_8, writer -> getLogEntrySerializer().serialize(logEntries, writer)));
                                 if (logEntry != null) {
                                     mockServerLogger.logEvent(logEntry);
                                 }
@@ -1902,10 +1854,7 @@ public class HttpState {
                                     consumer -> mockServerLog.retrieveRecordedExpectations(requestDefinition, consumer),
                                     logCorrelationId, request
                                 ), request);
-                                response.withBody(
-                                    getHarConverter().serialize(expectationsToLogEvents(expectations)),
-                                    MediaType.JSON_UTF_8
-                                );
+                                response.withBody(writtenBody(MediaType.JSON_UTF_8, writer -> getHarConverter().serialize(expectationsToLogEvents(expectations), writer)));
                                 if (logEntry != null) {
                                     mockServerLogger.logEvent(logEntry);
                                 }
@@ -1945,33 +1894,34 @@ public class HttpState {
                                 .filter(expectation -> isBlank(expectation.getNamespace()) || namespaceFilter.equals(expectation.getNamespace()))
                                 .collect(Collectors.toList());
                         }
+                        final List<Expectation> selected = expectations;
                         switch (format) {
                             case JAVA:
-                                response.withBody(getExpectationToJavaSerializer().serialize(expectations), MediaType.create("application", "java").withCharset(UTF_8));
+                                response.withBody(writtenBody(MediaType.create("application", "java").withCharset(UTF_8), writer -> getExpectationToJavaSerializer().serialize(selected, writer)));
                                 break;
                             case JAVASCRIPT:
-                                response.withBody(getExpectationToJavaScriptSerializer().serialize(expectations), MediaType.create("application", "javascript").withCharset(UTF_8));
+                                response.withBody(writtenBody(MediaType.create("application", "javascript").withCharset(UTF_8), writer -> getExpectationToJavaScriptSerializer().serialize(selected, writer)));
                                 break;
                             case PYTHON:
-                                response.withBody(getExpectationToPythonSerializer().serialize(expectations), MediaType.create("text", "x-python").withCharset(UTF_8));
+                                response.withBody(writtenBody(MediaType.create("text", "x-python").withCharset(UTF_8), writer -> getExpectationToPythonSerializer().serialize(selected, writer)));
                                 break;
                             case GO:
-                                response.withBody(getExpectationToGoSerializer().serialize(expectations), MediaType.create("text", "x-go").withCharset(UTF_8));
+                                response.withBody(writtenBody(MediaType.create("text", "x-go").withCharset(UTF_8), writer -> getExpectationToGoSerializer().serialize(selected, writer)));
                                 break;
                             case CSHARP:
-                                response.withBody(getExpectationToCSharpSerializer().serialize(expectations), MediaType.create("text", "x-csharp").withCharset(UTF_8));
+                                response.withBody(writtenBody(MediaType.create("text", "x-csharp").withCharset(UTF_8), writer -> getExpectationToCSharpSerializer().serialize(selected, writer)));
                                 break;
                             case RUBY:
-                                response.withBody(getExpectationToRubySerializer().serialize(expectations), MediaType.create("text", "x-ruby").withCharset(UTF_8));
+                                response.withBody(writtenBody(MediaType.create("text", "x-ruby").withCharset(UTF_8), writer -> getExpectationToRubySerializer().serialize(selected, writer)));
                                 break;
                             case RUST:
-                                response.withBody(getExpectationToRustSerializer().serialize(expectations), MediaType.create("text", "x-rust").withCharset(UTF_8));
+                                response.withBody(writtenBody(MediaType.create("text", "x-rust").withCharset(UTF_8), writer -> getExpectationToRustSerializer().serialize(selected, writer)));
                                 break;
                             case PHP:
-                                response.withBody(getExpectationToPhpSerializer().serialize(expectations), MediaType.create("application", "x-httpd-php").withCharset(UTF_8));
+                                response.withBody(writtenBody(MediaType.create("application", "x-httpd-php").withCharset(UTF_8), writer -> getExpectationToPhpSerializer().serialize(selected, writer)));
                                 break;
                             case JSON:
-                                response.withBody(getExpectationSerializer().serialize(expectations), MediaType.JSON_UTF_8);
+                                response.withBody(writtenBody(MediaType.JSON_UTF_8, writer -> getExpectationSerializer().serialize(selected, writer)));
                                 break;
                             case LOG_ENTRIES:
                                 response.withBody("LOG_ENTRIES not supported for ACTIVE_EXPECTATIONS", MediaType.create("text", "plain").withCharset(UTF_8));
@@ -1995,10 +1945,7 @@ public class HttpState {
                                     .withHeader("content-disposition", "attachment; filename=\"mockserver-expectations.bruno.zip\"");
                                 break;
                             case HAR:
-                                response.withBody(
-                                    getHarConverter().serialize(expectationsToLogEvents(expectations)),
-                                    MediaType.JSON_UTF_8
-                                );
+                                response.withBody(writtenBody(MediaType.JSON_UTF_8, writer -> getHarConverter().serialize(expectationsToLogEvents(selected), writer)));
                                 break;
                             case CURL:
                                 response.withBody("CURL not supported for ACTIVE_EXPECTATIONS", MediaType.create("text", "plain").withCharset(UTF_8));
@@ -2113,6 +2060,25 @@ public class HttpState {
         } else {
             return response().withStatusCode(200);
         }
+    }
+
+    @FunctionalInterface
+    private interface ResponseText {
+        void writeTo(Writer writer) throws IOException;
+    }
+
+    /**
+     * Writes a retrieve response's text straight into the bytes the frontend writes, encoded in the
+     * charset of {@code mediaType}: the response is never built as one String, nor copied as bytes.
+     */
+    private static StringBody writtenBody(MediaType mediaType, ResponseText text) {
+        SegmentedBytes bytes = new SegmentedBytes();
+        try (Writer writer = bytes.writer(mediaType.getCharset())) {
+            text.writeTo(writer);
+        } catch (IOException ioe) {
+            throw new UncheckedIOException(ioe);
+        }
+        return StringBody.fromSegmentedBytes(bytes, mediaType);
     }
 
     /**
@@ -8037,16 +8003,18 @@ public class HttpState {
      * Render a list of recorded requests as cURL commands, one per request,
      * separated by a blank line.
      */
-    private String toCurlCommands(List<HttpRequest> requests) {
-        StringBuilder builder = new StringBuilder();
+    private void writeCurlCommands(List<HttpRequest> requests, Writer writer) throws IOException {
+        boolean written = false;
         for (HttpRequest request : requests) {
-            if (builder.length() > 0) {
-                builder.append(NEW_LINE).append(NEW_LINE);
+            String curl = getHttpRequestToCurlSerializer().toCurl(request);
+            // a separator only follows text: a first command that renders empty is followed by none
+            if (written) {
+                writer.append(NEW_LINE).append(NEW_LINE);
             }
-            builder.append(getHttpRequestToCurlSerializer().toCurl(request));
+            writer.append(curl);
+            written = written || !curl.isEmpty();
         }
-        builder.append(NEW_LINE);
-        return builder.toString();
+        writer.append(NEW_LINE);
     }
 
     // ---- AsyncAPI control-plane ----

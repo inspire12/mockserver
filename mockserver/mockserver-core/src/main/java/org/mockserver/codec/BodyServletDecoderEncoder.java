@@ -5,6 +5,7 @@ import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.Body;
 import org.mockserver.model.BodyWithContentType;
+import org.mockserver.model.SegmentedBytes;
 import org.mockserver.streams.IOStreamUtils;
 import org.slf4j.event.Level;
 import jakarta.servlet.http.HttpServletRequest;
@@ -25,6 +26,11 @@ public class BodyServletDecoderEncoder {
     }
 
     public void bodyToServletResponse(HttpServletResponse httpServletResponse, Body body, String contentTypeHeader) {
+        SegmentedBytes segmentedBytes = BodyDecoderEncoder.wireSegments(body);
+        if (segmentedBytes != null) {
+            ioStreamUtils.writeToOutputStream(segmentedBytes, httpServletResponse);
+            return;
+        }
         byte[] bytes = bodyDecoderEncoder.bodyToBytes(body, contentTypeHeader);
         if (bytes != null) {
             ioStreamUtils.writeToOutputStream(bytes, httpServletResponse);

@@ -19,6 +19,7 @@ import org.mockserver.serialization.model.RequestDefinitionDTO;
 import org.mockserver.validator.jsonschema.JsonSchemaRequestDefinitionValidator;
 import org.slf4j.event.Level;
 
+import java.io.Writer;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -93,32 +94,59 @@ public class RequestDefinitionSerializer implements Serializer<RequestDefinition
     public String serialize(boolean prettyPrint, RequestDefinition... requestDefinitions) {
         try {
             if (requestDefinitions != null && requestDefinitions.length > 0) {
-                Object[] requestDefinitionDTOs = new Object[requestDefinitions.length];
-                for (int i = 0; i < requestDefinitions.length; i++) {
-                    if (requestDefinitions[i] instanceof HttpRequest) {
-                        requestDefinitionDTOs[i] = prettyPrint ? new HttpRequestPrettyPrintedDTO((HttpRequest) requestDefinitions[i]) : new HttpRequestDTO((HttpRequest) requestDefinitions[i]);
-                    } else if (requestDefinitions[i] instanceof OpenAPIDefinition) {
-                        requestDefinitionDTOs[i] = new OpenAPIDefinitionDTO((OpenAPIDefinition) requestDefinitions[i]);
-                    } else if (requestDefinitions[i] instanceof ConditionalRequestDefinition) {
-                        requestDefinitionDTOs[i] = new ConditionalRequestDefinitionDTO((ConditionalRequestDefinition) requestDefinitions[i]);
-                    }
-                }
-                return objectWriter.writeValueAsString(requestDefinitionDTOs);
+                return objectWriter.writeValueAsString(toDTOs(prettyPrint, requestDefinitions));
             } else {
                 return "[]";
             }
         } catch (Exception e) {
-            String description = SerializationFailure.describe(requestDefinitions, e);
-            mockServerLogger.logEvent(
-                new LogEntry()
-                    .setLogLevel(Level.ERROR)
-                    .setHttpRequests(LogEntry.nonNull(requestDefinitions))
-                    .setMessageFormat("exception while serializing RequestDefinition to JSON:{}")
-                    .setArguments(description)
-                    .setThrowable(e)
-            );
-            throw new RuntimeException("Exception while serializing RequestDefinition to JSON (" + description + ")", e);
+            throw failure(requestDefinitions, e);
         }
+    }
+
+    /**
+     * As {@link #serialize(List)}, writing the same text to {@code writer} rather than building it as one String.
+     */
+    public void serialize(List<? extends RequestDefinition> requestDefinitions, Writer writer) {
+        write(objectWriter, false, requestDefinitions.toArray(new RequestDefinition[0]), writer);
+    }
+
+    private void write(ObjectWriter jsonWriter, boolean prettyPrint, RequestDefinition[] definitions, Writer writer) {
+        try {
+            if (definitions.length > 0) {
+                jsonWriter.writeValue(writer, toDTOs(prettyPrint, definitions));
+            } else {
+                writer.write("[]");
+            }
+        } catch (Exception e) {
+            throw failure(definitions, e);
+        }
+    }
+
+    private static Object[] toDTOs(boolean prettyPrint, RequestDefinition[] requestDefinitions) {
+        Object[] requestDefinitionDTOs = new Object[requestDefinitions.length];
+        for (int i = 0; i < requestDefinitions.length; i++) {
+            if (requestDefinitions[i] instanceof HttpRequest) {
+                requestDefinitionDTOs[i] = prettyPrint ? new HttpRequestPrettyPrintedDTO((HttpRequest) requestDefinitions[i]) : new HttpRequestDTO((HttpRequest) requestDefinitions[i]);
+            } else if (requestDefinitions[i] instanceof OpenAPIDefinition) {
+                requestDefinitionDTOs[i] = new OpenAPIDefinitionDTO((OpenAPIDefinition) requestDefinitions[i]);
+            } else if (requestDefinitions[i] instanceof ConditionalRequestDefinition) {
+                requestDefinitionDTOs[i] = new ConditionalRequestDefinitionDTO((ConditionalRequestDefinition) requestDefinitions[i]);
+            }
+        }
+        return requestDefinitionDTOs;
+    }
+
+    private RuntimeException failure(RequestDefinition[] requestDefinitions, Exception e) {
+        String description = SerializationFailure.describe(requestDefinitions, e);
+        mockServerLogger.logEvent(
+            new LogEntry()
+                .setLogLevel(Level.ERROR)
+                .setHttpRequests(LogEntry.nonNull(requestDefinitions))
+                .setMessageFormat("exception while serializing RequestDefinition to JSON:{}")
+                .setArguments(description)
+                .setThrowable(e)
+        );
+        return new RuntimeException("Exception while serializing RequestDefinition to JSON (" + description + ")", e);
     }
 
     /**
@@ -132,32 +160,21 @@ public class RequestDefinitionSerializer implements Serializer<RequestDefinition
         RequestDefinition[] definitions = requestDefinitions.toArray(new RequestDefinition[0]);
         try {
             if (definitions.length > 0) {
-                Object[] requestDefinitionDTOs = new Object[definitions.length];
-                for (int i = 0; i < definitions.length; i++) {
-                    if (definitions[i] instanceof HttpRequest) {
-                        requestDefinitionDTOs[i] = prettyPrint ? new HttpRequestPrettyPrintedDTO((HttpRequest) definitions[i]) : new HttpRequestDTO((HttpRequest) definitions[i]);
-                    } else if (definitions[i] instanceof OpenAPIDefinition) {
-                        requestDefinitionDTOs[i] = new OpenAPIDefinitionDTO((OpenAPIDefinition) definitions[i]);
-                    } else if (definitions[i] instanceof ConditionalRequestDefinition) {
-                        requestDefinitionDTOs[i] = new ConditionalRequestDefinitionDTO((ConditionalRequestDefinition) definitions[i]);
-                    }
-                }
-                return objectWriter.withAttribute("emitRawBytes", Boolean.TRUE).writeValueAsString(requestDefinitionDTOs);
+                return objectWriter.withAttribute("emitRawBytes", Boolean.TRUE).writeValueAsString(toDTOs(prettyPrint, definitions));
             } else {
                 return "[]";
             }
         } catch (Exception e) {
-            String description = SerializationFailure.describe(definitions, e);
-            mockServerLogger.logEvent(
-                new LogEntry()
-                    .setLogLevel(Level.ERROR)
-                    .setHttpRequests(LogEntry.nonNull(definitions))
-                    .setMessageFormat("exception while serializing RequestDefinition to JSON:{}")
-                    .setArguments(description)
-                    .setThrowable(e)
-            );
-            throw new RuntimeException("Exception while serializing RequestDefinition to JSON (" + description + ")", e);
+            throw failure(definitions, e);
         }
+    }
+
+    /**
+     * As {@link #serializeRecordedRequests(boolean, List)}, writing the same text to {@code writer} rather than
+     * building it as one String.
+     */
+    public void serializeRecordedRequests(boolean prettyPrint, List<? extends RequestDefinition> requestDefinitions, Writer writer) {
+        write(objectWriter.withAttribute("emitRawBytes", Boolean.TRUE), prettyPrint, requestDefinitions.toArray(new RequestDefinition[0]), writer);
     }
 
     public RequestDefinition deserialize(String jsonRequestDefinition) {

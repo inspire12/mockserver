@@ -3,6 +3,7 @@ package org.mockserver.serialization.code;
 import org.mockserver.mock.Expectation;
 import org.mockserver.serialization.ExpectationSerializer;
 
+import java.io.Writer;
 import java.util.List;
 
 /**
@@ -60,6 +61,13 @@ public class ExpectationToCSharpSerializer {
     }
 
     public String serialize(List<Expectation> expectations) {
+        return GeneratedCode.toString(writer -> serialize(expectations, writer));
+    }
+
+    /**
+     * As {@link #serialize(List)}, writing the code for one expectation at a time to {@code writer}.
+     */
+    public void serialize(List<Expectation> expectations, Writer writer) {
         StringBuilder output = new StringBuilder();
         output.append("using System.Text.Json;").append(NEW_LINE);
         output.append("using System.Text.Json.Serialization;").append(NEW_LINE);
@@ -75,6 +83,7 @@ public class ExpectationToCSharpSerializer {
         output.append("var client = new MockServerClient(\"localhost\", 1080);").append(NEW_LINE);
         if (expectations != null) {
             for (Expectation expectation : expectations) {
+                GeneratedCode.flush(output, writer);
                 if (expectation == null) {
                     continue;
                 }
@@ -85,7 +94,7 @@ public class ExpectationToCSharpSerializer {
                     .append("\", jsonOptions));").append(NEW_LINE);
             }
         }
-        return output.toString();
+        GeneratedCode.flush(output, writer);
     }
 
     /**

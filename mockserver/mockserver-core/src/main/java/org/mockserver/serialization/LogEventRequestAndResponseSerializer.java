@@ -11,6 +11,7 @@ import org.mockserver.model.LogEventRequestAndResponse;
 import org.mockserver.serialization.model.LogEventRequestAndResponseDTO;
 import org.slf4j.event.Level;
 
+import java.io.Writer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -61,28 +62,54 @@ public class LogEventRequestAndResponseSerializer {
     public String serialize(LogEventRequestAndResponse... httpRequestAndHttpResponses) {
         try {
             if (httpRequestAndHttpResponses != null && httpRequestAndHttpResponses.length > 0) {
-                LogEventRequestAndResponseDTO[] httpRequestAndHttpResponseDTOS = new LogEventRequestAndResponseDTO[httpRequestAndHttpResponses.length];
-                for (int i = 0; i < httpRequestAndHttpResponses.length; i++) {
-                    httpRequestAndHttpResponseDTOS[i] = new LogEventRequestAndResponseDTO(httpRequestAndHttpResponses[i]);
-                }
                 return objectWriter
                     .withDefaultPrettyPrinter()
-                    .writeValueAsString(httpRequestAndHttpResponseDTOS);
+                    .writeValueAsString(toDTOs(httpRequestAndHttpResponses));
             } else {
                 return "[]";
             }
         } catch (Exception e) {
-            String description = SerializationFailure.describe(httpRequestAndHttpResponses, e);
-            mockServerLogger.logEvent(
-                new LogEntry()
-                    .setLogLevel(Level.ERROR)
-                    .setHttpRequests(LogEntry.nonNull(httpRequestAndHttpResponses == null ? null : Arrays.stream(httpRequestAndHttpResponses).filter(java.util.Objects::nonNull).map(LogEventRequestAndResponse::getHttpRequest).toArray(org.mockserver.model.RequestDefinition[]::new)))
-                    .setMessageFormat("exception while serializing HttpRequestAndHttpResponse to JSON:{}")
-                    .setArguments(description)
-                    .setThrowable(e)
-            );
-            throw new IllegalArgumentException("Exception while serializing HttpRequestAndHttpResponse to JSON (" + description + ")", e);
+            throw failure(httpRequestAndHttpResponses, e);
         }
+    }
+
+    /**
+     * As {@link #serialize(List)}, writing the same text to {@code writer} rather than building it as one String.
+     */
+    public void serialize(List<LogEventRequestAndResponse> httpRequestAndHttpResponses, Writer writer) {
+        LogEventRequestAndResponse[] pairs = httpRequestAndHttpResponses.toArray(new LogEventRequestAndResponse[0]);
+        try {
+            if (pairs.length > 0) {
+                objectWriter
+                    .withDefaultPrettyPrinter()
+                    .writeValue(writer, toDTOs(pairs));
+            } else {
+                writer.write("[]");
+            }
+        } catch (Exception e) {
+            throw failure(pairs, e);
+        }
+    }
+
+    private static LogEventRequestAndResponseDTO[] toDTOs(LogEventRequestAndResponse[] httpRequestAndHttpResponses) {
+        LogEventRequestAndResponseDTO[] httpRequestAndHttpResponseDTOS = new LogEventRequestAndResponseDTO[httpRequestAndHttpResponses.length];
+        for (int i = 0; i < httpRequestAndHttpResponses.length; i++) {
+            httpRequestAndHttpResponseDTOS[i] = new LogEventRequestAndResponseDTO(httpRequestAndHttpResponses[i]);
+        }
+        return httpRequestAndHttpResponseDTOS;
+    }
+
+    private IllegalArgumentException failure(LogEventRequestAndResponse[] httpRequestAndHttpResponses, Exception e) {
+        String description = SerializationFailure.describe(httpRequestAndHttpResponses, e);
+        mockServerLogger.logEvent(
+            new LogEntry()
+                .setLogLevel(Level.ERROR)
+                .setHttpRequests(LogEntry.nonNull(httpRequestAndHttpResponses == null ? null : Arrays.stream(httpRequestAndHttpResponses).filter(java.util.Objects::nonNull).map(LogEventRequestAndResponse::getHttpRequest).toArray(org.mockserver.model.RequestDefinition[]::new)))
+                .setMessageFormat("exception while serializing HttpRequestAndHttpResponse to JSON:{}")
+                .setArguments(description)
+                .setThrowable(e)
+        );
+        return new IllegalArgumentException("Exception while serializing HttpRequestAndHttpResponse to JSON (" + description + ")", e);
     }
 
     public LogEventRequestAndResponse deserialize(String jsonHttpRequestAndHttpResponse) {

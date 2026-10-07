@@ -9,6 +9,8 @@ import org.mockserver.version.Version;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.io.IOException;
+import java.io.Writer;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -21,6 +23,26 @@ public class HarConverter {
         .enable(SerializationFeature.INDENT_OUTPUT);
 
     public String serialize(List<LogEventRequestAndResponse> requestAndResponses) {
+        try {
+            return HAR_OBJECT_MAPPER.writeValueAsString(toHar(requestAndResponses));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("failed to serialize HAR", e);
+        }
+    }
+
+    /**
+     * As {@link #serialize(List)}, writing the same text to {@code writer} rather than building it as one String.
+     */
+    public void serialize(List<LogEventRequestAndResponse> requestAndResponses, Writer writer) {
+        Map<String, HarLog> har = toHar(requestAndResponses);
+        try {
+            HAR_OBJECT_MAPPER.writeValue(writer, har);
+        } catch (IOException e) {
+            throw new IllegalStateException("failed to serialize HAR", e);
+        }
+    }
+
+    private Map<String, HarLog> toHar(List<LogEventRequestAndResponse> requestAndResponses) {
         HarLog harLog = new HarLog()
             .withCreator(
                 new HarCreator()
@@ -35,12 +57,7 @@ public class HarConverter {
 
         Map<String, HarLog> wrapper = new LinkedHashMap<>();
         wrapper.put("log", harLog);
-
-        try {
-            return HAR_OBJECT_MAPPER.writeValueAsString(wrapper);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("failed to serialize HAR", e);
-        }
+        return wrapper;
     }
 
     private HarEntry convertEntry(LogEventRequestAndResponse requestAndResponse) {

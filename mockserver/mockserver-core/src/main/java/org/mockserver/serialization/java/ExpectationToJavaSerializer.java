@@ -8,6 +8,9 @@ import org.mockserver.model.HttpResponse;
 import org.mockserver.model.OpenAPIDefinition;
 import org.mockserver.model.RequestDefinition;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.io.Writer;
 import java.util.List;
 
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
@@ -28,6 +31,21 @@ public class ExpectationToJavaSerializer implements ToJavaSerializer<Expectation
             output.append(NEW_LINE);
         }
         return output.toString();
+    }
+
+    /**
+     * As {@link #serialize(List)}, writing the code for one expectation at a time to {@code writer}.
+     */
+    public void serialize(List<Expectation> expectations, Writer writer) {
+        try {
+            for (Expectation expectation : expectations) {
+                writer.write(serialize(0, expectation));
+                writer.write(NEW_LINE);
+                writer.write(NEW_LINE);
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
     }
 
     @Override

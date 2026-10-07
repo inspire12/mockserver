@@ -742,6 +742,37 @@ public class Http3RequestBridgeTest {
         assertThat(dataFrame, is(nullValue()));
     }
 
+    @Test
+    public void shouldWrapTheSegmentsOfASegmentedBodyAsTheDataFrame() throws java.io.IOException {
+        StringBuilder text = new StringBuilder("é😀");
+        while (text.length() < 10_000) {
+            text.append("segmented ");
+        }
+        org.mockserver.model.SegmentedBytes bytes = new org.mockserver.model.SegmentedBytes();
+        try (java.io.Writer writer = bytes.writer(StandardCharsets.UTF_8)) {
+            writer.write(text.toString());
+        }
+        HttpResponse response = HttpResponse.response()
+            .withBody(org.mockserver.model.StringBody.fromSegmentedBytes(bytes, org.mockserver.model.MediaType.JSON_UTF_8));
+
+        DefaultHttp3DataFrame dataFrame = Http3RequestBridge.toHttp3DataFrame(response);
+
+        ByteBuf content = dataFrame.content();
+        assertThat(content.toString(StandardCharsets.UTF_8), is(text.toString()));
+        // one buffer per segment: the segments are wrapped, not joined into one array
+        assertThat(content.nioBufferCount(), is(bytes.asByteBuffers().length));
+        assertThat(content.nioBufferCount(), greaterThan(1));
+        content.release();
+    }
+
+    @Test
+    public void shouldReturnNullDataFrameForAnEmptySegmentedBody() {
+        HttpResponse response = HttpResponse.response()
+            .withBody(org.mockserver.model.StringBody.fromSegmentedBytes(new org.mockserver.model.SegmentedBytes(), org.mockserver.model.MediaType.JSON_UTF_8));
+
+        assertThat(Http3RequestBridge.toHttp3DataFrame(response), is(nullValue()));
+    }
+
     // ---- body accumulation tests ----
 
     @Test

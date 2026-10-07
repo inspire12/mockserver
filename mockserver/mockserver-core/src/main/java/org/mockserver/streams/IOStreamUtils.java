@@ -4,12 +4,14 @@ import com.google.common.io.ByteStreams;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.log.model.SensitiveLogValue;
 import org.mockserver.logging.MockServerLogger;
+import org.mockserver.model.SegmentedBytes;
 import org.slf4j.event.Level;
 import jakarta.servlet.ServletRequest;
 import jakarta.servlet.ServletResponse;
 
 import java.io.*;
 import java.net.Socket;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 
@@ -85,25 +87,44 @@ public class IOStreamUtils {
         }
     }
 
+    public void writeToOutputStream(SegmentedBytes data, ServletResponse response) {
+        try {
+            OutputStream output = response.getOutputStream();
+            data.writeTo(output);
+            output.close();
+        } catch (IOException ioe) {
+            ByteBuffer[] buffers = data.asByteBuffers();
+            ByteBuffer first = buffers.length > 0 ? buffers[0] : ByteBuffer.allocate(0);
+            throw writeFailure(first.array(), first.remaining(), data.size(), ioe);
+        }
+    }
+
     public void writeToOutputStream(byte[] data, ServletResponse response) {
         try {
             OutputStream output = response.getOutputStream();
             output.write(data);
             output.close();
         } catch (IOException ioe) {
-            String truncatedContent = data.length > 100
-                ? new String(data, 0, 100, UTF_8) + "...(" + data.length + " bytes)"
-                : new String(data, UTF_8);
-            String sanitized = truncatedContent.replaceAll("[<>&]", "_");
-            mockServerLogger.logEvent(
-                new LogEntry()
-                    .setLogLevel(Level.ERROR)
-                    .setMessageFormat("IOException while writing [{}] to HttpServletResponse output stream")
-                    .setArguments(SensitiveLogValue.of(sanitized))
-                    .setThrowable(ioe)
-            );
-            throw new RuntimeException("IOException while writing " + data.length + " bytes to HttpServletResponse output stream", ioe);
+            throw writeFailure(data, data.length, data.length, ioe);
         }
+    }
+
+    /**
+     * @param start an array that begins with the data, of which {@code available} bytes are the data
+     */
+    private RuntimeException writeFailure(byte[] start, int available, int length, IOException ioe) {
+        String truncatedContent = length > 100
+            ? new String(start, 0, Math.min(100, available), UTF_8) + "...(" + length + " bytes)"
+            : new String(start, 0, available, UTF_8);
+        String sanitized = truncatedContent.replaceAll("[<>&]", "_");
+        mockServerLogger.logEvent(
+            new LogEntry()
+                .setLogLevel(Level.ERROR)
+                .setMessageFormat("IOException while writing [{}] to HttpServletResponse output stream")
+                .setArguments(SensitiveLogValue.of(sanitized))
+                .setThrowable(ioe)
+        );
+        return new RuntimeException("IOException while writing " + length + " bytes to HttpServletResponse output stream", ioe);
     }
 
 }

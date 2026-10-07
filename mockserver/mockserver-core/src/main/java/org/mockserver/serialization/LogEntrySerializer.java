@@ -8,6 +8,7 @@ import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.slf4j.event.Level;
 
+import java.io.Writer;
 import java.util.List;
 
 import static org.apache.commons.lang3.StringUtils.isBlank;
@@ -70,6 +71,22 @@ public class LogEntrySerializer {
             }
         } catch (Exception e) {
             throw failure(SerializationFailure.describe(logEntries, e, LogEntrySerializer::identify), e);
+        }
+    }
+
+    /**
+     * As {@link #serialize(List)}, writing the same text to {@code writer} rather than building it as one String.
+     */
+    public void serialize(List<LogEntry> logEntries, Writer writer) {
+        LogEntry[] entries = logEntries.toArray(new LogEntry[0]);
+        try {
+            if (entries.length > 0) {
+                objectWriter.writeValue(writer, entries);
+            } else {
+                writer.write("[]");
+            }
+        } catch (Exception e) {
+            throw failure(SerializationFailure.describe(entries, e, LogEntrySerializer::identify), e);
         }
     }
 
