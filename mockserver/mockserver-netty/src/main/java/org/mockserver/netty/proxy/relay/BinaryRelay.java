@@ -35,6 +35,7 @@ import static org.mockserver.exception.ExceptionHandling.boundedFault;
 import static org.mockserver.exception.ExceptionHandling.boundedFaultMessage;
 import static org.mockserver.exception.ExceptionHandling.closeOnFlush;
 import static org.mockserver.exception.ExceptionHandling.upstreamConnectionFailure;
+import static org.mockserver.exception.ExceptionHandling.upstreamHandshakeFailure;
 import static org.mockserver.formatting.StringFormatter.formatBytes;
 import static org.mockserver.log.model.LogEntry.LogMessageType.FORWARDED_REQUEST;
 import static org.mockserver.model.BinaryMessage.bytes;
@@ -87,6 +88,8 @@ public final class BinaryRelay {
     private int clearBeforeUpgrade = -1;
     private boolean connected;
     private boolean clientClosed;
+    // the upstream closed while the client was open: its close then closes the client before a handshake reports it
+    private boolean upstreamClosedFirst;
     private boolean finished;
     private boolean perMessage;
     private boolean upstreamHeldForClient;
@@ -432,7 +435,7 @@ public final class BinaryRelay {
             if (handshake.isSuccess()) {
                 release(ClientHold.UPSTREAM_HANDSHAKING);
             } else if (connected) {
-                upstreamTlsFailed(handshake.cause());
+                upstreamTlsFailed(upstreamHandshakeFailure(handshake.cause()));
             }
             // else the connect failed, which is what is reported, and the closed connection closes the client
         });
@@ -445,7 +448,7 @@ public final class BinaryRelay {
     }
 
     private void upstreamTlsFailed(Throwable cause) {
-        if (!clientClosed && mockServerLogger.isEnabledForInstance(Level.WARN)) {
+        if ((!clientClosed || upstreamClosedFirst) && mockServerLogger.isEnabledForInstance(Level.WARN)) {
             mockServerLogger.logEvent(
                 new LogEntry()
                     .setLogLevel(Level.WARN)
@@ -626,6 +629,7 @@ public final class BinaryRelay {
     }
 
     private void upstreamClosed() {
+        upstreamClosedFirst = !clientClosed;
         finished = true;
         stopUpstreamStallCheck();
         releaseEveryHold();

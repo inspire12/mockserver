@@ -941,7 +941,7 @@ Maximum response time (ms) from a socket.
 - Environment variable: MOCKSERVER_MAX_SOCKET_TIMEOUT
 
 **socketConnectionTimeout**
-Maximum socket connection time (ms).
+Maximum socket connection time (ms). Also bounds each TLS handshake, inbound and outbound, including binary (non-HTTP) forwards and proxied wss WebSockets.
 - Default: 20000
 - Environment variable: MOCKSERVER_SOCKET_CONNECTION_TIMEOUT
 

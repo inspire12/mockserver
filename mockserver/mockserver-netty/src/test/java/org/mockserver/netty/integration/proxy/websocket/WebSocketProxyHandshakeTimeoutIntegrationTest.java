@@ -6,6 +6,7 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 import org.mockserver.client.MockServerClient;
 import org.mockserver.configuration.Configuration;
+import org.mockserver.model.HttpForward;
 import org.mockserver.netty.MockServer;
 
 import java.io.ByteArrayOutputStream;
@@ -35,6 +36,8 @@ import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.lessThan;
 import static org.mockserver.configuration.Configuration.configuration;
+import static org.mockserver.model.HttpForward.forward;
+import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.stop.Stop.stopQuietly;
 
 /**
@@ -49,6 +52,8 @@ public class WebSocketProxyHandshakeTimeoutIntegrationTest {
     private static final long TIMEOUT_MILLIS = 2_000;
     private static final String FAILURE = "WebSocket proxy passthrough failed";
     private static final String TIMED_OUT = "upstream WebSocket handshake response was not received within maxSocketTimeout (" + TIMEOUT_MILLIS + " ms)";
+    private static final long TLS_TIMEOUT_MILLIS = 1_000;
+    private static final String TLS_TIMED_OUT = "TLS with the upstream failed: SslHandshakeTimeoutException: handshake timed out after " + TLS_TIMEOUT_MILLIS + "ms";
     private static final String FUTURE_TIMED_OUT = "upstream WebSocket handshake response was not received within maxFutureTimeout (" + TIMEOUT_MILLIS + " ms)";
 
     private static HandshakeUpstream upstream;
@@ -59,6 +64,8 @@ public class WebSocketProxyHandshakeTimeoutIntegrationTest {
     private static Configuration futureBoundedConfiguration;
     private static MockServer futureBounded;
     private static MockServerClient futureBoundedClient;
+    private static MockServer tlsBounded;
+    private static MockServerClient tlsBoundedClient;
 
     @BeforeClass
     public static void startServers() throws Exception {
@@ -71,6 +78,9 @@ public class WebSocketProxyHandshakeTimeoutIntegrationTest {
         futureBoundedConfiguration = relaying().maxFutureTimeoutInMillis(TIMEOUT_MILLIS);
         futureBounded = new MockServer(futureBoundedConfiguration, 0);
         futureBoundedClient = new MockServerClient("127.0.0.1", futureBounded.getLocalPort());
+        // a response wait far longer than the connection timeout, so only the TLS handshake timeout can end the relay
+        tlsBounded = new MockServer(relaying().socketConnectionTimeoutInMillis(TLS_TIMEOUT_MILLIS).maxSocketTimeoutInMillis(TimeUnit.MINUTES.toMillis(5)), 0);
+        tlsBoundedClient = new MockServerClient("127.0.0.1", tlsBounded.getLocalPort());
     }
 
     private static Configuration relaying() {
@@ -83,6 +93,8 @@ public class WebSocketProxyHandshakeTimeoutIntegrationTest {
         stopQuietly(boundedClient);
         stopQuietly(patientClient);
         stopQuietly(futureBoundedClient);
+        stopQuietly(tlsBoundedClient);
+        stopQuietly(tlsBounded);
         stopQuietly(bounded);
         stopQuietly(patient);
         stopQuietly(futureBounded);
@@ -97,6 +109,7 @@ public class WebSocketProxyHandshakeTimeoutIntegrationTest {
         boundedClient.reset();
         patientClient.reset();
         futureBoundedClient.reset();
+        tlsBoundedClient.reset();
     }
 
     @Test
@@ -121,6 +134,33 @@ public class WebSocketProxyHandshakeTimeoutIntegrationTest {
         futureBoundedClient.reset();
         futureBoundedConfiguration.maxSocketTimeoutInMillis(TimeUnit.MINUTES.toMillis(5));
         assertTimedOutWithOneWarning(futureBounded, futureBoundedClient, "/silent/3", FUTURE_TIMED_OUT);
+    }
+
+    /**
+     * A wss upstream that accepts the connection and never answers the ClientHello: the TLS handshake is bounded by
+     * {@code socketConnectionTimeout}, as every other outbound handshake is, not by Netty's fixed 10 seconds.
+     */
+    @Test
+    public void shouldEndAWssHandshakeThatStallsAtTheConfiguredConnectionTimeout() throws Exception {
+        tlsBoundedClient.when(request().withPath("/tls-stalled")).forward(forward().withHost("127.0.0.1").withPort(upstream.port()).withScheme(HttpForward.Scheme.HTTPS));
+        long start = System.nanoTime();
+        int status;
+        String body;
+        try (Socket socket = connect(tlsBounded)) {
+            sendUpgrade(socket, "/tls-stalled");
+            InputStream input = socket.getInputStream();
+            status = Integer.parseInt(readHead(input).substring(9, 12));
+            body = readToEnd(input);
+        }
+        long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+
+        assertThat(body, status, is(502));
+        assertThat(body, is(TLS_TIMED_OUT));
+        assertThat("ended no earlier than the configured timeout", elapsedMillis, greaterThanOrEqualTo(TLS_TIMEOUT_MILLIS - 200));
+        assertThat("ended by the configured timeout, not Netty's 10 second default (" + elapsedMillis + "ms)", elapsedMillis, lessThan(6_000L));
+        List<String> entries = failures(tlsBoundedClient);
+        assertThat(entries.toString(), entries.size(), is(1));
+        assertThat(entries.get(0), containsString(TLS_TIMED_OUT));
     }
 
     @Test

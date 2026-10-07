@@ -44,6 +44,8 @@ import static org.hamcrest.core.Is.is;
 public class PortForwardingMockingIntegrationTest extends AbstractBasicMockingSameJVMIntegrationTest {
 
     private static int mockServerPort;
+    // the port is forwarded to a plain HTTP echo server, which closes a connection that starts with a TLS ClientHello
+    private static final String UPSTREAM_CLOSED_DURING_TLS_HANDSHAKE = "TLS with the upstream failed: SSLHandshakeException: upstream closed the connection during the TLS handshake";
 
     @BeforeClass
     public static void startServer() {
@@ -315,7 +317,8 @@ public class PortForwardingMockingIntegrationTest extends AbstractBasicMockingSa
                 getHeadersToRemove()
             ), is(response()
                 .withStatusCode(HttpStatusCode.BAD_GATEWAY_502.code())
-                .withReasonPhrase(HttpStatusCode.BAD_GATEWAY_502.reasonPhrase())));
+                .withReasonPhrase(HttpStatusCode.BAD_GATEWAY_502.reasonPhrase())
+                .withBody(UPSTREAM_CLOSED_DURING_TLS_HANDSHAKE)));
         assertThat(makeRequest(
                 request()
                     .withSecure(true)
@@ -323,7 +326,8 @@ public class PortForwardingMockingIntegrationTest extends AbstractBasicMockingSa
                 getHeadersToRemove()
             ), is(response()
                 .withStatusCode(HttpStatusCode.BAD_GATEWAY_502.code())
-                .withReasonPhrase(HttpStatusCode.BAD_GATEWAY_502.reasonPhrase())));
+                .withReasonPhrase(HttpStatusCode.BAD_GATEWAY_502.reasonPhrase())
+                .withBody(UPSTREAM_CLOSED_DURING_TLS_HANDSHAKE)));
     }
 
     @Test

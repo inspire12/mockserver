@@ -782,6 +782,26 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **A binary forward or a proxied `wss` WebSocket now ends a stalled TLS handshake with the upstream
+  after `socketConnectionTimeoutInMillis`, and says why it failed.** A binary (non-HTTP) message
+  forwarded on a TLS connection of its own (`forwardBinaryRequestsUseSingleConnection` off, or through
+  an upstream proxy), and a WebSocket upgrade relayed to a `wss` upstream, waited Netty's fixed 10
+  seconds for an upstream that never finished the TLS handshake, whatever
+  `socketConnectionTimeoutInMillis` was set to, while HTTP forwards already followed it. Both now
+  follow it too, so by default they wait 20 seconds (the property's default) instead of 10: set
+  `socketConnectionTimeoutInMillis` lower to give up sooner. A failed handshake is now reported with
+  its reason: a binary forward fails with `TLS handshake with HOST:PORT failed: ...` (a timeout or a
+  close failed only as "Channel handler removed before valid response has been received"), and a
+  `wss` client is answered `502` with `TLS with the upstream failed: ...` (it read "upstream WebSocket
+  connection closed before handshake completed").
+- **A forward whose upstream closes the connection during the TLS handshake now says so.** An upstream
+  that accepts the connection and then closes it before the handshake completes (which is also how some
+  servers refuse a TLS version or cipher they do not support) failed the forward as a closed connection:
+  an empty `502`, "Channel handler removed before valid response has been received", and the reason in
+  no log. An HTTP forward now gets a `502` whose body is `TLS with the upstream failed:
+  SSLHandshakeException: upstream closed the connection during the TLS handshake` and is logged once
+  as an error with the request, and a binary forward or a `wss` WebSocket relay fails with the same
+  reason.
 - **The Node launcher's `stop_mockserver` now rejects when MockServer refuses or fails the stop request.** An answer such as `401`, `403` or `500` used to resolve as if MockServer had stopped; it now rejects with the status code (a `404`, meaning nothing to stop, still resolves), and a MockServer the launcher started is still stopped.
 - **The Node client's `pactVerify` now rejects when MockServer answers with an error instead of never settling.** A plain-text answer such as a `500` or `401` made the promise hang with neither callback called; it now rejects with the error message or the response body, and resolves only with a verification report.
 - **A request a client sends just before it resets its connection is no longer lost when a write to that client

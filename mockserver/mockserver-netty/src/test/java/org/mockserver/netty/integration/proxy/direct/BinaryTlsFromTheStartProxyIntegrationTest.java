@@ -14,7 +14,10 @@ import org.mockserver.socket.tls.PEMToFile;
 import org.slf4j.event.Level;
 
 import javax.net.ssl.SSLSocket;
+import java.io.DataInputStream;
 import java.io.IOException;
+import java.net.InetAddress;
+import java.net.ServerSocket;
 import java.net.Socket;
 import java.security.KeyStore;
 import java.security.cert.Certificate;
@@ -22,12 +25,16 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.lessThan;
 import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.integration.ClientAndServer.startClientAndServer;
 import static org.mockserver.model.BinaryRequestDefinition.binaryRequest;
@@ -68,9 +75,13 @@ public class BinaryTlsFromTheStartProxyIntegrationTest {
     }
 
     private void startMockServer(Configuration configuration, StartTlsUpstream upstream) {
+        startMockServer(configuration, upstream.port());
+    }
+
+    private void startMockServer(Configuration configuration, int upstreamPort) {
         // a clone: the event log clears the entry it is handed once it has copied it
         MockServerLogger.setGlobalLogEventListener(logEntry -> logged.add(logEntry.clone()));
-        mockServer = startClientAndServer(configuration.logLevel("INFO"), "127.0.0.1", upstream.port(), PortFactory.findFreePort());
+        mockServer = startClientAndServer(configuration.logLevel("INFO"), "127.0.0.1", upstreamPort, PortFactory.findFreePort());
     }
 
     /** A client connection to MockServer, TLS from its first byte, sending the given name, if any, as SNI. */
@@ -201,6 +212,70 @@ public class BinaryTlsFromTheStartProxyIntegrationTest {
             assertThat("nor anything in the clear", connection.receivedInTheClear().length, is(0));
             assertThat(upstream.connections().size(), is(1));
             tryWaitForSuccess(() -> assertThat(logged("unable to start TLS with upstream").size(), is(1)));
+        }
+    }
+
+    @Test
+    public void shouldReportAnUpstreamThatClosesTheConnectionDuringTheHandshake() throws Exception {
+        try (ServerSocket upstream = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))) {
+            Thread acceptor = new Thread(() -> {
+                try (Socket accepted = upstream.accept()) {
+                    accepted.setSoTimeout(20_000);
+                    // the whole ClientHello: a socket closed with bytes unread is reset, not closed
+                    DataInputStream input = new DataInputStream(accepted.getInputStream());
+                    byte[] header = new byte[5];
+                    input.readFully(header);
+                    input.readFully(new byte[((header[3] & 0xff) << 8) | (header[4] & 0xff)]);
+                } catch (IOException closedOrFailed) {
+                    // the test fails on what MockServer logged
+                }
+            }, "closing-upstream");
+            acceptor.setDaemon(true);
+            acceptor.start();
+            startMockServer(configuration(), upstream.getLocalPort());
+            SSLSocket tls = client(null, "TLSv1.3");
+
+            tls.getOutputStream().write(STARTUP);
+            tls.getOutputStream().flush();
+
+            assertThat(readAfterClose(tls), is("closed"));
+            tryWaitForSuccess(() -> assertThat(logged("unable to start TLS with upstream").size(), is(1)));
+            assertThat(logged("unable to start TLS with upstream").get(0).getMessage(), containsString("upstream closed the connection during the TLS handshake"));
+        }
+    }
+
+    @Test
+    public void shouldEndAnUpstreamHandshakeThatStallsAtTheConfiguredConnectionTimeout() throws Exception {
+        List<Socket> accepted = new CopyOnWriteArrayList<>();
+        try (ServerSocket upstream = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))) {
+            Thread acceptor = new Thread(() -> {
+                try {
+                    // held open and never answered, so only the handshake timeout ends the handshake
+                    accepted.add(upstream.accept());
+                } catch (IOException closed) {
+                    // the end of the test
+                }
+            }, "silent-upstream");
+            acceptor.setDaemon(true);
+            acceptor.start();
+            startMockServer(configuration().socketConnectionTimeoutInMillis(1000L), upstream.getLocalPort());
+            SSLSocket tls = client(null, "TLSv1.3");
+
+            long start = System.nanoTime();
+            tls.getOutputStream().write(STARTUP);
+            tls.getOutputStream().flush();
+            String outcome = readAfterClose(tls);
+            long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+
+            assertThat(outcome, is("closed"));
+            assertThat("ended no earlier than the configured timeout", elapsedMillis, greaterThanOrEqualTo(800L));
+            assertThat("ended by the configured timeout, not Netty's 10 second default (" + elapsedMillis + "ms)", elapsedMillis, lessThan(6000L));
+            tryWaitForSuccess(() -> assertThat(logged("unable to start TLS with upstream").size(), is(1)));
+            assertThat(logged("unable to start TLS with upstream").get(0).getMessage(), containsString("handshake timed out after 1000ms"));
+        } finally {
+            for (Socket socket : accepted) {
+                socket.close();
+            }
         }
     }
 

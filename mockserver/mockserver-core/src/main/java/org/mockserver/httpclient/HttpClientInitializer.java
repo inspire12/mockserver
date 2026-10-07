@@ -16,7 +16,6 @@ import org.mockserver.codec.MockServerBinaryClientCodec;
 import org.mockserver.codec.MockServerHttpClientCodec;
 import org.mockserver.codec.StreamingAwareHttpObjectAggregator;
 import org.mockserver.configuration.Configuration;
-import org.mockserver.configuration.ConfigurationProperties;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.LoggingHandler;
 import org.mockserver.logging.MockServerLogger;
@@ -45,8 +44,6 @@ import static org.slf4j.event.Level.TRACE;
 public class HttpClientInitializer extends ChannelInitializer<SocketChannel> {
 
     private final Configuration configuration;
-    // set for a binary forward, which is built without a Configuration
-    private final Integer binaryForwardMaxHeaderSize;
     private final MockServerLogger mockServerLogger;
     private final boolean forwardProxyClient;
     private final Protocol httpProtocol;
@@ -58,21 +55,12 @@ public class HttpClientInitializer extends ChannelInitializer<SocketChannel> {
     private final NettySslContextFactory nettySslContextFactory;
 
     /**
-     * For a binary forward, which has no HTTP codecs and keeps Netty's TLS handshake timeout: the one thing it reads
-     * as HTTP is an upstream proxy's answer to {@code CONNECT}, with headers up to {@code maxHeaderSize}.
+     * @param httpProtocol null for a binary forward, which has no HTTP codecs: the one thing it reads as HTTP is an
+     *                     upstream proxy's answer to {@code CONNECT}
      */
-    HttpClientInitializer(Map<ProxyConfiguration.Type, ProxyConfiguration> proxyConfigurations, MockServerLogger mockServerLogger, boolean forwardProxyClient, NettySslContextFactory nettySslContextFactory, int maxHeaderSize) {
-        this(proxyConfigurations, mockServerLogger, forwardProxyClient, nettySslContextFactory, null, null, maxHeaderSize);
-    }
-
     HttpClientInitializer(Map<ProxyConfiguration.Type, ProxyConfiguration> proxyConfigurations, MockServerLogger mockServerLogger, boolean forwardProxyClient, NettySslContextFactory nettySslContextFactory, Protocol httpProtocol, Configuration configuration) {
-        this(proxyConfigurations, mockServerLogger, forwardProxyClient, nettySslContextFactory, httpProtocol, configuration, null);
-    }
-
-    private HttpClientInitializer(Map<ProxyConfiguration.Type, ProxyConfiguration> proxyConfigurations, MockServerLogger mockServerLogger, boolean forwardProxyClient, NettySslContextFactory nettySslContextFactory, Protocol httpProtocol, Configuration configuration, Integer binaryForwardMaxHeaderSize) {
         this.proxyConfigurations = proxyConfigurations;
         this.configuration = configuration;
-        this.binaryForwardMaxHeaderSize = binaryForwardMaxHeaderSize;
         this.mockServerLogger = mockServerLogger;
         this.forwardProxyClient = forwardProxyClient;
         this.httpProtocol = httpProtocol;
@@ -154,13 +142,10 @@ public class HttpClientInitializer extends ChannelInitializer<SocketChannel> {
             // Bound the TLS handshake by the configured connection timeout instead of Netty's fixed 10s
             // default: the handshake is part of establishing the connection, so socketConnectionTimeout
             // (which also drives the TCP CONNECT_TIMEOUT_MILLIS) covers the whole connect-plus-handshake
-            // window. Covers pooled and unpooled channels and the ALPN HTTP/1.1 and HTTP/2 paths, which all
-            // add the handler here. configuration is null only on the binary path, which keeps Netty's default.
-            if (configuration != null) {
-                Long handshakeTimeoutMillis = configuration.socketConnectionTimeoutInMillis();
-                if (handshakeTimeoutMillis != null && handshakeTimeoutMillis > 0) {
-                    sslHandler.setHandshakeTimeoutMillis(handshakeTimeoutMillis);
-                }
+            // window, for HTTP and binary forwards, pooled or not.
+            Long handshakeTimeoutMillis = configuration.socketConnectionTimeoutInMillis();
+            if (handshakeTimeoutMillis != null && handshakeTimeoutMillis > 0) {
+                sslHandler.setHandshakeTimeoutMillis(handshakeTimeoutMillis);
             }
             pipeline.addLast(sslHandler);
         }
@@ -195,7 +180,7 @@ public class HttpClientInitializer extends ChannelInitializer<SocketChannel> {
      * one response, so arming the read timeout at pipeline-build time is correct for it.
      */
     private void addReadTimeoutHandlerIfNotPooled(ChannelPipeline pipeline) {
-        if (configuration == null || pipeline.channel().attr(CONNECTION_POOL).get() != null) {
+        if (pipeline.channel().attr(CONNECTION_POOL).get() != null) {
             return;
         }
         long readTimeoutMillis = configuration.maxSocketTimeoutInMillis();
@@ -209,7 +194,7 @@ public class HttpClientInitializer extends ChannelInitializer<SocketChannel> {
      * change applies to new connections.
      */
     private int maxHeaderSize() {
-        return binaryForwardMaxHeaderSize != null ? binaryForwardMaxHeaderSize : configuration.maxHeaderSize();
+        return configuration.maxHeaderSize();
     }
 
     private void configureHttp1Pipeline(ChannelPipeline pipeline) {
@@ -220,11 +205,7 @@ public class HttpClientInitializer extends ChannelInitializer<SocketChannel> {
         pipeline.addLast(new ForwardHeaderLimit.Http1Response(mockServerLogger, maxHeaderSize));
         pipeline.addLast(new BoundedZstdHttpContentDecompressor());
         pipeline.addLast(new TimeToFirstByteHandler());
-        if (configuration != null) {
-            pipeline.addLast(new StreamingAwareHttpObjectAggregator(configuration.maxResponseBodySize(), configuration, mockServerLogger));
-        } else {
-            pipeline.addLast(new StreamingAwareHttpObjectAggregator(ConfigurationProperties.maxResponseBodySize()));
-        }
+        pipeline.addLast(new StreamingAwareHttpObjectAggregator(configuration.maxResponseBodySize(), configuration, mockServerLogger));
         pipeline.addLast(new MockServerHttpClientCodec(mockServerLogger, proxyConfigurations));
         pipeline.addLast(httpClientHandler);
         recordForwardUpstreamProtocol(pipeline, "http1_1");
@@ -295,7 +276,7 @@ public class HttpClientInitializer extends ChannelInitializer<SocketChannel> {
         // connection, truncating the stream. The pre-dispatch window (connect + TLS handshake) is already
         // covered by the connect timeout and TLS handshake timeout.
 
-        int maxFrameSize = configuration != null ? configuration.maxResponseBodySize() : ConfigurationProperties.maxResponseBodySize();
+        int maxFrameSize = configuration.maxResponseBodySize();
         int maxHeaderSize = maxHeaderSize();
         // the limit an upstream announces for requests is advisory (RFC 9113 section 6.5.2): send, and relay its answer
         Http2FrameCodecBuilder frameCodecBuilder = Http2FrameCodecBuilder.forClient()

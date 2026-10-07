@@ -45,6 +45,7 @@ import org.mockserver.socket.tls.ForwardProxyTLSX509CertificatesTrustManager;
 import org.slf4j.event.Level;
 
 import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -104,6 +105,7 @@ public class ForwardConnectionErrorLoggingIntegrationTest {
     private static RawUpstream refusingProxy;
     private static RawUpstream plainHttpUpstream;
     private static RawUpstream silentUpstream;
+    private static RawUpstream closingUpstream;
     private static SelfSignedCertificate http2UpstreamCertificate;
     private static Channel untrustedUpstream;
     private static MockServer validating;
@@ -135,6 +137,13 @@ public class ForwardConnectionErrorLoggingIntegrationTest {
         });
         // accepts the connection and never answers the ClientHello
         silentUpstream = new RawUpstream(socket -> readUntilClosed(socket.getInputStream()));
+        // reads the whole ClientHello, then closes: a socket closed with bytes unread is reset, not closed
+        closingUpstream = new RawUpstream(socket -> {
+            DataInputStream input = new DataInputStream(socket.getInputStream());
+            byte[] header = new byte[5];
+            input.readFully(header);
+            input.readFully(new byte[((header[3] & 0xff) << 8) | (header[4] & 0xff)]);
+        });
         // answers a TLS ClientHello with bytes that are not TLS
         notTlsUpstream = new RawUpstream(socket -> {
             socket.getInputStream().read();
@@ -204,7 +213,7 @@ public class ForwardConnectionErrorLoggingIntegrationTest {
             nettysLog.close();
             http2Upstream.close();
             untrustedUpstream.close();
-            for (RawUpstream upstream : Arrays.asList(notTlsUpstream, resettingUpstream, refusingProxy, plainHttpUpstream, silentUpstream)) {
+            for (RawUpstream upstream : Arrays.asList(notTlsUpstream, resettingUpstream, refusingProxy, plainHttpUpstream, silentUpstream, closingUpstream)) {
                 upstream.close();
             }
             http2UpstreamCertificate.delete();
@@ -222,6 +231,7 @@ public class ForwardConnectionErrorLoggingIntegrationTest {
             client.when(request().withPath("/untrusted")).forward(forward().withHost("127.0.0.1").withPort(port(untrustedUpstream)).withScheme(HttpForward.Scheme.HTTPS));
             client.when(request().withPath("/plain-http")).forward(forward().withHost("127.0.0.1").withPort(plainHttpUpstream.port()).withScheme(HttpForward.Scheme.HTTPS));
             client.when(request().withPath("/silent")).forward(forward().withHost("127.0.0.1").withPort(silentUpstream.port()).withScheme(HttpForward.Scheme.HTTPS));
+            client.when(request().withPath("/closing")).forward(forward().withHost("127.0.0.1").withPort(closingUpstream.port()).withScheme(HttpForward.Scheme.HTTPS));
         }
         logged.clear();
         goAwaysSentToTheUpstream.clear();
@@ -358,6 +368,16 @@ public class ForwardConnectionErrorLoggingIntegrationTest {
 
         assertThat(response.toString(), response.status, is(502));
         assertThat(response.body, is("TLS with the upstream failed: SslHandshakeTimeoutException: handshake timed out after 1000ms"));
+        assertForwardFailureLoggedOnceAsAnError(response.body);
+        assertThat(nettysLog.since(nettysLogBeforeThisTest), empty());
+    }
+
+    @Test
+    public void shouldFailAForwardToAnUpstreamThatClosesTheConnectionDuringTheHandshakeWithThatReason() throws Exception {
+        Response response = post(mockServer, "/closing");
+
+        assertThat(response.toString(), response.status, is(502));
+        assertThat(response.body, is("TLS with the upstream failed: SSLHandshakeException: upstream closed the connection during the TLS handshake"));
         assertForwardFailureLoggedOnceAsAnError(response.body);
         assertThat(nettysLog.since(nettysLogBeforeThisTest), empty());
     }

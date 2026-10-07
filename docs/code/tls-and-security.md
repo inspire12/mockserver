@@ -225,7 +225,8 @@ Selection and caching live in `NettySslContextFactory.createClientSslContext(for
 ### When an Outbound TLS Connection Fails
 
 A forward whose TLS handshake fails (an untrusted certificate, a certificate for another host, an upstream
-that does not speak TLS, a handshake that outlasts `socketConnectionTimeout`), or whose client TLS context
+that does not speak TLS, an upstream that closes the connection during the handshake, a handshake that outlasts
+`socketConnectionTimeout`), or whose client TLS context
 cannot be built (`forwardProxyPrivateKey` / `forwardProxyCertificateChain` that are not valid PEM), is answered
 `502` with the reason in the body, for example `TLS with the upstream failed: SSLHandshakeException: PKIX path
 building failed: ...` or `connection to the upstream could not be set up: RuntimeException: Exception creating

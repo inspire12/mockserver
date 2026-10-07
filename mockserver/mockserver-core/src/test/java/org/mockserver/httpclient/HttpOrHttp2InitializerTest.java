@@ -235,8 +235,26 @@ public class HttpOrHttp2InitializerTest {
     }
 
     @Test
-    public void shouldLeaveAWaitingForwardToTheTeardownWhenTheHandshakeEndsBecauseTheConnectionClosed() {
-        // the upstream closed the connection: a connection failure, as before
+    public void shouldFailAWaitingForwardWithAnUpstreamThatClosedTheConnectionDuringTheHandshake() {
+        EmbeddedChannel connection = connection();
+        CompletableFuture<Message> forward = waitingForward(connection);
+        // as Netty's TLS handler reports a connection that closed while its handshake was in progress
+        ClosedChannelException closed = new ClosedChannelException();
+        closed.addSuppressed(new SSLHandshakeException("Connection closed while SSL/TLS handshake was in progress"));
+
+        connection.pipeline().fireUserEventTriggered(new SslHandshakeCompletionEvent(closed));
+
+        Throwable failure = failureOf(forward);
+        assertThat(failure, instanceOf(SocketConnectionException.class));
+        assertThat(failure.getCause(), instanceOf(SSLHandshakeException.class));
+        assertThat(failure.getMessage(), is("TLS handshake with upstream.example:8443 failed: SSLHandshakeException: upstream closed the connection during the TLS handshake"));
+        assertThat(logged, empty());
+        connection.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldLeaveAWaitingForwardToTheTeardownWhenTheConnectionClosedBeforeAHandshakeStarted() {
+        // without the suppressed handshake exception no handshake was in progress: a connection failure, as before
         EmbeddedChannel connection = connection();
         CompletableFuture<Message> forward = waitingForward(connection);
 

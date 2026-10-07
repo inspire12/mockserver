@@ -4,6 +4,8 @@ import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.*;
 import io.netty.handler.codec.http.*;
 import io.netty.handler.codec.http.websocketx.*;
+import io.netty.handler.ssl.SslHandler;
+import io.netty.handler.ssl.SslHandshakeCompletionEvent;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
@@ -34,6 +36,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.mockserver.exception.ExceptionHandling.boundedFaultDescriptionWithRootCause;
+import static org.mockserver.exception.ExceptionHandling.upstreamHandshakeFailure;
 import static org.mockserver.log.model.LogEntry.LogMessageType.FORWARDED_REQUEST;
 import static org.mockserver.model.HttpResponse.response;
 
@@ -160,9 +164,15 @@ public class WebSocketProxyRelayHandler {
                         // (forwardProxyTLSX509CertificatesTrustManagerType) — matching HttpClientInitializer /
                         // RelayConnectHandler. The false branch trusts only MockServer's own CA, which would fail
                         // wss to any real upstream and silently ignore the configured trust policy.
-                        pipeline.addLast(nettySslContextFactory
+                        SslHandler sslHandler = nettySslContextFactory
                             .createClientSslContext(true, false)
-                            .newHandler(ch.alloc(), upstreamHost, upstreamPort));
+                            .newHandler(ch.alloc(), upstreamHost, upstreamPort);
+                        // bounded as every other outbound handshake is, not by Netty's fixed 10 seconds
+                        Long tlsHandshakeTimeoutMillis = configuration.socketConnectionTimeoutInMillis();
+                        if (tlsHandshakeTimeoutMillis != null && tlsHandshakeTimeoutMillis > 0) {
+                            sslHandler.setHandshakeTimeoutMillis(tlsHandshakeTimeoutMillis);
+                        }
+                        pipeline.addLast(sslHandler);
                     }
                     // a status line is short, so it keeps Netty's limit; the headers follow maxHeaderSize as a forward's do
                     pipeline.addLast(new HttpClientCodec(HttpObjectDecoder.DEFAULT_MAX_INITIAL_LINE_LENGTH, maxHeaderSize, HttpObjectDecoder.DEFAULT_MAX_CHUNK_SIZE));
@@ -377,6 +387,18 @@ public class WebSocketProxyRelayHandler {
             if (handshakeTimeout != null) {
                 handshakeTimeout.cancel(false);
             }
+        }
+
+        /**
+         * A failed TLS handshake is reported first as this event, and only as that for a timeout or a close: the
+         * client is answered with its reason before the connection's close is reported in its place.
+         */
+        @Override
+        public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
+            if (evt instanceof SslHandshakeCompletionEvent && !((SslHandshakeCompletionEvent) evt).isSuccess()) {
+                fail(ctx, "TLS with the upstream failed: " + boundedFaultDescriptionWithRootCause(upstreamHandshakeFailure(((SslHandshakeCompletionEvent) evt).cause())));
+            }
+            super.userEventTriggered(ctx, evt);
         }
 
         @Override

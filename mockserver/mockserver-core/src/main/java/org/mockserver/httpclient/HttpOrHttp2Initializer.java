@@ -4,19 +4,16 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPipeline;
 import io.netty.handler.ssl.ApplicationProtocolNames;
 import io.netty.handler.ssl.ApplicationProtocolNegotiationHandler;
-import io.netty.handler.ssl.SslHandshakeCompletionEvent;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.slf4j.event.Level;
 
 import javax.net.ssl.SSLException;
 import java.net.ConnectException;
-import java.net.InetSocketAddress;
 import java.util.function.Consumer;
 
 import static org.mockserver.exception.ExceptionHandling.DIRECT_MEMORY_LIMIT_REACHED;
 import static org.mockserver.exception.ExceptionHandling.boundedFault;
-import static org.mockserver.exception.ExceptionHandling.boundedFaultDescriptionWithRootCause;
 import static org.mockserver.exception.ExceptionHandling.connectionClosedException;
 import static org.mockserver.exception.ExceptionHandling.directMemoryLimitReached;
 import static org.mockserver.exception.ExceptionHandling.isSslOrDecoderFault;
@@ -53,16 +50,15 @@ public class HttpOrHttp2Initializer extends ApplicationProtocolNegotiationHandle
     }
 
     /**
-     * A failed handshake is reported first as this event, and only as that for a timeout: the waiting request is
-     * failed with its exception here, before the connection closes and its teardown is reported in its place.
+     * A failed handshake is reported first as this event, and only as that for a timeout or a connection that
+     * closed during it: the waiting request is failed with its exception here, before the connection closes and
+     * its teardown is reported in its place.
      */
     @Override
     public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
-        if (evt instanceof SslHandshakeCompletionEvent && !((SslHandshakeCompletionEvent) evt).isSuccess()) {
-            SSLException handshakeFailure = tlsFailure(((SslHandshakeCompletionEvent) evt).cause());
-            if (handshakeFailure != null) {
-                failWaitingRequest(ctx, handshakeFailure);
-            }
+        SSLException handshakeFailure = HttpClientConnectionErrorHandler.handshakeFailure(evt);
+        if (handshakeFailure != null) {
+            failWaitingRequest(ctx, handshakeFailure);
         }
         super.userEventTriggered(ctx, evt);
     }
@@ -74,9 +70,7 @@ public class HttpOrHttp2Initializer extends ApplicationProtocolNegotiationHandle
         if (handshakeFailure == failedRequestWith) {
             return true;
         }
-        InetSocketAddress upstream = ctx.channel().attr(REMOTE_SOCKET).get();
-        String message = "TLS handshake with " + (upstream != null ? upstream.getHostString() + ":" + upstream.getPort() : "upstream") + " failed: " + boundedFaultDescriptionWithRootCause(handshakeFailure);
-        if (HttpClientConnectionErrorHandler.failWaitingRequest(ctx.channel(), new SocketConnectionException(message, handshakeFailure))) {
+        if (HttpClientConnectionErrorHandler.failWaitingRequestWithHandshakeFailure(ctx.channel(), handshakeFailure)) {
             failedRequestWith = handshakeFailure;
             return true;
         }

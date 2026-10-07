@@ -17,14 +17,17 @@ import io.netty.handler.ssl.util.SelfSignedCertificate;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.junit.function.ThrowingRunnable;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.httpclient.NettyHttpClient;
 import org.mockserver.httpclient.SocketConnectionException;
 import org.mockserver.logging.MockServerLogger;
+import org.mockserver.model.BinaryMessage;
 import org.mockserver.scheduler.Scheduler;
 import org.mockserver.socket.tls.ForwardProxyTLSX509CertificatesTrustManager;
 
 import javax.net.ssl.SSLHandshakeException;
+import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.InetAddress;
@@ -65,6 +68,7 @@ public class NettyHttpClientTlsFailureTest {
     private static Channel tlsUpstream;
     private static RawUpstream plainHttpUpstream;
     private static RawUpstream silentUpstream;
+    private static RawUpstream closingUpstream;
 
     @BeforeClass
     public static void startUpstreams() throws Exception {
@@ -95,6 +99,8 @@ public class NettyHttpClientTlsFailureTest {
             drain(socket.getInputStream());
         });
         silentUpstream = new RawUpstream(socket -> drain(socket.getInputStream()));
+        // reads the whole ClientHello first: a socket closed with bytes unread is reset, not closed
+        closingUpstream = new RawUpstream(NettyHttpClientTlsFailureTest::readTlsRecord);
     }
 
     @AfterClass
@@ -102,6 +108,7 @@ public class NettyHttpClientTlsFailureTest {
         tlsUpstream.close().sync();
         plainHttpUpstream.close();
         silentUpstream.close();
+        closingUpstream.close();
         certificate.delete();
         clientEventLoopGroup.shutdownGracefully(0, 0, MILLISECONDS).syncUninterruptibly();
         upstreamEventLoopGroup.shutdownGracefully(0, 0, MILLISECONDS).syncUninterruptibly();
@@ -148,11 +155,54 @@ public class NettyHttpClientTlsFailureTest {
         assertThat(failure.getMessage(), is(failedHandshakeWith(silentUpstream.port()) + "SslHandshakeTimeoutException: handshake timed out after 500ms"));
     }
 
+    @Test
+    public void shouldFailWithAnUpstreamThatClosesTheConnectionDuringTheHandshake() {
+        Throwable failure = failureOf(configuration(), closingUpstream.port());
+
+        assertThat(failure.getCause(), instanceOf(SSLHandshakeException.class));
+        assertThat(failure.getMessage(), is(failedHandshakeWith(closingUpstream.port()) + "SSLHandshakeException: upstream closed the connection during the TLS handshake"));
+    }
+
+    @Test
+    public void shouldFailABinaryForwardWithAnUpstreamThatClosesTheConnectionDuringTheHandshake() {
+        Throwable failure = binaryFailureOf(configuration(), closingUpstream.port());
+
+        assertThat(failure.getCause(), instanceOf(SSLHandshakeException.class));
+        assertThat(failure.getMessage(), is(failedHandshakeWith(closingUpstream.port()) + "SSLHandshakeException: upstream closed the connection during the TLS handshake"));
+    }
+
+    @Test
+    public void shouldFailABinaryForwardWithAHandshakeThatTimesOutAfterTheConfiguredConnectionTimeout() {
+        Throwable failure = binaryFailureOf(configuration().socketConnectionTimeoutInMillis(500L), silentUpstream.port());
+
+        assertThat(failure.getCause(), instanceOf(SslHandshakeTimeoutException.class));
+        assertThat(failure.getMessage(), is(failedHandshakeWith(silentUpstream.port()) + "SslHandshakeTimeoutException: handshake timed out after 500ms"));
+    }
+
+    @Test
+    public void shouldFailABinaryForwardWithAnUntrustedCertificate() {
+        Throwable failure = binaryFailureOf(configuration().forwardProxyTLSX509CertificatesTrustManagerType(ForwardProxyTLSX509CertificatesTrustManager.JVM), port(tlsUpstream));
+
+        assertThat(failure.getCause(), instanceOf(SSLHandshakeException.class));
+        assertThat(failure.getMessage(), containsString("unable to find valid certification path to requested target"));
+    }
+
     private Throwable failureOf(Configuration configuration, int upstreamPort) {
         NettyHttpClient client = new NettyHttpClient(configuration, mockServerLogger, clientEventLoopGroup, null, true);
-        ExecutionException exception = assertThrows(ExecutionException.class, () -> client
+        return handshakeFailure(upstreamPort, () -> client
             .sendRequest(request().withSecure(true).withHeader(HOST.toString(), "127.0.0.1:" + upstreamPort))
             .get(30, TimeUnit.SECONDS));
+    }
+
+    private Throwable binaryFailureOf(Configuration configuration, int upstreamPort) {
+        NettyHttpClient client = new NettyHttpClient(configuration, mockServerLogger, clientEventLoopGroup, null, true);
+        return handshakeFailure(upstreamPort, () -> client
+            .sendRequest(BinaryMessage.bytes(new byte[]{1, 2, 3}), true, new InetSocketAddress("127.0.0.1", upstreamPort), configuration.socketConnectionTimeoutInMillis(), null)
+            .get(30, TimeUnit.SECONDS));
+    }
+
+    private Throwable handshakeFailure(int upstreamPort, ThrowingRunnable forward) {
+        ExecutionException exception = assertThrows(ExecutionException.class, forward);
         // the type it failed with before, so callers that catch it still do
         assertThat(exception.getCause(), instanceOf(SocketConnectionException.class));
         Matcher matcher = Pattern.compile("^TLS handshake with ([^ ]+):" + upstreamPort + " failed: ").matcher(exception.getCause().getMessage());
@@ -170,6 +220,13 @@ public class NettyHttpClientTlsFailureTest {
 
     private static int port(Channel listener) {
         return ((InetSocketAddress) listener.localAddress()).getPort();
+    }
+
+    private static void readTlsRecord(Socket socket) throws IOException {
+        DataInputStream input = new DataInputStream(socket.getInputStream());
+        byte[] header = new byte[5];
+        input.readFully(header);
+        input.readFully(new byte[((header[3] & 0xff) << 8) | (header[4] & 0xff)]);
     }
 
     private static void drain(InputStream input) throws IOException {

@@ -191,6 +191,19 @@ public class HttpClientHandler extends SimpleChannelInboundHandler<Message> {
         return connectionHeader == null || !connectionHeader.toLowerCase().contains("close");
     }
 
+    /**
+     * A failed handshake reaches this handler only on a binary forward's connection, where it is the last handler:
+     * an HTTP forward's is handled by {@link HttpOrHttp2Initializer}, before this handler is added.
+     */
+    @Override
+    public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
+        SSLException handshakeFailure = HttpClientConnectionErrorHandler.handshakeFailure(evt);
+        if (handshakeFailure != null) {
+            HttpClientConnectionErrorHandler.failWaitingRequestWithHandshakeFailure(ctx.channel(), handshakeFailure);
+        }
+        super.userEventTriggered(ctx, evt);
+    }
+
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
         if (directMemoryLimitReached(cause)) {

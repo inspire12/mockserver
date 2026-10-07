@@ -1038,10 +1038,10 @@ completed the request's future directly the teardown would sometimes be reported
 | Connect refused, timed out, or host unresolvable | the connect cause |
 | The channel's pipeline could not be built (for example the client TLS context cannot be created from `forwardProxyPrivateKey` / `forwardProxyCertificateChain`, or a proxy handler cannot be constructed) | `ClientConfigurationException`, a `SocketConnectionException` whose cause is the initialisation error |
 | TLS handshake fails on a connected channel (untrusted certificate, host name mismatch, an upstream that does not speak TLS, handshake timeout) | `SocketConnectionException` whose cause is the handshake's `SSLException` |
+| The upstream closes the connection during the handshake | `SocketConnectionException` whose cause is an `SSLHandshakeException` saying `upstream closed the connection during the TLS handshake` (Netty reports it as a `ClosedChannelException` with a suppressed `SSLHandshakeException`; `ExceptionHandling.upstreamHandshakeFailure`) |
 | An HTTP/2 connection error with a request in flight | `SocketConnectionException` whose cause is the `Http2Exception` |
 | A TLS fault on an established HTTP/2 connection with a request in flight | the `DecoderException` itself, which Netty's `Http2MultiplexHandler` passes to the active streams when its cause is an `SSLException`; otherwise `SocketConnectionException` whose cause is the `SSLException` |
-| The upstream closes the connection during the handshake | the generic `Channel handler removed…` |
-| Binary forward (`sendRequest(BinaryMessage, …)`) | as above, and so does its `onRequestSent` callback: the connect cause, or `ClientConfigurationException` for a pipeline that cannot be built; with `forwardBinaryRequestsWithoutWaitingForResponse` a message that was never sent fails instead of completing empty |
+| Binary forward (`sendRequest(BinaryMessage, …)`) | as above, and so does its `onRequestSent` callback: the connect cause, or `ClientConfigurationException` for a pipeline that cannot be built; a failed TLS handshake as for an HTTP forward, from the handshake's event in `HttpClientHandler`, with the handshake bounded by `socketConnectionTimeoutInMillis`; with `forwardBinaryRequestsWithoutWaitingForResponse` a message that was never sent fails instead of completing empty |
 
 `HttpClientInitializer.initChannel` catches a failure to build the pipeline, fails the channel's
 `RESPONSE_FUTURE` with a `ClientConfigurationException` and closes the channel, so Netty's
@@ -1049,7 +1049,7 @@ completed the request's future directly the teardown would sometimes be reported
 `ClosedChannelException`, and `connectFresh` reports the channel's outcome in its place. A failed handshake,
 an HTTP/2 connection error and a TLS fault are raised in handlers after `HttpClientConnectionErrorHandler`,
 which never sees them: `HttpOrHttp2Initializer` (from the handshake's `SslHandshakeCompletionEvent`, which is
-all Netty reports for a timeout) and `Http2ForwardConnectionExceptionHandler` fail the waiting request with
+all Netty reports for a timeout or a close during the handshake; on a binary forward, `HttpClientHandler`) and `Http2ForwardConnectionExceptionHandler` fail the waiting request with
 them before the connection closes, and for an exception it does not recognise the HTTP/2 handler does the same
 before it closes the connection (see
 [netty-pipeline.md](netty-pipeline.md#exceptions-on-a-connection-to-an-upstream)). An `SSLException` that a

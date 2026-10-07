@@ -360,6 +360,24 @@ public class ExceptionHandling {
         return ssl;
     }
 
+    private static final String UPSTREAM_CLOSED_DURING_TLS_HANDSHAKE = "upstream closed the connection during the TLS handshake";
+
+    /**
+     * What a failed TLS handshake with an upstream failed with, as it is reported: {@code cause}, except that a
+     * connection that closed while the handshake was in progress, which Netty reports as a
+     * {@link ClosedChannelException} with a suppressed {@link SSLHandshakeException}, is an
+     * {@link SSLHandshakeException} saying the upstream closed it.
+     */
+    public static Throwable upstreamHandshakeFailure(Throwable cause) {
+        if (cause instanceof ClosedChannelException && Arrays.stream(cause.getSuppressed()).anyMatch(SSLHandshakeException.class::isInstance)) {
+            SSLHandshakeException closed = new SSLHandshakeException(UPSTREAM_CLOSED_DURING_TLS_HANDSHAKE);
+            // a stack trace would point here, not at the close
+            closed.setStackTrace(new StackTraceElement[0]);
+            return closed;
+        }
+        return cause;
+    }
+
     private static String scrubbedAndBounded(String message, UnaryOperator<String> scrub) {
         return message == null ? null : boundedFaultMessage(scrub.apply(message));
     }
