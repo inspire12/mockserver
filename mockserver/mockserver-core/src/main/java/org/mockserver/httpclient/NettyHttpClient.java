@@ -4,7 +4,6 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBufAllocator;
-import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
@@ -55,8 +54,7 @@ import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
-import static org.mockserver.exception.ExceptionHandling.boundedFault;
-import static org.mockserver.exception.ExceptionHandling.boundedFaultMessage;
+import static org.mockserver.formatting.StringFormatter.hexDumpForLog;
 import static org.mockserver.model.HttpResponse.response;
 
 public class NettyHttpClient {
@@ -637,7 +635,7 @@ public class NettyHttpClient {
                                     new LogEntry()
                                         .setLogLevel(Level.DEBUG)
                                         .setMessageFormat("sending bytes hex{}to{}")
-                                        .setArguments(SensitiveLogValue.of(ByteBufUtil.hexDump(binaryRequest.getBytes())), future.channel().attr(REMOTE_SOCKET).get())
+                                        .setArguments(SensitiveLogValue.of(hexDumpForLog(binaryRequest.getBytes(), configuration.maxLoggedBodyBytes())), future.channel().attr(REMOTE_SOCKET).get())
                                 );
                             }
                             // send the binary request
@@ -665,16 +663,7 @@ public class NettyHttpClient {
                     if (throwable == null) {
                         binaryResponseFuture.complete((BinaryMessage) message);
                     } else {
-                        // a header limit refusal was logged as it was raised
-                        if (HeaderLimitExceededException.in(throwable) == null && mockServerLogger.isEnabledForInstance(Level.WARN)) {
-                            mockServerLogger.logEvent(
-                                new LogEntry()
-                                    .setLogLevel(Level.WARN)
-                                    .setMessageFormat("exception while sending binary request:{}")
-                                    .setArguments(boundedFaultMessage(throwable))
-                                    .setThrowable(boundedFault(throwable))
-                            );
-                        }
+                        // not logged here: the caller has the failure, and the message's correlation id to log it with
                         binaryResponseFuture.completeExceptionally(throwable);
                     }
                 });

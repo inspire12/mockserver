@@ -41,7 +41,10 @@ import static org.mockserver.exception.ExceptionHandling.closeOnFlush;
 import static org.mockserver.exception.ExceptionHandling.connectionClosedException;
 import static org.mockserver.exception.ExceptionHandling.isSslOrDecoderFault;
 import static org.mockserver.exception.ExceptionHandling.sniDescription;
+import static org.mockserver.exception.ExceptionHandling.upstreamConnectionFailure;
 import static org.mockserver.formatting.StringFormatter.formatBytes;
+import static org.mockserver.formatting.StringFormatter.hexDumpForLog;
+import static org.mockserver.formatting.StringFormatter.utf8ForLog;
 import static org.mockserver.log.model.LogEntry.LogMessageType.FORWARDED_REQUEST;
 import static org.mockserver.log.model.LogEntry.LogMessageType.RECEIVED_REQUEST;
 import static org.mockserver.mock.action.http.HttpActionHandler.getRemoteAddress;
@@ -92,7 +95,7 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
                 .setLogLevel(Level.INFO)
                 .setCorrelationId(logCorrelationId)
                 .setMessageFormat("received binary request:{}")
-                .setArguments(SensitiveLogValue.of(ByteBufUtil.hexDump(binaryRequest.getBytes())))
+                .setArguments(SensitiveLogValue.of(hexDumpForLog(binaryRequest.getBytes(), configuration.maxLoggedBodyBytes())))
         );
         final InetSocketAddress remoteAddress = getRemoteAddress(ctx);
         if (remoteAddress != null) {
@@ -113,7 +116,7 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
                             .setLogLevel(Level.INFO)
                             .setCorrelationId(logCorrelationId)
                             .setMessageFormat("no matching binary expectation for binary request:{}")
-                            .setArguments(SensitiveLogValue.of(ByteBufUtil.hexDump(binaryRequest.getBytes())))
+                            .setArguments(SensitiveLogValue.of(hexDumpForLog(binaryRequest.getBytes(), configuration.maxLoggedBodyBytes())))
                     );
                 }
                 writeUnknownFormatMessage(ctx, binaryRequest, logCorrelationId);
@@ -150,7 +153,7 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
                         .setLogLevel(Level.INFO)
                         .setCorrelationId(logCorrelationId)
                         .setMessageFormat("returning nothing, as the binary mock response is empty, for binary request:{}")
-                        .setArguments(SensitiveLogValue.of(formatBytes(binaryRequest.getBytes())))
+                        .setArguments(SensitiveLogValue.of(formatBytes(binaryRequest.getBytes(), configuration.maxLoggedBodyBytes())))
                 );
             }
         } else {
@@ -161,7 +164,7 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
                         .setLogLevel(Level.INFO)
                         .setCorrelationId(logCorrelationId)
                         .setMessageFormat("returning binary mock response:{}for binary request:{}")
-                        .setArguments(SensitiveLogValue.of(formatBytes(reply)), SensitiveLogValue.of(formatBytes(binaryRequest.getBytes())))
+                        .setArguments(SensitiveLogValue.of(formatBytes(reply, configuration.maxLoggedBodyBytes())), SensitiveLogValue.of(formatBytes(binaryRequest.getBytes(), configuration.maxLoggedBodyBytes())))
                 );
             }
             ctx.writeAndFlush(Unpooled.copiedBuffer(reply));
@@ -200,7 +203,7 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
                         .setLogLevel(Level.WARN)
                         .setCorrelationId(logCorrelationId)
                         .setMessageFormat("forwarding binary request:{}to:{}because the expectation it matched has no binary response:{}")
-                        .setArguments(SensitiveLogValue.of(formatBytes(binaryRequest.getBytes())), remoteAddress, matchedExpectation.getId())
+                        .setArguments(SensitiveLogValue.of(formatBytes(binaryRequest.getBytes(), configuration.maxLoggedBodyBytes())), remoteAddress, matchedExpectation.getId())
                 );
             }
             return false;
@@ -232,7 +235,7 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
                     .setMessageFormat(
                         "unknown message format, only HTTP requests are supported for mocking or HTTP & binary requests for proxying, but request is not being proxied and request is not valid HTTP, found request in binary: {} in utf8 text: {}"
                     )
-                    .setArguments(SensitiveLogValue.of(ByteBufUtil.hexDump(binaryRequest.getBytes())), SensitiveLogValue.of(new String(binaryRequest.getBytes(), StandardCharsets.UTF_8)))
+                    .setArguments(SensitiveLogValue.of(hexDumpForLog(binaryRequest.getBytes(), configuration.maxLoggedBodyBytes())), SensitiveLogValue.of(utf8ForLog(binaryRequest.getBytes(), configuration.maxLoggedBodyBytes())))
             );
         }
         ctx.writeAndFlush(Unpooled.copiedBuffer(
@@ -453,7 +456,7 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
                             .setLogLevel(Level.INFO)
                             .setCorrelationId(logCorrelationId)
                             .setMessageFormat("returning binary response:{}from:{}for forwarded binary request:{}")
-                            .setArguments(SensitiveLogValue.of(formatBytes(binaryResponse.getBytes())), remoteAddress, SensitiveLogValue.of(formatBytes(binaryRequest.getBytes())))
+                            .setArguments(SensitiveLogValue.of(formatBytes(binaryResponse.getBytes(), configuration.maxLoggedBodyBytes())), remoteAddress, SensitiveLogValue.of(formatBytes(binaryRequest.getBytes(), configuration.maxLoggedBodyBytes())))
                     );
                     ctx.writeAndFlush(Unpooled.copiedBuffer(binaryResponse.getBytes()));
                 }
@@ -477,7 +480,7 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
                         .setLogLevel(Level.INFO)
                         .setCorrelationId(logCorrelationId)
                         .setMessageFormat("returning binary response:{}from:{}for forwarded binary request:{}")
-                        .setArguments(SensitiveLogValue.of(formatBytes(binaryResponse.getBytes())), remoteAddress, SensitiveLogValue.of(formatBytes(binaryRequest.getBytes())))
+                        .setArguments(SensitiveLogValue.of(formatBytes(binaryResponse.getBytes(), configuration.maxLoggedBodyBytes())), remoteAddress, SensitiveLogValue.of(formatBytes(binaryRequest.getBytes(), configuration.maxLoggedBodyBytes())))
                 );
                 if (binaryExchangeCallback != null) {
                     binaryExchangeCallback.onProxy(binaryRequest, binaryResponseFuture, remoteAddress, ctx.channel().remoteAddress());
@@ -491,8 +494,11 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
     }
 
     /**
-     * A forward refused for a header limit was logged as a warning, with its reason, as it was refused, so the
-     * connection it closes is logged below that, without a stack trace, as an HTTP forward's 502 is.
+     * The one entry for a failed forward: the forward client leaves it to this caller, except a target refused by
+     * forwardProxyBlockPrivateNetworks, which it logs as it refuses it. A forward refused for a header
+     * limit was logged as a warning as it was refused, so the connection it closes is logged below that. A failure
+     * of the upstream connection itself (it could not be made, failed, closed or timed out) is named without a stack
+     * trace, as an HTTP forward's is; anything else keeps one.
      */
     private void logFailedForward(BinaryMessage binaryRequest, String logCorrelationId, InetSocketAddress remoteAddress, Throwable throwable) {
         if (throwable.getCause() instanceof ForwardTargetBlockedException) {
@@ -507,8 +513,8 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
                     .setLogLevel(level)
                     .setCorrelationId(logCorrelationId)
                     .setMessageFormat("exception{}sending hex{}to{}closing connection")
-                    .setArguments(headerLimit != null ? headerLimit.getMessage() : boundedFaultMessage(throwable), SensitiveLogValue.of(ByteBufUtil.hexDump(binaryRequest.getBytes())), remoteAddress)
-                    .setThrowable(headerLimit != null ? null : boundedFault(throwable))
+                    .setArguments(headerLimit != null ? headerLimit.getMessage() : boundedFaultMessage(throwable), SensitiveLogValue.of(hexDumpForLog(binaryRequest.getBytes(), configuration.maxLoggedBodyBytes())), remoteAddress)
+                    .setThrowable(headerLimit != null || upstreamConnectionFailure(throwable) ? null : boundedFault(throwable))
             );
         }
     }

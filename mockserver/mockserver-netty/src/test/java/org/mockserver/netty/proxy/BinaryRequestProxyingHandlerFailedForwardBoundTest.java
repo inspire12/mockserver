@@ -27,6 +27,7 @@ import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.lessThan;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.nullValue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -39,8 +40,8 @@ import static org.mockserver.mock.action.http.HttpActionHandler.REMOTE_SOCKET;
 
 /**
  * A binary forward that fails because the upstream's answer was not a TLS record is logged with the count of the
- * bytes, not a hex dump of every one of them: in the entry's text and in the exception it attaches, whether or not
- * the forward waits for its response.
+ * bytes, not a hex dump of every one of them, and with no stack trace, whether or not the forward waits for its
+ * response.
  */
 public class BinaryRequestProxyingHandlerFailedForwardBoundTest {
 
@@ -81,8 +82,7 @@ public class BinaryRequestProxyingHandlerFailedForwardBoundTest {
         assertThat(text, containsString("not an SSL/TLS record: " + BYTES_READ + " bytes"));
         assertThat(text, not(containsString("4141")));
         assertThat(text.length(), lessThan(BYTES_READ));
-        assertThat(entry.getThrowable().toString(), not(containsString("4141")));
-        assertThat(entry.getThrowable().getCause().getCause().toString(), is("io.netty.handler.ssl.NotSslRecordException: not an SSL/TLS record: " + BYTES_READ + " bytes"));
+        assertThat("a TLS failure of the upstream connection is named, without a stack trace", entry.getThrowable(), is(nullValue()));
     }
 
     @Test

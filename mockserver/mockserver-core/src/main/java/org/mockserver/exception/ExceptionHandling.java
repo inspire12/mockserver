@@ -10,6 +10,7 @@ import io.netty.util.internal.OutOfDirectMemoryError;
 import io.netty.util.internal.PlatformDependent;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.exception.ExceptionUtils;
+import org.mockserver.httpclient.SocketCommunicationException;
 import org.mockserver.httpclient.SocketConnectionException;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.log.model.RedactedThrowable;
@@ -35,6 +36,7 @@ import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
 import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
@@ -430,6 +432,17 @@ public class ExceptionHandling {
             }
         }
         return false;
+    }
+
+    /**
+     * Whether a forward failed for its upstream connection: it could not be made, failed, was closed, or no response
+     * came in time. Such a failure's message says what happened, so its log entry needs no stack trace.
+     */
+    public static boolean upstreamConnectionFailure(Throwable failure) {
+        return ExceptionUtils.indexOfType(failure, IOException.class) >= 0
+            || ExceptionUtils.indexOfType(failure, SocketConnectionException.class) >= 0
+            || ExceptionUtils.indexOfType(failure, SocketCommunicationException.class) >= 0
+            || ExceptionUtils.indexOfType(failure, TimeoutException.class) >= 0;
     }
 
     private static final List<Class<? extends Exception>> CONNECTION_EXCEPTION_CLASSES = Arrays.asList(SocketConnectionException.class, ConnectException.class);

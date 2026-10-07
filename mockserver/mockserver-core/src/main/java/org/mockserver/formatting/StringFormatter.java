@@ -8,6 +8,7 @@ import org.mockserver.model.Action;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
 
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.regex.Pattern;
@@ -151,5 +152,46 @@ public class StringFormatter {
 
     public static String formatBytes(byte[] bytes) {
         return newLineJoiner.join(fixedLengthSplitter.split(ByteBufUtil.hexDump(bytes)));
+    }
+
+    /**
+     * As {@link #formatBytes(byte[])}, of at most the first {@code maxBytes} bytes (maxLoggedBodyBytes; 0 means
+     * all), followed, when bytes were left out, by {@link #bytesLeftOut(int, int)}.
+     */
+    public static String formatBytes(byte[] bytes, int maxBytes) {
+        if (maxBytes <= 0 || bytes.length <= maxBytes) {
+            return formatBytes(bytes);
+        }
+        return newLineJoiner.join(fixedLengthSplitter.split(ByteBufUtil.hexDump(bytes, 0, maxBytes))) + bytesLeftOut(bytes.length, maxBytes);
+    }
+
+    /**
+     * {@code ByteBufUtil.hexDump} of at most the first {@code maxBytes} bytes (maxLoggedBodyBytes; 0 means all),
+     * followed, when bytes were left out, by {@link #bytesLeftOut(int, int)}.
+     */
+    public static String hexDumpForLog(byte[] bytes, int maxBytes) {
+        if (maxBytes <= 0 || bytes.length <= maxBytes) {
+            return ByteBufUtil.hexDump(bytes);
+        }
+        return ByteBufUtil.hexDump(bytes, 0, maxBytes) + bytesLeftOut(bytes.length, maxBytes);
+    }
+
+    /**
+     * The bytes decoded as UTF-8, of at most the first {@code maxBytes} (maxLoggedBodyBytes; 0 means all), followed,
+     * when bytes were left out, by {@link #bytesLeftOut(int, int)}.
+     */
+    public static String utf8ForLog(byte[] bytes, int maxBytes) {
+        if (maxBytes <= 0 || bytes.length <= maxBytes) {
+            return new String(bytes, StandardCharsets.UTF_8);
+        }
+        return new String(bytes, 0, maxBytes, StandardCharsets.UTF_8) + bytesLeftOut(bytes.length, maxBytes);
+    }
+
+    /**
+     * What follows a binary message cut to its first bytes: as a body cut by maxLoggedBodyBytes, it gives the
+     * message's whole length.
+     */
+    static String bytesLeftOut(int length, int shown) {
+        return "...(" + length + " bytes, only the first " + shown + " logged, maxLoggedBodyBytes)";
     }
 }

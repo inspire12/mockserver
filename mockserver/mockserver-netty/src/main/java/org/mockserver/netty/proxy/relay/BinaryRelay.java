@@ -33,6 +33,7 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.mockserver.exception.ExceptionHandling.boundedFault;
 import static org.mockserver.exception.ExceptionHandling.boundedFaultMessage;
 import static org.mockserver.exception.ExceptionHandling.closeOnFlush;
+import static org.mockserver.exception.ExceptionHandling.upstreamConnectionFailure;
 import static org.mockserver.formatting.StringFormatter.formatBytes;
 import static org.mockserver.log.model.LogEntry.LogMessageType.FORWARDED_REQUEST;
 import static org.mockserver.model.BinaryMessage.bytes;
@@ -196,7 +197,7 @@ public final class BinaryRelay {
                     .setLogLevel(Level.WARN)
                     .setCorrelationId(logCorrelationId)
                     .setMessageFormat("binary mock response written to binary connection from:{}while forwarded binary request:{}has had no response from:{}the two may reach the client out of order")
-                    .setArguments(client.remoteAddress(), SensitiveLogValue.of(formatBytes(latest.request.getBytes())), target)
+                    .setArguments(client.remoteAddress(), SensitiveLogValue.of(formatBytes(latest.request.getBytes(), configuration.maxLoggedBodyBytes())), target)
             );
         }
         if (!client.isWritable()) {
@@ -318,9 +319,9 @@ public final class BinaryRelay {
                     new LogEntry()
                         .setLogLevel(Level.WARN)
                         .setCorrelationId(latestCorrelationId)
-                        .setMessageFormat("unable to connect to:{}for binary connection from:{}closing connection")
-                        .setArguments(target, client.remoteAddress())
-                        .setThrowable(failure)
+                        .setMessageFormat("unable to connect to:{}for binary connection from:{}closing connection:{}")
+                        .setArguments(target, client.remoteAddress(), boundedFaultMessage(failure))
+                        .setThrowable(upstreamConnectionFailure(failure) ? null : boundedFault(failure))
                 );
             }
             for (Exchange notSent : waitingForConnect) {
@@ -481,11 +482,11 @@ public final class BinaryRelay {
         if (answered != null) {
             logEntry
                 .setMessageFormat("returning binary response:{}from:{}for forwarded binary request:{}")
-                .setArguments(SensitiveLogValue.of(formatBytes(bytesRead)), target, SensitiveLogValue.of(formatBytes(answered.request.getBytes())));
+                .setArguments(SensitiveLogValue.of(formatBytes(bytesRead, configuration.maxLoggedBodyBytes())), target, SensitiveLogValue.of(formatBytes(answered.request.getBytes(), configuration.maxLoggedBodyBytes())));
         } else {
             logEntry
                 .setMessageFormat("returning binary response:{}from:{}")
-                .setArguments(SensitiveLogValue.of(formatBytes(bytesRead)), target);
+                .setArguments(SensitiveLogValue.of(formatBytes(bytesRead, configuration.maxLoggedBodyBytes())), target);
         }
         mockServerLogger.logEvent(logEntry);
         if (answered != null) {

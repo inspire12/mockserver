@@ -28,17 +28,19 @@ import java.util.stream.Collectors;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.hasSize;
-import static org.hamcrest.Matchers.lessThan;
+import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.junit.Assert.assertThrows;
 import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.model.BinaryMessage.bytes;
 
 /**
- * A binary request over TLS to an upstream that answers with bytes that are not a TLS record is logged with the count
- * of those bytes, not a hex dump of them, in the entry's text and in the exception it attaches. The forward client's
- * TLS handler is the JDK's here, as it is without the OpenSSL native: OpenSSL's message holds no dump.
+ * A binary request over TLS to an upstream that answers with bytes that are not a TLS record fails with the failure
+ * the caller logs, once, with the message's correlation id: the forward client logs no entry for it, so none quotes
+ * those bytes. The forward client's TLS handler is the JDK's here, as it is without the OpenSSL native: OpenSSL's
+ * message holds no dump. What the client logs of the message it sends is bounded by maxLoggedBodyBytes.
  */
 public class NettyHttpClientBinaryFaultLogEntryBoundTest {
 
@@ -90,34 +92,51 @@ public class NettyHttpClientBinaryFaultLogEntryBoundTest {
             };
             NettyHttpClient client = new NettyHttpClient(configuration(), mockServerLogger, clientEventLoopGroup, null, true, jdkTls);
 
-            assertThrows(ExecutionException.class, () -> client
+            ExecutionException failed = assertThrows(ExecutionException.class, () -> client
                 .sendRequest(bytes("binary request".getBytes()), true, new InetSocketAddress("127.0.0.1", upstream.getLocalPort()), 5_000L)
                 .get(30, TimeUnit.SECONDS));
 
-            List<LogEntry> warnings = binaryRequestWarnings();
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
-            while (warnings.isEmpty() && System.nanoTime() < deadline) {
-                Thread.sleep(50);
-                warnings = binaryRequestWarnings();
+            assertThat(failed.getCause().toString(), containsString("not an SSL/TLS record"));
+            // the response future fails as the channel's pipeline does, so what it logged is already in the list
+            List<LogEntry> aboutTheFailure = logged.stream()
+                .filter(entry -> entry.getThrowable() != null || entry.getMessage(configuration()).contains("not an SSL/TLS record"))
+                .collect(Collectors.toList());
+            assertThat(aboutTheFailure.toString(), aboutTheFailure, is(empty()));
+            for (LogEntry entry : logged) {
+                assertThat(entry.getMessage(configuration()), not(containsString("4141")));
             }
-            assertThat(warnings, hasSize(1));
-            LogEntry warning = warnings.get(0);
-            StringBuilder rendered = new StringBuilder(warning.getMessage(configuration())).append('\n');
-            for (Throwable throwable = warning.getThrowable(); throwable != null; throwable = throwable.getCause()) {
-                rendered.append(throwable).append('\n');
+        } finally {
+            clientEventLoopGroup.shutdownGracefully(0, 0, MILLISECONDS).syncUninterruptibly();
+        }
+    }
+    @Test(timeout = 60_000)
+    public void shouldLogAtMostTheFirstMaxLoggedBodyBytesOfABinaryRequestItSends() throws Exception {
+        EventLoopGroup clientEventLoopGroup = new NioEventLoopGroup(1, new Scheduler.SchedulerThreadFactory(NettyHttpClientBinaryFaultLogEntryBoundTest.class.getSimpleName() + "-client"));
+        try (ServerSocket upstream = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))) {
+            byte[] request = new byte[1_000];
+            Arrays.fill(request, (byte) 'A');
+            NettyHttpClient client = new NettyHttpClient(configuration().maxLoggedBodyBytes(16), mockServerLogger, clientEventLoopGroup, null, false);
+
+            client.sendRequest(bytes(request), false, new InetSocketAddress("127.0.0.1", upstream.getLocalPort()), 5_000L);
+            upstream.setSoTimeout(30_000);
+            try (Socket accepted = upstream.accept()) {
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+                while (sent().isEmpty() && System.nanoTime() < deadline) {
+                    Thread.sleep(20);
+                }
             }
-            assertThat(rendered.toString(), not(containsString("4141")));
-            // as many bytes as the TLS handler had read when it gave up
-            assertThat(rendered.toString(), java.util.regex.Pattern.compile("not an SSL/TLS record: [1-9][0-9]* bytes").matcher(rendered).find(), org.hamcrest.Matchers.is(true));
-            assertThat(rendered.length(), lessThan(2_000));
+
+            List<LogEntry> sent = sent();
+            assertThat(sent, hasSize(1));
+            String text = sent.get(0).getMessage(configuration());
+            assertThat(text, containsString("41".repeat(16) + "...(1000 bytes, only the first 16 logged, maxLoggedBodyBytes)"));
+            assertThat(text, not(containsString("41".repeat(17))));
         } finally {
             clientEventLoopGroup.shutdownGracefully(0, 0, MILLISECONDS).syncUninterruptibly();
         }
     }
 
-    private List<LogEntry> binaryRequestWarnings() {
-        return logged.stream()
-            .filter(entry -> entry.getLogLevel() == Level.WARN && entry.getMessageFormat() != null && entry.getMessageFormat().startsWith("exception while sending binary request"))
-            .collect(Collectors.toList());
+    private List<LogEntry> sent() {
+        return logged.stream().filter(entry -> entry.getLogLevel() == Level.DEBUG && "sending bytes hex{}to{}".equals(entry.getMessageFormat())).collect(Collectors.toList());
     }
 }

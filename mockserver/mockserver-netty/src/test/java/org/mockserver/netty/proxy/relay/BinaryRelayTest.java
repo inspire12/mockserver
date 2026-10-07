@@ -252,7 +252,8 @@ public class BinaryRelayTest {
         assertThat(warnings, hasSize(1));
         assertThat(warnings.get(0).getMessageFormat(), containsString("unable to connect to:{}"));
         assertThat(warnings.get(0).getArguments()[0], is(TARGET));
-        assertThat(warnings.get(0).getThrowable(), instanceOf(ConnectException.class));
+        assertThat("named, as a connection that could not be made, without a stack trace", warnings.get(0).getArguments()[2], is("Connection refused"));
+        assertThat(warnings.get(0).getThrowable(), is(nullValue()));
         assertThat("a message that was not sent has no response to wait for", responses.get(0).isCompletedExceptionally(), is(true));
         assertThat(assertThrows(ExecutionException.class, responses.get(0)::get).getCause(), instanceOf(ConnectException.class));
     }

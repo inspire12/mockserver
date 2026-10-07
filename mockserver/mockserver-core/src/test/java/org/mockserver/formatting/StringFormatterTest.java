@@ -11,6 +11,8 @@ import org.mockserver.mock.Expectation;
 
 import static org.mockserver.formatting.StringFormatter.formatBytes;
 import static org.mockserver.formatting.StringFormatter.formatCompactLogMessage;
+import static org.mockserver.formatting.StringFormatter.hexDumpForLog;
+import static org.mockserver.formatting.StringFormatter.utf8ForLog;
 import static org.mockserver.model.HttpForward.forward;
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
@@ -249,6 +251,33 @@ public class StringFormatterTest {
             "6c6420706c61792077697468206c65676f732061742063616d702e0a49742064" + NEW_LINE +
             "6f65736e277420736f756e64206c696b6520746861742077696c6c2065766572" + NEW_LINE +
             "206265206f6e206d792074726176656c206c6973742e"));
+    }
+
+    @Test
+    public void shouldLogOnlyTheFirstBytesOfALongerMessageAndItsLength() {
+        byte[] bytes = "0123456789".getBytes(StandardCharsets.UTF_8);
+
+        assertThat(hexDumpForLog(bytes, 4), is("30313233...(10 bytes, only the first 4 logged, maxLoggedBodyBytes)"));
+        assertThat(formatBytes(bytes, 4), is("30313233...(10 bytes, only the first 4 logged, maxLoggedBodyBytes)"));
+        assertThat(utf8ForLog(bytes, 4), is("0123...(10 bytes, only the first 4 logged, maxLoggedBodyBytes)"));
+    }
+
+    @Test
+    public void shouldLogAllOfAMessageNoLongerThanTheLimitOrWithNoLimit() {
+        byte[] bytes = "0123456789".getBytes(StandardCharsets.UTF_8);
+
+        for (int maxBytes : new int[]{10, 11, 0}) {
+            assertThat(hexDumpForLog(bytes, maxBytes), is("30313233343536373839"));
+            assertThat(formatBytes(bytes, maxBytes), is(formatBytes(bytes)));
+            assertThat(utf8ForLog(bytes, maxBytes), is("0123456789"));
+        }
+    }
+
+    @Test
+    public void shouldSplitTheLoggedFirstBytesIntoLinesAsTheWholeMessageIs() {
+        byte[] bytes = new byte[100];
+
+        assertThat(formatBytes(bytes, 40), is("0".repeat(64) + NEW_LINE + "0".repeat(16) + "...(100 bytes, only the first 40 logged, maxLoggedBodyBytes)"));
     }
 
 }

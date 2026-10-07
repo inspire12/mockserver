@@ -773,6 +773,7 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **A proxied binary message is shown in the log only up to `maxLoggedBodyBytes`, and a failed binary forward is logged once.** Every log entry about a binary (non-HTTP) message that MockServer proxied or mocked showed the whole message as hex, up to 256 KiB a message, and a forward that failed after connecting was logged twice, each time as a warning with a stack trace. With `maxLoggedBodyBytes` set, each entry now shows the hex of the message's first bytes up to that limit followed by its full length, as request and response bodies are already cut; a failed forward gives one warning, and a failure of the upstream connection (refused, closed, timed out) is named without a stack trace.
 - **Stopping one of several MockServers in a JVM no longer breaks the others' metrics, load scenarios or drift
   alerts.** When a newer server stopped, an older one still running reported the stopped server's live
   figures (active expectations, expectation bytes, event-log and scheduler queue gauges), and started load
