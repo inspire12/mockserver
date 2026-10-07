@@ -773,6 +773,11 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **Stopping one of several MockServers in a JVM no longer breaks the others' metrics, load scenarios or drift
+  alerts.** When a newer server stopped, an older one still running reported the stopped server's live
+  figures (active expectations, expectation bytes, event-log and scheduler queue gauges), and started load
+  scenarios and sent drift-alert webhooks through the stopped server's HTTP client. It now reports its own
+  figures and sends through its own client again as soon as the newer server stops.
 - **A proxied WebSocket connection now passes the upstream's handshake response headers to the client.** When MockServer relayed a WebSocket upgrade to the real server, the client's `101 Switching Protocols` carried only the handshake's own headers and the agreed subprotocol, so a `Set-Cookie` or any other header the upstream sent with its handshake was dropped. The client now receives them, and the recorded `101` shows them, except connection-level headers (`Connection`, `Upgrade`, `Keep-Alive`, `Transfer-Encoding`, `TE`, `Trailer`, `Proxy-*` and any header the upstream's `Connection` header names), `Content-Length`, and the handshake's own `Sec-WebSocket-*` headers, which MockServer answers from the client's request so the handshake stays valid. `Sec-WebSocket-Extensions` is not passed on: WebSocket extensions such as compression are not negotiated through the relay, as before.
 - **An HTTP/2 connection to an upstream is closed after an unexpected error on it, instead of being left open.** MockServer logs the error once, with its cause, fails a forward still waiting on that connection, sends the upstream `GOAWAY(INTERNAL_ERROR)` and closes it at once rather than waiting for the forward's stream, and no later forward reuses it from the connection pool.
 - **A request sent over HTTP/2 no longer gains `x-http2-scheme` and `x-http2-stream-id` headers.** A request an

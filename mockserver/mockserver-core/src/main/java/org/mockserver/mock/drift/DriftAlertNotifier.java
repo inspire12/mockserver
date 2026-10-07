@@ -2,6 +2,7 @@ package org.mockserver.mock.drift;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.mockserver.collections.MostRecentRegistration;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
@@ -28,7 +29,7 @@ import java.util.function.LongSupplier;
  * stored, carrying the record as JSON. Off by default.
  *
  * <p><b>Decoupling:</b> core must not depend on the Netty HTTP client, so the actual request sender is
- * injected via {@link #setSender(Function)} (mirrors {@code LoadScenarioOrchestrator.setSender} /
+ * injected via {@link #registerSender(Function)} (mirrors {@code LoadScenarioOrchestrator.registerSender} /
  * {@code HttpState.setReplayHandler}). The Netty runtime wires it from
  * {@code HttpActionHandler.getHttpClient()}; unit tests pass a deterministic synchronous fake sender.
  *
@@ -56,7 +57,7 @@ public class DriftAlertNotifier {
     private volatile LongSupplier clock;
 
     /** Sender installed by the runtime; null in unit tests until one is supplied. */
-    private volatile Function<HttpRequest, CompletableFuture<HttpResponse>> sender;
+    private final MostRecentRegistration<Function<HttpRequest, CompletableFuture<HttpResponse>>> sender = new MostRecentRegistration<>();
     private volatile boolean enabled;
     private volatile String webhookUrl;
     private volatile SemanticSeverity threshold = SemanticSeverity.BREAKING;
@@ -81,23 +82,29 @@ public class DriftAlertNotifier {
     }
 
     /**
-     * Install the request sender that issues an outbound {@link HttpRequest} and returns the response.
-     * Called by the Netty runtime, wiring the existing HTTP client so core never depends on it directly
-     * (mirrors {@code LoadScenarioOrchestrator.setSender}). This is runtime wiring, not configuration: it
-     * is deliberately not cleared by {@link #reset()}.
+     * Install the request sender that issues an outbound {@link HttpRequest} and returns the response,
+     * without registering it for {@link #unregisterSender} to fall back to. The runtime uses
+     * {@link #registerSender}, wiring the existing HTTP client so core never depends on it directly. This
+     * is runtime wiring, not configuration: it is deliberately not cleared by {@link #reset()}.
      */
-    public synchronized void setSender(Function<HttpRequest, CompletableFuture<HttpResponse>> sender) {
-        this.sender = sender;
+    public void setSender(Function<HttpRequest, CompletableFuture<HttpResponse>> sender) {
+        this.sender.set(sender);
     }
 
     /**
-     * Remove {@code sender} if it is still the installed one, as when the server that installed it stops; a
-     * sender installed since by another server is kept.
+     * Use {@code sender}, a running server's, from now on, and fall back to it when the server whose sender is
+     * in use stops, while this server is still running. Called by the runtime.
      */
-    public synchronized void clearSender(Function<HttpRequest, CompletableFuture<HttpResponse>> sender) {
-        if (sender != null && this.sender == sender) {
-            this.sender = null;
-        }
+    public void registerSender(Function<HttpRequest, CompletableFuture<HttpResponse>> sender) {
+        this.sender.register(sender);
+    }
+
+    /**
+     * Forget {@code sender}, a stopping server's. If it is the one in use, the sender of the server still running
+     * that registered most recently is used instead; a sender in use that is not {@code sender} is kept.
+     */
+    public void unregisterSender(Function<HttpRequest, CompletableFuture<HttpResponse>> sender) {
+        this.sender.unregister(sender);
     }
 
     /** Test hook: capture what is logged. */
@@ -136,7 +143,8 @@ public class DriftAlertNotifier {
      */
     public void onDriftStored(DriftRecord record) {
         try {
-            if (!enabled || sender == null || record == null) {
+            Function<HttpRequest, CompletableFuture<HttpResponse>> currentSender = this.sender.get();
+            if (!enabled || currentSender == null || record == null) {
                 return;
             }
             String url = this.webhookUrl;
@@ -154,10 +162,6 @@ public class DriftAlertNotifier {
 
             HttpRequest outbound = buildOutbound(url, record, effective, now);
             if (outbound == null) {
-                return;
-            }
-            Function<HttpRequest, CompletableFuture<HttpResponse>> currentSender = this.sender;
-            if (currentSender == null) {
                 return;
             }
             CompletableFuture<HttpResponse> future = currentSender.apply(outbound);

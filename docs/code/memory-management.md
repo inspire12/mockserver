@@ -990,13 +990,15 @@ process-wide places: the live-state gauge readers in `Metrics` (expectations, ev
 bytes, cluster members, scheduler queues), the scenario manager of `CrossProtocolEventBus`, and, once it
 has served a request, its request sender in `LoadScenarioOrchestrator` and `DriftAlertNotifier`. Each of
 these refers back to the server's `HttpState`, and so to its whole event log and expectation store. On
-`stop()` the server removes each registration that is still its own (compare-and-clear), so a stopped
-server that nothing else references is collected; a registration made since by another server in the same
-JVM is left alone. The scenario manager is not just reported but used (captures, the `scenario` template
-helper, cross-protocol triggers), so the bus keeps the managers of the servers still running, in start
-order, and when the one in use stops it goes back to the most recent of them instead of to none. It holds
-those managers weakly, so a server that is never stopped does not stay in that list once nothing else
-refers to it, and the fallback skips managers already collected. (An `HttpState` dropped without `stop()`
+`stop()` the server unregisters each of them, so a stopped server that nothing else references is
+collected; a registration made since by another server in the same JVM is left alone. Each place is a
+`MostRecentRegistration`: it keeps the registrations of the servers still running, in the order they
+registered, uses the most recent, and when the one in use is unregistered goes back to the most recent of
+the others instead of to none. So when a newer server stops, an older one still running gets its gauges,
+its scenario state (captures, the `scenario` template helper, cross-protocol triggers) and its load and
+drift-alert sender back without first accepting a new connection (`RunningServerKeepsItsRegistrationsTest`).
+The registrations not in use are held weakly, so a server that is never stopped does not stay in those lists
+once nothing else refers to it, and the fallback skips ones already collected. (An `HttpState` dropped without `stop()`
 is still kept by its own event-log thread, which only `stop()` ends; `AbandonedHttpStateIsCollectedTest`
 checks that, once that thread has ended, no process-wide registration keeps it.) A constructor that throws
 part way leaves its caller nothing to stop, so it does the same release itself before rethrowing: it ends

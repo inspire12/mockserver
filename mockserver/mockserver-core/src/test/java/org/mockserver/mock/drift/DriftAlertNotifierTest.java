@@ -63,21 +63,28 @@ public class DriftAlertNotifierTest {
     }
 
     @Test
-    public void clearingASenderRemovesItOnlyWhileItIsStillTheInstalledOne() {
+    public void unregisteringASenderKeepsANewerOneAndFallsBackToTheOlderOneStillRegistered() {
         DriftAlertNotifier notifier = new DriftAlertNotifier(() -> 1000L);
+        CapturingSender olderServers = new CapturingSender();
         CapturingSender stoppedServers = new CapturingSender();
-        CapturingSender runningServers = new CapturingSender();
+        CapturingSender newerServers = new CapturingSender();
         notifier.configure(true, "https://hooks.example.com/drift", SemanticSeverity.BREAKING, 0);
-        notifier.setSender(stoppedServers);
-        notifier.setSender(runningServers);
+        notifier.registerSender(olderServers);
+        notifier.registerSender(stoppedServers);
+        notifier.registerSender(newerServers);
 
-        notifier.clearSender(stoppedServers);
+        notifier.unregisterSender(stoppedServers);
         notifier.onDriftStored(record(DriftType.STATUS, "statusCode"));
-        assertThat("a sender installed since by another server is kept", runningServers.captured, hasSize(1));
+        assertThat("a sender registered since by another server is kept", newerServers.captured, hasSize(1));
 
-        notifier.clearSender(runningServers);
+        notifier.unregisterSender(newerServers);
         notifier.onDriftStored(record(DriftType.STATUS, "body"));
-        assertThat(runningServers.captured, hasSize(1));
+        assertThat("the sender of the server still running is used", olderServers.captured, hasSize(1));
+
+        notifier.unregisterSender(olderServers);
+        notifier.onDriftStored(record(DriftType.STATUS, "headers"));
+        assertThat(olderServers.captured, hasSize(1));
+        assertThat(newerServers.captured, hasSize(1));
         assertThat(stoppedServers.captured, hasSize(0));
     }
 

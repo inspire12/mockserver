@@ -318,7 +318,7 @@ public class HttpState {
     // optional — set by the runtime (NettyHttpClient) to enable PUT /mockserver/replay
     private volatile java.util.function.Function<HttpRequest, CompletableFuture<HttpResponse>> replayHandler;
     // what this server registered in process-wide places, removed on stop() wherever it is still registered
-    private final List<Object> metricsSuppliers = new ArrayList<>();
+    private volatile Metrics.LiveStateReaders registeredLiveStateReaders;
     private volatile java.util.function.Function<HttpRequest, CompletableFuture<HttpResponse>> installedRequestSender;
     // readiness flag — flipped true once the constructor (incl. synchronous expectation
     // initializers / OpenAPI seeding) has completed. The liveness/status endpoints answer 200 the
@@ -430,25 +430,29 @@ public class HttpState {
                     }
                 });
             }
-            Metrics.setActiveExpectationsSupplier(registeredWithMetrics(() -> requestMatchers.retrieveActiveExpectations(null)));
-            Metrics.setClusterMemberCountSupplier(registeredWithMetrics(() -> stateBackend.clusterInfo().members().size()));
-            Metrics.setEventLogRingStatsSupplier(registeredWithMetrics(() -> new Metrics.RingStats(
-                mockServerLog.getRingBufferOccupancy(),
-                mockServerLog.getRingBufferSizeInForce(),
-                mockServerLog.getInFlightBytes(),
-                mockServerLog.getMaxInFlightBytes(),
-                mockServerLog.getRetainedEntryCount(),
-                mockServerLog.getRetainedBytes(),
-                mockServerLog.getMaxRetainedBytes(),
-                mockServerLog.getMaxRetainedEntries())));
+            Metrics.LiveStateReaders liveStateReaders = new Metrics.LiveStateReaders()
+                .withActiveExpectations(() -> requestMatchers.retrieveActiveExpectations(null))
+                .withClusterMemberCount(() -> stateBackend.clusterInfo().members().size())
+                .withEventLogRingStats(() -> new Metrics.RingStats(
+                    mockServerLog.getRingBufferOccupancy(),
+                    mockServerLog.getRingBufferSizeInForce(),
+                    mockServerLog.getInFlightBytes(),
+                    mockServerLog.getMaxInFlightBytes(),
+                    mockServerLog.getRetainedEntryCount(),
+                    mockServerLog.getRetainedBytes(),
+                    mockServerLog.getMaxRetainedBytes(),
+                    mockServerLog.getMaxRetainedEntries()))
+                .withExpectationStoreStats(() -> new Metrics.ExpectationStoreStats(
+                    requestMatchers.getExpectationBytes(),
+                    requestMatchers.getMaxExpectationBytes(),
+                    requestMatchers.getExpectationByteEvictedCount()));
             if (scheduler != null) {
-                Metrics.setSchedulerQueueDepthSuppliers(registeredWithMetrics(scheduler::getQueuedTaskCount), registeredWithMetrics(scheduler::getQueuedTemplateActionCount));
-                Metrics.setPendingDelayedTasksSupplier(registeredWithMetrics(scheduler::getPendingDelayedTaskCount));
+                liveStateReaders
+                    .withSchedulerQueueDepths(scheduler::getQueuedTaskCount, scheduler::getQueuedTemplateActionCount)
+                    .withPendingDelayedTasks(scheduler::getPendingDelayedTaskCount);
             }
-            Metrics.setExpectationStoreStatsSupplier(registeredWithMetrics(() -> new Metrics.ExpectationStoreStats(
-                requestMatchers.getExpectationBytes(),
-                requestMatchers.getMaxExpectationBytes(),
-                requestMatchers.getExpectationByteEvictedCount())));
+            this.registeredLiveStateReaders = liveStateReaders;
+            Metrics.registerLiveStateReaders(liveStateReaders);
             if (configuration.persistExpectations()) {
                 this.expectationFileSystemPersistence = new ExpectationFileSystemPersistence(configuration, mockServerLogger, requestMatchers, stateBackend.blobs());
             }
@@ -631,13 +635,8 @@ public class HttpState {
     public void installRequestSender(java.util.function.Function<HttpRequest, CompletableFuture<HttpResponse>> requestSender) {
         this.installedRequestSender = requestSender;
         setReplayHandler(requestSender);
-        org.mockserver.mock.action.http.LoadScenarioOrchestrator.getInstance().setSender(requestSender);
-        org.mockserver.mock.drift.DriftAlertNotifier.getInstance().setSender(requestSender);
-    }
-
-    private <T> T registeredWithMetrics(T supplier) {
-        metricsSuppliers.add(supplier);
-        return supplier;
+        org.mockserver.mock.action.http.LoadScenarioOrchestrator.getInstance().registerSender(requestSender);
+        org.mockserver.mock.drift.DriftAlertNotifier.getInstance().registerSender(requestSender);
     }
 
     public Configuration getConfiguration() {
@@ -7109,12 +7108,12 @@ public class HttpState {
         if (clusterFanIn != null) {
             clusterFanIn.close();
         }
-        Metrics.clearLiveStateSuppliers(metricsSuppliers.toArray());
+        Metrics.unregisterLiveStateReaders(registeredLiveStateReaders);
         if (requestMatchers != null) {
             CrossProtocolEventBus.getInstance().unregisterScenarioManager(requestMatchers.getScenarioManager());
         }
-        org.mockserver.mock.action.http.LoadScenarioOrchestrator.getInstance().clearSender(installedRequestSender);
-        org.mockserver.mock.drift.DriftAlertNotifier.getInstance().clearSender(installedRequestSender);
+        org.mockserver.mock.action.http.LoadScenarioOrchestrator.getInstance().unregisterSender(installedRequestSender);
+        org.mockserver.mock.drift.DriftAlertNotifier.getInstance().unregisterSender(installedRequestSender);
         mockServerLog.stop();
         // G10 phase 2a: close the state backend (no-op for in-memory)
         if (stateBackend != null) {

@@ -1423,21 +1423,42 @@ public class LoadScenarioOrchestratorTest {
     }
 
     @Test
-    public void clearingASenderRemovesItOnlyWhileItIsStillTheInstalledOne() {
+    public void unregisteringASenderKeepsANewerOneAndFallsBackToTheOlderOneStillRegistered() throws Exception {
         LoadScenarioOrchestrator installed = orchestratorTickedOnlyByTheTest(clock::get);
+        CompletableFuture<HttpRequest> sentByOlder = new CompletableFuture<>();
+        CompletableFuture<HttpRequest> sentByNewer = new CompletableFuture<>();
+        Function<HttpRequest, CompletableFuture<HttpResponse>> olderServers = httpRequest -> {
+            sentByOlder.complete(httpRequest);
+            return new CompletableFuture<>();
+        };
         Function<HttpRequest, CompletableFuture<HttpResponse>> stoppedServers = httpRequest -> new CompletableFuture<>();
+        Function<HttpRequest, CompletableFuture<HttpResponse>> newerServers = httpRequest -> {
+            sentByNewer.complete(httpRequest);
+            return new CompletableFuture<>();
+        };
         try {
-            installed.setSender(stoppedServers);
-            installed.setSender(NEVER_RESPONDS);
-            installed.clearSender(stoppedServers);
-            assertThat("a sender installed since by another server is kept", installed.start(oneSecondScenario("kept"), null), is(nullValue()));
+            installed.registerSender(olderServers);
+            installed.registerSender(stoppedServers);
+            installed.registerSender(newerServers);
+            installed.unregisterSender(stoppedServers);
+            assertThat("a sender registered since by another server is kept", installed.start(oneSecondScenario("kept"), null), is(nullValue()));
+            installed.tickNow();
+            assertThat(sentByNewer.get(10, TimeUnit.SECONDS).getPath().getValue(), is("/api"));
+            installed.stop("kept");
 
-            installed.clearSender(NEVER_RESPONDS);
-            assertThat(installed.start(oneSecondScenario("cleared"), null), is("no load sender installed (server runtime not wired)"));
+            installed.unregisterSender(newerServers);
+            assertThat(installed.start(oneSecondScenario("fallen-back"), null), is(nullValue()));
+            installed.tickNow();
+            assertThat("the sender of the server still running is used", sentByOlder.get(10, TimeUnit.SECONDS).getPath().getValue(), is("/api"));
+            installed.stop("fallen-back");
+
+            installed.unregisterSender(olderServers);
+            assertThat(installed.start(oneSecondScenario("none"), null), is("no load sender installed (server runtime not wired)"));
         } finally {
             installed.reset();
         }
     }
+
 
     @Test
     public void aStopLandingWhileItsRunIsStillStartingKeepsTheStoppedStatus() throws Exception {

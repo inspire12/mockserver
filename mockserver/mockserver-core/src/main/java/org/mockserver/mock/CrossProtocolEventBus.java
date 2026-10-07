@@ -2,6 +2,7 @@ package org.mockserver.mock;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.mockserver.collections.MostRecentRegistration;
 import org.mockserver.model.CrossProtocolScenario;
 import org.mockserver.model.CrossProtocolTrigger;
 import org.mockserver.serialization.ObjectMapperFactory;
@@ -10,8 +11,6 @@ import org.mockserver.state.StateBackend;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.lang.ref.WeakReference;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -46,9 +45,7 @@ public class CrossProtocolEventBus {
 
     private final ConcurrentHashMap<CrossProtocolTrigger, List<CrossProtocolScenario>> listeners =
         new ConcurrentHashMap<>();
-    private volatile ScenarioManager scenarioManager;
-    // guarded by this; weak, so a server that is never stopped does not keep its manager once it is unreachable
-    private final List<WeakReference<ScenarioManager>> registeredScenarioManagers = new ArrayList<>();
+    private final MostRecentRegistration<ScenarioManager> scenarioManager = new MostRecentRegistration<>();
 
     // G11 follow-up: optional clustered backend for fleet replication
     private volatile KeyValueStore<ObjectNode> backendStore;
@@ -70,8 +67,8 @@ public class CrossProtocolEventBus {
         return INSTANCE;
     }
 
-    public synchronized void setScenarioManager(ScenarioManager manager) {
-        this.scenarioManager = manager;
+    public void setScenarioManager(ScenarioManager manager) {
+        scenarioManager.set(manager);
     }
 
     /**
@@ -79,12 +76,8 @@ public class CrossProtocolEventBus {
      * the order they registered, for {@link #unregisterScenarioManager}; they are held weakly, so the manager of a
      * server that was never stopped is dropped once nothing else refers to it.
      */
-    public synchronized void registerScenarioManager(ScenarioManager manager) {
-        if (manager != null) {
-            removeRegistered(manager);
-            registeredScenarioManagers.add(new WeakReference<>(manager));
-            this.scenarioManager = manager;
-        }
+    public void registerScenarioManager(ScenarioManager manager) {
+        scenarioManager.register(manager);
     }
 
     /**
@@ -92,32 +85,8 @@ public class CrossProtocolEventBus {
      * one registered most recently by a server still running is used instead, so that server's captures and
      * templates keep working; a manager in use that is not {@code manager} is kept.
      */
-    public synchronized void unregisterScenarioManager(ScenarioManager manager) {
-        if (manager != null) {
-            removeRegistered(manager);
-            if (this.scenarioManager == manager) {
-                this.scenarioManager = mostRecentlyRegistered();
-            }
-        }
-    }
-
-    private ScenarioManager mostRecentlyRegistered() {
-        for (int i = registeredScenarioManagers.size() - 1; i >= 0; i--) {
-            ScenarioManager registered = registeredScenarioManagers.get(i).get();
-            if (registered != null) {
-                return registered;
-            }
-            registeredScenarioManagers.remove(i);
-        }
-        return null;
-    }
-
-    // also drops the entries of managers already collected
-    private void removeRegistered(ScenarioManager manager) {
-        registeredScenarioManagers.removeIf(registered -> {
-            ScenarioManager referent = registered.get();
-            return referent == null || referent == manager;
-        });
+    public void unregisterScenarioManager(ScenarioManager manager) {
+        scenarioManager.unregister(manager);
     }
 
     /**
@@ -131,7 +100,7 @@ public class CrossProtocolEventBus {
      * vice-versa.
      */
     public ScenarioManager getScenarioManager() {
-        return scenarioManager;
+        return scenarioManager.get();
     }
 
     /**
@@ -180,6 +149,7 @@ public class CrossProtocolEventBus {
      *                   gRPC service name, HTTP path, WebSocket URL)
      */
     public void fire(CrossProtocolTrigger trigger, String identifier) {
+        ScenarioManager scenarioManager = this.scenarioManager.get();
         if (scenarioManager == null) {
             return;
         }

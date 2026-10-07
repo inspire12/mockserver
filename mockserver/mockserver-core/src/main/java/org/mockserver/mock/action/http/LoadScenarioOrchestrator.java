@@ -1,5 +1,6 @@
 package org.mockserver.mock.action.http;
 
+import org.mockserver.collections.MostRecentRegistration;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.load.IterationContext;
 import org.mockserver.log.model.LogEntry;
@@ -82,7 +83,7 @@ import java.util.function.LongSupplier;
  * </ul>
  *
  * <p><b>Decoupling:</b> core must not depend on the Netty HTTP client, so the actual request sender is
- * injected via {@link #setSender(Function)} (mirrors {@code HttpState.setReplayHandler}). The Netty
+ * injected via {@link #registerSender(Function)} (mirrors {@code HttpState.setReplayHandler}). The Netty
  * runtime wires it from {@code HttpActionHandler.getHttpClient()}; unit tests pass a deterministic
  * synchronous fake sender to {@link #start(LoadScenario, Function)}.
  *
@@ -139,7 +140,7 @@ public class LoadScenarioOrchestrator {
      */
     private volatile ScheduledFuture<?> sharedTick;
     /** Sender installed by the runtime; null in unit tests until start() supplies one. */
-    private volatile Function<HttpRequest, CompletableFuture<HttpResponse>> installedSender;
+    private final MostRecentRegistration<Function<HttpRequest, CompletableFuture<HttpResponse>>> installedSender = new MostRecentRegistration<>();
     /** Configuration used to read caps and to build the template engines for rendering. */
     private volatile Configuration configuration = Configuration.configuration();
     /** Logs a request forwardProxyBlockPrivateNetworks refused, at the configured log level. */
@@ -156,21 +157,28 @@ public class LoadScenarioOrchestrator {
 
     /**
      * Install the request sender that re-issues a {@link HttpRequest} to its target and returns
-     * the upstream response. Called by the Netty runtime, wiring the existing HTTP client so the
-     * core never depends on it directly (mirrors {@code HttpState.setReplayHandler}).
+     * the upstream response, without registering it for {@link #unregisterSender} to fall back to.
+     * The runtime uses {@link #registerSender}, wiring the existing HTTP client so the core never
+     * depends on it directly (mirrors {@code HttpState.setReplayHandler}).
      */
-    public synchronized void setSender(Function<HttpRequest, CompletableFuture<HttpResponse>> sender) {
-        this.installedSender = sender;
+    public void setSender(Function<HttpRequest, CompletableFuture<HttpResponse>> sender) {
+        installedSender.set(sender);
     }
 
     /**
-     * Remove {@code sender} if it is still the installed one, as when the server that installed it stops; a
-     * sender installed since by another server is kept.
+     * Use {@code sender}, a running server's, from now on, and fall back to it when the server whose sender is
+     * in use stops, while this server is still running. Called by the runtime.
      */
-    public synchronized void clearSender(Function<HttpRequest, CompletableFuture<HttpResponse>> sender) {
-        if (sender != null && this.installedSender == sender) {
-            this.installedSender = null;
-        }
+    public void registerSender(Function<HttpRequest, CompletableFuture<HttpResponse>> sender) {
+        installedSender.register(sender);
+    }
+
+    /**
+     * Forget {@code sender}, a stopping server's. If it is the one in use, the sender of the server still running
+     * that registered most recently is used instead; a sender in use that is not {@code sender} is kept.
+     */
+    public void unregisterSender(Function<HttpRequest, CompletableFuture<HttpResponse>> sender) {
+        installedSender.unregister(sender);
     }
 
     /** Install the configuration used for caps and template engines. Called by the runtime. */
@@ -212,7 +220,7 @@ public class LoadScenarioOrchestrator {
         if (error != null) {
             return error;
         }
-        Function<HttpRequest, CompletableFuture<HttpResponse>> effectiveSender = sender != null ? sender : installedSender;
+        Function<HttpRequest, CompletableFuture<HttpResponse>> effectiveSender = sender != null ? sender : installedSender.get();
         if (effectiveSender == null) {
             return "no load sender installed (server runtime not wired)";
         }

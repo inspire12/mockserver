@@ -24,6 +24,7 @@ import org.slf4j.event.Level;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -403,6 +404,62 @@ public class MetricsTest {
         } finally {
             Metrics.setSchedulerQueueDepthSuppliers(null, null);
         }
+    }
+
+    @Test
+    public void readsTheLiveStateOfTheServerStillRunningThatRegisteredMostRecentlyWhenANewerOneStops() {
+        new Metrics(configuration().metricsEnabled(true));
+        Metrics.LiveStateReaders older = liveStateReaders(1);
+        Metrics.LiveStateReaders stopped = liveStateReaders(2);
+        Metrics.LiveStateReaders newer = liveStateReaders(3);
+        try {
+            Metrics.registerLiveStateReaders(older);
+            Metrics.registerLiveStateReaders(stopped);
+            Metrics.registerLiveStateReaders(newer);
+
+            Metrics.unregisterLiveStateReaders(stopped);
+            assertLiveStateReadFrom(3);
+
+            Metrics.unregisterLiveStateReaders(newer);
+            assertLiveStateReadFrom(1);
+
+            Metrics.unregisterLiveStateReaders(older);
+            assertThat(scrapeGauge("mock_server_scheduler_queued_tasks"), is(0.0));
+            assertThat(scrapeGauge("mock_server_template_action_queued_tasks"), is(0.0));
+            assertThat(scrapeGauge("mock_server_pending_delayed_tasks"), is(0.0));
+            assertThat(Metrics.getActiveExpectationCountByType(), is(Collections.emptyMap()));
+            assertThat(Metrics.getClusterMemberCount(), is(1));
+            assertThat(Metrics.getEventLogRingStats().retainedEntries, is(0L));
+            assertThat(Metrics.getExpectationStoreStats().totalBytes, is(0L));
+        } finally {
+            Metrics.unregisterLiveStateReaders(newer);
+            Metrics.unregisterLiveStateReaders(stopped);
+            Metrics.unregisterLiveStateReaders(older);
+        }
+    }
+
+    private static Metrics.LiveStateReaders liveStateReaders(int server) {
+        List<Expectation> expectations = new ArrayList<>();
+        for (int i = 0; i < server; i++) {
+            expectations.add(new Expectation(request("/" + i)).thenRespond(org.mockserver.model.HttpResponse.response()));
+        }
+        return new Metrics.LiveStateReaders()
+            .withSchedulerQueueDepths(() -> 10 + server, () -> 20 + server)
+            .withPendingDelayedTasks(() -> 30 + server)
+            .withActiveExpectations(() -> expectations)
+            .withClusterMemberCount(() -> 40 + server)
+            .withEventLogRingStats(() -> new Metrics.RingStats(0, 0, 0, 0, 50 + server, 0, 0, 0))
+            .withExpectationStoreStats(() -> new Metrics.ExpectationStoreStats(60 + server, 0, 0));
+    }
+
+    private static void assertLiveStateReadFrom(int server) {
+        assertThat(scrapeGauge("mock_server_scheduler_queued_tasks"), is(10.0 + server));
+        assertThat(scrapeGauge("mock_server_template_action_queued_tasks"), is(20.0 + server));
+        assertThat(scrapeGauge("mock_server_pending_delayed_tasks"), is(30.0 + server));
+        assertThat(Metrics.getActiveExpectationCountByType(), is(Collections.singletonMap("RESPONSE", server)));
+        assertThat(Metrics.getClusterMemberCount(), is(40 + server));
+        assertThat(Metrics.getEventLogRingStats().retainedEntries, is(50L + server));
+        assertThat(Metrics.getExpectationStoreStats().totalBytes, is(60L + server));
     }
 
     @Test

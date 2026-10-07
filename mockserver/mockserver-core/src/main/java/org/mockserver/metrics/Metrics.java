@@ -6,6 +6,7 @@ import io.prometheus.metrics.core.metrics.Gauge;
 import io.prometheus.metrics.core.metrics.GaugeWithCallback;
 import io.prometheus.metrics.core.metrics.Histogram;
 import io.prometheus.metrics.model.registry.PrometheusRegistry;
+import org.mockserver.collections.MostRecentRegistration;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.log.MockServerEventLog;
 import org.mockserver.log.model.LogEntry;
@@ -77,9 +78,9 @@ public class Metrics {
     // Responses cut by responseWriteStallTimeoutMillis, labelled by protocol and by what was cut.
     private static volatile Counter responseWriteStallsTotal;
     // Live queue depths of the shared scheduler pool and the template-action pool, set by HttpState.
-    private static final AtomicReference<IntSupplier> schedulerQueueDepthSupplier = new AtomicReference<>();
-    private static final AtomicReference<IntSupplier> templateActionQueueDepthSupplier = new AtomicReference<>();
-    private static final AtomicReference<IntSupplier> pendingDelayedTasksSupplier = new AtomicReference<>();
+    private static final MostRecentRegistration<IntSupplier> schedulerQueueDepthSupplier = new MostRecentRegistration<>();
+    private static final MostRecentRegistration<IntSupplier> templateActionQueueDepthSupplier = new MostRecentRegistration<>();
+    private static final MostRecentRegistration<IntSupplier> pendingDelayedTasksSupplier = new MostRecentRegistration<>();
     // Requests answered 503 because a bounded action queue was full, labelled by which bound. Null until
     // metrics are enabled.
     private static volatile Counter overloadRejectionsTotal;
@@ -170,24 +171,24 @@ public class Metrics {
     // Supplier of active expectations, set by HttpState at startup so the
     // expectations-by-type GaugeWithCallback can read live state at scrape time
     // without a core->netty dependency.
-    private static final AtomicReference<Supplier<List<Expectation>>> activeExpectationsSupplier = new AtomicReference<>();
+    private static final MostRecentRegistration<Supplier<List<Expectation>>> activeExpectationsSupplier = new MostRecentRegistration<>();
     // Supplier of the current cluster member count, set by HttpState at startup
     // so the cluster_members GaugeWithCallback can read live membership at scrape
     // time from the StateBackend without Metrics depending on the state package.
     // Defaults to 1 (single local node) until a supplier is registered.
-    private static final AtomicReference<Supplier<Integer>> clusterMemberCountSupplier = new AtomicReference<>();
+    private static final MostRecentRegistration<Supplier<Integer>> clusterMemberCountSupplier = new MostRecentRegistration<>();
     // Supplier of the event-log ring-buffer live occupancy stats (occupied slots, ring capacity,
     // in-flight body bytes, in-flight byte budget), set by HttpState at startup so the event-log
     // ring GaugeWithCallbacks can read live state at scrape time from MockServerEventLog without
     // Metrics (core) depending on the log package's instance lifecycle. Null until registered; the
     // gauges then read 0 (a run with no event log, or before startup). See RingStats.
-    private static final AtomicReference<Supplier<RingStats>> eventLogRingStatsSupplier = new AtomicReference<>();
+    private static final MostRecentRegistration<Supplier<RingStats>> eventLogRingStatsSupplier = new MostRecentRegistration<>();
     // Supplier of the expectation store's live byte figures (total weight, byte budget in force,
     // byte-driven eviction count), set by HttpState at startup so the mock_server_expectations_bytes /
     // _max_expectations_bytes / _byte_evicted gauges can read live state at scrape time from
     // RequestMatchers without Metrics (core) depending on the store instance lifecycle. Null until
     // registered; the gauges then read 0 (before startup / no store). See ExpectationStoreStats.
-    private static final AtomicReference<Supplier<ExpectationStoreStats>> expectationStoreStatsSupplier = new AtomicReference<>();
+    private static final MostRecentRegistration<Supplier<ExpectationStoreStats>> expectationStoreStatsSupplier = new MostRecentRegistration<>();
     // Kernel accept-queue ceiling source (Linux). Read ONCE at construction to decide whether the
     // effective-backlog gauge can honestly be emitted; a package-private field only so tests can point
     // it at a temp file (readable) or a missing path (unreadable) to exercise both branches.
@@ -1006,7 +1007,7 @@ public class Metrics {
 
     /**
      * Set the live queue-depth readers behind {@code mock_server_scheduler_queued_tasks} and
-     * {@code mock_server_template_action_queued_tasks}. Called by HttpState at startup.
+     * {@code mock_server_template_action_queued_tasks}. HttpState registers its own through {@link #registerLiveStateReaders}.
      */
     public static void setSchedulerQueueDepthSuppliers(IntSupplier schedulerQueueDepth, IntSupplier templateActionQueueDepth) {
         schedulerQueueDepthSupplier.set(schedulerQueueDepth);
@@ -1014,38 +1015,91 @@ public class Metrics {
     }
 
     /**
-     * Set the live reader behind {@code mock_server_pending_delayed_tasks}. Called by HttpState at startup.
+     * Set the live reader behind {@code mock_server_pending_delayed_tasks}. HttpState registers its own through {@link #registerLiveStateReaders}.
      */
     public static void setPendingDelayedTasksSupplier(IntSupplier pendingDelayedTasks) {
         pendingDelayedTasksSupplier.set(pendingDelayedTasks);
     }
 
     /**
-     * Remove each live-state reader that is still one of {@code registered}, so the gauges no longer read,
-     * or keep in memory, a server that has stopped. A reader registered since by another server is kept.
+     * The live-state readers of one server behind the gauges that report a server's state (queue depths,
+     * expectations, cluster members, event log, expectation store). A server registers its own on start with
+     * {@link #registerLiveStateReaders} and removes them on stop with {@link #unregisterLiveStateReaders}; a reader
+     * left {@code null} is not registered.
      */
-    public static void clearLiveStateSuppliers(Object... registered) {
-        List<AtomicReference<?>> liveStateSuppliers = Arrays.asList(
-            schedulerQueueDepthSupplier,
-            templateActionQueueDepthSupplier,
-            pendingDelayedTasksSupplier,
-            activeExpectationsSupplier,
-            clusterMemberCountSupplier,
-            eventLogRingStatsSupplier,
-            expectationStoreStatsSupplier
-        );
-        for (Object supplier : registered) {
-            if (supplier != null) {
-                for (AtomicReference<?> reference : liveStateSuppliers) {
-                    clearIfStill(reference, supplier);
-                }
-            }
+    public static final class LiveStateReaders {
+        private IntSupplier schedulerQueueDepth;
+        private IntSupplier templateActionQueueDepth;
+        private IntSupplier pendingDelayedTasks;
+        private Supplier<List<Expectation>> activeExpectations;
+        private Supplier<Integer> clusterMemberCount;
+        private Supplier<RingStats> eventLogRingStats;
+        private Supplier<ExpectationStoreStats> expectationStoreStats;
+
+        public LiveStateReaders withSchedulerQueueDepths(IntSupplier schedulerQueueDepth, IntSupplier templateActionQueueDepth) {
+            this.schedulerQueueDepth = schedulerQueueDepth;
+            this.templateActionQueueDepth = templateActionQueueDepth;
+            return this;
+        }
+
+        public LiveStateReaders withPendingDelayedTasks(IntSupplier pendingDelayedTasks) {
+            this.pendingDelayedTasks = pendingDelayedTasks;
+            return this;
+        }
+
+        public LiveStateReaders withActiveExpectations(Supplier<List<Expectation>> activeExpectations) {
+            this.activeExpectations = activeExpectations;
+            return this;
+        }
+
+        public LiveStateReaders withClusterMemberCount(Supplier<Integer> clusterMemberCount) {
+            this.clusterMemberCount = clusterMemberCount;
+            return this;
+        }
+
+        public LiveStateReaders withEventLogRingStats(Supplier<RingStats> eventLogRingStats) {
+            this.eventLogRingStats = eventLogRingStats;
+            return this;
+        }
+
+        public LiveStateReaders withExpectationStoreStats(Supplier<ExpectationStoreStats> expectationStoreStats) {
+            this.expectationStoreStats = expectationStoreStats;
+            return this;
         }
     }
 
-    @SuppressWarnings("unchecked")
-    private static void clearIfStill(AtomicReference<?> reference, Object supplier) {
-        ((AtomicReference<Object>) reference).compareAndSet(supplier, null);
+    /**
+     * Make the gauges read {@code readers}, a starting server's, from now on. When a newer server that
+     * registered its own stops, the gauges go back to the readers of the server still running that registered
+     * most recently.
+     */
+    public static void registerLiveStateReaders(LiveStateReaders readers) {
+        if (readers != null) {
+            schedulerQueueDepthSupplier.register(readers.schedulerQueueDepth);
+            templateActionQueueDepthSupplier.register(readers.templateActionQueueDepth);
+            pendingDelayedTasksSupplier.register(readers.pendingDelayedTasks);
+            activeExpectationsSupplier.register(readers.activeExpectations);
+            clusterMemberCountSupplier.register(readers.clusterMemberCount);
+            eventLogRingStatsSupplier.register(readers.eventLogRingStats);
+            expectationStoreStatsSupplier.register(readers.expectationStoreStats);
+        }
+    }
+
+    /**
+     * Remove {@code readers}, a stopping server's, so the gauges no longer read, or keep in memory, a server
+     * that has stopped. A reader in use is replaced by the one registered most recently by a server still
+     * running, or by none; a reader in use that is not one of {@code readers} is kept.
+     */
+    public static void unregisterLiveStateReaders(LiveStateReaders readers) {
+        if (readers != null) {
+            schedulerQueueDepthSupplier.unregister(readers.schedulerQueueDepth);
+            templateActionQueueDepthSupplier.unregister(readers.templateActionQueueDepth);
+            pendingDelayedTasksSupplier.unregister(readers.pendingDelayedTasks);
+            activeExpectationsSupplier.unregister(readers.activeExpectations);
+            clusterMemberCountSupplier.unregister(readers.clusterMemberCount);
+            eventLogRingStatsSupplier.unregister(readers.eventLogRingStats);
+            expectationStoreStatsSupplier.unregister(readers.expectationStoreStats);
+        }
     }
 
     /**
@@ -1087,7 +1141,7 @@ public class Metrics {
         return counter != null ? (long) counter.labelValues(reason).get() : 0L;
     }
 
-    private static int readQueueDepth(AtomicReference<IntSupplier> reference) {
+    private static int readQueueDepth(MostRecentRegistration<IntSupplier> reference) {
         IntSupplier supplier = reference.get();
         if (supplier != null) {
             try {
@@ -1543,7 +1597,7 @@ public class Metrics {
     }
 
     /**
-     * Set the supplier of active expectations. Called by HttpState at startup
+     * Set the supplier of active expectations. HttpState registers its own through {@link #registerLiveStateReaders}
      * so the expectations-by-type GaugeWithCallback can read live state at
      * scrape time without a core-to-netty dependency.
      *
@@ -1591,8 +1645,8 @@ public class Metrics {
     }
 
     /**
-     * Set the supplier of the current cluster member count. Called by HttpState
-     * at startup so the {@code mock_server_cluster_members} GaugeWithCallback can
+     * Set the supplier of the current cluster member count. HttpState registers its
+     * own through {@link #registerLiveStateReaders} so the {@code mock_server_cluster_members} GaugeWithCallback can
      * read live membership from the StateBackend at scrape time without Metrics
      * depending on the state package.
      *
@@ -1668,7 +1722,7 @@ public class Metrics {
     private static final RingStats EMPTY_RING_STATS = new RingStats(0, 0, 0, 0, 0, 0, 0, 0);
 
     /**
-     * Set the supplier of event-log live internals. Called by HttpState at startup so the
+     * Set the supplier of event-log live internals. HttpState registers its own through {@link #registerLiveStateReaders} so the
      * {@code mock_server_event_log_*} gauge family can read live state at scrape time from
      * {@link org.mockserver.log.MockServerEventLog} without Metrics depending on the log instance
      * lifecycle.
@@ -1729,7 +1783,7 @@ public class Metrics {
     private static final ExpectationStoreStats EMPTY_EXPECTATION_STORE_STATS = new ExpectationStoreStats(0, 0, 0);
 
     /**
-     * Set the supplier of expectation-store byte figures. Called by HttpState at startup so the
+     * Set the supplier of expectation-store byte figures. HttpState registers its own through {@link #registerLiveStateReaders} so the
      * {@code mock_server_expectations_bytes} / {@code mock_server_max_expectations_bytes} /
      * {@code mock_server_expectations_byte_evicted} gauges can read live state at scrape time from
      * {@link org.mockserver.mock.RequestMatchers} without Metrics depending on the store lifecycle.
