@@ -61,6 +61,9 @@ public class HttpStateAuditEndpointTest {
     @After
     public void tearDown() {
         AuditStore.getInstance().clear();
+        if (httpState != null) {
+            httpState.stop();
+        }
     }
 
     private void seedMutation(String operation) {

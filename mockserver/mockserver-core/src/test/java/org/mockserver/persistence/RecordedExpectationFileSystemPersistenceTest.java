@@ -76,6 +76,7 @@ public class RecordedExpectationFileSystemPersistenceTest {
             if (persistence != null) {
                 persistence.stop();
             }
+            httpState.stop();
         }
     }
 
@@ -110,6 +111,7 @@ public class RecordedExpectationFileSystemPersistenceTest {
             if (persistence != null) {
                 persistence.stop();
             }
+            httpState.stop();
         }
     }
 

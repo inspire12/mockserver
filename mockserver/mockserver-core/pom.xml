@@ -781,6 +781,8 @@
                         <exclude>**/CaptureProcessorTest.java</exclude>
                         <!-- asserts the CrossProtocolEventBus singleton and static Metrics readers let an HttpState abandoned without stop() go -->
                         <exclude>**/AbandonedHttpStateIsCollectedTest.java</exclude>
+                        <!-- asserts the CrossProtocolEventBus singleton and static Metrics readers let go of an HttpState whose constructor threw -->
+                        <exclude>**/HttpStateFailedConstructionTest.java</exclude>
                         <!-- WS7.1 OIDC authorization-code test mutates the OidcAuthorizationStore singleton -->
                         <exclude>**/OidcProviderGeneratorTest.java</exclude>
                         <!-- OidcTokenCallback test registers providers into the OidcAuthorizationStore singleton -->
@@ -1026,6 +1028,7 @@
                                 <include>**/GrpcStreamMessageScenarioTemplateTest.java</include>
                                 <include>**/CaptureProcessorTest.java</include>
                                 <include>**/AbandonedHttpStateIsCollectedTest.java</include>
+                                <include>**/HttpStateFailedConstructionTest.java</include>
                                 <include>**/OidcProviderGeneratorTest.java</include>
                                 <include>**/OidcTokenCallbackTest.java</include>
                                 <include>**/OidcIntrospectionCallbackTest.java</include>

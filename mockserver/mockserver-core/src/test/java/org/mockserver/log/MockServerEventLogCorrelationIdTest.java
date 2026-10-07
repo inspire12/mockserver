@@ -1,5 +1,6 @@
 package org.mockserver.log;
 
+import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.Test;
@@ -40,6 +41,7 @@ public class MockServerEventLogCorrelationIdTest {
     private final Configuration configuration = configuration();
     private MockServerLogger mockServerLogger;
     private MockServerEventLog mockServerEventLog;
+    private HttpState httpStateHandler;
 
     @AfterClass
     public static void stopScheduler() {
@@ -48,9 +50,16 @@ public class MockServerEventLogCorrelationIdTest {
 
     @Before
     public void setupTestFixture() {
-        HttpState httpState = new HttpState(configuration, new MockServerLogger(configuration, MockServerLogger.class), scheduler);
-        mockServerLogger = httpState.getMockServerLogger();
-        mockServerEventLog = httpState.getMockServerLog();
+        httpStateHandler = new HttpState(configuration, new MockServerLogger(configuration, MockServerLogger.class), scheduler);
+        mockServerLogger = httpStateHandler.getMockServerLogger();
+        mockServerEventLog = httpStateHandler.getMockServerLog();
+    }
+
+    @After
+    public void stopHttpState() {
+        if (httpStateHandler != null) {
+            httpStateHandler.stop();
+        }
     }
 
     private String verify(Verification verification) {
@@ -282,26 +291,30 @@ public class MockServerEventLogCorrelationIdTest {
         try {
             Configuration localConfiguration = configuration().logLevel(Level.INFO);
             HttpState httpState = new HttpState(localConfiguration, new MockServerLogger(localConfiguration, MockServerLogger.class), scheduler);
-            RequestMatchers requestMatchers = httpState.getRequestMatchers();
-            MockServerEventLog eventLog = httpState.getMockServerLog();
+            try {
+                RequestMatchers requestMatchers = httpState.getRequestMatchers();
+                MockServerEventLog eventLog = httpState.getMockServerLog();
 
-            requestMatchers.add(
-                new Expectation(request().withPath("some_path"))
-                    .thenRespond(response().withBody("some_body")),
-                API
-            );
+                requestMatchers.add(
+                    new Expectation(request().withPath("some_path"))
+                        .thenRespond(response().withBody("some_body")),
+                    API
+                );
 
-            String testCorrelationId = "test-clear-correlation-id";
-            requestMatchers.clear(request().withPath("some_path").withLogCorrelationId(testCorrelationId));
+                String testCorrelationId = "test-clear-correlation-id";
+                requestMatchers.clear(request().withPath("some_path").withLogCorrelationId(testCorrelationId));
 
-            CompletableFuture<List<LogEntry>> future = new CompletableFuture<>();
-            eventLog.retrieveMessageLogEntries(null, future::complete);
-            List<LogEntry> logEntries = future.get(10, SECONDS);
-            List<LogEntry> removedEntries = logEntries.stream()
-                .filter(entry -> entry.getType() == REMOVED_EXPECTATION)
-                .collect(Collectors.toList());
-            assertThat(removedEntries, hasSize(1));
-            assertThat(removedEntries.get(0).getCorrelationId(), is(testCorrelationId));
+                CompletableFuture<List<LogEntry>> future = new CompletableFuture<>();
+                eventLog.retrieveMessageLogEntries(null, future::complete);
+                List<LogEntry> logEntries = future.get(10, SECONDS);
+                List<LogEntry> removedEntries = logEntries.stream()
+                    .filter(entry -> entry.getType() == REMOVED_EXPECTATION)
+                    .collect(Collectors.toList());
+                assertThat(removedEntries, hasSize(1));
+                assertThat(removedEntries.get(0).getCorrelationId(), is(testCorrelationId));
+            } finally {
+                httpState.stop();
+            }
         } catch (Exception e) {
             fail(e.getMessage());
         }

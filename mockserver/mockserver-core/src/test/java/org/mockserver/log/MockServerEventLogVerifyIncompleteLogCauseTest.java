@@ -68,10 +68,14 @@ public class MockServerEventLogVerifyIncompleteLogCauseTest {
 
     private MockServerEventLog log;
     private Scheduler scheduler;
+    private HttpState httpState;
 
     @After
     public void stop() {
-        if (log != null) {
+        if (httpState != null) {
+            // stops its event log too
+            httpState.stop();
+        } else if (log != null) {
             log.stop();
         }
         if (scheduler != null) {
@@ -397,7 +401,8 @@ public class MockServerEventLogVerifyIncompleteLogCauseTest {
     private MockServerEventLog eventLogRecordingItsOwnVerifications(Configuration configuration) {
         configuration.logLevel(Level.INFO);
         scheduler = new Scheduler(configuration, new MockServerLogger());
-        return new HttpState(configuration, new MockServerLogger(configuration, MockServerLogger.class), scheduler).getMockServerLog();
+        httpState = new HttpState(configuration, new MockServerLogger(configuration, MockServerLogger.class), scheduler);
+        return httpState.getMockServerLog();
     }
 
     // Entries with no request or response weigh nothing in flight, so with the consumer held they are

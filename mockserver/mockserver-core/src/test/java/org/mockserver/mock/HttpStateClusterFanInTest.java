@@ -90,6 +90,9 @@ public class HttpStateClusterFanInTest {
 
     @After
     public void tearDown() {
+        if (httpState != null) {
+            httpState.stop();
+        }
         if (schedulerExecutor != null) {
             schedulerExecutor.shutdownNow();
         }

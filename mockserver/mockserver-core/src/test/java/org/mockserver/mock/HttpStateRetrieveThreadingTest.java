@@ -70,6 +70,9 @@ public class HttpStateRetrieveThreadingTest {
 
     @After
     public void tearDown() {
+        if (httpState != null) {
+            httpState.stop();
+        }
         if (schedulerExecutor != null) {
             schedulerExecutor.shutdownNow();
         }

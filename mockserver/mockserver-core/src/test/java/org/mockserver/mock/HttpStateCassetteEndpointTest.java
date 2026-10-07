@@ -69,6 +69,9 @@ public class HttpStateCassetteEndpointTest {
     @After
     public void tearDown() {
         CassetteRegistry.getInstance().reset();
+        if (httpState != null) {
+            httpState.stop();
+        }
     }
 
     /** Drive {@code GET /mockserver/cassettes} and return the {@code cassettes} array from the JSON body. */

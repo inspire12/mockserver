@@ -127,6 +127,9 @@ public class ControlPlaneAuthenticationRouteDenialTest {
     @After
     public void tearDown() {
         try {
+            if (httpState != null) {
+                httpState.stop();
+            }
             clearControlPlaneSystemProperties();
             if (scheduler != null) {
                 scheduler.shutdown();

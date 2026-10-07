@@ -2,6 +2,7 @@ package org.mockserver.mock;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockserver.configuration.Configuration;
@@ -49,6 +50,13 @@ public class HttpStateScenarioEndpointTest {
         Configuration configuration = configuration();
         Scheduler scheduler = new Scheduler(configuration, new MockServerLogger(configuration, HttpStateScenarioEndpointTest.class), true);
         httpState = new HttpState(configuration, new MockServerLogger(configuration, HttpStateScenarioEndpointTest.class), scheduler);
+    }
+
+    @After
+    public void stopHttpState() {
+        if (httpState != null) {
+            httpState.stop();
+        }
     }
 
     @Test

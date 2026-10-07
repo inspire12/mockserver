@@ -93,6 +93,9 @@ public class HttpStateAuthorizationTest {
     @After
     public void tearDown() {
         AuditStore.getInstance().clear();
+        if (httpState != null) {
+            httpState.stop();
+        }
     }
 
     private HttpResponse handle(HttpRequest request) {

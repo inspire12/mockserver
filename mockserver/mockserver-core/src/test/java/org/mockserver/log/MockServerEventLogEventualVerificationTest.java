@@ -82,8 +82,8 @@ public class MockServerEventLogEventualVerificationTest {
             }
         }
         delayedThreads.clear();
-        if (mockServerEventLog != null) {
-            mockServerEventLog.stop();
+        if (httpStateHandler != null) {
+            httpStateHandler.stop();
         }
         if (scheduler != null) {
             scheduler.shutdown();

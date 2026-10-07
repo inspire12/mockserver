@@ -1,5 +1,6 @@
 package org.mockserver.mock;
 
+import org.junit.After;
 import org.junit.Test;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.logging.MockServerLogger;
@@ -24,6 +25,16 @@ import static org.mockserver.configuration.Configuration.configuration;
  */
 public class HttpStateReadinessTest {
 
+    private final AtomicReference<HttpState> constructed = new AtomicReference<>();
+
+    @After
+    public void stopHttpState() {
+        HttpState httpState = constructed.get();
+        if (httpState != null) {
+            httpState.stop();
+        }
+    }
+
     @Test
     public void shouldNotBeReadyUntilSlowInitializerCompletes() throws Exception {
         // given - an initializer that blocks inside the HttpState constructor
@@ -32,7 +43,6 @@ public class HttpStateReadinessTest {
         MockServerLogger mockServerLogger = new MockServerLogger(configuration, HttpStateReadinessTest.class);
         Scheduler scheduler = mock(Scheduler.class);
 
-        AtomicReference<HttpState> constructed = new AtomicReference<>();
         CompletableFuture<Void> construction = CompletableFuture.runAsync(() ->
             constructed.set(new HttpState(configuration, mockServerLogger, scheduler))
         );

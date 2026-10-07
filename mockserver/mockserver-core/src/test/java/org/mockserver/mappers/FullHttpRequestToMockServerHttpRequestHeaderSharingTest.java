@@ -66,6 +66,7 @@ public class FullHttpRequestToMockServerHttpRequestHeaderSharingTest {
 
     private final MockServerLogger mockServerLogger = new MockServerLogger();
     private final List<ScheduledExecutorService> executors = new ArrayList<>();
+    private final List<HttpState> httpStates = new ArrayList<>();
 
     /**
      * One connection's requests, in order. Exercises repeats, a case-only change, a changed value, reordering,
@@ -208,6 +209,7 @@ public class FullHttpRequestToMockServerHttpRequestHeaderSharingTest {
 
     @After
     public void shutdownExecutors() {
+        httpStates.forEach(HttpState::stop);
         executors.forEach(ExecutorService::shutdownNow);
     }
 
@@ -379,7 +381,9 @@ public class FullHttpRequestToMockServerHttpRequestHeaderSharingTest {
         executors.add(executor);
         when(scheduler.getExecutorService()).thenReturn(executor);
         Configuration configuration = configuration();
-        return new HttpState(configuration, new MockServerLogger(configuration, MockServerLogger.class), scheduler);
+        HttpState httpState = new HttpState(configuration, new MockServerLogger(configuration, MockServerLogger.class), scheduler);
+        httpStates.add(httpState);
+        return httpState;
     }
 
     private static String retrieve(HttpState httpState, String format) throws InterruptedException {

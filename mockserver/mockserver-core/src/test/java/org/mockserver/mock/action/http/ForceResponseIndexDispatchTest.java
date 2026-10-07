@@ -65,6 +65,9 @@ public class ForceResponseIndexDispatchTest {
 
     @After
     public void tearDown() {
+        if (httpState != null) {
+            httpState.stop();
+        }
         scheduler.shutdown();
     }
 

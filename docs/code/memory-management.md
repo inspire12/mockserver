@@ -998,7 +998,12 @@ order, and when the one in use stops it goes back to the most recent of them ins
 those managers weakly, so a server that is never stopped does not stay in that list once nothing else
 refers to it, and the fallback skips managers already collected. (An `HttpState` dropped without `stop()`
 is still kept by its own event-log thread, which only `stop()` ends; `AbandonedHttpStateIsCollectedTest`
-checks that, once that thread has ended, no process-wide registration keeps it.) The in-flight reader given to `PreemptionSimulator` reads a counter, not the server, so
+checks that, once that thread has ended, no process-wide registration keeps it.) A constructor that throws
+part way leaves its caller nothing to stop, so it does the same release itself before rethrowing: it ends
+the event-log thread, removes the registrations it had made and closes what it had opened, but does not
+reset the process-wide AsyncAPI connections, which it never started (`HttpStateFailedConstructionTest`).
+Core tests stop every `HttpState` they construct, and `HttpStateStoppedGuardTest` fails the build when one
+does not. The in-flight reader given to `PreemptionSimulator` reads a counter, not the server, so
 it holds nothing. `StoppedServerIsCollectedTest` guards this for the default in-memory state backend; with
 a clustered backend the chaos registries and the cross-protocol bus also keep a store of that backend after
 a stop, which has not been checked for references back to the server.

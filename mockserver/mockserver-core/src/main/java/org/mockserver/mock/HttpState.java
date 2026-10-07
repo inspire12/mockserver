@@ -362,149 +362,159 @@ public class HttpState {
         LocalCallbackRegistry.setMaxWebSocketExpectations(configuration.maxWebSocketExpectations());
         this.maxWebSocketExpectationsInForce = configuration.maxWebSocketExpectations();
         this.mockServerLog = new MockServerEventLog(configuration, mockServerLogger, scheduler, true);
-        // G10 phase 2a: create the pluggable state backend (default in-memory, clustered in 2b+).
-        this.stateBackend = StateBackendFactory.create(configuration);
-        // ADV3: persisted, named chaos-profile library backed by the state backend's
-        // CRUD-entity store (survives reset; replicates across the fleet when clustered).
-        this.chaosProfileLibrary = new org.mockserver.mock.action.http.ChaosProfileLibrary(stateBackend);
-        // Load Scenario Registry: persisted, named registry of load scenario definitions backed by the
-        // state backend's CRUD-entity store (survives reset; replicates across the fleet when clustered;
-        // preloadable at startup). Mirrors the saved chaos-profile library.
-        this.loadScenarioRegistry = new org.mockserver.mock.action.http.LoadScenarioRegistry(stateBackend);
-        // G10 phase 1: obtain the expectation store via the pluggable factory (default = standard
-        // in-memory RequestMatchers; an optional clustered backend can register an alternative).
-        this.requestMatchers = ExpectationStoreFactory.create(configuration, mockServerLogger, scheduler, webSocketClientRegistry);
-        this.requestMatchers.setStateBackend(stateBackend);
-        // G10 phase 2c: wire invalidation listener so remote cluster writes
-        // trigger a node-local view rebuild (reconcileFromBackend). For
-        // single-node/LOCAL backends the listener fires locally only (no-op
-        // because the node-local CPQ is already in sync from the local put).
-        stateBackend.addInvalidationListener(new InvalidationListener() {
-            @Override
-            public void onChanged(String key) {
-                requestMatchers.reconcileFromBackend();
-            }
-
-            @Override
-            public void onCleared() {
-                requestMatchers.reconcileFromBackend();
-            }
-        });
-        // G11: wire chaos registries to the clustered backend for fleet-wide
-        // chaos replication. When the backend is not clustered (default), the
-        // setStateBackend calls are no-ops and the registries stay node-local.
-        org.mockserver.mock.action.http.ServiceChaosRegistry.getInstance().setStateBackend(stateBackend);
-        org.mockserver.mock.action.http.TcpChaosRegistry.getInstance().setStateBackend(stateBackend);
-        org.mockserver.mock.action.http.GrpcChaosRegistry.getInstance().setStateBackend(stateBackend);
-        // Install the live configuration on the chaos auto-halt circuit-breaker. Its only production
-        // caller is the static Metrics.incrementHttpChaosInjected(...), which has no Configuration in
-        // scope, so the settings must be pushed in here instead. This is the same Configuration
-        // instance that PUT /mockserver/configuration mutates, so auto-halt settings applied over the
-        // REST config API take effect; unset instance values still fall back to ConfigurationProperties.
-        org.mockserver.mock.action.http.ChaosAutoHaltMonitor.getInstance().setConfiguration(configuration);
-        // Install the live configuration on the LLM provider sniffer for the same reason: it is a
-        // wholly-static utility called from several independent static analysis chains (dataset
-        // export, optimisation report building, MCP analysis tools, the forward path) that have no
-        // Configuration in scope, so llmProvider/llmBaseUrl must be pushed in here rather than
-        // threaded through every caller. Unset instance values still fall back to
-        // ConfigurationProperties.
-        org.mockserver.llm.client.LlmProviderSniffer.setConfiguration(configuration);
-        // G11: register a SEPARATE InvalidationListener for chaos reconciliation
-        // so that remote writes to chaos stores trigger the node-local rebuild.
-        // This is distinct from the expectations reconcile listener above.
-        if (stateBackend.isClustered()) {
+        try {
+            // G10 phase 2a: create the pluggable state backend (default in-memory, clustered in 2b+).
+            this.stateBackend = StateBackendFactory.create(configuration);
+            // ADV3: persisted, named chaos-profile library backed by the state backend's
+            // CRUD-entity store (survives reset; replicates across the fleet when clustered).
+            this.chaosProfileLibrary = new org.mockserver.mock.action.http.ChaosProfileLibrary(stateBackend);
+            // Load Scenario Registry: persisted, named registry of load scenario definitions backed by the
+            // state backend's CRUD-entity store (survives reset; replicates across the fleet when clustered;
+            // preloadable at startup). Mirrors the saved chaos-profile library.
+            this.loadScenarioRegistry = new org.mockserver.mock.action.http.LoadScenarioRegistry(stateBackend);
+            // G10 phase 1: obtain the expectation store via the pluggable factory (default = standard
+            // in-memory RequestMatchers; an optional clustered backend can register an alternative).
+            this.requestMatchers = ExpectationStoreFactory.create(configuration, mockServerLogger, scheduler, webSocketClientRegistry);
+            this.requestMatchers.setStateBackend(stateBackend);
+            // G10 phase 2c: wire invalidation listener so remote cluster writes
+            // trigger a node-local view rebuild (reconcileFromBackend). For
+            // single-node/LOCAL backends the listener fires locally only (no-op
+            // because the node-local CPQ is already in sync from the local put).
             stateBackend.addInvalidationListener(new InvalidationListener() {
                 @Override
                 public void onChanged(String key) {
-                    org.mockserver.mock.action.http.ServiceChaosRegistry.getInstance().reconcileFromBackend();
-                    org.mockserver.mock.action.http.TcpChaosRegistry.getInstance().reconcileFromBackend();
-                    org.mockserver.mock.action.http.GrpcChaosRegistry.getInstance().reconcileFromBackend();
+                    requestMatchers.reconcileFromBackend();
                 }
 
                 @Override
                 public void onCleared() {
-                    org.mockserver.mock.action.http.ServiceChaosRegistry.getInstance().reconcileFromBackend();
-                    org.mockserver.mock.action.http.TcpChaosRegistry.getInstance().reconcileFromBackend();
-                    org.mockserver.mock.action.http.GrpcChaosRegistry.getInstance().reconcileFromBackend();
+                    requestMatchers.reconcileFromBackend();
                 }
             });
-        }
-        Metrics.setActiveExpectationsSupplier(registeredWithMetrics(() -> requestMatchers.retrieveActiveExpectations(null)));
-        Metrics.setClusterMemberCountSupplier(registeredWithMetrics(() -> stateBackend.clusterInfo().members().size()));
-        Metrics.setEventLogRingStatsSupplier(registeredWithMetrics(() -> new Metrics.RingStats(
-            mockServerLog.getRingBufferOccupancy(),
-            mockServerLog.getRingBufferSizeInForce(),
-            mockServerLog.getInFlightBytes(),
-            mockServerLog.getMaxInFlightBytes(),
-            mockServerLog.getRetainedEntryCount(),
-            mockServerLog.getRetainedBytes(),
-            mockServerLog.getMaxRetainedBytes(),
-            mockServerLog.getMaxRetainedEntries())));
-        if (scheduler != null) {
-            Metrics.setSchedulerQueueDepthSuppliers(registeredWithMetrics(scheduler::getQueuedTaskCount), registeredWithMetrics(scheduler::getQueuedTemplateActionCount));
-            Metrics.setPendingDelayedTasksSupplier(registeredWithMetrics(scheduler::getPendingDelayedTaskCount));
-        }
-        Metrics.setExpectationStoreStatsSupplier(registeredWithMetrics(() -> new Metrics.ExpectationStoreStats(
-            requestMatchers.getExpectationBytes(),
-            requestMatchers.getMaxExpectationBytes(),
-            requestMatchers.getExpectationByteEvictedCount())));
-        if (configuration.persistExpectations()) {
-            this.expectationFileSystemPersistence = new ExpectationFileSystemPersistence(configuration, mockServerLogger, requestMatchers, stateBackend.blobs());
-        }
-        if (configuration.persistRecordedExpectations()) {
-            this.recordedExpectationFileSystemPersistence = new org.mockserver.persistence.RecordedExpectationFileSystemPersistence(configuration, mockServerLogger, mockServerLog, stateBackend.blobs());
-        }
-        if (configuration.persistRecordedRequestsToDisk()) {
-            this.recordedRequestsFileSystemPersistence = new org.mockserver.persistence.RecordedRequestsFileSystemPersistence(configuration, mockServerLogger);
-            mockServerLog.setRecordedRequestConsumer(recordedRequestsFileSystemPersistence::append, recordedRequestsFileSystemPersistence::flush);
-        }
-        if (isNotBlank(configuration.initializationJsonPath()) || isNotBlank(configuration.initializationOpenAPIPath()) || isNotBlank(configuration.initializationClass())) {
-            ExpectationInitializerLoader expectationInitializerLoader = new ExpectationInitializerLoader(configuration, mockServerLogger, requestMatchers);
-            if ((isNotBlank(configuration.initializationJsonPath()) || isNotBlank(configuration.initializationOpenAPIPath())) && configuration.watchInitializationJson()) {
-                this.expectationFileWatcher = new ExpectationFileWatcher(configuration, mockServerLogger, requestMatchers, expectationInitializerLoader);
-            }
-        }
-        // G11 follow-up: wire the cross-protocol event bus to the clustered
-        // backend for fleet-wide registration replication. When the backend is
-        // not clustered (default), setStateBackend is a no-op and the bus stays
-        // node-local. Mirrors the chaos registry wiring pattern above.
-        CrossProtocolEventBus.getInstance().setStateBackend(stateBackend);
-        if (stateBackend.isClustered()) {
-            stateBackend.addInvalidationListener(new InvalidationListener() {
-                @Override
-                public void onChanged(String key) {
-                    CrossProtocolEventBus.getInstance().reconcileFromBackend();
-                }
+            // G11: wire chaos registries to the clustered backend for fleet-wide
+            // chaos replication. When the backend is not clustered (default), the
+            // setStateBackend calls are no-ops and the registries stay node-local.
+            org.mockserver.mock.action.http.ServiceChaosRegistry.getInstance().setStateBackend(stateBackend);
+            org.mockserver.mock.action.http.TcpChaosRegistry.getInstance().setStateBackend(stateBackend);
+            org.mockserver.mock.action.http.GrpcChaosRegistry.getInstance().setStateBackend(stateBackend);
+            // Install the live configuration on the chaos auto-halt circuit-breaker. Its only production
+            // caller is the static Metrics.incrementHttpChaosInjected(...), which has no Configuration in
+            // scope, so the settings must be pushed in here instead. This is the same Configuration
+            // instance that PUT /mockserver/configuration mutates, so auto-halt settings applied over the
+            // REST config API take effect; unset instance values still fall back to ConfigurationProperties.
+            org.mockserver.mock.action.http.ChaosAutoHaltMonitor.getInstance().setConfiguration(configuration);
+            // Install the live configuration on the LLM provider sniffer for the same reason: it is a
+            // wholly-static utility called from several independent static analysis chains (dataset
+            // export, optimisation report building, MCP analysis tools, the forward path) that have no
+            // Configuration in scope, so llmProvider/llmBaseUrl must be pushed in here rather than
+            // threaded through every caller. Unset instance values still fall back to
+            // ConfigurationProperties.
+            org.mockserver.llm.client.LlmProviderSniffer.setConfiguration(configuration);
+            // G11: register a SEPARATE InvalidationListener for chaos reconciliation
+            // so that remote writes to chaos stores trigger the node-local rebuild.
+            // This is distinct from the expectations reconcile listener above.
+            if (stateBackend.isClustered()) {
+                stateBackend.addInvalidationListener(new InvalidationListener() {
+                    @Override
+                    public void onChanged(String key) {
+                        org.mockserver.mock.action.http.ServiceChaosRegistry.getInstance().reconcileFromBackend();
+                        org.mockserver.mock.action.http.TcpChaosRegistry.getInstance().reconcileFromBackend();
+                        org.mockserver.mock.action.http.GrpcChaosRegistry.getInstance().reconcileFromBackend();
+                    }
 
-                @Override
-                public void onCleared() {
-                    CrossProtocolEventBus.getInstance().reconcileFromBackend();
+                    @Override
+                    public void onCleared() {
+                        org.mockserver.mock.action.http.ServiceChaosRegistry.getInstance().reconcileFromBackend();
+                        org.mockserver.mock.action.http.TcpChaosRegistry.getInstance().reconcileFromBackend();
+                        org.mockserver.mock.action.http.GrpcChaosRegistry.getInstance().reconcileFromBackend();
+                    }
+                });
+            }
+            Metrics.setActiveExpectationsSupplier(registeredWithMetrics(() -> requestMatchers.retrieveActiveExpectations(null)));
+            Metrics.setClusterMemberCountSupplier(registeredWithMetrics(() -> stateBackend.clusterInfo().members().size()));
+            Metrics.setEventLogRingStatsSupplier(registeredWithMetrics(() -> new Metrics.RingStats(
+                mockServerLog.getRingBufferOccupancy(),
+                mockServerLog.getRingBufferSizeInForce(),
+                mockServerLog.getInFlightBytes(),
+                mockServerLog.getMaxInFlightBytes(),
+                mockServerLog.getRetainedEntryCount(),
+                mockServerLog.getRetainedBytes(),
+                mockServerLog.getMaxRetainedBytes(),
+                mockServerLog.getMaxRetainedEntries())));
+            if (scheduler != null) {
+                Metrics.setSchedulerQueueDepthSuppliers(registeredWithMetrics(scheduler::getQueuedTaskCount), registeredWithMetrics(scheduler::getQueuedTemplateActionCount));
+                Metrics.setPendingDelayedTasksSupplier(registeredWithMetrics(scheduler::getPendingDelayedTaskCount));
+            }
+            Metrics.setExpectationStoreStatsSupplier(registeredWithMetrics(() -> new Metrics.ExpectationStoreStats(
+                requestMatchers.getExpectationBytes(),
+                requestMatchers.getMaxExpectationBytes(),
+                requestMatchers.getExpectationByteEvictedCount())));
+            if (configuration.persistExpectations()) {
+                this.expectationFileSystemPersistence = new ExpectationFileSystemPersistence(configuration, mockServerLogger, requestMatchers, stateBackend.blobs());
+            }
+            if (configuration.persistRecordedExpectations()) {
+                this.recordedExpectationFileSystemPersistence = new org.mockserver.persistence.RecordedExpectationFileSystemPersistence(configuration, mockServerLogger, mockServerLog, stateBackend.blobs());
+            }
+            if (configuration.persistRecordedRequestsToDisk()) {
+                this.recordedRequestsFileSystemPersistence = new org.mockserver.persistence.RecordedRequestsFileSystemPersistence(configuration, mockServerLogger);
+                mockServerLog.setRecordedRequestConsumer(recordedRequestsFileSystemPersistence::append, recordedRequestsFileSystemPersistence::flush);
+            }
+            if (isNotBlank(configuration.initializationJsonPath()) || isNotBlank(configuration.initializationOpenAPIPath()) || isNotBlank(configuration.initializationClass())) {
+                ExpectationInitializerLoader expectationInitializerLoader = new ExpectationInitializerLoader(configuration, mockServerLogger, requestMatchers);
+                if ((isNotBlank(configuration.initializationJsonPath()) || isNotBlank(configuration.initializationOpenAPIPath())) && configuration.watchInitializationJson()) {
+                    this.expectationFileWatcher = new ExpectationFileWatcher(configuration, mockServerLogger, requestMatchers, expectationInitializerLoader);
                 }
-            });
+            }
+            // G11 follow-up: wire the cross-protocol event bus to the clustered
+            // backend for fleet-wide registration replication. When the backend is
+            // not clustered (default), setStateBackend is a no-op and the bus stays
+            // node-local. Mirrors the chaos registry wiring pattern above.
+            CrossProtocolEventBus.getInstance().setStateBackend(stateBackend);
+            if (stateBackend.isClustered()) {
+                stateBackend.addInvalidationListener(new InvalidationListener() {
+                    @Override
+                    public void onChanged(String key) {
+                        CrossProtocolEventBus.getInstance().reconcileFromBackend();
+                    }
+
+                    @Override
+                    public void onCleared() {
+                        CrossProtocolEventBus.getInstance().reconcileFromBackend();
+                    }
+                });
+            }
+            CrossProtocolEventBus.getInstance().registerScenarioManager(requestMatchers.getScenarioManager());
+            // T1.9: opt-in cluster verify/retrieve fan-in. The per-node event log means a
+            // verify/retrieve behind a load balancer sees only local traffic; when enabled
+            // (clusterVerifyFanIn=true + clusterVerifyFanInPeers set) this aggregates across
+            // peers. Default OFF = unchanged per-node behaviour. Injectable for tests.
+            this.clusterFanIn = new ClusterFanIn(configuration, this.mockServerLogger,
+                new HttpClusterPeerAccessor(configuration, this.mockServerLogger));
+            // Preload load scenario definitions from a JSON file into the registry (LOADED state, staged but
+            // not running). Mirrors the expectation initialization-from-file mechanism.
+            preloadLoadScenarios();
+            this.memoryMonitoring = new MemoryMonitoring(configuration, this.mockServerLog, this.requestMatchers);
+            if (mockServerLogger != null && mockServerLogger.isEnabledForInstance(TRACE)) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(TRACE)
+                        .setMessageFormat("log ring buffer created, with size " + configuration.ringBufferSize())
+                );
+            }
+            initGrpcDescriptorStore();
+            // All synchronous startup work (expectation initializers, OpenAPI seeding, gRPC descriptor
+            // loading) is now complete — flip the readiness flag so the /mockserver/ready probe reports
+            // ready. Set last so a partially-constructed HttpState never reports ready.
+            this.initializationComplete = true;
+        } catch (Throwable throwable) {
+            // the caller has no reference to stop: end the event-log thread and undo the registrations here
+            try {
+                stop(false);
+            } catch (Throwable suppressed) {
+                throwable.addSuppressed(suppressed);
+            }
+            throw throwable;
         }
-        CrossProtocolEventBus.getInstance().registerScenarioManager(requestMatchers.getScenarioManager());
-        // T1.9: opt-in cluster verify/retrieve fan-in. The per-node event log means a
-        // verify/retrieve behind a load balancer sees only local traffic; when enabled
-        // (clusterVerifyFanIn=true + clusterVerifyFanInPeers set) this aggregates across
-        // peers. Default OFF = unchanged per-node behaviour. Injectable for tests.
-        this.clusterFanIn = new ClusterFanIn(configuration, this.mockServerLogger,
-            new HttpClusterPeerAccessor(configuration, this.mockServerLogger));
-        // Preload load scenario definitions from a JSON file into the registry (LOADED state, staged but
-        // not running). Mirrors the expectation initialization-from-file mechanism.
-        preloadLoadScenarios();
-        this.memoryMonitoring = new MemoryMonitoring(configuration, this.mockServerLog, this.requestMatchers);
-        if (mockServerLogger != null && mockServerLogger.isEnabledForInstance(TRACE)) {
-            mockServerLogger.logEvent(
-                new LogEntry()
-                    .setLogLevel(TRACE)
-                    .setMessageFormat("log ring buffer created, with size " + configuration.ringBufferSize())
-            );
-        }
-        initGrpcDescriptorStore();
-        // All synchronous startup work (expectation initializers, OpenAPI seeding, gRPC descriptor
-        // loading) is now complete — flip the readiness flag so the /mockserver/ready probe reports
-        // ready. Set last so a partially-constructed HttpState never reports ready.
-        this.initializationComplete = true;
     }
 
     /**
@@ -7067,6 +7077,14 @@ public class HttpState {
     }
 
     public void stop() {
+        stop(true);
+    }
+
+    /**
+     * @param resetAsyncApi whether to stop the process-wide AsyncAPI broker connections, which a constructor that
+     *                      failed never started; every other step skips what was never created
+     */
+    private void stop(boolean resetAsyncApi) {
         if (expectationFileSystemPersistence != null) {
             expectationFileSystemPersistence.stop();
         }
@@ -7085,15 +7103,19 @@ public class HttpState {
         // Stop any active AsyncAPI broker connections (Kafka consumers, MQTT clients)
         // so they are not leaked on shutdown; no-op when the async module is absent
         // or nothing is loaded.
-        org.mockserver.async.AsyncApiControlPlaneRegistry.getInstance().reset();
+        if (resetAsyncApi) {
+            org.mockserver.async.AsyncApiControlPlaneRegistry.getInstance().reset();
+        }
         if (clusterFanIn != null) {
             clusterFanIn.close();
         }
         Metrics.clearLiveStateSuppliers(metricsSuppliers.toArray());
-        CrossProtocolEventBus.getInstance().unregisterScenarioManager(requestMatchers.getScenarioManager());
+        if (requestMatchers != null) {
+            CrossProtocolEventBus.getInstance().unregisterScenarioManager(requestMatchers.getScenarioManager());
+        }
         org.mockserver.mock.action.http.LoadScenarioOrchestrator.getInstance().clearSender(installedRequestSender);
         org.mockserver.mock.drift.DriftAlertNotifier.getInstance().clearSender(installedRequestSender);
-        getMockServerLog().stop();
+        mockServerLog.stop();
         // G10 phase 2a: close the state backend (no-op for in-memory)
         if (stateBackend != null) {
             stateBackend.close();

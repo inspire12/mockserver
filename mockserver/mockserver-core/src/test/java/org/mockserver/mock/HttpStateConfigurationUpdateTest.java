@@ -110,6 +110,9 @@ public class HttpStateConfigurationUpdateTest {
     @After
     public void restoreAuditStore() {
         AuditStore.getInstance().setMaxSize(originalAuditMaxSize);
+        if (httpState != null) {
+            httpState.stop();
+        }
     }
 
     /**
@@ -342,6 +345,7 @@ public class HttpStateConfigurationUpdateTest {
         // given - a real asynchronous scheduler behind the running state, with room for many delayed responses
         configuration.maxPendingDelayedResponses(100);
         Scheduler scheduler = new Scheduler(configuration, logger, false);
+        httpState.stop();
         httpState = new HttpState(configuration, logger, scheduler);
         try {
             java.util.concurrent.atomic.AtomicInteger refused = new java.util.concurrent.atomic.AtomicInteger();

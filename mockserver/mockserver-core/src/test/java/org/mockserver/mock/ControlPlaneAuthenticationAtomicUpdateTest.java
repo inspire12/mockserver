@@ -48,6 +48,7 @@ public class ControlPlaneAuthenticationAtomicUpdateTest {
     private static String jwkSource;
 
     private final List<Scheduler> schedulers = new ArrayList<>();
+    private final List<HttpState> httpStates = new ArrayList<>();
 
     @BeforeClass
     public static void createJwkSource() throws Exception {
@@ -72,6 +73,7 @@ public class ControlPlaneAuthenticationAtomicUpdateTest {
 
     @After
     public void shutdownSchedulers() {
+        httpStates.forEach(HttpState::stop);
         schedulers.forEach(Scheduler::shutdown);
     }
 
@@ -79,7 +81,9 @@ public class ControlPlaneAuthenticationAtomicUpdateTest {
         MockServerLogger mockServerLogger = new MockServerLogger();
         Scheduler scheduler = new Scheduler(configuration, mockServerLogger);
         schedulers.add(scheduler);
-        return new HttpState(configuration, mockServerLogger, scheduler);
+        HttpState httpState = new HttpState(configuration, mockServerLogger, scheduler);
+        httpStates.add(httpState);
+        return httpState;
     }
 
     private static boolean allowedWithoutCredentials(HttpState httpState) {

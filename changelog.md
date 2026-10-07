@@ -715,6 +715,7 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **A server that fails to start no longer leaves a thread and its memory behind.** When starting failed part way, for example because an expectation initializer failed with `failOnInitializationError=true` or the configured state backend could not be created, MockServer kept the thread of its request log running, and with it everything the failed server had loaded, for the life of the JVM; an embedded server that was retried after such a failure accumulated one per attempt. A server that was already running in the same JVM could also go on using the failed server's scenario state. The failed start now stops that thread and undoes what it had set up before reporting the error.
 - **A TLS connection whose server certificate could not be provided no longer leaks memory.** When MockServer
   failed to provide a certificate for a TLS client (for example a fixed `x509CertificatePath` not signed by the
   configured certificate authority) and the connection then closed, or MockServer was stopped while it was still

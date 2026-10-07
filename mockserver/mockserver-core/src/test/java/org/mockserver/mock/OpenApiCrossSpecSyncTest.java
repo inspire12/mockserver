@@ -1,5 +1,6 @@
 package org.mockserver.mock;
 
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockserver.configuration.Configuration;
@@ -104,6 +105,13 @@ public class OpenApiCrossSpecSyncTest {
         Configuration configuration = configuration();
         Scheduler scheduler = mock(Scheduler.class);
         httpState = new HttpState(configuration, new MockServerLogger(configuration, MockServerLogger.class), scheduler);
+    }
+
+    @After
+    public void stopHttpState() {
+        if (httpState != null) {
+            httpState.stop();
+        }
     }
 
     private Set<String> activeIds() {

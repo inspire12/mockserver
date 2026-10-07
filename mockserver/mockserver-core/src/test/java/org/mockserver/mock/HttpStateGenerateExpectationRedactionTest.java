@@ -63,6 +63,9 @@ public class HttpStateGenerateExpectationRedactionTest {
 
     @After
     public void cleanup() {
+        if (httpState != null) {
+            httpState.stop();
+        }
         if (schedulerExecutor != null) {
             schedulerExecutor.shutdownNow();
         }

@@ -67,6 +67,9 @@ public class HttpStateVerifySloEndpointTest {
     public void tearDown() {
         store.reset();
         ConfigurationProperties.sloTrackingEnabled(false);
+        if (httpState != null) {
+            httpState.stop();
+        }
     }
 
     private HttpResponse handle(String body) {
@@ -138,6 +141,7 @@ public class HttpStateVerifySloEndpointTest {
         ConfigurationProperties.sloTrackingEnabled(false);
         Configuration configuration = configuration().sloTrackingEnabled(false);
         Scheduler scheduler = new Scheduler(configuration, new MockServerLogger(configuration, HttpStateVerifySloEndpointTest.class), true);
+        httpState.stop();
         httpState = new HttpState(configuration, new MockServerLogger(configuration, HttpStateVerifySloEndpointTest.class), scheduler);
 
         HttpResponse response = handle(criteria("LESS_THAN", 500));

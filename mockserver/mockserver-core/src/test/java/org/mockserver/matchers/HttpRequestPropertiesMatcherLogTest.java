@@ -1,6 +1,7 @@
 package org.mockserver.matchers;
 
 import org.apache.commons.text.StringEscapeUtils;
+import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.ClassRule;
@@ -44,7 +45,8 @@ public class HttpRequestPropertiesMatcherLogTest {
 
     private final Configuration configuration = configuration();
     private final MockServerLogger mockServerLogger = new MockServerLogger(HttpRequestPropertiesMatcherLogTest.class);
-    private final HttpState httpStateHandler = new HttpState(configuration(), mockServerLogger, new Scheduler(configuration(), mockServerLogger));
+    private final Scheduler scheduler = new Scheduler(configuration(), mockServerLogger);
+    private final HttpState httpStateHandler = new HttpState(configuration(), mockServerLogger, scheduler);
     private static Level originalLevel;
 
     @ClassRule
@@ -61,6 +63,12 @@ public class HttpRequestPropertiesMatcherLogTest {
     @AfterClass
     public static void resetLogs() {
         logLevel(originalLevel.name());
+    }
+
+    @After
+    public void stopHttpState() {
+        httpStateHandler.stop();
+        scheduler.shutdown();
     }
 
     private boolean match(HttpRequest matcher, HttpRequest matched) {

@@ -113,6 +113,9 @@ public class HttpStateTest {
 
     @After
     public void resetClock() {
+        if (httpState != null) {
+            httpState.stop();
+        }
         TimeService.reset();
         if (schedulerExecutor != null) {
             schedulerExecutor.shutdownNow();
@@ -548,19 +551,22 @@ public class HttpStateTest {
         Scheduler scheduler = mock(Scheduler.class);
         org.mockito.Mockito.when(scheduler.getExecutorService()).thenReturn(schedulerExecutor);
         HttpState ssrfState = new HttpState(ssrfConfiguration, new MockServerLogger(ssrfConfiguration, MockServerLogger.class), scheduler);
+        try {
+            HttpRequest trafficValidateRequest = request("/mockserver/trafficValidate")
+                .withMethod("PUT")
+                .withBody("{\"spec\":\"http://169.254.169.254/openapi.json\"}");
+            FakeResponseWriter responseWriter = new FakeResponseWriter();
 
-        HttpRequest trafficValidateRequest = request("/mockserver/trafficValidate")
-            .withMethod("PUT")
-            .withBody("{\"spec\":\"http://169.254.169.254/openapi.json\"}");
-        FakeResponseWriter responseWriter = new FakeResponseWriter();
+            // when
+            boolean handle = ssrfState.handle(trafficValidateRequest, responseWriter, false);
 
-        // when
-        boolean handle = ssrfState.handle(trafficValidateRequest, responseWriter, false);
-
-        // then
-        assertThat(handle, is(true));
-        assertThat(responseWriter.response.getStatusCode(), is(403));
-        assertThat(responseWriter.response.getBodyAsString(), containsString("SSRF"));
+            // then
+            assertThat(handle, is(true));
+            assertThat(responseWriter.response.getStatusCode(), is(403));
+            assertThat(responseWriter.response.getBodyAsString(), containsString("SSRF"));
+        } finally {
+            ssrfState.stop();
+        }
     }
 
     @Test
@@ -2373,44 +2379,47 @@ public class HttpStateTest {
         Scheduler scheduler = mock(Scheduler.class);
         org.mockito.Mockito.when(scheduler.getExecutorService()).thenReturn(schedulerExecutor);
         HttpState largeLogState = new HttpState(largeLogConfiguration, new MockServerLogger(largeLogConfiguration, MockServerLogger.class), scheduler);
+        try {
+            StringBuilder largeBodyBuilder = new StringBuilder(bodyBytes);
+            for (int i = 0; i < bodyBytes; i++) {
+                largeBodyBuilder.append('x');
+            }
+            String largeBody = largeBodyBuilder.toString();
+            for (int i = 0; i < entryCount; i++) {
+                largeLogState.log(
+                    new LogEntry()
+                        .setLogLevel(INFO)
+                        .setType(EXPECTATION_RESPONSE)
+                        .setHttpRequest(request("/req-" + i))
+                        .setHttpResponse(response(largeBody))
+                );
+            }
 
-        StringBuilder largeBodyBuilder = new StringBuilder(bodyBytes);
-        for (int i = 0; i < bodyBytes; i++) {
-            largeBodyBuilder.append('x');
-        }
-        String largeBody = largeBodyBuilder.toString();
-        for (int i = 0; i < entryCount; i++) {
-            largeLogState.log(
-                new LogEntry()
-                    .setLogLevel(INFO)
-                    .setType(EXPECTATION_RESPONSE)
-                    .setHttpRequest(request("/req-" + i))
-                    .setHttpResponse(response(largeBody))
-            );
-        }
+            // when
+            long start = System.currentTimeMillis();
+            HttpResponse response = largeLogState
+                .retrieve(
+                    request()
+                        .withQueryStringParameter("type", "request_responses")
+                        .withQueryStringParameter("format", "json")
+                        .withBody(requestDefinitionSerializer.serialize(request("/req-.*")))
+                );
+            long durationMillis = System.currentTimeMillis() - start;
 
-        // when
-        long start = System.currentTimeMillis();
-        HttpResponse response = largeLogState
-            .retrieve(
-                request()
-                    .withQueryStringParameter("type", "request_responses")
-                    .withQueryStringParameter("format", "json")
-                    .withBody(requestDefinitionSerializer.serialize(request("/req-.*")))
-            );
-        long durationMillis = System.currentTimeMillis() - start;
-
-        // then - completed (no TimeoutException) and returned every entry
-        assertThat(response.getStatusCode(), is(200));
-        assertThat(durationMillis, lessThan(largeLogConfiguration.maxFutureTimeoutInMillis()));
-        String body = response.getBodyAsString();
-        assertThat(body, containsString("/req-0\""));
-        assertThat(body, containsString("/req-" + (entryCount - 1) + "\""));
-        int pathCount = 0;
-        for (int idx = body.indexOf("\"path\""); idx >= 0; idx = body.indexOf("\"path\"", idx + 1)) {
-            pathCount++;
+            // then - completed (no TimeoutException) and returned every entry
+            assertThat(response.getStatusCode(), is(200));
+            assertThat(durationMillis, lessThan(largeLogConfiguration.maxFutureTimeoutInMillis()));
+            String body = response.getBodyAsString();
+            assertThat(body, containsString("/req-0\""));
+            assertThat(body, containsString("/req-" + (entryCount - 1) + "\""));
+            int pathCount = 0;
+            for (int idx = body.indexOf("\"path\""); idx >= 0; idx = body.indexOf("\"path\"", idx + 1)) {
+                pathCount++;
+            }
+            assertThat(pathCount, is(entryCount));
+        } finally {
+            largeLogState.stop();
         }
-        assertThat(pathCount, is(entryCount));
     }
 
     @Test
@@ -3523,18 +3532,21 @@ public class HttpStateTest {
         // given
         Scheduler scheduler = mock(Scheduler.class);
         HttpState metricsEnabledState = new HttpState(configuration().metricsEnabled(true), new MockServerLogger(), scheduler);
+        try {
+            // when
+            HttpResponse response = metricsEnabledState
+                .retrieve(
+                    request()
+                        .withQueryStringParameter("type", "metrics")
+                );
 
-        // when
-        HttpResponse response = metricsEnabledState
-            .retrieve(
-                request()
-                    .withQueryStringParameter("type", "metrics")
-            );
-
-        // then
-        assertThat(response.getStatusCode(), is(200));
-        assertThat(response.getBodyAsString(), containsString("REQUESTS_RECEIVED_COUNT"));
-        assertThat(response.getBodyAsString(), containsString("EXPECTATIONS_NOT_MATCHED_COUNT"));
+            // then
+            assertThat(response.getStatusCode(), is(200));
+            assertThat(response.getBodyAsString(), containsString("REQUESTS_RECEIVED_COUNT"));
+            assertThat(response.getBodyAsString(), containsString("EXPECTATIONS_NOT_MATCHED_COUNT"));
+        } finally {
+            metricsEnabledState.stop();
+        }
     }
 
     @Test
@@ -4728,35 +4740,38 @@ public class HttpStateTest {
             new MockServerLogger(configuration, MockServerLogger.class),
             evictionScheduler
         );
-
-        // and a respondBeforeBody expectation added FIRST (so it is the oldest / first evicted)
-        smallState.add(new Expectation(
-            request().withMethod("POST").withPath("/upload").withRespondBeforeBody(true)
-        ).thenRespond(response().withStatusCode(403)));
-        assertThat(smallState.firstMatchingEarlyExpectation(
-            request().withMethod("POST").withPath("/upload")
-        ), is(notNullValue()));
-
-        // when enough ordinary expectations are added to overflow the cap and evict the oldest
-        for (int i = 0; i < 3; i++) {
+        try {
+            // and a respondBeforeBody expectation added FIRST (so it is the oldest / first evicted)
             smallState.add(new Expectation(
-                request().withMethod("GET").withPath("/evict/" + i)
-            ).thenRespond(response().withStatusCode(200)));
+                request().withMethod("POST").withPath("/upload").withRespondBeforeBody(true)
+            ).thenRespond(response().withStatusCode(403)));
+            assertThat(smallState.firstMatchingEarlyExpectation(
+                request().withMethod("POST").withPath("/upload")
+            ), is(notNullValue()));
+
+            // when enough ordinary expectations are added to overflow the cap and evict the oldest
+            for (int i = 0; i < 3; i++) {
+                smallState.add(new Expectation(
+                    request().withMethod("GET").withPath("/evict/" + i)
+                ).thenRespond(response().withStatusCode(200)));
+            }
+
+            // then the evicted respondBeforeBody expectation no longer early-matches
+            assertThat(smallState.firstMatchingEarlyExpectation(
+                request().withMethod("POST").withPath("/upload")
+            ), is(nullValue()));
+
+            // and a fresh respondBeforeBody expectation still early-matches (set consistent after eviction)
+            Expectation afterEviction = new Expectation(
+                request().withMethod("POST").withPath("/fresh").withRespondBeforeBody(true)
+            ).thenRespond(response().withStatusCode(403));
+            smallState.add(afterEviction);
+            assertThat(smallState.firstMatchingEarlyExpectation(
+                request().withMethod("POST").withPath("/fresh")
+            ), is(afterEviction));
+        } finally {
+            smallState.stop();
         }
-
-        // then the evicted respondBeforeBody expectation no longer early-matches
-        assertThat(smallState.firstMatchingEarlyExpectation(
-            request().withMethod("POST").withPath("/upload")
-        ), is(nullValue()));
-
-        // and a fresh respondBeforeBody expectation still early-matches (set consistent after eviction)
-        Expectation afterEviction = new Expectation(
-            request().withMethod("POST").withPath("/fresh").withRespondBeforeBody(true)
-        ).thenRespond(response().withStatusCode(403));
-        smallState.add(afterEviction);
-        assertThat(smallState.firstMatchingEarlyExpectation(
-            request().withMethod("POST").withPath("/fresh")
-        ), is(afterEviction));
     }
 
     @Test

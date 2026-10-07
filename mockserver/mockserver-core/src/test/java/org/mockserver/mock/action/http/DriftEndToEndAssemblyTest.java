@@ -141,6 +141,9 @@ public class DriftEndToEndAssemblyTest {
 
     @After
     public void tearDown() {
+        if (realHttpState != null) {
+            realHttpState.stop();
+        }
         DriftStore.getInstance().clear();
         if (forwardScheduler != null) {
             forwardScheduler.shutdown();

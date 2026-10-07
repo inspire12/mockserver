@@ -82,6 +82,7 @@ public class HttpStateClusteredListenerWiringTest {
     }
 
     private final boolean clustered;
+    private HttpState httpState;
 
     public HttpStateClusteredListenerWiringTest(boolean clustered) {
         this.clustered = clustered;
@@ -89,6 +90,9 @@ public class HttpStateClusteredListenerWiringTest {
 
     @After
     public void tearDown() {
+        if (httpState != null) {
+            httpState.stop();
+        }
         // Constructing HttpState wires our spy backend into these process-wide singletons; reset them
         // (and the factory) so no later sequential test observes this test's spy store.
         StateBackendFactory.resetToDefault();
@@ -104,7 +108,7 @@ public class HttpStateClusteredListenerWiringTest {
         Configuration configuration = configuration();
         MockServerLogger mockServerLogger = new MockServerLogger(configuration, HttpStateClusteredListenerWiringTest.class);
         // Construct the real HttpState — this is the code under test (its constructor registers the listeners).
-        new HttpState(configuration, mockServerLogger, mock(Scheduler.class));
+        httpState = new HttpState(configuration, mockServerLogger, mock(Scheduler.class));
         return backend;
     }
 

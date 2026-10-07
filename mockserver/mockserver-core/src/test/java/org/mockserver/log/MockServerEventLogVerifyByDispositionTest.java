@@ -1,5 +1,6 @@
 package org.mockserver.log;
 
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockserver.configuration.Configuration;
@@ -38,14 +39,22 @@ public class MockServerEventLogVerifyByDispositionTest {
     private final Configuration configuration = configuration();
     private MockServerLogger mockServerLogger;
     private MockServerEventLog mockServerEventLog;
+    private HttpState httpStateHandler;
 
     @Before
     public void setupTestFixture() {
         Scheduler scheduler = mock(Scheduler.class);
-        HttpState httpStateHandler = new HttpState(configuration, new MockServerLogger(configuration, MockServerLogger.class), scheduler);
+        httpStateHandler = new HttpState(configuration, new MockServerLogger(configuration, MockServerLogger.class), scheduler);
         mockServerLogger = httpStateHandler.getMockServerLogger();
         mockServerEventLog = httpStateHandler.getMockServerLog();
         configuration.logLevel(Level.INFO);
+    }
+
+    @After
+    public void stopHttpState() {
+        if (httpStateHandler != null) {
+            httpStateHandler.stop();
+        }
     }
 
     private String verify(Verification verification) {

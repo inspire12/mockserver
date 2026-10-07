@@ -81,12 +81,18 @@ public class HttpStateLoadScenarioEndpointTest {
         LoadScenarioOrchestrator.getInstance().reset();
         LoadScenarioOrchestrator.getInstance().setSender(null);
         ConfigurationProperties.loadGenerationEnabled(originalEnabled);
+        if (httpState != null) {
+            httpState.stop();
+        }
     }
 
     private void rebuildHttpState(boolean enabled) {
         ConfigurationProperties.loadGenerationEnabled(enabled);
         Configuration configuration = configuration().loadGenerationEnabled(enabled);
         Scheduler scheduler = new Scheduler(configuration, new MockServerLogger(configuration, HttpStateLoadScenarioEndpointTest.class), true);
+        if (httpState != null) {
+            httpState.stop();
+        }
         httpState = new HttpState(configuration, new MockServerLogger(configuration, HttpStateLoadScenarioEndpointTest.class), scheduler);
         LoadScenarioOrchestrator.getInstance().setConfiguration(configuration);
     }

@@ -1,6 +1,7 @@
 package org.mockserver.log;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.ClassRule;
 import org.junit.Test;
@@ -47,6 +48,7 @@ public class MockServerEventLogTest {
     private final Configuration configuration = configuration();
     private MockServerLogger mockServerLogger;
     private MockServerEventLog mockServerEventLog;
+    private HttpState httpStateHandler;
 
     @ClassRule
     public static final GlobalFixedTime fixedTime = new GlobalFixedTime();
@@ -54,9 +56,16 @@ public class MockServerEventLogTest {
     @Before
     public void setupTestFixture() {
         Scheduler scheduler = mock(Scheduler.class);
-        HttpState httpStateHandler = new HttpState(configuration, new MockServerLogger(configuration, MockServerLogger.class), scheduler);
+        httpStateHandler = new HttpState(configuration, new MockServerLogger(configuration, MockServerLogger.class), scheduler);
         mockServerLogger = httpStateHandler.getMockServerLogger();
         mockServerEventLog = httpStateHandler.getMockServerLog();
+    }
+
+    @After
+    public void stopHttpState() {
+        if (httpStateHandler != null) {
+            httpStateHandler.stop();
+        }
     }
 
     private List<LogEntry> retrieveMessageLogEntries(RequestDefinition httpRequest) {

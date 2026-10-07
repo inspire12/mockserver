@@ -70,6 +70,9 @@ public class HttpStateAuditTest {
     @After
     public void tearDown() {
         AuditStore.getInstance().clear();
+        if (httpState != null) {
+            httpState.stop();
+        }
     }
 
     private void handle(HttpRequest request) {

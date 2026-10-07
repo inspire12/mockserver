@@ -1,5 +1,6 @@
 package org.mockserver.mock;
 
+import org.junit.After;
 import org.junit.Test;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.log.model.LogEntry;
@@ -13,6 +14,9 @@ import org.mockserver.responsewriter.ResponseWriter;
 import org.mockserver.scheduler.Scheduler;
 import org.mockserver.serialization.ExpectationSerializer;
 import org.mockserver.serialization.RequestDefinitionSerializer;
+
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
@@ -46,6 +50,8 @@ import static org.mockserver.model.HttpResponse.response;
  */
 public class RecordAndForwardRoundTripHttpStateTest {
 
+    private final List<HttpState> httpStates = new ArrayList<>();
+
     private final RequestDefinitionSerializer requestDefinitionSerializer = new RequestDefinitionSerializer(new MockServerLogger());
     private final ExpectationSerializer expectationSerializer = new ExpectationSerializer(new MockServerLogger());
 
@@ -62,9 +68,16 @@ public class RecordAndForwardRoundTripHttpStateTest {
         }
     }
 
+    @After
+    public void stopHttpStates() {
+        httpStates.forEach(HttpState::stop);
+    }
+
     private HttpState newHttpState(Configuration configuration) {
         Scheduler scheduler = mock(Scheduler.class);
-        return new HttpState(configuration, new MockServerLogger(configuration, MockServerLogger.class), scheduler);
+        HttpState httpState = new HttpState(configuration, new MockServerLogger(configuration, MockServerLogger.class), scheduler);
+        httpStates.add(httpState);
+        return httpState;
     }
 
     private void recordUsersCalls(HttpState httpState) {

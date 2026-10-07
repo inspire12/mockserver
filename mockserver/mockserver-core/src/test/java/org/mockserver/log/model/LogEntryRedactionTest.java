@@ -20,6 +20,7 @@ import org.mockserver.serialization.ObjectMapperFactory;
 import org.mockserver.time.GlobalFixedTime;
 import org.mockserver.verify.Verification;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
@@ -63,6 +64,7 @@ public class LogEntryRedactionTest {
     public static final GlobalFixedTime fixedTime = new GlobalFixedTime();
 
     private boolean originalValue;
+    private final List<HttpState> httpStates = new ArrayList<>();
 
     @Before
     public void setUp() {
@@ -75,6 +77,7 @@ public class LogEntryRedactionTest {
         // restore through the setter: System.clearProperty leaves ConfigurationProperties' cached value in
         // place, which kept redaction on for every later test in the same JVM
         ConfigurationProperties.redactSecretsInLog(originalValue);
+        httpStates.forEach(HttpState::stop);
     }
 
     @Test
@@ -317,6 +320,7 @@ public class LogEntryRedactionTest {
         Configuration configuration = configuration();
         Scheduler scheduler = mock(Scheduler.class);
         HttpState httpState = new HttpState(configuration, new MockServerLogger(configuration, MockServerLogger.class), scheduler);
+        httpStates.add(httpState);
         return httpState.getMockServerLog();
     }
 

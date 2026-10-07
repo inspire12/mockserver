@@ -102,6 +102,9 @@ public class HttpStateRetrieveOutOfMemoryTest {
 
     @After
     public void tearDown() {
+        if (httpState != null) {
+            httpState.stop();
+        }
         schedulerExecutor.shutdownNow();
     }
 

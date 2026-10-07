@@ -68,6 +68,7 @@ public class HttpStateChaosProfileEndpointTest {
         FakeResponseWriter rw = new FakeResponseWriter();
         httpState.handle(request("/mockserver/chaosExperiment/profiles/payments-outage").withMethod("DELETE"), rw, false);
         httpState.handle(request("/mockserver/chaosExperiment/profiles/looped").withMethod("DELETE"), rw, false);
+        httpState.stop();
     }
 
     private HttpResponse handle(String path, String method, String body) {

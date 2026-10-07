@@ -2,6 +2,7 @@ package org.mockserver.mock;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockserver.configuration.Configuration;
@@ -44,6 +45,13 @@ public class HttpStateDebugMismatchClosestMatchTest {
             new MockServerLogger(configuration, HttpStateDebugMismatchClosestMatchTest.class), true);
         httpState = new HttpState(configuration,
             new MockServerLogger(configuration, HttpStateDebugMismatchClosestMatchTest.class), scheduler);
+    }
+
+    @After
+    public void stopHttpState() {
+        if (httpState != null) {
+            httpState.stop();
+        }
     }
 
     /**
