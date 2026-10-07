@@ -43,6 +43,9 @@ dependencies {
     implementation "org.mock-server:mockserver-client-java-no-dependencies:${project.findProperty('mockserverVersion')}"
     implementation "org.mock-server:mockserver-netty-no-dependencies:${project.findProperty('mockserverVersion')}"
     testImplementation "org.mock-server:mockserver-integration-testing-no-dependencies:${project.findProperty('mockserverVersion')}"
+    // the integration-testing jar declares JUnit as provided rather than bundling it (#2772)
+    testImplementation "junit:junit:4.13.2"
+    testImplementation "org.hamcrest:hamcrest:2.2"
 
 }
 
