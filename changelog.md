@@ -786,16 +786,6 @@ This release delivers a sustained performance and memory programme alongside dat
   `localBoundIP` was set, so a user who set `localBoundIP=127.0.0.1` to keep MockServer off the network still exposed
   DNS mocking and HTTP/3 to it. **If you set `localBoundIP` and send DNS queries or HTTP/3 requests to another address
   of the host, they are no longer answered**: send them to the `localBoundIP` address, or leave `localBoundIP` unset.
-
-### Amend (unreleased entry)
-
-Append to the existing `[Unreleased]` bullet that begins **"A mocked response with a `1xx` status and nothing after it
-no longer leaves an HTTP/2 client waiting."**:
-
-  The first time an expectation answers a request over HTTP/2 this way, MockServer logs one `WARN` (no stack trace)
-  naming the expectation, saying that the stream was reset and that most clients report the request as failed, and
-  how to answer HTTP/2 clients: a status of `200` or above, or a request matcher with a protocol of `HTTP_1_1` to keep
-  the `1xx` for HTTP/1.1 clients. Later requests to the same expectation log nothing more.
 - **A reset made other than by the Node client now stays reset, and a Node callback with a `times` limit is no longer served again once it is used up.** MockServer closes a callback's WebSocket when it removes the callback's expectation: when its `times` are used up, or when it is cleared or reset through the REST API, the dashboard, another process or another client. The Node client took every such close for a dropped connection: about two seconds later it reconnected and registered the callback's expectation again, as new and with its full `times`, and ran the registration's `then()` again. So a reset was undone, and a callback limited to one request (the default) answered once, then 404, then again after each reconnect. The client now registers a callback's expectation once. When its WebSocket closes, it reconnects only if MockServer still holds the expectation, and then with the same client id, so the callback keeps its remaining `times`; otherwise it leaves the WebSocket closed without a reconnect warning, so a process whose callbacks are all used up can exit. A breakpoint's WebSocket is no longer reopened after MockServer closes it, which brought back the client's first breakpoint after a reset; the next breakpoint opens a new WebSocket.
 - **A reset no longer fails with a 500 while callback WebSockets are open.** When a callback or breakpoint WebSocket was served by the same I/O thread as the `PUT /mockserver/reset` request, the reset failed part way through with a `ConcurrentModificationException`: expectations and logs were cleared, but the other callback WebSockets stayed registered and everything reset after them (CRUD and file stores, quotas, rate limits, chaos and load state, SLO samples and more) was not reset. Every WebSocket is now closed and the reset completes.
 - **A connection that starts with a PROXY protocol header is now handled like any other.** With
@@ -1065,7 +1055,11 @@ no longer leaves an HTTP/2 client waiting."**:
   closes the stream without an error. The connection carries on with its other requests and is no longer held open
   by that stream. A `1xx` with a chunk size (`connectionOptions`), which sent nothing at all over HTTP/2,
   is sent the same way. HTTP/1.1 is unchanged, and so is a real interim response such as the `100` that answers
-  `Expect: 100-continue`.
+  `Expect: 100-continue`. The first time an expectation answers a request over HTTP/2 this way, MockServer logs one
+  `WARN` (no stack trace) naming the expectation, saying that the stream was reset and that most clients report the
+  request as failed, and how to answer HTTP/2 clients: a status of `200` or above, or a request matcher with a
+  protocol of `HTTP_1_1` to keep the `1xx` for HTTP/1.1 clients. Later requests to the same expectation log nothing
+  more.
 - **Log level change: an HTTP/2 upload the client gives up on is now one `INFO` entry, not an `ERROR` with a stack
   trace.** A client that reset a stream part way through a request body, or whose connection closed part way through
   one, was logged at `ERROR` as `web socket server caught exception` with a stack trace, though nothing was wrong
