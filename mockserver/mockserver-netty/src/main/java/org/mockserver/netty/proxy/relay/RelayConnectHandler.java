@@ -486,6 +486,7 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
         final LoopbackHttp2ResponseStreamer responseStreamer = new LoopbackHttp2ResponseStreamer(connection);
         // reads only responses MockServer itself wrote, so no limit on their headers, as on the HTTP/1.1 loopback
         final HttpToHttp2ConnectionHandler http2ConnectionHandler = Http2RequestHeaderLimit.relayLoopbackHandler(
+            mockServerLogger,
             connection,
             streamErrorHandler.frameListener(responseStreamer.relaying(
                 LoopbackAggregatingListener.of(connection, configuration.maxRequestBodySize())

@@ -69,14 +69,15 @@ public final class Http2RequestHeaderLimit {
     /**
      * @return the client handler of the loopback leg of a CONNECT or SOCKS tunnel carrying HTTP/2, built as Netty's
      * {@code HttpToHttp2ConnectionHandlerBuilder} builds it with {@link #relayLoopbackSettings()}, except that it sends
-     * no {@code x-http2-} extension header a request read from the proxy client carries
+     * no {@code x-http2-} extension header a request read from the proxy client carries, and that it logs a connection
+     * error it closes the loopback for
      */
-    public static HttpToHttp2ConnectionHandler relayLoopbackHandler(Http2Connection connection, Http2FrameListener frameListener, Http2FrameLogger frameLogger) {
-        return relayLoopbackHandlerBuilder(connection, frameListener, frameLogger).build();
+    public static HttpToHttp2ConnectionHandler relayLoopbackHandler(MockServerLogger mockServerLogger, Http2Connection connection, Http2FrameListener frameListener, Http2FrameLogger frameLogger) {
+        return relayLoopbackHandlerBuilder(mockServerLogger, connection, frameListener, frameLogger).build();
     }
 
-    static RelayLoopbackHandlerBuilder relayLoopbackHandlerBuilder(Http2Connection connection, Http2FrameListener frameListener, Http2FrameLogger frameLogger) {
-        return new RelayLoopbackHandlerBuilder(connection, frameListener, frameLogger);
+    static RelayLoopbackHandlerBuilder relayLoopbackHandlerBuilder(MockServerLogger mockServerLogger, Http2Connection connection, Http2FrameListener frameListener, Http2FrameLogger frameLogger) {
+        return new RelayLoopbackHandlerBuilder(mockServerLogger, connection, frameListener, frameLogger);
     }
 
     /**
@@ -132,6 +133,21 @@ public final class Http2RequestHeaderLimit {
         try {
             logRefusal(mockServerLogger, ctx, settings, outbound, cause);
             Http2StreamFaults.logError(mockServerLogger, ctx, outbound, cause);
+        } finally {
+            nettysOnError.run();
+        }
+    }
+
+    /**
+     * Logs a connection error an {@code HttpToHttp2ConnectionHandler} raised as it read, as a direct connection logs
+     * it: unlike {@code Http2FrameCodec}, that handler fires none down the pipeline, but answers it with a
+     * {@code GOAWAY} and a close in Netty's own handling, which runs whatever the logging does.
+     */
+    static void logConnectionErrorThen(MockServerLogger mockServerLogger, ChannelHandlerContext ctx, boolean outbound, Throwable cause, Runnable nettysOnError) {
+        try {
+            if (!outbound && isConnectionError(cause)) {
+                Http2ConnectionExceptionHandler.log(mockServerLogger, ctx, cause);
+            }
         } finally {
             nettysOnError.run();
         }
@@ -220,7 +236,10 @@ public final class Http2RequestHeaderLimit {
      */
     static final class RelayLoopbackHandlerBuilder extends AbstractHttp2ConnectionHandlerBuilder<HttpToHttp2ConnectionHandler, RelayLoopbackHandlerBuilder> {
 
-        private RelayLoopbackHandlerBuilder(Http2Connection connection, Http2FrameListener frameListener, Http2FrameLogger frameLogger) {
+        private final MockServerLogger mockServerLogger;
+
+        private RelayLoopbackHandlerBuilder(MockServerLogger mockServerLogger, Http2Connection connection, Http2FrameListener frameListener, Http2FrameLogger frameLogger) {
+            this.mockServerLogger = mockServerLogger;
             initialSettings(relayLoopbackSettings());
             connection(connection);
             frameListener(frameListener);
@@ -237,6 +256,10 @@ public final class Http2RequestHeaderLimit {
         @Override
         protected HttpToHttp2ConnectionHandler build(Http2ConnectionDecoder decoder, Http2ConnectionEncoder encoder, Http2Settings initialSettings) {
             return new HttpToHttp2ConnectionHandler(decoder, new ExtensionHeaderStrippingHttp2ConnectionEncoder(encoder), initialSettings, isValidateHeaders(), decoupleCloseAndGoAway(), flushPreface(), null) {
+                @Override
+                public void onError(ChannelHandlerContext ctx, boolean outbound, Throwable cause) {
+                    logConnectionErrorThen(mockServerLogger, ctx, outbound, cause, () -> super.onError(ctx, outbound, cause));
+                }
             };
         }
     }
@@ -273,16 +296,8 @@ public final class Http2RequestHeaderLimit {
             return new HttpToHttp2ConnectionHandler(decoder, new ExtensionHeaderStrippingHttp2ConnectionEncoder(encoder), initialSettings, isValidateHeaders(), decoupleCloseAndGoAway(), flushPreface(), null) {
                 @Override
                 public void onError(ChannelHandlerContext ctx, boolean outbound, Throwable cause) {
-                    logRefusalThen(mockServerLogger, ctx, initialSettings, outbound, cause, () -> {
-                        try {
-                            // logged here: unlike Http2FrameCodec, this handler fires no connection error down the pipeline
-                            if (!outbound && isConnectionError(cause)) {
-                                Http2ConnectionExceptionHandler.log(mockServerLogger, ctx, cause);
-                            }
-                        } finally {
-                            super.onError(ctx, outbound, cause);
-                        }
-                    });
+                    logRefusalThen(mockServerLogger, ctx, initialSettings, outbound, cause,
+                        () -> logConnectionErrorThen(mockServerLogger, ctx, outbound, cause, () -> super.onError(ctx, outbound, cause)));
                 }
 
                 @Override
