@@ -1,6 +1,8 @@
 package org.mockserver.mock.action.http;
 
 import org.mockserver.configuration.Configuration;
+import org.mockserver.httpclient.ClientConfigurationException;
+import org.mockserver.httpclient.HeaderLimitExceededException;
 import org.mockserver.time.TimeService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,8 +20,9 @@ import java.util.function.LongSupplier;
  * to one upstream the breaker trips <b>open</b> and {@link #allowRequest(String)} fails subsequent
  * requests fast (the caller returns a 503) for {@code forwardProxyCircuitBreakerWindowMillis}. Once
  * the window elapses the breaker moves to <b>half-open</b>: it permits a single trial request. A
- * success ({@link #recordSuccess(String)}) closes the breaker; a failure
- * ({@link #recordFailure(String)}) re-opens it for another window.
+ * success ({@link #recordSuccess}) closes the breaker; a failure ({@link #recordFailure}) re-opens it for
+ * another window. An outcome that says nothing about the upstream's health ({@link #recordNeutral}) does
+ * neither.
  *
  * <p>The whole mechanism is inert unless {@code forwardProxyCircuitBreakerEnabled} is true, so the
  * default behaviour (every request attempted) is unchanged.
@@ -171,6 +174,31 @@ public class ForwardCircuitBreaker {
                 configuration.forwardProxyCircuitBreakerWindowMillis()
             );
         }
+    }
+
+    /**
+     * Record a forward whose outcome says nothing about the upstream's health: a configuration error, which never
+     * reached the upstream, or a refusal of the upstream's response headers for {@code maxHeaderSize}. The breaker's
+     * state and failure count are left as they were; only a half-open trial is released, so the next request probes
+     * the upstream. No-op when the breaker is disabled or the key is null.
+     */
+    public void recordNeutral(Configuration configuration, String key) {
+        if (configuration == null || !Boolean.TRUE.equals(configuration.forwardProxyCircuitBreakerEnabled()) || key == null) {
+            return;
+        }
+        UpstreamState state = upstreams.get(key);
+        if (state != null) {
+            state.trialInFlight.set(0);
+        }
+    }
+
+    /**
+     * Whether a forward that failed with {@code throwable} says nothing about the upstream's health, so is recorded
+     * with {@link #recordNeutral}.
+     */
+    public static boolean isNeutral(Throwable throwable) {
+        return throwable != null
+            && (ClientConfigurationException.in(throwable) != null || HeaderLimitExceededException.in(throwable) != null);
     }
 
     /**

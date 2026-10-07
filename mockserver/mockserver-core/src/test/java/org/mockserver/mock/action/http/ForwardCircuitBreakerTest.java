@@ -133,6 +133,71 @@ public class ForwardCircuitBreakerTest {
     }
 
     @Test
+    public void shouldNotResetTheFailureCountOnANeutralOutcome() {
+        breaker.recordFailure(configuration, key());
+        breaker.recordFailure(configuration, key());
+        breaker.recordNeutral(configuration, key());
+        breaker.recordNeutral(configuration, key());
+        assertThat(breaker.isOpen(key()), is(false));
+
+        breaker.recordFailure(configuration, key());
+
+        assertThat(breaker.isOpen(key()), is(true));
+    }
+
+    @Test
+    public void shouldNotOpenOnNeutralOutcomesAlone() {
+        for (int i = 0; i < 10; i++) {
+            breaker.recordNeutral(configuration, key());
+        }
+
+        assertThat(breaker.isOpen(key()), is(false));
+        assertThat(breaker.allowRequest(configuration, key()), is(true));
+        assertThat(breaker.trackedUpstreamCount(), is(0));
+    }
+
+    @Test
+    public void shouldKeepAHalfOpenBreakerOpenAndReleaseItsTrialOnANeutralOutcome() {
+        // given - open, then half-open with the trial taken
+        breaker.recordFailure(configuration, key());
+        breaker.recordFailure(configuration, key());
+        breaker.recordFailure(configuration, key());
+        clock.addAndGet(10_001L);
+        assertThat(breaker.allowRequest(configuration, key()), is(true));
+        assertThat(breaker.allowRequest(configuration, key()), is(false));
+
+        // when - the trial's outcome says nothing about the upstream
+        breaker.recordNeutral(configuration, key());
+
+        // then - still open, and the next request is the trial
+        assertThat(breaker.isOpen(key()), is(true));
+        assertThat(breaker.openCircuitCount(), is(1));
+        assertThat(breaker.allowRequest(configuration, key()), is(true));
+        assertThat(breaker.allowRequest(configuration, key()), is(false));
+
+        // and - that trial's failure re-opens the breaker for a whole window
+        breaker.recordFailure(configuration, key());
+        assertThat(breaker.allowRequest(configuration, key()), is(false));
+        clock.addAndGet(9_999L);
+        assertThat(breaker.allowRequest(configuration, key()), is(false));
+    }
+
+    @Test
+    public void shouldIgnoreANeutralOutcomeWhenDisabled() {
+        Configuration disabled = Configuration.configuration().forwardProxyCircuitBreakerEnabled(false);
+        breaker.recordFailure(configuration, key());
+        breaker.recordFailure(configuration, key());
+        breaker.recordFailure(configuration, key());
+        clock.addAndGet(10_001L);
+        assertThat(breaker.allowRequest(configuration, key()), is(true));
+
+        breaker.recordNeutral(disabled, key());
+        breaker.recordNeutral(configuration, null);
+
+        assertThat(breaker.allowRequest(configuration, key()), is(false));
+    }
+
+    @Test
     public void shouldKeySeparatelyPerUpstream() {
         String a = ForwardCircuitBreaker.keyFor(new InetSocketAddress("a.example", 80));
         String b = ForwardCircuitBreaker.keyFor(new InetSocketAddress("b.example", 80));

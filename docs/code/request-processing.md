@@ -651,7 +651,7 @@ flowchart TD
 ```
 
 - **Retry** (`ForwardRetryPolicy`, config `forwardProxyRetryCount` / `forwardProxyRetryBackoffMillis`): re-issues the upstream call up to *N* times when an attempt is a transient failure — a connection-level exception or an upstream **502/503/504**. Only **idempotent** methods (GET, HEAD, OPTIONS, PUT, DELETE, TRACE) are retried; POST/PATCH are never retried so a request is never executed twice. Retries are chained asynchronously off the response future (never blocking the event loop) with a linear back-off (`backoff × attemptNumber`). Default `forwardProxyRetryCount=0` = forward exactly once.
-- **Circuit breaker** (`ForwardCircuitBreaker`, config `forwardProxyCircuitBreakerEnabled` + threshold/window): a process-wide singleton keyed by upstream `host:port`. After `forwardProxyCircuitBreakerFailureThreshold` consecutive failures the breaker trips **open** and `sendRequest` fails fast with a 503 (no upstream attempt) for `forwardProxyCircuitBreakerWindowMillis`; then **half-open** admits a single trial request — a success closes it, a failure re-opens it. The retry policy and breaker compose: a request's final outcome (after any retries) feeds `recordSuccess`/`recordFailure`. The open-upstream count is exported as the `mock_server_upstream_circuit_open` gauge (see [metrics.md](metrics.md)) and reset on `HttpState.reset()`.
+- **Circuit breaker** (`ForwardCircuitBreaker`, config `forwardProxyCircuitBreakerEnabled` + threshold/window): a process-wide singleton keyed by upstream `host:port`. After `forwardProxyCircuitBreakerFailureThreshold` consecutive failures the breaker trips **open** and `sendRequest` fails fast with a 503 (no upstream attempt) for `forwardProxyCircuitBreakerWindowMillis`; then **half-open** admits a single trial request — a success closes it, a failure re-opens it. The retry policy and breaker compose: a request's final outcome (after any retries) feeds `recordSuccess`/`recordFailure`, or `recordNeutral` when it says nothing about the upstream's health (a configuration error or a header-limit refusal): that leaves the state and the failure count as they were and only frees a half-open trial, so the next request probes the upstream. A target `forwardProxyBlockPrivateNetworks` refuses is turned away before the breaker is consulted, so it is not counted either and takes no trial. The open-upstream count is exported as the `mock_server_upstream_circuit_open` gauge (see [metrics.md](metrics.md)) and reset on `HttpState.reset()`.
 
 The unmatched speculative-proxy path (`HttpActionHandler`, which calls `NettyHttpClient` directly) is intentionally **not** wrapped by these controls; they apply to matched forward expectations. Self-loopback relay and the HTTP/2/HTTP/3 forward paths are unaffected (the breaker only keys on a resolvable host, and retry only engages for idempotent methods when explicitly configured).
 
@@ -1091,9 +1091,9 @@ the reason (in the entry, the `502` body and its `INFO` entry) and for the cause
 redaction matches whole values only, so a credential cut at character 256 would otherwise keep its first part.
 
 A configuration error or an undecodable response is not a transient failure: `ForwardRetryPolicy.isTransientFailure`
-is false for it, so it is not retried, and the circuit breaker records it as it records a header-limit refusal
-(not a failure). A
-TLS or HTTP/2 failure counts as before.
+is false for it, so it is not retried. The circuit breaker records a configuration error, like a header-limit
+refusal, as neither a success nor a failure (`recordNeutral`), and an undecodable response as a success, since the
+upstream answered. A TLS or HTTP/2 failure counts as a failure.
 
 ### Streaming Forward Path
 

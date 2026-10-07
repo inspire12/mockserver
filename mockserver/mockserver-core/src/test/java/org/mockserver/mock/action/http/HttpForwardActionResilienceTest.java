@@ -220,6 +220,122 @@ public class HttpForwardActionResilienceTest {
     }
 
     @Test
+    public void shouldNotResetTheFailureCountForAConfigurationError() throws Exception {
+        assertARunOfNeutralOutcomesDoesNotResetTheFailureCount(configurationError());
+    }
+
+    @Test
+    public void shouldNotResetTheFailureCountForAHeaderLimitRefusal() throws Exception {
+        assertARunOfNeutralOutcomesDoesNotResetTheFailureCount(headerLimitRefusal());
+    }
+
+    private void assertARunOfNeutralOutcomesDoesNotResetTheFailureCount(Throwable neutral) throws Exception {
+        // given - breaker enabled, threshold 3, retry disabled
+        Configuration configuration = Configuration.configuration()
+            .forwardProxyCircuitBreakerEnabled(true)
+            .forwardProxyCircuitBreakerFailureThreshold(3)
+            .forwardProxyCircuitBreakerWindowMillis(60_000L);
+        HttpForwardActionHandler handler = handlerWith(configuration);
+
+        // when - two real failures, then a run of outcomes that say nothing about the upstream, then a third failure
+        forwardFailingWith(handler, new java.io.IOException("Connection reset"));
+        forwardFailingWith(handler, new java.io.IOException("Connection reset"));
+        assertThat(ForwardCircuitBreaker.getInstance().isOpen("upstream.example:8080"), is(false));
+        for (int i = 0; i < 5; i++) {
+            forwardFailingWith(handler, neutral);
+        }
+        assertThat(ForwardCircuitBreaker.getInstance().isOpen("upstream.example:8080"), is(false));
+        forwardFailingWith(handler, new java.io.IOException("Connection reset"));
+
+        // then - the three real failures are consecutive, so the breaker opens
+        assertThat(ForwardCircuitBreaker.getInstance().isOpen("upstream.example:8080"), is(true));
+    }
+
+    @Test
+    public void shouldNeitherCloseNorStrandAHalfOpenBreakerForAConfigurationError() throws Exception {
+        assertANeutralHalfOpenTrialLeavesTheBreakerOpenAndReleasesTheTrial(configurationError());
+    }
+
+    @Test
+    public void shouldNeitherCloseNorStrandAHalfOpenBreakerForAHeaderLimitRefusal() throws Exception {
+        assertANeutralHalfOpenTrialLeavesTheBreakerOpenAndReleasesTheTrial(headerLimitRefusal());
+    }
+
+    private void assertANeutralHalfOpenTrialLeavesTheBreakerOpenAndReleasesTheTrial(Throwable neutral) throws Exception {
+        // given - breaker enabled, threshold 1, a 1ms window so the breaker reaches half-open
+        Configuration configuration = Configuration.configuration()
+            .forwardProxyCircuitBreakerEnabled(true)
+            .forwardProxyCircuitBreakerFailureThreshold(1)
+            .forwardProxyCircuitBreakerWindowMillis(1L);
+        HttpForwardActionHandler handler = handlerWith(configuration);
+        forwardFailingWith(handler, new java.io.IOException("Connection refused"));
+        assertThat(ForwardCircuitBreaker.getInstance().isOpen("upstream.example:8080"), is(true));
+        Thread.sleep(5);
+
+        // when - the half-open trial ends in an outcome that says nothing about the upstream
+        forwardFailingWith(handler, neutral);
+
+        // then - the breaker is still open: the upstream has not been shown to have recovered
+        assertThat(ForwardCircuitBreaker.getInstance().isOpen("upstream.example:8080"), is(true));
+        assertThat(MetricsHelper.openCount(), is(1));
+
+        // and - the trial was released, so the next request probes the upstream, and its success closes the breaker
+        reset(mockHttpClient);
+        when(mockHttpClient.sendRequest(any(HttpRequest.class), any(InetSocketAddress.class))).thenReturn(ok());
+        HttpResponse probe = handler.handle(upstream(), request().withMethod("GET").withPath("/x")).getHttpResponse().get(5, TimeUnit.SECONDS);
+        assertThat(probe.getStatusCode(), is(200));
+        verify(mockHttpClient, times(1)).sendRequest(any(HttpRequest.class), any(InetSocketAddress.class));
+        assertThat(ForwardCircuitBreaker.getInstance().isOpen("upstream.example:8080"), is(false));
+    }
+
+    @Test
+    public void shouldNeitherCountNorTakeTheHalfOpenTrialForATargetRefusedByForwardProxyBlockPrivateNetworks() throws Exception {
+        // given - the block on, and a half-open breaker for a loopback upstream
+        Configuration configuration = Configuration.configuration()
+            .forwardProxyBlockPrivateNetworks(true)
+            .forwardProxyCircuitBreakerEnabled(true)
+            .forwardProxyCircuitBreakerFailureThreshold(1)
+            .forwardProxyCircuitBreakerWindowMillis(1L);
+        String loopback = "127.0.0.1:8080";
+        ForwardCircuitBreaker.getInstance().recordFailure(configuration, loopback);
+        Thread.sleep(5);
+        HttpForwardActionHandler handler = handlerWith(configuration);
+
+        // when - forwards to the loopback upstream are refused
+        for (int i = 0; i < 3; i++) {
+            HttpResponse refused = handler.handle(forward().withHost("127.0.0.1").withPort(8080).withScheme(HttpForward.Scheme.HTTP), request().withMethod("GET").withPath("/x"))
+                .getHttpResponse().get(5, TimeUnit.SECONDS);
+            assertThat(refused.getStatusCode(), is(502));
+        }
+
+        // then - nothing was sent, the breaker is still open, and the half-open trial is still free
+        verify(mockHttpClient, never()).sendRequest(any(HttpRequest.class), any(InetSocketAddress.class));
+        assertThat(ForwardCircuitBreaker.getInstance().isOpen(loopback), is(true));
+        assertThat(ForwardCircuitBreaker.getInstance().allowRequest(configuration, loopback), is(true));
+    }
+
+    private void forwardFailingWith(HttpForwardActionHandler handler, Throwable failure) throws Exception {
+        reset(mockHttpClient);
+        CompletableFuture<HttpResponse> failed = new CompletableFuture<>();
+        failed.completeExceptionally(failure);
+        when(mockHttpClient.sendRequest(any(HttpRequest.class), any(InetSocketAddress.class))).thenReturn(failed);
+        // POST is never retried, so each forward is one outcome
+        ExecutionException thrown = org.junit.Assert.assertThrows(ExecutionException.class, () -> handler.handle(upstream(), request().withMethod("POST").withPath("/x")).getHttpResponse().get(5, TimeUnit.SECONDS));
+        assertThat(thrown.getCause(), is(sameInstance(failure)));
+        verify(mockHttpClient, times(1)).sendRequest(any(HttpRequest.class), any(InetSocketAddress.class));
+    }
+
+    private static Throwable headerLimitRefusal() {
+        return new HeaderLimitExceededException("upstream response headers are larger than maxHeaderSize (262144 bytes)");
+    }
+
+    private static Throwable configurationError() throws Exception {
+        Constructor<ClientConfigurationException> constructor = ClientConfigurationException.class.getDeclaredConstructor(String.class, Throwable.class);
+        constructor.setAccessible(true);
+        return constructor.newInstance("connection to upstream.example:8080 could not be set up: RuntimeException: Exception creating SSL context for client", new RuntimeException("Exception creating SSL context for client"));
+    }
+
+    @Test
     public void shouldNotStrandOpenWhenHalfOpenTrialThrowsSynchronously() throws Exception {
         // given - breaker enabled, threshold 3, short window so we can reach half-open
         Configuration configuration = Configuration.configuration()

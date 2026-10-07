@@ -161,7 +161,9 @@ public abstract class HttpForwardAction {
             if (circuitBreakerEnabled && circuitKey != null) {
                 final String key = circuitKey;
                 responseFuture = responseFuture.whenComplete((res, throwable) -> {
-                    if (ForwardRetryPolicy.isTransientFailure(res, throwable)) {
+                    if (ForwardCircuitBreaker.isNeutral(throwable)) {
+                        ForwardCircuitBreaker.getInstance().recordNeutral(configuration, key);
+                    } else if (ForwardRetryPolicy.isTransientFailure(res, throwable)) {
                         ForwardCircuitBreaker.getInstance().recordFailure(configuration, key);
                     } else {
                         ForwardCircuitBreaker.getInstance().recordSuccess(configuration, key);
