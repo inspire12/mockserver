@@ -1050,8 +1050,11 @@ completed the request's future directly the teardown would sometimes be reported
 an HTTP/2 connection error and a TLS fault are raised in handlers after `HttpClientConnectionErrorHandler`,
 which never sees them: `HttpOrHttp2Initializer` (from the handshake's `SslHandshakeCompletionEvent`, which is
 all Netty reports for a timeout) and `Http2ForwardConnectionExceptionHandler` fail the waiting request with
-them before the connection closes. An `SSLException` that a non-TLS I/O failure caused (Netty's `failure when writing
-TLS control frames` when a proxy refuses the tunnel or the connection closes) is left to that failure, which
+them before the connection closes, and for an exception it does not recognise the HTTP/2 handler does the same
+before it closes the connection (see
+[netty-pipeline.md](netty-pipeline.md#exceptions-on-a-connection-to-an-upstream)). An `SSLException` that a
+non-TLS I/O failure caused (Netty's `failure when writing TLS control frames` when a proxy refuses the tunnel
+or the connection closes) is left to that failure, which
 reaches the request through `HttpClientConnectionErrorHandler` as before (`ExceptionHandling.tlsFailure`).
 
 Each is wrapped in the `SocketConnectionException` the request failed with before, so a caller that catches it

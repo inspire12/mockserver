@@ -80,6 +80,11 @@ class HttpForwardConnectionPool {
      */
     private static final AttributeKey<Boolean> CLOSE_LISTENER_ADDED = AttributeKey.valueOf("POOL_CLOSE_LISTENER_ADDED");
 
+    /**
+     * Marks a channel that is closing and must not be pooled again, though it is active until it has closed.
+     */
+    private static final AttributeKey<Boolean> RETIRED = AttributeKey.valueOf("POOL_RETIRED");
+
     HttpForwardConnectionPool(int maxIdleConnectionsPerKey, long idleTimeoutMillis) {
         this(maxIdleConnectionsPerKey, idleTimeoutMillis, false, 0);
     }
@@ -152,7 +157,7 @@ class HttpForwardConnectionPool {
         // The isActive() check here is a fast best-effort guard; a channel can still go inactive
         // after this point, which is safe because acquire() re-checks isActive() and discards any
         // dead channel before returning it.
-        if (key == null || channel == null || !channel.isActive()) {
+        if (key == null || channel == null || !channel.isActive() || Boolean.TRUE.equals(channel.attr(RETIRED).get())) {
             return false;
         }
         Deque<Channel> deque = idleChannels.computeIfAbsent(key, k -> new ArrayDeque<>());
@@ -169,6 +174,19 @@ class HttpForwardConnectionPool {
         }
         scheduleIdleEviction(key, channel);
         return true;
+    }
+
+    /**
+     * Takes a channel that is about to close out of its pool, if it is pooled, for good: out of the idle set at once,
+     * and never accepted by {@link #release(String, Channel)} again. Call it on the channel's event loop.
+     */
+    static void retire(Channel channel) {
+        channel.attr(RETIRED).set(Boolean.TRUE);
+        HttpForwardConnectionPool pool = channel.attr(NettyHttpClient.CONNECTION_POOL).get();
+        String key = channel.attr(NettyHttpClient.POOL_KEY).get();
+        if (pool != null && pool.removeIdle(key, channel)) {
+            pool.cancelIdleEviction(channel);
+        }
     }
 
     private void scheduleIdleEviction(String key, Channel channel) {
@@ -195,7 +213,7 @@ class HttpForwardConnectionPool {
      * still idle), false if it had already been acquired or evicted.
      */
     private boolean removeIdle(String key, Channel channel) {
-        Deque<Channel> deque = idleChannels.get(key);
+        Deque<Channel> deque = key != null ? idleChannels.get(key) : null;
         if (deque == null) {
             return false;
         }

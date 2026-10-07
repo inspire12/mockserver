@@ -2,8 +2,11 @@ package org.mockserver.httpclient;
 
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.handler.codec.http2.DefaultHttp2GoAwayFrame;
 import io.netty.handler.codec.http2.Http2CodecUtil;
+import io.netty.handler.codec.http2.Http2Error;
 import io.netty.handler.codec.http2.Http2Exception;
+import io.netty.handler.codec.http2.Http2FrameCodec;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.Message;
@@ -14,6 +17,7 @@ import java.net.InetSocketAddress;
 import java.util.concurrent.CompletableFuture;
 
 import static org.mockserver.exception.ExceptionHandling.DIRECT_MEMORY_LIMIT_REACHED;
+import static org.mockserver.exception.ExceptionHandling.boundedFaultDescription;
 import static org.mockserver.exception.ExceptionHandling.boundedFaultDescriptionWithRootCause;
 import static org.mockserver.exception.ExceptionHandling.boundedFaultMessage;
 import static org.mockserver.exception.ExceptionHandling.connectionClosedException;
@@ -31,7 +35,9 @@ import static org.mockserver.httpclient.NettyHttpClient.RESPONSE_FUTURE;
  * which the stream's handlers do not see, and the entry is then {@code DEBUG}: the forward is logged with its cause.
  * <p>
  * It does not close the connection for an HTTP/2 connection error, which Netty's codec fires here before it sends
- * the {@code GOAWAY} and closes: closing here would lose the {@code GOAWAY}.
+ * the {@code GOAWAY} and closes: closing here would lose the {@code GOAWAY}. For an exception it does not recognise
+ * it fails the forward in flight, takes the connection out of the pool and closes it with
+ * {@code GOAWAY(INTERNAL_ERROR)}, as {@code Http2ConnectionExceptionHandler} does for a connection to MockServer.
  */
 final class Http2ForwardConnectionExceptionHandler extends ChannelInboundHandlerAdapter {
 
@@ -79,13 +85,19 @@ final class Http2ForwardConnectionExceptionHandler extends ChannelInboundHandler
             // Netty's JDK TLS handler leaves the connection open after such bytes and reports every read that follows
             ctx.close();
         } else if (connectionClosedException(cause)) {
-            // despite its name, true for everything except a connection its peer closed or reset
+            // despite its name, true for everything except a connection its peer closed or reset;
+            // ERROR whether or not a forward waits: that forward is reported as a failed connection, or sent again
             mockServerLogger.logEvent(
                 new LogEntry()
                     .setLogLevel(Level.ERROR)
-                    .setMessageFormat("exception caught on HTTP/2 connection to upstream " + ctx.channel())
+                    .setMessageFormat("closing HTTP/2 connection to:{}for unexpected exception")
+                    .setArguments(ctx.channel().attr(REMOTE_SOCKET).get())
                     .setThrowable(cause)
             );
+            failWaitingRequest(ctx, "HTTP/2 connection to " + upstream(ctx) + " failed: unexpected exception: " + boundedFaultDescription(cause), cause);
+            HttpForwardConnectionPool.retire(ctx.channel());
+            // later: the codec fires an exception it caught decoding here before it sends its own GOAWAY for it
+            ctx.channel().eventLoop().execute(() -> closeWithGoAway(ctx));
         } else if (mockServerLogger.isEnabledForInstance(Level.DEBUG)) {
             mockServerLogger.logEvent(
                 new LogEntry()
@@ -93,6 +105,21 @@ final class Http2ForwardConnectionExceptionHandler extends ChannelInboundHandler
                     .setMessageFormat("HTTP/2 connection to:{}closed by the upstream:{}")
                     .setArguments(ctx.channel().attr(REMOTE_SOCKET).get(), cause.getMessage())
             );
+        }
+    }
+
+    /**
+     * Through the codec, which writes the {@code GOAWAY} after the frames already written and, once it is written,
+     * closes without waiting for the streams in flight, as it does after any {@code GOAWAY} with an error code. None
+     * is written once the codec has sent one: its own, for a connection error, names a different last stream.
+     */
+    private static void closeWithGoAway(ChannelHandlerContext ctx) {
+        if (ctx.channel().isActive()) {
+            Http2FrameCodec codec = ctx.pipeline().get(Http2FrameCodec.class);
+            if (codec == null || !codec.connection().goAwaySent()) {
+                ctx.write(new DefaultHttp2GoAwayFrame(Http2Error.INTERNAL_ERROR));
+            }
+            ctx.close();
         }
     }
 

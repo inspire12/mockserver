@@ -200,6 +200,27 @@ public class HttpActionHandlerForwardFailureTest {
     }
 
     @Test
+    public void shouldNotLogAgainAForwardFailedForAnUnexpectedExceptionOnItsHttp2Connection() {
+        // the connection's handler has logged the exception at ERROR with its stack trace
+        Throwable failure = unexpectedExceptionOnHttp2Connection();
+
+        actionHandler.handleExceptionDuringForwardingRequest(ACTION, request, responseWriter, failure);
+
+        assertThat(answer().getStatusCode(), is(502));
+        assertThat(errors(), empty());
+    }
+
+    @Test
+    public void shouldNotLogAgainAProxiedRequestFailedForAnUnexpectedExceptionOnItsHttp2Connection() {
+        Throwable failure = unexpectedExceptionOnHttp2Connection();
+
+        actionHandler.handleUnmatchedForwardFailure(failure, request, responseWriter, UPSTREAM, false);
+
+        assertThat(answer().getStatusCode(), is(502));
+        assertThat(errors(), empty());
+    }
+
+    @Test
     public void shouldAnswerAProxiedRequestsFailureWithItsReason() {
         Throwable failure = socketConnectionException("TLS handshake failed", new SSLHandshakeException("PKIX path building failed"));
 
@@ -350,6 +371,14 @@ public class HttpActionHandlerForwardFailureTest {
         assertThat(errors.get(0).getHttpRequest(), is(request));
         assertThat(errors.get(0).getMessage(configuration()), containsString(reason));
         assertThat("the cause, for its stack trace", errors.get(0).getThrowable() != null, is(true));
+    }
+
+    /**
+     * As {@code Http2ForwardConnectionExceptionHandler} fails a forward in flight on a connection it closes for an
+     * exception it does not recognise.
+     */
+    private static Throwable unexpectedExceptionOnHttp2Connection() {
+        return socketConnectionException("HTTP/2 connection to upstream.example:8443 failed: unexpected exception: IllegalStateException: unexpected", new IllegalStateException("unexpected"));
     }
 
     private static Throwable socketConnectionException(String message, Throwable cause) {

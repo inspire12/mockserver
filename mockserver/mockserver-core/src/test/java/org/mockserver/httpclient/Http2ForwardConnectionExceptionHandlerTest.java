@@ -1,10 +1,17 @@
 package org.mockserver.httpclient;
 
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
+import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.DecoderException;
 import io.netty.handler.codec.PrematureChannelClosureException;
 import io.netty.handler.codec.http2.Http2Error;
 import io.netty.handler.codec.http2.Http2Exception;
+import io.netty.handler.codec.http2.Http2FrameCodec;
+import io.netty.handler.codec.http2.Http2FrameCodecBuilder;
+import io.netty.handler.codec.http2.Http2FrameLogger;
+import io.netty.handler.logging.LogLevel;
 import io.netty.handler.ssl.NotSslRecordException;
 import io.netty.util.internal.OutOfDirectMemoryError;
 import org.junit.Test;
@@ -195,18 +202,89 @@ public class Http2ForwardConnectionExceptionHandlerTest {
     }
 
     @Test
-    public void shouldLogAnyOtherExceptionAsAnErrorWithItsCause() {
+    public void shouldLogAnyOtherExceptionOnceAsAnErrorWithItsCauseAndCloseTheConnection() {
         logLevel = Level.ERROR;
         IllegalStateException unexpected = new IllegalStateException("unexpected");
         EmbeddedChannel connection = connection();
 
         connection.pipeline().fireExceptionCaught(unexpected);
+        connection.runPendingTasks();
 
         assertThat(logged, hasSize(1));
         assertThat(logged.get(0).getLogLevel(), is(Level.ERROR));
-        assertThat(logged.get(0).getMessageFormat(), startsWith("exception caught on HTTP/2 connection to upstream "));
+        assertThat(logged.get(0).getMessageFormat(), is("closing HTTP/2 connection to:{}for unexpected exception"));
+        assertThat(Arrays.asList(logged.get(0).getArguments()), contains(UPSTREAM));
         assertThat(logged.get(0).getThrowable(), is(sameInstance(unexpected)));
-        assertHandledWithoutClosing(connection);
+        assertThat("passed on to the end of the pipeline", reachedTheEndOfThePipeline(connection), is(nullValue()));
+        assertThat("closed, so it is not logged again each time it recurs", connection.isOpen(), is(false));
+        connection.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldFailAForwardInFlightWithAnyOtherExceptionAndStillLogItAsAnError() {
+        IllegalStateException unexpected = new IllegalStateException("unexpected");
+        CompletableFuture<Message> forward = new CompletableFuture<>();
+        EmbeddedChannel connection = connection();
+        connection.attr(RESPONSE_FUTURE).set(forward);
+
+        connection.pipeline().fireExceptionCaught(unexpected);
+
+        assertThat("failed", forward.isCompletedExceptionally(), is(true));
+        Throwable failure = assertThrows(ExecutionException.class, forward::get).getCause();
+        assertThat(failure, instanceOf(SocketConnectionException.class));
+        assertThat(failure.getCause(), is(sameInstance(unexpected)));
+        assertThat(failure.getMessage(), is("HTTP/2 connection to upstream.example:8443 failed: unexpected exception: IllegalStateException: unexpected"));
+        assertThat("the forward is reported as a failed connection, without the cause's stack trace", logged, hasSize(1));
+        assertThat(logged.get(0).getLogLevel(), is(Level.ERROR));
+        connection.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldTakeAConnectionClosingForAnyOtherExceptionOutOfThePoolAtOnce() {
+        HttpForwardConnectionPool pool = new HttpForwardConnectionPool(4, 30_000L);
+        String key = "upstream.example:8443:true:HTTP_2";
+        EmbeddedChannel connection = connection();
+        connection.attr(NettyHttpClient.CONNECTION_POOL).set(pool);
+        connection.attr(NettyHttpClient.POOL_KEY).set(key);
+        assertThat(pool.release(key, connection), is(true));
+
+        connection.pipeline().fireExceptionCaught(new IllegalStateException("unexpected"));
+
+        assertThat("still open: the close is on a later task", connection.isOpen(), is(true));
+        assertThat("handed out again while it closes", pool.acquire(key), is(nullValue()));
+        assertThat("taken back while it closes", pool.release(key, connection), is(false));
+        connection.runPendingTasks();
+        assertThat(connection.isOpen(), is(false));
+        connection.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldCloseWithGoAwayInternalErrorThroughTheCodecForAnyOtherException() {
+        List<String> goAways = new ArrayList<>();
+        EmbeddedChannel connection = http2Connection(goAways);
+
+        connection.pipeline().fireExceptionCaught(new IllegalStateException("unexpected"));
+        connection.runPendingTasks();
+
+        assertThat(goAways, contains("INTERNAL_ERROR last stream 0"));
+        assertThat(connection.isOpen(), is(false));
+        connection.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldSendNoGoAwayOfItsOwnOnceTheCodecHasSentOne() {
+        List<String> goAways = new ArrayList<>();
+        EmbeddedChannel connection = http2Connection(goAways);
+        Http2FrameCodec codec = connection.pipeline().get(Http2FrameCodec.class);
+        // as the codec names it for a connection error, which a lower last stream could follow
+        codec.goAway(connection.pipeline().context(codec), Integer.MAX_VALUE, Http2Error.INTERNAL_ERROR.code(), Unpooled.EMPTY_BUFFER, connection.newPromise());
+
+        connection.pipeline().fireExceptionCaught(new IllegalStateException("unexpected"));
+        connection.runPendingTasks();
+
+        assertThat(goAways, contains("INTERNAL_ERROR last stream 2147483647"));
+        assertThat(connection.isOpen(), is(false));
+        connection.finishAndReleaseAll();
     }
 
     @Test
@@ -295,6 +373,23 @@ public class Http2ForwardConnectionExceptionHandlerTest {
         assertThat(logged, hasSize(1));
         assertThat(logged.get(0).getMessageFormat(), is("HTTP/2 connection to:{}closed by the upstream:{}"));
         assertHandledWithoutClosing(connection);
+    }
+
+    /**
+     * A client codec, as the forward client's HTTP/2 pipeline starts, that records each GOAWAY it writes.
+     */
+    private EmbeddedChannel http2Connection(List<String> goAways) {
+        Http2FrameLogger recorder = new Http2FrameLogger(LogLevel.TRACE) {
+            @Override
+            public void logGoAway(Direction direction, ChannelHandlerContext ctx, int lastStreamId, long errorCode, ByteBuf debugData) {
+                if (direction == Direction.OUTBOUND) {
+                    goAways.add(Http2Error.valueOf(errorCode) + " last stream " + lastStreamId);
+                }
+            }
+        };
+        EmbeddedChannel connection = new EmbeddedChannel(Http2FrameCodecBuilder.forClient().frameLogger(recorder).build(), new Http2ForwardConnectionExceptionHandler(mockServerLogger));
+        connection.attr(REMOTE_SOCKET).set(UPSTREAM);
+        return connection;
     }
 
     private EmbeddedChannel connection() {
