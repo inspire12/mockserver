@@ -3,6 +3,7 @@ package org.mockserver.netty.proxy;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.mockserver.client.MockServerClient;
 import org.mockserver.echo.http.EchoServer;
 import org.mockserver.netty.MockServer;
 import org.mockserver.socket.PortFactory;
@@ -15,7 +16,9 @@ import java.nio.charset.StandardCharsets;
 import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.not;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.arrayWithSize;
 import static org.mockserver.configuration.Configuration.configuration;
+import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.stop.Stop.stopQuietly;
 
 /**
@@ -100,6 +103,9 @@ public class ProxyProtocolForwardingIntegrationTest {
                     + "so its reflected unique header should be present; response was:\n" + response,
                 response, containsString(uniqueMarker));
         }
+        // and it was forwarded as HTTP, not relayed as raw bytes, so it was recorded as a request
+        assertThat(new MockServerClient("127.0.0.1", mockServer.getLocalPort())
+            .retrieveRecordedRequests(request().withPath("/proxy-protocol-forward").withHeader("X-Proxy-Proto-Test", uniqueMarker)), arrayWithSize(1));
     }
 
     @Test

@@ -773,6 +773,20 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **A connection that starts with a PROXY protocol header is now handled like any other.** With
+  `transparentProxyEnabled`, a connection that a load balancer opened with a PROXY protocol v1 or v2 header
+  (AWS NLB, HAProxy, nginx) was taken for a raw binary connection, in every release from 7.0.0 to 8.0.0:
+  its HTTP requests were never matched against expectations, mocked or recorded, and everything sent on it,
+  CONNECT requests, HTTP/2 and HTTP inside TLS included, was forwarded as raw bytes to the destination the
+  header named. Only binary forwarding worked. What follows the header is now detected as on any other connection, so HTTP/1.1
+  and HTTP/2 requests are matched (and forwarded to the header's destination when none matches), TLS is
+  terminated and anything else is forwarded as binary. A CONNECT request is handled by MockServer, which
+  tunnels to the header's destination; that works only when the destination is itself a MockServer, a
+  known limitation. The remote address of requests on such a connection (as callbacks and response
+  templates see it) is now the client address and port the header names, not the load balancer's, and a
+  binary proxy listener is given that address too. A client that sends a few bytes and then waits for an
+  answer, such as a SOCKS5 greeting, is no longer held while MockServer waits to see whether a PROXY
+  header is coming.
 - **An HTTP/1.1 upload its client gives up on is logged as a client close, not an error.** When a connection closed or was reset while a request's body was still arriving, MockServer logged an `ERROR` with a stack trace (`web socket server caught exception`, or `exception caught by upstream relay handler` through a CONNECT tunnel). It now logs one `INFO` entry, `HTTP/1.1 request from: ... ended with its connection before it was complete`, naming the request's method, path, query string and headers and with no stack trace, as an HTTP/2 upload cut short is logged.
 - **`socketConnectionTimeoutInMillis` now also bounds the first stage of an inbound TLS handshake.** Waiting for a client's complete ClientHello and generating a certificate for it was always limited to a fixed 10 seconds, so lowering the setting did not shorten how long a client could hold that stage open, and a certificate generation slower than 10 seconds closed the connection whatever it was set to. That stage is now limited by `socketConnectionTimeoutInMillis` (default 20 seconds), as the rest of the handshake already was; a value of 0 or less keeps the 10 seconds. It now follows the setting, so with the default (20 seconds) that stage can take up to 20 seconds rather than 10.
 - **Hosts on `noProxyHosts` are now connected to directly whichever upstream proxy is set, as `no_proxy`

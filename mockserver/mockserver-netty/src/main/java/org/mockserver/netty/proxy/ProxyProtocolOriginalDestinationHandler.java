@@ -3,6 +3,7 @@ package org.mockserver.netty.proxy;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.util.NetUtil;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.slf4j.event.Level;
@@ -14,14 +15,15 @@ import java.nio.charset.StandardCharsets;
 import static org.mockserver.mock.action.http.HttpActionHandler.REMOTE_SOCKET;
 import static org.mockserver.netty.HttpRequestHandler.PROXYING;
 import static org.mockserver.netty.proxy.TransparentProxyHandler.TRANSPARENT_ORIGINAL_DST_RESOLVED;
+import static org.mockserver.socket.SocketAddresses.PROXY_PROTOCOL_SOURCE;
 
 /**
  * Inbound handler that detects and parses PROXY protocol v1 (text format) and v2 (binary
  * format) headers prepended to TCP connections by upstream load balancers (e.g., AWS GWLB,
  * HAProxy, nginx with {@code proxy_protocol on}).
  * <p>
- * <b>Placement:</b> This handler must be added FIRST in the transparent-proxy pipeline
- * (before {@link TransparentProxyHandler} and the port-unification handler). It inspects
+ * <b>Placement:</b> This handler must come before the port-unification handler, so that what
+ * follows the header (HTTP, TLS, CONNECT, SOCKS or binary) is what is classified. It inspects
  * the first inbound bytes and dispatches on the first byte:
  * <ul>
  *   <li>{@code 0x0D} — candidate PROXY v2 (binary): the 12-byte v2 signature begins with
@@ -30,8 +32,10 @@ import static org.mockserver.netty.proxy.TransparentProxyHandler.TRANSPARENT_ORI
  *   <li>anything else — not a PROXY header; pass through unchanged.</li>
  * </ul>
  * In all cases the handler consumes any recognised header, sets the {@code REMOTE_SOCKET} /
- * {@code PROXYING} / {@code TRANSPARENT_ORIGINAL_DST_RESOLVED} channel attributes, and removes
- * itself from the pipeline.
+ * {@code PROXYING} / {@code TRANSPARENT_ORIGINAL_DST_RESOLVED} channel attributes, records the
+ * header's source as {@code PROXY_PROTOCOL_SOURCE} (the client address recorded for the
+ * connection's requests), and removes itself from the pipeline. Bytes that stop matching a
+ * signature are passed on at once, without waiting for more.
  * <p>
  * <b>PROXY v1 format (HAProxy spec):</b>
  * <pre>
@@ -123,19 +127,19 @@ public class ProxyProtocolOriginalDestinationHandler extends ChannelInboundHandl
             return;
         }
 
-        // Check if we have enough bytes to determine if this is a v1 PROXY header
-        if (readable < PROXY_V1_SIGNATURE_BYTES.length) {
-            // Need more bytes to decide
-            return;
-        }
-
-        // Check for PROXY v1 signature
-        if (!matchesSignature(cumulation)) {
+        // Check for PROXY v1 signature: bytes that stop matching it are passed on at once, as a client that
+        // sent only a few (a SOCKS5 greeting is three) may be waiting for an answer before it sends more
+        if (!startsWith(cumulation, PROXY_V1_SIGNATURE_BYTES)) {
             // Not a PROXY header — pass through all accumulated bytes.
             // Clear cumulation BEFORE removeSelf to prevent double-release in handlerRemoved.
             ByteBuf passThrough = cumulation;
             cumulation = null;
             removeSelfAndFireRead(ctx, passThrough);
+            return;
+        }
+
+        if (readable < PROXY_V1_SIGNATURE_BYTES.length) {
+            // Need more bytes to decide
             return;
         }
 
@@ -190,15 +194,15 @@ public class ProxyProtocolOriginalDestinationHandler extends ChannelInboundHandl
      */
     private void handleV2(ChannelHandlerContext ctx) {
         int readable = cumulation.readableBytes();
-        if (readable < PROXY_V2_SIGNATURE.length) {
-            // Need the full 12-byte signature to confirm v2
-            return;
-        }
-        if (!matchesV2Signature(cumulation)) {
+        if (!startsWith(cumulation, PROXY_V2_SIGNATURE)) {
             // First byte was 0x0D but the full v2 signature does not match — pass through
             ByteBuf passThrough = cumulation;
             cumulation = null;
             removeSelfAndFireRead(ctx, passThrough);
+            return;
+        }
+        if (readable < PROXY_V2_SIGNATURE.length) {
+            // Need the full 12-byte signature to confirm v2
             return;
         }
         if (readable < V2_HEADER_PREFIX_LENGTH) {
@@ -236,12 +240,15 @@ public class ProxyProtocolOriginalDestinationHandler extends ChannelInboundHandl
         }
 
         InetSocketAddress originalDst = null;
+        InetSocketAddress source = null;
         // command 0x01 = PROXY (real connection); 0x00 = LOCAL (health-check, no address)
         if (command == 0x01) {
             try {
-                originalDst = extractV2Destination(cumulation, base + V2_HEADER_PREFIX_LENGTH, family, addrLen);
+                originalDst = extractV2Address(cumulation, base + V2_HEADER_PREFIX_LENGTH, family, addrLen, false);
+                source = extractV2Address(cumulation, base + V2_HEADER_PREFIX_LENGTH, family, addrLen, true);
             } catch (Exception e) {
                 originalDst = null;
+                source = null;
                 logWarning("failed to extract destination from PROXY protocol v2 address block ({}), deferring to downstream resolution", e.getMessage());
             }
         }
@@ -249,6 +256,9 @@ public class ProxyProtocolOriginalDestinationHandler extends ChannelInboundHandl
         // Consume the entire v2 header (prefix + address block)
         cumulation.skipBytes(total);
 
+        if (source != null) {
+            ctx.channel().attr(PROXY_PROTOCOL_SOURCE).set(source);
+        }
         if (originalDst != null) {
             applyOriginalDst(ctx, originalDst, "v2");
         } else if (logger != null && logger.isEnabledForInstance(Level.DEBUG)) {
@@ -273,12 +283,13 @@ public class ProxyProtocolOriginalDestinationHandler extends ChannelInboundHandl
     }
 
     /**
-     * Checks whether the first bytes of the buffer match the PROXY v1 signature.
+     * Whether the bytes received so far match the signature for as far as they go.
      */
-    private boolean matchesSignature(ByteBuf buf) {
+    private static boolean startsWith(ByteBuf buf, byte[] signature) {
         int readerIndex = buf.readerIndex();
-        for (int i = 0; i < PROXY_V1_SIGNATURE_BYTES.length; i++) {
-            if (buf.getByte(readerIndex + i) != PROXY_V1_SIGNATURE_BYTES[i]) {
+        int compared = Math.min(buf.readableBytes(), signature.length);
+        for (int i = 0; i < compared; i++) {
+            if (buf.getByte(readerIndex + i) != signature[i]) {
                 return false;
             }
         }
@@ -286,20 +297,7 @@ public class ProxyProtocolOriginalDestinationHandler extends ChannelInboundHandl
     }
 
     /**
-     * Checks whether the first 12 bytes of the buffer match the PROXY v2 binary signature.
-     */
-    private boolean matchesV2Signature(ByteBuf buf) {
-        int readerIndex = buf.readerIndex();
-        for (int i = 0; i < PROXY_V2_SIGNATURE.length; i++) {
-            if (buf.getByte(readerIndex + i) != PROXY_V2_SIGNATURE[i]) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    /**
-     * Extracts the destination {@link InetSocketAddress} from a PROXY v2 address block.
+     * Extracts the source or destination {@link InetSocketAddress} from a PROXY v2 address block.
      * <p>
      * INET (IPv4): {@code src(4) dst(4) sport(2) dport(2)}; INET6: {@code src(16) dst(16)
      * sport(2) dport(2)}. UNIX-socket and unspecified families return {@code null}.
@@ -308,25 +306,27 @@ public class ProxyProtocolOriginalDestinationHandler extends ChannelInboundHandl
      * @param addrOffset absolute index of the first byte of the address block
      * @param family     the address-family nibble (1=INET, 2=INET6, 3=UNIX)
      * @param addrLen    the declared address-block length
-     * @return the destination address, or {@code null} when none is available
+     * @param source     the source address rather than the destination
+     * @return the address, or {@code null} when none is available
      */
-    private InetSocketAddress extractV2Destination(ByteBuf buf, int addrOffset, int family, int addrLen) throws Exception {
+    private InetSocketAddress extractV2Address(ByteBuf buf, int addrOffset, int family, int addrLen, boolean source) throws Exception {
+        int addressLength;
         if (family == 0x1) { // AF_INET
-            if (addrLen < 12) {
-                return null;
-            }
-            byte[] dst = new byte[4];
-            buf.getBytes(addrOffset + 4, dst, 0, 4);
-            int dstPort = ((buf.getByte(addrOffset + 10) & 0xFF) << 8) | (buf.getByte(addrOffset + 11) & 0xFF);
-            return new InetSocketAddress(InetAddress.getByAddress(dst), dstPort);
+            addressLength = 4;
         } else if (family == 0x2) { // AF_INET6
-            if (addrLen < 36) {
+            addressLength = 16;
+        } else {
+            addressLength = 0;
+        }
+        if (addressLength > 0) {
+            if (addrLen < 2 * addressLength + 4) {
                 return null;
             }
-            byte[] dst = new byte[16];
-            buf.getBytes(addrOffset + 16, dst, 0, 16);
-            int dstPort = ((buf.getByte(addrOffset + 34) & 0xFF) << 8) | (buf.getByte(addrOffset + 35) & 0xFF);
-            return new InetSocketAddress(InetAddress.getByAddress(dst), dstPort);
+            byte[] address = new byte[addressLength];
+            buf.getBytes(addrOffset + (source ? 0 : addressLength), address, 0, addressLength);
+            int portOffset = addrOffset + 2 * addressLength + (source ? 0 : 2);
+            int port = ((buf.getByte(portOffset) & 0xFF) << 8) | (buf.getByte(portOffset + 1) & 0xFF);
+            return new InetSocketAddress(InetAddress.getByAddress(address), port);
         }
         // AF_UNIX (0x3) or AF_UNSPEC (0x0) — no IP destination
         return null;
@@ -384,9 +384,28 @@ public class ProxyProtocolOriginalDestinationHandler extends ChannelInboundHandl
             return false;
         }
 
+        InetSocketAddress source = v1Source(parts[2], parts[4]);
+        if (source != null) {
+            ctx.channel().attr(PROXY_PROTOCOL_SOURCE).set(source);
+        }
         InetSocketAddress originalDst = new InetSocketAddress(dstIp, dstPort);
         applyOriginalDst(ctx, originalDst, "v1 (" + protocol + ")");
         return true;
+    }
+
+    /**
+     * The client address of a v1 header, or {@code null} when it is not an IP address and port.
+     */
+    private static InetSocketAddress v1Source(String ip, String port) {
+        if (!NetUtil.isValidIpV4Address(ip) && !NetUtil.isValidIpV6Address(ip)) {
+            return null;
+        }
+        try {
+            int sourcePort = Integer.parseInt(port);
+            return sourcePort >= 0 && sourcePort <= 65535 ? new InetSocketAddress(NetUtil.createInetAddressFromIpAddressString(ip), sourcePort) : null;
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     /**

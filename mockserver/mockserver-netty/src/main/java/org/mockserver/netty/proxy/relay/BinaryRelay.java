@@ -18,6 +18,7 @@ import org.mockserver.model.BinaryProxyListener;
 import org.mockserver.netty.proxy.BinaryRequestProxyingHandler;
 import org.mockserver.scheduler.Scheduler;
 import org.mockserver.socket.ChannelReadPause;
+import org.mockserver.socket.SocketAddresses;
 import org.mockserver.socket.tls.SniHandler;
 import org.slf4j.event.Level;
 
@@ -568,7 +569,7 @@ public final class BinaryRelay {
         if (++pendingListenerCalls > MAX_PENDING_LISTENER_CALLS) {
             hold(ClientHold.LISTENER_BEHIND);
         }
-        SocketAddress clientAddress = client.remoteAddress();
+        SocketAddress clientAddress = SocketAddresses.clientAddress(client);
         CompletableFuture<Void> called = new CompletableFuture<>();
         // one chain with the per-message forwarder's, so a connection handed back to it keeps its calls in order
         CompletableFuture<Void> previousCalled = client.attr(BinaryRequestProxyingHandler.PREVIOUS_LISTENER_CALL).getAndSet(called);

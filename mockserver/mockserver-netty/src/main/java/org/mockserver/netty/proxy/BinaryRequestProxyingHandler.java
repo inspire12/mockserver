@@ -23,6 +23,7 @@ import org.mockserver.netty.proxy.relay.BinaryRelay;
 import org.mockserver.proxyconfiguration.ForwardTargetBlockedException;
 import org.mockserver.scheduler.Scheduler;
 import org.mockserver.socket.ChannelReadPause;
+import org.mockserver.socket.SocketAddresses;
 import org.mockserver.uuid.UUIDService;
 import org.slf4j.event.Level;
 
@@ -423,7 +424,7 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
      * time, in arrival order, and a listener that throws still closes the connection.
      */
     private void notifyListener(ChannelHandlerContext ctx, BinaryMessage binaryRequest, CompletableFuture<BinaryMessage> binaryResponseFuture, InetSocketAddress remoteAddress) {
-        SocketAddress clientAddress = ctx.channel().remoteAddress();
+        SocketAddress clientAddress = SocketAddresses.clientAddress(ctx.channel());
         CompletableFuture<Void> called = new CompletableFuture<>();
         CompletableFuture<Void> previousCalled = ctx.channel().attr(PREVIOUS_LISTENER_CALL).getAndSet(called);
         Runnable call = () -> scheduler.scheduleLocalCallback(() -> {
@@ -483,7 +484,7 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
                         .setArguments(SensitiveLogValue.of(formatBytes(binaryResponse.getBytes(), configuration.maxLoggedBodyBytes())), remoteAddress, SensitiveLogValue.of(formatBytes(binaryRequest.getBytes(), configuration.maxLoggedBodyBytes())))
                 );
                 if (binaryExchangeCallback != null) {
-                    binaryExchangeCallback.onProxy(binaryRequest, binaryResponseFuture, remoteAddress, ctx.channel().remoteAddress());
+                    binaryExchangeCallback.onProxy(binaryRequest, binaryResponseFuture, remoteAddress, SocketAddresses.clientAddress(ctx.channel()));
                 }
                 ctx.writeAndFlush(Unpooled.copiedBuffer(binaryResponse.getBytes()));
             } catch (Throwable throwable) {

@@ -8,6 +8,7 @@ import io.netty.util.Attribute;
 import io.netty.util.AttributeKey;
 import org.mockserver.mock.action.http.HttpActionHandler;
 import org.mockserver.netty.HttpRequestHandler;
+import org.mockserver.socket.SocketAddresses;
 import org.mockserver.socket.tls.SniHandler;
 
 import java.util.Arrays;
@@ -77,6 +78,8 @@ public class ConnectionScopeHandler extends ChannelInboundHandlerAdapter {
      *   <li>{@code REMOTE_SOCKET} — {@code HttpActionHandler.getRemoteAddress} on the forward path (the
      *       CONNECT / original-destination / port-forward target); the connection-scoped sibling of
      *       {@code PROXYING} — set on the parent by the same proxy handlers and the server bootstrap;</li>
+     *   <li>{@code PROXY_PROTOCOL_SOURCE} — {@code SocketAddresses.clientAddress}, the client address a
+     *       PROXY protocol header carried, recorded as each request's remote address;</li>
      *   <li>{@code HTTP2_ENABLED} — {@code PortUnificationHandler.isHttp2Enabled}, read by the
      *       callback and dashboard WebSocket handlers;</li>
      *   <li>{@code TLS_ENABLED_UPSTREAM} / {@code TLS_ENABLED_DOWNSTREAM} —
@@ -97,6 +100,7 @@ public class ConnectionScopeHandler extends ChannelInboundHandlerAdapter {
         HttpRequestHandler.LOCAL_HOST_HEADERS,
         HttpRequestHandler.PROXYING,
         HttpActionHandler.REMOTE_SOCKET,
+        SocketAddresses.PROXY_PROTOCOL_SOURCE,
         PortUnificationHandler.HTTP2_ENABLED,
         PortUnificationHandler.TLS_ENABLED_UPSTREAM,
         PortUnificationHandler.TLS_ENABLED_DOWNSTREAM,

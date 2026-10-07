@@ -61,13 +61,10 @@ public class MockServerUnificationInitializer extends ChannelHandlerAdapter {
         if (writeStallTimeoutMillis > 0) {
             ctx.pipeline().addFirst("write-stall", new WriteStallTimeoutHandler(writeStallTimeoutMillis, httpState.getMockServerLogger()));
         }
-        // When transparent proxy mode is enabled, add:
-        // 1. PROXY protocol v1 handler (reads first inbound bytes for PROXY header)
-        // 2. Transparent proxy handler (resolves via conntrack at channelActive)
-        // The PROXY protocol handler is first so it can detect and parse headers
-        // before the transparent proxy handler fires its channel-level resolution.
+        // The PROXY protocol handler goes in front of port unification, so that what follows the header is
+        // classified, not the header itself, which begins none of the protocols port unification detects
         if (Boolean.TRUE.equals(configuration.transparentProxyEnabled())) {
-            ctx.pipeline().addLast("proxy-protocol", new ProxyProtocolOriginalDestinationHandler(httpState.getMockServerLogger()));
+            ctx.pipeline().addBefore(ctx.name(), "proxy-protocol", new ProxyProtocolOriginalDestinationHandler(httpState.getMockServerLogger()));
             ctx.pipeline().addLast("transparent-proxy", new TransparentProxyHandler(configuration, httpState.getMockServerLogger()));
         }
         ctx.pipeline().replace(this, null, new PortUnificationHandler(configuration, server, httpState, actionHandler, nettySslContextFactory, mcpStreamableHttpHandler));

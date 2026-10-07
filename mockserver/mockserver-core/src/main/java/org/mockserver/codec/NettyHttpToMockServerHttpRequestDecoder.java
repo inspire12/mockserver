@@ -8,6 +8,7 @@ import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.mappers.FullHttpRequestToMockServerHttpRequest;
 import org.mockserver.model.Header;
+import org.mockserver.socket.SocketAddresses;
 import org.slf4j.event.Level;
 
 import java.net.SocketAddress;
@@ -48,7 +49,7 @@ public class NettyHttpToMockServerHttpRequestDecoder extends MessageToMessageDec
             preservedHeaders = preserved.headers();
             originalRawBody = preserved.originalRawBody();
             localAddress = ctx.channel().localAddress();
-            remoteAddress = ctx.channel().remoteAddress();
+            remoteAddress = SocketAddresses.clientAddress(ctx.channel());
         }
         out.add(fullHttpRequestToMockServerRequest.mapFullHttpRequestToMockServerRequest(fullHttpRequest, preservedHeaders, originalRawBody, localAddress, remoteAddress, getALPNProtocol(mockServerLogger, ctx)));
     }

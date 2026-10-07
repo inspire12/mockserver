@@ -148,16 +148,17 @@ HTTP/2 stream channels are the case that is easy to miss: Netty builds each `Htt
 | `HTTP_ENABLED` | `Boolean` | HTTP pipeline configured |
 | `HTTP2_ENABLED` | `Boolean` | HTTP/2 pipeline configured |
 | `TRANSPARENT_ORIGINAL_DST_RESOLVED` | `Boolean` | Whether original-dst was resolved (conntrack/PROXY protocol) |
+| `PROXY_PROTOCOL_SOURCE` | `InetSocketAddress` | Client address a PROXY protocol header carried; `SocketAddresses.clientAddress` returns it in place of the channel's peer, so it is the recorded `remoteAddress` of the connection's requests (and of HTTP/2 streams, via `ConnectionScopeHandler`) and the binary listener's client address |
 | `NETTY_SSL_CONTEXT_FACTORY` | `NettySslContextFactory` | SSL context for this channel |
 
 ## Channel Initializer
 
 `MockServerUnificationInitializer` is a `@Sharable` `ChannelHandlerAdapter` that replaces itself with a `PortUnificationHandler` on `handlerAdded()`. This thin adapter ensures each new channel gets its own `PortUnificationHandler` instance (since the decoder maintains per-channel state).
 
-When `transparentProxyEnabled` is true, the initializer adds two handlers before the port unification handler:
+When `transparentProxyEnabled` is true, the initializer adds two handlers:
 
-1. **`ProxyProtocolOriginalDestinationHandler`** (`"proxy-protocol"`) — inspects the first inbound bytes for a PROXY protocol header, dispatching on the first byte: `0x0D` → v2 (binary), `'P'` → v1 (text). If a recognised header is found, sets `REMOTE_SOCKET` + `PROXYING` + `TRANSPARENT_ORIGINAL_DST_RESOLVED` (v2: for the PROXY command on INET/INET6; LOCAL/UNIX defer to downstream resolution), consumes the header bytes, and removes itself. If not found, removes itself and passes bytes through unchanged.
-2. **`TransparentProxyHandler`** (`"transparent-proxy"`) — fires at `channelActive` and runs the pluggable `CompositeOriginalDestinationResolver` chain (default: TPROXY → eBPF → SO_ORIGINAL_DST → conntrack → dns-intent). Skips resolution if `TRANSPARENT_ORIGINAL_DST_RESOLVED` is already set (e.g., by the PROXY protocol handler).
+1. **`ProxyProtocolOriginalDestinationHandler`** (`"proxy-protocol"`) — added **in front of** the port unification handler, so port unification classifies what follows the header (HTTP/1.1, h2c, TLS, CONNECT, SOCKS or binary) rather than the header itself, which no known protocol begins with. It inspects the first inbound bytes for a PROXY protocol header, dispatching on the first byte: `0x0D` → v2 (binary), `'P'` → v1 (text). If a recognised header is found, sets `REMOTE_SOCKET` + `PROXYING` + `TRANSPARENT_ORIGINAL_DST_RESOLVED` from the destination (v2: for the PROXY command on INET/INET6; LOCAL/UNIX defer to downstream resolution) and `PROXY_PROTOCOL_SOURCE` from the source, consumes the header bytes, and removes itself. Bytes that stop matching a signature (for example a three-byte SOCKS5 greeting) are passed on at once, unchanged, and the handler removes itself.
+2. **`TransparentProxyHandler`** (`"transparent-proxy"`) — added after the port unification handler; fires at `channelActive` and runs the pluggable `CompositeOriginalDestinationResolver` chain (default: TPROXY → eBPF → SO_ORIGINAL_DST → conntrack → dns-intent). Skips resolution if `TRANSPARENT_ORIGINAL_DST_RESOLVED` is already set (e.g., by the PROXY protocol handler).
 
 ### Original Destination Resolver Chain
 

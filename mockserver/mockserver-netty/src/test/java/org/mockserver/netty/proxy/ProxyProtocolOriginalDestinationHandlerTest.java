@@ -14,6 +14,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.mockserver.mock.action.http.HttpActionHandler.REMOTE_SOCKET;
 import static org.mockserver.netty.HttpRequestHandler.PROXYING;
 import static org.mockserver.netty.proxy.TransparentProxyHandler.TRANSPARENT_ORIGINAL_DST_RESOLVED;
+import static org.mockserver.socket.SocketAddresses.PROXY_PROTOCOL_SOURCE;
 
 public class ProxyProtocolOriginalDestinationHandlerTest {
 
@@ -617,6 +618,151 @@ public class ProxyProtocolOriginalDestinationHandlerTest {
         assertThat(result, is(notV2));
         remaining.release();
 
+        channel.close();
+    }
+
+    // --- what follows the header, and who sent it ---
+
+    @Test
+    public void shouldPassOnAShortGreetingThatIsNotAProxyHeaderAtOnce() {
+        // a SOCKS5 greeting is three bytes, and its client waits for the answer before sending more
+        EmbeddedChannel channel = new EmbeddedChannel(new ProxyProtocolOriginalDestinationHandler(logger));
+        byte[] greeting = {0x05, 0x01, 0x00};
+
+        channel.writeInbound(Unpooled.wrappedBuffer(greeting));
+
+        assertPassedOnUnchanged(channel, greeting);
+    }
+
+    @Test
+    public void shouldPassOnShortBytesThatStartLikeAV1HeaderButDivergeAtOnce() {
+        EmbeddedChannel channel = new EmbeddedChannel(new ProxyProtocolOriginalDestinationHandler(logger));
+        byte[] put = "PU".getBytes(StandardCharsets.US_ASCII);
+
+        channel.writeInbound(Unpooled.wrappedBuffer(put));
+
+        assertPassedOnUnchanged(channel, put);
+    }
+
+    @Test
+    public void shouldPassOnShortBytesThatStartLikeAV2HeaderButDivergeAtOnce() {
+        EmbeddedChannel channel = new EmbeddedChannel(new ProxyProtocolOriginalDestinationHandler(logger));
+        byte[] notV2 = {0x0D, 0x0A, 0x42};
+
+        channel.writeInbound(Unpooled.wrappedBuffer(notV2));
+
+        assertPassedOnUnchanged(channel, notV2);
+    }
+
+    @Test
+    public void shouldHoldBytesWhileTheyMayStillBeAProxyHeader() {
+        EmbeddedChannel v1 = new EmbeddedChannel(new ProxyProtocolOriginalDestinationHandler(logger));
+        EmbeddedChannel v2 = new EmbeddedChannel(new ProxyProtocolOriginalDestinationHandler(logger));
+
+        v1.writeInbound(Unpooled.copiedBuffer("PROX", StandardCharsets.US_ASCII));
+        v2.writeInbound(Unpooled.wrappedBuffer(new byte[]{0x0D, 0x0A, 0x0D}));
+
+        for (EmbeddedChannel channel : new EmbeddedChannel[]{v1, v2}) {
+            assertThat(channel.readInbound(), is(nullValue()));
+            assertThat(channel.pipeline().get(ProxyProtocolOriginalDestinationHandler.class), is(notNullValue()));
+            channel.close();
+        }
+    }
+
+    @Test
+    public void shouldRecordTheV1SourceAsTheClientAddress() {
+        EmbeddedChannel channel = new EmbeddedChannel(new ProxyProtocolOriginalDestinationHandler(logger));
+
+        channel.writeInbound(Unpooled.copiedBuffer("PROXY TCP4 192.168.1.1 10.0.0.1 56324 80\r\n", StandardCharsets.US_ASCII));
+
+        assertThat(channel.attr(PROXY_PROTOCOL_SOURCE).get(), is(new InetSocketAddress("192.168.1.1", 56324)));
+        channel.close();
+    }
+
+    @Test
+    public void shouldRecordTheV1Tcp6SourceAsTheClientAddress() {
+        EmbeddedChannel channel = new EmbeddedChannel(new ProxyProtocolOriginalDestinationHandler(logger));
+
+        channel.writeInbound(Unpooled.copiedBuffer("PROXY TCP6 2001:db8::1 2001:db8::2 56324 443\r\n", StandardCharsets.US_ASCII));
+
+        assertThat(channel.attr(PROXY_PROTOCOL_SOURCE).get(), is(new InetSocketAddress("2001:db8::1", 56324)));
+        channel.close();
+    }
+
+    @Test
+    public void shouldNotRecordAV1SourceThatIsNotAnIpAddress() {
+        EmbeddedChannel channel = new EmbeddedChannel(new ProxyProtocolOriginalDestinationHandler(logger));
+
+        channel.writeInbound(Unpooled.copiedBuffer("PROXY TCP4 not-an-address 10.0.0.1 56324 80\r\n", StandardCharsets.US_ASCII));
+
+        assertThat(channel.attr(PROXY_PROTOCOL_SOURCE).get(), is(nullValue()));
+        assertThat(channel.attr(REMOTE_SOCKET).get(), is(new InetSocketAddress("10.0.0.1", 80)));
+        channel.close();
+    }
+
+    @Test
+    public void shouldNotRecordAV1SourcePortOutOfRange() {
+        EmbeddedChannel channel = new EmbeddedChannel(new ProxyProtocolOriginalDestinationHandler(logger));
+
+        channel.writeInbound(Unpooled.copiedBuffer("PROXY TCP4 192.168.1.1 10.0.0.1 65536 80\r\n", StandardCharsets.US_ASCII));
+
+        assertThat(channel.attr(PROXY_PROTOCOL_SOURCE).get(), is(nullValue()));
+        channel.close();
+    }
+
+    @Test
+    public void shouldRecordTheV2InetSourceAsTheClientAddress() {
+        EmbeddedChannel channel = new EmbeddedChannel(new ProxyProtocolOriginalDestinationHandler(logger));
+        byte[] addr = {
+            (byte) 192, (byte) 168, 1, 1,   // src
+            10, 0, 0, 1,                     // dst
+            (byte) 0xDC, 0x04,               // src port 56324
+            0x01, (byte) 0xBB                // dst port 443
+        };
+
+        channel.writeInbound(Unpooled.wrappedBuffer(proxyV2(0x21, 0x11, addr)));
+
+        assertThat(channel.attr(PROXY_PROTOCOL_SOURCE).get(), is(new InetSocketAddress("192.168.1.1", 56324)));
+        assertThat(channel.attr(REMOTE_SOCKET).get(), is(new InetSocketAddress("10.0.0.1", 443)));
+        channel.close();
+    }
+
+    @Test
+    public void shouldRecordTheV2Inet6SourceAsTheClientAddress() {
+        EmbeddedChannel channel = new EmbeddedChannel(new ProxyProtocolOriginalDestinationHandler(logger));
+        byte[] addr = new byte[36];
+        addr[0] = 0x20; addr[1] = 0x01; addr[2] = 0x0d; addr[3] = (byte) 0xb8; addr[15] = 1; // src 2001:db8::1
+        addr[31] = 2;                                                                       // dst ::2
+        addr[32] = (byte) 0xDC; addr[33] = 0x04;                                            // src port 56324
+        addr[34] = 0x01; addr[35] = (byte) 0xBB;                                            // dst port 443
+
+        channel.writeInbound(Unpooled.wrappedBuffer(proxyV2(0x21, 0x21, addr)));
+
+        assertThat(channel.attr(PROXY_PROTOCOL_SOURCE).get(), is(new InetSocketAddress("2001:db8::1", 56324)));
+        assertThat(channel.attr(REMOTE_SOCKET).get(), is(new InetSocketAddress("::2", 443)));
+        channel.close();
+    }
+
+    @Test
+    public void shouldNotRecordASourceForAV2LocalCommand() {
+        EmbeddedChannel channel = new EmbeddedChannel(new ProxyProtocolOriginalDestinationHandler(logger));
+        byte[] addr = {(byte) 192, (byte) 168, 1, 1, 10, 0, 0, 1, (byte) 0xDC, 0x04, 0x01, (byte) 0xBB};
+
+        channel.writeInbound(Unpooled.wrappedBuffer(proxyV2(0x20, 0x11, addr)));
+
+        assertThat(channel.attr(PROXY_PROTOCOL_SOURCE).get(), is(nullValue()));
+        channel.close();
+    }
+
+    private static void assertPassedOnUnchanged(EmbeddedChannel channel, byte[] expected) {
+        assertThat(channel.pipeline().get(ProxyProtocolOriginalDestinationHandler.class), is(nullValue()));
+        ByteBuf passedOn = channel.readInbound();
+        assertThat(passedOn, is(notNullValue()));
+        byte[] actual = new byte[passedOn.readableBytes()];
+        passedOn.readBytes(actual);
+        passedOn.release();
+        assertThat(actual, is(expected));
+        assertThat(channel.attr(REMOTE_SOCKET).get(), is(nullValue()));
         channel.close();
     }
 }
