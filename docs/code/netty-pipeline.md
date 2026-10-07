@@ -2260,7 +2260,11 @@ an IPv4 bind of `0.0.0.0:port` and, if that fails, a dual-stack bind of a plain 
 first fails and the second succeeds the port is refused through the first row of the table, with a
 `BindException` naming the other socket and `lsof -nP -iUDP:<port>` as the underlying error. Where the
 dual-stack bind fails as well (Linux, an IPv4-only stack) the server's own bind runs and reports the
-conflict as before, so on Linux the probe costs one IPv4 socket opened and closed for a free port.
+conflict as before, so on Linux the probe costs one IPv4 socket opened and closed for a free port. A
+socket that takes the port on `0.0.0.0` after the probe and before the bind is caught, on macOS, by the same check the
+HTTP/3 listener makes after its bind (a datagram to `127.0.0.1:port` that the DNS channel must receive): the channel
+is closed and the port refused with the same `BindException`, or, for a chosen port, replaced.
+`DnsPortTakenAfterProbeTest` takes the port on `0.0.0.0` just after the probe, for both.
 
 A `dnsPort` of 0 lets `MockServer` choose: it takes a port from the IPv4 allocator (an IPv4 socket bound to
 `0.0.0.0:0`, then closed), probes it as above and binds it as an explicit port. A candidate the probe

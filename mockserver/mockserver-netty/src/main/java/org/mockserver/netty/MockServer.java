@@ -385,11 +385,12 @@ public class MockServer extends LifeCycle {
 
     /**
      * Refused before anything is bound where macOS would let the server share the port with a socket that holds it
-     * on IPv4, and that socket would get the queries sent to localhost (see {@link Ipv4UdpPortProbe}).
+     * on IPv4, and that socket would get the queries sent to localhost (see {@link Ipv4UdpPortProbe}); a socket that
+     * takes the port between the probe and the bind is caught after the bind.
      */
-    private static Channel bindExplicitDnsPort(Bootstrap dnsBootstrap, InetSocketAddress listenerAddress) {
+    private Channel bindExplicitDnsPort(Bootstrap dnsBootstrap, InetSocketAddress listenerAddress) {
         int dnsPort = listenerAddress.getPort();
-        if (Ipv4UdpPortProbe.shadowedOnIpv4(listenerAddress)) {
+        if (dnsPortShadowedOnIpv4(listenerAddress)) {
             throw DnsStartupException.portCouldNotBeOpenedOrBound(dnsPort, Ipv4UdpPortProbe.ipv4WildcardConflict(dnsPort, "DNS queries", "dnsPort"));
         }
         ChannelFuture bind = dnsBootstrap.bind(listenerAddress).awaitUninterruptibly();
@@ -397,7 +398,22 @@ public class MockServer extends LifeCycle {
             // also fails when the channel cannot be created or registered
             throw DnsStartupException.portCouldNotBeOpenedOrBound(dnsPort, bind.cause());
         }
+        if (sharedWithAnotherSocket(bind.channel())) {
+            throw DnsStartupException.portCouldNotBeOpenedOrBound(dnsPort, Ipv4UdpPortProbe.ipv4WildcardConflict(dnsPort, "DNS queries", "dnsPort"));
+        }
         return bind.channel();
+    }
+
+    /**
+     * Closes {@code dnsChannel} if the port was taken on {@code 0.0.0.0} after the probe and before the bind, which
+     * macOS then let the server share.
+     */
+    private static boolean sharedWithAnotherSocket(Channel dnsChannel) {
+        if (Ipv4UdpPortProbe.loopbackReachesAnotherSocket(dnsChannel)) {
+            dnsChannel.close().awaitUninterruptibly();
+            return true;
+        }
+        return false;
     }
 
     /**
@@ -410,17 +426,25 @@ public class MockServer extends LifeCycle {
         for (int attempt = 0; attempt < DNS_PORT_CANDIDATES; attempt++) {
             int candidate = nextDnsPortCandidate();
             InetSocketAddress listenerAddress = Ipv4UdpPortProbe.listenerAddress(localBoundIP, candidate);
-            if (candidate > 0 && Ipv4UdpPortProbe.shadowedOnIpv4(listenerAddress)) {
+            if (candidate > 0 && dnsPortShadowedOnIpv4(listenerAddress)) {
                 lastFailure = Ipv4UdpPortProbe.ipv4WildcardConflict(candidate, "DNS queries", "dnsPort");
                 continue;
             }
             ChannelFuture bind = dnsBootstrap.bind(listenerAddress).awaitUninterruptibly();
-            if (bind.isSuccess()) {
+            if (!bind.isSuccess()) {
+                lastFailure = bind.cause();
+            } else if (sharedWithAnotherSocket(bind.channel())) {
+                lastFailure = Ipv4UdpPortProbe.ipv4WildcardConflict(((InetSocketAddress) bind.channel().localAddress()).getPort(), "DNS queries", "dnsPort");
+            } else {
                 return bind.channel();
             }
-            lastFailure = bind.cause();
         }
         throw DnsStartupException.serverCouldNotStart(0, lastFailure);
+    }
+
+    // a seam: tests take the port on IPv4 after this probe, as another application could
+    boolean dnsPortShadowedOnIpv4(InetSocketAddress listenerAddress) {
+        return Ipv4UdpPortProbe.shadowedOnIpv4(listenerAddress);
     }
 
     // 0, which lets the operating system choose, where IPv4 is unavailable

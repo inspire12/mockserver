@@ -250,9 +250,14 @@ public class Http3Server {
             String localBoundIP = configuration != null ? configuration.localBoundIP() : null;
             InetSocketAddress listenerAddress = Ipv4UdpPortProbe.listenerAddress(localBoundIP, port);
             bind = port == 0 ? bootstrap.bind(listenerAddress) : bindExplicitPort(bootstrap, listenerAddress);
-            channel = bound(bind);
+            Channel listener = bound(bind);
+            int boundPort = ((InetSocketAddress) listener.localAddress()).getPort();
+            if (Ipv4UdpPortProbe.loopbackReachesAnotherSocket(listener)) {
+                // taken on 0.0.0.0 between the probe and the bind, which macOS then let this socket share
+                throw Ipv4UdpPortProbe.ipv4WildcardConflict(boundPort, "HTTP/3 requests", "http3Port");
+            }
+            channel = listener;
 
-            int boundPort = ((InetSocketAddress) channel.localAddress()).getPort();
             LOG.info("HTTP/3 (QUIC) server started on UDP port: {}", boundPort);
             group = localGroup;
             success = true;
@@ -276,11 +281,16 @@ public class Http3Server {
      * {@link Ipv4UdpPortProbe}). The refusal is decided before Netty binds anything, so a refused port is free
      * as soon as this throws. Where the bind itself fails (Linux, or an IPv4-only stack), its own error is kept.
      */
-    private static ChannelFuture bindExplicitPort(Bootstrap bootstrap, InetSocketAddress listenerAddress) throws Exception {
-        if (Ipv4UdpPortProbe.shadowedOnIpv4(listenerAddress)) {
+    private ChannelFuture bindExplicitPort(Bootstrap bootstrap, InetSocketAddress listenerAddress) throws Exception {
+        if (shadowedOnIpv4(listenerAddress)) {
             throw Ipv4UdpPortProbe.ipv4WildcardConflict(listenerAddress.getPort(), "HTTP/3 requests", "http3Port");
         }
         return bootstrap.bind(listenerAddress);
+    }
+
+    // a seam: tests take the port on IPv4 after this probe, as another application could
+    boolean shadowedOnIpv4(InetSocketAddress listenerAddress) {
+        return Ipv4UdpPortProbe.shadowedOnIpv4(listenerAddress);
     }
 
     /**

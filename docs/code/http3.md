@@ -495,9 +495,21 @@ an IPv4-only stack) the server's own bind runs and its error is kept. The test b
 refused port free when `start` throws: refusing after Netty had bound left the socket open until the
 event loop deregistered it, so the caller could not rebind the port for up to about 200 ms. The probe has to come first: on both macOS and Linux an IPv4 bind fails once the same process's
 own dual-stack socket holds the port, so a probe after the bind cannot tell MockServer's socket from
-another application's. Port 0 is bound as before, without the probe: `MockServer` starts HTTP/3 only
+another application's. An application that binds the port on `0.0.0.0` in the moment between the probe
+and the bind is caught after the bind instead (`Ipv4UdpPortProbe.loopbackReachesAnotherSocket`): a
+datagram is sent from an IPv4 socket on `127.0.0.1`, connected to `127.0.0.1:port`, and a handler added
+first in the listener's pipeline must take it (it is never passed on to the QUIC codec). If up to three
+datagrams, 200 ms apart, do not arrive while the event loop is responsive, `start` throws the same
+`BindException` as the probe. An ICMP port unreachable on the probe socket (nothing listens on IPv4, as
+with `IPV6_V6ONLY`), a stalled event loop or an unavailable IPv4 stack leave the start alone. The check
+runs only on macOS: on Linux the bind itself fails in that race, so there is nothing to catch, and an
+iptables `REDIRECT` of loopback UDP (DNS redirection by a Kubernetes sidecar) would divert the probe and
+refuse a good start. It is also skipped when `localBoundIP` names a single address, since only a wildcard
+bind can share the port. Port 0 is bound as before, without the probe
+(the check after the bind still runs): `MockServer` starts HTTP/3 only
 for an `http3Port` above 0, and tests take their port through `Http3TestServer.startWithHttp3`. A refused
-`http3Port` fails `MockServer` start-up (see *Lifecycle Integration*). `Http3ServerIpv4PortConflictTest` covers the probe, rebinding a refused port 25 times in one JVM.
+`http3Port` fails `MockServer` start-up (see *Lifecycle Integration*). `Http3ServerIpv4PortConflictTest` covers the probe, rebinding a refused port 25 times in one JVM, and a
+port taken just after it; `Ipv4UdpLoopbackProbeTest` covers the check after the bind.
 
 ### Test QUIC client writes (flush every awaited write)
 
@@ -792,7 +804,7 @@ bidi-streaming) work over HTTP/3, matching the TCP (HTTP/1.1 and HTTP/2) path.
   process holds on the IPv4 wildcard (`0.0.0.0`), and traffic to `127.0.0.1` then reaches that process.
   The HTTP/3 and DNS servers probe the port on IPv4 before binding and refuse it (see
   [Test UDP sockets](#test-udp-sockets-macos-port-shadowing)); a process that takes the port between the
-  probe and the bind is not detected.
+  probe and the bind is caught by a loopback datagram sent after the bind.
 - **API stability**: `netty-codec-http3` has graduated from the incubator into
   mainline Netty 4.2, but the HTTP/3 API may still evolve in future 4.2.x releases.
 - **Netty version coupling**: the HTTP/3 codec version is now aligned with the

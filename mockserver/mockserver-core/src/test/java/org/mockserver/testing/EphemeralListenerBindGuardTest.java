@@ -26,7 +26,7 @@ import static org.hamcrest.Matchers.hasItems;
 import static org.hamcrest.Matchers.is;
 
 /**
- * Build-time guard: test code must not bind a dual-stack socket to port 0.
+ * Build-time guard: test code, and production code, must not bind a dual-stack socket to port 0.
  *
  * <h2>Why</h2>
  * <p>On macOS a default (dual-stack) socket bound to port 0, or to {@code 0.0.0.0} port 0, can be given a port
@@ -39,7 +39,10 @@ import static org.hamcrest.Matchers.is;
  * {@code "::"}, a {@code null} or wildcard {@code InetAddress}), {@code new DatagramSocket(0)},
  * {@code new DatagramSocket()}, Jetty's {@code new Server(0)} and WireMock's {@code dynamicPort()}. The port may be
  * written as {@code 0}, {@code 0x0} or a name holding 0. Bind {@code 127.0.0.1} and connect to {@code 127.0.0.1};
- * take a port for MockServer to bind from {@code PortFactory.findFreePort()}.
+ * take a port for MockServer to bind from {@code PortFactory.findFreePort()}. The main sources of every other module
+ * are production code, held to the same rule with an allow-list of their own, {@link #PRODUCTION_ALLOWED}: there a
+ * port 0 bind on every address hands a port another process may hold on IPv4 to a server whose localhost traffic
+ * that process then gets.
  *
  * <h2>Limits</h2>
  * <p>A textual check. A name holds 0 when its nearest earlier assignment in the enclosing method is 0, or it is a
@@ -109,6 +112,13 @@ public class EphemeralListenerBindGuardTest {
             "binds a socket of the default family to learn that family; nothing connects to it")
     );
 
+    /**
+     * Dual-stack binds of port 0 in production code that are meant, keyed by {@code module/File.java}, with how many
+     * the file has.
+     */
+    private static final List<Allowed> PRODUCTION_ALLOWED = List.of(
+    );
+
     @Test
     public void shouldNotBindADualStackSocketToPortZeroInTestCode() throws IOException {
         List<Path> sources = testSources();
@@ -117,6 +127,36 @@ public class EphemeralListenerBindGuardTest {
             hasItems("mockserver-core", "mockserver-netty", "mockserver-integration-testing", "mockserver-benchmark"));
         assertThat("must scan a representative source tree", sources.size(), greaterThan(1000));
 
+        Scan scan = scan(sources, ALLOWED, "ALLOWED");
+        assertThat("must find the port 0 binds to check", scan.binds, greaterThan(10));
+        assertThat("test code binding a dual-stack socket to port 0, which on macOS can be given a port another process "
+                + "listens on at 127.0.0.1 - bind 127.0.0.1 (and connect to 127.0.0.1), use an IPv4 channel, take the port "
+                + "from PortFactory.findFreePort(), or add a reasoned entry to ALLOWED:\n" + String.join("\n", scan.problems),
+            scan.problems, is(empty()));
+    }
+
+    @Test
+    public void shouldNotBindADualStackSocketToPortZeroInProductionCode() throws IOException {
+        List<Path> sources = productionSources();
+        Set<String> modules = sources.stream().map(EphemeralListenerBindGuardTest::module).collect(Collectors.toCollection(TreeSet::new));
+        assertThat("must scan the server and client sources: " + modules, modules,
+            hasItems("mockserver-core", "mockserver-netty", "mockserver-client-java"));
+        assertThat("must not scan the sources the test-code scan covers: " + modules, modules.stream().noneMatch(MAIN_SOURCE_MODULES::contains), is(true));
+        assertThat("must scan a representative source tree", sources.size(), greaterThan(1000));
+
+        Scan scan = scan(sources, PRODUCTION_ALLOWED, "PRODUCTION_ALLOWED");
+        assertThat("must find the port 0 binds to check", scan.binds, greaterThan(3));
+        assertThat("production code binding a dual-stack socket to port 0, which on macOS can be given a port another process "
+                + "holds on IPv4, which then gets the traffic sent to 127.0.0.1 - use an IPv4 channel, bind a port the IPv4 "
+                + "allocator chose, or add a reasoned entry to PRODUCTION_ALLOWED:\n" + String.join("\n", scan.problems),
+            scan.problems, is(empty()));
+    }
+
+    /**
+     * The dual-stack binds of port 0 in {@code sources} that {@code allowed} does not list, and each entry of
+     * {@code allowed} whose count does not match.
+     */
+    private static Scan scan(List<Path> sources, List<Allowed> allowed, String allowedName) throws IOException {
         Map<String, List<String>> offendersByFile = new TreeMap<>();
         int binds = 0;
         for (Path source : sources) {
@@ -127,22 +167,17 @@ public class EphemeralListenerBindGuardTest {
                     .add(MODULES_ROOT.relativize(source) + ":" + offender);
             }
         }
-        assertThat("must find the port 0 binds to check", binds, greaterThan(10));
-
         List<String> problems = new ArrayList<>();
-        for (Allowed allowed : ALLOWED) {
-            List<String> found = offendersByFile.remove(allowed.file);
+        for (Allowed entry : allowed) {
+            List<String> found = offendersByFile.remove(entry.file);
             int actual = found == null ? 0 : found.size();
-            if (actual != allowed.count) {
-                problems.add("ALLOWED expects " + allowed.count + " in " + allowed.file + " (" + allowed.reason + ") but found " + actual
+            if (actual != entry.count) {
+                problems.add(allowedName + " expects " + entry.count + " in " + entry.file + " (" + entry.reason + ") but found " + actual
                     + (found == null ? "" : ":\n  " + String.join("\n  ", found)));
             }
         }
         offendersByFile.values().forEach(problems::addAll);
-        assertThat("test code binding a dual-stack socket to port 0, which on macOS can be given a port another process "
-                + "listens on at 127.0.0.1 - bind 127.0.0.1 (and connect to 127.0.0.1), use an IPv4 channel, take the port "
-                + "from PortFactory.findFreePort(), or add a reasoned entry to ALLOWED:\n" + String.join("\n", problems),
-            problems, is(empty()));
+        return new Scan(binds, problems);
     }
 
     @Test
@@ -371,11 +406,26 @@ public class EphemeralListenerBindGuardTest {
     }
 
     static List<Path> testSources() throws IOException {
+        return sources(true);
+    }
+
+    /**
+     * The main sources of every module whose main sources {@link #testSources()} does not cover.
+     */
+    static List<Path> productionSources() throws IOException {
+        return sources(false);
+    }
+
+    private static List<Path> sources(boolean testCode) throws IOException {
         List<Path> sources = new ArrayList<>();
         try (Stream<Path> modules = Files.list(MODULES_ROOT)) {
             for (Path module : modules.filter(Files::isDirectory).collect(Collectors.toList())) {
-                List<Path> roots = new ArrayList<>(List.of(module.resolve(Paths.get("src", "test", "java"))));
-                if (MAIN_SOURCE_MODULES.contains(module.getFileName().toString())) {
+                boolean mainIsTestCode = MAIN_SOURCE_MODULES.contains(module.getFileName().toString());
+                List<Path> roots = new ArrayList<>();
+                if (testCode) {
+                    roots.add(module.resolve(Paths.get("src", "test", "java")));
+                }
+                if (testCode == mainIsTestCode) {
                     roots.add(module.resolve(Paths.get("src", "main", "java")));
                 }
                 for (Path root : roots) {
@@ -454,6 +504,16 @@ public class EphemeralListenerBindGuardTest {
 
     private static Allowed allowed(String file, int count, String reason) {
         return new Allowed(file, count, reason);
+    }
+
+    private static final class Scan {
+        private final int binds;
+        private final List<String> problems;
+
+        private Scan(int binds, List<String> problems) {
+            this.binds = binds;
+            this.problems = problems;
+        }
     }
 
     private static final class Allowed {

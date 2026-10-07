@@ -91,6 +91,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.greaterThan;
+import static org.hamcrest.Matchers.lessThan;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
@@ -137,6 +138,8 @@ public class ResponseWriteStallTimeoutIntegrationTest {
     private static final int SMALL_BODY_BYTES = 1024 * 1024;
     private static final int LARGE_STREAM_WINDOW = 1024 * 1024;
     private static final Map<String, Channel> UPSTREAM_CHANNELS = new ConcurrentHashMap<>();
+    // Netty's SslHandler default, which MockServer does not change: a close that waited on the client would take this long
+    private static final long TLS_CLOSE_NOTIFY_FLUSH_TIMEOUT_MILLIS = 3000;
 
     private static byte[] fixedBody;
     private static byte[][] events;
@@ -235,6 +238,59 @@ public class ResponseWriteStallTimeoutIntegrationTest {
             Received received = read(socket, 0, Received::streamedResponseComplete);
             assertThat("no terminating chunk made the response look complete", received.text(), not(endsWith(TERMINATING_CHUNK)));
             assertThat("MockServer closed the connection", received.endedBy, is(Ending.CLOSED));
+        }
+    }
+
+    @Test
+    public void shouldEndAStalledTlsReadersSocketAsSoonAsItsStallIsCut() throws Exception {
+        // no relay is involved, so only the watcher can end it; a server of its own, so the only connection it counts
+        // is this client's
+        MockServer server = new MockServer(configuration()
+            .logLevel("WARN")
+            .metricsEnabled(true)
+            .responseWriteStallTimeoutMillis(STALL_MILLIS));
+        try {
+            forwardOverAClosedConnection(server);
+            awaitInboundConnections(server, 0);
+            long countedBefore = Metrics.getResponseWriteStallsCount(HTTP1_CONNECTION);
+            try (Socket ignored = connectOverTls(server, "/forward/fixed?test=tls-aggregated-stalled")) {
+                awaitInboundConnections(server, 1);
+                long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CUT_WITHIN_MILLIS);
+                while (Metrics.getResponseWriteStallsCount(HTTP1_CONNECTION) == countedBefore) {
+                    assertThat("MockServer cut the stalled connection within " + CUT_WITHIN_MILLIS + "ms", System.nanoTime() < deadline, is(true));
+                    TimeUnit.MILLISECONDS.sleep(5);
+                }
+                long cut = System.nanoTime();
+                awaitInboundConnections(server, 0);
+                long endedAfterMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - cut);
+                assertThat("MockServer's socket ended well before a TLS close_notify flush timeout (" + TLS_CLOSE_NOTIFY_FLUSH_TIMEOUT_MILLIS + "ms) could end it",
+                    endedAfterMillis, lessThan(TLS_CLOSE_NOTIFY_FLUSH_TIMEOUT_MILLIS - 1000));
+            }
+        } finally {
+            stopQuietly(server);
+        }
+    }
+
+    // a MockServerClient would keep its connection, and its close() stops the server
+    private static void forwardOverAClosedConnection(MockServer server) throws IOException {
+        byte[] expectation = ("{\"httpRequest\":{\"path\":\"/forward/.*\"},\"httpForward\":{\"host\":\"127.0.0.1\",\"port\":" + upstreamPort + "}}")
+            .getBytes(StandardCharsets.UTF_8);
+        try (Socket socket = new Socket("127.0.0.1", server.getLocalPort())) {
+            socket.setSoTimeout((int) TimeUnit.SECONDS.toMillis(15));
+            socket.getOutputStream().write(("PUT /mockserver/expectation HTTP/1.1\r\nHost: 127.0.0.1:" + server.getLocalPort()
+                + "\r\nContent-Type: application/json\r\nContent-Length: " + expectation.length + "\r\nConnection: close\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
+            socket.getOutputStream().write(expectation);
+            socket.getOutputStream().flush();
+            String response = new String(socket.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            assertThat(response, startsWith("HTTP/1.1 201"));
+        }
+    }
+
+    private static void awaitInboundConnections(MockServer server, int expected) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CUT_WITHIN_MILLIS);
+        while (server.getInboundConnectionCount() != expected) {
+            assertThat("open inbound connections reached " + expected + " within " + CUT_WITHIN_MILLIS + "ms", System.nanoTime() < deadline, is(true));
+            TimeUnit.MILLISECONDS.sleep(5);
         }
     }
 
@@ -699,6 +755,14 @@ public class ResponseWriteStallTimeoutIntegrationTest {
         socket.connect(new InetSocketAddress("127.0.0.1", server.getLocalPort()));
         socket.setSoTimeout((int) TimeUnit.SECONDS.toMillis(15));
         return get(socket, uri);
+    }
+
+    private static Socket connectOverTls(MockServer server, String uri) throws IOException {
+        Socket socket = new Socket();
+        socket.setReceiveBufferSize(32 * 1024);
+        socket.connect(new InetSocketAddress("127.0.0.1", server.getLocalPort()));
+        socket.setSoTimeout((int) TimeUnit.SECONDS.toMillis(15));
+        return get(sslSocketFactory().wrapSocket(socket), uri);
     }
 
     /**

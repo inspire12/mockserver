@@ -5,6 +5,8 @@ import org.junit.Assume;
 import org.junit.Test;
 import org.mockserver.lifecycle.Ipv4UdpPortProbe;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.BindException;
 import java.net.InetSocketAddress;
 import java.net.StandardProtocolFamily;
@@ -61,6 +63,41 @@ public class Http3ServerIpv4PortConflictTest {
                     + ", so HTTP/3 requests to localhost:" + port + " would reach that socket instead of MockServer"
                     + "; stop the application that holds it or choose a different http3Port (to find it run: lsof -nP -iUDP:" + port + ")"));
             }
+        }
+    }
+
+    // another application can take the port between the probe and the bind, and on macOS the bind then succeeds
+    @Test
+    public void shouldRefuseAPortTakenOnTheIpv4WildcardAfterTheProbe() throws Exception {
+        assumeQuicAvailable();
+        int port = portFreeOnBothStacks();
+        try (DatagramChannel otherApplication = DatagramChannel.open(StandardProtocolFamily.INET)) {
+            Http3Server taken = new Http3Server() {
+                @Override
+                boolean shadowedOnIpv4(InetSocketAddress probed) {
+                    boolean shadowed = super.shadowedOnIpv4(probed);
+                    try {
+                        otherApplication.bind(new InetSocketAddress("0.0.0.0", probed.getPort()));
+                    } catch (IOException e) {
+                        throw new UncheckedIOException(e);
+                    }
+                    return shadowed;
+                }
+            };
+            server = taken;
+
+            Exception thrown = assertThrows(Exception.class, () -> taken.start(port));
+
+            assertThat("the other application took the port", otherApplication.getLocalAddress(), is(new InetSocketAddress("0.0.0.0", port)));
+            assertThat(thrown, instanceOf(BindException.class));
+            assertThat(taken.getPort(), is(-1));
+            if (DUAL_STACK_MAC_OS) {
+                assertThat(thrown.getMessage(), is("UDP port " + port + " is already in use by another socket listening on 0.0.0.0:" + port
+                    + ", so HTTP/3 requests to localhost:" + port + " would reach that socket instead of MockServer"
+                    + "; stop the application that holds it or choose a different http3Port (to find it run: lsof -nP -iUDP:" + port + ")"));
+            }
+            otherApplication.close();
+            assertThat("the refused server must hold no socket on UDP port " + port, Ipv4UdpPortProbe.dualStackBindSucceeds(port), is(true));
         }
     }
 

@@ -87,6 +87,10 @@ public class Http3PortFindThenBindGuardTest {
             "binds a found port as an explicit dnsPort, not http3Port, and tries another when one is taken"),
         allowed("mockserver-netty/MainTest.java", 2,
             "asserts the exit code for a port another socket holds and for 70000"),
+        allowed("mockserver-netty/DnsPortTakenAfterProbeTest.java", 1,
+            "finds a port free on both stacks as the dnsPort another socket then takes just after MockServer's probe"),
+        allowed("mockserver-netty/Ipv4UdpLoopbackProbeTest.java", 2,
+            "binds a bare listener on a found port, trying another if it is taken, and finds one nothing listens on"),
         allowed("mockserver-testcontainers/MockServerContainerConfigTest.java", 1,
             "asserts a container's environment; nothing binds the port on this host")
     );
