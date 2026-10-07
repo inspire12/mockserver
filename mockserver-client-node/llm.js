@@ -21,7 +21,8 @@
  * `newScenarioState`). Null/undefined fields are omitted from the JSON, matching
  * the server's NON_NULL serialization.
  */
-(function () {
+// a browser has no module, so a stand-in receives the exports there and the global gets them
+(function (module) {
     "use strict";
 
     // ---------------------------------------------------------------------
@@ -799,7 +800,8 @@
     // =====================================================================
     // Public API surface (mirrors org.mockserver.client.Llm + builders)
     // =====================================================================
-    var llm = {
+    // assigned as a literal of identifiers, the form in which Node finds the names for an ES module
+    var llm = module.exports = {
         // enums
         Provider: Provider,
         Role: Role,
@@ -837,10 +839,7 @@
         defaultErrorBody: defaultErrorBody
     };
 
-    if (typeof module !== "undefined") {
-        module.exports = llm;
-    }
     if (typeof window !== "undefined") {
         window.mockServerLlm = llm;
     }
-})();
+})(typeof module !== "undefined" ? module : {exports: {}});

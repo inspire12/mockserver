@@ -509,19 +509,10 @@ This release delivers a sustained performance and memory programme alongside dat
     `mockserver-client/llmTypes` instead, and read a member added to `Llm` from the `llm` of
     `mockserver-client` or through a variable typed `Llm`. An augmentation of `mockserver-client`
     behaves as it did.
-  - **In an ES module (`.mts`, or `"type": "module"`) a re-export of builder names without
-    `type` now fails at run time.** `export { Role, Completion } from 'mockserver-client/llm.js'`
-    compiled and ran against 8.0.0, where the names were types alone and were erased. They are
-    values now, so the re-export is kept, and Node throws `SyntaxError: Named export 'Role' not
-    found` when the module loads. Write `export type { Role, Completion } from ...`.
 
-  From an ES module, import the package's modules by their default export
-  (`import llm from 'mockserver-client/llm.js'`, `import mockServer from 'mockserver-client'`).
-  Node cannot see the names this package's CommonJS modules export, so there a named import of a
-  value fails when the module loads and `import * as` gives an object without the members, even
-  though both type-check; that was already so for `mockserver-client` itself. The `TurnBuilder`
-  constructor, which the module has always exported beside the other builder constructors, is
-  now declared as well.
+  From an ES module, the package's modules can be imported by name as well as by default (see Fixed).
+  The `TurnBuilder` constructor, which the module has always exported beside the other builder
+  constructors, is now declared as well.
 - **BREAKING: a proxied binary (non-HTTP) connection now keeps one upstream connection for its
   whole life (`forwardBinaryRequestsUseSingleConnection`, on by default); set it to `false` for the
   8.0.0 behaviour.** Until now each message a client sent was forwarded on an upstream connection
@@ -715,6 +706,7 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **Named imports of the Node client now work from an ES module.** In an `.mjs` or `.mts` file, or a package with `"type": "module"`, `import { mockServerClient, llm } from 'mockserver-client'` type-checked and then failed when the module loaded with `SyntaxError: Named export ... not found`, and `import * as` gave an object without the members; only the default import worked. Every module of the package now exposes its names to an ES module importer, so named imports, `import * as` and the default import all work, from the package and from its other modules (`import { llmMock, completion } from 'mockserver-client/llm.js'`; a deep import from an ES module still needs its `.js` extension). Nothing changes for CommonJS or for the TypeScript typings.
 - **A response relayed through an HTTP/2 tunnel no longer carries an `x-http2-stream-weight` header.** A response
   sent to an HTTP/2 client through MockServer as a CONNECT or SOCKS5 proxy (TLS or h2c), whether mocked or
   forwarded, arrived with an extra `x-http2-stream-weight: 16` header that the same request on a direct connection

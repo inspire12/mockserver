@@ -9,12 +9,22 @@
 (function () {
     "use strict";
 
+    var client = require('./mockServerClient');
+    var mockServerClient = client.mockServerClient;
+    var MockMode = client.MockMode;
+    var setupMockServer = require('./setupMockServer').setupMockServer;
+    var llm = require('./llm');
+    var mcpMock = require('./mcpMockBuilder').mcpMock;
+    var a2aMock = require('./a2aMockBuilder').a2aMock;
+
+    // values are identifiers only: Node reads an ES module importer's names from this literal
+    // and stops at the first value that is not one
     module.exports = {
-        mockServerClient: require('./mockServerClient').mockServerClient,
-        MockMode: require('./mockServerClient').MockMode,
-        setupMockServer: require('./setupMockServer').setupMockServer,
-        llm: require('./llm'),
-        mcpMock: require('./mcpMockBuilder').mcpMock,
-        a2aMock: require('./a2aMockBuilder').a2aMock
+        mockServerClient: mockServerClient,
+        MockMode: MockMode,
+        setupMockServer: setupMockServer,
+        llm: llm,
+        mcpMock: mcpMock,
+        a2aMock: a2aMock
     };
 })();

@@ -3460,12 +3460,17 @@ var mockServerClient;
     });
 
     if (typeof module !== 'undefined') {
+        var llmModule = require('./llm');
+        var mcpMockFactory = require('./mcpMockBuilder').mcpMock;
+        var a2aMockFactory = require('./a2aMockBuilder').a2aMock;
+        // values are identifiers only: Node reads an ES module importer's names from this literal
+        // and stops at the first value that is not one
         module.exports = {
             mockServerClient: mockServerClient,
             MockMode: MockMode,
-            llm: require('./llm'),
-            mcpMock: require('./mcpMockBuilder').mcpMock,
-            a2aMock: require('./a2aMockBuilder').a2aMock,
+            llm: llmModule,
+            mcpMock: mcpMockFactory,
+            a2aMock: a2aMockFactory,
             routeBreakpointMessage: _routeBreakpointMessage,
             extractBreakpointHeaders: _extractBreakpointHeaders,
             // exported so a test can ratchet it against the server's own expectation schema
