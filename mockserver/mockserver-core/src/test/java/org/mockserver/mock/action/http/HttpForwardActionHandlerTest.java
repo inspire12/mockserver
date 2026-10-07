@@ -157,11 +157,9 @@ public class HttpForwardActionHandlerTest {
 
     @Test
     public void shouldDocumentNoProxyMatchingForUnresolvedForwardTarget() {
-        // Documents the post-change no_proxy edge: forward targets are now unresolved, so the
-        // connect-target InetSocketAddress carries a hostname literal but no resolved IP. The
-        // hostname-form no_proxy entry still matches (via getHostString), but an IP-literal no_proxy
-        // entry can no longer match a hostname target by its resolved IP (getAddress() is null), so
-        // NettyHttpClient.isHostNotOnNoProxyHostList skips its IP-literal branch for such targets.
+        // Forward targets are unresolved, so the connect target carries a host name but no address.
+        // A host-name no_proxy entry matches it by name; an IP-address entry matches only a target
+        // given as that address, as NettyHttpClient's no_proxy check never looks a name up.
 
         // given - the exact connect target the handler hands to the http client
         CompletableFuture<HttpResponse> responseFuture = new CompletableFuture<>();
@@ -175,7 +173,7 @@ public class HttpForwardActionHandlerTest {
         verify(mockHttpClient).sendRequest(any(HttpRequest.class), addressCaptor.capture());
         InetSocketAddress forwardTarget = addressCaptor.getValue();
 
-        // then - unresolved: no resolved IP, so the IP-literal no_proxy branch is never reached
+        // then - unresolved: no resolved IP
         assertThat(forwardTarget.isUnresolved(), is(true));
         assertThat(forwardTarget.getAddress(), is(nullValue()));
 

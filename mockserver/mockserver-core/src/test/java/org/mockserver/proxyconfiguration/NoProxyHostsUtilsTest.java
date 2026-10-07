@@ -104,4 +104,32 @@ public class NoProxyHostsUtilsTest {
         assertThat(NoProxyHostsUtils.extractHost("example.com"), is("example.com"));
     }
 
+    @Test
+    public void shouldMatchLeadingDotDomainSuffix() {
+        assertThat(NoProxyHostsUtils.isHostOnNoProxyList("api.internal.corp", ".internal.corp"), is(true));
+        assertThat(NoProxyHostsUtils.isHostOnNoProxyList("deep.api.internal.corp:8443", ".Internal.Corp"), is(true));
+        assertThat(NoProxyHostsUtils.isHostOnNoProxyList("internal.corp", ".internal.corp"), is(true));
+        assertThat(NoProxyHostsUtils.isHostOnNoProxyList("notinternal.corp", ".internal.corp"), is(false));
+        assertThat(NoProxyHostsUtils.isHostOnNoProxyList("example.com", ".internal.corp"), is(false));
+    }
+
+    @Test
+    public void shouldNotMatchWildcardSuffixToHostThatOnlyEndsWithTheSameLetters() {
+        assertThat(NoProxyHostsUtils.isHostOnNoProxyList("notinternal.corp", "*.internal.corp"), is(false));
+    }
+
+    @Test
+    public void shouldMatchIpAddressEntryWrittenDifferently() {
+        assertThat(NoProxyHostsUtils.isHostOnNoProxyList("0:0:0:0:0:0:0:1", "::1"), is(true));
+        assertThat(NoProxyHostsUtils.isHostOnNoProxyList("[::1]:8080", "0:0:0:0:0:0:0:1"), is(true));
+        assertThat(NoProxyHostsUtils.isHostOnNoProxyList("2001:db8::1", "2001:DB8:0:0::1"), is(true));
+        assertThat(NoProxyHostsUtils.isHostOnNoProxyList("2001:db8::2", "2001:db8::1"), is(false));
+    }
+
+    @Test
+    public void shouldNotMatchIpAddressEntryToHostName() {
+        assertThat(NoProxyHostsUtils.isHostOnNoProxyList("localhost", "127.0.0.1"), is(false));
+        assertThat(NoProxyHostsUtils.isHostOnNoProxyList("127.0.0.1", "localhost"), is(false));
+    }
+
 }

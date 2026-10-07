@@ -17,19 +17,12 @@ import org.mockserver.model.HttpResponse;
 import org.mockserver.proxyconfiguration.ProxyConfiguration;
 import org.mockserver.scheduler.Scheduler;
 
-import java.io.DataInputStream;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
-import java.net.Socket;
 import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
-import java.util.List;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 
 import static io.netty.handler.codec.http.HttpHeaderNames.HOST;
@@ -65,7 +58,7 @@ public class UpstreamProxyResolvesDestinationIntegrationTest {
     private static EventLoopGroup clientEventLoopGroup;
     private static ClientAndServer destinationClientAndServer;
 
-    private TunnelProxy upstreamProxy;
+    private RecordingUpstreamProxy upstreamProxy;
     private ClientAndServer proxyClientAndServer;
 
     @BeforeClass
@@ -99,7 +92,7 @@ public class UpstreamProxyResolvesDestinationIntegrationTest {
 
     @Test
     public void shouldLeaveSecureDestinationNameToForwardHttpsProxy() throws Exception {
-        upstreamProxy = new TunnelProxy(TunnelProxy.Protocol.CONNECT);
+        upstreamProxy = new RecordingUpstreamProxy(RecordingUpstreamProxy.Protocol.CONNECT, TIMEOUT_SECONDS);
         proxyClientAndServer = startClientAndServer(configuration().forwardHttpsProxy(upstreamProxy.address()));
 
         HttpResponse response = sendTo(proxyClientAndServer, request().withPath("/target").withSecure(true).withHeader(HOST.toString(), UNRESOLVABLE + ":" + destinationPort()));
@@ -110,7 +103,7 @@ public class UpstreamProxyResolvesDestinationIntegrationTest {
 
     @Test
     public void shouldLeaveDestinationNameOfConnectTunnelToForwardHttpsProxy() throws Exception {
-        upstreamProxy = new TunnelProxy(TunnelProxy.Protocol.CONNECT);
+        upstreamProxy = new RecordingUpstreamProxy(RecordingUpstreamProxy.Protocol.CONNECT, TIMEOUT_SECONDS);
         proxyClientAndServer = startClientAndServer(configuration().forwardHttpsProxy(upstreamProxy.address()));
 
         // the client tunnels to the proxy with CONNECT, as a browser or HTTP client configured with an HTTPS proxy does
@@ -124,7 +117,7 @@ public class UpstreamProxyResolvesDestinationIntegrationTest {
 
     @Test
     public void shouldLeavePlainDestinationNameToForwardSocksProxy() throws Exception {
-        upstreamProxy = new TunnelProxy(TunnelProxy.Protocol.SOCKS5);
+        upstreamProxy = new RecordingUpstreamProxy(RecordingUpstreamProxy.Protocol.SOCKS5, TIMEOUT_SECONDS);
         proxyClientAndServer = startClientAndServer(configuration().forwardSocksProxy(upstreamProxy.address()));
 
         HttpResponse response = sendTo(proxyClientAndServer, request().withPath("/target").withHeader(HOST.toString(), UNRESOLVABLE + ":" + destinationPort()));
@@ -135,7 +128,7 @@ public class UpstreamProxyResolvesDestinationIntegrationTest {
 
     @Test
     public void shouldLeaveSecureDestinationNameToForwardSocksProxy() throws Exception {
-        upstreamProxy = new TunnelProxy(TunnelProxy.Protocol.SOCKS5);
+        upstreamProxy = new RecordingUpstreamProxy(RecordingUpstreamProxy.Protocol.SOCKS5, TIMEOUT_SECONDS);
         proxyClientAndServer = startClientAndServer(configuration().forwardSocksProxy(upstreamProxy.address()));
 
         HttpResponse response = sendTo(proxyClientAndServer, request().withPath("/target").withSecure(true).withHeader(HOST.toString(), UNRESOLVABLE + ":" + destinationPort()));
@@ -146,7 +139,7 @@ public class UpstreamProxyResolvesDestinationIntegrationTest {
 
     @Test
     public void shouldNotLookUpDestinationNameThatResolvesLocally() throws Exception {
-        upstreamProxy = new TunnelProxy(TunnelProxy.Protocol.SOCKS5);
+        upstreamProxy = new RecordingUpstreamProxy(RecordingUpstreamProxy.Protocol.SOCKS5, TIMEOUT_SECONDS);
         proxyClientAndServer = startClientAndServer(configuration().forwardSocksProxy(upstreamProxy.address()));
 
         HttpResponse response = sendTo(proxyClientAndServer, request().withPath("/target").withHeader(HOST.toString(), "localhost:" + destinationPort()));
@@ -158,7 +151,7 @@ public class UpstreamProxyResolvesDestinationIntegrationTest {
 
     @Test
     public void shouldSendNameOfDestinationResolvedByCallerToForwardSocksProxy() throws Exception {
-        upstreamProxy = new TunnelProxy(TunnelProxy.Protocol.SOCKS5);
+        upstreamProxy = new RecordingUpstreamProxy(RecordingUpstreamProxy.Protocol.SOCKS5, TIMEOUT_SECONDS);
         NettyHttpClient client = new NettyHttpClient(configuration(), new MockServerLogger(), clientEventLoopGroup, Collections.singletonList(proxyConfiguration(ProxyConfiguration.Type.SOCKS5, upstreamProxy.address())), true);
 
         HttpResponse response = client
@@ -171,7 +164,7 @@ public class UpstreamProxyResolvesDestinationIntegrationTest {
 
     @Test
     public void shouldSendIpLiteralDestinationToForwardSocksProxyAsAnAddress() throws Exception {
-        upstreamProxy = new TunnelProxy(TunnelProxy.Protocol.SOCKS5);
+        upstreamProxy = new RecordingUpstreamProxy(RecordingUpstreamProxy.Protocol.SOCKS5, TIMEOUT_SECONDS);
         proxyClientAndServer = startClientAndServer(configuration().forwardSocksProxy(upstreamProxy.address()));
 
         HttpResponse response = sendTo(proxyClientAndServer, request().withPath("/target").withHeader(HOST.toString(), "127.0.0.1:" + destinationPort()));
@@ -182,7 +175,7 @@ public class UpstreamProxyResolvesDestinationIntegrationTest {
 
     @Test
     public void shouldLeaveBinaryDestinationNameToForwardSocksProxy() throws Exception {
-        upstreamProxy = new TunnelProxy(TunnelProxy.Protocol.SOCKS5);
+        upstreamProxy = new RecordingUpstreamProxy(RecordingUpstreamProxy.Protocol.SOCKS5, TIMEOUT_SECONDS);
         try (EchoServer echoServer = new EchoServer()) {
             NettyHttpClient client = new NettyHttpClient(configuration(), new MockServerLogger(), clientEventLoopGroup, Collections.singletonList(proxyConfiguration(ProxyConfiguration.Type.SOCKS5, upstreamProxy.address())), true);
 
@@ -204,7 +197,7 @@ public class UpstreamProxyResolvesDestinationIntegrationTest {
 
     @Test
     public void shouldStillBlockForwardToPrivateNetworkWhenUpstreamProxyResolves() throws Exception {
-        upstreamProxy = new TunnelProxy(TunnelProxy.Protocol.CONNECT);
+        upstreamProxy = new RecordingUpstreamProxy(RecordingUpstreamProxy.Protocol.CONNECT, TIMEOUT_SECONDS);
         proxyClientAndServer = startClientAndServer(configuration().forwardHttpsProxy(upstreamProxy.address()).forwardProxyBlockPrivateNetworks(true));
         // a name that resolves here to loopback, and one that does not resolve here: neither is vetted, so neither is sent
         for (String host : new String[]{"localhost", UNRESOLVABLE}) {
@@ -235,162 +228,5 @@ public class UpstreamProxyResolvesDestinationIntegrationTest {
         return new NettyHttpClient(configuration(), new MockServerLogger(), clientEventLoopGroup, null, false)
             .sendRequest(request, new InetSocketAddress("127.0.0.1", server.getLocalPort()))
             .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
-    }
-
-    /**
-     * An upstream proxy, HTTP {@code CONNECT} or SOCKS5 without authentication, that records each destination it is
-     * asked for and connects it to the same port on this machine, whatever its name.
-     */
-    private static final class TunnelProxy {
-        enum Protocol {CONNECT, SOCKS5}
-
-        private final Protocol protocol;
-        private final ServerSocket listener = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"));
-        private final List<Socket> sockets = new CopyOnWriteArrayList<>();
-        private final List<String> destinations = new CopyOnWriteArrayList<>();
-
-        private TunnelProxy(Protocol protocol) throws IOException {
-            this.protocol = protocol;
-            daemon(() -> {
-                while (!listener.isClosed()) {
-                    Socket client = listener.accept();
-                    sockets.add(client);
-                    daemon(() -> tunnel(client));
-                }
-            });
-        }
-
-        private InetSocketAddress address() {
-            return new InetSocketAddress("127.0.0.1", listener.getLocalPort());
-        }
-
-        private List<String> destinations() {
-            return destinations;
-        }
-
-        private void tunnel(Socket client) throws IOException {
-            client.setSoTimeout((int) TimeUnit.SECONDS.toMillis(TIMEOUT_SECONDS));
-            int port = protocol == Protocol.CONNECT ? readConnect(client) : readSocks5(client);
-            Socket upstream = new Socket("127.0.0.1", port);
-            sockets.add(upstream);
-            if (protocol == Protocol.CONNECT) {
-                write(client, "HTTP/1.1 200 Connection established\r\n\r\n".getBytes(StandardCharsets.ISO_8859_1));
-            } else {
-                write(client, new byte[]{5, 0, 0, 1, 0, 0, 0, 0, 0, 0});
-            }
-            daemon(() -> copy(upstream, client));
-            copy(client, upstream);
-        }
-
-        private int readConnect(Socket client) throws IOException {
-            StringBuilder head = new StringBuilder();
-            InputStream fromClient = client.getInputStream();
-            while (head.indexOf("\r\n\r\n") < 0) {
-                int read = fromClient.read();
-                if (read == -1) {
-                    throw new IOException("closed before CONNECT");
-                }
-                head.append((char) read);
-            }
-            String authority = head.substring("CONNECT ".length(), head.indexOf(" HTTP/1.1"));
-            destinations.add(authority);
-            return Integer.parseInt(authority.substring(authority.lastIndexOf(':') + 1));
-        }
-
-        private int readSocks5(Socket client) throws IOException {
-            DataInputStream fromClient = new DataInputStream(client.getInputStream());
-            // greeting: version, method count, methods; answer "no authentication"
-            fromClient.readUnsignedByte();
-            fromClient.readFully(new byte[fromClient.readUnsignedByte()]);
-            write(client, new byte[]{5, 0});
-            // request: version, command, reserved, address type, address, port
-            fromClient.readUnsignedByte();
-            fromClient.readUnsignedByte();
-            fromClient.readUnsignedByte();
-            int addressType = fromClient.readUnsignedByte();
-            String destination;
-            if (addressType == 3) {
-                byte[] name = new byte[fromClient.readUnsignedByte()];
-                fromClient.readFully(name);
-                destination = "domain " + new String(name, StandardCharsets.US_ASCII);
-            } else {
-                byte[] address = new byte[addressType == 1 ? 4 : 16];
-                fromClient.readFully(address);
-                destination = (addressType == 1 ? "ipv4 " : "ipv6 ") + InetAddress.getByAddress(address).getHostAddress();
-            }
-            int port = fromClient.readUnsignedShort();
-            destinations.add(destination + ":" + port);
-            return port;
-        }
-
-        private void close() throws IOException {
-            listener.close();
-            for (Socket socket : sockets) {
-                socket.close();
-            }
-        }
-    }
-
-    private static final class EchoServer implements AutoCloseable {
-        private final ServerSocket listener = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"));
-        private final List<Socket> sockets = new CopyOnWriteArrayList<>();
-
-        private EchoServer() throws IOException {
-            daemon(() -> {
-                while (!listener.isClosed()) {
-                    Socket client = listener.accept();
-                    sockets.add(client);
-                    daemon(() -> copy(client, client));
-                }
-            });
-        }
-
-        private int port() {
-            return listener.getLocalPort();
-        }
-
-        @Override
-        public void close() throws IOException {
-            listener.close();
-            for (Socket socket : sockets) {
-                socket.close();
-            }
-        }
-    }
-
-    private static void write(Socket socket, byte[] bytes) throws IOException {
-        socket.getOutputStream().write(bytes);
-        socket.getOutputStream().flush();
-    }
-
-    private static void copy(Socket from, Socket to) throws IOException {
-        try {
-            byte[] buffer = new byte[16 * 1024];
-            InputStream input = from.getInputStream();
-            OutputStream output = to.getOutputStream();
-            for (int read = input.read(buffer); read != -1; read = input.read(buffer)) {
-                output.write(buffer, 0, read);
-                output.flush();
-            }
-        } finally {
-            from.close();
-            to.close();
-        }
-    }
-
-    private static void daemon(IoTask task) {
-        Thread thread = new Thread(() -> {
-            try {
-                task.run();
-            } catch (IOException closed) {
-                // the listener or a tunnel was closed
-            }
-        }, "upstream-proxy");
-        thread.setDaemon(true);
-        thread.start();
-    }
-
-    private interface IoTask {
-        void run() throws IOException;
     }
 }

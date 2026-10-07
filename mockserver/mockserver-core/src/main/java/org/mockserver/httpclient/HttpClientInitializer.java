@@ -53,6 +53,7 @@ public class HttpClientInitializer extends ChannelInitializer<SocketChannel> {
     private final HttpClientConnectionErrorHandler httpClientConnectionHandler;
     private final CompletableFuture<Protocol> protocolFuture;
     private final HttpClientHandler httpClientHandler;
+    // the upstream proxies this connection goes through: none for a host on noProxyHosts
     private final Map<ProxyConfiguration.Type, ProxyConfiguration> proxyConfigurations;
     private final NettySslContextFactory nettySslContextFactory;
 

@@ -1,27 +1,38 @@
 package org.mockserver.proxyconfiguration;
 
+import io.netty.util.NetUtil;
 import org.apache.commons.lang3.StringUtils;
 
+import java.util.Arrays;
 import java.util.Locale;
 import java.util.stream.Stream;
 
 public class NoProxyHostsUtils {
 
+    /**
+     * Whether a host is on a {@code noProxyHosts} list, as curl and the JVM match {@code no_proxy}: an entry is a host
+     * name, matched exactly; a domain suffix ({@code *.example.com} or {@code .example.com}), which matches the domain
+     * and every name under it; or an IP address, which matches only a host given as that address. No name is looked
+     * up. Case and the host's port are ignored.
+     */
     public static boolean isHostOnNoProxyList(String host, String noProxyHosts) {
         if (StringUtils.isBlank(noProxyHosts) || StringUtils.isBlank(host)) {
             return false;
         }
         String hostOnly = extractHost(host);
         String hostLower = hostOnly.toLowerCase(Locale.ROOT);
+        byte[] hostAddress = NetUtil.createByteArrayFromIpAddressString(hostOnly);
         return Stream.of(noProxyHosts.split(","))
             .map(String::trim)
             .filter(StringUtils::isNotBlank)
             .anyMatch(pattern -> {
                 String patternLower = pattern.toLowerCase(Locale.ROOT);
-                if (patternLower.startsWith("*.")) {
-                    String suffix = patternLower.substring(1);
-                    return hostLower.endsWith(suffix)
-                        || hostLower.equals(patternLower.substring(2));
+                if (patternLower.startsWith("*.") || patternLower.startsWith(".")) {
+                    String domain = patternLower.substring(patternLower.indexOf('.') + 1);
+                    return hostLower.endsWith("." + domain) || hostLower.equals(domain);
+                }
+                if (hostAddress != null) {
+                    return Arrays.equals(hostAddress, NetUtil.createByteArrayFromIpAddressString(pattern));
                 }
                 return hostLower.equals(patternLower);
             });
