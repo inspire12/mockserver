@@ -4,6 +4,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.util.NetUtil;
+import io.netty.util.concurrent.ScheduledFuture;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.slf4j.event.Level;
@@ -11,10 +12,12 @@ import org.slf4j.event.Level;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.TimeUnit;
 
 import static org.mockserver.mock.action.http.HttpActionHandler.REMOTE_SOCKET;
 import static org.mockserver.netty.HttpRequestHandler.PROXYING;
 import static org.mockserver.netty.proxy.TransparentProxyHandler.TRANSPARENT_ORIGINAL_DST_RESOLVED;
+import static org.mockserver.netty.unification.PortUnificationHandler.UNDECIDED_PROTOCOL_WAIT_MILLIS;
 import static org.mockserver.socket.SocketAddresses.PROXY_PROTOCOL_SOURCE;
 
 /**
@@ -35,7 +38,9 @@ import static org.mockserver.socket.SocketAddresses.PROXY_PROTOCOL_SOURCE;
  * {@code PROXYING} / {@code TRANSPARENT_ORIGINAL_DST_RESOLVED} channel attributes, records the
  * header's source as {@code PROXY_PROTOCOL_SOURCE} (the client address recorded for the
  * connection's requests), and removes itself from the pipeline. Bytes that stop matching a
- * signature are passed on at once, without waiting for more.
+ * signature are passed on at once, without waiting for more; bytes that are only the start of a
+ * signature are passed on unchanged once the client has sent nothing more for as long as port
+ * unification waits for the start of a protocol.
  * <p>
  * <b>PROXY v1 format (HAProxy spec):</b>
  * <pre>
@@ -90,6 +95,7 @@ public class ProxyProtocolOriginalDestinationHandler extends ChannelInboundHandl
 
     /** Accumulates bytes until we can determine if a PROXY header is present. */
     private ByteBuf cumulation;
+    private ScheduledFuture<?> undecidedWait;
 
     public ProxyProtocolOriginalDestinationHandler(MockServerLogger logger) {
         this.logger = logger;
@@ -97,6 +103,7 @@ public class ProxyProtocolOriginalDestinationHandler extends ChannelInboundHandl
 
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+        stopUndecidedWait();
         if (!(msg instanceof ByteBuf)) {
             // Non-ByteBuf message — pass through and remove self
             removeSelfAndFireRead(ctx, msg);
@@ -139,7 +146,7 @@ public class ProxyProtocolOriginalDestinationHandler extends ChannelInboundHandl
         }
 
         if (readable < PROXY_V1_SIGNATURE_BYTES.length) {
-            // Need more bytes to decide
+            startUndecidedWait(ctx);
             return;
         }
 
@@ -202,7 +209,7 @@ public class ProxyProtocolOriginalDestinationHandler extends ChannelInboundHandl
             return;
         }
         if (readable < PROXY_V2_SIGNATURE.length) {
-            // Need the full 12-byte signature to confirm v2
+            startUndecidedWait(ctx);
             return;
         }
         if (readable < V2_HEADER_PREFIX_LENGTH) {
@@ -442,6 +449,28 @@ public class ProxyProtocolOriginalDestinationHandler extends ChannelInboundHandl
         return -1;
     }
 
+    private void startUndecidedWait(ChannelHandlerContext ctx) {
+        undecidedWait = ctx.executor().schedule(() -> {
+            undecidedWait = null;
+            if (!ctx.channel().config().isAutoRead()) {
+                // the rest may have been sent and be waiting unread, so the silence says nothing yet
+                startUndecidedWait(ctx);
+                return;
+            }
+            ByteBuf passThrough = cumulation;
+            cumulation = null;
+            removeSelfAndFireRead(ctx, passThrough);
+            ctx.fireChannelReadComplete();
+        }, UNDECIDED_PROTOCOL_WAIT_MILLIS, TimeUnit.MILLISECONDS);
+    }
+
+    private void stopUndecidedWait() {
+        if (undecidedWait != null) {
+            undecidedWait.cancel(false);
+            undecidedWait = null;
+        }
+    }
+
     private void removeSelfAndFireRead(ChannelHandlerContext ctx, Object msg) {
         removeSelf(ctx);
         ctx.fireChannelRead(msg);
@@ -466,6 +495,7 @@ public class ProxyProtocolOriginalDestinationHandler extends ChannelInboundHandl
 
     @Override
     public void handlerRemoved(ChannelHandlerContext ctx) {
+        stopUndecidedWait();
         // Release any accumulated bytes if the handler is removed unexpectedly
         if (cumulation != null) {
             cumulation.release();

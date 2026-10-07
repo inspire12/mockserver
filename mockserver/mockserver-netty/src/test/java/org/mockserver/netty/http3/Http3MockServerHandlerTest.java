@@ -25,7 +25,11 @@ import org.mockserver.model.HttpRequest;
 import org.slf4j.event.Level;
 
 import io.netty.channel.ChannelFuture;
+import io.netty.handler.codec.http3.Http3DataFrame;
 import io.netty.handler.codec.http3.Http3HeadersFrame;
+import org.mockserver.model.HttpResponse;
+import org.mockserver.responsewriter.ControlPlaneFailureResponse;
+import org.mockserver.responsewriter.ResponseWriter;
 
 import java.net.InetSocketAddress;
 import java.nio.channels.ClosedChannelException;
@@ -36,7 +40,10 @@ import java.util.List;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
+import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.startsWith;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.nullValue;
@@ -166,6 +173,106 @@ public class Http3MockServerHandlerTest {
             .orElseThrow(() -> new AssertionError("no response header section written"));
         written.getAllValues().forEach(io.netty.util.ReferenceCountUtil::release);
         return String.valueOf(responseHeaders.headers().status());
+    }
+
+    @Test
+    public void shouldAnswerADataPlaneFailureWithAServerErrorAndAGenericMessage() throws Exception {
+        List<Object> written = writtenWhenProcessingThrows("text/plain", false);
+
+        assertThat(statusesOf(written), contains("500"));
+        String body = bodyOf(written);
+        assertThat(body, startsWith(ControlPlaneFailureResponse.UNEXPECTED_FAILURE_MESSAGE));
+        assertThat(body, not(containsString("internal detail")));
+        Http3HeadersFrame responseHeaders = (Http3HeadersFrame) written.get(0);
+        assertThat(String.valueOf(responseHeaders.headers().get("content-type")), is("text/plain; charset=utf-8"));
+        assertThat("a mock response gets CORS headers only when enableCORSForAllResponses is on",
+            responseHeaders.headers().contains("access-control-allow-origin") || responseHeaders.headers().contains("access-control-allow-credentials"), is(false));
+    }
+
+    @Test
+    public void shouldNotAnswerADataPlaneFailureAgainAfterItsResponseWasStarted() throws Exception {
+        List<Object> written = writtenWhenProcessingThrows("text/plain", true);
+
+        assertThat(statusesOf(written), contains("200"));
+    }
+
+    @Test
+    public void shouldAnswerAGrpcDataPlaneFailureWithTheInternalStatus() throws Exception {
+        List<Object> written = writtenWhenProcessingThrows(GrpcStatusMapper.GRPC_CONTENT_TYPE, false);
+
+        assertThat(statusesOf(written), contains("200"));
+        Http3HeadersFrame trailersOnly = (Http3HeadersFrame) written.get(0);
+        assertThat(String.valueOf(trailersOnly.headers().get(GrpcStatusMapper.GRPC_STATUS_HEADER)),
+            is(String.valueOf(GrpcStatusMapper.GrpcStatusCode.INTERNAL.getCode())));
+        assertThat(String.valueOf(trailersOnly.headers().get(GrpcStatusMapper.GRPC_MESSAGE_HEADER)), not(containsString("internal")));
+    }
+
+    @Test
+    public void shouldNotAnswerAGrpcDataPlaneFailureAgainAfterItsResponseWasStarted() throws Exception {
+        List<Object> written = writtenWhenProcessingThrows(GrpcStatusMapper.GRPC_CONTENT_TYPE, true);
+
+        assertThat(written, hasSize(1));
+        assertThat(String.valueOf(((Http3HeadersFrame) written.get(0)).headers().get(GrpcStatusMapper.GRPC_STATUS_HEADER)), is("0"));
+    }
+
+    /**
+     * Sends a request whose data-plane processing throws, after first answering it when {@code answerFirst}, and
+     * returns the frames written to the stream.
+     */
+    private List<Object> writtenWhenProcessingThrows(String contentType, boolean answerFirst) throws Exception {
+        HttpState httpState = mock(HttpState.class);
+        when(httpState.handle(any(), any(), anyBoolean())).thenReturn(false);
+        HttpActionHandler httpActionHandler = mock(HttpActionHandler.class);
+        doAnswer(invocation -> {
+            if (answerFirst) {
+                ResponseWriter responseWriter = invocation.getArgument(1);
+                responseWriter.writeResponse(invocation.getArgument(0), HttpResponse.response().withHeader(GrpcStatusMapper.GRPC_STATUS_HEADER, "0"), false);
+            }
+            throw new NullPointerException("internal detail of the fault");
+        }).when(httpActionHandler).processAction(any(), any(), any(), any(), anyBoolean(), anyBoolean());
+        Http3MockServerHandler handler = new Http3MockServerHandler(
+            CONFIGURATION, LOGGER, httpState, httpActionHandler, new Metrics(CONFIGURATION)
+        );
+        ChannelHandlerContext ctx = mockChannelHandlerContextWithWrite();
+        Channel stream = new io.netty.channel.embedded.EmbeddedChannel();
+        when(ctx.channel()).thenReturn(stream);
+
+        DefaultHttp3HeadersFrame headersFrame = new DefaultHttp3HeadersFrame();
+        headersFrame.headers().method("POST");
+        headersFrame.headers().path("/some/data-plane/path");
+        headersFrame.headers().scheme("https");
+        headersFrame.headers().add("content-type", contentType);
+        headersFrame.headers().add("origin", "https://elsewhere.example");
+        handler.channelRead(ctx, headersFrame);
+        handler.channelInputClosed(ctx);
+
+        verify(httpActionHandler).processAction(any(), any(), any(), any(), anyBoolean(), anyBoolean());
+        ArgumentCaptor<Object> written = ArgumentCaptor.forClass(Object.class);
+        verify(ctx, atLeast(0)).write(written.capture());
+        verify(ctx, atLeast(0)).writeAndFlush(written.capture());
+        stream.close();
+        return written.getAllValues();
+    }
+
+    private static List<String> statusesOf(List<Object> written) {
+        List<String> statuses = new ArrayList<>();
+        for (Object frame : written) {
+            if (frame instanceof Http3HeadersFrame && ((Http3HeadersFrame) frame).headers().status() != null) {
+                statuses.add(String.valueOf(((Http3HeadersFrame) frame).headers().status()));
+            }
+        }
+        return statuses;
+    }
+
+    private static String bodyOf(List<Object> written) {
+        StringBuilder body = new StringBuilder();
+        for (Object frame : written) {
+            if (frame instanceof Http3DataFrame) {
+                body.append(((Http3DataFrame) frame).content().toString(StandardCharsets.UTF_8));
+                ((Http3DataFrame) frame).release();
+            }
+        }
+        return body.toString();
     }
 
     @Test

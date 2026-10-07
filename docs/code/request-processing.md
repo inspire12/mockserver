@@ -237,6 +237,11 @@ scheduler-run `/llm/optimisationReport` and `/llm/diffRuns` answer through `Cont
 
 The same catch-all in `HttpRequestHandler` also answers a fault on the data-plane path outside `processAction`'s own
 `catch` (`CONNECT` set-up, the data-plane authentication gate, the TLS-required check), so those are a `500` too.
+`processAction`'s own `catch` (`HttpRequestHandler` for HTTP/1.1 and HTTP/2, both `Http3MockServerHandler` paths) answers
+every exception as the `500` row does, whatever its class, with the same body and log entry, but written as a mock
+response (`ControlPlaneFailureResponse.dataPlaneFailureResponse`), so it carries CORS headers only when
+`enableCORSForAllResponses` is on and no `version` header; on the gRPC-over-HTTP/3 path
+the answer is the gRPC `INTERNAL` status carrying that message, and an HTTP/3 stream already answered is not answered again.
 The correlation id is the request's log correlation id (set by `HttpState.handle`), or a new one when the failure came
 before it was set. Before 9.0.0 the catch-all answered every exception `400` with its bare message (an exception
 without one gave an empty body) and an `Error` closed the connection with no response. The Java client raises a

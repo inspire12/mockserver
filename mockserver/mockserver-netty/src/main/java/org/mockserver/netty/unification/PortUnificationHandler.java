@@ -107,7 +107,7 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
      * How long first bytes that are only the start of a known protocol are held once the client falls silent,
      * before they are taken for what they are. Bytes that cannot become a known protocol are never held.
      */
-    static final long UNDECIDED_PROTOCOL_WAIT_MILLIS = 1000;
+    public static final long UNDECIDED_PROTOCOL_WAIT_MILLIS = 1000;
     // the record content types SslHandler.isEncrypted accepts: change cipher spec (20) to heartbeat (24)
     private static final int TLS_CONTENT_TYPE_FIRST = 20;
     private static final int TLS_CONTENT_TYPE_LAST = 24;

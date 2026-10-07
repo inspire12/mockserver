@@ -318,6 +318,21 @@ public class Http3GrpcResponseWriter extends ResponseWriter implements GrpcStrea
             .addListener(QuicStreamChannel.SHUTDOWN_OUTPUT);
     }
 
+    /**
+     * Ends the stream with {@code statusCode} unless a response, a stream or the deadline has already claimed it.
+     */
+    void writeErrorResponseIfUnanswered(GrpcStatusMapper.GrpcStatusCode statusCode, String message) {
+        // the stream state first: claiming completed while a stream is running would stop the deadline ending it
+        if (!streamState.compareAndSet(StreamState.IDLE, StreamState.COMPLETED) || !completed.compareAndSet(false, true)) {
+            return;
+        }
+        if (deadlineFuture != null) {
+            deadlineFuture.cancel(false);
+            deadlineFuture = null;
+        }
+        writeErrorResponse(statusCode, message);
+    }
+
     // ------------------------------------------------------------------
     // Server-streaming gRPC over HTTP/3 (GrpcStreamResponseWriter)
     // ------------------------------------------------------------------

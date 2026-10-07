@@ -29,6 +29,7 @@ import org.mockserver.model.HttpResponse;
 import org.mockserver.model.MediaType;
 import org.mockserver.model.RetrieveType;
 import org.mockserver.netty.responsewriter.NettyResponseWriter;
+import org.mockserver.responsewriter.ControlPlaneFailureResponse;
 import org.mockserver.scheduler.Scheduler;
 import org.mockserver.serialization.ExpectationSerializer;
 import org.mockserver.serialization.HttpRequestSerializer;
@@ -46,6 +47,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.endsWith;
+import static org.hamcrest.CoreMatchers.startsWith;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.core.Is.is;
 import static org.hamcrest.core.IsNot.not;
@@ -1384,7 +1386,7 @@ public class HttpRequestHandlerTest {
     @Test
     public void shouldAnswerWithServerErrorWhenProcessingTheActionThrows() {
         // given
-        HttpRequest request = request("request_one");
+        HttpRequest request = request("request_one").withHeader("origin", "https://elsewhere.example");
         embeddedChannel.attr(LOCAL_HOST_HEADERS).set(ImmutableSet.of("localhost:666"));
         embeddedChannel.attr(PROXYING).set(false);
         doThrow(new IllegalStateException("broken action")).when(mockActionHandler).processAction(
@@ -1396,5 +1398,10 @@ public class HttpRequestHandlerTest {
         // then
         HttpResponse httpResponse = embeddedChannel.readOutbound();
         assertThat("the client is answered rather than left waiting on an abandoned exchange", httpResponse.getStatusCode(), is(500));
+        assertThat(httpResponse.getBodyAsString(), startsWith(ControlPlaneFailureResponse.UNEXPECTED_FAILURE_MESSAGE));
+        assertThat("the fault's own text is not sent", httpResponse.getBodyAsString(), not(containsString("broken action")));
+        assertThat(httpResponse.getFirstHeader("content-type"), is("text/plain; charset=utf-8"));
+        assertThat("a mock response gets CORS headers only when enableCORSForAllResponses is on",
+            httpResponse.containsHeader("access-control-allow-origin") || httpResponse.containsHeader("access-control-allow-credentials"), is(false));
     }
 }

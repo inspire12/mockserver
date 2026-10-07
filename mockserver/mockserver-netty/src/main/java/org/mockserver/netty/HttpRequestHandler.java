@@ -567,17 +567,10 @@ public class HttpRequestHandler extends SimpleChannelInboundHandler<HttpRequest>
                         try {
                             httpActionHandler.processAction(request, responseWriter, ctx, getLocalAddresses(ctx), isProxyingRequest(ctx), false);
                         } catch (Throwable throwable) {
-                            mockServerLogger.logEvent(
-                                new LogEntry()
-                                    .setLogLevel(Level.ERROR)
-                                    .setHttpRequest(request)
-                                    .setMessageFormat("exception processing request:{}error:{}")
-                                    .setArguments(request, throwable.getMessage())
-                                    .setThrowable(throwable)
-                            );
+                            String message = ControlPlaneFailureResponse.logUnexpectedFailure(mockServerLogger, request, throwable);
                             // answer, as the other error paths here do, so the client is not left waiting
                             // and the connection's exchange tracking stays paired
-                            responseWriter.writeResponse(request, response().withStatusCode(INTERNAL_SERVER_ERROR.code()), false);
+                            responseWriter.writeResponse(request, ControlPlaneFailureResponse.dataPlaneFailureResponse(message), false);
                         }
                     }
 

@@ -44,10 +44,18 @@ import java.util.List;
 public class Http3ResponseWriter extends ResponseWriter implements StreamErrorWriter {
 
     private final ChannelHandlerContext ctx;
+    private volatile boolean responseStarted;
 
     public Http3ResponseWriter(Configuration configuration, MockServerLogger mockServerLogger, ChannelHandlerContext ctx) {
         super(configuration, mockServerLogger);
         this.ctx = ctx;
+    }
+
+    /**
+     * Whether a response, or a reset of the stream, has been started on this stream.
+     */
+    boolean isResponseStarted() {
+        return responseStarted;
     }
 
     /**
@@ -57,6 +65,7 @@ public class Http3ResponseWriter extends ResponseWriter implements StreamErrorWr
      */
     @Override
     public void writeStreamError(long errorCode) {
+        responseStarted = true;
         if (ctx.channel() instanceof QuicStreamChannel && ctx.channel().isActive()) {
             // Netty's QuicStreamChannel.shutdownOutput takes an int, but a QUIC application error code
             // is a 62-bit varint. Every RFC 9114 §8.1 HTTP/3 code is tiny (<= 0x110), so this only
@@ -85,6 +94,7 @@ public class Http3ResponseWriter extends ResponseWriter implements StreamErrorWr
 
     @Override
     public void sendResponse(HttpRequest request, HttpResponse response) {
+        responseStarted = true;
         if (response == null) {
             response = HttpResponse.notFoundResponse();
         }

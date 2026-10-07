@@ -1,13 +1,20 @@
 package org.mockserver.netty.proxy;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
 import org.junit.Test;
 import org.mockserver.logging.MockServerLogger;
+import org.mockserver.netty.unification.PortUnificationHandler;
 
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.hamcrest.CoreMatchers.*;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -667,6 +674,103 @@ public class ProxyProtocolOriginalDestinationHandlerTest {
             assertThat(channel.pipeline().get(ProxyProtocolOriginalDestinationHandler.class), is(notNullValue()));
             channel.close();
         }
+    }
+
+    @Test
+    public void shouldPassOnBytesThatAreOnlyTheStartOfASignatureWhenTheClientFallsSilent() {
+        for (byte[] start : Arrays.asList(ascii("P"), ascii("PROXY"), new byte[]{0x0D}, new byte[]{0x0D, 0x0A}, Arrays.copyOf(PROXY_V2_SIGNATURE_START, 11))) {
+            AtomicInteger readsCompleted = new AtomicInteger();
+            EmbeddedChannel channel = new EmbeddedChannel(new ProxyProtocolOriginalDestinationHandler(logger), new ChannelInboundHandlerAdapter() {
+                @Override
+                public void channelReadComplete(ChannelHandlerContext ctx) {
+                    readsCompleted.incrementAndGet();
+                    ctx.fireChannelReadComplete();
+                }
+            });
+            String sent = ByteBufUtil.hexDump(start);
+
+            channel.writeInbound(Unpooled.wrappedBuffer(start));
+            channel.advanceTimeBy(PortUnificationHandler.UNDECIDED_PROTOCOL_WAIT_MILLIS - 1, TimeUnit.MILLISECONDS);
+            channel.runScheduledPendingTasks();
+            assertThat(sent + " is held just before the wait ends", channel.readInbound(), is(nullValue()));
+            int readsCompletedBeforeTheWaitEnds = readsCompleted.get();
+
+            channel.advanceTimeBy(1, TimeUnit.MILLISECONDS);
+            channel.runScheduledPendingTasks();
+            assertThat(sent + " is passed on as a completed read", readsCompleted.get(), is(readsCompletedBeforeTheWaitEnds + 1));
+            assertPassedOnUnchanged(channel, start);
+        }
+    }
+
+    @Test
+    public void shouldRestartTheWaitWhenMoreOfTheSignatureArrives() {
+        EmbeddedChannel channel = new EmbeddedChannel(new ProxyProtocolOriginalDestinationHandler(logger));
+
+        channel.writeInbound(Unpooled.copiedBuffer("PRO", StandardCharsets.US_ASCII));
+        channel.advanceTimeBy(PortUnificationHandler.UNDECIDED_PROTOCOL_WAIT_MILLIS - 1, TimeUnit.MILLISECONDS);
+        channel.runScheduledPendingTasks();
+        channel.writeInbound(Unpooled.copiedBuffer("X", StandardCharsets.US_ASCII));
+        channel.advanceTimeBy(PortUnificationHandler.UNDECIDED_PROTOCOL_WAIT_MILLIS - 1, TimeUnit.MILLISECONDS);
+        channel.runScheduledPendingTasks();
+        assertThat(channel.readInbound(), is(nullValue()));
+
+        channel.advanceTimeBy(1, TimeUnit.MILLISECONDS);
+        channel.runScheduledPendingTasks();
+        assertPassedOnUnchanged(channel, ascii("PROX"));
+    }
+
+    @Test
+    public void shouldNotEndTheWaitWhileReadsArePaused() {
+        EmbeddedChannel channel = new EmbeddedChannel(new ProxyProtocolOriginalDestinationHandler(logger));
+        channel.writeInbound(Unpooled.copiedBuffer("PR", StandardCharsets.US_ASCII));
+
+        channel.config().setAutoRead(false);
+        channel.advanceTimeBy(PortUnificationHandler.UNDECIDED_PROTOCOL_WAIT_MILLIS, TimeUnit.MILLISECONDS);
+        channel.runScheduledPendingTasks();
+        assertThat("the rest may be waiting unread", channel.readInbound(), is(nullValue()));
+
+        channel.config().setAutoRead(true);
+        channel.advanceTimeBy(PortUnificationHandler.UNDECIDED_PROTOCOL_WAIT_MILLIS, TimeUnit.MILLISECONDS);
+        channel.runScheduledPendingTasks();
+        assertPassedOnUnchanged(channel, ascii("PR"));
+    }
+
+    @Test
+    public void shouldEndTheWaitWhenTheHeaderArrivesOrTheHandlerIsRemoved() {
+        EmbeddedChannel decided = new EmbeddedChannel(new ProxyProtocolOriginalDestinationHandler(logger));
+        decided.writeInbound(Unpooled.copiedBuffer("PROX", StandardCharsets.US_ASCII));
+        decided.writeInbound(Unpooled.copiedBuffer("Y TCP4 192.168.1.1 10.0.0.1 56324 80\r\n", StandardCharsets.US_ASCII));
+        assertThat(decided.attr(REMOTE_SOCKET).get(), is(new InetSocketAddress("10.0.0.1", 80)));
+        assertThat("no wait is left running", decided.runScheduledPendingTasks(), is(-1L));
+        decided.close();
+
+        EmbeddedChannel removed = new EmbeddedChannel(new ProxyProtocolOriginalDestinationHandler(logger));
+        ByteBuf held = Unpooled.copiedBuffer("PROX", StandardCharsets.US_ASCII);
+        removed.writeInbound(held);
+        removed.pipeline().remove(ProxyProtocolOriginalDestinationHandler.class);
+        assertThat("the held bytes are released", held.refCnt(), is(0));
+        assertThat("no wait is left running", removed.runScheduledPendingTasks(), is(-1L));
+        removed.close();
+    }
+
+    @Test
+    public void shouldKeepHoldingAHeaderWhoseSignatureHasArrived() {
+        EmbeddedChannel channel = new EmbeddedChannel(new ProxyProtocolOriginalDestinationHandler(logger));
+
+        channel.writeInbound(Unpooled.copiedBuffer("PROXY TCP4 192.168", StandardCharsets.US_ASCII));
+        channel.advanceTimeBy(PortUnificationHandler.UNDECIDED_PROTOCOL_WAIT_MILLIS, TimeUnit.MILLISECONDS);
+        channel.runScheduledPendingTasks();
+
+        assertThat(channel.readInbound(), is(nullValue()));
+        channel.writeInbound(Unpooled.copiedBuffer(".1.1 10.0.0.1 56324 80\r\n", StandardCharsets.US_ASCII));
+        assertThat(channel.attr(REMOTE_SOCKET).get(), is(new InetSocketAddress("10.0.0.1", 80)));
+        channel.close();
+    }
+
+    private static final byte[] PROXY_V2_SIGNATURE_START = {0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A};
+
+    private static byte[] ascii(String text) {
+        return text.getBytes(StandardCharsets.US_ASCII);
     }
 
     @Test

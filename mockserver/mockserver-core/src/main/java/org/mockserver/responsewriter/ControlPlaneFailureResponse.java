@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.exc.InvalidDefinitionException;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpRequest;
+import org.mockserver.model.HttpResponse;
 import org.mockserver.model.MediaType;
 import org.mockserver.uuid.UUIDService;
 import org.slf4j.event.Level;
@@ -45,28 +46,53 @@ public final class ControlPlaneFailureResponse {
     }
 
     public static void write(MockServerLogger mockServerLogger, ResponseWriter responseWriter, HttpRequest request, Throwable throwable) {
-        String correlationId = request != null && request.getLogCorrelationId() != null ? request.getLogCorrelationId() : UUIDService.getNonSecureUUID();
         if (isClientError(throwable)) {
             mockServerLogger.logEvent(
                 new LogEntry()
                     .setLogLevel(Level.ERROR)
-                    .setCorrelationId(correlationId)
+                    .setCorrelationId(correlationId(request))
                     .setHttpRequest(request)
                     .setMessageFormat("exception processing request:{}error:{}")
                     .setArguments(request, throwable.getMessage())
             );
             responseWriter.writeResponse(request, BAD_REQUEST, throwable.getMessage(), MediaType.create("text", "plain").toString());
         } else {
-            mockServerLogger.logEvent(
-                new LogEntry()
-                    .setLogLevel(Level.ERROR)
-                    .setCorrelationId(correlationId)
-                    .setHttpRequest(request)
-                    .setMessageFormat("unexpected exception processing request:{}correlation id:{}")
-                    .setArguments(request, correlationId)
-                    .setThrowable(throwable)
-            );
-            responseWriter.writeResponse(request, INTERNAL_SERVER_ERROR, UNEXPECTED_FAILURE_MESSAGE + correlationId, MediaType.create("text", "plain").toString());
+            responseWriter.writeResponse(request, INTERNAL_SERVER_ERROR, logUnexpectedFailure(mockServerLogger, request, throwable), MediaType.create("text", "plain").toString());
         }
+    }
+
+    /**
+     * Logs a fault in MockServer once at {@code ERROR} with a correlation id and the stack trace.
+     *
+     * @return the generic message naming that correlation id, to answer the request with
+     */
+    public static String logUnexpectedFailure(MockServerLogger mockServerLogger, HttpRequest request, Throwable throwable) {
+        String correlationId = correlationId(request);
+        mockServerLogger.logEvent(
+            new LogEntry()
+                .setLogLevel(Level.ERROR)
+                .setCorrelationId(correlationId)
+                .setHttpRequest(request)
+                .setMessageFormat("unexpected exception processing request:{}correlation id:{}")
+                .setArguments(request, correlationId)
+                .setThrowable(throwable)
+        );
+        return UNEXPECTED_FAILURE_MESSAGE + correlationId;
+    }
+
+    /**
+     * The {@code 500} a data-plane request whose processing threw is answered with. It is written as a mock response
+     * ({@code apiResponse} false), so it carries CORS headers only when {@code enableCORSForAllResponses} is on.
+     */
+    public static HttpResponse dataPlaneFailureResponse(String message) {
+        return HttpResponse.response()
+            .withStatusCode(INTERNAL_SERVER_ERROR.code())
+            .withReasonPhrase(INTERNAL_SERVER_ERROR.reasonPhrase())
+            .withHeader("content-type", MediaType.create("text", "plain").toString() + "; charset=utf-8")
+            .withBody(message);
+    }
+
+    private static String correlationId(HttpRequest request) {
+        return request != null && request.getLogCorrelationId() != null ? request.getLogCorrelationId() : UUIDService.getNonSecureUUID();
     }
 }

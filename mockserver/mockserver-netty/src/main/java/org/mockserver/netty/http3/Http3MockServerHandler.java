@@ -39,7 +39,6 @@ import org.mockserver.netty.DataPlaneAuthenticationGate;
 import org.mockserver.netty.mcp.JsonRpcMessage;
 import org.mockserver.netty.mcp.McpRequestProcessor;
 import org.mockserver.responsewriter.ControlPlaneFailureResponse;
-import org.mockserver.responsewriter.ResponseWriter;
 import org.mockserver.telemetry.TraceContextAttributes;
 import org.mockserver.telemetry.W3CTraceContext;
 import org.mockserver.uuid.UUIDService;
@@ -293,7 +292,7 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
                 return;
             }
 
-            ResponseWriter responseWriter = new Http3ResponseWriter(configuration, mockServerLogger, ctx);
+            Http3ResponseWriter responseWriter = new Http3ResponseWriter(configuration, mockServerLogger, ctx);
 
             // first, try control-plane handling (expectations CRUD, status, etc.)
             boolean handled;
@@ -325,14 +324,11 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
                         true                    // synchronous processing
                     );
                 } catch (Throwable throwable) {
-                    mockServerLogger.logEvent(
-                        new LogEntry()
-                            .setLogLevel(Level.ERROR)
-                            .setHttpRequest(request)
-                            .setMessageFormat("exception processing HTTP/3 request:{}error:{}")
-                            .setArguments(request, throwable.getMessage())
-                            .setThrowable(throwable)
-                    );
+                    String message = ControlPlaneFailureResponse.logUnexpectedFailure(mockServerLogger, request, throwable);
+                    // answer, as HTTP/1.1 and HTTP/2 do, so the client is not left waiting for its own timeout
+                    if (!responseWriter.isResponseStarted()) {
+                        responseWriter.writeResponse(request, ControlPlaneFailureResponse.dataPlaneFailureResponse(message), false);
+                    }
                 }
             }
         } finally {
@@ -541,7 +537,7 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
     private void processRequestThroughPipeline(
         ChannelHandlerContext ctx,
         HttpRequest request,
-        ResponseWriter responseWriter
+        Http3GrpcResponseWriter responseWriter
     ) {
         if (!httpState.handle(request, responseWriter, false)) {
             // Data-plane authentication gate (opt-in, default off) — same as the non-gRPC HTTP/3 path
@@ -561,13 +557,9 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
                     true
                 );
             } catch (Throwable throwable) {
-                mockServerLogger.logEvent(
-                    new LogEntry()
-                        .setLogLevel(Level.ERROR)
-                        .setHttpRequest(request)
-                        .setMessageFormat("exception processing gRPC request over HTTP/3:{}error:{}")
-                        .setArguments(request, throwable.getMessage())
-                        .setThrowable(throwable)
+                responseWriter.writeErrorResponseIfUnanswered(
+                    GrpcStatusMapper.GrpcStatusCode.INTERNAL,
+                    ControlPlaneFailureResponse.logUnexpectedFailure(mockServerLogger, request, throwable)
                 );
             }
         }
