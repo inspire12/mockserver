@@ -13,7 +13,7 @@ module.exports = function (grunt) {
     grunt.initConfig({
         exec: {
             stop_existing_mockservers: '../scripts/stop_MockServer.sh',
-            typecheck: 'npx tsc',
+            typecheck: 'npm run typecheck',
             node_test: 'node test/run_node_tests.js test/no_proxy/mcp_mock_builder_test.js test/no_proxy/mock_server_node_client_test.js test/with_proxy/proxy_client_node_test.js',
             node_test_local: 'node test/run_with_local_server.js'
         },

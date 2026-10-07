@@ -40,6 +40,49 @@
     "bin",
     "mockserver-netty-8.0.0-jar-with-dependencies.jar"
   ],
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "require": "./index.js",
+      "import": "./index.js",
+      "default": "./index.js"
+    },
+    "./index": {
+      "types": "./index.d.ts",
+      "require": "./index.js",
+      "import": "./index.js",
+      "default": "./index.js"
+    },
+    "./index.js": {
+      "types": "./index.d.ts",
+      "require": "./index.js",
+      "import": "./index.js",
+      "default": "./index.js"
+    },
+    "./downloadJar": {
+      "require": "./downloadJar.js",
+      "import": "./downloadJar.js",
+      "default": "./downloadJar.js"
+    },
+    "./downloadJar.js": {
+      "require": "./downloadJar.js",
+      "import": "./downloadJar.js",
+      "default": "./downloadJar.js"
+    },
+    "./downloadBinary": {
+      "types": "./downloadBinary.d.ts",
+      "require": "./downloadBinary.js",
+      "import": "./downloadBinary.js",
+      "default": "./downloadBinary.js"
+    },
+    "./downloadBinary.js": {
+      "types": "./downloadBinary.d.ts",
+      "require": "./downloadBinary.js",
+      "import": "./downloadBinary.js",
+      "default": "./downloadBinary.js"
+    },
+    "./package.json": "./package.json"
+  },
   "devDependencies": {
     "glob": "~13.0.6",
     "grunt": "~1.6.2",

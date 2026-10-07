@@ -40,8 +40,121 @@
     "sendRequest.js",
     "webSocketClient.js"
   ],
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "require": "./index.js",
+      "import": "./index.js",
+      "default": "./index.js"
+    },
+    "./index": {
+      "types": "./index.d.ts",
+      "require": "./index.js",
+      "import": "./index.js",
+      "default": "./index.js"
+    },
+    "./index.js": {
+      "types": "./index.d.ts",
+      "require": "./index.js",
+      "import": "./index.js",
+      "default": "./index.js"
+    },
+    "./llm": {
+      "types": "./llm.d.ts",
+      "require": "./llm.js",
+      "import": "./llm.js",
+      "default": "./llm.js"
+    },
+    "./llm.js": {
+      "types": "./llm.d.ts",
+      "require": "./llm.js",
+      "import": "./llm.js",
+      "default": "./llm.js"
+    },
+    "./llmTypes": {
+      "types": "./llmTypes.d.ts"
+    },
+    "./llmTypes.js": {
+      "types": "./llmTypes.d.ts"
+    },
+    "./mcpMockBuilder": {
+      "types": "./mcpMockBuilder.d.ts",
+      "require": "./mcpMockBuilder.js",
+      "import": "./mcpMockBuilder.js",
+      "default": "./mcpMockBuilder.js"
+    },
+    "./mcpMockBuilder.js": {
+      "types": "./mcpMockBuilder.d.ts",
+      "require": "./mcpMockBuilder.js",
+      "import": "./mcpMockBuilder.js",
+      "default": "./mcpMockBuilder.js"
+    },
+    "./a2aMockBuilder": {
+      "types": "./a2aMockBuilder.d.ts",
+      "require": "./a2aMockBuilder.js",
+      "import": "./a2aMockBuilder.js",
+      "default": "./a2aMockBuilder.js"
+    },
+    "./a2aMockBuilder.js": {
+      "types": "./a2aMockBuilder.d.ts",
+      "require": "./a2aMockBuilder.js",
+      "import": "./a2aMockBuilder.js",
+      "default": "./a2aMockBuilder.js"
+    },
+    "./mockServer": {
+      "types": "./mockServer.d.ts"
+    },
+    "./mockServer.js": {
+      "types": "./mockServer.d.ts"
+    },
+    "./mockServerClient": {
+      "types": "./mockServerClient.d.ts",
+      "require": "./mockServerClient.js",
+      "import": "./mockServerClient.js",
+      "default": "./mockServerClient.js"
+    },
+    "./mockServerClient.js": {
+      "types": "./mockServerClient.d.ts",
+      "require": "./mockServerClient.js",
+      "import": "./mockServerClient.js",
+      "default": "./mockServerClient.js"
+    },
+    "./setupMockServer": {
+      "types": "./setupMockServer.d.ts",
+      "require": "./setupMockServer.js",
+      "import": "./setupMockServer.js",
+      "default": "./setupMockServer.js"
+    },
+    "./setupMockServer.js": {
+      "types": "./setupMockServer.d.ts",
+      "require": "./setupMockServer.js",
+      "import": "./setupMockServer.js",
+      "default": "./setupMockServer.js"
+    },
+    "./sendRequest": {
+      "require": "./sendRequest.js",
+      "import": "./sendRequest.js",
+      "default": "./sendRequest.js"
+    },
+    "./sendRequest.js": {
+      "require": "./sendRequest.js",
+      "import": "./sendRequest.js",
+      "default": "./sendRequest.js"
+    },
+    "./webSocketClient": {
+      "require": "./webSocketClient.js",
+      "import": "./webSocketClient.js",
+      "default": "./webSocketClient.js"
+    },
+    "./webSocketClient.js": {
+      "require": "./webSocketClient.js",
+      "import": "./webSocketClient.js",
+      "default": "./webSocketClient.js"
+    },
+    "./package.json": "./package.json"
+  },
   "scripts": {
-    "typecheck": "tsc",
+    "typecheck": "tsc && tsc -p test/exports/tsconfig.node16.json && tsc -p test/exports/tsconfig.bundler.json && tsc -p ../mockserver-node/test/typescript/tsconfig.node16.json && tsc -p ../mockserver-node/test/typescript/tsconfig.bundler.json",
     "pretest": "npm run typecheck",
     "test": "node test/run_with_local_server.js",
     "test:external": "node test/run_node_tests.js",

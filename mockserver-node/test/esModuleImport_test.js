@@ -15,7 +15,8 @@ var path = require('path');
 var url = require('url');
 
 var PACKAGE_ROOT = path.join(__dirname, '..');
-var publishedModules = require('../package.json').files.filter(function (file) {
+var manifest = require('../package.json');
+var publishedModules = manifest.files.filter(function (file) {
   return file.endsWith('.js');
 });
 
@@ -64,7 +65,7 @@ test('ES module import', async function (t) {
     var checks = runModule(directory, [
       "import mockserver, { start_mockserver, stop_mockserver, getMockServerProcess, getMockServerExit, getMockServerOutput } from 'mockserver-node';",
       "import * as launcher from 'mockserver-node';",
-      "import { downloadJar } from 'mockserver-node/downloadJar.js';",
+      "import { downloadJar } from 'mockserver-node/downloadJar';",
       "import { ensureBinary, resolvePlatform } from 'mockserver-node/downloadBinary.js';",
       "export { runBinary } from 'mockserver-node/downloadBinary.js';",
       "console.log(JSON.stringify({",
@@ -75,5 +76,67 @@ test('ES module import', async function (t) {
       "}));"
     ]);
     assert.deepStrictEqual(checks, {sameAsDefault: true, namespace: true, beforeAnyStart: true, downloads: true});
+  });
+
+  await t.test('requires and imports each path of the exports map as the module file itself', function () {
+    var files = {};
+    Object.keys(manifest.exports).forEach(function (subpath) {
+      if (typeof manifest.exports[subpath] === 'object') {
+        files[subpath] = path.join(PACKAGE_ROOT, manifest.exports[subpath].require);
+      }
+    });
+    assert.deepStrictEqual(Object.keys(files).sort(),
+      ['.', './downloadBinary', './downloadBinary.js', './downloadJar', './downloadJar.js', './index', './index.js']);
+    var compared = runModule(directory, [
+      "import { createRequire } from 'node:module';",
+      "const require = createRequire(import.meta.url);",
+      "const result = {};",
+      "for (const [subpath, file] of Object.entries(" + JSON.stringify(files) + ")) {",
+      "    const name = 'mockserver-node' + subpath.slice(1);",
+      "    const imported = await import(name);",
+      "    const required = require(file);",
+      "    result[subpath] = {",
+      "        sameRequired: require(name) === required,",
+      "        imported: Object.keys(imported).filter((key) => key !== 'default' && key !== 'module.exports').sort(),",
+      "        required: Object.keys(required).sort(),",
+      "        different: Object.keys(required).filter((key) => imported[key] !== required[key])",
+      "    };",
+      "}",
+      "console.log(JSON.stringify(result));"
+    ]);
+    Object.keys(files).forEach(function (subpath) {
+      assert.strictEqual(compared[subpath].sameRequired, true, subpath + ' required by name');
+      assert.ok(compared[subpath].required.length > 0, subpath + ' exports nothing');
+      assert.deepStrictEqual(compared[subpath].imported, compared[subpath].required, subpath + ' names');
+      assert.deepStrictEqual(compared[subpath].different, [], subpath + ' values');
+    });
+  });
+
+  await t.test('reads package.json by name, and loads no path the exports map does not name', function () {
+    var checks = runModule(directory, [
+      "import { createRequire } from 'node:module';",
+      "const require = createRequire(import.meta.url);",
+      "const imported = await import('mockserver-node/package.json', { with: { type: 'json' } });",
+      "const refused = {};",
+      "for (const name of ['mockserver-node/tasks/mockServer.js', 'mockserver-node/test/sendRequest.js', 'mockserver-node/downloadBinary.d.ts']) {",
+      "    let required = 'loaded', importedCode = 'loaded';",
+      "    try { require(name); } catch (error) { required = error.code; }",
+      "    try { await import(name); } catch (error) { importedCode = error.code; }",
+      "    refused[name] = [required, importedCode];",
+      "}",
+      "console.log(JSON.stringify({",
+      "    versions: [require('mockserver-node/package.json').version, imported.default.version],",
+      "    refused: refused",
+      "}));"
+    ]);
+    var refusal = ['ERR_PACKAGE_PATH_NOT_EXPORTED', 'ERR_PACKAGE_PATH_NOT_EXPORTED'];
+    assert.deepStrictEqual(checks, {
+      versions: [manifest.version, manifest.version],
+      refused: {
+        'mockserver-node/tasks/mockServer.js': refusal,
+        'mockserver-node/test/sendRequest.js': refusal,
+        'mockserver-node/downloadBinary.d.ts': refusal
+      }
+    });
   });
 });

@@ -62,7 +62,9 @@ var mockserver = require('mockserver-node');
 
 The package includes TypeScript typings, which use Node's own types and so need `@types/node` in the project. It is a CommonJS module, so in TypeScript import it with `import mockserver = require('mockserver-node')`, or with `import mockserver from 'mockserver-node'` when `esModuleInterop` is on. The option types are `mockserver.StartServerOptions` and `mockserver.StopServerOptions`.
 
-From an ES module (`.mjs`, `.mts`, or a package with `"type": "module"`) named imports work, `import { start_mockserver, stop_mockserver } from 'mockserver-node'`, as do `import * as` and the default import, `import mockserver from 'mockserver-node'`. Import a module other than the package itself with its extension: `import { downloadJar } from 'mockserver-node/downloadJar.js'`.
+From an ES module (`.mjs`, `.mts`, or a package with `"type": "module"`) named imports work, `import { start_mockserver, stop_mockserver } from 'mockserver-node'`, as do `import * as` and the default import, `import mockserver from 'mockserver-node'`. A module other than the package itself can be imported with or without its extension: `import { downloadJar } from 'mockserver-node/downloadJar'`.
+
+The package's `exports` map names every path that can be imported or required: the package itself, `index`, `downloadJar` and `downloadBinary`, each with and without `.js`, and `package.json`. Any other path inside the package fails with `ERR_PACKAGE_PATH_NOT_EXPORTED`. The `mockserver` command and the Grunt tasks (`grunt.loadNpmTasks('mockserver-node')`) are found by their files, not through the map, and work as before.
 
 Then you can use either the `start_mockserver` or `stop_mockserver` functions as follows:
 

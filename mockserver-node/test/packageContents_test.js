@@ -16,7 +16,9 @@ const PACKAGE_ROOT = path.join(__dirname, '..');
 
 packageContents.registerTests(PACKAGE_ROOT, {
   // the internals downloadBinary.js exposes to its own tests
-  acceptedUndeclaredExports: { 'downloadBinary.d.ts': ['_internal'] }
+  acceptedUndeclaredExports: { 'downloadBinary.d.ts': ['_internal'] },
+  // run by npm as a command and loaded by Grunt from its file, neither through the exports map
+  acceptedUnexported: ['bin/mockserver.js', 'tasks/mockServer.js']
 });
 
 test('the Grunt task that grunt.loadNpmTasks(\'mockserver-node\') loads is in the published tarball', function () {

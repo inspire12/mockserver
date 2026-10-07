@@ -94,7 +94,8 @@ function declaredPaths(manifest) {
   });
   (function walk(node, field) {
     if (typeof node === 'string') {
-      declared.push({ field: field, path: node });
+      // Node completes no extension of an exports target
+      declared.push({ field: field, path: node, exact: true });
     } else if (node && typeof node === 'object') {
       Object.keys(node).forEach(function (key) {
         walk(node[key], field + '[' + JSON.stringify(key) + ']');
@@ -102,6 +103,35 @@ function declaredPaths(manifest) {
     }
   })(manifest.exports, 'exports');
   return declared;
+}
+
+/**
+ * The exports map that names each published module as `./name` and `./name.js` (and index.js as
+ * `.` too), with the typings beside it as `types`, plus `./package.json`. A .d.ts with no module
+ * beside it is named with `types` alone. `unexported` lists published modules left out.
+ */
+function expectedExports(files, unexported) {
+  const expected = {};
+  Array.from(files).filter(function (file) {
+    return file.endsWith('.js') ? !unexported.includes(file)
+      : file.endsWith('.d.ts') && !files.has(file.replace(/\.d\.ts$/, '.js'));
+  }).sort().forEach(function (file) {
+    const base = file.replace(/(?:\.d\.ts|\.js)$/, '');
+    const conditions = {};
+    if (files.has(base + '.d.ts')) {
+      conditions.types = './' + base + '.d.ts';
+    }
+    if (files.has(base + '.js')) {
+      ['require', 'import', 'default'].forEach(function (condition) {
+        conditions[condition] = './' + base + '.js';
+      });
+    }
+    (base === 'index' ? ['.'] : []).concat(['./' + base, './' + base + '.js']).forEach(function (subpath) {
+      expected[subpath] = conditions;
+    });
+  });
+  expected['./package.json'] = './package.json';
+  return expected;
 }
 
 /** True when `target` is in `files` as written, or as Node or TypeScript would complete it. */
@@ -430,6 +460,7 @@ function typedModules(packageRoot) {
  * `acceptedDefaultExports`: files declaring a default export their module does not have.
  * `acceptedUncheckedTypings`: files in which no exported function or value was found to compare.
  * `acceptedUndeclaredExports`: by .d.ts file, the names its module exports and it does not declare.
+ * `acceptedUnexported`: published modules the exports map does not name.
  * `builtObjects` lists objects the package builds, each compared with the interface that types
  * it: `{ typings, name, build, acceptedUndeclared }`, where `build()` returns the object and
  * `acceptedUndeclared` lists the names it has that the interface does not declare.
@@ -439,17 +470,33 @@ function registerTests(packageRoot, options) {
   const acceptedUncheckedTypings = (options && options.acceptedUncheckedTypings) || [];
   const acceptedUndeclaredExports = (options && options.acceptedUndeclaredExports) || {};
   const builtObjects = (options && options.builtObjects) || [];
+  const acceptedUnexported = (options && options.acceptedUnexported) || [];
   const manifest = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8'));
 
   test('every path package.json declares is in the published tarball', function () {
     const files = packedFiles(packageRoot);
     const missing = declaredPaths(manifest).filter(function (declared) {
-      return !isPacked(files, declared.path, SCRIPT_SUFFIXES);
+      return declared.exact ? !declared.path.startsWith('./') || !isPacked(files, declared.path.slice(2), [''])
+        : !isPacked(files, declared.path, SCRIPT_SUFFIXES);
     }).map(function (declared) {
       return declared.field + ': ' + declared.path;
     });
 
     assert.deepStrictEqual(missing, [], 'declared in package.json but not selected by its "files" list');
+  });
+
+  test('the exports map names every published module with and without its extension, and package.json', function () {
+    // a deep import the map does not name fails, so the map must follow the "files" list
+    const files = packedFiles(packageRoot);
+    assert.deepStrictEqual(acceptedUnexported.filter(function (file) {
+      return !files.has(file);
+    }), [], 'accepted as unexported but not published');
+    const expected = expectedExports(files, acceptedUnexported);
+    assert.deepStrictEqual(manifest.exports, expected);
+    const misordered = Object.keys(expected).filter(function (subpath) {
+      return Object.keys(Object(manifest.exports[subpath])).join() !== Object.keys(Object(expected[subpath])).join();
+    });
+    assert.deepStrictEqual(misordered, [], 'conditions are matched in order: types first, default last');
   });
 
   test('the typings beside a published module are in the published tarball', function () {

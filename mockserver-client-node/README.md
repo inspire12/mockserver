@@ -32,7 +32,9 @@ For more information on how to do so check [mockserver-node](https://www.npmjs.o
 
 The package includes TypeScript typings. It is a CommonJS module. From CommonJS, or TypeScript compiled to it, `import { mockServerClient, llm } from 'mockserver-client'` works with or without `esModuleInterop`. The LLM builders can also be imported on their own: `import llm = require('mockserver-client/llm')`, `import * as llm from 'mockserver-client/llm'`, or by name, `import { llmMock, completion } from 'mockserver-client/llm'`; `import llm from 'mockserver-client/llm'` needs `esModuleInterop`. That module has no `default` property.
 
-From an ES module (`.mjs`, `.mts`, or a package with `"type": "module"`) named imports work too, `import { mockServerClient, llm } from 'mockserver-client'`, as do `import * as` and the default import, `import mockServer from 'mockserver-client'`. Import a module other than the package itself with its extension: `import { llmMock, completion } from 'mockserver-client/llm.js'`.
+From an ES module (`.mjs`, `.mts`, or a package with `"type": "module"`) named imports work too, `import { mockServerClient, llm } from 'mockserver-client'`, as do `import * as` and the default import, `import mockServer from 'mockserver-client'`. A module other than the package itself can be imported with or without its extension: `import { llmMock, completion } from 'mockserver-client/llm'`.
+
+The package's `exports` map names every path that can be imported or required: the package itself, each of its modules with and without `.js` (`llm`, `setupMockServer`, `mockServerClient`, `mcpMockBuilder`, `a2aMockBuilder`, `index`, `sendRequest`, `webSocketClient`), the types-only `llmTypes` and `mockServer` (for `import type`), and `package.json`. Any other path inside the package, such as a `.d.ts` file or a test file, fails with `ERR_PACKAGE_PATH_NOT_EXPORTED`. Each path with typings names them under a `types` condition, so TypeScript finds them under the `node16`, `nodenext` and `bundler` module resolutions.
 
 ## Setup Expectation
 

@@ -56,7 +56,7 @@ describe('ES module import', function () {
         it('runs named imports, a named re-export and the default import', function () {
             fs.writeFileSync(path.join(directory, 'consumer.mjs'), [
                 "import mockServer, { mockServerClient, MockMode, setupMockServer, llm, mcpMock, a2aMock } from 'mockserver-client';",
-                "import { llmMock, completion, Role } from 'mockserver-client/llm.js';",
+                "import { llmMock, completion, Role } from 'mockserver-client/llm';",
                 "import * as llmNamespace from 'mockserver-client/llm.js';",
                 "export { Completion } from 'mockserver-client/llm.js';",
                 "const checks = {",
@@ -78,6 +78,112 @@ describe('ES module import', function () {
                 others: true,
                 llm: true,
                 builtExpectation: true
+            });
+        });
+    });
+
+    describe('through the exports map', function () {
+        var directory;
+        var runtimeSubpaths = Object.keys(manifest.exports).filter(function (subpath) {
+            return typeof manifest.exports[subpath] === 'object' && manifest.exports[subpath].require;
+        });
+        var typesOnlySubpaths = Object.keys(manifest.exports).filter(function (subpath) {
+            return typeof manifest.exports[subpath] === 'object' && !manifest.exports[subpath].require;
+        });
+
+        function specifier(subpath) {
+            return 'mockserver-client' + subpath.slice(1);
+        }
+
+        function run(file, source) {
+            fs.writeFileSync(path.join(directory, file), source.join('\n'));
+            var result = childProcess.spawnSync(process.execPath, [file], {cwd: directory, encoding: 'utf8'});
+            assert.equal(result.status, 0, result.stderr);
+            return JSON.parse(result.stdout);
+        }
+
+        // what require of the file itself returns, by subpath: the names and whether each value is the same
+        function compareWithFile(load) {
+            return [
+                "const result = {};",
+                "for (const [subpath, file] of Object.entries(" + JSON.stringify(runtimeSubpaths.reduce(function (files, subpath) {
+                    files[subpath] = path.join(PACKAGE_ROOT, manifest.exports[subpath].require);
+                    return files;
+                }, {})) + ")) {",
+                "    const loaded = " + load + ";",
+                "    const required = require(file);",
+                "    result[subpath] = {",
+                "        names: Object.keys(loaded).filter((name) => name !== 'default' && name !== 'module.exports').sort(),",
+                "        required: Object.keys(required).sort(),",
+                "        different: Object.keys(required).filter((name) => loaded[name] !== required[name])",
+                "    };",
+                "}",
+                "console.log(JSON.stringify(result));"
+            ];
+        }
+
+        function assertSameAsFile(compared) {
+            assert.deepEqual(Object.keys(compared).sort(), runtimeSubpaths.slice().sort());
+            runtimeSubpaths.forEach(function (subpath) {
+                assert.ok(compared[subpath].required.length > 0, subpath + ' exports nothing');
+                assert.deepEqual(compared[subpath].names, compared[subpath].required, subpath + ' names');
+                assert.deepEqual(compared[subpath].different, [], subpath + ' values');
+            });
+        }
+
+        before(function () {
+            directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mockserver-client-exports-'));
+            fs.mkdirSync(path.join(directory, 'node_modules'));
+            fs.symlinkSync(PACKAGE_ROOT, path.join(directory, 'node_modules', 'mockserver-client'), 'junction');
+        });
+
+        after(function () {
+            fs.rmSync(directory, {recursive: true, force: true});
+        });
+
+        it('declares the documented paths, with and without their extension', function () {
+            ['.', './llm', './llm.js', './llmTypes', './setupMockServer', './setupMockServer.js', './package.json'].forEach(function (subpath) {
+                assert.ok(subpath in manifest.exports, subpath + ' is not in the exports map');
+            });
+        });
+
+        it('requires each path from CommonJS as the module file itself', function () {
+            assertSameAsFile(run('consumer.cjs', compareWithFile('require(' + JSON.stringify('mockserver-client') + ' + subpath.slice(1))')));
+        });
+
+        it('imports each path from an ES module with every name require returns', function () {
+            assertSameAsFile(run('consumer.mjs', ["import { createRequire } from 'node:module';", "const require = createRequire(import.meta.url);"]
+                .concat(compareWithFile("await import('mockserver-client' + subpath.slice(1))"))));
+        });
+
+        it('reads package.json from CommonJS and from an ES module', function () {
+            var versions = run('consumer.mjs', [
+                "import { createRequire } from 'node:module';",
+                "const require = createRequire(import.meta.url);",
+                "const imported = await import('mockserver-client/package.json', { with: { type: 'json' } });",
+                "console.log(JSON.stringify([require('mockserver-client/package.json').version, imported.default.version]));"
+            ]);
+            assert.deepEqual(versions, [manifest.version, manifest.version]);
+        });
+
+        it('loads nothing for a path with typings alone, or for a path the map does not name', function () {
+            var undeclared = ['./test/run_node_tests.js', './test/run_node_tests', './llm.d.ts', './lib/llm'];
+            var codes = run('consumer.mjs', [
+                "import { createRequire } from 'node:module';",
+                "const require = createRequire(import.meta.url);",
+                "const result = {};",
+                "for (const subpath of " + JSON.stringify(typesOnlySubpaths.concat(undeclared)) + ") {",
+                "    const name = 'mockserver-client' + subpath.slice(1);",
+                "    let required = 'loaded', imported = 'loaded';",
+                "    try { require(name); } catch (error) { required = error.code; }",
+                "    try { await import(name); } catch (error) { imported = error.code; }",
+                "    result[subpath] = [required, imported];",
+                "}",
+                "console.log(JSON.stringify(result));"
+            ]);
+            assert.deepEqual(typesOnlySubpaths.slice().sort(), ['./llmTypes', './llmTypes.js', './mockServer', './mockServer.js']);
+            typesOnlySubpaths.concat(undeclared).forEach(function (subpath) {
+                assert.deepEqual(codes[subpath], ['ERR_PACKAGE_PATH_NOT_EXPORTED', 'ERR_PACKAGE_PATH_NOT_EXPORTED'], specifier(subpath));
             });
         });
     });
