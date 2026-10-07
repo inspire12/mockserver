@@ -6,6 +6,8 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 import org.mockserver.client.MockServerClient;
 import org.mockserver.configuration.Configuration;
+import org.mockserver.model.HttpResponse;
+import org.mockserver.model.LogEventRequestAndResponse;
 import org.mockserver.netty.MockServer;
 
 import java.io.ByteArrayOutputStream;
@@ -29,20 +31,24 @@ import java.util.stream.Collectors;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.anyOf;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.lessThan;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
 import static org.mockserver.configuration.Configuration.configuration;
+import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.stop.Stop.stopQuietly;
 
 /**
  * The WebSocket proxy relay reads an upstream's handshake response headers up to {@code maxHeaderSize}, as the
  * forward client does for any other response; a larger one, or one it cannot decode for another reason, fails the
  * relay with a {@code 502} that says why, and one WARN. A client (a raw socket) sends the upgrade to MockServer, which
- * relays it to an upstream on 127.0.0.1 that writes its {@code 101} as bytes and then echoes text frames.
+ * relays it to an upstream on 127.0.0.1 that writes its {@code 101} as bytes and then echoes text frames. The
+ * client is answered with the upstream's response headers, less the hop-by-hop ones and the handshake's own.
  */
 public class WebSocketProxyHandshakeHeaderLimitIntegrationTest {
 
@@ -239,6 +245,61 @@ public class WebSocketProxyHandshakeHeaderLimitIntegrationTest {
         assertThat(entries.toString(), entries.size(), is(1));
     }
 
+    @Test
+    public void shouldPassTheUpstreamsHandshakeResponseHeadersToTheClientButNotItsHopByHopOrHandshakeHeaders() throws Exception {
+        Exchange exchange = upgrade(defaults, "/headers/0", "Sec-WebSocket-Protocol: chat\r\nSec-WebSocket-Extensions: permessage-deflate\r\n");
+
+        assertThat(exchange.toString(), exchange.status, is(101));
+        assertThat("the handshake still holds", exchange.echo, is("echo:hello"));
+        assertThat(exchange.head, headerValues(exchange.head, "set-cookie"), contains("session=abc; Path=/; HttpOnly", "theme=dark"));
+        assertThat(exchange.head, headerValues(exchange.head, "x-custom"), contains("one"));
+        assertThat(exchange.head, headerValues(exchange.head, "sec-websocket-protocol"), contains("chat"));
+        // the upstream's own was for MockServer's key, not the client's
+        assertThat(exchange.head, headerValues(exchange.head, "sec-websocket-accept"), contains(UpgradeKey.ACCEPT));
+        assertThat(exchange.head, headerValues(exchange.head, "upgrade"), contains("websocket"));
+        assertThat(exchange.head, headerValues(exchange.head, "connection"), contains("upgrade"));
+        for (String notRelayed : new String[]{"sec-websocket-extensions", "x-hop", "keep-alive", "proxy-connection", "proxy-authenticate", "transfer-encoding", "te", "trailer", "content-length"}) {
+            assertThat(notRelayed + " in " + exchange.head, headerValues(exchange.head, notRelayed), empty());
+        }
+
+        HttpResponse recorded = awaitRecordedUpgrade(defaultsClient, "/headers/0");
+        assertThat(recorded.toString(), recorded.getHeader("set-cookie"), contains("session=abc; Path=/; HttpOnly", "theme=dark"));
+        assertThat(recorded.toString(), recorded.getHeader("x-custom"), contains("one"));
+        assertThat(recorded.toString(), recorded.containsHeader("keep-alive"), is(false));
+        // the relay's own recording headers keep the relay's values alone
+        assertThat(recorded.toString(), recorded.getHeader("x-mockserver-websocket-frames"), contains(not("999")));
+        assertThat(recorded.toString(), recorded.getHeader("x-mockserver-websocket-transcript-truncated"), contains("false"));
+    }
+
+    @Test
+    public void shouldPassAHandshakeResponseHeaderOfUpToMaxHeaderSizeToTheClient() throws Exception {
+        Exchange exchange = upgrade(limited, "/last/" + LIMIT);
+
+        assertThat(exchange.toString(), exchange.status, is(101));
+        assertThat(headerValues(exchange.head, "set-cookie"), contains("session=" + "a".repeat(LIMIT - 124)));
+        assertThat(headerValues(exchange.head, "x-served-by"), contains("test"));
+    }
+
+    private static List<String> headerValues(String head, String name) {
+        return Arrays.stream(head.split("\r\n"))
+            .skip(1)
+            .filter(line -> line.toLowerCase(Locale.ROOT).startsWith(name + ":"))
+            .map(line -> line.substring(line.indexOf(':') + 1).trim())
+            .collect(Collectors.toList());
+    }
+
+    private static HttpResponse awaitRecordedUpgrade(MockServerClient client, String path) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (true) {
+            LogEventRequestAndResponse[] recorded = client.retrieveRecordedRequestsAndResponses(request().withPath(path));
+            if (recorded.length > 0) {
+                return recorded[0].getHttpResponse();
+            }
+            assertThat("the upgrade to " + path + " is recorded", System.nanoTime(), lessThan(deadline));
+            Thread.sleep(20);
+        }
+    }
+
     private static void assertFailedWithOneWarning(MockServerClient client, String path, Exchange exchange, String reason) throws InterruptedException {
         assertThat(path + " " + exchange, exchange.status, is(502));
         assertThat(exchange.body, is(reason));
@@ -261,6 +322,10 @@ public class WebSocketProxyHandshakeHeaderLimitIntegrationTest {
      * the connection. Every read ends within 15 seconds.
      */
     private static Exchange upgrade(MockServer mockServer, String path) throws Exception {
+        return upgrade(mockServer, path, "");
+    }
+
+    private static Exchange upgrade(MockServer mockServer, String path, String extraHeaders) throws Exception {
         try (Socket socket = new Socket("127.0.0.1", mockServer.getLocalPort())) {
             socket.setSoTimeout(15_000);
             OutputStream output = socket.getOutputStream();
@@ -269,7 +334,8 @@ public class WebSocketProxyHandshakeHeaderLimitIntegrationTest {
                 + "Host: 127.0.0.1:" + upstream.port() + "\r\n"
                 + "Upgrade: websocket\r\n"
                 + "Connection: Upgrade\r\n"
-                + "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                + "Sec-WebSocket-Key: " + UpgradeKey.KEY + "\r\n"
+                + extraHeaders
                 + "Sec-WebSocket-Version: 13\r\n\r\n").getBytes(StandardCharsets.ISO_8859_1));
             output.flush();
             String head = readHead(input);
@@ -279,7 +345,7 @@ public class WebSocketProxyHandshakeHeaderLimitIntegrationTest {
                 for (int read = input.read(); read != -1; read = input.read()) {
                     body.write(read);
                 }
-                return new Exchange(status, body.toString(StandardCharsets.UTF_8.name()), "");
+                return new Exchange(status, head, body.toString(StandardCharsets.UTF_8.name()), "");
             }
             // a client's frames are masked: FIN and text, the mask bit and the length, the key, the payload
             byte[] hello = "hello".getBytes(StandardCharsets.UTF_8);
@@ -294,7 +360,7 @@ public class WebSocketProxyHandshakeHeaderLimitIntegrationTest {
             output.write(new byte[]{(byte) 0x88, (byte) 0x80});
             output.write(mask);
             output.flush();
-            return new Exchange(status, "", echo);
+            return new Exchange(status, head, "", echo);
         }
     }
 
@@ -330,13 +396,21 @@ public class WebSocketProxyHandshakeHeaderLimitIntegrationTest {
         return bytes;
     }
 
+    private static final class UpgradeKey {
+        private static final String KEY = "dGhlIHNhbXBsZSBub25jZQ==";
+        // RFC 6455's worked example: the accept value for that key
+        private static final String ACCEPT = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
+    }
+
     private static final class Exchange {
         private final int status;
+        private final String head;
         private final String body;
         private final String echo;
 
-        private Exchange(int status, String body, String echo) {
+        private Exchange(int status, String head, String body, String echo) {
             this.status = status;
+            this.head = head;
             this.body = body;
             this.echo = echo;
         }
@@ -400,6 +474,34 @@ public class WebSocketProxyHandshakeHeaderLimitIntegrationTest {
                     pause();
                     // the end of the head, then the text frame "hello"
                     output.write("x-last: 1\r\n\r\n\u0081\u0005hello".getBytes(StandardCharsets.ISO_8859_1));
+                } else if (path.startsWith("/headers/")) {
+                    // the handshake's own headers, with a hop-by-hop one named by Connection in another case, the subprotocol asked
+                    // for, an extension nobody offered it, end-to-end headers and hop-by-hop ones
+                    String protocol = Arrays.stream(head.split("\r\n"))
+                        .filter(line -> line.toLowerCase(Locale.ROOT).startsWith("sec-websocket-protocol:"))
+                        .map(line -> "sec-websocket-protocol: " + line.substring(line.indexOf(':') + 1).trim() + "\r\n")
+                        .findFirst()
+                        .orElse("");
+                    output.write(("HTTP/1.1 101 Switching Protocols\r\n"
+                        + "upgrade: websocket\r\n"
+                        + "connection: upgrade, X-Hop\r\n"
+                        + "sec-websocket-accept: " + accept(head) + "\r\n"
+                        + protocol
+                        + "Sec-WebSocket-Extensions: permessage-deflate\r\n"
+                        + "set-cookie: session=abc; Path=/; HttpOnly\r\n"
+                        + "set-cookie: theme=dark\r\n"
+                        + "x-custom: one\r\n"
+                        + "X-MockServer-WebSocket-Frames: 999\r\n"
+                        + "x-mockserver-websocket-transcript-truncated: true\r\n"
+                        + "x-hop: 1\r\n"
+                        + "Keep-Alive: timeout=5\r\n"
+                        + "proxy-connection: keep-alive\r\n"
+                        + "Proxy-Authenticate: Basic realm=\"upstream\"\r\n"
+                        + "transfer-encoding: gzip\r\n"
+                        + "te: trailers\r\n"
+                        + "trailer: x-checksum\r\n"
+                        + "content-length: 0\r\n"
+                        + "\r\n").getBytes(StandardCharsets.ISO_8859_1));
                 } else if (path.startsWith("/refused")) {
                     String accepted = path.startsWith("/refused-then-accepted/") ? "HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: upgrade\r\nsec-websocket-accept: " + accept(head) + "\r\n\r\n" : "";
                     output.write(("HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\n\r\n" + accepted).getBytes(StandardCharsets.ISO_8859_1));

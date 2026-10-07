@@ -23,7 +23,10 @@ import org.slf4j.event.Level;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.HashSet;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -252,6 +255,42 @@ public class WebSocketProxyRelayHandler {
             || lower.equals("content-length");
     }
 
+    /**
+     * The upstream's handshake response headers that the client is answered with: all but the hop-by-hop ones (those
+     * the {@code Connection} header names too), {@code Content-Length}, which a {@code 101} does not carry, and the
+     * handshake's own {@code Sec-WebSocket-*} fields, which the client's handshake answers from its own request.
+     * {@code Sec-WebSocket-Extensions} goes with them: the client's offer is not forwarded upstream and each leg's
+     * frames are decoded and encoded again, so no extension is in force end to end.
+     */
+    static HttpHeaders buildDownstreamResponseHeaders(HttpHeaders upstreamHeaders) {
+        Set<String> namedByConnection = new HashSet<>();
+        for (String connection : upstreamHeaders.getAll(HttpHeaderNames.CONNECTION)) {
+            for (String token : connection.split(",")) {
+                namedByConnection.add(token.trim().toLowerCase(Locale.ROOT));
+            }
+        }
+        HttpHeaders headers = new DefaultHttpHeaders();
+        for (Map.Entry<String, String> header : upstreamHeaders) {
+            String name = header.getKey().toLowerCase(Locale.ROOT);
+            if (!isNotRelayedResponseHeader(name) && !namedByConnection.contains(name)) {
+                headers.add(header.getKey(), header.getValue());
+            }
+        }
+        return headers;
+    }
+
+    private static boolean isNotRelayedResponseHeader(String lowerCaseName) {
+        return lowerCaseName.equals("connection")
+            || lowerCaseName.equals("upgrade")
+            || lowerCaseName.equals("keep-alive")
+            || lowerCaseName.equals("transfer-encoding")
+            || lowerCaseName.equals("te")
+            || lowerCaseName.equals("trailer")
+            || lowerCaseName.equals("content-length")
+            || lowerCaseName.startsWith("proxy-")
+            || lowerCaseName.startsWith("sec-websocket-");
+    }
+
     private void failClient(Channel clientChannel, HttpRequest request, String message) {
         if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
             mockServerLogger.logEvent(
@@ -378,10 +417,10 @@ public class WebSocketProxyRelayHandler {
                 clientCtx.channel(), upstreamChannel, FrameDirection.UPSTREAM_TO_CLIENT, transcript, request));
 
             // complete the downstream (server-side) handshake to relay the 101 to the original client
-            completeDownstreamHandshake(negotiatedSubprotocol, upstreamChannel);
+            completeDownstreamHandshake(negotiatedSubprotocol, buildDownstreamResponseHeaders(msg.headers()), upstreamChannel);
         }
 
-        private void completeDownstreamHandshake(String negotiatedSubprotocol, Channel upstreamChannel) {
+        private void completeDownstreamHandshake(String negotiatedSubprotocol, HttpHeaders responseHeaders, Channel upstreamChannel) {
             final Channel clientChannel = clientCtx.channel();
             FullHttpRequest nettyRequest = buildNettyUpgradeRequest(request);
             String host = request.getFirstHeader("Host");
@@ -398,7 +437,7 @@ public class WebSocketProxyRelayHandler {
                 upstreamChannel.close();
                 return;
             }
-            serverHandshaker.handshake(clientChannel, nettyRequest).addListener((ChannelFutureListener) future -> {
+            serverHandshaker.handshake(clientChannel, nettyRequest, responseHeaders, clientChannel.newPromise()).addListener((ChannelFutureListener) future -> {
                 try {
                     if (future.isSuccess()) {
                         removeHttpServerHandlers(clientCtx);
@@ -409,7 +448,7 @@ public class WebSocketProxyRelayHandler {
                         clientChannel.closeFuture().addListener(f -> closeQuietly(upstreamChannel));
                         upstreamChannel.closeFuture().addListener(f -> closeQuietly(clientChannel));
                         transcript.flushOnClose(clientChannel, upstreamChannel, () ->
-                            recordUpgrade(request, negotiatedSubprotocol, transcript));
+                            recordUpgrade(request, negotiatedSubprotocol, responseHeaders, transcript));
 
                         CrossProtocolEventBus.getInstance().fire(
                             CrossProtocolTrigger.WEBSOCKET_CONNECT,
@@ -657,7 +696,7 @@ public class WebSocketProxyRelayHandler {
 
     // ---- recording --------------------------------------------------------------------------------------------
 
-    private void recordUpgrade(HttpRequest request, String negotiatedSubprotocol, FrameTranscript transcript) {
+    private void recordUpgrade(HttpRequest request, String negotiatedSubprotocol, HttpHeaders responseHeaders, FrameTranscript transcript) {
         HttpResponse logResponse = response()
             .withStatusCode(HttpResponseStatus.SWITCHING_PROTOCOLS.code())
             .withReasonPhrase("Switching Protocols")
@@ -668,6 +707,12 @@ public class WebSocketProxyRelayHandler {
             .withBody(transcript.toJson());
         if (negotiatedSubprotocol != null && !negotiatedSubprotocol.isEmpty()) {
             logResponse.withHeader("Sec-WebSocket-Protocol", negotiatedSubprotocol);
+        }
+        for (String name : responseHeaders.names()) {
+            // the upstream cannot add a value to the relay's own recording headers
+            if (!name.toLowerCase(Locale.ROOT).startsWith("x-mockserver-websocket-")) {
+                logResponse.withHeader(name, responseHeaders.getAll(name).toArray(new String[0]));
+            }
         }
         mockServerLogger.logEvent(
             new LogEntry()

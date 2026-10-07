@@ -2076,7 +2076,14 @@ is already made: `WebSocketProxyRelayHandler.isWebSocketUpgrade(request)` is che
    headers (e.g. `Authorization`, `Cookie`) and requested subprotocol.
 4. On upstream `101`, completes the **server-side** handshake back to the original client (reusing the same
    `WebSocketServerHandshakerFactory` approach as the WS mock handler), strips the HTTP server handlers, and installs a
-   `FrameRelayHandler` on each channel.
+   `FrameRelayHandler` on each channel. The client's `101` carries the upstream's response headers (`Set-Cookie`,
+   custom headers, ...) less those `buildDownstreamResponseHeaders` drops: the hop-by-hop ones (`Connection`,
+   `Upgrade`, `Keep-Alive`, `Transfer-Encoding`, `TE`, `Trailer`, `Proxy-*`, and any header the upstream's
+   `Connection` names), `Content-Length`, and every `Sec-WebSocket-*` field. The server-side handshake sets
+   `Upgrade`, `Connection`, `Sec-WebSocket-Accept` (from the client's key, not MockServer's) and the negotiated
+   `Sec-WebSocket-Protocol` itself. `Sec-WebSocket-Extensions` is dropped because no extension is in force end to
+   end: the client's offer is not forwarded upstream and each leg's frames are decoded and encoded again. The headers
+   are a subset of a response read under `maxHeaderSize`, so they are bounded by it too.
 
 **Backpressure.** Each `FrameRelayHandler` mirrors its channel's writability onto the *peer's* `autoRead` in
 `channelWritabilityChanged` (the standard Netty proxy pattern): when the channel it writes to saturates, reads on the
@@ -2097,7 +2104,7 @@ relayed. No-op when the feature is disabled (the default).
 (direction, opcode, payload — text as a UTF-8 string, other opcodes as base64, per-frame payload capped at 32KB). The
 transcript is flushed to the event log **once, when the connection closes** — a long-lived relay does not appear in
 `retrieveRecordedRequests` until it closes. It is written as a single `FORWARDED_REQUEST`: request = the upgrade `GET`,
-response = `101` with an `x-mockserver-websocket-frames` count header, an `x-mockserver-websocket-transcript-truncated`
+response = `101` with the upstream's headers the client was sent (except any named `x-mockserver-websocket-*`, so an upstream cannot add a value to the relay's own), an `x-mockserver-websocket-frames` count header, an `x-mockserver-websocket-transcript-truncated`
 flag, and the transcript as the JSON body — so `retrieveRecordedRequests` / `retrieveRecordedRequestsAndResponses` and
 the dashboard show the WebSocket traffic. Two independent caps bound memory: the frame-count cap
 `webSocketProxyMaxRecordedFrames` (default `1000`, `0` disables frame recording — the handshake is still recorded and is
