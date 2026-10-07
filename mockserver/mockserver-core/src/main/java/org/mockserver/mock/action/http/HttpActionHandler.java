@@ -32,6 +32,7 @@ import org.mockserver.model.StreamingBody;
 import org.mockserver.openapi.OpenAPIRequestValidator;
 import org.mockserver.openapi.OpenAPIResponseValidator;
 import org.mockserver.openapi.OpenApiRuntimeExpressionResolver;
+import org.mockserver.proxyconfiguration.ForwardTargetBlockedException;
 import org.mockserver.proxyconfiguration.InetAddressValidator;
 import org.mockserver.proxyconfiguration.NoProxyHostsUtils;
 import org.mockserver.proxyconfiguration.ProxyConfiguration;
@@ -133,7 +134,14 @@ public class HttpActionHandler {
     private HopByHopHeaderFilter hopByHopHeaderFilter = new HopByHopHeaderFilter();
     private HttpRequestToCurlSerializer httpRequestToCurlSerializer;
     private final org.mockserver.metrics.Metrics metrics;
-    private final java.util.function.Function<HttpRequest, java.util.concurrent.CompletableFuture<HttpResponse>> requestSender = request -> getHttpClient().sendRequest(request);
+    private final java.util.function.Function<HttpRequest, java.util.concurrent.CompletableFuture<HttpResponse>> requestSender = request -> {
+        try {
+            checkOutboundTarget(request);
+        } catch (ForwardTargetBlockedException blocked) {
+            return java.util.concurrent.CompletableFuture.failedFuture(blocked);
+        }
+        return getHttpClient().sendRequest(request);
+    };
 
     /**
      * @return the shared {@link Scheduler}. Exposed to the (same-package) local object-callback handlers
@@ -1776,6 +1784,36 @@ public class HttpActionHandler {
         }
     }
 
+    /**
+     * Applies forwardProxyBlockPrivateNetworks to a request MockServer sends itself, to the destination the request
+     * names, as a forward action's target is checked.
+     */
+    private void checkOutboundTarget(HttpRequest request) {
+        InetAddressValidator.validateForwardTarget(configuration, request, null, getHttpClient().sendsThroughHttpProxy(request, null));
+    }
+
+    /**
+     * @return why forwardProxyBlockPrivateNetworks refuses this webhook, logged here, or null when it may be sent
+     */
+    private ForwardTargetBlockedException refusedWebhook(HttpRequest webhook, HttpRequest request, String label) {
+        try {
+            checkOutboundTarget(webhook);
+            return null;
+        } catch (ForwardTargetBlockedException blocked) {
+            if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.WARN)
+                        .setCorrelationId(request.getLogCorrelationId())
+                        .setHttpRequest(request)
+                        .setMessageFormat(label + " webhook blocked by SSRF policy:{}")
+                        .setArguments(blocked.getMessage())
+                );
+            }
+            return blocked;
+        }
+    }
+
     private void dispatchAfterAction(final AfterAction afterAction, final HttpRequest request) {
         dispatchSideAction(afterAction, request, "after-action");
     }
@@ -1793,6 +1831,9 @@ public class HttpActionHandler {
                     HttpRequest callbackRequest = OpenApiRuntimeExpressionResolver.resolve(
                         action.getHttpRequest(), request
                     );
+                    if (refusedWebhook(callbackRequest, request, label) != null) {
+                        return;
+                    }
                     httpClient.sendRequest(callbackRequest)
                         .whenComplete((response, throwable) -> {
                             if (throwable != null && mockServerLogger.isEnabledForInstance(Level.INFO)) {
@@ -1876,6 +1917,14 @@ public class HttpActionHandler {
             final long timeoutMillis = beforeAction.getTimeout() != null
                 ? beforeAction.getTimeout().getTimeUnit().toMillis(beforeAction.getTimeout().getValue())
                 : configuration.maxSocketTimeoutInMillis();
+            ForwardTargetBlockedException refused = refusedWebhook(callbackRequest, request, "before-action");
+            if (refused != null) {
+                if (failurePolicy == FailurePolicy.FAIL_FAST) {
+                    responseWriter.writeResponse(request, badGatewayResponse().withBody("before-action failed: " + refused.getMessage()), false);
+                    return false;
+                }
+                continue;
+            }
             try {
                 httpClient.sendRequest(callbackRequest, timeoutMillis, MILLISECONDS);
             } catch (Exception e) {
@@ -1938,6 +1987,14 @@ public class HttpActionHandler {
             final long timeoutMillis = step.getTimeout() != null
                 ? step.getTimeout().getTimeUnit().toMillis(step.getTimeout().getValue())
                 : configuration.maxSocketTimeoutInMillis();
+            ForwardTargetBlockedException refused = refusedWebhook(callbackRequest, request, "step");
+            if (refused != null) {
+                if (failurePolicy == FailurePolicy.FAIL_FAST) {
+                    responseWriter.writeResponse(request, badGatewayResponse().withBody("step failed: " + refused.getMessage()), false);
+                    return false;
+                }
+                continue;
+            }
             try {
                 httpClient.sendRequest(callbackRequest, timeoutMillis, MILLISECONDS);
             } catch (Exception e) {
@@ -1984,6 +2041,9 @@ public class HttpActionHandler {
                     HttpRequest callbackRequest = OpenApiRuntimeExpressionResolver.resolve(
                         step.getHttpRequest(), request
                     );
+                    if (refusedWebhook(callbackRequest, request, "step") != null) {
+                        return;
+                    }
                     httpClient.sendRequest(callbackRequest)
                         .whenComplete((response, throwable) -> {
                             if (throwable != null && mockServerLogger.isEnabledForInstance(Level.INFO)) {
@@ -3980,7 +4040,9 @@ public class HttpActionHandler {
 
     /**
      * @return a sender that issues a request with {@link #getHttpClient()}, the same instance for the life of
-     * this handler, so that a server can later remove it from the process-wide places it installed it in
+     * this handler, so that a server can later remove it from the process-wide places it installed it in. A request
+     * whose destination forwardProxyBlockPrivateNetworks refuses is not sent: its future fails with a
+     * {@link ForwardTargetBlockedException}, which the caller logs.
      */
     public java.util.function.Function<HttpRequest, java.util.concurrent.CompletableFuture<HttpResponse>> getRequestSender() {
         return requestSender;

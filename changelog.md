@@ -30,6 +30,7 @@ This release delivers a sustained performance and memory programme alongside dat
 
 ### Security
 
+- **`forwardProxyBlockPrivateNetworks` now also applies to requests MockServer sends itself and to tunnels it opens straight to a destination.** With the setting enabled, 8.0.0 still sent these to loopback, private-network and cloud-metadata addresses unchecked: before-action, after-action and step webhooks, load scenario requests, drift alert webhooks, and a `CONNECT` or SOCKS tunnel that goes straight to `proxyRemoteHost` or to the original destination of a transparent-proxy connection. Each is now checked as a forward is, and a refused one is not sent and is logged once as a warning naming the blocked address. A refused blocking webhook with the `FAIL_FAST` failure policy makes the response a `502 Bad Gateway` (with `BEST_EFFORT` the response goes ahead), a refused load scenario request is counted as a failed request of kind `blocked` (one warning for the run), and a refused tunnel gets a `502 Bad Gateway` or a SOCKS failure. `proxyRemoteHost` is checked although it is set in configuration, as it is for proxied requests; only the upstream proxies MockServer sends through (`forwardHttpProxy`, `forwardHttpsProxy`, `forwardSocksProxy`) are not checked.
 - **`forwardProxyBlockPrivateNetworks` now applies to every forwarded and proxied request.** With
   the setting enabled, 8.0.0 checked only `httpForward` actions (including forward templates,
   forwards with a fallback and validating forwards). Overridden forwarded requests

@@ -282,6 +282,9 @@ flowchart LR
   webhook misconfiguration, a slow/unreachable endpoint, or a malformed URL can therefore **never** throw
   into the drift-analysis pipeline nor affect the served response. When disabled or unwired the call is a
   pure no-op.
+- **`forwardProxyBlockPrivateNetworks`** — the installed sender applies it to the webhook URL's host; a
+  refused alert is not sent and is logged as one WARN (`drift alert webhook blocked by SSRF policy`), at the
+  log level of the configuration `LifeCycle` passes to `configure(...)`.
 
 ### Effective severity and structural fallback
 

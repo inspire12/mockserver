@@ -4350,7 +4350,7 @@ curl -s http://localhost:1080/mockserver/metrics | grep '^mock_server_load_'</co
         <tr>
             <td><code class="inline code">mock_server_load_errors</code></td>
             <td>Counter</td>
-            <td>Failed dispatches. Label <code class="inline code">kind</code> = <code class="inline code">render</code>, <code class="inline code">connection</code>, <code class="inline code">timeout</code>, <code class="inline code">null_response</code>, or <code class="inline code">http_5xx</code>.</td>
+            <td>Failed dispatches. Label <code class="inline code">kind</code> = <code class="inline code">render</code>, <code class="inline code">connection</code>, <code class="inline code">timeout</code>, <code class="inline code">null_response</code>, <code class="inline code">http_5xx</code>, or <code class="inline code">blocked</code> (the request was not sent because <code class="inline code">forwardProxyBlockPrivateNetworks</code> refused its destination).</td>
         </tr>
         <tr>
             <td><code class="inline code">mock_server_load_active_vus</code></td>

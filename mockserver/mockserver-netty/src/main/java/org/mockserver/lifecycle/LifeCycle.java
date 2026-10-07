@@ -272,7 +272,7 @@ public abstract class LifeCycle implements Stoppable {
                 return;
             }
             long cooldownMillis = configuration.driftAlertCooldownMillis();
-            org.mockserver.mock.drift.DriftAlertNotifier.getInstance().configure(true, url, threshold, cooldownMillis);
+            org.mockserver.mock.drift.DriftAlertNotifier.getInstance().configure(true, url, threshold, cooldownMillis, configuration);
             // INFO logs only scheme+host: the configured webhook URL often embeds a secret token
             // (e.g. a Slack incoming-webhook path), so the full URL must never be written at INFO.
             org.slf4j.LoggerFactory.getLogger(LifeCycle.class)

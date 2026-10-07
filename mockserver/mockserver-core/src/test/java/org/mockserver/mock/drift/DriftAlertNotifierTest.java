@@ -3,16 +3,22 @@ package org.mockserver.mock.drift;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.junit.After;
 import org.junit.Test;
+import org.mockserver.log.model.LogEntry;
+import org.mockserver.logging.MockServerLogger;
 import org.mockserver.mock.Expectation;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.model.SocketAddress;
+import org.mockserver.proxyconfiguration.ForwardTargetBlockedException;
 import org.mockserver.serialization.ObjectMapperFactory;
+import org.slf4j.event.Level;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
 import java.util.function.Function;
 
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -299,5 +305,48 @@ public class DriftAlertNotifierTest {
         notifier.configure(true, "http://h/x", SemanticSeverity.BREAKING, 60000);
         notifier.onDriftStored(null);
         assertThat(sender.captured, hasSize(0));
+    }
+
+    @Test
+    public void logsAnAlertForwardProxyBlockPrivateNetworksRefusedOnceAsAWarning() {
+        DriftAlertNotifier notifier = new DriftAlertNotifier(() -> 1000L);
+        List<LogEntry> logged = new CopyOnWriteArrayList<>();
+        notifier.setMockServerLogger(capturing(logged));
+        notifier.setSender(request -> CompletableFuture.failedFuture(new ForwardTargetBlockedException("Forward to loopback address blocked: 127.0.0.1")));
+        notifier.configure(true, "http://127.0.0.1:1/drift", SemanticSeverity.BREAKING, 0);
+
+        notifier.onDriftStored(record(DriftType.STATUS, "statusCode"));
+
+        List<LogEntry> warnings = logged.stream().filter(entry -> entry.getLogLevel() == Level.WARN).collect(Collectors.toList());
+        assertThat(warnings, hasSize(1));
+        assertThat(warnings.get(0).getMessageFormat(), is("drift alert webhook blocked by SSRF policy:{}"));
+        assertThat(String.valueOf(warnings.get(0).getArguments()[0]), containsString("Forward to loopback address blocked: 127.0.0.1"));
+    }
+
+    @Test
+    public void logsNoWarningForAnAlertThatFailsForAnotherReason() {
+        DriftAlertNotifier notifier = new DriftAlertNotifier(() -> 1000L);
+        List<LogEntry> logged = new CopyOnWriteArrayList<>();
+        notifier.setMockServerLogger(capturing(logged));
+        notifier.setSender(request -> CompletableFuture.failedFuture(new IllegalArgumentException("connection refused")));
+        notifier.configure(true, "http://127.0.0.1:1/drift", SemanticSeverity.BREAKING, 0);
+
+        notifier.onDriftStored(record(DriftType.STATUS, "statusCode"));
+
+        assertThat(logged, hasSize(0));
+    }
+
+    private static MockServerLogger capturing(List<LogEntry> logged) {
+        return new MockServerLogger(DriftAlertNotifier.class) {
+            @Override
+            public boolean isEnabledForInstance(Level level) {
+                return true;
+            }
+
+            @Override
+            public void logEvent(LogEntry logEntry) {
+                logged.add(logEntry);
+            }
+        };
     }
 }

@@ -2,13 +2,18 @@ package org.mockserver.mock.drift;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.mockserver.configuration.Configuration;
+import org.mockserver.log.model.LogEntry;
+import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.model.MediaType;
 import org.mockserver.model.SocketAddress;
+import org.mockserver.proxyconfiguration.ForwardTargetBlockedException;
 import org.mockserver.serialization.ObjectMapperFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.event.Level;
 
 import java.net.URI;
 import java.util.Iterator;
@@ -56,6 +61,8 @@ public class DriftAlertNotifier {
     private volatile String webhookUrl;
     private volatile SemanticSeverity threshold = SemanticSeverity.BREAKING;
     private volatile long cooldownMs = 60000;
+    /** Logs an alert forwardProxyBlockPrivateNetworks refused, at the configuring server's log level. */
+    private volatile MockServerLogger mockServerLogger = new MockServerLogger(DriftAlertNotifier.class);
 
     /** signature (expectationId|driftType|field) -> epoch ms it last fired. Bounded by COOLDOWN_MAP_CAP. */
     private final ConcurrentHashMap<String, Long> lastFiredAtMs = new ConcurrentHashMap<>();
@@ -93,9 +100,22 @@ public class DriftAlertNotifier {
         }
     }
 
+    /** Test hook: capture what is logged. */
+    void setMockServerLogger(MockServerLogger mockServerLogger) {
+        this.mockServerLogger = mockServerLogger;
+    }
+
     /**
-     * Apply the drift-alert webhook configuration. Called by the runtime at startup. A blank URL or a
-     * disabled flag leaves the notifier inert.
+     * As {@link #configure(boolean, String, SemanticSeverity, long)}, logging at the level {@code configuration}
+     * sets. Called by the runtime at startup.
+     */
+    public void configure(boolean enabled, String webhookUrl, SemanticSeverity threshold, long cooldownMs, Configuration configuration) {
+        this.mockServerLogger = new MockServerLogger(configuration, DriftAlertNotifier.class);
+        configure(enabled, webhookUrl, threshold, cooldownMs);
+    }
+
+    /**
+     * Apply the drift-alert webhook configuration. A blank URL or a disabled flag leaves the notifier inert.
      */
     public void configure(boolean enabled, String webhookUrl, SemanticSeverity threshold, long cooldownMs) {
         this.enabled = enabled;
@@ -143,7 +163,10 @@ public class DriftAlertNotifier {
             CompletableFuture<HttpResponse> future = currentSender.apply(outbound);
             if (future != null) {
                 future.exceptionally(t -> {
-                    if (LOG.isTraceEnabled()) {
+                    ForwardTargetBlockedException blocked = blockedCause(t);
+                    if (blocked != null) {
+                        logBlocked(blocked);
+                    } else if (LOG.isTraceEnabled()) {
                         LOG.trace("drift alert webhook delivery failed for {}: {}", url, t != null ? t.getMessage() : "null");
                     }
                     return null;
@@ -154,6 +177,25 @@ public class DriftAlertNotifier {
             if (LOG.isTraceEnabled()) {
                 LOG.trace("drift alert webhook suppressed error: {}", t.getMessage());
             }
+        }
+    }
+
+    private static ForwardTargetBlockedException blockedCause(Throwable throwable) {
+        if (throwable instanceof ForwardTargetBlockedException) {
+            return (ForwardTargetBlockedException) throwable;
+        }
+        return throwable != null && throwable.getCause() instanceof ForwardTargetBlockedException ? (ForwardTargetBlockedException) throwable.getCause() : null;
+    }
+
+    private void logBlocked(ForwardTargetBlockedException blocked) {
+        MockServerLogger logger = this.mockServerLogger;
+        if (logger.isEnabledForInstance(Level.WARN)) {
+            logger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.WARN)
+                    .setMessageFormat("drift alert webhook blocked by SSRF policy:{}")
+                    .setArguments(blocked.getMessage())
+            );
         }
     }
 

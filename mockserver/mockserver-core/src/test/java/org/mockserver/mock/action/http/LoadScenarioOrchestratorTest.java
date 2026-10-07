@@ -2284,4 +2284,54 @@ public class LoadScenarioOrchestratorTest {
         assertThat(scenario.getStepSelection(), is(LoadScenario.StepSelection.WEIGHTED));
         assertThat(orchestrator.validate(scenario), is(nullValue()));
     }
+
+    @Test
+    public void countsARequestForwardProxyBlockPrivateNetworksRefusedAsBlockedAndLogsItOncePerRun() throws Exception {
+        org.mockserver.configuration.Configuration config =
+            org.mockserver.configuration.Configuration.configuration().metricsEnabled(true);
+        new Metrics(config);
+        orchestrator.setConfiguration(config);
+        java.util.List<org.mockserver.log.model.LogEntry> logged = new java.util.concurrent.CopyOnWriteArrayList<>();
+        orchestrator.setMockServerLogger(new org.mockserver.logging.MockServerLogger(LoadScenarioOrchestrator.class) {
+            @Override
+            public boolean isEnabledForInstance(org.slf4j.event.Level level) {
+                return true;
+            }
+
+            @Override
+            public void logEvent(org.mockserver.log.model.LogEntry logEntry) {
+                logged.add(logEntry);
+            }
+        });
+        java.util.concurrent.atomic.AtomicInteger refused = new java.util.concurrent.atomic.AtomicInteger();
+        Function<HttpRequest, CompletableFuture<HttpResponse>> refusing = request -> {
+            refused.incrementAndGet();
+            return CompletableFuture.failedFuture(new org.mockserver.proxyconfiguration.ForwardTargetBlockedException("Forward to loopback address blocked: 127.0.0.1"));
+        };
+        LoadScenario scenario = new LoadScenario().withName("refused")
+            .withProfile(LoadProfile.constant(1, 60_000L))
+            .withSteps(new LoadStep().withRequest(request().withPath("/a").withHeader("Host", "127.0.0.1"))
+                .withThinkTime(org.mockserver.model.Delay.milliseconds(5)));
+
+        try {
+            assertThat(orchestrator.start(scenario, refusing), is(nullValue()));
+            String runId = orchestrator.statusFor("refused").runId;
+            long deadline = System.currentTimeMillis() + 5_000L;
+            while (refused.get() < 5 && System.currentTimeMillis() < deadline) {
+                Thread.sleep(5);
+            }
+            assertThat(refused.get(), greaterThanOrEqualTo(5));
+
+            assertThat(Metrics.getLoadErrorCount("refused", runId, LoadScenarioOrchestrator.BLOCKED), greaterThanOrEqualTo(4L));
+            assertThat(Metrics.getLoadErrorCount("refused", runId, "connection"), is(0L));
+            java.util.List<org.mockserver.log.model.LogEntry> warnings = logged.stream()
+                .filter(entry -> entry.getLogLevel() == org.slf4j.event.Level.WARN)
+                .collect(java.util.stream.Collectors.toList());
+            assertThat(warnings, hasSize(1));
+            assertThat(warnings.get(0).getMessageFormat(), is("load scenario:{}request blocked by SSRF policy:{}"));
+            assertThat(String.valueOf(warnings.get(0).getArguments()[1]), containsString("Forward to loopback address blocked: 127.0.0.1"));
+        } finally {
+            orchestrator.stop("refused");
+        }
+    }
 }

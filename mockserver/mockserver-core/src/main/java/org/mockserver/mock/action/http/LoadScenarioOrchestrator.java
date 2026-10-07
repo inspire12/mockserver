@@ -2,6 +2,8 @@ package org.mockserver.mock.action.http;
 
 import org.mockserver.configuration.Configuration;
 import org.mockserver.load.IterationContext;
+import org.mockserver.log.model.LogEntry;
+import org.mockserver.logging.MockServerLogger;
 import org.mockserver.load.LoadCapture;
 import org.mockserver.load.LoadCheck;
 import org.mockserver.load.LoadResponseExtractor;
@@ -20,6 +22,7 @@ import org.mockserver.model.Delay;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.model.HttpTemplate;
+import org.mockserver.proxyconfiguration.ForwardTargetBlockedException;
 import org.mockserver.slo.Scope;
 import org.mockserver.slo.SloSampleStore;
 import org.mockserver.telemetry.W3CTraceContext;
@@ -31,6 +34,7 @@ import org.HdrHistogram.ConcurrentHistogram;
 import org.HdrHistogram.Histogram;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.event.Level;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -95,6 +99,9 @@ public class LoadScenarioOrchestrator {
 
     private static final Logger LOG = LoggerFactory.getLogger(LoadScenarioOrchestrator.class);
 
+    /** Error kind of a request forwardProxyBlockPrivateNetworks refused, which was not sent. */
+    static final String BLOCKED = "blocked";
+
     /** Control tick interval in milliseconds (stage advance + setpoint recomputation). */
     static final long CONTROL_TICK_MILLIS = 100;
 
@@ -135,6 +142,8 @@ public class LoadScenarioOrchestrator {
     private volatile Function<HttpRequest, CompletableFuture<HttpResponse>> installedSender;
     /** Configuration used to read caps and to build the template engines for rendering. */
     private volatile Configuration configuration = Configuration.configuration();
+    /** Logs a request forwardProxyBlockPrivateNetworks refused, at the configured log level. */
+    private volatile MockServerLogger mockServerLogger = new MockServerLogger(LoadScenarioOrchestrator.class);
 
     LoadScenarioOrchestrator(LongSupplier clock, ScheduledExecutorService scheduler) {
         this.clock = clock;
@@ -168,6 +177,24 @@ public class LoadScenarioOrchestrator {
     public void setConfiguration(Configuration configuration) {
         if (configuration != null) {
             this.configuration = configuration;
+            this.mockServerLogger = new MockServerLogger(configuration, LoadScenarioOrchestrator.class);
+        }
+    }
+
+    /** Test hook: capture what is logged. */
+    void setMockServerLogger(MockServerLogger mockServerLogger) {
+        this.mockServerLogger = mockServerLogger;
+    }
+
+    private void logBlocked(RunningScenario run, ForwardTargetBlockedException blocked) {
+        MockServerLogger logger = this.mockServerLogger;
+        if (logger.isEnabledForInstance(Level.WARN)) {
+            logger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.WARN)
+                    .setMessageFormat("load scenario:{}request blocked by SSRF policy:{}")
+                    .setArguments(run.scenario.getName(), blocked.getMessage())
+            );
         }
     }
 
@@ -872,6 +899,10 @@ public class LoadScenarioOrchestrator {
             boolean error = throwable != null || response == null
                 || (response.getStatusCode() != null && response.getStatusCode() >= 500);
             String errorKind = classifyError(throwable, response);
+            if (BLOCKED.equals(errorKind) && run.blockedLogged.compareAndSet(false, true)) {
+                // once per run: every refused request is counted, as an error of kind "blocked"
+                logBlocked(run, blockedCause(throwable));
+            }
             recordResult(run, host, stepLabel, route, method, requestBytes, traceId, stepCustomLabels, response, scheduledNanos, error, errorKind);
             // Evaluate this step's per-step response checks (k6 'check' parity) against the completed
             // response, recording pass/fail outcomes and feeding the CHECK_FAILURE_RATE threshold.
@@ -986,6 +1017,9 @@ public class LoadScenarioOrchestrator {
      * the request succeeded.
      */
     private static String classifyError(Throwable throwable, HttpResponse response) {
+        if (blockedCause(throwable) != null) {
+            return BLOCKED;
+        }
         if (throwable != null) {
             Throwable cause = throwable.getCause() != null ? throwable.getCause() : throwable;
             String name = cause.getClass().getSimpleName().toLowerCase();
@@ -1002,6 +1036,16 @@ public class LoadScenarioOrchestrator {
             return "http_5xx";
         }
         return null;
+    }
+
+    /**
+     * @return the refusal, by forwardProxyBlockPrivateNetworks, that failed a request, or null
+     */
+    private static ForwardTargetBlockedException blockedCause(Throwable throwable) {
+        if (throwable instanceof ForwardTargetBlockedException) {
+            return (ForwardTargetBlockedException) throwable;
+        }
+        return throwable != null && throwable.getCause() instanceof ForwardTargetBlockedException ? (ForwardTargetBlockedException) throwable.getCause() : null;
     }
 
     private void scheduleNextStep(RunningScenario run, int vuId, long vuIteration, int stepIndex, LoadStep step, boolean looping, Map<String, String> captured, Map<String, String> data, long iterationStartNanos, List<LoadStep> iterationSteps) {
@@ -1325,6 +1369,8 @@ public class LoadScenarioOrchestrator {
         final String runId = UUID.randomUUID().toString();
         final Metrics.LoadGaugeKey gaugeKey;
         final AtomicBoolean stopped = new AtomicBoolean(false);
+        /** Whether a request refused by forwardProxyBlockPrivateNetworks has been logged for this run. */
+        final AtomicBoolean blockedLogged = new AtomicBoolean(false);
         /** Live VU population: incremented once per launch, decremented exactly once when a loop ends. */
         final AtomicInteger activeVUs = new AtomicInteger(0);
         /** Live in-flight (dispatched, not-yet-completed) request count, backing the inflight gauge. */

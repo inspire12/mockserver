@@ -33,6 +33,8 @@ import org.mockserver.netty.unification.Http2RequestHeaderLimit;
 import org.mockserver.netty.unification.HttpServerCodecResponsePairing;
 import org.mockserver.netty.unification.HttpServerCodecs;
 import org.mockserver.netty.unification.PortUnificationHandler;
+import org.mockserver.proxyconfiguration.ForwardTargetBlockedException;
+import org.mockserver.proxyconfiguration.InetAddressValidator;
 import org.slf4j.event.Level;
 
 import java.net.InetSocketAddress;
@@ -74,7 +76,13 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
 
     @Override
     public void channelRead0(final ChannelHandlerContext proxyClientCtx, final T request) {
-        final InetSocketAddress remoteSocket = getDownstreamSocket(proxyClientCtx);
+        final InetSocketAddress remoteSocket;
+        try {
+            remoteSocket = getDownstreamSocket(proxyClientCtx);
+        } catch (ForwardTargetBlockedException blocked) {
+            refuse(proxyClientCtx, request, blocked);
+            return;
+        }
         Bootstrap bootstrap = new Bootstrap()
             .group(proxyClientCtx.channel().eventLoop())
             .channel(NettyTransport.socketChannelClassFor(proxyClientCtx.channel().eventLoop()))
@@ -212,13 +220,32 @@ public abstract class RelayConnectHandler<T> extends SimpleChannelInboundHandler
         });
     }
 
+    /**
+     * MockServer itself, whose handling of the tunnelled requests applies forwardProxyBlockPrivateNetworks, unless
+     * the connection names a destination (proxyRemoteHost, or where a transparent-proxy client was going): that is
+     * connected to directly, so it is checked here, and the address checked is the one connected to.
+     */
     private InetSocketAddress getDownstreamSocket(ChannelHandlerContext ctx) {
         InetSocketAddress remoteAddress = getRemoteAddress(ctx);
         if (remoteAddress != null) {
-            return remoteAddress;
+            return InetAddressValidator.validateForwardTarget(configuration, remoteAddress);
         } else {
             return new InetSocketAddress(server.getLocalPort());
         }
+    }
+
+    private void refuse(ChannelHandlerContext proxyClientCtx, T request, ForwardTargetBlockedException blocked) {
+        if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.WARN)
+                    .setMessageFormat("tunnel blocked by SSRF policy:{}")
+                    .setArguments(blocked.getMessage())
+            );
+        }
+        Channel proxyClientChannel = proxyClientCtx.channel();
+        proxyClientChannel.writeAndFlush(failureResponse(request));
+        closeOnFlush(proxyClientChannel);
     }
 
     @Override

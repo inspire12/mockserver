@@ -495,7 +495,7 @@ Optional custom labels (appended after fixed labels) are declared via the `mocks
 | `mock_server_load_response_bytes` | Counter (unit: bytes) | fixed + custom | Inbound response bytes |
 | `mock_server_load_iterations` | Counter | `scenario`, `run_id` | Full VU iteration completions |
 | `mock_server_load_throttled` | Counter | `scenario`, `run_id`, `reason` | Dispatches skipped by the self-load guard (`reason` = `inflight_cap` or `rate_limit`) |
-| `mock_server_load_errors` | Counter | `scenario`, `run_id`, `kind` | Failed dispatches (`kind` = `render`, `connection`, `timeout`, `null_response`, `http_5xx`) |
+| `mock_server_load_errors` | Counter | `scenario`, `run_id`, `kind` | Failed dispatches (`kind` = `render`, `connection`, `timeout`, `null_response`, `http_5xx`, `blocked`) |
 | `mock_server_load_active_vus` | GaugeWithCallback | `scenario`, `run_id` | Virtual users currently running |
 | `mock_server_load_inflight_requests` | GaugeWithCallback | `scenario`, `run_id` | Dispatches currently in flight |
 

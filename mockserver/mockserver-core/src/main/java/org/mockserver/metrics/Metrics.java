@@ -624,7 +624,7 @@ public class Metrics {
             .register();
         loadErrorsTotal = Counter.builder()
             .name("mock_server_load_errors")
-            .help("Total load-scenario request errors by kind (timeout, connection, render, http_5xx, null_response)")
+            .help("Total load-scenario request errors by kind (timeout, connection, render, http_5xx, null_response, blocked)")
             .labelNames("scenario", "run_id", "kind")
             .register();
         loadChecksTotal = Counter.builder()
@@ -2099,7 +2099,7 @@ public class Metrics {
     /**
      * Increment the error counter for the given kind.
      *
-     * @param kind one of "timeout", "connection", "render", "http_5xx", "null_response"
+     * @param kind one of "timeout", "connection", "render", "http_5xx", "null_response", "blocked"
      */
     public static void incrementLoadError(String scenario, String runId, String kind) {
         Counter counter = loadErrorsTotal;
