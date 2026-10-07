@@ -21,6 +21,7 @@ import org.mockserver.model.MediaType;
 import org.mockserver.model.PortBinding;
 import org.mockserver.netty.proxy.connect.HttpConnectHandler;
 import org.mockserver.netty.responsewriter.NettyResponseWriter;
+import org.mockserver.responsewriter.ControlPlaneFailureResponse;
 import org.mockserver.responsewriter.ResponseWriter;
 import org.mockserver.scheduler.Scheduler;
 import org.mockserver.authentication.ProxyAuthenticationValidator;
@@ -578,26 +579,8 @@ public class HttpRequestHandler extends SimpleChannelInboundHandler<HttpRequest>
 
                 }
             }
-        } catch (IllegalArgumentException iae) {
-            mockServerLogger.logEvent(
-                new LogEntry()
-                    .setLogLevel(Level.ERROR)
-                    .setHttpRequest(request)
-                    .setMessageFormat("exception processing request:{}error:{}")
-                    .setArguments(request, iae.getMessage())
-            );
-            // send request without API CORS headers
-            responseWriter.writeResponse(request, BAD_REQUEST, iae.getMessage(), MediaType.create("text", "plain").toString());
-        } catch (Exception ex) {
-            mockServerLogger.logEvent(
-                new LogEntry()
-                    .setLogLevel(Level.ERROR)
-                    .setHttpRequest(request)
-                    .setMessageFormat("exception processing request:{}")
-                    .setArguments(request)
-                    .setThrowable(ex)
-            );
-            responseWriter.writeResponse(request, response().withStatusCode(BAD_REQUEST.code()).withBody(ex.getMessage()), true);
+        } catch (Throwable throwable) {
+            ControlPlaneFailureResponse.write(mockServerLogger, responseWriter, request, throwable);
         }
     }
 
@@ -655,16 +638,8 @@ public class HttpRequestHandler extends SimpleChannelInboundHandler<HttpRequest>
                         .writerWithDefaultPrettyPrinter().writeValueAsString(result.getReport());
                     responseWriter.writeResponse(request, OK, json, "application/json");
                 }
-            } catch (Exception e) {
-                mockServerLogger.logEvent(
-                    new LogEntry()
-                        .setLogLevel(Level.ERROR)
-                        .setHttpRequest(request)
-                        .setMessageFormat("exception building LLM optimisation report:{}")
-                        .setArguments(e.getMessage())
-                        .setThrowable(e)
-                );
-                responseWriter.writeResponse(request, INTERNAL_SERVER_ERROR, "Internal error generating optimisation report", MediaType.create("text", "plain").toString());
+            } catch (Throwable throwable) {
+                ControlPlaneFailureResponse.write(mockServerLogger, responseWriter, request, throwable);
             }
         });
     }
@@ -724,16 +699,8 @@ public class HttpRequestHandler extends SimpleChannelInboundHandler<HttpRequest>
                     new org.mockserver.llm.analysis.AgentRunDiff().diff(before, after, options);
 
                 responseWriter.writeResponse(request, OK, serializeDiff(mapper, diff), "application/json");
-            } catch (Exception e) {
-                mockServerLogger.logEvent(
-                    new LogEntry()
-                        .setLogLevel(Level.ERROR)
-                        .setHttpRequest(request)
-                        .setMessageFormat("exception diffing LLM agent runs:{}")
-                        .setArguments(e.getMessage())
-                        .setThrowable(e)
-                );
-                responseWriter.writeResponse(request, INTERNAL_SERVER_ERROR, "Internal error diffing agent runs", MediaType.create("text", "plain").toString());
+            } catch (Throwable throwable) {
+                ControlPlaneFailureResponse.write(mockServerLogger, responseWriter, request, throwable);
             }
         });
     }
@@ -833,6 +800,9 @@ public class HttpRequestHandler extends SimpleChannelInboundHandler<HttpRequest>
             .withQueryStringParameter("format", "JSON");
         HttpResponse retrieveResponse = httpState.retrieve(retrieveRequest);
         String body = retrieveResponse.getBodyAsString();
+        if (retrieveResponse.getStatusCode() != null && retrieveResponse.getStatusCode() != OK.code()) {
+            throw new IllegalStateException("retrieving recorded requests and responses failed with status " + retrieveResponse.getStatusCode() + ": " + body);
+        }
         java.util.List<org.mockserver.model.LogEventRequestAndResponse> result = new java.util.ArrayList<>();
         if (body != null && !body.trim().isEmpty()) {
             try {

@@ -38,6 +38,7 @@ import org.mockserver.model.HttpRequest;
 import org.mockserver.netty.DataPlaneAuthenticationGate;
 import org.mockserver.netty.mcp.JsonRpcMessage;
 import org.mockserver.netty.mcp.McpRequestProcessor;
+import org.mockserver.responsewriter.ControlPlaneFailureResponse;
 import org.mockserver.responsewriter.ResponseWriter;
 import org.mockserver.telemetry.TraceContextAttributes;
 import org.mockserver.telemetry.W3CTraceContext;
@@ -295,7 +296,14 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
             ResponseWriter responseWriter = new Http3ResponseWriter(configuration, mockServerLogger, ctx);
 
             // first, try control-plane handling (expectations CRUD, status, etc.)
-            if (!httpState.handle(request, responseWriter, false)) {
+            boolean handled;
+            try {
+                handled = httpState.handle(request, responseWriter, false);
+            } catch (Throwable throwable) {
+                ControlPlaneFailureResponse.write(mockServerLogger, responseWriter, request, throwable);
+                return;
+            }
+            if (!handled) {
                 // Data-plane authentication gate (opt-in, default off) — identical to the HTTP/1.1/HTTP/2
                 // path. The shared gate exempts control-plane (/mockserver/*) and the liveness probe path
                 // internally, which matters here because the HTTP/3 handler (unlike HttpRequestHandler)

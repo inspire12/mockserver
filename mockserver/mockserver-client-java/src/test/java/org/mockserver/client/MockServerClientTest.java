@@ -1167,6 +1167,46 @@ public class MockServerClientTest {
     }
 
     @Test
+    public void shouldRaiseAServerFailureFromEveryControlPlaneCallInsteadOfReturningItAsData() {
+        // given - MockServer failed unexpectedly while handling the request
+        String failure = "unexpected error processing request, see the MockServer log for correlation id: 1234";
+        when(mockHttpClient.sendRequest(any(HttpRequest.class), anyLong(), any(TimeUnit.class), anyBoolean()))
+            .thenReturn(response().withStatusCode(500).withBody(failure));
+
+        // then - callers that read the body as their result raise rather than return the failure text
+        ClientException retrieveFailure = assertThrows(ClientException.class, () -> mockServerClient.retrieveActiveExpectations(request("/some_path"), Format.JSON));
+        assertThat(retrieveFailure.getMessage(), containsString(failure));
+        ClientException logsFailure = assertThrows(ClientException.class, () -> mockServerClient.retrieveLogsByCorrelationId("some-id"));
+        assertThat(logsFailure.getMessage(), containsString(failure));
+        ClientException configurationFailure = assertThrows(ClientException.class, () -> mockServerClient.retrieveConfiguration());
+        assertThat(configurationFailure.getMessage(), containsString(failure));
+    }
+
+    @Test
+    public void shouldRaiseAFailedRetrieveOfActiveExpectationsOrLogsInsteadOfReturningItAsData() {
+        // given - a retrieve that could not reach every cluster peer
+        when(mockHttpClient.sendRequest(any(HttpRequest.class), anyLong(), any(TimeUnit.class), anyBoolean()))
+            .thenReturn(response().withStatusCode(502).withBody("{\"error\":\"peer unreachable\"}"));
+
+        // then
+        ClientException retrieveFailure = assertThrows(ClientException.class, () -> mockServerClient.retrieveActiveExpectations(request("/some_path"), Format.JSON));
+        assertThat(retrieveFailure.getMessage(), containsString("peer unreachable"));
+        ClientException logsFailure = assertThrows(ClientException.class, () -> mockServerClient.retrieveLogsByCorrelationId("some-id"));
+        assertThat(logsFailure.getMessage(), containsString("peer unreachable"));
+    }
+
+    @Test
+    public void shouldStillRaiseAnInvalidRequestAsAnIllegalArgumentException() {
+        // given
+        when(mockHttpClient.sendRequest(any(HttpRequest.class), anyLong(), any(TimeUnit.class), anyBoolean()))
+            .thenReturn(response().withStatusCode(BAD_REQUEST.code()).withBody("incorrect request matcher json format"));
+
+        // then
+        IllegalArgumentException invalid = assertThrows(IllegalArgumentException.class, () -> mockServerClient.retrieveLogsByCorrelationId("some-id"));
+        assertThat(invalid.getMessage(), is("incorrect request matcher json format"));
+    }
+
+    @Test
     public void shouldRetrieveActiveExpectationsByNamespace() {
         // given - a request
         HttpRequest someRequestMatcher = new HttpRequest()
@@ -2096,7 +2136,7 @@ public class MockServerClientTest {
 
     @Test
     public void shouldThrowErrorWhenGenerateLoadScenarioFromOpenAPIRejected() {
-        // given (a 5xx error other than 400/401, which sendRequest maps to dedicated exceptions)
+        // given (a 500, which sendRequest raises as a ClientException carrying the server body)
         when(mockHttpClient.sendRequest(any(HttpRequest.class), anyLong(), any(TimeUnit.class), anyBoolean()))
             .thenReturn(response().withStatusCode(500).withBody("{\"error\":\"boom\"}"));
 
@@ -2104,7 +2144,8 @@ public class MockServerClientTest {
         ClientException clientException = assertThrows(ClientException.class, () -> mockServerClient.generateLoadScenarioFromOpenAPI("{\"name\":\"x\"}"));
 
         // then
-        assertThat(clientException.getMessage(), containsString("while generating load scenario from OpenAPI"));
+        assertThat(clientException.getMessage(), containsString("boom"));
+        assertThat(clientException.getMessage(), containsString("/mockserver/loadScenario/generateFromOpenAPI"));
     }
 
     @Test
@@ -2150,7 +2191,7 @@ public class MockServerClientTest {
 
     @Test
     public void shouldThrowErrorWhenGenerateLoadScenarioFromRecordingRejected() {
-        // given (a 5xx error other than 400/401, which sendRequest maps to dedicated exceptions)
+        // given (a 500, which sendRequest raises as a ClientException carrying the server body)
         when(mockHttpClient.sendRequest(any(HttpRequest.class), anyLong(), any(TimeUnit.class), anyBoolean()))
             .thenReturn(response().withStatusCode(500).withBody("{\"error\":\"boom\"}"));
 
@@ -2158,7 +2199,8 @@ public class MockServerClientTest {
         ClientException clientException = assertThrows(ClientException.class, () -> mockServerClient.generateLoadScenarioFromRecording("{\"name\":\"x\"}"));
 
         // then
-        assertThat(clientException.getMessage(), containsString("while generating load scenario from recording"));
+        assertThat(clientException.getMessage(), containsString("boom"));
+        assertThat(clientException.getMessage(), containsString("/mockserver/loadScenario/generateFromRecording"));
     }
 
     // -------------------------------------------------------------------

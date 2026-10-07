@@ -6,7 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-This release delivers a sustained performance and memory programme alongside data-integrity fixes under load. The headline numbers, from the single-load-generator benchmark on the same six-core rig (builds 420 and 464): the healthy ceiling rises from 39,033 to 57,149 req/s and the peak from 43,671 to 59,905 req/s, with p95 at 32,000 req/s falling from 56.6 ms to 0.44 ms on the new ZGC default in the Docker images; event-log retained heap at 20,000 entries falls from 429 MB to 61 MB; Docker image download shrinks ~23%; and instance shutdown drops from ~107 ms to near zero. Five BREAKING changes affect only users of HTTP/3, of DNS mocking, of the TypeScript typings of the Node client's `mockserver-client/llm` path, of binary (non-HTTP) proxying, or of code that reads the `message` or `arguments` of `LOG_ENTRIES` output — see the `BREAKING` entries in *Changed*.
+This release delivers a sustained performance and memory programme alongside data-integrity fixes under load. The headline numbers, from the single-load-generator benchmark on the same six-core rig (builds 420 and 464): the healthy ceiling rises from 39,033 to 57,149 req/s and the peak from 43,671 to 59,905 req/s, with p95 at 32,000 req/s falling from 56.6 ms to 0.44 ms on the new ZGC default in the Docker images; event-log retained heap at 20,000 entries falls from 429 MB to 61 MB; Docker image download shrinks ~23%; and instance shutdown drops from ~107 ms to near zero. Six BREAKING changes affect only users of HTTP/3, of DNS mocking, of the TypeScript typings of the Node client's `mockserver-client/llm` path, of binary (non-HTTP) proxying, of code that reads the `message` or `arguments` of `LOG_ENTRIES` output, or of code that relies on the status of a failed control-plane request — see the `BREAKING` entries in *Changed*.
 
 **BREAKING** — if you set `http3Port`, HTTP/3's native library now ships separately: use the `jar-with-dependencies-http3` jar, or in containers the new `mockserver/mockserver:<version>-http3` image (Helm: `image.variant=http3`). A server configured for HTTP/3 without it now refuses to start with a message naming the exact fix, where it used to log a warning and ignore the port — which is what every published Docker image did, because none of them could load the native. It also refuses to start when the HTTP/3 port itself cannot be used, for example because another application holds that UDP port, where it used to log a warning and serve only HTTP/1.1 and HTTP/2. If you do not use HTTP/3 — the default — nothing changes except a smaller standalone jar.
 
@@ -17,6 +17,8 @@ This release delivers a sustained performance and memory programme alongside dat
 **BREAKING** — if you proxy a binary (non-HTTP) protocol through MockServer, a client's connection now gets one upstream connection for its whole life instead of a new one for every message (`forwardBinaryRequestsUseSingleConnection`, on by default). The upstream therefore sees one connection per client connection, held open as long as the client's is, everything it sends reaches the client, when it closes its connection the client's is closed too, and a client whose upstream never answers is no longer cut off after `maxFutureTimeout`. Set `forwardBinaryRequestsUseSingleConnection=false` to get the 8.0.0 behaviour back exactly. A client that turns TLS on part way through, such as PostgreSQL with `sslmode=require`, now has its upstream connection upgraded to TLS on the same connection, so such a database can be proxied (SCRAM channel binding needs `channelBinding=disable` in the client, or MockServer given the server's own certificate). A client that starts with TLS from its first byte also gets one upstream connection, which MockServer opens with TLS from its first byte, where 8.0.0 opened a new TLS connection for every message. Every binary connection when an upstream proxy is configured is still forwarded as in 8.0.0. `forwardBinaryRequestsWithoutWaitingForResponse` is deprecated and applies only when the new setting is `false`. If you do not proxy binary protocols nothing changes.
 
 **BREAKING** — if you retrieve logs with `format=LOG_ENTRIES` (or through the MCP `retrieve_logs` and `raw_retrieve` tools) and read a request or response body from an entry's `message` or `arguments`, read it from the entry's `httpRequest` or `httpResponse` instead: those fields now refer to the entry's own request or response by a short form such as `"POST /orders"` or `"201"`, and the `expectation` recorded for a proxied exchange is written without its bodies. Each body is written once, so a log of large bodies retrieves at about a third of its former size. See *Changed*.
+
+**BREAKING** — if your code treats a `400` from the control plane (`/mockserver/...`) as any failure, or catches the Java client's `IllegalArgumentException` for failures that are not about your input: an unexpected failure inside MockServer is now answered `500` with a generic message naming a correlation id, where it was answered `400` with the exception's bare message. Requests MockServer cannot accept are still `400` with a message saying what is wrong. See *Changed*.
 
 | Metric | Before | After |
 |--------|--------|-------|
@@ -299,6 +301,32 @@ This release delivers a sustained performance and memory programme alongside dat
   retained entry holds about what the budget counts. Log output is unchanged.
 ### Changed
 
+- **BREAKING: an unexpected failure while MockServer handles a control-plane request is answered
+  `500` with a generic message, not `400` with the exception's message.** Before: a fault inside
+  MockServer while it handled, for example, `PUT /mockserver/expectation` was answered `400 Bad
+  Request` whose whole body was the exception's message (a bare number for one such fault, or an
+  empty body), so it read as a problem with your request; an `Error` such as a stack overflow
+  closed the connection with no response. After: it is answered `500 Internal Server Error` with
+  `unexpected error processing request, see the MockServer log for correlation id: <id>`, and the
+  log holds one `ERROR` entry with the stack trace under that id. Requests MockServer cannot accept
+  are still answered `400` with a message saying what is wrong: JSON it cannot read, an
+  expectation or request matcher that fails validation, an invalid parameter, or an operation the
+  deployment does not support. This holds over HTTP/1.1, HTTP/2 and HTTP/3 and in the WAR
+  deployments. The same rule now answers a fault on the path to a mocked response that happens
+  outside the mocked response's own handling, such as setting up a `CONNECT` tunnel or checking
+  data-plane credentials: it was a `400` carrying the exception's message and is now the same
+  `500`; a fault while producing the mocked response itself was already a `500`.
+  `GET /mockserver/llm/optimisationReport` and `PUT /mockserver/llm/diffRuns` follow
+  the same rule, so `diffRuns` now answers unreadable JSON with `400` rather than `500`, and both
+  answer `500` rather than an empty result when MockServer cannot retrieve the recorded traffic.
+  Clients: the Java client raises a `500` from any call as a `ClientException`, and
+  `retrieveLogsByCorrelationId` and `retrieveActiveExpectations(requestDefinition, format)` now
+  raise for any status of 400 or more (a `400` is still an `IllegalArgumentException`) where they
+  returned the error's text as their result. The PHP client raises the failure as
+  `MockServerException` rather than `InvalidRequestException`, and the Rust client as
+  `Error::UnexpectedStatus` rather than `Error::InvalidRequest`; the Node, Python, Ruby, Go and
+  .NET clients raise the same error as before, and the dashboard shows it as an internal error
+  with the correlation id in its details.
 - **The dashboard shortens bodies longer than 64 KiB, with a button to load the whole body.** Each
   live update used to carry every request and response body in full, several times over, so a
   few large bodies made updates hundreds of megabytes: 100 requests with 1 MiB bodies could not be

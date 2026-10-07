@@ -64,6 +64,7 @@ import java.util.function.Supplier;
 import static io.netty.handler.codec.http.HttpHeaderNames.*;
 import static io.netty.handler.codec.http.HttpResponseStatus.BAD_REQUEST;
 import static io.netty.handler.codec.http.HttpResponseStatus.FORBIDDEN;
+import static io.netty.handler.codec.http.HttpResponseStatus.INTERNAL_SERVER_ERROR;
 import static io.netty.handler.codec.http.HttpResponseStatus.NOT_ACCEPTABLE;
 import static io.netty.handler.codec.http.HttpResponseStatus.UNAUTHORIZED;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
@@ -664,6 +665,9 @@ public class MockServerClient implements Stoppable {
                             throw new IllegalArgumentException(response.getBodyAsString());
                         } else if (response.getStatusCode() == UNAUTHORIZED.code()) {
                             throw new AuthenticationException(response.getBodyAsString());
+                        } else if (response.getStatusCode() == INTERNAL_SERVER_ERROR.code()) {
+                            // a failure inside MockServer, never a result: raised whatever the caller passed as throwClientException
+                            throw new ClientException(formatLogMessage("error:{}while sending request:{}", response, request));
                         }
                     }
                     String serverVersion = response.getFirstHeader("version");
@@ -2821,7 +2825,7 @@ public class MockServerClient implements Stoppable {
                 .withQueryStringParameter("type", RetrieveType.ACTIVE_EXPECTATIONS.name())
                 .withQueryStringParameter("format", format.name())
                 .withBody(requestDefinition != null ? requestDefinitionSerializer.serialize(requestDefinition) : "", StandardCharsets.UTF_8),
-            false
+            true
         );
         return httpResponse.getBodyAsString();
     }
@@ -3027,7 +3031,7 @@ public class MockServerClient implements Stoppable {
                 .withQueryStringParameter("type", RetrieveType.LOGS.name())
                 .withQueryStringParameter("correlationId", correlationId)
                 .withBody("", StandardCharsets.UTF_8),
-            false
+            true
         );
         return httpResponse.getBodyAsString();
     }

@@ -224,6 +224,27 @@ Before a request reaches `HttpRequestHandler`, the Netty pipeline may intercept 
 | CONNECT method | - | HTTP CONNECT tunnel setup |
 | Everything else | - | `HttpActionHandler.processAction()` |
 
+### Control-Plane Failures: 400 or 500
+
+When handling a control-plane request throws and no endpoint-specific `catch` answers it, every frontend
+(`HttpRequestHandler` for HTTP/1.1 and HTTP/2, `Http3MockServerHandler`, `MockServerServlet`, `ProxyServlet`) and the
+scheduler-run `/llm/optimisationReport` and `/llm/diffRuns` answer through `ControlPlaneFailureResponse` (core):
+
+| Thrown | Status | Body | Log |
+|--------|--------|------|-----|
+| `IllegalArgumentException` (every deserializer reports unreadable or schema-invalid JSON this way), `UnsupportedOperationException`, a Jackson `JsonProcessingException` other than a write failure (`StreamWriteException`) or `InvalidDefinitionException` | `400` | the exception's message, `text/plain` | one `ERROR` entry with the message |
+| anything else, `Error`s included | `500` | `unexpected error processing request, see the MockServer log for correlation id: <id>`, `text/plain` | one `ERROR` entry with the stack trace under that correlation id |
+
+The same catch-all in `HttpRequestHandler` also answers a fault on the data-plane path outside `processAction`'s own
+`catch` (`CONNECT` set-up, the data-plane authentication gate, the TLS-required check), so those are a `500` too.
+The correlation id is the request's log correlation id (set by `HttpState.handle`), or a new one when the failure came
+before it was set. Before 9.0.0 the catch-all answered every exception `400` with its bare message (an exception
+without one gave an empty body) and an `Error` closed the connection with no response. The Java client raises a
+`500` as a `ClientException` whatever the call passed as `throwClientException`, as it raises a `400` as an
+`IllegalArgumentException`. Endpoint-specific `catch (Exception e)` blocks inside `HttpState` (pact import and export,
+promote recordings, baseline compare, gRPC descriptors, WASM modules, files and others) still answer `400` with the
+exception's message, as does the `PUT /mockserver/configuration` route's "Invalid configuration JSON".
+
 ## Expectation Matching
 
 ### RequestMatchers

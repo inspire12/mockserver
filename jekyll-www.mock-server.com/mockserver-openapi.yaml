@@ -16,6 +16,9 @@ info:
 
 
     MockServer also supports AI integration via MCP (Model Context Protocol), enabling AI agents and LLM-powered tools to programmatically create expectations, verify requests, and manage mock server state.
+
+
+    Errors: a request MockServer cannot accept (JSON it cannot read, an expectation or request matcher that fails schema validation, an invalid parameter, or an operation this deployment does not support) is answered 400 with a plain-text message describing the problem. An unexpected failure inside MockServer is answered 500 with a generic plain-text message naming a correlation id; the details, including the stack trace, are in the MockServer log under that correlation id.
   license:
     url: 'https://github.com/mock-server/mockserver-monorepo/blob/master/LICENSE.md'
     name: Apache 2.0

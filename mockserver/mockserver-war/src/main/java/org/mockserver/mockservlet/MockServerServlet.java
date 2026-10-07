@@ -5,19 +5,17 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.log.MockServerEventLog;
-import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.mappers.HttpServletRequestToMockServerHttpRequestDecoder;
 import org.mockserver.mock.HttpState;
 import org.mockserver.mock.action.http.HttpActionHandler;
 import org.mockserver.model.HttpRequest;
-import org.mockserver.model.MediaType;
+import org.mockserver.responsewriter.ControlPlaneFailureResponse;
 import org.mockserver.responsewriter.ResponseWriter;
 import org.mockserver.scheduler.Scheduler;
 import org.mockserver.serialization.PortBindingSerializer;
 import org.mockserver.servlet.responsewriter.ServletResponseWriter;
 import org.mockserver.socket.tls.NettySslContextFactory;
-import org.slf4j.event.Level;
 import jakarta.servlet.ServletContextEvent;
 import jakarta.servlet.ServletContextListener;
 import jakarta.servlet.http.HttpServlet;
@@ -25,14 +23,12 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 
 import static io.netty.handler.codec.http.HttpHeaderNames.HOST;
-import static io.netty.handler.codec.http.HttpResponseStatus.BAD_REQUEST;
 import static io.netty.handler.codec.http.HttpResponseStatus.OK;
 import static io.netty.handler.codec.rtsp.RtspResponseStatuses.NOT_IMPLEMENTED;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
 import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.mock.HttpState.PATH_PREFIX;
-import static org.mockserver.model.HttpResponse.response;
 import static org.mockserver.model.PortBinding.portBinding;
 
 /**
@@ -139,26 +135,8 @@ public class MockServerServlet extends HttpServlet implements ServletContextList
 
                 }
             }
-        } catch (IllegalArgumentException iae) {
-            mockServerLogger.logEvent(
-                new LogEntry()
-                    .setLogLevel(Level.ERROR)
-                    .setHttpRequest(request)
-                    .setMessageFormat("exception processing request:{}error:{}")
-                    .setArguments(request, iae.getMessage())
-            );
-            // send request without API CORS headers
-            responseWriter.writeResponse(request, BAD_REQUEST, iae.getMessage(), MediaType.create("text", "plain").toString());
-        } catch (Exception e) {
-            mockServerLogger.logEvent(
-                new LogEntry()
-                    .setLogLevel(Level.ERROR)
-                    .setHttpRequest(request)
-                    .setMessageFormat("exception processing request:{}")
-                    .setArguments(request)
-                    .setThrowable(e)
-            );
-            responseWriter.writeResponse(request, response().withStatusCode(BAD_REQUEST.code()).withBody(e.getMessage()), true);
+        } catch (Throwable throwable) {
+            ControlPlaneFailureResponse.write(mockServerLogger, responseWriter, request, throwable);
         }
     }
 

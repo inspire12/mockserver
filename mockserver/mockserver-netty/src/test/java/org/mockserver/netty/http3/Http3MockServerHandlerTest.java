@@ -131,6 +131,44 @@ public class Http3MockServerHandlerTest {
     }
 
     @Test
+    public void shouldAnswerAnUnexpectedControlPlaneFailureWithAServerErrorAndAGenericMessage() throws Exception {
+        assertThat(controlPlaneStatusWhenHandlingThrows(new NullPointerException("internal detail of the fault")), is("500"));
+    }
+
+    @Test
+    public void shouldAnswerAControlPlaneClientErrorWithABadRequest() throws Exception {
+        assertThat(controlPlaneStatusWhenHandlingThrows(new IllegalArgumentException("incorrect expectation json format")), is("400"));
+    }
+
+    private String controlPlaneStatusWhenHandlingThrows(RuntimeException fault) throws Exception {
+        HttpState httpState = mock(HttpState.class);
+        when(httpState.handle(any(), any(), anyBoolean())).thenThrow(fault);
+        HttpActionHandler httpActionHandler = mock(HttpActionHandler.class);
+        Http3MockServerHandler handler = new Http3MockServerHandler(
+            CONFIGURATION, LOGGER, httpState, httpActionHandler, new Metrics(CONFIGURATION)
+        );
+        ChannelHandlerContext ctx = mockChannelHandlerContextWithWrite();
+
+        DefaultHttp3HeadersFrame headersFrame = new DefaultHttp3HeadersFrame();
+        headersFrame.headers().method("PUT");
+        headersFrame.headers().path("/mockserver/expectation");
+        headersFrame.headers().scheme("https");
+        handler.channelRead(ctx, headersFrame);
+        handler.channelInputClosed(ctx);
+
+        verify(httpActionHandler, never()).processAction(any(), any(), any(), any(), anyBoolean(), anyBoolean());
+        ArgumentCaptor<Object> written = ArgumentCaptor.forClass(Object.class);
+        verify(ctx, atLeast(0)).write(written.capture());
+        verify(ctx, atLeast(0)).writeAndFlush(written.capture());
+        Http3HeadersFrame responseHeaders = (Http3HeadersFrame) written.getAllValues().stream()
+            .filter(frame -> frame instanceof Http3HeadersFrame)
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("no response header section written"));
+        written.getAllValues().forEach(io.netty.util.ReferenceCountUtil::release);
+        return String.valueOf(responseHeaders.headers().status());
+    }
+
+    @Test
     public void shouldReleaseBodyAccumulatorOnHandlerRemoved() throws Exception {
         // given: a handler that has received headers and a data frame
         Metrics metrics = new Metrics(CONFIGURATION);
