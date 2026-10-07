@@ -10,6 +10,7 @@ import java.util.Collections;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.core.Is.is;
+import static org.mockserver.configuration.Configuration.configuration;
 
 public class MockServerPropertyCustomizerConfigurationTest {
 
@@ -47,6 +48,23 @@ public class MockServerPropertyCustomizerConfigurationTest {
         assertThat(config.persistExpectations(), is(true));
         assertThat(config.disableLogging(), is(true));
         assertThat(config.enableCORSForAPI(), is(true));
+    }
+
+    @Test
+    public void shouldApplyDnsProperties() {
+        Configuration config = MockServerPropertyCustomizer.buildConfiguration(
+            Arrays.asList("mockserver.dnsEnabled=true", "mockserver.dnsPort=0")
+        );
+        assertThat(config.dnsEnabled(), is(true));
+        assertThat(config.dnsPort(), is(0));
+    }
+
+    @Test
+    public void shouldIgnoreADnsPortOutOfRange() {
+        Configuration config = MockServerPropertyCustomizer.buildConfiguration(
+            Arrays.asList("mockserver.dnsPort=65536", "mockserver.dnsPort=port")
+        );
+        assertThat(config.dnsPort(), is(configuration().dnsPort()));
     }
 
     @Test

@@ -61,6 +61,14 @@ public final class Http3TestClient implements AutoCloseable {
 
     public static Http3TestClient open(EventLoopGroup group, MockServer mockServer) throws Exception {
         assertThat("the HTTP/3 server started", mockServer.getHttp3Port(), greaterThan(0));
+        return open(group, new InetSocketAddress("127.0.0.1", mockServer.getHttp3Port()), TimeUnit.SECONDS.toMillis(WAIT_SECONDS));
+    }
+
+    /**
+     * @throws java.util.concurrent.TimeoutException if no handshake with {@code server} completes within
+     *                                               {@code waitMillis}; nothing of the attempt is left open
+     */
+    public static Http3TestClient open(EventLoopGroup group, InetSocketAddress server, long waitMillis) throws Exception {
         QuicSslContext sslContext = QuicSslContextBuilder.forClient()
             .trustManager(InsecureTrustManagerFactory.INSTANCE)
             .applicationProtocols(Http3.supportedApplicationProtocols())
@@ -94,30 +102,36 @@ public final class Http3TestClient implements AutoCloseable {
                 return true;
             }
         };
-        QuicChannel quicChannel = QuicChannel.newBootstrap(datagramChannel)
-            .handler(new ChannelInitializer<QuicChannel>() {
-                @Override
-                protected void initChannel(QuicChannel ch) {
-                    ch.pipeline().addLast(new Http3ClientConnectionHandler(controlStreamHandler, null, null, null, true));
-                    ch.pipeline().addLast(new ChannelInboundHandlerAdapter() {
-                        @Override
-                        public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
-                            if (evt instanceof QuicConnectionCloseEvent) {
-                                closedByServer.complete((QuicConnectionCloseEvent) evt);
+        QuicChannel quicChannel;
+        try {
+            quicChannel = QuicChannel.newBootstrap(datagramChannel)
+                .handler(new ChannelInitializer<QuicChannel>() {
+                    @Override
+                    protected void initChannel(QuicChannel ch) {
+                        ch.pipeline().addLast(new Http3ClientConnectionHandler(controlStreamHandler, null, null, null, true));
+                        ch.pipeline().addLast(new ChannelInboundHandlerAdapter() {
+                            @Override
+                            public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
+                                if (evt instanceof QuicConnectionCloseEvent) {
+                                    closedByServer.complete((QuicConnectionCloseEvent) evt);
+                                }
+                                ctx.fireUserEventTriggered(evt);
                             }
-                            ctx.fireUserEventTriggered(evt);
-                        }
-
-                        @Override
-                        public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-                            // a connection the server closes is observed through closedByServer()
-                        }
-                    });
-                }
-            })
-            .remoteAddress(new InetSocketAddress("127.0.0.1", mockServer.getHttp3Port()))
-            .connect()
-            .get(WAIT_SECONDS, TimeUnit.SECONDS);
+    
+                            @Override
+                            public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+                                // a connection the server closes is observed through closedByServer()
+                            }
+                        });
+                    }
+                })
+                .remoteAddress(server)
+                .connect()
+                .get(waitMillis, TimeUnit.MILLISECONDS);
+        } catch (Exception notConnected) {
+            datagramChannel.close().awaitUninterruptibly(5, TimeUnit.SECONDS);
+            throw notConnected;
+        }
         return new Http3TestClient(datagramChannel, quicChannel, serverSettings, closedByServer);
     }
 

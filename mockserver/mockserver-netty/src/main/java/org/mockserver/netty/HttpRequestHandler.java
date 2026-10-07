@@ -127,6 +127,12 @@ public class HttpRequestHandler extends SimpleChannelInboundHandler<HttpRequest>
         return new HashSet<>();
     }
 
+    // null, so left out of the status JSON, unless DNS mocking is on
+    private Integer dnsPort() {
+        int dnsPort = server instanceof MockServer ? ((MockServer) server).getDnsPort() : -1;
+        return dnsPort > 0 ? dnsPort : null;
+    }
+
     /**
      * Complete the WS7.2 in-flight token for control-plane branches that write their response
      * directly via {@code ctx.writeAndFlush(...)} / a handler render method rather than through
@@ -261,7 +267,7 @@ public class HttpRequestHandler extends SimpleChannelInboundHandler<HttpRequest>
                 } else if (controlPlaneCandidate && (request.matches("PUT", PATH_PREFIX + "/status", "/status") ||
                     isNotBlank(configuration.livenessHttpGetPath()) && request.matches("GET", configuration.livenessHttpGetPath()))) {
 
-                    responseWriter.writeResponse(request, OK, portBindingSerializer.serialize(portBinding(server.getLocalPorts())), "application/json");
+                    responseWriter.writeResponse(request, OK, portBindingSerializer.serialize(portBinding(server.getLocalPorts()).setDnsPort(dnsPort())), "application/json");
 
                 } else if (controlPlaneCandidate && request.matches("PUT", PATH_PREFIX + "/bind", "/bind")) {
 

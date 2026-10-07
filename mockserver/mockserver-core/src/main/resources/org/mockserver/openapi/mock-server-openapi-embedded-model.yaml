@@ -6138,6 +6138,9 @@ components:
           items:
             type: number
           type: array
+        dnsPort:
+          description: "UDP port of the DNS mock server; only in the answer to /mockserver/status, and only while DNS mocking is on"
+          type: number
     HttpRequestAndHttpResponse:
       description: "request and response"
       type: object

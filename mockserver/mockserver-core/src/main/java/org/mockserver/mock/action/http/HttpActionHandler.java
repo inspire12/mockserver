@@ -126,6 +126,7 @@ public class HttpActionHandler {
     private GrpcStreamResponseActionHandler grpcStreamResponseActionHandler;
     private HttpErrorActionHandler httpErrorActionHandler;
     private org.mockserver.templates.engine.DelayTemplateResolver delayTemplateResolver;
+    private final FinalInformationalResponseWarning finalInformationalResponseWarning = new FinalInformationalResponseWarning();
 
     // forwarding
     private NettyHttpClient httpClient;
@@ -2562,6 +2563,7 @@ public class HttpActionHandler {
                                 .setArguments(responseToWrite, request, action, action.getExpectationId())
                         );
                         HttpResponse validatedResponse = validateOpenAPIResponse(responseToWrite, request, action, requestDefinition);
+                        finalInformationalResponseWarning.warnOnce(mockServerLogger, request, validatedResponse, action);
                         responseWriter.writeResponse(request, validatedResponse, false);
                         emitRequestSpan(request, validatedResponse, action, ctx, 0);
                     }, postProcessor)) {
@@ -2587,6 +2589,7 @@ public class HttpActionHandler {
                         .setArguments(effectiveResponse, request, action, action.getExpectationId())
                 );
                 HttpResponse validatedResponse = validateOpenAPIResponse(effectiveResponse, request, action, requestDefinition);
+                finalInformationalResponseWarning.warnOnce(mockServerLogger, request, validatedResponse, action);
                 responseWriter.writeResponse(request, validatedResponse, false);
                 emitRequestSpan(request, validatedResponse, action, ctx, 0);
             } finally {

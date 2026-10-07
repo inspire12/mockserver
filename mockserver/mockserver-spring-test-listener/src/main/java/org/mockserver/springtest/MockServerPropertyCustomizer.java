@@ -63,17 +63,24 @@ public class MockServerPropertyCustomizer implements ContextCustomizer {
 
     @Override
     public void customizeContext(ConfigurableApplicationContext context, MergedContextConfiguration mergedConfig) {
-        ClientAndServer server = getOrCreateClientAndServer(mockServerProperties);
+        exposePorts(context, getOrCreateClientAndServer(mockServerProperties), springProperties);
+    }
+
+    /**
+     * Sets {@code mockServerPort} and {@code mockServerDnsPort} (-1 when DNS mocking is not on) in the context's
+     * environment, where a {@code ${mockServerDnsPort}} in a property is resolved when it is read.
+     */
+    static void exposePorts(ConfigurableApplicationContext context, ClientAndServer server, List<String> springProperties) {
         int port = server.getPort();
+        int dnsPort = server.getDnsPort();
 
         context
             .getEnvironment()
             .getPropertySources()
-            .addLast(new MockPropertySource().withProperty("mockServerPort", port));
+            .addLast(new MockPropertySource().withProperty("mockServerPort", port).withProperty("mockServerDnsPort", dnsPort));
 
         springProperties.forEach(property -> {
-                String replacement =
-                    MOCK_SERVER_PORT_PATTERN.matcher(property).replaceAll(String.valueOf(port));
+                String replacement = MOCK_SERVER_PORT_PATTERN.matcher(property).replaceAll(String.valueOf(port));
                 TestPropertySourceUtils.addInlinedPropertiesToEnvironment(context, replacement);
             }
         );
@@ -297,6 +304,21 @@ public class MockServerPropertyCustomizer implements ContextCustomizer {
                 break;
             case "attemptToProxyIfNoMatchingExpectation":
                 config.attemptToProxyIfNoMatchingExpectation(parseStrictBoolean(value, key));
+                break;
+            case "dnsEnabled":
+                config.dnsEnabled(parseStrictBoolean(value, key));
+                break;
+            case "dnsPort":
+                int dnsPort;
+                try {
+                    dnsPort = Integer.parseInt(value);
+                } catch (NumberFormatException nfe) {
+                    throw new IllegalArgumentException("mockserver.dnsPort must be an integer between 0 and 65535, got: " + value);
+                }
+                if (dnsPort < 0 || dnsPort > 65535) {
+                    throw new IllegalArgumentException("mockserver.dnsPort must be between 0 and 65535, got: " + dnsPort);
+                }
+                config.dnsPort(dnsPort);
                 break;
             case "proxyRemoteHost":
                 config.proxyRemoteHost(value);

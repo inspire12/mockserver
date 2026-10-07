@@ -3190,7 +3190,7 @@ public class ConfigurationProperties {
     }
 
     /**
-     * The local IP address to bind to for accepting new socket connections
+     * The local IP address MockServer listens on, for the TCP ports and the DNS and HTTP/3 UDP ports alike
      * <p>
      * Default is 0.0.0.0
      *

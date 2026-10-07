@@ -83,6 +83,8 @@ public class Http3PortFindThenBindGuardTest {
             "asserts that start-up fails where the QUIC native is missing, so the port is never bound"),
         allowed("mockserver-netty/Http3NativeStartupIntegrationTest.java", 2,
             "passes the port to a forked jar: through the starter where HTTP/3 must start, found only where the native cannot load"),
+        allowed("mockserver-netty/DnsLocalBoundIpTest.java", 1,
+            "binds a found port as an explicit dnsPort, not http3Port, and tries another when one is taken"),
         allowed("mockserver-netty/MainTest.java", 2,
             "asserts the exit code for a port another socket holds and for 70000"),
         allowed("mockserver-testcontainers/MockServerContainerConfigTest.java", 1,

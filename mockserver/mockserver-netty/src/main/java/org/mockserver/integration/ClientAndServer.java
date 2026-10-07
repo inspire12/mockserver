@@ -148,6 +148,14 @@ public class ClientAndServer extends MockServerClient {
         return mockServer.getLocalPorts();
     }
 
+    /**
+     * @return the UDP port of the DNS mock server, which for the default {@code dnsPort} of 0 is the port the
+     * operating system chose, or -1 if DNS mocking ({@code dnsEnabled}) is not on
+     */
+    public int getDnsPort() {
+        return mockServer.getDnsPort();
+    }
+
     public InetSocketAddress getRemoteAddress() {
         return mockServer.getRemoteAddress();
     }

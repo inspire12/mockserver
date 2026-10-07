@@ -201,6 +201,7 @@
     <span class="this_value">mockServer</span>.stop();
 }</code></pre>
 
+<p>With <a href="/mock_server/configuration_properties.html#button_configuration_dns_port">DNS mocking</a> on, <span class="inline_code">mockServer.getDnsPort()</span> gives the UDP port of the DNS mock server, the port MockServer chose unless <span class="inline_code">dnsPort</span> is set, or <span class="inline_code">-1</span> while DNS mocking is off.</p>
 <p>The <a target="_blank" href="https://github.com/mock-server/mockserver-monorepo/tree/master/examples/java" rel="noopener noreferrer">mockserver-example</a> project contains an example test called
 	<a target="_blank" href="https://github.com/mock-server/mockserver-monorepo/blob/master/examples/java/src/test/java/org/mockserver/examples/proxy/web/controller/BooksPageIntegrationTest.java" rel="noopener noreferrer">BooksPageIntegrationTest</a> that demonstrates a fully working example.</p>
 
@@ -267,6 +268,7 @@
  */</span>
 <span class="keyword">public</span> MockServerRule(Object target, <span class="keyword">boolean</span> perTestSuite, Integer... ports);</code></pre>
 
+<p><span class="inline_code">mockServerRule.getPort()</span> gives the HTTP(S) port and, with <a href="/mock_server/configuration_properties.html#button_configuration_dns_port">DNS mocking</a> on, <span class="inline_code">mockServerRule.getDnsPort()</span> gives the UDP port of the DNS mock server (<span class="inline_code">-1</span> while DNS mocking is off). Turn DNS mocking on with the <span class="inline_code">mockserver.dnsEnabled</span> system property.</p>
 <p><strong>Reducing in-memory store size (optional).</strong> Each MockServer keeps an in-memory event log and expectation store whose default sizes are derived from the JVM's maximum heap (up to <code>maxLogEntries = 250000</code> / <code>maxExpectations = 15000</code>) and stay constant for the life of the JVM. A test suite that starts many short-lived servers in one JVM can trim its memory footprint by enabling <a href="/mock_server/configuration_properties.html">dev mode</a> with <code>-Dmockserver.devMode=true</code> (or <code>MOCKSERVER_DEV_MODE=true</code>), which fixes both stores at 1000 entries — measured at roughly 117&nbsp;MB down to 52&nbsp;MB across 32 servers in one JVM. Enabling dev mode applies JVM-wide, not only to servers the <strong>MockServerRule</strong> started, so a <code>ClientAndServer</code> you construct directly is affected too. If 1000 is too small for a test — a full store overwrites its oldest entries, so a <code>verify</code> can stop matching once more than 1000 requests or expectations accumulate in a single server — raise the limits explicitly with <code>-Dmockserver.maxLogEntries=…</code> / <code>-Dmockserver.maxExpectations=…</code> (or the matching <code>MOCKSERVER_*</code> environment variables, or a <code>mockserver.properties</code> file); an explicit size always wins over the dev-mode default. When dev mode is enabled MockServer logs the effective sizes at <code>INFO</code> once per JVM.</p>
 
 <a id="junit_test_extension" class="anchor" href="#junit_test_extension">&nbsp;</a>
@@ -375,6 +377,19 @@ class IsolatedTestClass {
 <p>The reset fires in <code>BeforeEachCallback</code>, which runs before any <span class="annotation">@BeforeEach</span> methods in the test class. When combined with <code>perTestSuite = true</code> the same shared server is reset before each test across all test classes in the suite.</p>
 </div>
 
+<p>An injected <strong>ClientAndServer</strong> also gives, with <a href="/mock_server/configuration_properties.html#button_configuration_dns_port">DNS mocking</a> on, the UDP port of the DNS mock server from <span class="inline_code">getDnsPort()</span> (<span class="inline_code">-1</span> while DNS mocking is off). Turn DNS mocking on with the <span class="inline_code">mockserver.dnsEnabled</span> system property, or register an extension with a server of your own:</p>
+<pre class="prettyprint lang-java code"><code class="code">class ExampleDnsTestClass {
+    @RegisterExtension
+    static MockServerExtension mockServer = new MockServerExtension(
+        ClientAndServer.startClientAndServer(configuration().dnsEnabled(true))
+    );
+
+    @Test
+    void testSomething(ClientAndServer client) {
+        int dnsPort = client.getDnsPort();
+        // ...
+    }
+}</code></pre>
 <p><strong>Reducing in-memory store size (optional).</strong> Each MockServer keeps an in-memory event log and expectation store whose default sizes are derived from the JVM's maximum heap (up to <code>maxLogEntries = 250000</code> / <code>maxExpectations = 15000</code>) and stay constant for the life of the JVM. A test suite that starts many short-lived servers in one JVM can trim its memory footprint by enabling <a href="/mock_server/configuration_properties.html">dev mode</a> with <code>-Dmockserver.devMode=true</code> (or <code>MOCKSERVER_DEV_MODE=true</code>), which fixes both stores at 1000 entries — measured at roughly 117&nbsp;MB down to 52&nbsp;MB across 32 servers in one JVM. Enabling dev mode applies JVM-wide, not only to servers the <strong>MockServerExtension</strong> started, so a <code>ClientAndServer</code> you construct directly is affected too. If 1000 is too small for a test — a full store overwrites its oldest entries, so a <code>verify</code> can stop matching once more than 1000 requests or expectations accumulate in a single server — raise the limits explicitly with <code>-Dmockserver.maxLogEntries=…</code> / <code>-Dmockserver.maxExpectations=…</code> (or the matching <code>MOCKSERVER_*</code> environment variables, or a <code>mockserver.properties</code> file); an explicit size always wins over the dev-mode default. When dev mode is enabled MockServer logs the effective sizes at <code>INFO</code> once per JVM.</p>
 
 <a id="spring_test_exec_listener" class="anchor" href="#spring_test_exec_listener">&nbsp;</a>
@@ -473,6 +488,25 @@ public class ExampleSpringTestListenerTestWithPortInjection {
 
     @MockServerPort
     Integer mockServerPort;
+
+    @Test
+    public void testSomething() {
+        // test code
+    }
+
+}</code></pre>
+
+<p>With DNS mocking on (<code>mockserver.dnsEnabled=true</code>), the UDP port of the DNS mock server, which MockServer chooses unless <code>mockserver.dnsPort</code> is set, is added the same way: as the <code>${mockServerDnsPort}</code> placeholder and with <code>@MockServerDnsPort</code>. Both are <code>-1</code> while DNS mocking is off. See <a href="/mock_server/configuration_properties.html#button_configuration_dns_port">DNS Port</a>.</p>
+
+<pre><code class="prettyprint lang-java code">@MockServerTest({
+    "mockserver.dnsEnabled=true",
+    "resolver.address=127.0.0.1:${mockServerDnsPort}"
+})
+@RunWith(SpringRunner.class)
+public class ExampleSpringTestListenerTestWithDnsPortInjection {
+
+    @MockServerDnsPort
+    Integer mockServerDnsPort;
 
     @Test
     public void testSomething() {

@@ -247,7 +247,9 @@ public class Http3Server {
                         listener.pipeline().addLast(codec, new Http3ListenerExceptionHandler(handlerLogger));
                     }
                 });
-            bind = port == 0 ? bootstrap.bind(new InetSocketAddress(0)) : bindExplicitPort(bootstrap, port);
+            String localBoundIP = configuration != null ? configuration.localBoundIP() : null;
+            InetSocketAddress listenerAddress = Ipv4UdpPortProbe.listenerAddress(localBoundIP, port);
+            bind = port == 0 ? bootstrap.bind(listenerAddress) : bindExplicitPort(bootstrap, listenerAddress);
             channel = bound(bind);
 
             int boundPort = ((InetSocketAddress) channel.localAddress()).getPort();
@@ -274,11 +276,11 @@ public class Http3Server {
      * {@link Ipv4UdpPortProbe}). The refusal is decided before Netty binds anything, so a refused port is free
      * as soon as this throws. Where the bind itself fails (Linux, or an IPv4-only stack), its own error is kept.
      */
-    private static ChannelFuture bindExplicitPort(Bootstrap bootstrap, int port) throws Exception {
-        if (Ipv4UdpPortProbe.shadowedOnIpv4(port)) {
-            throw Ipv4UdpPortProbe.ipv4WildcardConflict(port, "HTTP/3 requests", "http3Port");
+    private static ChannelFuture bindExplicitPort(Bootstrap bootstrap, InetSocketAddress listenerAddress) throws Exception {
+        if (Ipv4UdpPortProbe.shadowedOnIpv4(listenerAddress)) {
+            throw Ipv4UdpPortProbe.ipv4WildcardConflict(listenerAddress.getPort(), "HTTP/3 requests", "http3Port");
         }
-        return bootstrap.bind(new InetSocketAddress(port));
+        return bootstrap.bind(listenerAddress);
     }
 
     /**

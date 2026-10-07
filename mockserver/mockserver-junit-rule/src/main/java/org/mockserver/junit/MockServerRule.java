@@ -118,6 +118,15 @@ public class MockServerRule implements TestRule {
         return ports;
     }
 
+    /**
+     * @return the UDP port of the DNS mock server, which for the default {@code dnsPort} of 0 is the port the
+     * operating system chose; -1 if DNS mocking ({@code mockserver.dnsEnabled}) is not on, or null before the
+     * server has started
+     */
+    public Integer getDnsPort() {
+        return clientAndServer != null ? clientAndServer.getDnsPort() : null;
+    }
+
     public Statement apply(Statement base, Description description) {
         return statement(base);
     }

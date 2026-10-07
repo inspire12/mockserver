@@ -17,6 +17,7 @@ public class PortBinding extends ObjectWithJsonToString {
     private static final String GIT_HASH = Version.getGitHash();
 
     private List<Integer> ports = new ArrayList<>();
+    private Integer dnsPort;
     private final String version = VERSION;
     private final String artifactId = ARTIFACT_ID;
     private final String groupId = GROUP_ID;
@@ -36,6 +37,19 @@ public class PortBinding extends ObjectWithJsonToString {
 
     public PortBinding setPorts(List<Integer> ports) {
         this.ports = ports;
+        return this;
+    }
+
+    /**
+     * @return the UDP port of the DNS mock server, set only in the answer to a status request and only while DNS
+     * mocking is on
+     */
+    public Integer getDnsPort() {
+        return dnsPort;
+    }
+
+    public PortBinding setDnsPort(Integer dnsPort) {
+        this.dnsPort = dnsPort;
         return this;
     }
 

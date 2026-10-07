@@ -951,7 +951,7 @@ Always close connections after response (ignore keep-alive).
 - Environment variable: MOCKSERVER_ALWAYS_CLOSE_SOCKET_CONNECTIONS
 
 **localBoundIP**
-Local IP address to bind for accepting socket connections.
+Local IP address MockServer listens on: the HTTP(S) ports, the DNS port and the HTTP/3 port.
 - Default: 0.0.0.0
 - Environment variable: MOCKSERVER_LOCAL_BOUND_IP
 

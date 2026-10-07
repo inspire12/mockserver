@@ -16,10 +16,14 @@ import org.mockserver.netty.MockServerCaTrustTestSupport;
 import org.mockserver.netty.integration.Http2TestClient;
 import org.mockserver.netty.integration.NettyBufferLeaks;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.net.InetSocketAddress;
 import java.net.ProxySelector;
+import java.net.Socket;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.net.http.HttpClient;
 import java.net.http.HttpResponse;
 import java.time.Duration;
@@ -29,14 +33,17 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.startsWith;
 import static org.junit.Assert.assertThrows;
 import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.model.ConnectionOptions.connectionOptions;
@@ -120,6 +127,42 @@ public class Http2FinalInformationalResponseIntegrationTest {
             }
         }
         assertThat("ending a stream this way is not a fault", warningsAndErrors(), is(empty()));
+        assertThat("one for each expectation, on whichever route it was first served", finalInformationalWarningStatuses(), containsInAnyOrder(102, 103));
+    }
+
+    @Test
+    public void shouldWarnOnceForEachExpectationNotForEachRequest() throws Exception {
+        for (int request = 0; request < 3; request++) {
+            try (Http2TestClient client = connect(Route.H2C)) {
+                assertThat(client.send(headers(Route.H2C, HttpMethod.GET, "/processing"), true).resetErrorCode(), is(Http2Error.NO_ERROR.code()));
+            }
+        }
+        assertThat(finalInformationalWarningStatuses(), contains(102));
+
+        String warning = finalInformationalWarnings().get(0);
+        assertThat("names the expectation", warning, containsString(mockServerClient.retrieveActiveExpectations(request().withPath("/processing"))[0].getId()));
+        assertThat("says what happens", warning, containsString("reset the stream with NO_ERROR"));
+        assertThat("and what to do", warning, containsString("add a protocol of HTTP_1_1"));
+
+        mockServerClient.when(request().withPath("/processing-again")).respond(response().withStatusCode(102));
+        try (Http2TestClient client = connect(Route.TLS)) {
+            client.send(headers(Route.TLS, HttpMethod.GET, "/processing-again"), true).resetErrorCode();
+            client.send(headers(Route.TLS, HttpMethod.GET, "/processing"), true).resetErrorCode();
+        }
+        assertThat("another expectation is warned about once too", finalInformationalWarningStatuses(), contains(102, 102));
+        assertThat(warningsAndErrors(), is(empty()));
+    }
+
+    @Test
+    public void shouldNotWarnAboutAFinalInformationalResponseOverHttp11() throws Exception {
+        try (Socket socket = new Socket("localhost", mockServer.getLocalPort())) {
+            socket.setSoTimeout(10000);
+            socket.getOutputStream().write("GET /processing HTTP/1.1\r\nHost: localhost\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
+            String statusLine = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.US_ASCII)).readLine();
+            assertThat(statusLine, startsWith("HTTP/1.1 102"));
+        }
+        assertThat(finalInformationalWarnings(), is(empty()));
+        assertThat(warningsAndErrors(), is(empty()));
     }
 
     /**
@@ -150,6 +193,7 @@ public class Http2FinalInformationalResponseIntegrationTest {
             }
         }
         assertThat(warningsAndErrors(), is(empty()));
+        assertThat("one for each of the six expectations", finalInformationalWarningStatuses(), contains(102, 102, 102, 102, 102, 102));
     }
 
     @Test
@@ -267,12 +311,31 @@ public class Http2FinalInformationalResponseIntegrationTest {
     }
 
     /**
-     * What MockServer logged since the last reset, other than the requests it received and the responses it returned.
+     * What MockServer logged since the last reset, other than the requests it received, the responses it returned and
+     * the warnings about a final 1xx over HTTP/2.
      */
     private static List<String> warningsAndErrors() {
-        return Arrays.stream(mockServerClient.retrieveLogMessagesArray(null))
-            .map(message -> message.substring(message.indexOf(" - ") + " - ".length()))
-            .filter(message -> !message.startsWith("received request") && !message.startsWith("returning "))
+        return logMessages()
+            .filter(message -> !message.startsWith("received request") && !message.startsWith("returning ") && !isFinalInformationalWarning(message))
             .collect(Collectors.toList());
+    }
+
+    private static List<String> finalInformationalWarnings() {
+        return logMessages().filter(Http2FinalInformationalResponseIntegrationTest::isFinalInformationalWarning).collect(Collectors.toList());
+    }
+
+    private static List<Integer> finalInformationalWarningStatuses() {
+        return finalInformationalWarnings().stream()
+            .map(warning -> Integer.parseInt(warning.replaceAll("(?s).*with the status:\\s*(\\d+).*", "$1")))
+            .collect(Collectors.toList());
+    }
+
+    private static boolean isFinalInformationalWarning(String message) {
+        return message.startsWith("expectation:") && message.contains("answered a request over HTTP/2 with the status:");
+    }
+
+    private static Stream<String> logMessages() {
+        return Arrays.stream(mockServerClient.retrieveLogMessagesArray(null))
+            .map(message -> message.substring(message.indexOf(" - ") + " - ".length()));
     }
 }

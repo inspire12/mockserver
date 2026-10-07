@@ -9,6 +9,8 @@ import java.net.StandardProtocolFamily;
 import java.net.UnknownHostException;
 import java.nio.channels.DatagramChannel;
 
+import static org.apache.commons.lang3.StringUtils.isBlank;
+
 /**
  * The UDP counterpart of the TCP listeners' {@code LoopbackShadowProbe}, for the HTTP/3 and DNS listeners. On macOS
  * a dual-stack UDP bind succeeds on a port another socket holds on {@code 0.0.0.0}, which then receives the
@@ -21,6 +23,26 @@ public final class Ipv4UdpPortProbe {
     private static final InetAddress IPV4_WILDCARD = ipv4Wildcard();
 
     private Ipv4UdpPortProbe() {
+    }
+
+    /**
+     * @return the address a UDP listener binds: {@code localBoundIP} when it is set, as the TCP listeners do, otherwise
+     * every address
+     */
+    public static InetSocketAddress listenerAddress(String localBoundIP, int port) {
+        return isBlank(localBoundIP) ? new InetSocketAddress(port) : new InetSocketAddress(localBoundIP, port);
+    }
+
+    /**
+     * Only a wildcard bind is checked: a bind of one address fails against a socket on {@code 0.0.0.0:port}, and a
+     * socket on one address is sent every datagram for that address.
+     *
+     * @return true if the server's bind of {@code listenerAddress} would share its port with a socket on the IPv4
+     * wildcard, which would then get the localhost datagrams
+     */
+    public static boolean shadowedOnIpv4(InetSocketAddress listenerAddress) {
+        InetAddress address = listenerAddress.getAddress();
+        return address != null && address.isAnyLocalAddress() && shadowedOnIpv4(listenerAddress.getPort());
     }
 
     /**

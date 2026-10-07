@@ -348,14 +348,14 @@ public class MockServer extends LifeCycle {
     private void startDnsServer(Configuration configuration) {
         int dnsPort = configuration.dnsPort() != null ? configuration.dnsPort() : 0;
         try {
-            bindDnsPort(dnsPort);
+            bindDnsPort(dnsPort, configuration.localBoundIP());
         } catch (Throwable throwable) {
             stopRefusedStart();
             throw throwable instanceof DnsStartupException ? (DnsStartupException) throwable : DnsStartupException.serverCouldNotStart(dnsPort, throwable);
         }
     }
 
-    private void bindDnsPort(int dnsPort) {
+    private void bindDnsPort(int dnsPort, String localBoundIP) {
         DnsRequestHandler dnsHandler = new DnsRequestHandler(mockServerLogger, httpState);
         Bootstrap dnsBootstrap = new Bootstrap()
             .group(workerGroup)
@@ -370,7 +370,7 @@ public class MockServer extends LifeCycle {
                         .addLast(dnsHandler);
                 }
             });
-        dnsChannel = dnsPort > 0 ? bindExplicitDnsPort(dnsBootstrap, dnsPort) : bindChosenDnsPort(dnsBootstrap);
+        dnsChannel = dnsPort > 0 ? bindExplicitDnsPort(dnsBootstrap, Ipv4UdpPortProbe.listenerAddress(localBoundIP, dnsPort)) : bindChosenDnsPort(dnsBootstrap, localBoundIP);
         int boundPort = ((InetSocketAddress) dnsChannel.localAddress()).getPort();
         if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
             mockServerLogger.logEvent(
@@ -387,11 +387,12 @@ public class MockServer extends LifeCycle {
      * Refused before anything is bound where macOS would let the server share the port with a socket that holds it
      * on IPv4, and that socket would get the queries sent to localhost (see {@link Ipv4UdpPortProbe}).
      */
-    private static Channel bindExplicitDnsPort(Bootstrap dnsBootstrap, int dnsPort) {
-        if (Ipv4UdpPortProbe.shadowedOnIpv4(dnsPort)) {
+    private static Channel bindExplicitDnsPort(Bootstrap dnsBootstrap, InetSocketAddress listenerAddress) {
+        int dnsPort = listenerAddress.getPort();
+        if (Ipv4UdpPortProbe.shadowedOnIpv4(listenerAddress)) {
             throw DnsStartupException.portCouldNotBeOpenedOrBound(dnsPort, Ipv4UdpPortProbe.ipv4WildcardConflict(dnsPort, "DNS queries", "dnsPort"));
         }
-        ChannelFuture bind = dnsBootstrap.bind(dnsPort).awaitUninterruptibly();
+        ChannelFuture bind = dnsBootstrap.bind(listenerAddress).awaitUninterruptibly();
         if (!bind.isSuccess()) {
             // also fails when the channel cannot be created or registered
             throw DnsStartupException.portCouldNotBeOpenedOrBound(dnsPort, bind.cause());
@@ -404,15 +405,16 @@ public class MockServer extends LifeCycle {
      * the IPv4 allocator and bound as an explicit one would be; a candidate refused, or taken before it is bound, is
      * replaced.
      */
-    private Channel bindChosenDnsPort(Bootstrap dnsBootstrap) {
+    private Channel bindChosenDnsPort(Bootstrap dnsBootstrap, String localBoundIP) {
         Throwable lastFailure = null;
         for (int attempt = 0; attempt < DNS_PORT_CANDIDATES; attempt++) {
             int candidate = nextDnsPortCandidate();
-            if (candidate > 0 && Ipv4UdpPortProbe.shadowedOnIpv4(candidate)) {
+            InetSocketAddress listenerAddress = Ipv4UdpPortProbe.listenerAddress(localBoundIP, candidate);
+            if (candidate > 0 && Ipv4UdpPortProbe.shadowedOnIpv4(listenerAddress)) {
                 lastFailure = Ipv4UdpPortProbe.ipv4WildcardConflict(candidate, "DNS queries", "dnsPort");
                 continue;
             }
-            ChannelFuture bind = dnsBootstrap.bind(candidate).awaitUninterruptibly();
+            ChannelFuture bind = dnsBootstrap.bind(listenerAddress).awaitUninterruptibly();
             if (bind.isSuccess()) {
                 return bind.channel();
             }

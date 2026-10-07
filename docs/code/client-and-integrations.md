@@ -207,6 +207,7 @@ classDiagram
         -mockServer: MockServer
         +startClientAndServer(ports): ClientAndServer
         +isRunning(): boolean
+        +getDnsPort(): int
         +registerListener(ExpectationsListener)
     }
 
@@ -303,6 +304,8 @@ public class MyTest {
 - `new MockServerRule(this, true)` — per-test-suite (static, shared across tests)
 - `new MockServerRule(this, 1080)` — specific port, per-test-suite
 
+`getPort()`/`getPorts()` give the TCP ports and `getDnsPort()` the DNS mock's UDP port (-1 while DNS mocking is off, null before a server has started); the JUnit 5 extension's injected `ClientAndServer` has the same `getDnsPort()`.
+
 ### JUnit 5 Extension
 
 ```java
@@ -343,8 +346,8 @@ sequenceDiagram
     PC->>PC: Split properties into Spring vs mockserver.*
     PC->>PC: Build Configuration from mockserver.* properties
     PC->>PC: Create ClientAndServer with Configuration on free port
-    PC->>SB: Add mockServerPort to Environment
-    PC->>SB: Replace ${mockServerPort} in Spring property values
+    PC->>SB: Add mockServerPort and mockServerDnsPort to Environment
+    PC->>SB: Replace ${mockServerPort} in Spring property values (${mockServerDnsPort} resolves from the Environment)
 
     SB->>EL: prepareTestInstance()
     EL->>EL: Find MockServerClient fields
@@ -379,7 +382,7 @@ class MyTest {
 **How it works:**
 1. `MockServerTestCustomizerFactory` (loaded via `spring.factories`) scans for `@MockServerTest`
 2. `MockServerPropertyCustomizer` splits annotation properties: `mockserver.*`-prefixed properties are applied to a per-instance `Configuration` object; other properties go to the Spring `Environment`
-3. `MockServerPropertyCustomizer` creates a `ClientAndServer` with the `Configuration` on a free port and injects `mockServerPort` into the Spring `Environment`
+3. `MockServerPropertyCustomizer` creates a `ClientAndServer` with the `Configuration` on a free port and injects `mockServerPort` and `mockServerDnsPort` (the DNS mock's UDP port, -1 while DNS mocking is off; `@MockServerDnsPort`) into the Spring `Environment`
 4. `MockServerTestExecutionListener` injects the `ClientAndServer` into `MockServerClient` fields
 5. After each test, `reset()` clears state
 
@@ -723,6 +726,7 @@ graph TB
 | `MockServerPropertyCustomizer` | spring-test-listener | Spring context customizer |
 | `MockServerTestExecutionListener` | spring-test-listener | Spring test lifecycle |
 | `MockServerPort` | spring-test-listener | Port injection annotation |
+| `MockServerDnsPort` | spring-test-listener | DNS port injection annotation (-1 while DNS mocking is off) |
 | `MockServerAutoConfiguration` | spring-boot-starter | Spring Boot auto-configuration (main app) |
 | `MockServerProperties` | spring-boot-starter | `mockserver.*` `@ConfigurationProperties` |
 | `WebSocketClient` | core | Client-side WebSocket connector |

@@ -886,6 +886,8 @@ sequenceDiagram
 
 **How.** `NettyResponseWriter.writeWhole` writes a `DefaultHttp2ResetFrame` to the stream's channel after the response, in the same flush, and hands the reset's write on as the response's. The order matters for a response with `closeSocket`, whose stream's channel is closed when that write completes: closing a stream that has not been reset sends `CANCEL` (a delayed response with `closeSocket` did, written the other way round). A final `1xx` with a `chunkSize` (with or without a `chunkDelay`) is written whole over HTTP/2, without the chunk size (`withoutChunking`): Netty's codec takes a `1xx` only as one `FullHttpResponse`, so in pieces it sent nothing at all, neither the `1xx` nor a reset (also before this change). Over HTTP/1.1 `HttpExchangeEndedEvent` is fired, as before. Netty's `Http2StreamFrameToHttpObjectCodec` already wrote a `1xx` without `END_STREAM`. On a tunnel the loopback's `LoopbackHttp2ResponseStreamer` hands a `1xx` on as it is read, as a `StreamedHttp2ResponsePart` whose headers do not end the stream, where before `InboundHttp2ToHttpAdapter` handed it on whole and the client leg's `HttpToHttp2ConnectionHandler` ended the stream with it; `LoopbackHttp2StreamErrorHandler` then relays MockServer's reset with its code, as it does any other.
 
+**The user is told once per expectation.** Most clients report such a request as failed, which an expectation written for HTTP/1.1 does not lead a user to expect, so the first time an expectation answers a request over HTTP/2 with a final `1xx`, `HttpActionHandler` logs one `WARN`, with no stack trace, naming the expectation, saying the stream was reset and how to answer HTTP/2 clients (a status of 200 or above, or a request matcher with a protocol of `HTTP_1_1`). Later requests to it log nothing more: a user mocking a `102` on purpose to test a client would find a `WARN` per request noise. The mark is the expectation's action, held by identity in a weak set (`FinalInformationalResponseWarning`), so an expectation that is replaced or added again is warned about again and a removed one leaves nothing behind; each response of a response sequence is its own action. The protocol is the request's own (`Protocol.HTTP_2`, from the stream's codec, also on the loopback leg of a tunnel), which is decided only when a request arrives, not when the expectation is created.
+
 **An interim response that a final one follows is not affected.** The `100` MockServer answers `Expect: 100-continue` with comes from the stream's aggregator (from the relay, in a tunnel), not from an expectation, and its stream goes on to the final response. MockServer has no way to mock a `103` that a final response follows.
 
 | Protocol | A mocked final `1xx` | Then |
@@ -2217,8 +2219,18 @@ A `dnsPort` of 0 lets `MockServer` choose: it takes a port from the IPv4 allocat
 `0.0.0.0:0`, then closed), probes it as above and binds it as an explicit port. A candidate the probe
 refuses, or whose bind fails (another socket took it in between, or holds it on IPv6), is replaced, up to
 10 candidates; then the start fails through the second row. Where IPv4 is unavailable the candidate is 0
-and the operating system chooses. `MockServer.getDnsPort()` returns the bound port, or -1 when DNS is off.
-`ClientAndServer` has no accessor for it. `DnsPortChoiceTest` offers a held port as the first candidate.
+and the operating system chooses. `MockServer.getDnsPort()` returns the bound port, or -1 when DNS is off,
+and so do `ClientAndServer.getDnsPort()` (and through it the `ClientAndServer` the JUnit 5 extension injects)
+and `MockServerRule.getDnsPort()` (null before the rule has started a server). The Spring listener sets
+`mockServerDnsPort` (`${mockServerDnsPort}`, `@MockServerDnsPort`), and `PUT /mockserver/status` answers it
+as `dnsPort`, left out while DNS is off. `DnsPortChoiceTest` offers a held port as the first candidate.
+
+**`localBoundIP`.** When it is set the DNS listener binds that address, as the TCP listeners do
+(`Ipv4UdpPortProbe.listenerAddress`), and so does the HTTP/3 listener. The probe above runs only for a
+wildcard bind: a bind of one address fails against a socket on `0.0.0.0:port` (macOS and Linux alike), and a
+socket bound to one address is sent every datagram for it, so nothing can shadow it. A port of 0 is still
+taken from the IPv4 allocator and bound on that address. `DnsLocalBoundIpTest` and `Http3LocalBoundIpTest`
+send to another address of the host and get no answer.
 
 This replaced a path that logged `exception binding DNS port - DNS mocking disabled` at WARN and kept
 serving TCP with `getDnsPort()` returning -1. `DnsStartFailureTest` covers a port held by another

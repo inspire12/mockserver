@@ -216,6 +216,13 @@ This release delivers a sustained performance and memory programme alongside dat
 
 ### Added
 
+- **The DNS port MockServer chose can be read from every embedded API and from the status endpoint.** With DNS mocking
+  on and the default `dnsPort` of `0`, the port could be read only from `MockServer.getDnsPort()` or the start-up log.
+  It is now also `ClientAndServer.getDnsPort()` (so also on the `ClientAndServer` the JUnit 5 extension injects),
+  `MockServerRule.getDnsPort()`, the Spring listener's `${mockServerDnsPort}` placeholder and `@MockServerDnsPort`
+  annotation, and the `dnsPort` field of the answer to `PUT /mockserver/status`. Each Java accessor and the Spring
+  placeholder give `-1` while DNS mocking is off, and the status answer leaves the field out, so nothing changes for a
+  server without DNS mocking. `@MockServerTest` now also accepts `mockserver.dnsEnabled` and `mockserver.dnsPort`.
 - **HTTP/3 Docker image: `mockserver/mockserver:<version>-http3`** (also `mockserver-<version>-http3` and `latest-http3`, plus `snapshot-http3` / `mockserver-snapshot-http3` for every `master` build), for `linux/amd64` and `linux/arm64` on Docker Hub, ECR Public and the GHCR mirror, and cosign-signed like the other release images. It is the standard image plus the QUIC native for its architecture (~3 MB download, ~7 MB on disk), so it behaves identically and serves HTTP/3 once `http3Port` is set (for example `-e MOCKSERVER_HTTP3_PORT=8443 -p 8443:8443/udp`), including with a read-only root filesystem. Helm: `--set image.variant=http3`.
 - **"Throughput by hardware size" on the performance page.** A new section on `performance.html` shows, for single MockServer containers from 1 core / 512 MB up to 6 cores / 2 GB (including a 3-core point, plus a 2-core / 2 GB control to separate the effect of memory from cores), the healthy request rate, the request rate per core, how that compares with the 1-core size, the peak rate, the median and p95 latency at the healthy rate, and how much request history each memory size keeps. Its chart adds a dashed line for ideal linear scaling from 1 core. Each size is driven by four load generators so that it measures MockServer rather than the load generator; a size the load generator may still have limited is marked "≥".
 - **Request latency including the network write: `mock_server_request_transport_duration_seconds`.**
@@ -774,6 +781,21 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **`localBoundIP` now keeps the DNS and HTTP/3 ports on that address too.** It applied to the HTTP(S) ports only:
+  the DNS port and the experimental HTTP/3 port, which use UDP, listened on every address of the host even when
+  `localBoundIP` was set, so a user who set `localBoundIP=127.0.0.1` to keep MockServer off the network still exposed
+  DNS mocking and HTTP/3 to it. **If you set `localBoundIP` and send DNS queries or HTTP/3 requests to another address
+  of the host, they are no longer answered**: send them to the `localBoundIP` address, or leave `localBoundIP` unset.
+
+### Amend (unreleased entry)
+
+Append to the existing `[Unreleased]` bullet that begins **"A mocked response with a `1xx` status and nothing after it
+no longer leaves an HTTP/2 client waiting."**:
+
+  The first time an expectation answers a request over HTTP/2 this way, MockServer logs one `WARN` (no stack trace)
+  naming the expectation, saying that the stream was reset and that most clients report the request as failed, and
+  how to answer HTTP/2 clients: a status of `200` or above, or a request matcher with a protocol of `HTTP_1_1` to keep
+  the `1xx` for HTTP/1.1 clients. Later requests to the same expectation log nothing more.
 - **A reset made other than by the Node client now stays reset, and a Node callback with a `times` limit is no longer served again once it is used up.** MockServer closes a callback's WebSocket when it removes the callback's expectation: when its `times` are used up, or when it is cleared or reset through the REST API, the dashboard, another process or another client. The Node client took every such close for a dropped connection: about two seconds later it reconnected and registered the callback's expectation again, as new and with its full `times`, and ran the registration's `then()` again. So a reset was undone, and a callback limited to one request (the default) answered once, then 404, then again after each reconnect. The client now registers a callback's expectation once. When its WebSocket closes, it reconnects only if MockServer still holds the expectation, and then with the same client id, so the callback keeps its remaining `times`; otherwise it leaves the WebSocket closed without a reconnect warning, so a process whose callbacks are all used up can exit. A breakpoint's WebSocket is no longer reopened after MockServer closes it, which brought back the client's first breakpoint after a reset; the next breakpoint opens a new WebSocket.
 - **A reset no longer fails with a 500 while callback WebSockets are open.** When a callback or breakpoint WebSocket was served by the same I/O thread as the `PUT /mockserver/reset` request, the reset failed part way through with a `ConcurrentModificationException`: expectations and logs were cleared, but the other callback WebSockets stayed registered and everything reset after them (CRUD and file stores, quotas, rate limits, chaos and load state, SLO samples and more) was not reset. Every WebSocket is now closed and the reset completes.
 - **A connection that starts with a PROXY protocol header is now handled like any other.** With

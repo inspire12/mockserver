@@ -16,7 +16,7 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * Asks a DNS server on {@code 127.0.0.1} the way a client of MockServer would.
+ * Asks a DNS server, on {@code 127.0.0.1} unless told otherwise, the way a client of MockServer would.
  */
 public final class DnsQueries {
 
@@ -29,10 +29,18 @@ public final class DnsQueries {
      * @return the address in the A record answered for {@code name}, or why there was none
      */
     public static String addressAnsweredFor(String name, int dnsPort) throws Exception {
+        return addressAnsweredFor(name, new InetSocketAddress("127.0.0.1", dnsPort));
+    }
+
+    /**
+     * @param server where the query is sent, from a socket bound to the same address
+     * @return the address in the A record answered for {@code name}, or why there was none
+     */
+    public static String addressAnsweredFor(String name, InetSocketAddress server) throws Exception {
         byte[] query = Message.newQuery(org.xbill.DNS.Record.newRecord(Name.fromString(name), Type.A, DClass.IN)).toWire();
-        try (DatagramSocket resolver = new DatagramSocket(new InetSocketAddress("127.0.0.1", 0))) {
+        try (DatagramSocket resolver = new DatagramSocket(new InetSocketAddress(server.getAddress(), 0))) {
             resolver.setSoTimeout(QUERY_TIMEOUT_MILLIS);
-            resolver.connect(new InetSocketAddress("127.0.0.1", dnsPort));
+            resolver.connect(server);
             resolver.send(new DatagramPacket(query, query.length));
             DatagramPacket reply = new DatagramPacket(new byte[512], 512);
             resolver.receive(reply);
