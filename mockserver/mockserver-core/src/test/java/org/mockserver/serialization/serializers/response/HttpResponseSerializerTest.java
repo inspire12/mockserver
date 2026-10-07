@@ -140,4 +140,15 @@ public class HttpResponseSerializerTest {
         );
     }
 
+    @Test
+    public void shouldReturnFormattedResponseMarkedPrimary() throws JsonProcessingException {
+        assertThat(ObjectMapperFactory.createObjectMapper(true, false).writeValueAsString(
+            response().withStatusCode(202).withPrimary(true)
+            ),
+            is("{" + NEW_LINE +
+                "  \"statusCode\" : 202," + NEW_LINE +
+                "  \"primary\" : true" + NEW_LINE +
+                "}")
+        );
+    }
 }

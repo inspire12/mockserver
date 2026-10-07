@@ -55,6 +55,30 @@ public class HttpServletRequestToMockServerHttpRequestDecoder {
         return request;
     }
 
+    /**
+     * The method, path, headers and keep-alive of a request that {@link #mapHttpServletRequestToMockServerRequest}
+     * failed to decode, so an error response can still be written for it. Never throws: a part that cannot be
+     * read is left at its default.
+     */
+    public HttpRequest mapUndecodableServletRequest(HttpServletRequest httpServletRequest) {
+        HttpRequest request = new HttpRequest();
+        try {
+            setMethod(request, httpServletRequest);
+            setPath(request, httpServletRequest);
+            setHeaders(request, httpServletRequest);
+            request.withKeepAlive(isKeepAlive(httpServletRequest));
+        } catch (RuntimeException ignore) {
+            // keep the parts read before the failure
+        }
+        if (request.getMethod().getValue() == null) {
+            request.withMethod("");
+        }
+        if (request.getPath().getValue() == null) {
+            request.withPath("");
+        }
+        return request;
+    }
+
     private void setMethod(HttpRequest httpRequest, HttpServletRequest httpServletRequest) {
         httpRequest.withMethod(httpServletRequest.getMethod());
     }

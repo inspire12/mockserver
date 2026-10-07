@@ -66,6 +66,9 @@ public class HttpResponseDTOSerializer extends StdSerializer<HttpResponseDTO> {
         if (httpResponseDTO.getRecoverAfter() != null) {
             jgen.writeObjectField("recoverAfter", httpResponseDTO.getRecoverAfter());
         }
+        if (httpResponseDTO.isPrimary()) {
+            jgen.writeObjectField("primary", true);
+        }
         jgen.writeEndObject();
     }
 }

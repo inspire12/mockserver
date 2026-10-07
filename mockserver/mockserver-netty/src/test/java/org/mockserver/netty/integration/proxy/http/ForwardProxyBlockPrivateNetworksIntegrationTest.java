@@ -13,10 +13,12 @@ import org.mockserver.integration.ClientAndServer;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.closurecallback.websocketregistry.LocalCallbackRegistry;
+import org.mockserver.mock.Expectation;
 import org.mockserver.mock.action.ExpectationForwardCallback;
 import org.mockserver.mock.breakpoint.BreakpointCallbackDispatcher;
 import org.mockserver.mock.breakpoint.BreakpointMatcherRegistry;
 import org.mockserver.mock.breakpoint.BreakpointPhase;
+import org.mockserver.model.HttpObjectCallback;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.netty.MockServer;
@@ -161,13 +163,9 @@ public class ForwardProxyBlockPrivateNetworksIntegrationTest {
             for (boolean block : new boolean[]{true, false}) {
                 logged.clear();
                 proxy = startClientAndServer(blockingPrivateNetworks(block));
-                // as JSON: the Java client does not send an action's primary flag
-                HttpResponse created = sendTo(proxy, request().withMethod("PUT").withPath("/mockserver/expectation").withBody(
-                    "{\"httpRequest\": {\"path\": \"/secondary\"}," +
-                        " \"httpResponse\": {\"statusCode\": 202, \"primary\": true}," +
-                        " \"httpForwardObjectCallback\": {\"clientId\": \"" + clientId + "\"}}"
-                ));
-                assertThat(created.getBodyAsString(), created.getStatusCode(), is(201));
+                proxy.upsert(new Expectation(request().withPath("/secondary"))
+                    .thenRespond(response().withStatusCode(202).withPrimary(true))
+                    .thenForward(new HttpObjectCallback().withClientId(clientId)));
 
                 assertThat(sendTo(proxy, request().withPath("/secondary")).getStatusCode(), is(202));
 

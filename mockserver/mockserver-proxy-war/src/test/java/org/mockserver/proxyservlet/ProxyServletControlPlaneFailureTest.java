@@ -1,5 +1,7 @@
 package org.mockserver.proxyservlet;
 
+import jakarta.servlet.ReadListener;
+import jakarta.servlet.ServletInputStream;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -7,13 +9,16 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
+import org.mockserver.mappers.HttpServletRequestToMockServerHttpRequestDecoder;
 import org.mockserver.mock.Expectation;
 import org.mockserver.mock.HttpState;
+import org.mockserver.model.HttpRequest;
 import org.mockserver.scheduler.Scheduler;
 import org.slf4j.event.Level;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
 
+import java.io.IOException;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -21,7 +26,9 @@ import static io.netty.handler.codec.http.HttpHeaderNames.CONTENT_TYPE;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
@@ -41,6 +48,7 @@ public class ProxyServletControlPlaneFailureTest {
     private HttpState httpStateHandler;
     private HttpState realHttpState;
     private MockServerLogger mockServerLogger;
+    private HttpServletRequestToMockServerHttpRequestDecoder httpServletRequestToMockServerRequestDecoder;
 
     @InjectMocks
     private ProxyServlet servlet;
@@ -58,6 +66,7 @@ public class ProxyServletControlPlaneFailureTest {
         };
         httpStateHandler = spy(realHttpState);
         mockServerLogger = mock(MockServerLogger.class);
+        httpServletRequestToMockServerRequestDecoder = spy(new HttpServletRequestToMockServerHttpRequestDecoder(configuration(), new MockServerLogger()));
         servlet = new ProxyServlet();
         openMocks(this);
     }
@@ -113,6 +122,74 @@ public class ProxyServletControlPlaneFailureTest {
         // then
         assertThat(response.getStatus(), is(400));
         assertThat(new String(response.getContentAsByteArray(), UTF_8), containsString("incorrect expectation json format"));
+    }
+
+    @Test
+    public void shouldAnswerARequestWhoseBodyCannotBeReadWithAServerErrorAndAGenericMessage() {
+        // given
+        MockHttpServletRequest request = new MockHttpServletRequest("PUT", "/mockserver/expectation") {
+            @Override
+            public ServletInputStream getInputStream() {
+                return new FailingServletInputStream();
+            }
+        };
+        request.addHeader("Origin", "https://dashboard.example.com");
+
+        // when
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        servlet.service(request, response);
+
+        // then
+        String body = new String(response.getContentAsByteArray(), UTF_8);
+        assertThat(response.getStatus(), is(500));
+        assertThat(body, startsWith(UNEXPECTED_FAILURE_MESSAGE));
+        assertThat(body, not(containsString("connection reset reading body")));
+        assertThat(response.getHeader("Access-Control-Allow-Origin"), is("https://dashboard.example.com"));
+
+        // and - logged once at ERROR, against the request as far as it could be read
+        ArgumentCaptor<LogEntry> logged = ArgumentCaptor.forClass(LogEntry.class);
+        verify(mockServerLogger, atLeastOnce()).logEvent(logged.capture());
+        List<LogEntry> errors = logged.getAllValues().stream()
+            .filter(entry -> entry.getLogLevel() == Level.ERROR && entry.getThrowable() != null)
+            .collect(Collectors.toList());
+        assertThat(errors, hasSize(1));
+        assertThat(body, is(UNEXPECTED_FAILURE_MESSAGE + errors.get(0).getCorrelationId()));
+        assertThat(((HttpRequest) errors.get(0).getHttpRequest()).getPath().getValue(), is("/mockserver/expectation"));
+    }
+
+    @Test
+    public void shouldAnswerARequestTheDecoderRejectsAsABadRequestWithItsMessage() {
+        // given
+        doThrow(new IllegalArgumentException("request line not understood"))
+            .when(httpServletRequestToMockServerRequestDecoder).mapHttpServletRequestToMockServerRequest(any());
+
+        // when
+        MockHttpServletResponse response = putExpectation(EXPECTATION_JSON);
+
+        // then
+        assertThat(response.getStatus(), is(400));
+        assertThat(new String(response.getContentAsByteArray(), UTF_8), is("request line not understood"));
+    }
+
+    private static class FailingServletInputStream extends ServletInputStream {
+        @Override
+        public int read() throws IOException {
+            throw new IOException("connection reset reading body");
+        }
+
+        @Override
+        public boolean isFinished() {
+            return false;
+        }
+
+        @Override
+        public boolean isReady() {
+            return true;
+        }
+
+        @Override
+        public void setReadListener(ReadListener readListener) {
+        }
     }
 
     private MockHttpServletResponse putExpectation(String body) {

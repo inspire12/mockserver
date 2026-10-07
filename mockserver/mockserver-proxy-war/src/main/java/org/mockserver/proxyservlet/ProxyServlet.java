@@ -133,6 +133,9 @@ public class ProxyServlet extends HttpServlet implements ServletContextListener 
                 }
             }
         } catch (Throwable throwable) {
+            if (request == null) {
+                request = httpServletRequestToMockServerRequestDecoder.mapUndecodableServletRequest(httpServletRequest);
+            }
             ControlPlaneFailureResponse.write(mockServerLogger, responseWriter, request, throwable);
         }
     }

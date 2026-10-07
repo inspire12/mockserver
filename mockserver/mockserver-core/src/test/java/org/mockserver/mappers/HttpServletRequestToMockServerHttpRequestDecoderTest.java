@@ -184,4 +184,61 @@ public class HttpServletRequestToMockServerHttpRequestDecoderTest {
         // when
         new HttpServletRequestToMockServerHttpRequestDecoder(configuration(), new MockServerLogger()).mapHttpServletRequestToMockServerRequest(httpServletRequest);
     }
+
+    @Test
+    public void shouldMapAnUndecodableRequestWithoutReadingItsBody() {
+        // given
+        MockHttpServletRequest httpServletRequest = new MockHttpServletRequest("PUT", "/mockserver/expectation") {
+            @Override
+            public jakarta.servlet.ServletInputStream getInputStream() {
+                throw new IllegalStateException("body must not be read");
+            }
+        };
+        httpServletRequest.setContextPath(null);
+        httpServletRequest.addHeader("Origin", "https://dashboard.example.com");
+
+        // when
+        HttpRequest httpRequest = new HttpServletRequestToMockServerHttpRequestDecoder(configuration(), new MockServerLogger()).mapUndecodableServletRequest(httpServletRequest);
+
+        // then
+        assertThat(httpRequest.getMethod(), is(string("PUT")));
+        assertThat(httpRequest.getPath(), is(string("/mockserver/expectation")));
+        assertThat(httpRequest.getFirstHeader("Origin"), is("https://dashboard.example.com"));
+        assertThat(httpRequest.isKeepAlive(), is(true));
+    }
+
+    @Test
+    public void shouldMapAnUndecodableRequestWhoseHeadersCannotBeReadToItsMethodAndPath() {
+        // given
+        MockHttpServletRequest httpServletRequest = new MockHttpServletRequest("PUT", "/mockserver/expectation") {
+            @Override
+            public Enumeration<String> getHeaderNames() {
+                throw new IllegalStateException("headers not readable");
+            }
+        };
+        httpServletRequest.setContextPath(null);
+
+        // when
+        HttpRequest httpRequest = new HttpServletRequestToMockServerHttpRequestDecoder(configuration(), new MockServerLogger()).mapUndecodableServletRequest(httpServletRequest);
+
+        // then
+        assertThat(httpRequest.getMethod(), is(string("PUT")));
+        assertThat(httpRequest.getPath(), is(string("/mockserver/expectation")));
+        assertThat(httpRequest.getHeaders() == null || httpRequest.getHeaders().isEmpty(), is(true));
+    }
+
+    @Test
+    public void shouldMapAnUndecodableRequestWithNoMethodOrPathToEmptyValues() {
+        // given
+        MockHttpServletRequest httpServletRequest = new MockHttpServletRequest((String) null, null);
+        httpServletRequest.setContextPath(null);
+        httpServletRequest.setRequestURI(null);
+
+        // when
+        HttpRequest httpRequest = new HttpServletRequestToMockServerHttpRequestDecoder(configuration(), new MockServerLogger()).mapUndecodableServletRequest(httpServletRequest);
+
+        // then
+        assertThat(httpRequest.getMethod().getValue(), is(""));
+        assertThat(httpRequest.getPath().getValue(), is(""));
+    }
 }

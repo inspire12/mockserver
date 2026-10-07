@@ -69,6 +69,9 @@ public class HttpResponseSerializer extends StdSerializer<HttpResponse> {
         if (httpResponse.getTiming() != null) {
             jgen.writeObjectField("timing", httpResponse.getTiming());
         }
+        if (httpResponse.isPrimary()) {
+            jgen.writeObjectField("primary", true);
+        }
         jgen.writeEndObject();
     }
 }

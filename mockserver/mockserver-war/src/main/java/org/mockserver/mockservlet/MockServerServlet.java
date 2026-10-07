@@ -136,6 +136,9 @@ public class MockServerServlet extends HttpServlet implements ServletContextList
                 }
             }
         } catch (Throwable throwable) {
+            if (request == null) {
+                request = httpServletRequestToMockServerRequestDecoder.mapUndecodableServletRequest(httpServletRequest);
+            }
             ControlPlaneFailureResponse.write(mockServerLogger, responseWriter, request, throwable);
         }
     }
