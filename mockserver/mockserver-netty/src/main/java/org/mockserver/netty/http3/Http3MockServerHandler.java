@@ -16,6 +16,7 @@ import io.netty.handler.codec.http3.Http3HeadersFrame;
 import io.netty.handler.codec.http3.Http3RequestStreamInboundHandler;
 import io.netty.handler.codec.quic.QuicChannel;
 import io.netty.handler.codec.quic.QuicStreamChannel;
+import io.netty.handler.codec.quic.QuicStreamResetException;
 import org.mockserver.authentication.AuthenticationException;
 import org.mockserver.authentication.AuthenticationHandler;
 import org.mockserver.codec.HttpObjectAggregators;
@@ -47,6 +48,7 @@ import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.SSLSession;
 import java.net.InetSocketAddress;
+import java.nio.channels.ClosedChannelException;
 import java.security.cert.Certificate;
 import java.util.HashSet;
 import java.util.Set;
@@ -778,6 +780,16 @@ public class Http3MockServerHandler extends Http3RequestStreamInboundHandler {
                             ? "closing HTTP/3 connection from:{}because a request's trailer section is larger than maxHeaderSize:{}"
                             : "closing HTTP/3 connection from:{}because a request's header section is larger than maxHeaderSize:{}")
                         .setArguments(peerAddress(ctx.channel()), configuration.maxHeaderSize())
+                );
+            }
+        } else if (cause instanceof QuicStreamResetException || cause instanceof ClosedChannelException) {
+            // a client that abandons its request, as Http3ExceptionHandler logs it on any other stream
+            if (mockServerLogger.isEnabledForInstance(Level.DEBUG)) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.DEBUG)
+                        .setMessageFormat("request stream of HTTP/3 connection from:{}closed or reset by its client:{}")
+                        .setArguments(peerAddress(ctx.channel()), cause.getMessage())
                 );
             }
         } else if (mockServerLogger.isEnabledForInstance(Level.WARN)) {

@@ -3,32 +3,44 @@ package org.mockserver.netty.http3;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.CompositeByteBuf;
 import io.netty.buffer.Unpooled;
+import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.http3.Http3Exception;
 import io.netty.handler.codec.http3.Http3ErrorCode;
 import io.netty.handler.codec.http3.DefaultHttp3DataFrame;
 import io.netty.handler.codec.http3.DefaultHttp3HeadersFrame;
+import io.netty.handler.codec.quic.QuicStreamResetException;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.grpc.GrpcDerivedHeaders;
 import org.mockserver.grpc.GrpcProtoDescriptorStore;
 import org.mockserver.grpc.GrpcStatusMapper;
+import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.metrics.Metrics;
 import org.mockserver.mock.HttpState;
 import org.mockserver.mock.action.http.HttpActionHandler;
 import org.mockserver.model.HttpRequest;
+import org.slf4j.event.Level;
 
 import io.netty.channel.ChannelFuture;
 import io.netty.handler.codec.http3.Http3HeadersFrame;
 
+import java.net.InetSocketAddress;
+import java.nio.channels.ClosedChannelException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.empty;
+import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.nullValue;
+import static org.hamcrest.Matchers.sameInstance;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 import static org.mockserver.configuration.Configuration.configuration;
@@ -61,6 +73,61 @@ public class Http3MockServerHandlerTest {
         assertThat("another error code", Http3MockServerHandler.isHeaderSectionTooLarge(new Http3Exception(Http3ErrorCode.H3_MESSAGE_ERROR, "Header size exceeded max allowed size (8192)")), is(false));
         assertThat("another error code", Http3MockServerHandler.isHeaderSectionTooLarge(new Http3Exception(Http3ErrorCode.H3_FRAME_ERROR, "Received an invalid frame len 9000 for frame of type 1.")), is(false));
         assertThat("not an HTTP/3 error", Http3MockServerHandler.isHeaderSectionTooLarge(new IllegalStateException("Header size exceeded max allowed size (8192)")), is(false));
+    }
+
+    @Test
+    public void shouldLogAStreamItsClientResetOrClosedAtDebugAndAnyOtherExceptionAsAWarningAndCloseTheStream() {
+        List<LogEntry> logged = new ArrayList<>();
+        Level[] logLevel = {Level.DEBUG};
+        MockServerLogger capturingLogger = new MockServerLogger(Http3MockServerHandlerTest.class) {
+            @Override
+            public boolean isEnabledForInstance(Level level) {
+                return isEnabled(level, logLevel[0]);
+            }
+
+            @Override
+            public void logEvent(LogEntry logEntry) {
+                if (isEnabledForInstance(logEntry.getLogLevel())) {
+                    logged.add(logEntry);
+                }
+            }
+        };
+        for (Throwable cause : new Throwable[]{new QuicStreamResetException("STREAM_RESET", Http3ErrorCode.H3_REQUEST_CANCELLED.code()), new ClosedChannelException()}) {
+            logged.clear();
+            logLevel[0] = Level.DEBUG;
+            ChannelHandlerContext ctx = streamContext();
+
+            new Http3MockServerHandler(CONFIGURATION, capturingLogger, mock(HttpState.class), mock(HttpActionHandler.class), new Metrics(CONFIGURATION)).exceptionCaught(ctx, cause);
+
+            assertThat(cause.toString(), logged, hasSize(1));
+            assertThat(logged.get(0).getLogLevel(), is(Level.DEBUG));
+            assertThat(logged.get(0).getMessageFormat(), is("request stream of HTTP/3 connection from:{}closed or reset by its client:{}"));
+            assertThat(logged.get(0).getThrowable(), is(nullValue()));
+            verify(ctx).close();
+
+            logged.clear();
+            logLevel[0] = Level.INFO;
+            new Http3MockServerHandler(CONFIGURATION, capturingLogger, mock(HttpState.class), mock(HttpActionHandler.class), new Metrics(CONFIGURATION)).exceptionCaught(streamContext(), cause);
+            assertThat("nothing at the default level", logged, empty());
+        }
+
+        logged.clear();
+        logLevel[0] = Level.DEBUG;
+        IllegalStateException other = new IllegalStateException("handler failed");
+        ChannelHandlerContext ctx = streamContext();
+        new Http3MockServerHandler(CONFIGURATION, capturingLogger, mock(HttpState.class), mock(HttpActionHandler.class), new Metrics(CONFIGURATION)).exceptionCaught(ctx, other);
+        assertThat(logged, hasSize(1));
+        assertThat(logged.get(0).getLogLevel(), is(Level.WARN));
+        assertThat(logged.get(0).getThrowable(), sameInstance(other));
+        verify(ctx).close();
+    }
+
+    private static ChannelHandlerContext streamContext() {
+        Channel stream = mock(Channel.class);
+        when(stream.remoteAddress()).thenReturn(new InetSocketAddress("127.0.0.1", 50443));
+        ChannelHandlerContext ctx = mock(ChannelHandlerContext.class);
+        when(ctx.channel()).thenReturn(stream);
+        return ctx;
     }
 
     @Test

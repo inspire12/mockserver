@@ -13,6 +13,7 @@ import io.netty.handler.codec.http3.DefaultHttp3HeadersFrame;
 import io.netty.handler.codec.http3.Http3;
 import io.netty.handler.codec.http3.Http3ClientConnectionHandler;
 import io.netty.handler.codec.http3.Http3DataFrame;
+import io.netty.handler.codec.http3.Http3ErrorCode;
 import io.netty.handler.codec.http3.Http3Headers;
 import io.netty.handler.codec.http3.Http3HeadersFrame;
 import io.netty.handler.codec.http3.Http3RequestStreamInboundHandler;
@@ -237,6 +238,14 @@ public final class Http3TestClient implements AutoCloseable {
          */
         public Exchange end() throws Exception {
             stream.shutdownOutput().sync();
+            return this;
+        }
+
+        /**
+         * Resets the request stream with an error code, as a client that abandons its request does.
+         */
+        public Exchange reset(Http3ErrorCode errorCode) throws Exception {
+            stream.shutdownOutput(errorCode.code()).sync();
             return this;
         }
 

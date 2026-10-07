@@ -195,6 +195,30 @@ public class Http3ConnectionErrorLoggingIntegrationTest {
         assertThatHttp3IsStillServed();
     }
 
+    @Test
+    public void shouldLogARequestStreamItsClientResetPartWayThroughItsBodyOnceBelowAWarningAndKeepTheConnection() throws Exception {
+        try (Http3TestClient connection = Http3TestClient.open(clientGroup, mockServer)) {
+            Http3TestClient.Exchange exchange = connection.start(new DefaultHttp3Headers().method("POST").scheme("https").authority("localhost:" + mockServer.getHttp3Port()).path("/served").addInt("content-length", 100));
+            exchange.data(new byte[10]);
+
+            exchange.reset(Http3ErrorCode.H3_REQUEST_CANCELLED);
+
+            List<LogEntry> entries = awaitConnectionEntries(connection.localPort());
+            assertThat(nettysLog.since(nettysLogBeforeThisTest), empty());
+            List<LogEntry> warnings = logged.stream()
+                .filter(entry -> entry.getLogLevel().toInt() >= Level.WARN.toInt())
+                .collect(Collectors.toList());
+            assertThat(warnings.toString(), warnings, empty());
+            assertThat(entries.toString(), entries, hasSize(1));
+            assertThat(entries.get(0).getLogLevel(), is(Level.DEBUG));
+            assertThat(entries.get(0).getMessageFormat(), is("request stream of HTTP/3 connection from:{}closed or reset by its client:{}"));
+            assertThat(entries.get(0).getThrowable(), is(nullValue()));
+
+            Http3TestClient.Exchange next = connection.send(new DefaultHttp3Headers().method("GET").scheme("https").authority("localhost:" + mockServer.getHttp3Port()).path("/served"));
+            assertThat("the connection carries on", next.status(), is(200));
+        }
+    }
+
     private static void assertThatHttp3IsStillServed() throws Exception {
         try (Http3TestClient connection = Http3TestClient.open(clientGroup, mockServer)) {
             Http3TestClient.Exchange exchange = connection.send(new DefaultHttp3Headers().method("GET").scheme("https").authority("localhost:" + mockServer.getHttp3Port()).path("/served"));

@@ -715,6 +715,17 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **An HTTP/3 client that abandons a request no longer causes a warning with a stack trace.** When a client
+  reset an HTTP/3 request stream, for example by cancelling a request part-way through its body, MockServer
+  logged `exception in HTTP/3 request handler` at `WARN` with a stack trace. It now logs one `DEBUG` entry
+  with the client's address, which the default log level does not show, as it already did for the other
+  streams of an HTTP/3 connection. Other errors on a request stream are still logged at `WARN`.
+- **An error on the HTTP/3 UDP port is now reported in MockServer's log.** An exception on the UDP socket
+  that serves HTTP/3, such as a failed read, was logged by Netty at `WARN` with a stack trace through its own
+  logger, outside MockServer's log, its log level and the event log. MockServer now logs it itself: a socket
+  error, after which the port keeps serving, as one `WARN` without a stack trace for the first of each kind
+  (any repeat at `DEBUG`, so a recurring error cannot flood the log); a client's port reported unreachable at
+  `DEBUG`; and any other error, after which Netty stops serving HTTP/3 on that port, at `ERROR` with its cause.
 - **A server that fails to start no longer leaves a thread and its memory behind.** When starting failed part way, for example because an expectation initializer failed with `failOnInitializationError=true` or the configured state backend could not be created, MockServer kept the thread of its request log running, and with it everything the failed server had loaded, for the life of the JVM; an embedded server that was retried after such a failure accumulated one per attempt. A server that was already running in the same JVM could also go on using the failed server's scenario state. The failed start now stops that thread and undoes what it had set up before reporting the error.
 - **A TLS connection whose server certificate could not be provided no longer leaks memory.** When MockServer
   failed to provide a certificate for a TLS client (for example a fixed `x509CertificatePath` not signed by the

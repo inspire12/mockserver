@@ -172,7 +172,8 @@ public class Http3Server {
 
             AtomicInteger connectionCounter = this.activeHttp3Connections;
             // stateless, so one serves every connection; the legacy echo mode has no logger of its own
-            Http3ExceptionHandler exceptionHandler = Http3ExceptionHandler.forConnection(mockServerLogger != null ? mockServerLogger : new MockServerLogger(Http3Server.class));
+            MockServerLogger handlerLogger = mockServerLogger != null ? mockServerLogger : new MockServerLogger(Http3Server.class);
+            Http3ExceptionHandler exceptionHandler = Http3ExceptionHandler.forConnection(handlerLogger);
 
             ChannelHandler codec = Http3.newQuicServerCodecBuilder()
                 .sslContext(sslContext)
@@ -234,7 +235,13 @@ public class Http3Server {
                 .group(localGroup)
                 .channel(NioDatagramChannel.class)
                 .option(ChannelOption.ALLOCATOR, NettyAllocator.ALLOCATOR)
-                .handler(codec);
+                .handler(new ChannelInitializer<Channel>() {
+                    @Override
+                    protected void initChannel(Channel listener) {
+                        // the QUIC codec takes no exception, so without this one would reach the end of the pipeline
+                        listener.pipeline().addLast(codec, new Http3ListenerExceptionHandler(handlerLogger));
+                    }
+                });
             bind = port == 0 ? bootstrap.bind(new InetSocketAddress(0)) : bindExplicitPort(bootstrap, port);
             channel = bound(bind);
 
@@ -307,6 +314,13 @@ public class Http3Server {
      */
     public int getActiveConnectionCount() {
         return activeHttp3Connections.get();
+    }
+
+    /**
+     * @return the UDP listener's channel, or null if not started
+     */
+    Channel listener() {
+        return channel;
     }
 
     /**
