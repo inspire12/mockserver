@@ -20,6 +20,7 @@ import org.mockserver.serialization.model.WebSocketClientIdDTO;
 import org.mockserver.serialization.model.WebSocketErrorDTO;
 
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 import static org.mockserver.metrics.Metrics.Name.*;
@@ -353,18 +354,18 @@ public class WebSocketClientRegistry {
         forwardCallbackRegistry.clear();
         responseCallbackRegistry.clear();
         streamFrameCallbackRegistry.clear();
-        // Iteration over a Collections.synchronizedMap is only safe while holding
-        // the map's own monitor (the synchronized(this) on reset() guards a
-        // different lock than registerClient/unregisterClient, which mutate the
-        // map under the map's monitor). Synchronize on the map to make the
-        // forEach + clear atomic with respect to those mutators.
+        // copied and cleared under the map's own monitor, which registerClient/unregisterClient mutate it
+        // under; closed after, because a channel on this thread's event loop closes at once and its close
+        // listener unregisters the client from the map
+        Map<String, Channel> clients;
         synchronized (clientRegistry) {
-            clientRegistry.forEach((clientId, channel) -> {
-                LocalCallbackRegistry.unregisterCallback(clientId);
-                channel.close();
-            });
+            clients = new LinkedHashMap<>(clientRegistry);
             clientRegistry.clear();
         }
+        clients.forEach((clientId, channel) -> {
+            LocalCallbackRegistry.unregisterCallback(clientId);
+            channel.close();
+        });
         clearWebSocketMetrics();
     }
 }

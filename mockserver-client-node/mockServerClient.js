@@ -726,6 +726,12 @@ var mockServerClient;
                                 breakpointResponseHandlers = {};
                                 breakpointStreamFrameHandlers = {};
                             },
+                            // the browser's WebSocket does not reconnect
+                            reconnectWhen: function () {
+                            },
+                            isClosed: function () {
+                                return !socket || socket.readyState === socket.CLOSING || socket.readyState === socket.CLOSED;
+                            },
                             close: function () {
                                 if (!socket || socket.readyState === socket.CLOSED) {
                                     return Promise.resolve();
@@ -797,6 +803,58 @@ var mockServerClient;
             });
         };
 
+        /*
+         * Resolves with the active expectation that has this id, or null when MockServer does not hold it
+         * (it answers 400 for an unknown id); rejects when MockServer cannot say.
+         */
+        var findActiveExpectation = function (expectationId) {
+            return new Promise(function (resolve, reject) {
+                makeRequest(host, port, "/mockserver/retrieve?type=ACTIVE_EXPECTATIONS&format=JSON", {id: expectationId}).then(function (result) {
+                    var expectations = result && result.body ? JSON.parse(result.body) : [];
+                    resolve(expectations.filter(function (expectation) {
+                        return expectation.id === expectationId;
+                    })[0] || null);
+                }, function (reason) {
+                    if (String(reason).indexOf("No expectation found with id") !== -1) {
+                        resolve(null);
+                    } else {
+                        reject(reason);
+                    }
+                });
+            });
+        };
+
+        /*
+         * Registers the expectation of a callback once its WebSocket has a client id. MockServer closes the
+         * WebSocket when it removes the expectation (used up, cleared or reset) and when the connection drops.
+         * The client reconnects, with the same client id, only while MockServer still holds the expectation
+         * (or cannot say), and never registers it again: success runs once.
+         */
+        var registerCallbackExpectation = function (webSocketClient, createExpectation, sucess, error) {
+            var registered = false;
+            var expectationId = null;
+            webSocketClient.reconnectWhen(function () {
+                return expectationId === null || findActiveExpectation(expectationId).then(function (expectation) {
+                    return expectation !== null;
+                });
+            });
+            webSocketClient.clientIdCallback(function (clientId) {
+                if (registered) {
+                    return;
+                }
+                registered = true;
+                makeRequest(host, port, "/mockserver/expectation", createExpectation(clientId)).then(function (result) {
+                    try {
+                        expectationId = JSON.parse(result.body)[0].id || null;
+                    } catch (e) {
+                        expectationId = null;
+                    }
+                    if (sucess) {
+                        sucess(result);
+                    }
+                }, error);
+            });
+        };
 
         /**
          * Override:
@@ -1025,9 +1083,9 @@ var mockServerClient;
                                     value: JSON.stringify(response)
                                 };
                             });
-                            webSocketClient.clientIdCallback(function (clientId) {
-                                return makeRequest(host, port, "/mockserver/expectation", createExpectationWithCallback(requestMatcher, clientId, times, priority, timeToLive, id)).then(sucess, error);
-                            });
+                            registerCallbackExpectation(webSocketClient, function (clientId) {
+                                return createExpectationWithCallback(requestMatcher, clientId, times, priority, timeToLive, id);
+                            }, sucess, error);
                         }, error);
                     } catch (e) {
                         if (error) {
@@ -1056,9 +1114,9 @@ var mockServerClient;
                                     value: JSON.stringify(forwardRequest)
                                 };
                             });
-                            webSocketClient.clientIdCallback(function (clientId) {
-                                return makeRequest(host, port, "/mockserver/expectation", createExpectationWithForwardCallback(requestMatcher, clientId, times, priority, timeToLive, id)).then(sucess, error);
-                            });
+                            registerCallbackExpectation(webSocketClient, function (clientId) {
+                                return createExpectationWithForwardCallback(requestMatcher, clientId, times, priority, timeToLive, id);
+                            }, sucess, error);
                         }, error);
                     } catch (e) {
                         if (error) {
@@ -1106,9 +1164,9 @@ var mockServerClient;
                                     value: JSON.stringify(response)
                                 };
                             });
-                            webSocketClient.clientIdCallback(function (clientId) {
-                                return makeRequest(host, port, "/mockserver/expectation", createExpectationWithForwardAndResponseCallback(requestMatcher, clientId, times, priority, timeToLive, id)).then(sucess, error);
-                            });
+                            registerCallbackExpectation(webSocketClient, function (clientId) {
+                                return createExpectationWithForwardAndResponseCallback(requestMatcher, clientId, times, priority, timeToLive, id);
+                            }, sucess, error);
                         }, error);
                     } catch (e) {
                         if (error) {
@@ -3132,7 +3190,7 @@ var mockServerClient;
          * @return promise resolving to the webSocketClient
          */
         var ensureBreakpointWebSocket = function () {
-            if (_breakpointWebSocketOpening && _breakpointWebSocketOpening.isClosed()) {
+            if ((_breakpointWebSocketOpening && _breakpointWebSocketOpening.isClosed()) || (_breakpointWebSocketClient && _breakpointWebSocketClient.isClosed())) {
                 _breakpointWebSocketClient = null;
                 _breakpointWebSocketClientId = null;
                 _breakpointWebSocketOpening = null;
@@ -3149,6 +3207,11 @@ var mockServerClient;
             return {
                 then: function (success, error) {
                     webSocketClientPromise.then(function (webSocketClient) {
+                        // MockServer drops a client's breakpoints when its WebSocket closes, so a new one could
+                        // restore none: the next breakpoint opens a new WebSocket instead
+                        webSocketClient.reconnectWhen(function () {
+                            return false;
+                        });
                         webSocketClient.clientIdCallback(function (clientId) {
                             _breakpointWebSocketClient = webSocketClient;
                             _breakpointWebSocketClientId = clientId;

@@ -419,6 +419,15 @@ working, and a later callback or breakpoint opens a new WebSocket:
 after(() => client.close());
 ```
 
+MockServer also closes a callback's WebSocket itself when it removes the callback's
+expectation: when its `times` are used up, or when it is cleared or reset, whether by
+this client, another process, the REST API or the dashboard. The client then leaves
+it closed and never registers that expectation again, so a reset stays reset. If
+the connection drops while MockServer still holds the expectation, the client
+reconnects with the same client id and the callback carries on with its remaining
+`times`. A breakpoint's WebSocket is not reopened (MockServer drops a client's
+breakpoints when its WebSocket closes); the next breakpoint opens a new one.
+
 ## Start / Launch MockServer
 
 This package (`mockserver-client`) is the REST/WebSocket client for communicating with a running MockServer. To **download and launch** a local MockServer instance (no Java or Docker required), use the companion [`mockserver-node`](https://www.npmjs.org/package/mockserver-node) package:

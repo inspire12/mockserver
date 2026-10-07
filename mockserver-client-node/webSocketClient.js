@@ -268,6 +268,7 @@
                     var closed = false;
                     var currentConnection = null;
                     var reconnectTimer = null;
+                    var reconnectWanted = null;
                     var webSocketLocation = (tls ? "wss" : "ws") + "://" + host + ":" + port + contextPath + "/_mockserver_callback_websocket";
 
                     var client = new WebSocketClient({
@@ -290,7 +291,8 @@
                         console.warn('WebSocket disconnected, reconnecting (attempt ' + reconnectAttempts + '/' + MAX_RECONNECT_ATTEMPTS + ') in ' + (delayMs / 1000) + 's');
                         reconnectTimer = setTimeout(function () {
                             reconnectTimer = null;
-                            client.connect(webSocketLocation, []);
+                            // the same client id, so an expectation MockServer still holds keeps reaching this client
+                            client.connect(webSocketLocation, [], undefined, clientId ? {"X-CLIENT-REGISTRATION-ID": clientId} : undefined);
                         }, delayMs);
                     };
 
@@ -333,9 +335,25 @@
                             }
                         });
                         connection.on('close', function () {
-                            if (!closed) {
-                                scheduleReconnect();
+                            if (closed) {
+                                return;
                             }
+                            if (!reconnectWanted) {
+                                scheduleReconnect();
+                                return;
+                            }
+                            // false stops for good; true, or a failure to answer, reconnects
+                            Promise.resolve().then(reconnectWanted).then(function (wanted) {
+                                if (wanted === false) {
+                                    closed = true;
+                                } else if (!closed) {
+                                    scheduleReconnect();
+                                }
+                            }, function () {
+                                if (!closed) {
+                                    scheduleReconnect();
+                                }
+                            });
                         });
                         connection.on('message', function (message) {
                             if (message.type === 'utf8') {
@@ -411,6 +429,13 @@
                             breakpointRequestHandlers = {};
                             breakpointResponseHandlers = {};
                             breakpointStreamFrameHandlers = {};
+                        },
+                        // asked, when MockServer drops the connection, whether to reconnect: a promise of false (or false) stops for good
+                        reconnectWhen: function (predicate) {
+                            reconnectWanted = predicate;
+                        },
+                        isClosed: function () {
+                            return closed;
                         },
                         // closes the connection for good: no reconnect follows; resolves once it has closed
                         close: function () {
