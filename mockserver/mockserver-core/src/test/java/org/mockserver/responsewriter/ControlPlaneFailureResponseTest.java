@@ -96,6 +96,21 @@ public class ControlPlaneFailureResponseTest {
         assertThat(captured.response.getBodyAsString(), is(UNEXPECTED_FAILURE_MESSAGE + correlationId));
     }
 
+    @Test
+    public void shouldAnswerAFailureTheCallerJudgedAFaultAsAServerErrorWhateverItsType() {
+        // given - an endpoint that reads no input decided this IllegalArgumentException is a fault in MockServer
+        IllegalArgumentException fault = new IllegalArgumentException("internal detail of the fault");
+
+        // when
+        Captured captured = write(requestWithCorrelationId("some-id"), fault, true);
+
+        // then
+        assertThat(captured.response.getStatusCode(), is(500));
+        assertThat(captured.response.getBodyAsString(), is(UNEXPECTED_FAILURE_MESSAGE + "some-id"));
+        assertThat(captured.errors(), hasSize(1));
+        assertThat(captured.errors().get(0).getThrowable(), sameInstance(fault));
+    }
+
     private static HttpRequest requestWithCorrelationId(String correlationId) {
         HttpRequest request = request("/mockserver/expectation");
         request.withLogCorrelationId(correlationId);
@@ -103,6 +118,10 @@ public class ControlPlaneFailureResponseTest {
     }
 
     private static Captured write(HttpRequest request, Throwable throwable) {
+        return write(request, throwable, false);
+    }
+
+    private static Captured write(HttpRequest request, Throwable throwable, boolean unexpected) {
         Captured captured = new Captured();
         MockServerLogger logger = new MockServerLogger(ControlPlaneFailureResponseTest.class) {
             @Override
@@ -117,7 +136,11 @@ public class ControlPlaneFailureResponseTest {
                 captured.response = response;
             }
         };
-        ControlPlaneFailureResponse.write(logger, responseWriter, request, throwable);
+        if (unexpected) {
+            ControlPlaneFailureResponse.writeUnexpectedFailure(logger, responseWriter, request, throwable);
+        } else {
+            ControlPlaneFailureResponse.write(logger, responseWriter, request, throwable);
+        }
         assertThat("a response", captured.response, notNullValue());
         return captured;
     }

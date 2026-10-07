@@ -8,6 +8,7 @@ import org.mockserver.configuration.ConfigurationProperties;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
+import static org.junit.Assert.assertThrows;
 
 /**
  * Tests for {@link AsyncApiControlPlaneImpl}.
@@ -295,6 +296,14 @@ public class AsyncApiControlPlaneImplTest {
         assertThat(status.get("loaded").asBoolean(), is(false));
         assertThat(status.get("publishers").asInt(), is(0));
         assertThat(status.get("subscribers").asInt(), is(0));
+    }
+
+    @Test
+    public void shouldReportAnUnreadableSpecAsInvalidInput() {
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> controlPlane.load("{\"asyncapi\": not json"));
+
+        assertThat(e.getMessage(), containsString("Failed to load AsyncAPI spec"));
+        assertThat(controlPlane.status().get("loaded").asBoolean(), is(false));
     }
 
     @Test

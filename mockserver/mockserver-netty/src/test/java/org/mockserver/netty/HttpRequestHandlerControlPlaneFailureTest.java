@@ -149,6 +149,45 @@ public class HttpRequestHandlerControlPlaneFailureTest {
         assertThat(response.getBodyAsString(), startsWith(UNEXPECTED_FAILURE_MESSAGE));
     }
 
+    @Test
+    public void shouldAnswerAFaultWhileUpdatingTheConfigurationWithAServerErrorAndAGenericMessage() {
+        // given - a fault inside MockServer while it applies a configuration update
+        IllegalStateException fault = new IllegalStateException("internal detail of the fault");
+        httpState = new HttpState(configuration(), capturingLogger(), synchronousScheduler()) {
+            @Override
+            public void applyConfigurationUpdate(org.mockserver.serialization.model.ConfigurationDTO suppliedConfiguration) {
+                throw fault;
+            }
+        };
+        build(httpState);
+
+        // when
+        embeddedChannel.writeInbound(request("/mockserver/configuration").withMethod("PUT").withBody("{}"));
+        HttpResponse response = embeddedChannel.readOutbound();
+
+        // then
+        assertThat(response.getStatusCode(), is(500));
+        assertThat(response.getBodyAsString(), startsWith(UNEXPECTED_FAILURE_MESSAGE));
+        assertThat(response.getBodyAsString(), not(containsString("internal detail of the fault")));
+        List<LogEntry> errors = errorsFor(fault);
+        assertThat(errors, hasSize(1));
+        assertThat(response.getBodyAsString(), is(UNEXPECTED_FAILURE_MESSAGE + errors.get(0).getCorrelationId()));
+    }
+
+    @Test
+    public void shouldAnswerUnreadableConfigurationJsonAsABadRequest() {
+        // given
+        givenAddingAnExpectationThrows(null);
+
+        // when
+        embeddedChannel.writeInbound(request("/mockserver/configuration").withMethod("PUT").withBody("{not json"));
+        HttpResponse response = embeddedChannel.readOutbound();
+
+        // then
+        assertThat(response.getStatusCode(), is(400));
+        assertThat(response.getBodyAsString(), is("Invalid configuration JSON"));
+    }
+
     private void givenAddingAnExpectationThrows(Supplier<Throwable> fault) {
         httpState = new HttpState(configuration(), capturingLogger(), synchronousScheduler()) {
             @Override

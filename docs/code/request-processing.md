@@ -246,9 +246,19 @@ The correlation id is the request's log correlation id (set by `HttpState.handle
 before it was set. Before 9.0.0 the catch-all answered every exception `400` with its bare message (an exception
 without one gave an empty body) and an `Error` closed the connection with no response. The Java client raises a
 `500` as a `ClientException` whatever the call passed as `throwClientException`, as it raises a `400` as an
-`IllegalArgumentException`. Endpoint-specific `catch (Exception e)` blocks inside `HttpState` (pact import and export,
-promote recordings, baseline compare, gRPC descriptors, WASM modules, files and others) still answer `400` with the
-exception's message, as does the `PUT /mockserver/configuration` route's "Invalid configuration JSON".
+`IllegalArgumentException`.
+
+Endpoints that catch their own exceptions (`HttpState`'s identity providers, import, promote recordings, baseline
+compare, Pact, CRUD, gRPC, WASM, files, clock, chaos, load scenarios, scenarios, cassettes, breakpoint matchers,
+diagnostics, contract test, traffic validation, replay and AsyncAPI routes, and the Netty `PUT /mockserver/configuration`
+route) apply the same split. A client error by `ControlPlaneFailureResponse.isClientError`, plus an invalid gRPC
+descriptor set (a protobuf `InvalidProtocolBufferException` or `DescriptorValidationException` among the causes), keeps
+the endpoint's `400` and its own message format. Anything else is answered `500` through
+`ControlPlaneFailureResponse.writeUnexpectedFailure` (text endpoints) or `HttpState.unexpectedFailure` (JSON endpoints,
+`{"error": "<the same generic message>"}`), logged once with the stack trace. An endpoint that reads no input (for
+example `PUT /mockserver/files/list`, `PUT /mockserver/grpc/services`, `GET /mockserver/wasm/modules`) answers every
+exception `500`. `AsyncApiControlPlaneImpl.load` reports a spec or broker configuration it cannot read as an
+`IllegalArgumentException`, so only a failure after that, such as a broker connection, is a `500`.
 
 ## Expectation Matching
 

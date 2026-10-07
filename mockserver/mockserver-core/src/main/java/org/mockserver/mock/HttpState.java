@@ -34,6 +34,7 @@ import org.mockserver.persistence.ExpectationFileSystemPersistence;
 import org.mockserver.persistence.RecordedExpectationPostProcessor;
 import org.mockserver.proxyconfiguration.InetAddressValidator;
 import org.mockserver.persistence.ExpectationFileWatcher;
+import org.mockserver.responsewriter.ControlPlaneFailureResponse;
 import org.mockserver.responsewriter.ResponseWriter;
 import org.mockserver.scheduler.Scheduler;
 import org.mockserver.serialization.*;
@@ -85,6 +86,7 @@ import static org.mockserver.log.model.LogEntryMessages.RECEIVED_REQUEST_MESSAGE
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
 import static org.mockserver.openapi.OpenAPIParser.OPEN_API_LOAD_ERROR;
+import static org.mockserver.responsewriter.ControlPlaneFailureResponse.isClientError;
 import static org.slf4j.event.Level.TRACE;
 
 /**
@@ -1102,6 +1104,9 @@ public class HttpState {
                 .withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(resultNode), MediaType.JSON_UTF_8);
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             mockServerLogger.logEvent(
                 new LogEntry()
                     .setLogLevel(Level.ERROR)
@@ -1288,28 +1293,7 @@ public class HttpState {
 
             return responseFuture.get(configuration.maxFutureTimeoutInMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
         } catch (Exception e) {
-            mockServerLogger.logEvent(
-                new LogEntry()
-                    .setLogLevel(Level.ERROR)
-                    .setCorrelationId(correlationId)
-                    .setMessageFormat("exception handling explainUnmatched request:{}error:{}")
-                    .setArguments(request, e.getMessage())
-                    .setThrowable(e)
-            );
-            try {
-                com.fasterxml.jackson.databind.ObjectMapper errorMapper = ObjectMapperFactory.createObjectMapper();
-                com.fasterxml.jackson.databind.node.ObjectNode errorNode = errorMapper.createObjectNode();
-                errorNode.put("error", "failed to explain unmatched requests: " + e.getMessage());
-                errorNode.put("correlationId", correlationId);
-                errorNode.put("timestamp", timestamp);
-                return response()
-                    .withStatusCode(BAD_REQUEST.code())
-                    .withBody(errorMapper.writerWithDefaultPrettyPrinter().writeValueAsString(errorNode), MediaType.JSON_UTF_8);
-            } catch (Exception jsonError) {
-                return response()
-                    .withStatusCode(BAD_REQUEST.code())
-                    .withBody("{\"error\":\"failed to explain unmatched requests\"}", MediaType.JSON_UTF_8);
-            }
+            return unexpectedFailure(request, e);
         }
     }
 
@@ -2374,34 +2358,8 @@ public class HttpState {
                         responseWriter.writeResponse(request, response()
                             .withStatusCode(CREATED.code())
                             .withBody(getExpectationSerializer().serialize(upsertedExpectations), MediaType.JSON_UTF_8), true);
-                    } catch (IllegalArgumentException iae) {
-                        mockServerLogger.logEvent(
-                            new LogEntry()
-                                .setLogLevel(Level.ERROR)
-                                .setMessageFormat("exception handling request for oidc provider:{}error:{}")
-                                .setArguments(request, iae.getMessage())
-                                .setThrowable(iae)
-                        );
-                        responseWriter.writeResponse(
-                            request,
-                            BAD_REQUEST,
-                            iae.getMessage(),
-                            MediaType.create("text", "plain").toString()
-                        );
                     } catch (Exception e) {
-                        mockServerLogger.logEvent(
-                            new LogEntry()
-                                .setLogLevel(Level.ERROR)
-                                .setMessageFormat("exception handling request for oidc provider:{}error:{}")
-                                .setArguments(request, e.getMessage())
-                                .setThrowable(e)
-                        );
-                        responseWriter.writeResponse(
-                            request,
-                            BAD_REQUEST,
-                            e.getMessage(),
-                            MediaType.create("text", "plain").toString()
-                        );
+                        writeEndpointFailure(request, responseWriter, e, isClientError(e), new LogEntry().setMessageFormat("exception handling request for oidc provider:{}error:{}"), "");
                     }
                 }
                 canHandle.complete(true);
@@ -2426,34 +2384,8 @@ public class HttpState {
                         responseWriter.writeResponse(request, response()
                             .withStatusCode(CREATED.code())
                             .withBody(getExpectationSerializer().serialize(upsertedExpectations), MediaType.JSON_UTF_8), true);
-                    } catch (IllegalArgumentException iae) {
-                        mockServerLogger.logEvent(
-                            new LogEntry()
-                                .setLogLevel(Level.ERROR)
-                                .setMessageFormat("exception handling request for saml provider:{}error:{}")
-                                .setArguments(request, iae.getMessage())
-                                .setThrowable(iae)
-                        );
-                        responseWriter.writeResponse(
-                            request,
-                            BAD_REQUEST,
-                            iae.getMessage(),
-                            MediaType.create("text", "plain").toString()
-                        );
                     } catch (Exception e) {
-                        mockServerLogger.logEvent(
-                            new LogEntry()
-                                .setLogLevel(Level.ERROR)
-                                .setMessageFormat("exception handling request for saml provider:{}error:{}")
-                                .setArguments(request, e.getMessage())
-                                .setThrowable(e)
-                        );
-                        responseWriter.writeResponse(
-                            request,
-                            BAD_REQUEST,
-                            e.getMessage(),
-                            MediaType.create("text", "plain").toString()
-                        );
+                        writeEndpointFailure(request, responseWriter, e, isClientError(e), new LogEntry().setMessageFormat("exception handling request for saml provider:{}error:{}"), "");
                     }
                 }
                 canHandle.complete(true);
@@ -2478,34 +2410,8 @@ public class HttpState {
                         responseWriter.writeResponse(request, response()
                             .withStatusCode(CREATED.code())
                             .withBody(getExpectationSerializer().serialize(upsertedExpectations), MediaType.JSON_UTF_8), true);
-                    } catch (IllegalArgumentException iae) {
-                        mockServerLogger.logEvent(
-                            new LogEntry()
-                                .setLogLevel(Level.ERROR)
-                                .setMessageFormat("exception handling request for scim provider:{}error:{}")
-                                .setArguments(request, iae.getMessage())
-                                .setThrowable(iae)
-                        );
-                        responseWriter.writeResponse(
-                            request,
-                            BAD_REQUEST,
-                            iae.getMessage(),
-                            MediaType.create("text", "plain").toString()
-                        );
                     } catch (Exception e) {
-                        mockServerLogger.logEvent(
-                            new LogEntry()
-                                .setLogLevel(Level.ERROR)
-                                .setMessageFormat("exception handling request for scim provider:{}error:{}")
-                                .setArguments(request, e.getMessage())
-                                .setThrowable(e)
-                        );
-                        responseWriter.writeResponse(
-                            request,
-                            BAD_REQUEST,
-                            e.getMessage(),
-                            MediaType.create("text", "plain").toString()
-                        );
+                        writeEndpointFailure(request, responseWriter, e, isClientError(e), new LogEntry().setMessageFormat("exception handling request for scim provider:{}error:{}"), "");
                     }
                 }
                 canHandle.complete(true);
@@ -2644,34 +2550,8 @@ public class HttpState {
                                     .withBody(getExpectationSerializer().serialize(upsertedExpectations), MediaType.JSON_UTF_8), true);
                             }
                         }
-                    } catch (IllegalArgumentException iae) {
-                        mockServerLogger.logEvent(
-                            new LogEntry()
-                                .setLogLevel(Level.ERROR)
-                                .setMessageFormat("exception handling request for import:{}error:{}")
-                                .setArguments(request, iae.getMessage())
-                                .setThrowable(iae)
-                        );
-                        responseWriter.writeResponse(
-                            request,
-                            BAD_REQUEST,
-                            iae.getMessage(),
-                            MediaType.create("text", "plain").toString()
-                        );
                     } catch (Exception e) {
-                        mockServerLogger.logEvent(
-                            new LogEntry()
-                                .setLogLevel(Level.ERROR)
-                                .setMessageFormat("exception handling request for import:{}error:{}")
-                                .setArguments(request, e.getMessage())
-                                .setThrowable(e)
-                        );
-                        responseWriter.writeResponse(
-                            request,
-                            BAD_REQUEST,
-                            e.getMessage(),
-                            MediaType.create("text", "plain").toString()
-                        );
+                        writeEndpointFailure(request, responseWriter, e, isClientError(e), new LogEntry().setMessageFormat("exception handling request for import:{}error:{}"), "");
                     }
                 }
                 canHandle.complete(true);
@@ -2706,24 +2586,8 @@ public class HttpState {
                         responseWriter.writeResponse(request, response()
                             .withStatusCode(CREATED.code())
                             .withBody(getExpectationSerializer().serialize(activated), MediaType.JSON_UTF_8), true);
-                    } catch (IllegalArgumentException iae) {
-                        mockServerLogger.logEvent(
-                            new LogEntry()
-                                .setLogLevel(Level.ERROR)
-                                .setMessageFormat("exception handling request to promote recordings:{}error:{}")
-                                .setArguments(request, iae.getMessage())
-                                .setThrowable(iae)
-                        );
-                        responseWriter.writeResponse(request, BAD_REQUEST, iae.getMessage(), MediaType.create("text", "plain").toString());
                     } catch (Exception e) {
-                        mockServerLogger.logEvent(
-                            new LogEntry()
-                                .setLogLevel(Level.ERROR)
-                                .setMessageFormat("exception handling request to promote recordings:{}error:{}")
-                                .setArguments(request, e.getMessage())
-                                .setThrowable(e)
-                        );
-                        responseWriter.writeResponse(request, BAD_REQUEST, e.getMessage(), MediaType.create("text", "plain").toString());
+                        writeEndpointFailure(request, responseWriter, e, isClientError(e), new LogEntry().setMessageFormat("exception handling request to promote recordings:{}error:{}"), "");
                     }
                 }
                 canHandle.complete(true);
@@ -2760,24 +2624,8 @@ public class HttpState {
                         responseWriter.writeResponse(request, response()
                             .withStatusCode(OK.code())
                             .withBody(ObjectMapperFactory.createObjectMapper().writeValueAsString(report), MediaType.JSON_UTF_8), true);
-                    } catch (IllegalArgumentException iae) {
-                        mockServerLogger.logEvent(
-                            new LogEntry()
-                                .setLogLevel(Level.ERROR)
-                                .setMessageFormat("exception handling request for baseline compare:{}error:{}")
-                                .setArguments(request, iae.getMessage())
-                                .setThrowable(iae)
-                        );
-                        responseWriter.writeResponse(request, BAD_REQUEST, iae.getMessage(), MediaType.create("text", "plain").toString());
                     } catch (Exception e) {
-                        mockServerLogger.logEvent(
-                            new LogEntry()
-                                .setLogLevel(Level.ERROR)
-                                .setMessageFormat("exception handling request for baseline compare:{}error:{}")
-                                .setArguments(request, e.getMessage())
-                                .setThrowable(e)
-                        );
-                        responseWriter.writeResponse(request, BAD_REQUEST, e.getMessage(), MediaType.create("text", "plain").toString());
+                        writeEndpointFailure(request, responseWriter, e, isClientError(e), new LogEntry().setMessageFormat("exception handling request for baseline compare:{}error:{}"), "");
                     }
                 }
                 canHandle.complete(true);
@@ -2815,24 +2663,8 @@ public class HttpState {
                         responseWriter.writeResponse(request, response()
                             .withStatusCode(CREATED.code())
                             .withBody(getExpectationSerializer().serialize(upsertedExpectations), MediaType.JSON_UTF_8), true);
-                    } catch (IllegalArgumentException iae) {
-                        mockServerLogger.logEvent(
-                            new LogEntry()
-                                .setLogLevel(Level.ERROR)
-                                .setMessageFormat("exception handling request for pact import:{}error:{}")
-                                .setArguments(request, iae.getMessage())
-                                .setThrowable(iae)
-                        );
-                        responseWriter.writeResponse(request, BAD_REQUEST, iae.getMessage(), MediaType.create("text", "plain").toString());
                     } catch (Exception e) {
-                        mockServerLogger.logEvent(
-                            new LogEntry()
-                                .setLogLevel(Level.ERROR)
-                                .setMessageFormat("exception handling request for pact import:{}error:{}")
-                                .setArguments(request, e.getMessage())
-                                .setThrowable(e)
-                        );
-                        responseWriter.writeResponse(request, BAD_REQUEST, e.getMessage(), MediaType.create("text", "plain").toString());
+                        writeEndpointFailure(request, responseWriter, e, isClientError(e), new LogEntry().setMessageFormat("exception handling request for pact import:{}error:{}"), "");
                     }
                 }
                 canHandle.complete(true);
@@ -2856,19 +2688,7 @@ public class HttpState {
                             .withStatusCode(OK.code())
                             .withBody(pact, MediaType.JSON_UTF_8), true);
                     } catch (Exception e) {
-                        mockServerLogger.logEvent(
-                            new LogEntry()
-                                .setLogLevel(Level.ERROR)
-                                .setMessageFormat("exception handling request for pact export:{}error:{}")
-                                .setArguments(request, e.getMessage())
-                                .setThrowable(e)
-                        );
-                        responseWriter.writeResponse(
-                            request,
-                            BAD_REQUEST,
-                            e.getMessage(),
-                            MediaType.create("text", "plain").toString()
-                        );
+                        writeEndpointFailure(request, responseWriter, e, false, null, "");
                     }
                 }
                 canHandle.complete(true);
@@ -3025,14 +2845,14 @@ public class HttpState {
             } else if (request.matches("PUT", PATH_PREFIX + "/breakpoint/matcher/clear", "/breakpoint/matcher/clear")) {
 
                 if (controlPlaneRequestAuthenticated(request, responseWriter)) {
-                    responseWriter.writeResponse(request, withDashboardCORS(request, handleBreakpointMatcherClear()), true);
+                    responseWriter.writeResponse(request, withDashboardCORS(request, handleBreakpointMatcherClear(request)), true);
                 }
                 canHandle.complete(true);
 
             } else if (request.matches("PUT", PATH_PREFIX + "/breakpoint/matchers", "/breakpoint/matchers")) {
 
                 if (controlPlaneRequestAuthenticated(request, responseWriter)) {
-                    responseWriter.writeResponse(request, withDashboardCORS(request, handleBreakpointMatcherList()), true);
+                    responseWriter.writeResponse(request, withDashboardCORS(request, handleBreakpointMatcherList(request)), true);
                 }
                 canHandle.complete(true);
 
@@ -3135,7 +2955,7 @@ public class HttpState {
                                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(responseNode), MediaType.JSON_UTF_8), true);
                         }
                     } catch (Exception e) {
-                        responseWriter.writeResponse(request, BAD_REQUEST, "failed to register CRUD resource: " + e.getMessage(), MediaType.create("text", "plain").toString());
+                        writeEndpointFailure(request, responseWriter, e, isClientError(e), null, "failed to register CRUD resource: ");
                     }
                 }
                 canHandle.complete(true);
@@ -3154,7 +2974,7 @@ public class HttpState {
                             responseWriter.writeResponse(request, BAD_REQUEST, "descriptor set body is empty", MediaType.create("text", "plain").toString());
                         }
                     } catch (Exception e) {
-                        responseWriter.writeResponse(request, BAD_REQUEST, "failed to load gRPC descriptor: " + e.getMessage(), MediaType.create("text", "plain").toString());
+                        writeEndpointFailure(request, responseWriter, e, isClientError(e) || isInvalidDescriptorSet(e), null, "failed to load gRPC descriptor: ");
                     }
                 }
                 canHandle.complete(true);
@@ -3184,7 +3004,7 @@ public class HttpState {
                             .withStatusCode(OK.code())
                             .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(servicesArray), MediaType.JSON_UTF_8), true);
                     } catch (Exception e) {
-                        responseWriter.writeResponse(request, BAD_REQUEST, "failed to list gRPC services: " + e.getMessage(), MediaType.create("text", "plain").toString());
+                        writeEndpointFailure(request, responseWriter, e, false, null, "failed to list gRPC services: ");
                     }
                 }
                 canHandle.complete(true);
@@ -3226,7 +3046,7 @@ public class HttpState {
                                 }
                             }
                         } catch (Exception e) {
-                            responseWriter.writeResponse(request, BAD_REQUEST, "failed to load WASM module: " + e.getMessage(), MediaType.create("text", "plain").toString());
+                            writeEndpointFailure(request, responseWriter, e, false, null, "failed to load WASM module: ");
                         }
                     }
                 }
@@ -3260,7 +3080,7 @@ public class HttpState {
                             responseWriter.writeResponse(request, BAD_REQUEST, "request body is empty", MediaType.create("text", "plain").toString());
                         }
                     } catch (Exception e) {
-                        responseWriter.writeResponse(request, BAD_REQUEST, "failed to store file: " + e.getMessage(), MediaType.create("text", "plain").toString());
+                        writeEndpointFailure(request, responseWriter, e, isClientError(e), null, "failed to store file: ");
                     }
                 }
                 canHandle.complete(true);
@@ -3286,7 +3106,7 @@ public class HttpState {
                             }
                         }
                     } catch (Exception e) {
-                        responseWriter.writeResponse(request, BAD_REQUEST, "failed to retrieve file: " + e.getMessage(), MediaType.create("text", "plain").toString());
+                        writeEndpointFailure(request, responseWriter, e, isClientError(e), null, "failed to retrieve file: ");
                     }
                 }
                 canHandle.complete(true);
@@ -3300,7 +3120,7 @@ public class HttpState {
                             .withStatusCode(OK.code())
                             .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(fileStore.listFiles()), MediaType.JSON_UTF_8), true);
                     } catch (Exception e) {
-                        responseWriter.writeResponse(request, BAD_REQUEST, "failed to list files: " + e.getMessage(), MediaType.create("text", "plain").toString());
+                        writeEndpointFailure(request, responseWriter, e, false, null, "failed to list files: ");
                     }
                 }
                 canHandle.complete(true);
@@ -3321,7 +3141,7 @@ public class HttpState {
                             responseWriter.writeResponse(request, NOT_FOUND, "file not found: " + fileName, MediaType.create("text", "plain").toString());
                         }
                     } catch (Exception e) {
-                        responseWriter.writeResponse(request, BAD_REQUEST, "failed to delete file: " + e.getMessage(), MediaType.create("text", "plain").toString());
+                        writeEndpointFailure(request, responseWriter, e, isClientError(e), null, "failed to delete file: ");
                     }
                 }
                 canHandle.complete(true);
@@ -3413,25 +3233,25 @@ public class HttpState {
             }
             if (request.matches("GET", PATH_PREFIX + "/cassettes", "/cassettes")) {
                 if (controlPlaneRequestAuthenticated(request, responseWriter)) {
-                    responseWriter.writeResponse(request, withDashboardCORS(request, handleCassettesGet()), true);
+                    responseWriter.writeResponse(request, withDashboardCORS(request, handleCassettesGet(request)), true);
                 }
                 return true;
             }
             if (request.matches("GET", PATH_PREFIX + "/breakpoint/matchers", "/breakpoint/matchers")) {
                 if (controlPlaneRequestAuthenticated(request, responseWriter)) {
-                    responseWriter.writeResponse(request, withDashboardCORS(request, handleBreakpointMatcherList()), true);
+                    responseWriter.writeResponse(request, withDashboardCORS(request, handleBreakpointMatcherList(request)), true);
                 }
                 return true;
             }
             if (request.matches("GET", PATH_PREFIX + "/chaosExperiment/profiles", "/chaosExperiment/profiles")) {
                 if (controlPlaneRequestAuthenticated(request, responseWriter)) {
-                    responseWriter.writeResponse(request, withDashboardCORS(request, handleChaosProfileList()), true);
+                    responseWriter.writeResponse(request, withDashboardCORS(request, handleChaosProfileList(request)), true);
                 }
                 return true;
             }
             if (chaosProfileName(request, "GET", "/chaosExperiment/profiles/") != null) {
                 if (controlPlaneRequestAuthenticated(request, responseWriter)) {
-                    responseWriter.writeResponse(request, withDashboardCORS(request, handleChaosProfileGet(chaosProfileName(request, "GET", "/chaosExperiment/profiles/"))), true);
+                    responseWriter.writeResponse(request, withDashboardCORS(request, handleChaosProfileGet(request, chaosProfileName(request, "GET", "/chaosExperiment/profiles/"))), true);
                 }
                 return true;
             }
@@ -3455,13 +3275,13 @@ public class HttpState {
             }
             if (loadScenarioReportName(request) != null) {
                 if (controlPlaneRequestAuthenticated(request, responseWriter)) {
-                    responseWriter.writeResponse(request, withDashboardCORS(request, handleLoadScenarioReport(loadScenarioReportName(request), request.getFirstQueryStringParameter("format"))), true);
+                    responseWriter.writeResponse(request, withDashboardCORS(request, handleLoadScenarioReport(request, loadScenarioReportName(request), request.getFirstQueryStringParameter("format"))), true);
                 }
                 return true;
             }
             if (loadScenarioName(request, "GET") != null) {
                 if (controlPlaneRequestAuthenticated(request, responseWriter)) {
-                    responseWriter.writeResponse(request, withDashboardCORS(request, handleLoadScenarioGetOne(loadScenarioName(request, "GET"))), true);
+                    responseWriter.writeResponse(request, withDashboardCORS(request, handleLoadScenarioGetOne(request, loadScenarioName(request, "GET"))), true);
                 }
                 return true;
             }
@@ -3518,7 +3338,7 @@ public class HttpState {
                                 .withStatusCode(OK.code())
                                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(modulesArray), MediaType.JSON_UTF_8)), true);
                         } catch (Exception e) {
-                            responseWriter.writeResponse(request, BAD_REQUEST, "failed to list WASM modules: " + e.getMessage(), MediaType.create("text", "plain").toString());
+                            writeEndpointFailure(request, responseWriter, e, false, null, "failed to list WASM modules: ");
                         }
                     }
                 }
@@ -3526,7 +3346,7 @@ public class HttpState {
             }
             if (request.matches("GET", PATH_PREFIX + "/asyncapi", "/asyncapi")) {
                 if (controlPlaneRequestAuthenticated(request, responseWriter)) {
-                    responseWriter.writeResponse(request, withDashboardCORS(request, handleAsyncApiGet()), true);
+                    responseWriter.writeResponse(request, withDashboardCORS(request, handleAsyncApiGet(request)), true);
                 }
                 return true;
             }
@@ -3617,7 +3437,7 @@ public class HttpState {
             }
             if (chaosProfileName(request, "DELETE", "/chaosExperiment/profiles/") != null) {
                 if (controlPlaneRequestAuthenticated(request, responseWriter)) {
-                    responseWriter.writeResponse(request, withDashboardCORS(request, handleChaosProfileDelete(chaosProfileName(request, "DELETE", "/chaosExperiment/profiles/"))), true);
+                    responseWriter.writeResponse(request, withDashboardCORS(request, handleChaosProfileDelete(request, chaosProfileName(request, "DELETE", "/chaosExperiment/profiles/"))), true);
                 }
                 return true;
             }
@@ -3629,13 +3449,13 @@ public class HttpState {
             }
             if (request.matches("DELETE", PATH_PREFIX + "/loadScenario", "/loadScenario")) {
                 if (controlPlaneRequestAuthenticated(request, responseWriter)) {
-                    responseWriter.writeResponse(request, withDashboardCORS(request, handleLoadScenarioDeleteAll()), true);
+                    responseWriter.writeResponse(request, withDashboardCORS(request, handleLoadScenarioDeleteAll(request)), true);
                 }
                 return true;
             }
             if (loadScenarioName(request, "DELETE") != null) {
                 if (controlPlaneRequestAuthenticated(request, responseWriter)) {
-                    responseWriter.writeResponse(request, withDashboardCORS(request, handleLoadScenarioDeleteOne(loadScenarioName(request, "DELETE"))), true);
+                    responseWriter.writeResponse(request, withDashboardCORS(request, handleLoadScenarioDeleteOne(request, loadScenarioName(request, "DELETE"))), true);
                 }
                 return true;
             }
@@ -3761,6 +3581,9 @@ public class HttpState {
                 .withStatusCode(OK.code())
                 .withBody(result.toString(), MediaType.JSON_UTF_8);
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return response()
                 .withStatusCode(BAD_REQUEST.code())
                 .withBody(objectMapper.createObjectNode().put("error", "failed to test WASM module: " + e.getMessage()).toString(), MediaType.JSON_UTF_8);
@@ -3889,6 +3712,12 @@ public class HttpState {
                                     objectMapper.createObjectNode().put("error", "invalid 'instant' value, must be ISO-8601 format (e.g. 2024-01-01T00:00:00Z)")), MediaType.JSON_UTF_8);
                         }
                     }
+                    if (instant != null && !representableInEpochMillis(instant)) {
+                        return response()
+                            .withStatusCode(BAD_REQUEST.code())
+                            .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(
+                                objectMapper.createObjectNode().put("error", "'instant' is outside the range MockServer's clock can represent")), MediaType.JSON_UTF_8);
+                    }
                     TimeService.freeze(instant);
                     break;
                 }
@@ -3902,6 +3731,14 @@ public class HttpState {
                             .withStatusCode(BAD_REQUEST.code())
                             .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(
                                 objectMapper.createObjectNode().put("error", "'durationMillis' must be a positive number")), MediaType.JSON_UTF_8);
+                    }
+                    // the clock is reported in epoch milliseconds, so it must not move past Long.MAX_VALUE of them
+                    long currentEpochMillis = TimeService.now().toEpochMilli();
+                    if (durationMillis > Long.MAX_VALUE - currentEpochMillis) {
+                        return response()
+                            .withStatusCode(BAD_REQUEST.code())
+                            .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(
+                                objectMapper.createObjectNode().put("error", "'durationMillis' must be at most " + (Long.MAX_VALUE - currentEpochMillis) + ", or the clock would pass the latest time it can represent")), MediaType.JSON_UTF_8);
                     }
                     TimeService.advance(java.time.Duration.ofMillis(durationMillis));
                     break;
@@ -3937,6 +3774,9 @@ public class HttpState {
                 .withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(resultNode), MediaType.JSON_UTF_8);
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             try {
                 com.fasterxml.jackson.databind.ObjectMapper errorMapper = ObjectMapperFactory.createObjectMapper();
                 return response()
@@ -3948,6 +3788,15 @@ public class HttpState {
                     .withStatusCode(BAD_REQUEST.code())
                     .withBody("{\"error\":\"failed to process clock request\"}", MediaType.JSON_UTF_8);
             }
+        }
+    }
+
+    private static boolean representableInEpochMillis(java.time.Instant instant) {
+        try {
+            instant.toEpochMilli();
+            return true;
+        } catch (ArithmeticException e) {
+            return false;
         }
     }
 
@@ -4098,6 +3947,9 @@ public class HttpState {
             // thrown by HttpChaosProfile validation (e.g. errorStatus out of range)
             return serviceChaosError(objectMapper, "invalid chaos profile: " + e.getMessage());
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return serviceChaosError(objectMapper, "failed to process service chaos request: " + e.getMessage());
         }
     }
@@ -4134,6 +3986,9 @@ public class HttpState {
         } catch (IllegalArgumentException e) {
             return serviceChaosError(objectMapper, "invalid chaos profile: " + e.getMessage());
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return serviceChaosError(objectMapper, "failed to process service chaos patch: " + e.getMessage());
         }
     }
@@ -4237,6 +4092,9 @@ public class HttpState {
         } catch (IllegalArgumentException e) {
             return chaosExperimentError(objectMapper, "invalid experiment definition: " + e.getMessage());
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return chaosExperimentError(objectMapper, "failed to process chaos experiment request: " + e.getMessage());
         }
     }
@@ -4274,6 +4132,9 @@ public class HttpState {
         } catch (IllegalArgumentException e) {
             return sloError(objectMapper, "invalid SLO criteria: " + e.getMessage());
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return sloError(objectMapper, "failed to process SLO verify request: " + e.getMessage());
         }
     }
@@ -4423,6 +4284,9 @@ public class HttpState {
         } catch (IllegalArgumentException e) {
             return loadScenarioError(objectMapper, "invalid load scenario definition: " + e.getMessage());
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return loadScenarioError(objectMapper, "failed to process load scenario request: " + e.getMessage());
         }
     }
@@ -4505,6 +4369,9 @@ public class HttpState {
         } catch (IllegalArgumentException e) {
             return loadScenarioError(objectMapper, "invalid generate-from-OpenAPI request: " + e.getMessage());
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return loadScenarioError(objectMapper, "failed to process generate-from-OpenAPI request: " + e.getMessage());
         }
     }
@@ -4643,6 +4510,9 @@ public class HttpState {
         } catch (IllegalArgumentException e) {
             return loadScenarioError(objectMapper, "invalid generate-from-recording request: " + e.getMessage());
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return loadScenarioError(objectMapper, "failed to process generate-from-recording request: " + e.getMessage());
         }
     }
@@ -4681,7 +4551,7 @@ public class HttpState {
     }
 
     /** Handle {@code GET /mockserver/loadScenario/{name}}: one scenario (definition + state + status), 404 if absent. */
-    private HttpResponse handleLoadScenarioGetOne(String name) {
+    private HttpResponse handleLoadScenarioGetOne(HttpRequest request, String name) {
         com.fasterxml.jackson.databind.ObjectMapper objectMapper = ObjectMapperFactory.createObjectMapper();
         try {
             if (!loadScenarioRegistry.contains(name)) {
@@ -4693,6 +4563,9 @@ public class HttpState {
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(
                     loadScenarioNode(objectMapper, name)), MediaType.JSON_UTF_8);
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return loadScenarioError(objectMapper, "failed to get load scenario: " + e.getMessage());
         }
     }
@@ -4703,7 +4576,7 @@ public class HttpState {
      * finished one). Returns JSON by default; {@code ?format=junit} returns a JUnit-XML {@code testsuite}
      * with {@code application/xml}. {@code 404} when the scenario is unknown / never ran. Read-only.
      */
-    private HttpResponse handleLoadScenarioReport(String name, String format) {
+    private HttpResponse handleLoadScenarioReport(HttpRequest request, String name, String format) {
         com.fasterxml.jackson.databind.ObjectMapper objectMapper = ObjectMapperFactory.createObjectMapper();
         try {
             org.mockserver.mock.action.http.LoadScenarioOrchestrator.LoadScenarioStatus status =
@@ -4720,12 +4593,15 @@ public class HttpState {
             return response().withStatusCode(OK.code())
                 .withBody(org.mockserver.load.LoadScenarioReport.toJson(status), MediaType.JSON_UTF_8);
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return loadScenarioError(objectMapper, "failed to build load scenario report: " + e.getMessage());
         }
     }
 
     /** Handle {@code DELETE /mockserver/loadScenario/{name}}: remove from the registry (stop it if running). */
-    private HttpResponse handleLoadScenarioDeleteOne(String name) {
+    private HttpResponse handleLoadScenarioDeleteOne(HttpRequest request, String name) {
         com.fasterxml.jackson.databind.ObjectMapper objectMapper = ObjectMapperFactory.createObjectMapper();
         try {
             org.mockserver.mock.action.http.LoadScenarioOrchestrator orchestrator =
@@ -4739,12 +4615,15 @@ public class HttpState {
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(result), MediaType.JSON_UTF_8);
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return loadScenarioError(objectMapper, "failed to delete load scenario: " + e.getMessage());
         }
     }
 
     /** Handle {@code DELETE /mockserver/loadScenario}: clear the whole registry (stop all running). */
-    private HttpResponse handleLoadScenarioDeleteAll() {
+    private HttpResponse handleLoadScenarioDeleteAll(HttpRequest request) {
         com.fasterxml.jackson.databind.ObjectMapper objectMapper = ObjectMapperFactory.createObjectMapper();
         try {
             org.mockserver.mock.action.http.LoadScenarioOrchestrator orchestrator =
@@ -4759,7 +4638,7 @@ public class HttpState {
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(result), MediaType.JSON_UTF_8);
         } catch (Exception e) {
-            return loadScenarioError(objectMapper, "failed to clear load scenarios: " + e.getMessage());
+            return unexpectedFailure(request, e);
         }
     }
 
@@ -4822,6 +4701,9 @@ public class HttpState {
         } catch (IllegalArgumentException e) {
             return loadScenarioError(objectMapper, "invalid load scenario start request: " + e.getMessage());
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return loadScenarioError(objectMapper, "failed to start load scenario(s): " + e.getMessage());
         }
     }
@@ -4864,6 +4746,9 @@ public class HttpState {
         } catch (IllegalArgumentException e) {
             return loadScenarioError(objectMapper, "invalid load scenario stop request: " + e.getMessage());
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return loadScenarioError(objectMapper, "failed to stop load scenario(s): " + e.getMessage());
         }
     }
@@ -5213,11 +5098,14 @@ public class HttpState {
         } catch (IllegalArgumentException e) {
             return chaosExperimentError(objectMapper, "invalid chaos profile: " + e.getMessage());
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return chaosExperimentError(objectMapper, "failed to save chaos profile: " + e.getMessage());
         }
     }
 
-    private HttpResponse handleChaosProfileList() {
+    private HttpResponse handleChaosProfileList(HttpRequest request) {
         com.fasterxml.jackson.databind.ObjectMapper objectMapper = ObjectMapperFactory.createObjectMapper();
         try {
             com.fasterxml.jackson.databind.node.ObjectNode result = objectMapper.createObjectNode();
@@ -5228,11 +5116,11 @@ public class HttpState {
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(result), MediaType.JSON_UTF_8);
         } catch (Exception e) {
-            return chaosExperimentError(objectMapper, "failed to list chaos profiles: " + e.getMessage());
+            return unexpectedFailure(request, e);
         }
     }
 
-    private HttpResponse handleChaosProfileGet(String name) {
+    private HttpResponse handleChaosProfileGet(HttpRequest request, String name) {
         com.fasterxml.jackson.databind.ObjectMapper objectMapper = ObjectMapperFactory.createObjectMapper();
         try {
             java.util.Optional<com.fasterxml.jackson.databind.node.ObjectNode> profile = chaosProfileLibrary.get(name);
@@ -5244,11 +5132,14 @@ public class HttpState {
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(profile.get()), MediaType.JSON_UTF_8);
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return chaosExperimentError(objectMapper, "failed to get chaos profile: " + e.getMessage());
         }
     }
 
-    private HttpResponse handleChaosProfileDelete(String name) {
+    private HttpResponse handleChaosProfileDelete(HttpRequest request, String name) {
         com.fasterxml.jackson.databind.ObjectMapper objectMapper = ObjectMapperFactory.createObjectMapper();
         try {
             boolean removed = chaosProfileLibrary.delete(name);
@@ -5258,6 +5149,9 @@ public class HttpState {
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(result), MediaType.JSON_UTF_8);
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return chaosExperimentError(objectMapper, "failed to delete chaos profile: " + e.getMessage());
         }
     }
@@ -5299,6 +5193,9 @@ public class HttpState {
         } catch (IllegalArgumentException e) {
             return chaosExperimentError(objectMapper, "invalid saved chaos profile: " + e.getMessage());
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return chaosExperimentError(objectMapper, "failed to apply chaos profile: " + e.getMessage());
         }
     }
@@ -5364,6 +5261,9 @@ public class HttpState {
         } catch (IllegalArgumentException e) {
             return tcpChaosError(objectMapper, "invalid TCP chaos profile: " + e.getMessage());
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return tcpChaosError(objectMapper, "failed to process TCP chaos request: " + e.getMessage());
         }
     }
@@ -5400,6 +5300,9 @@ public class HttpState {
         } catch (IllegalArgumentException e) {
             return tcpChaosError(objectMapper, "invalid TCP chaos profile: " + e.getMessage());
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return tcpChaosError(objectMapper, "failed to process TCP chaos patch: " + e.getMessage());
         }
     }
@@ -5590,6 +5493,9 @@ public class HttpState {
         } catch (IllegalArgumentException e) {
             return grpcChaosError(objectMapper, "invalid gRPC chaos profile: " + e.getMessage());
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return grpcChaosError(objectMapper, "failed to process gRPC chaos request: " + e.getMessage());
         }
     }
@@ -5626,6 +5532,9 @@ public class HttpState {
         } catch (IllegalArgumentException e) {
             return grpcChaosError(objectMapper, "invalid gRPC chaos profile: " + e.getMessage());
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return grpcChaosError(objectMapper, "failed to process gRPC chaos patch: " + e.getMessage());
         }
     }
@@ -5780,6 +5689,9 @@ public class HttpState {
                     .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(result), MediaType.JSON_UTF_8);
             }
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return scenarioError(objectMapper, "failed to process scenario request: " + e.getMessage());
         }
     }
@@ -5787,14 +5699,14 @@ public class HttpState {
     /**
      * Handles GET /mockserver/scenario/{name} — returns the current state of a scenario.
      * When no name is supplied (GET /mockserver/scenario), returns the list of all known
-     * scenarios and their current states (see {@link #handleScenarioList()}).
+     * scenarios and their current states (see {@link #handleScenarioList(HttpRequest)}).
      */
     private HttpResponse handleScenarioGet(HttpRequest request) {
         com.fasterxml.jackson.databind.ObjectMapper objectMapper = ObjectMapperFactory.createObjectMapper();
         try {
             String scenarioPath = extractScenarioPath(request);
             if (isBlank(scenarioPath)) {
-                return handleScenarioList();
+                return handleScenarioList(request);
             }
 
             ScenarioManager scenarioManager = requestMatchers.getScenarioManager();
@@ -5806,6 +5718,9 @@ public class HttpState {
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(result), MediaType.JSON_UTF_8);
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return scenarioError(objectMapper, "failed to get scenario state: " + e.getMessage());
         }
     }
@@ -5815,7 +5730,7 @@ public class HttpState {
      * as {@code { "scenarios": [ { "scenarioName", "currentState" }, ... ] }} so the dashboard
      * can list existing scenarios without the caller having to know their names in advance.
      */
-    private HttpResponse handleScenarioList() {
+    private HttpResponse handleScenarioList(HttpRequest request) {
         com.fasterxml.jackson.databind.ObjectMapper objectMapper = ObjectMapperFactory.createObjectMapper();
         try {
             ScenarioManager scenarioManager = requestMatchers.getScenarioManager();
@@ -5830,7 +5745,7 @@ public class HttpState {
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(result), MediaType.JSON_UTF_8);
         } catch (Exception e) {
-            return scenarioError(objectMapper, "failed to list scenarios: " + e.getMessage());
+            return unexpectedFailure(request, e);
         }
     }
 
@@ -5842,7 +5757,7 @@ public class HttpState {
      * most-recently-used first. The dashboard merges this with its per-browser list so cassettes
      * recorded/loaded anywhere (or seeded by automation) are visible across reloads and browsers.
      */
-    private HttpResponse handleCassettesGet() {
+    private HttpResponse handleCassettesGet(HttpRequest request) {
         com.fasterxml.jackson.databind.ObjectMapper objectMapper = ObjectMapperFactory.createObjectMapper();
         try {
             com.fasterxml.jackson.databind.node.ObjectNode result = objectMapper.createObjectNode();
@@ -5859,7 +5774,7 @@ public class HttpState {
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(result), MediaType.JSON_UTF_8);
         } catch (Exception e) {
-            return cassetteError(objectMapper, "failed to list cassettes: " + e.getMessage());
+            return unexpectedFailure(request, e);
         }
     }
 
@@ -5892,6 +5807,9 @@ public class HttpState {
             return response().withStatusCode(CREATED.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(result), MediaType.JSON_UTF_8);
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return cassetteError(objectMapper, "failed to register cassette: " + e.getMessage());
         }
     }
@@ -5919,6 +5837,9 @@ public class HttpState {
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writeValueAsString(result), MediaType.JSON_UTF_8);
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return cassetteError(objectMapper, "failed to remove cassette: " + e.getMessage());
         }
     }
@@ -6186,6 +6107,9 @@ public class HttpState {
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(result), MediaType.JSON_UTF_8);
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return response().withStatusCode(BAD_REQUEST.code())
                 .withBody("{\"error\":\"failed to set gRPC health status: " + e.getMessage() + "\"}", MediaType.JSON_UTF_8);
         }
@@ -6300,6 +6224,9 @@ public class HttpState {
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(result), MediaType.JSON_UTF_8);
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return response().withStatusCode(BAD_REQUEST.code())
                 .withBody("{\"error\":\"failed to diff requests: " + e.getMessage() + "\"}", MediaType.JSON_UTF_8);
         }
@@ -7282,33 +7209,41 @@ public class HttpState {
                         .withStatusCode(OK.code())
                         .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(reportNode), MediaType.JSON_UTF_8)), true);
                 } catch (Exception e) {
-                    mockServerLogger.logEvent(
-                        new LogEntry()
-                            .setLogLevel(Level.ERROR)
-                            .setHttpRequest(controlPlaneRequest)
-                            .setMessageFormat("exception handling contract test request:{}error:{}")
-                            .setArguments(controlPlaneRequest, e.getMessage())
-                            .setThrowable(e)
-                    );
-                    responseWriter.writeResponse(controlPlaneRequest, withDashboardCORS(controlPlaneRequest, response()
-                        .withStatusCode(BAD_REQUEST.code())
-                        .withBody("{\"error\":" + jsonEncodeString(e.getMessage() != null ? e.getMessage() : "unknown error") + "}", MediaType.JSON_UTF_8)), true);
+                    if (!isClientError(e)) {
+                        responseWriter.writeResponse(controlPlaneRequest, withDashboardCORS(controlPlaneRequest, unexpectedFailure(controlPlaneRequest, e)), true);
+                    } else {
+                        mockServerLogger.logEvent(
+                            new LogEntry()
+                                .setLogLevel(Level.ERROR)
+                                .setHttpRequest(controlPlaneRequest)
+                                .setMessageFormat("exception handling contract test request:{}error:{}")
+                                .setArguments(controlPlaneRequest, e.getMessage())
+                                .setThrowable(e)
+                        );
+                        responseWriter.writeResponse(controlPlaneRequest, withDashboardCORS(controlPlaneRequest, response()
+                            .withStatusCode(BAD_REQUEST.code())
+                            .withBody("{\"error\":" + jsonEncodeString(e.getMessage() != null ? e.getMessage() : "unknown error") + "}", MediaType.JSON_UTF_8)), true);
+                    }
                 } finally {
                     canHandle.complete(true);
                 }
             });
         } catch (Exception e) {
-            mockServerLogger.logEvent(
-                new LogEntry()
-                    .setLogLevel(Level.ERROR)
-                    .setHttpRequest(controlPlaneRequest)
-                    .setMessageFormat("exception handling contract test request:{}error:{}")
-                    .setArguments(controlPlaneRequest, e.getMessage())
-                    .setThrowable(e)
-            );
-            responseWriter.writeResponse(controlPlaneRequest, withDashboardCORS(controlPlaneRequest, response()
-                .withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":" + jsonEncodeString(e.getMessage() != null ? e.getMessage() : "unknown error") + "}", MediaType.JSON_UTF_8)), true);
+            if (!isClientError(e)) {
+                responseWriter.writeResponse(controlPlaneRequest, withDashboardCORS(controlPlaneRequest, unexpectedFailure(controlPlaneRequest, e)), true);
+            } else {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.ERROR)
+                        .setHttpRequest(controlPlaneRequest)
+                        .setMessageFormat("exception handling contract test request:{}error:{}")
+                        .setArguments(controlPlaneRequest, e.getMessage())
+                        .setThrowable(e)
+                );
+                responseWriter.writeResponse(controlPlaneRequest, withDashboardCORS(controlPlaneRequest, response()
+                    .withStatusCode(BAD_REQUEST.code())
+                    .withBody("{\"error\":" + jsonEncodeString(e.getMessage() != null ? e.getMessage() : "unknown error") + "}", MediaType.JSON_UTF_8)), true);
+            }
             canHandle.complete(true);
         }
     }
@@ -7450,17 +7385,21 @@ public class HttpState {
                         .withStatusCode(OK.code())
                         .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(reportNode), MediaType.JSON_UTF_8)), true);
                 } catch (Exception e) {
-                    mockServerLogger.logEvent(
-                        new LogEntry()
-                            .setLogLevel(Level.ERROR)
-                            .setHttpRequest(controlPlaneRequest)
-                            .setMessageFormat("exception handling traffic validation request:{}error:{}")
-                            .setArguments(controlPlaneRequest, e.getMessage())
-                            .setThrowable(e)
-                    );
-                    responseWriter.writeResponse(controlPlaneRequest, withDashboardCORS(controlPlaneRequest, response()
-                        .withStatusCode(BAD_REQUEST.code())
-                        .withBody("{\"error\":" + jsonEncodeString(e.getMessage() != null ? e.getMessage() : "unknown error") + "}", MediaType.JSON_UTF_8)), true);
+                    if (!isClientError(e)) {
+                        responseWriter.writeResponse(controlPlaneRequest, withDashboardCORS(controlPlaneRequest, unexpectedFailure(controlPlaneRequest, e)), true);
+                    } else {
+                        mockServerLogger.logEvent(
+                            new LogEntry()
+                                .setLogLevel(Level.ERROR)
+                                .setHttpRequest(controlPlaneRequest)
+                                .setMessageFormat("exception handling traffic validation request:{}error:{}")
+                                .setArguments(controlPlaneRequest, e.getMessage())
+                                .setThrowable(e)
+                        );
+                        responseWriter.writeResponse(controlPlaneRequest, withDashboardCORS(controlPlaneRequest, response()
+                            .withStatusCode(BAD_REQUEST.code())
+                            .withBody("{\"error\":" + jsonEncodeString(e.getMessage() != null ? e.getMessage() : "unknown error") + "}", MediaType.JSON_UTF_8)), true);
+                    }
                 } finally {
                     canHandle.complete(true);
                 }
@@ -7484,17 +7423,21 @@ public class HttpState {
               }
             });
         } catch (Exception e) {
-            mockServerLogger.logEvent(
-                new LogEntry()
-                    .setLogLevel(Level.ERROR)
-                    .setHttpRequest(controlPlaneRequest)
-                    .setMessageFormat("exception handling traffic validation request:{}error:{}")
-                    .setArguments(controlPlaneRequest, e.getMessage())
-                    .setThrowable(e)
-            );
-            responseWriter.writeResponse(controlPlaneRequest, withDashboardCORS(controlPlaneRequest, response()
-                .withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":" + jsonEncodeString(e.getMessage() != null ? e.getMessage() : "unknown error") + "}", MediaType.JSON_UTF_8)), true);
+            if (!isClientError(e)) {
+                responseWriter.writeResponse(controlPlaneRequest, withDashboardCORS(controlPlaneRequest, unexpectedFailure(controlPlaneRequest, e)), true);
+            } else {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.ERROR)
+                        .setHttpRequest(controlPlaneRequest)
+                        .setMessageFormat("exception handling traffic validation request:{}error:{}")
+                        .setArguments(controlPlaneRequest, e.getMessage())
+                        .setThrowable(e)
+                );
+                responseWriter.writeResponse(controlPlaneRequest, withDashboardCORS(controlPlaneRequest, response()
+                    .withStatusCode(BAD_REQUEST.code())
+                    .withBody("{\"error\":" + jsonEncodeString(e.getMessage() != null ? e.getMessage() : "unknown error") + "}", MediaType.JSON_UTF_8)), true);
+            }
             canHandle.complete(true);
         }
     }
@@ -7615,17 +7558,21 @@ public class HttpState {
                     }
                 });
         } catch (Exception e) {
-            mockServerLogger.logEvent(
-                new LogEntry()
-                    .setLogLevel(Level.ERROR)
-                    .setHttpRequest(controlPlaneRequest)
-                    .setMessageFormat("exception handling replay request:{}error:{}")
-                    .setArguments(controlPlaneRequest, e.getMessage())
-                    .setThrowable(e)
-            );
-            responseWriter.writeResponse(controlPlaneRequest, withDashboardCORS(controlPlaneRequest, response()
-                .withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":" + jsonEncodeString(e.getMessage() != null ? e.getMessage() : "unknown error") + "}", MediaType.JSON_UTF_8)), true);
+            if (!isClientError(e)) {
+                responseWriter.writeResponse(controlPlaneRequest, withDashboardCORS(controlPlaneRequest, unexpectedFailure(controlPlaneRequest, e)), true);
+            } else {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.ERROR)
+                        .setHttpRequest(controlPlaneRequest)
+                        .setMessageFormat("exception handling replay request:{}error:{}")
+                        .setArguments(controlPlaneRequest, e.getMessage())
+                        .setThrowable(e)
+                );
+                responseWriter.writeResponse(controlPlaneRequest, withDashboardCORS(controlPlaneRequest, response()
+                    .withStatusCode(BAD_REQUEST.code())
+                    .withBody("{\"error\":" + jsonEncodeString(e.getMessage() != null ? e.getMessage() : "unknown error") + "}", MediaType.JSON_UTF_8)), true);
+            }
             canHandle.complete(true);
         }
     }
@@ -8036,6 +7983,9 @@ public class HttpState {
             return response().withStatusCode(CREATED.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(result), MediaType.JSON_UTF_8);
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             String message = String.valueOf(e.getMessage());
             return response().withStatusCode(BAD_REQUEST.code())
                 .withBody("{\"error\":\"failed to load AsyncAPI spec: " + message.replace("\"", "'") + "\"}", MediaType.JSON_UTF_8);
@@ -8062,9 +8012,57 @@ public class HttpState {
             return response().withStatusCode(BAD_REQUEST.code())
                 .withBody(errorJson(String.valueOf(e.getMessage())), MediaType.JSON_UTF_8);
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return response().withStatusCode(BAD_REQUEST.code())
                 .withBody(errorJson("failed to import AsyncAPI spec as HTTP expectations: " + e.getMessage()), MediaType.JSON_UTF_8);
         }
+    }
+
+    /**
+     * Answers an exception a text endpoint caught. A client error keeps the endpoint's {@code 400} with its prefixed
+     * message (and its log entry, when it logged one: {@code clientErrorLog} carries that entry's format); anything
+     * else is a fault in MockServer, answered {@code 500} with a generic message naming a correlation id and logged
+     * with the stack trace.
+     */
+    private void writeEndpointFailure(HttpRequest request, ResponseWriter responseWriter, Exception exception, boolean clientError, LogEntry clientErrorLog, String clientErrorPrefix) {
+        if (!clientError) {
+            ControlPlaneFailureResponse.writeUnexpectedFailure(mockServerLogger, responseWriter, request, exception);
+            return;
+        }
+        if (clientErrorLog != null) {
+            mockServerLogger.logEvent(
+                clientErrorLog
+                    .setLogLevel(Level.ERROR)
+                    .setArguments(request, exception.getMessage())
+                    .setThrowable(exception)
+            );
+        }
+        responseWriter.writeResponse(request, BAD_REQUEST, clientErrorPrefix + exception.getMessage(), MediaType.create("text", "plain").toString());
+    }
+
+    /**
+     * A fault in MockServer caught by a JSON endpoint: {@code 500} with a generic {@code error} naming a correlation id,
+     * logged with the stack trace, so the exception's text never reaches the caller.
+     */
+    private HttpResponse unexpectedFailure(HttpRequest request, Throwable throwable) {
+        return response()
+            .withStatusCode(INTERNAL_SERVER_ERROR.code())
+            .withBody(errorJson(ControlPlaneFailureResponse.logUnexpectedFailure(mockServerLogger, request, throwable)), MediaType.JSON_UTF_8);
+    }
+
+    /**
+     * A descriptor set the caller sent that is not a valid {@code FileDescriptorSet} or does not resolve; the store
+     * wraps both in a {@code GrpcException}.
+     */
+    private static boolean isInvalidDescriptorSet(Throwable throwable) {
+        for (Throwable cause = throwable; cause != null; cause = cause.getCause() == cause ? null : cause.getCause()) {
+            if (cause instanceof com.google.protobuf.InvalidProtocolBufferException || cause instanceof com.google.protobuf.Descriptors.DescriptorValidationException) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -8081,7 +8079,7 @@ public class HttpState {
         }
     }
 
-    private HttpResponse handleAsyncApiGet() {
+    private HttpResponse handleAsyncApiGet(HttpRequest request) {
         try {
             org.mockserver.async.AsyncApiControlPlaneRegistry registry = org.mockserver.async.AsyncApiControlPlaneRegistry.getInstance();
             if (!registry.isAvailable()) {
@@ -8093,9 +8091,7 @@ public class HttpState {
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(result), MediaType.JSON_UTF_8);
         } catch (Exception e) {
-            String message = String.valueOf(e.getMessage());
-            return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to get AsyncAPI status: " + message.replace("\"", "'") + "\"}", MediaType.JSON_UTF_8);
+            return unexpectedFailure(request, e);
         }
     }
 
@@ -8156,6 +8152,9 @@ public class HttpState {
             return response().withStatusCode(BAD_REQUEST.code())
                 .withBody("{\"error\":\"" + String.valueOf(e.getMessage()).replace("\"", "'") + "\"}", MediaType.JSON_UTF_8);
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             String message = String.valueOf(e.getMessage());
             return response().withStatusCode(BAD_REQUEST.code())
                 .withBody("{\"error\":\"failed to verify Pact contract: " + message.replace("\"", "'") + "\"}", MediaType.JSON_UTF_8);
@@ -8185,6 +8184,9 @@ public class HttpState {
             return response().withStatusCode(BAD_REQUEST.code())
                 .withBody("{\"error\":\"" + String.valueOf(e.getMessage()).replace("\"", "'") + "\"}", MediaType.JSON_UTF_8);
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             String message = String.valueOf(e.getMessage());
             return response().withStatusCode(BAD_REQUEST.code())
                 .withBody("{\"error\":\"failed to verify async messages: " + message.replace("\"", "'") + "\"}", MediaType.JSON_UTF_8);
@@ -8350,11 +8352,11 @@ public class HttpState {
             return response().withStatusCode(CREATED.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(result), MediaType.JSON_UTF_8);
         } catch (Exception e) {
-            return breakpointErrorResponse(objectMapper, e);
+            return breakpointErrorResponse(request, objectMapper, e);
         }
     }
 
-    private HttpResponse handleBreakpointMatcherList() {
+    private HttpResponse handleBreakpointMatcherList(HttpRequest request) {
         com.fasterxml.jackson.databind.ObjectMapper objectMapper = ObjectMapperFactory.createObjectMapper();
         try {
             org.mockserver.mock.breakpoint.BreakpointMatcherRegistry registry = org.mockserver.mock.breakpoint.BreakpointMatcherRegistry.getInstance();
@@ -8398,7 +8400,7 @@ public class HttpState {
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(result), MediaType.JSON_UTF_8);
         } catch (Exception e) {
-            return breakpointErrorResponse(objectMapper, e);
+            return unexpectedFailure(request, e);
         }
     }
 
@@ -8432,11 +8434,11 @@ public class HttpState {
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(result), MediaType.JSON_UTF_8);
         } catch (Exception e) {
-            return breakpointErrorResponse(objectMapper, e);
+            return breakpointErrorResponse(request, objectMapper, e);
         }
     }
 
-    private HttpResponse handleBreakpointMatcherClear() {
+    private HttpResponse handleBreakpointMatcherClear(HttpRequest request) {
         com.fasterxml.jackson.databind.ObjectMapper objectMapper = ObjectMapperFactory.createObjectMapper();
         try {
             org.mockserver.mock.breakpoint.BreakpointMatcherRegistry registry = org.mockserver.mock.breakpoint.BreakpointMatcherRegistry.getInstance();
@@ -8449,7 +8451,7 @@ public class HttpState {
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(result), MediaType.JSON_UTF_8);
         } catch (Exception e) {
-            return breakpointErrorResponse(objectMapper, e);
+            return unexpectedFailure(request, e);
         }
     }
 
@@ -8457,7 +8459,10 @@ public class HttpState {
      * Builds a safe JSON error response for breakpoint endpoints using Jackson,
      * avoiding string-concatenation JSON injection.
      */
-    private HttpResponse breakpointErrorResponse(com.fasterxml.jackson.databind.ObjectMapper objectMapper, Exception e) {
+    private HttpResponse breakpointErrorResponse(HttpRequest request, com.fasterxml.jackson.databind.ObjectMapper objectMapper, Exception e) {
+        if (!isClientError(e)) {
+            return unexpectedFailure(request, e);
+        }
         try {
             com.fasterxml.jackson.databind.node.ObjectNode errNode = objectMapper.createObjectNode();
             errNode.put("error", String.valueOf(e.getMessage()));

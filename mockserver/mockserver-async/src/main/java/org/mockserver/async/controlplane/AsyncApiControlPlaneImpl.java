@@ -178,6 +178,10 @@ public class AsyncApiControlPlaneImpl implements AsyncApiControlPlane {
             // Build response
             return buildLoadResponse(spec);
 
+        } catch (IllegalArgumentException | com.fasterxml.jackson.core.JsonProcessingException e) {
+            // a spec or broker configuration the caller can correct
+            resetInternal();
+            throw new IllegalArgumentException("Failed to load AsyncAPI spec: " + e.getMessage(), e);
         } catch (Exception e) {
             // Clean up any partially-created brokers on failure
             resetInternal();

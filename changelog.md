@@ -786,6 +786,22 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **A fault inside MockServer is now answered `500` by the control-plane endpoints that handle their own errors too,
+  not `400` with the fault's message.** This extends the BREAKING change that answers an unexpected control-plane
+  failure `500` with `unexpected error processing request, see the MockServer log for correlation id: <id>`: it
+  first covered only failures no endpoint caught itself. Before, endpoints such as `PUT /mockserver/import`,
+  `/mockserver/pact/import`, `/mockserver/recordings/promote`, `/mockserver/baseline/compare`, `/mockserver/crud`,
+  `/mockserver/grpc/descriptors`, `/mockserver/wasm/modules`, `/mockserver/files/...`, `/mockserver/oidc`,
+  `/mockserver/clock`, the chaos, load-scenario, scenario, cassette, breakpoint, contract-test, replay and AsyncAPI
+  endpoints, and `PUT /mockserver/configuration` answered any exception `400` with its message, so a fault in
+  MockServer read as a problem with your request. Now only your own mistakes (JSON that cannot be read, invalid
+  values, a protobuf descriptor set that is not valid) are still `400` with the same message as before; anything
+  else is `500` with the generic message, in a JSON `error` field on endpoints that answer errors in JSON, and the
+  MockServer log holds one `ERROR` entry with the stack trace under that correlation id.
+- **`PUT /mockserver/clock` refuses to move the clock past the latest time it can report.** A `freeze` to an
+  `instant` beyond the epoch-millisecond range, or an `advance` whose `durationMillis` would carry the clock past
+  it, is now answered `400` saying so and leaves the clock unchanged; before, the clock moved and the request then
+  failed while building its response.
 - **An expectation with more than one action can now be created through the Java client.** The client did not send the `primary` flag of an `httpResponse` action, so an expectation that combined a response marked primary with a second action, such as a forward callback, was rejected with "when multiple action types are configured, exactly one must be marked as primary". The flag is now sent, and is shown when the expectation is retrieved.
 - **The WAR deployments now answer a request they cannot read with a proper error response.** When the servlet (`mockserver-war` or `mockserver-proxy-war`) failed to read a request, for example because the connection dropped while its body was being read, it failed again writing the error response, and the servlet container answered with its own error page. It now answers `500` with a message naming a correlation id, or `400` with the reason when the request itself is invalid, like any other failed request.
 - **An HTTP/3 request whose processing fails unexpectedly is now answered instead of left waiting, and every protocol answers it the same way.** When matching or running an expectation threw an error, MockServer logged it and sent nothing on the HTTP/3 stream, so the client waited until its own timeout. It now answers `500` with a short message naming a correlation id to look up in the MockServer log (the error's own text is not sent), or, for a gRPC call over HTTP/3, ends it with the gRPC status `INTERNAL`; an HTTP/3 request that already has a response started is not answered a second time. Over HTTP/1.1 and HTTP/2 the same failure was answered with an empty `500`; it now carries the same message and correlation id.

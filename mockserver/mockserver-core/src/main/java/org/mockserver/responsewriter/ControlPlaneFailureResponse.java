@@ -62,6 +62,14 @@ public final class ControlPlaneFailureResponse {
     }
 
     /**
+     * Answers a failure the caller has already decided is a fault in MockServer: {@code 500}, generic message, logged
+     * once at {@code ERROR} with the stack trace, whatever the exception's type.
+     */
+    public static void writeUnexpectedFailure(MockServerLogger mockServerLogger, ResponseWriter responseWriter, HttpRequest request, Throwable throwable) {
+        responseWriter.writeResponse(request, INTERNAL_SERVER_ERROR, logUnexpectedFailure(mockServerLogger, request, throwable), MediaType.create("text", "plain").toString());
+    }
+
+    /**
      * Logs a fault in MockServer once at {@code ERROR} with a correlation id and the stack trace.
      *
      * @return the generic message naming that correlation id, to answer the request with

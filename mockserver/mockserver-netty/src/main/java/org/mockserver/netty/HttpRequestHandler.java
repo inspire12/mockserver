@@ -364,7 +364,11 @@ public class HttpRequestHandler extends SimpleChannelInboundHandler<HttpRequest>
                         } catch (IllegalArgumentException e) {
                             responseWriter.writeResponse(request, BAD_REQUEST, e.getMessage(), MediaType.create("text", "plain").toString());
                         } catch (Exception e) {
-                            responseWriter.writeResponse(request, BAD_REQUEST, "Invalid configuration JSON", MediaType.create("text", "plain").toString());
+                            if (ControlPlaneFailureResponse.isClientError(e)) {
+                                responseWriter.writeResponse(request, BAD_REQUEST, "Invalid configuration JSON", MediaType.create("text", "plain").toString());
+                            } else {
+                                ControlPlaneFailureResponse.writeUnexpectedFailure(mockServerLogger, responseWriter, request, e);
+                            }
                         }
                     }
 
