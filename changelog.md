@@ -782,6 +782,22 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **A request a client sends just before it resets its connection is no longer lost when a write to that client
+  fails first.** When a client sent a request and then reset the connection (closed it with `SO_LINGER` 0, or with
+  data still unread) while MockServer still had something to write to it, such as the rest of a large response the
+  client had stopped reading, the failed write closed the connection with the request still unread, so it was not
+  recorded, matched or forwarded. This affected HTTP/1.1 and `h2c` requests directly and through `CONNECT` tunnels,
+  `h2` requests over TLS directly and through `CONNECT` tunnels, and an `h2` request sent together with the client's
+  last TLS handshake message, directly and through `CONNECT` and SOCKS tunnels. A failed write
+  now ends only the connection's output: MockServer goes on reading what the client had already sent, records and
+  matches it (its response cannot be delivered), and closes the connection when the client's input ends, or 5 seconds
+  later at the latest.
+
+Also, in the existing unreleased `### Fixed` entry "An HTTP/2 request from a client that resets its connection as soon
+as it has sent it is now received.", delete its last sentence ("A request large enough to be read in more than one
+pass can still be lost this way."). The same change covers that case: the flush at the end of the first pass no
+longer closes the connection. That is reasoned, not measured: the tests make a write fail before a read, not between
+two passes of one request.
 - **`localBoundIP` now keeps the DNS and HTTP/3 ports on that address too.** It applied to the HTTP(S) ports only:
   the DNS port and the experimental HTTP/3 port, which use UDP, listened on every address of the host even when
   `localBoundIP` was set, so a user who set `localBoundIP=127.0.0.1` to keep MockServer off the network still exposed
@@ -1001,8 +1017,7 @@ This release delivers a sustained performance and memory programme alongside dat
   connection or through a SOCKS tunnel. MockServer's first write on the connection, its HTTP/2 settings, failed and
   closed the connection before the request it had already read was handled. The settings are now sent at the end of
   that read, once the request has been handled; a client that waits for them before sending its request still gets
-  them at once. HTTP/1.1 was not affected. A request large enough to be read in more than one pass can still be lost
-  this way.
+  them at once. HTTP/1.1 was not affected.
 
 - **A dashboard that cannot keep up no longer makes MockServer queue update after update for it.**
   When captured requests have large bodies each dashboard update can be tens of megabytes, and

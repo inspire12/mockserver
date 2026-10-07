@@ -4,6 +4,7 @@ import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.socket.DuplexChannel;
 import org.mockserver.socket.LingeringClose;
+import org.mockserver.socket.ReadAfterFailedWrite;
 
 import static org.mockserver.socket.LingeringClose.closeSocket;
 
@@ -47,7 +48,7 @@ final class RelayLegClose {
             return;
         }
         // at the socket, as the close is: through the pipeline a TLS handler would first write its close_notify
-        ((DuplexChannel) channel).shutdownOutput();
+        ReadAfterFailedWrite.endOutput((DuplexChannel) channel);
         LingeringClose.closeSocketUnlessClosedWithinLinger(channel);
     }
 }

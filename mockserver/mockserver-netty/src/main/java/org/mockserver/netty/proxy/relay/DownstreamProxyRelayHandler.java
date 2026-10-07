@@ -17,6 +17,7 @@ import org.mockserver.responsewriter.HttpExchangeEndedEvent;
 import org.mockserver.responsewriter.ResponseWrittenBeneathCodecEvent;
 import org.mockserver.socket.ChannelReadPause;
 import org.mockserver.logging.MockServerLogger;
+import org.mockserver.socket.ReadAfterFailedWrite;
 import org.slf4j.event.Level;
 
 import java.util.concurrent.atomic.AtomicLong;
@@ -203,11 +204,15 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
      * <p>
      * A proxy client that has gone had sent whole any request still being written to the loopback, so that loopback is
      * left to {@link UpstreamProxyRelayHandler} to close, and is read (and dropped) meanwhile: an HTTP/2 request body
-     * waits for MockServer's window updates.
+     * waits for MockServer's window updates. So is the loopback of a proxy client whose output a failed write has ended:
+     * that client is read to the end of its input ({@link ReadAfterFailedWrite}), and what it sent goes on to MockServer.
      */
     private void endRelay(ChannelHandlerContext ctx) {
         relayEnded = true;
         if (!upstreamChannel.isActive() && UpstreamProxyRelayHandler.isWritingRequestTo(ctx.channel())) {
+            return;
+        }
+        if (ReadAfterFailedWrite.isReadingOn(upstreamChannel)) {
             return;
         }
         // never released: it also stops a read in progress from going on to read the socket closed below

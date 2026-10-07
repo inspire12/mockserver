@@ -5,6 +5,7 @@ import io.netty.buffer.UnpooledByteBufAllocator;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.channel.socket.ChannelOutputShutdownException;
 import io.netty.handler.codec.DecoderException;
 import io.netty.handler.ssl.NotSslRecordException;
 import io.netty.handler.ssl.SslContextBuilder;
@@ -17,6 +18,7 @@ import org.mockserver.log.model.RedactedThrowable;
 import org.mockserver.logging.MockServerLogger;
 
 import javax.net.ssl.SSLException;
+import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.util.ArrayList;
@@ -45,6 +47,13 @@ import static org.mockserver.exception.ExceptionHandling.isSslOrDecoderFault;
 import static org.mockserver.exception.ExceptionHandling.swallowThrowable;
 
 public class ExceptionHandlingTest {
+
+    @Test
+    public void shouldTreatAWriteFailedAsTheOutputEndedAsTheSocketClosing() {
+        assertThat(ExceptionHandling.socketClosedException(new ChannelOutputShutdownException("Channel output shutdown", new IOException("Broken pipe"))), is(true));
+        assertThat(ExceptionHandling.clientGoneException(new ChannelOutputShutdownException("Channel output shutdown")), is(true));
+        assertThat(ExceptionHandling.socketClosedException(new IOException("Broken pipe")), is(false));
+    }
 
     @Test
     public void shouldSwallowException() {

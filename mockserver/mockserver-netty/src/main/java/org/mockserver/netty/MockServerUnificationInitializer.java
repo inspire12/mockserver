@@ -15,6 +15,7 @@ import org.mockserver.netty.proxy.ProxyProtocolOriginalDestinationHandler;
 import org.mockserver.netty.proxy.TransparentProxyHandler;
 import org.mockserver.netty.unification.BinaryAwareRecvByteBufAllocator;
 import org.mockserver.netty.unification.PortUnificationHandler;
+import org.mockserver.socket.ReadAfterFailedWrite;
 import org.mockserver.socket.tls.NettySslContextFactory;
 
 @ChannelHandler.Sharable
@@ -61,6 +62,8 @@ public class MockServerUnificationInitializer extends ChannelHandlerAdapter {
         if (writeStallTimeoutMillis > 0) {
             ctx.pipeline().addFirst("write-stall", new WriteStallTimeoutHandler(writeStallTimeoutMillis, httpState.getMockServerLogger()));
         }
+        // a failed write ends the connection's output, not the connection: requests already received are still read
+        ReadAfterFailedWrite.install(ctx.channel());
         // The PROXY protocol handler goes in front of port unification, so that what follows the header is
         // classified, not the header itself, which begins none of the protocols port unification detects
         if (Boolean.TRUE.equals(configuration.transparentProxyEnabled())) {

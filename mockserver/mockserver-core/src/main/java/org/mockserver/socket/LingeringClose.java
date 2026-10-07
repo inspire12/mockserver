@@ -57,7 +57,7 @@ public final class LingeringClose {
         ChannelFuture outputWritten = sslHandler != null ? sslHandler.closeOutbound() : channel.newSucceededFuture();
         outputWritten.addListener(written -> {
             if (written.isSuccess() && channel.isActive()) {
-                ((DuplexChannel) channel).shutdownOutput().addListener(shutdown -> {
+                ReadAfterFailedWrite.endOutput((DuplexChannel) channel).addListener(shutdown -> {
                     if (!shutdown.isSuccess()) {
                         closeSocket(channel);
                     }

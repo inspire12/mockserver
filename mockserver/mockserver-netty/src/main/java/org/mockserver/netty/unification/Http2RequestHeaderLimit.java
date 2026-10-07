@@ -2,6 +2,7 @@ package org.mockserver.netty.unification;
 
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.PrematureChannelClosureException;
 import io.netty.handler.codec.http2.AbstractHttp2ConnectionHandlerBuilder;
 import io.netty.handler.codec.http2.Http2CodecUtil;
@@ -21,6 +22,7 @@ import io.netty.util.AttributeKey;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
+import org.mockserver.socket.ReadAfterFailedWrite;
 import org.slf4j.event.Level;
 
 /**
@@ -102,6 +104,18 @@ public final class Http2RequestHeaderLimit {
                     public void onError(ChannelHandlerContext ctx, boolean outbound, Throwable cause) {
                         logRefusalThen(mockServerLogger, ctx, initialSettings, outbound, cause, () -> super.onError(ctx, outbound, cause));
                     }
+
+                    @Override
+                    protected void onConnectionError(ChannelHandlerContext ctx, boolean outbound, Throwable cause, Http2Exception http2Ex) {
+                        if (!isWriteFailedAsTheOutputEnded(ctx, outbound, http2Ex)) {
+                            super.onConnectionError(ctx, outbound, cause, http2Ex);
+                        }
+                    }
+
+                    @Override
+                    public void close(ChannelHandlerContext ctx, ChannelPromise promise) throws Exception {
+                        closeOnceReadUnlessReadingOn(ctx, promise, () -> super.close(ctx, promise));
+                    }
                 };
                 codec.gracefulShutdownTimeoutMillis(gracefulShutdownTimeoutMillis());
                 return codec;
@@ -151,6 +165,31 @@ public final class Http2RequestHeaderLimit {
         } finally {
             nettysOnError.run();
         }
+    }
+
+    /**
+     * Whether a connection error is a write that failed because the connection's output has ended, which on an accepted
+     * connection is then read to the end of its input ({@link ReadAfterFailedWrite}). Netty would answer it with a
+     * {@code GOAWAY}, after which it ignores the streams the client opened later, and a close.
+     */
+    static boolean isWriteFailedAsTheOutputEnded(ChannelHandlerContext ctx, boolean outbound, Http2Exception http2Ex) {
+        return outbound && http2Ex == null && ReadAfterFailedWrite.isReadingOn(ctx.channel());
+    }
+
+    /**
+     * A close asked for while the connection is read to the end of its input waits for that end; through Netty's
+     * handler it would send a {@code GOAWAY} first, as {@link #isWriteFailedAsTheOutputEnded} describes.
+     */
+    static void closeOnceReadUnlessReadingOn(ChannelHandlerContext ctx, ChannelPromise promise, CloseAction nettysClose) throws Exception {
+        if (ReadAfterFailedWrite.isReadingOn(ctx.channel())) {
+            ReadAfterFailedWrite.closeWhenInputEnds(ctx.channel(), promise);
+        } else {
+            nettysClose.close();
+        }
+    }
+
+    interface CloseAction {
+        void close() throws Exception;
     }
 
     static void logRefusal(MockServerLogger mockServerLogger, ChannelHandlerContext ctx, Http2Settings settings, boolean outbound, Throwable cause) {
@@ -298,6 +337,18 @@ public final class Http2RequestHeaderLimit {
                 public void onError(ChannelHandlerContext ctx, boolean outbound, Throwable cause) {
                     logRefusalThen(mockServerLogger, ctx, initialSettings, outbound, cause,
                         () -> logConnectionErrorThen(mockServerLogger, ctx, outbound, cause, () -> super.onError(ctx, outbound, cause)));
+                }
+
+                @Override
+                protected void onConnectionError(ChannelHandlerContext ctx, boolean outbound, Throwable cause, Http2Exception http2Ex) {
+                    if (!isWriteFailedAsTheOutputEnded(ctx, outbound, http2Ex)) {
+                        super.onConnectionError(ctx, outbound, cause, http2Ex);
+                    }
+                }
+
+                @Override
+                public void close(ChannelHandlerContext ctx, ChannelPromise promise) throws Exception {
+                    closeOnceReadUnlessReadingOn(ctx, promise, () -> super.close(ctx, promise));
                 }
 
                 @Override

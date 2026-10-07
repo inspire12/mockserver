@@ -3,6 +3,7 @@ package org.mockserver.exception;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFutureListener;
+import io.netty.channel.socket.ChannelOutputShutdownException;
 import io.netty.handler.codec.DecoderException;
 import io.netty.handler.ssl.NotSslRecordException;
 import io.netty.handler.ssl.SslClosedEngineException;
@@ -244,11 +245,12 @@ public class ExceptionHandling {
     }
 
     /**
-     * returns true if a write failed because its connection had already closed, or because its client had closed its
-     * TLS session (the socket may stay open a moment longer)
+     * returns true if a write failed because its connection had already closed, because the connection's output had
+     * ended (as a failed write ends it, see {@link org.mockserver.socket.ReadAfterFailedWrite}), or because its client
+     * had closed its TLS session (the socket may stay open a moment longer)
      */
     public static boolean socketClosedException(Throwable throwable) {
-        return throwable instanceof ClosedChannelException || throwable instanceof ClosedSelectorException || throwable instanceof SslClosedEngineException;
+        return throwable instanceof ClosedChannelException || throwable instanceof ChannelOutputShutdownException || throwable instanceof ClosedSelectorException || throwable instanceof SslClosedEngineException;
     }
 
     /**

@@ -771,21 +771,47 @@ MockServer has no HTTP/1.1 `Upgrade: h2c` path. A handler between the socket and
 `channelReadComplete` on (see [the invariant](#invariant-a-handler-overriding-channelreadcomplete-must-propagate-it)),
 or a client waiting for the server's `SETTINGS` would wait for ever.
 
+A flush that fails between two reads, or before a read in the same event-loop pass, is covered by the next section.
+
+##### A write that fails on a connection the client has reset
+
+**Outcome:** on an accepted connection a write that fails ends the connection's output, not the connection. Whatever
+the client sent before it reset the connection, and which has reached the socket unread, is still decoded, recorded
+and matched (its response is attempted, and fails); the connection closes when its input ends, and after
+`LingeringClose.LINGER_MILLIS` (5 s) at the latest.
+
+Netty closes a channel whose write fails with an `IOException` (`autoClose`, in `AbstractUnsafe.handleWriteError`), and
+the close drops what is still in the socket. When a write and a read are both waiting the write goes first: NIO's
+`processSelectedKey` handles `OP_WRITE` (a flush of what is pending) before `OP_READ`, epoll's `processReady` runs
+`epollOutReady` before `epollInReady` (an `EPOLLERR` event sets both), and a write handed to the event loop from
+another thread runs with its tasks, before its next I/O. So a request that arrived with the reset while a response was
+still being written (a client that gave up on a large response), or while the event loop was busy, was lost, and so
+was an `h2` request sent with the client's last TLS handshake message through a tunnel, which writes when the handshake
+completes; a request read in more than one pass whose first pass ended with a flush could be lost the same way.
+
+| Part | What it does |
+|---|---|
+| `ReadAfterFailedWrite.install` (`mockserver-core` `o.m.socket`), from `MockServerUnificationInitializer` | Turns `autoClose` off on every accepted connection, so a failed write shuts the socket's output down and fires `ChannelOutputShutdownEvent`. Its handler then closes the socket after `LINGER_MILLIS` unless it has closed, or at once if the channel's reads are paused, as nothing would be read |
+| The server HTTP/2 handlers (`Http2RequestHeaderLimit.frameCodecBuilder`, the tunnel's client-facing handler) | Skip `onConnectionError` for a write that failed as the output ended (no `Http2Exception`, output ended, channel active): Netty would send a `GOAWAY`, after which it ignores the streams the client opens later, and close. A close asked of them while the output has ended (the `CLOSE_ON_FAILURE` on their `SETTINGS`) waits for the input to end |
+| `DownstreamProxyRelayHandler.endRelay` | When a write to the proxy client fails because its output ended, leaves the loopback open (read, and its responses dropped) so that what the client sent goes on to MockServer; `UpstreamProxyRelayHandler` closes it when the client's leg closes |
+| `ReadAfterFailedWrite.endOutput` | Used by `LingeringClose` and `RelayLegClose`, which end an output on purpose and close the socket themselves; the handler leaves those alone |
+
+On a reset connection the read after the failed write returns the bytes still unread and then the error, or the end of
+the input, and Netty closes the channel. On NIO a write that had been waiting for the socket leaves `OP_WRITE` set when
+it fails, so the selector reports the socket writable until the channel closes; on a reset connection that is the next
+read, and the 5 s limit bounds any other case. Reads paused only after the output-shutdown event (a TCP chaos latency
+queue, a parked WebSocket frame) are not closed at once, so on NIO the selector can spin on `OP_WRITE` for up to 5 s.
+
 What this does not cover:
 
-- **A request read in more than one pass.** The first pass's flush (of `SETTINGS`, an acknowledgement or a
-  `WINDOW_UPDATE`) can fail on a reset connection and close it before the next pass. On loopback a request under the
-  65,535-byte window is read in one pass.
-- **Linux epoll.** Not run locally. Reasoned from Netty's epoll event loop: when data and the reset have both arrived,
-  the event carries `EPOLLIN` and `EPOLLERR`, and `AbstractEpollChannel` calls `epollOutReady` (a flush) before `epollInReady`
-  (the read). On a connection whose first bytes these are nothing is waiting to be flushed, so the read runs and decodes
-  the request before the end-of-read flush fails; the read error that follows the data fires `channelReadComplete`
-  before the channel is closed. Something left unflushed from an earlier pass would be flushed first, fail, and close
-  the channel before the read, which is the multi-pass case above. Linux keeps data received before a reset readable,
-  and returns it before the error. `RelayTunnelFirstBytesIntegrationTest` must be green on CI's Linux agents for this
-  reasoning to hold.
-- **`h2` over TLS.** Not measured. A client that closes a TLS connection sends `close_notify` first; the tunnel case
-  whose handler is added at the handshake still flushes there.
+- **Linux epoll.** Not run locally. `RequestAfterFailedWriteIntegrationTest` holds MockServer's event loops while the
+  client's request and reset arrive, so the failed write runs first on either transport; it must be green on CI's Linux
+  agents for the epoll reasoning above to hold. Linux keeps data received before a reset readable, and returns it
+  before the error.
+- **A request read in more than one pass.** Covered by the same change, by reasoning: on loopback a read pass takes
+  everything the socket holds, so the tests make the write fail before a read rather than between two passes.
+- **A client that closes TLS with `close_notify`.** A JDK `SSLSocket` sends it before it closes; the tests reset the
+  TCP socket under the TLS client instead.
 
 ##### Exceptions on the connection
 
