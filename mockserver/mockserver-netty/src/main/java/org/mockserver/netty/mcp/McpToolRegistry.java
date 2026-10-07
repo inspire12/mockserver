@@ -41,6 +41,7 @@ import org.mockserver.model.*;
 import org.mockserver.openapi.OpenApiContractTest;
 import org.mockserver.openapi.OpenApiResiliencyTest;
 import org.mockserver.openapi.OpenApiTrafficValidator;
+import org.mockserver.proxyconfiguration.InetAddressValidator;
 import org.mockserver.scheduler.Scheduler;
 import org.mockserver.serialization.ExpectationSerializer;
 import org.mockserver.serialization.LogEventRequestAndResponseSerializer;
@@ -2021,6 +2022,10 @@ public class McpToolRegistry {
             if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) {
                 return errorResult("'baseUrl' must use the http or https scheme: " + baseUrl);
             }
+            ObjectNode refused = blockedTargetResult("run_contract_test", host);
+            if (refused != null) {
+                return refused;
+            }
             int port = uri.getPort();
             boolean secure = "https".equalsIgnoreCase(uri.getScheme());
             if (port == -1) {
@@ -2051,7 +2056,7 @@ public class McpToolRegistry {
 
                         // 10s timeout: contract tests expect a healthy endpoint that responds
                         // promptly; a longer timeout avoids false failures on slow cold-start services
-                        return sendHttpRequest(request, remoteAddress, isSecure);
+                        return sendToCheckedTarget(request, remoteAddress, isSecure, 10000);
                     } catch (Exception e) {
                         return HttpResponse.response()
                             .withStatusCode(0)
@@ -2159,6 +2164,10 @@ public class McpToolRegistry {
             if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) {
                 return errorResult("'baseUrl' must use the http or https scheme: " + baseUrl);
             }
+            ObjectNode refused = blockedTargetResult("run_resiliency_test", host);
+            if (refused != null) {
+                return refused;
+            }
             int port = uri.getPort();
             boolean secure = "https".equalsIgnoreCase(uri.getScheme());
             if (port == -1) {
@@ -2187,7 +2196,7 @@ public class McpToolRegistry {
                         request.withSecure(isSecure);
                         // 5s timeout: resiliency tests deliberately send malformed input, so an
                         // unresponsive endpoint should be classified as UNEXPECTED promptly
-                        return sendHttpRequest(request, remoteAddress, isSecure, 5000);
+                        return sendToCheckedTarget(request, remoteAddress, isSecure, 5000);
                     } catch (Exception e) {
                         return HttpResponse.response()
                             .withStatusCode(0)
@@ -2290,6 +2299,10 @@ public class McpToolRegistry {
             if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) {
                 return errorResult("'targetUrl' must use the http or https scheme: " + targetUrl);
             }
+            ObjectNode refused = blockedTargetResult("run_mcp_contract_test", host);
+            if (refused != null) {
+                return refused;
+            }
             final boolean isSecure = "https".equalsIgnoreCase(scheme);
             int port = uri.getPort();
             if (port == -1) {
@@ -2312,7 +2325,7 @@ public class McpToolRegistry {
                     if (sessionId != null && !sessionId.isEmpty()) {
                         httpRequest.withHeader("Mcp-Session-Id", sessionId);
                     }
-                    HttpResponse httpResponse = sendHttpRequest(httpRequest, remoteAddress, isSecure);
+                    HttpResponse httpResponse = sendToCheckedTarget(httpRequest, remoteAddress, isSecure, 10000);
                     int statusCode = httpResponse.getStatusCode() != null ? httpResponse.getStatusCode() : 0;
                     if (statusCode == 0) {
                         return McpContractTest.ExchangeResult.transportError(httpResponse.getBodyAsText());
@@ -2439,11 +2452,33 @@ public class McpToolRegistry {
     }
 
     /**
-     * Send an HTTP request using java.net.HttpURLConnection for simplicity and client-agnosticism.
-     * This avoids the need to construct a NettyHttpClient which requires an EventLoopGroup.
+     * Applies forwardProxyBlockPrivateNetworks to the host a tool sends to: null when it may be sent to, otherwise
+     * the error result the tool returns, the refusal logged once.
      */
-    private HttpResponse sendHttpRequest(HttpRequest request, java.net.InetSocketAddress remoteAddress, boolean secure) {
-        return sendHttpRequest(request, remoteAddress, secure, 10000);
+    private ObjectNode blockedTargetResult(String toolName, String host) {
+        try {
+            InetAddressValidator.validateForwardTarget(httpState.getConfiguration(), host);
+            return null;
+        } catch (IllegalArgumentException blocked) {
+            if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.WARN)
+                        .setMessageFormat("MCP {} blocked by SSRF policy:{}")
+                        .setArguments(toolName, blocked.getMessage())
+                );
+            }
+            return errorResult(toolName + " blocked by SSRF policy: " + blocked.getMessage());
+        }
+    }
+
+    /**
+     * Checks the target again just before each request, so a name whose DNS answer changed after the tool's first
+     * check is refused (the request's connection error) rather than sent.
+     */
+    private HttpResponse sendToCheckedTarget(HttpRequest request, java.net.InetSocketAddress remoteAddress, boolean secure, int timeoutMillis) {
+        InetAddressValidator.validateForwardTarget(httpState.getConfiguration(), remoteAddress.getHostString());
+        return sendHttpRequest(request, remoteAddress, secure, timeoutMillis);
     }
 
     /**
@@ -2456,11 +2491,19 @@ public class McpToolRegistry {
      */
     static final long MAX_FIXTURE_FILE_SIZE = 50L * 1024 * 1024;
 
-    private HttpResponse sendHttpRequest(HttpRequest request, java.net.InetSocketAddress remoteAddress, boolean secure, int timeoutMillis) {
+    /**
+     * Send an HTTP request using java.net.HttpURLConnection for simplicity and client-agnosticism.
+     * This avoids the need to construct a NettyHttpClient which requires an EventLoopGroup.
+     */
+    HttpResponse sendHttpRequest(HttpRequest request, java.net.InetSocketAddress remoteAddress, boolean secure, int timeoutMillis) {
         java.net.HttpURLConnection connection = null;
         try {
             String scheme = secure ? "https" : "http";
             String path = request.getPath() != null ? request.getPath().getValue() : "/";
+            // a path not starting with "/" (from a spec) would otherwise be read as part of the URL's authority
+            if (!path.startsWith("/")) {
+                path = "/" + path;
+            }
 
             // Build query string from query parameters
             StringBuilder queryString = new StringBuilder();
@@ -2485,6 +2528,8 @@ public class McpToolRegistry {
             java.net.URL url = new java.net.URL(urlString);
             connection = (java.net.HttpURLConnection) url.openConnection();
             connection.setRequestMethod(request.getMethod() != null ? request.getMethod().getValue() : "GET");
+            // a redirect would go to a host the private network check has not seen
+            connection.setInstanceFollowRedirects(!InetAddressValidator.isEnabled(httpState.getConfiguration()));
             connection.setConnectTimeout(timeoutMillis);
             connection.setReadTimeout(timeoutMillis);
 
