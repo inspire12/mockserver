@@ -3,7 +3,6 @@ package org.mockserver.mappers;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.handler.codec.http.*;
-import io.netty.handler.codec.http2.HttpConversionUtil;
 import org.mockserver.codec.BodyContentEncodingEncoder;
 import org.mockserver.codec.BodyDecoderEncoder;
 import org.mockserver.codec.SnappyBlockOrFrameDecoder;
@@ -147,14 +146,8 @@ public class MockServerHttpRequestToFullHttpRequest {
             request.headers().add(HOST, httpRequest.getFirstHeader(HOST.toString()));
         }
         request.headers().set(ACCEPT_ENCODING, GZIP + "," + DEFLATE);
-        if (Protocol.HTTP_2.equals(httpRequest.getProtocol())) {
-            HttpScheme scheme = Boolean.TRUE.equals(httpRequest.isSecure()) ? HttpScheme.HTTPS : HttpScheme.HTTP;
-            request.headers().add(HttpConversionUtil.ExtensionHeaderNames.SCHEME.text(), scheme.name());
-            Integer streamId = httpRequest.getStreamId();
-            if (streamId != null) {
-                request.headers().add(HttpConversionUtil.ExtensionHeaderNames.STREAM_ID.text(), streamId);
-            }
-        }
+        // no x-http2-scheme or x-http2-stream-id: the HTTP/2 forward's stream codec sets the scheme and stream itself,
+        // and when ALPN settles on HTTP/1.1 they would reach the upstream as headers
         request.headers().set(CONTENT_LENGTH, request.content().readableBytes());
         if (isKeepAlive(request)) {
             request.headers().set(CONNECTION, KEEP_ALIVE);

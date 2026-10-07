@@ -379,8 +379,8 @@ public class MockServerHttpRequestToFullHttpRequestTest {
     // --- HTTP/2 ---
 
     @Test
-    public void shouldSetSchemeForHTTP2Secure() {
-        // given
+    public void shouldNotAddHTTP2ExtensionHeadersForSecureHTTP2Request() {
+        // given - ALPN may still settle on HTTP/1.1, where these would be sent as headers
         HttpRequest httpRequest = request()
             .withPath("/path")
             .withSecure(true)
@@ -392,27 +392,29 @@ public class MockServerHttpRequestToFullHttpRequestTest {
 
         try {
             // then
-            assertThat(result.headers().get("x-http2-scheme"), equalTo("https"));
-            assertThat(result.headers().getInt("x-http2-stream-id"), equalTo(3));
+            assertThat(result.headers().contains("x-http2-scheme"), is(false));
+            assertThat(result.headers().contains("x-http2-stream-id"), is(false));
         } finally {
             result.release();
         }
     }
 
     @Test
-    public void shouldSetSchemeForHTTP2NonSecure() {
+    public void shouldNotAddHTTP2ExtensionHeadersForNonSecureHTTP2Request() {
         // given
         HttpRequest httpRequest = request()
             .withPath("/path")
             .withSecure(false)
-            .withProtocol(Protocol.HTTP_2);
+            .withProtocol(Protocol.HTTP_2)
+            .withStreamId(5);
 
         // when
         FullHttpRequest result = mapper.mapMockServerRequestToNettyRequest(httpRequest);
 
         try {
             // then
-            assertThat(result.headers().get("x-http2-scheme"), equalTo("http"));
+            assertThat(result.headers().contains("x-http2-scheme"), is(false));
+            assertThat(result.headers().contains("x-http2-stream-id"), is(false));
         } finally {
             result.release();
         }

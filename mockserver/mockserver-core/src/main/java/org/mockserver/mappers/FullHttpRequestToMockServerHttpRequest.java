@@ -151,12 +151,16 @@ public class FullHttpRequestToMockServerHttpRequest {
             headerNames.ensureCapacity(httpHeaders.size());
             headerValues.ensureCapacity(httpHeaders.size());
             // over HTTP/1.1 the only repeated AsciiString instances are decoder constants, already shared
-            boolean findReordered = Protocol.HTTP_2.equals(httpRequest.getProtocol());
+            boolean overHttp2 = Protocol.HTTP_2.equals(httpRequest.getProtocol());
             int position = 0;
             while (headerIterator.hasNext()) {
                 Map.Entry<CharSequence, CharSequence> header = headerIterator.next();
-                NottableString name = headerNames.share(position, header.getKey(), findReordered);
-                NottableString value = headerValues.share(position, header.getValue(), findReordered);
+                // over HTTP/1.1 an x-http2- header is the client's own; the stream id is kept in streamId below
+                if (overHttp2 && Http2ExtensionHeaders.isExtensionHeader(header.getKey())) {
+                    continue;
+                }
+                NottableString name = headerNames.share(position, header.getKey(), overHttp2);
+                NottableString value = headerValues.share(position, header.getValue(), overHttp2);
                 position++;
                 if (hasPreservedTransferEncoding && name.getValue().equalsIgnoreCase(CONTENT_LENGTH.toString())) {
                     continue;

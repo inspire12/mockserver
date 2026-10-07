@@ -42,9 +42,8 @@ import static org.mockserver.stop.Stop.stopQuietly;
  * A response relayed through MockServer as a CONNECT or SOCKS5 proxy reaches an HTTP/2 client with the header block a
  * connection made straight to MockServer is sent, with none of the {@code x-http2-} extension headers Netty uses inside
  * a process, whether the response was mocked or forwarded. Neither the requests MockServer and its upstream record nor
- * the responses MockServer records carry the priority extension headers the tunnel's legs set. (A recorded HTTP/2
- * request carries {@code x-http2-stream-id} and {@code x-http2-scheme} on a direct connection too, which this test does
- * not cover.)
+ * the responses MockServer records carry the priority extension headers the tunnel's legs set. The other extension
+ * headers of a recorded or forwarded request are covered by {@link Http2RequestExtensionHeadersIntegrationTest}.
  */
 @RunWith(Parameterized.class)
 public class Http2TunnelResponseHeadersIntegrationTest {

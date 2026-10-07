@@ -617,6 +617,73 @@ public class FullHttpRequestToMockServerHttpRequestTest {
         }
     }
 
+    @Test
+    public void shouldLeaveNettysExtensionHeadersOutOfAnHttp2Request() {
+        // given - as Netty's conversion builds an HTTP/2 request: scheme and stream id extension headers
+        FullHttpRequest nettyRequest = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/some/path");
+        nettyRequest.headers().add("host", "localhost:1080");
+        nettyRequest.headers().add("x-http2-scheme", "https");
+        nettyRequest.headers().add("x-other", "kept");
+        nettyRequest.headers().add("x-http2-not-netty", "kept");
+        for (io.netty.handler.codec.http2.HttpConversionUtil.ExtensionHeaderNames name : io.netty.handler.codec.http2.HttpConversionUtil.ExtensionHeaderNames.values()) {
+            nettyRequest.headers().add(name.text().toString().toUpperCase(java.util.Locale.ROOT), "1");
+        }
+        nettyRequest.headers().set("x-http2-stream-id", "3");
+
+        try {
+            // when
+            HttpRequest result = createMapper(true, 1080)
+                .mapFullHttpRequestToMockServerRequest(nettyRequest, null, null, null, Protocol.HTTP_2);
+
+            // then - no extension header in the model, the stream id is kept apart from the headers
+            List<String> names = new java.util.ArrayList<>();
+            for (Header header : result.getHeaderList()) {
+                names.add(header.getName().getValue());
+            }
+            assertThat(names, contains("host", "x-other", "x-http2-not-netty"));
+            assertThat(result.getStreamId(), is(3));
+            assertThat(result.isSecure(), is(true));
+        } finally {
+            nettyRequest.release();
+        }
+    }
+
+    @Test
+    public void shouldKeepAnHttp1ClientsOwnHttp2NamedHeaders() {
+        // given - an HTTP/1.1 client sends headers that happen to share Netty's extension header names
+        FullHttpRequest nettyRequest = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/some/path");
+        nettyRequest.headers().add("x-http2-scheme", "https");
+        nettyRequest.headers().add("x-http2-stream-id", "99");
+
+        try {
+            // when
+            HttpRequest result = createMapper(false, 80)
+                .mapFullHttpRequestToMockServerRequest(nettyRequest, null, null, null, Protocol.HTTP_1_1);
+
+            // then - they are the client's headers, recorded as sent
+            assertThat(result.getFirstHeader("x-http2-scheme"), is("https"));
+            assertThat(result.getFirstHeader("x-http2-stream-id"), is("99"));
+        } finally {
+            nettyRequest.release();
+        }
+    }
+
+    @Test
+    public void shouldLeaveNettysExtensionHeadersOutOfAnHttp2RequestsHeadersOnly() {
+        // given - the early-response path maps the head before the body is aggregated
+        DefaultHttpRequest nettyRequest = new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, "/some/path");
+        nettyRequest.headers().add("x-http2-scheme", "http");
+        nettyRequest.headers().add("x-http2-stream-id", "5");
+
+        // when
+        HttpRequest result = createMapper(false, 80)
+            .mapHeadersOnlyHttpRequestToMockServerRequest(nettyRequest, null, null, null, Protocol.HTTP_2);
+
+        // then
+        assertThat(result.getHeaderList(), is(empty()));
+        assertThat(result.getStreamId(), is(5));
+    }
+
     // --- address string memoisation ---
 
     @Test

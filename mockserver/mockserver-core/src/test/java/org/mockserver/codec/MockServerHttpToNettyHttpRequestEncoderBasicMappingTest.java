@@ -225,7 +225,7 @@ public class MockServerHttpToNettyHttpRequestEncoderBasicMappingTest {
     }
 
     @Test
-    public void shouldAddHTTP2SchemeHeaderForNotSecureRequest() {
+    public void shouldAddNoHTTP2ExtensionHeaderForNotSecureRequest() {
         // given
         httpRequest.withProtocol(Protocol.HTTP_2);
 
@@ -237,14 +237,12 @@ public class MockServerHttpToNettyHttpRequestEncoderBasicMappingTest {
         assertThat(headers.names(), containsInAnyOrder(
             "accept-encoding",
             "content-length",
-            "connection",
-            "x-http2-scheme"
+            "connection"
         ));
-        assertThat(headers.getAll("x-http2-scheme"), containsInAnyOrder("http"));
     }
 
     @Test
-    public void shouldAddHTTP2SchemeHeaderForSecureRequest() {
+    public void shouldAddNoHTTP2ExtensionHeaderForSecureRequest() {
         // given
         httpRequest
             .withProtocol(Protocol.HTTP_2)
@@ -258,10 +256,8 @@ public class MockServerHttpToNettyHttpRequestEncoderBasicMappingTest {
         assertThat(headers.names(), containsInAnyOrder(
             "accept-encoding",
             "content-length",
-            "connection",
-            "x-http2-scheme"
+            "connection"
         ));
-        assertThat(headers.getAll("x-http2-scheme"), containsInAnyOrder("https"));
     }
 
     @Test
