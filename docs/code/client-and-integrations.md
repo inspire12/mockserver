@@ -561,8 +561,9 @@ When adding a client, add its version location to **both**.
 
 Hardening common to all: version strings are validated and resolved cache paths are asserted to stay
 within the cache root (no path traversal); SHA-256 verification is mandatory on the public path; the
-Windows `.bat` launcher is spawned with safe quoting; child process stdout/stderr are drained to avoid
-pipe-buffer deadlock; HTTP downloads use timeouts and stream to disk. Tests are hermetic (no live
+Windows `.bat` launcher is spawned with safe quoting (the Node launcher also refuses a `cmd.exe` line
+with two or more `%`, which `cmd.exe` expands as `%NAME%` even inside quotes, or with a line break);
+child process stdout/stderr are drained to avoid pipe-buffer deadlock; HTTP downloads use timeouts and stream to disk. Tests are hermetic (no live
 network) using `file://` fixtures and a stubbed downloader, plus one integration test that runs only
 when a real bundle is available. *(Known minor follow-up: the PHP pruner relies on `version_compare`,
 which can treat `8.0.0` and `8.0.0-SNAPSHOT` as equal — prune order between those two is not

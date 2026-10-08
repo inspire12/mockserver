@@ -141,6 +141,19 @@ function cacheDir() {
 // ---------- URL helpers ----------
 
 /**
+ * Remove every trailing occurrence of a single character, in linear time
+ * (a /c+$/ regex backtracks quadratically on a long run of c not at the end).
+ * @param {string} s
+ * @param {string} c  a single character
+ * @returns {string}
+ */
+function trimTrailing(s, c) {
+  var end = s.length;
+  while (end > 0 && s.charAt(end - 1) === c) { end--; }
+  return s.slice(0, end);
+}
+
+/**
  * Return true if version contains '-SNAPSHOT' (case-insensitive).
  * @param {string} version
  * @returns {boolean}
@@ -164,7 +177,7 @@ function assetUrl(version, file) {
       (SNAPSHOT_CDN + '/mockserver-' + version) :
       ('https://github.com/' + REPO + '/releases/download/mockserver-' + version);
   }
-  return base.replace(/\/+$/, '') + '/' + file;
+  return trimTrailing(base, '/') + '/' + file;
 }
 
 /**
@@ -555,8 +568,46 @@ function escapeCmdArg(arg) {
   var escaped = arg.replace(/"/g, '""');
   // If the arg ends with a backslash, double it so it does not escape the
   // closing double-quote character
-  escaped = escaped.replace(/\\+$/, function (m) { return m + m; });
+  var trimmed = trimTrailing(escaped, '\\');
+  escaped += escaped.slice(trimmed.length);
   return '"' + escaped + '"';
+}
+
+/** A line break or NUL ends a cmd.exe command line, even inside double quotes. */
+var CMD_LINE_END = /[\r\n\0]/;
+
+/**
+ * Build the arguments for cmd.exe to run a .bat launcher with the given args (H4).
+ * /d skips AutoRun, /v:off keeps ! literal, /s /c runs the quoted line as is.
+ * cmd.exe replaces %NAME% with a variable's value even inside quotes, and no
+ * escape works there, so a line with two or more % is refused; a single % is
+ * left as it is (a percent-encoded URL with one escape, for example).
+ * @param {string} launcher
+ * @param {string[]} args
+ * @returns {string[]}
+ * @throws {Error} if the launcher path or an argument cannot be passed to cmd.exe safely
+ */
+function windowsCommandArgs(launcher, args) {
+  if (CMD_LINE_END.test(launcher) || launcher.indexOf('"') !== -1) {
+    throw new Error('launcher path cannot be run through cmd.exe safely (contains ", a line break or NUL): ' + launcher);
+  }
+  // errors name an argument by its position only: its value may be a secret
+  var cmdLine = '"' + launcher + '"';
+  var withPercent = launcher.indexOf('%') !== -1 ? ['the launcher path'] : [];
+  args.forEach(function (a, i) {
+    a = String(a);
+    if (CMD_LINE_END.test(a)) {
+      throw new Error('argument ' + i + ' cannot be passed through cmd.exe safely (contains a line break or NUL)');
+    }
+    if (a.indexOf('%') !== -1) { withPercent.push('argument ' + i); }
+    cmdLine += ' ' + escapeCmdArg(a);
+  });
+  if (cmdLine.indexOf('%') !== cmdLine.lastIndexOf('%')) {
+    throw new Error('the launcher path and arguments contain more than one %, which cmd.exe would expand as an ' +
+      'environment variable reference (%NAME%); remove the % characters to run on Windows (% found in: ' +
+      withPercent.join(', ') + ')');
+  }
+  return ['/d', '/v:off', '/s', '/c', '"' + cmdLine + '"'];
 }
 
 // ---------- runBinary ----------
@@ -583,10 +634,7 @@ function runBinary(version, args, opts) {
 
     if (process.platform === 'win32') {
       // H4: on Windows, .bat files must be executed via cmd.exe.
-      // Use /d (no autorun) /s /c with explicit quoting to prevent injection.
-      var cmdLine = '"' + launcher + '"';
-      args.forEach(function (a) { cmdLine += ' ' + escapeCmdArg(a); });
-      return spawn('cmd.exe', ['/d', '/s', '/c', '"' + cmdLine + '"'], Object.assign(
+      return spawn('cmd.exe', windowsCommandArgs(launcher, args), Object.assign(
         spawnOpts, { windowsVerbatimArguments: true }
       ));
     }
@@ -601,6 +649,8 @@ var internal = {
   parseVersionSegments: parseVersionSegments,
   assertWithinBase: assertWithinBase,
   escapeCmdArg: escapeCmdArg,
+  windowsCommandArgs: windowsCommandArgs,
+  trimTrailing: trimTrailing,
   isSnapshot: isSnapshot,
   download: download,
   sha256: sha256,

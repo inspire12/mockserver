@@ -42,7 +42,7 @@ function shortenedRow(name: string, opts: { unmatched?: boolean; path?: string }
 }
 
 function pathText(path: string): RegExp {
-  return new RegExp(path.replace(/[/-]/g, '\\$&'));
+  return new RegExp(path.replace(/[.*+?^${}()|[\]\\/-]/g, '\\$&'));
 }
 
 type Loads = Record<string, Record<string, unknown>>;

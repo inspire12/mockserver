@@ -875,6 +875,129 @@ test('escapeCmdArg uses doubled quotes and handles trailing backslash (H4)', fun
   assert.strictEqual(escape('C:\\Users\\test\\'), '"C:\\Users\\test\\\\"');
   // Multiple trailing backslashes are all doubled
   assert.strictEqual(escape('path\\\\'), '"path\\\\\\\\"');
+  // Backslashes that are not trailing are left alone
+  assert.strictEqual(escape('a\\b c'), '"a\\b c"');
+});
+
+test('escapeCmdArg is linear on a long run of backslashes that is not trailing', function () {
+  var escape = binary._internal.escapeCmdArg;
+  var arg = ' ' + '\\'.repeat(100000) + 'x';
+  var started = Date.now();
+  var escaped = escape(arg);
+  assert.ok(Date.now() - started < 1000, 'took ' + (Date.now() - started) + ' ms');
+  assert.strictEqual(escaped, '"' + arg + '"');
+});
+
+// ================================================================
+// 24b. windowsCommandArgs: the cmd.exe line for a .bat launcher (H4)
+// ================================================================
+
+test('windowsCommandArgs quotes the launcher and each argument for cmd.exe', function () {
+  var cmdArgs = binary._internal.windowsCommandArgs('C:\\cache dir\\bin\\mockserver.bat', ['-serverPort', '1080', 'a & b', 'say "hi"']);
+  assert.deepStrictEqual(cmdArgs, [
+    '/d', '/v:off', '/s', '/c',
+    '""C:\\cache dir\\bin\\mockserver.bat" -serverPort 1080 "a & b" "say ""hi"""' + '"'
+  ]);
+});
+
+test('windowsCommandArgs refuses an argument that would cut the cmd.exe line short', function () {
+  var cmdArgs = binary._internal.windowsCommandArgs;
+  ['line\nbreak', 'carriage\rreturn', 'nul\0byte'].forEach(function (arg) {
+    assert.throws(function () { cmdArgs('C:\\bin\\mockserver.bat', ['-logLevel', arg]); },
+      /argument 1 cannot be passed through cmd\.exe safely/, JSON.stringify(arg));
+  });
+});
+
+test('windowsCommandArgs refuses a launcher path cmd.exe would misquote or cut short', function () {
+  var cmdArgs = binary._internal.windowsCommandArgs;
+  ['C:\\a"b\\mockserver.bat', 'C:\\a\nb\\mockserver.bat'].forEach(function (launcher) {
+    assert.throws(function () { cmdArgs(launcher, []); }, /launcher path cannot be run through cmd\.exe safely/, JSON.stringify(launcher));
+  });
+});
+
+test('windowsCommandArgs refuses a line cmd.exe would expand as %NAME%', function () {
+  var cmdArgs = binary._internal.windowsCommandArgs;
+  var expandOnWindows = /contain more than one %, which cmd\.exe would expand/;
+  assert.throws(function () { cmdArgs('C:\\bin\\mockserver.bat', ['%PATH%']); }, expandOnWindows);
+  assert.throws(function () { cmdArgs('C:\\bin\\mockserver.bat', ['https://h/a%20b%20c.yaml']); }, expandOnWindows);
+  // a pair split across two arguments, or between the launcher path and an argument
+  assert.throws(function () { cmdArgs('C:\\bin\\mockserver.bat', ['50%', 'x%']); }, expandOnWindows);
+  assert.throws(function () { cmdArgs('C:\\100%\\bin\\mockserver.bat', ['x%']); }, expandOnWindows);
+});
+
+test('windowsCommandArgs errors name an argument by position, never its value', function () {
+  var cmdArgs = binary._internal.windowsCommandArgs;
+  assert.throws(function () { cmdArgs('C:\\bin\\mockserver.bat', ['-token', 'se%cr%et']); },
+    function (e) {
+      assert.match(e.message, /% found in: argument 1\)$/);
+      assert.ok(e.message.indexOf('se%cr%et') === -1, e.message);
+      return true;
+    });
+  assert.throws(function () { cmdArgs('C:\\bin\\mockserver.bat', ['-token', 'sec\nret']); },
+    function (e) {
+      assert.match(e.message, /^argument 1 cannot be passed through cmd\.exe safely/);
+      assert.ok(e.message.indexOf('sec') === -1, e.message);
+      return true;
+    });
+});
+
+test('runBinary on Windows spawns cmd.exe with the line windowsCommandArgs builds', async function () {
+  var modulePath = require.resolve('../downloadBinary');
+  var savedModule = require.cache[modulePath];
+  var savedSpawn = child_process.spawn;
+  var savedPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+  var prevCache = process.env.MOCKSERVER_BINARY_CACHE;
+  var tmp = makeTempDir('ms-win32-');
+  var calls = [];
+  try {
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    child_process.spawn = function (cmd, cmdArgs, opts) { calls.push({ cmd: cmd, args: cmdArgs, opts: opts }); return { fake: true }; };
+    delete require.cache[modulePath];
+    var winBinary = require('../downloadBinary');
+    process.env.MOCKSERVER_BINARY_CACHE = tmp.base;
+    var name = winBinary.bundleBaseName('1.2.3').name;
+    var launcher = path.join(tmp.base, '1.2.3', name, 'bin', 'mockserver.bat');
+    fs.mkdirSync(path.dirname(launcher), { recursive: true });
+    fs.writeFileSync(launcher, '@echo off\r\n');
+
+    await winBinary.runBinary('1.2.3', ['-serverPort', '1080', 'a & b']);
+    assert.strictEqual(calls.length, 1);
+    assert.strictEqual(calls[0].cmd, 'cmd.exe');
+    assert.deepStrictEqual(calls[0].args, winBinary._internal.windowsCommandArgs(launcher, ['-serverPort', '1080', 'a & b']));
+    assert.strictEqual(calls[0].opts.windowsVerbatimArguments, true);
+
+    await assert.rejects(winBinary.runBinary('1.2.3', ['%PATH%']), /more than one %/);
+    assert.strictEqual(calls.length, 1, 'a refused line is not spawned');
+  } finally {
+    Object.defineProperty(process, 'platform', savedPlatform);
+    child_process.spawn = savedSpawn;
+    if (savedModule) { require.cache[modulePath] = savedModule; } else { delete require.cache[modulePath]; }
+    if (prevCache === undefined) { delete process.env.MOCKSERVER_BINARY_CACHE; }
+    else { process.env.MOCKSERVER_BINARY_CACHE = prevCache; }
+    tmp.cleanup();
+  }
+});
+
+test('windowsCommandArgs passes a single % through, which cmd.exe leaves as it is', function () {
+  var cmdArgs = binary._internal.windowsCommandArgs;
+  assert.strictEqual(cmdArgs('C:\\bin\\mockserver.bat', ['--openapi', 'https://h/a%20b.yaml'])[4],
+    '""C:\\bin\\mockserver.bat" --openapi "https://h/a%20b.yaml""');
+});
+
+test('assetUrl trims trailing slashes from the mirror in linear time', function () {
+  var prev = process.env.MOCKSERVER_BINARY_BASE_URL;
+  try {
+    process.env.MOCKSERVER_BINARY_BASE_URL = 'https://mirror.example/a///';
+    assert.strictEqual(binary.assetUrl('1.2.3', 'f.zip'), 'https://mirror.example/a/f.zip');
+    process.env.MOCKSERVER_BINARY_BASE_URL = 'https://h' + '/'.repeat(100000) + 'x';
+    var started = Date.now();
+    var url = binary.assetUrl('1.2.3', 'f.zip');
+    assert.ok(Date.now() - started < 1000, 'took ' + (Date.now() - started) + ' ms');
+    assert.ok(url.endsWith('x/f.zip'));
+  } finally {
+    if (prev === undefined) { delete process.env.MOCKSERVER_BINARY_BASE_URL; }
+    else { process.env.MOCKSERVER_BINARY_BASE_URL = prev; }
+  }
 });
 
 // ================================================================
