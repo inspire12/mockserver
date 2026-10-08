@@ -7,6 +7,7 @@ import io.netty.buffer.UnpooledHeapByteBuf;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.*;
 import io.netty.util.ReferenceCountUtil;
+import io.netty.util.ResourceLeakDetector;
 import org.junit.Test;
 
 import java.util.ArrayList;
@@ -29,6 +30,9 @@ public class CoalescingHttpObjectAggregatorSlicedInputTest {
     private static final int SMALL = CoalescingHttpObjectAggregator.SMALL_PIECE_BYTES;
     private static final int READ = 32 * 1024;
     private static final int MAX = 300_000;
+    // the paranoid leak detector records a stack trace per buffer, which makes the cases of hundreds of thousands
+    // of pieces run for many minutes; they still run without it, and the gate still covers the others
+    private static final int MAX_PIECES_UNDER_PARANOID_LEAK_DETECTION = 4_096;
     private static final int[][] PATTERNS = {
         {1}, {7}, {SMALL - 1}, {SMALL}, {8191}, {8192}, {BLOCK - 1}, {BLOCK},
         {1, BLOCK}, {BLOCK, 1}, runThen(1, 15, SMALL), runThen(100, 31, SMALL), runThen(1, 31, BLOCK), random(7)
@@ -58,6 +62,10 @@ public class CoalescingHttpObjectAggregatorSlicedInputTest {
                 for (int componentLimit : new int[]{0, 128}) {
                     for (int[] pattern : PATTERNS) {
                         for (int length : lengths(pattern)) {
+                            if (ResourceLeakDetector.getLevel() == ResourceLeakDetector.Level.PARANOID
+                                && pieces(pattern, length) > MAX_PIECES_UNDER_PARANOID_LEAK_DETECTION) {
+                                continue;
+                            }
                             for (Ending ending : Ending.values()) {
                                 check(slicing, stream, componentLimit, pattern, length, ending);
                                 cases++;
@@ -67,7 +75,7 @@ public class CoalescingHttpObjectAggregatorSlicedInputTest {
                 }
             }
         }
-        assertThat(cases, greaterThan(3_000));
+        assertThat(cases, greaterThan(ResourceLeakDetector.getLevel() == ResourceLeakDetector.Level.PARANOID ? 1_000 : 3_000));
     }
 
     @Test(timeout = 120_000)
