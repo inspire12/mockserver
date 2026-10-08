@@ -59,6 +59,7 @@ public class StartTlsUpstream implements AutoCloseable {
     private volatile KeyStore keyStore;
     private volatile char[] keyStorePassword;
     private volatile SSLContext sslContext;
+    private volatile CountDownLatch tlsHeldUntil;
 
     public StartTlsUpstream() throws IOException {
         Thread accept = new Thread(this::acceptConnections, "start-tls-upstream-accept");
@@ -75,6 +76,12 @@ public class StartTlsUpstream implements AutoCloseable {
     /** Every connection is TLS from its first byte, as for a client that opens with TLS: no SSLRequest is expected. */
     public StartTlsUpstream startingWithTls() {
         this.startingWithTls = true;
+        return this;
+    }
+
+    /** After answering {@code S}, does not start its side of the handshake until the latch is released. */
+    public StartTlsUpstream holdingTlsUntil(CountDownLatch release) {
+        this.tlsHeldUntil = release;
         return this;
     }
 
@@ -231,6 +238,10 @@ public class StartTlsUpstream implements AutoCloseable {
                     upgraded.setEnabledProtocols(tlsProtocols);
                 }
                 upgraded.setNeedClientAuth(requireClientCertificate);
+                CountDownLatch release = tlsHeldUntil;
+                if (release != null && !release.await(30, TimeUnit.SECONDS)) {
+                    throw new IOException("the test never released the handshake");
+                }
                 upgraded.startHandshake();
                 tlsProtocol = upgraded.getSession().getProtocol();
                 List<String> names = new ArrayList<>();

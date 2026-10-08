@@ -2613,6 +2613,8 @@ With `forwardBinaryRequestsMatchExpectations` (default `false`) a message on a r
 | Client faster than its replies | After a local reply that leaves the client not writable, one more hold, `CLIENT_NOT_WRITABLE`, released by `clientWritabilityChanged` and by every close, like the other holds |
 | A message boundary that differs from the expectation's bytes | No match, so the bytes are relayed intact. Prefix or partial matching would swallow pipelined messages, so none is offered |
 | The upstream's state | It never sees an answered message, so the canned reply must be true for the session's real state (PostgreSQL's `ReadyForQuery` status byte, prepared statements, portals) |
+| The in-band TLS upgrade | An expectation matches the same bytes before and after the client turns TLS on. A message read while MockServer's handshake with the upstream runs is matched first: a match is answered at once, and only a forwarded message holds the client (`UPSTREAM_HANDSHAKING`) until that handshake succeeds |
+| An answered `SSLRequest` | The upstream never agreed to TLS, so MockServer's handshake with it, the first bytes of the upstream connection, fails or times out (`socketConnectionTimeoutInMillis`): both connections close with a WARN and nothing decrypted is sent. Do not answer the negotiation; the consumer docs say so |
 
 ## SOCKS Protocol Detection
 

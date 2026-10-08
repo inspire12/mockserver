@@ -1,5 +1,6 @@
 package org.mockserver.netty.integration.proxy.direct;
 
+import io.netty.buffer.ByteBufUtil;
 import org.junit.After;
 import org.junit.Test;
 import org.mockserver.configuration.Configuration;
@@ -12,6 +13,7 @@ import org.mockserver.mock.Expectation;
 import org.mockserver.model.BinaryMessage;
 import org.slf4j.event.Level;
 
+import javax.net.ssl.SSLSocket;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -20,6 +22,7 @@ import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -33,11 +36,13 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.oneOf;
 import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.integration.ClientAndServer.startClientAndServer;
 import static org.mockserver.model.BinaryRequestDefinition.binaryRequest;
 import static org.mockserver.model.BinaryResponse.binaryResponse;
 import static org.mockserver.model.HttpResponse.response;
+import static org.mockserver.netty.integration.proxy.direct.StartTlsUpstream.SSL_REQUEST;
 import static org.mockserver.stop.Stop.stopQuietly;
 import static org.mockserver.test.Retries.tryWaitForSuccess;
 
@@ -47,6 +52,13 @@ import static org.mockserver.test.Retries.tryWaitForSuccess;
  * reaches the upstream, and every other message is relayed as without the setting.
  */
 public class BinaryExpectationsOnProxiedConnectionIntegrationTest {
+
+    private static final byte[] STARTUP = {0, 0, 0, 23, 0, 3, 0, 0, 'u', 's', 'e', 'r', 0, 'p', 'o', 's', 't', 'g', 'r', 'e', 's', 0, 0};
+    private static final byte[] AUTHENTICATION_OK_AND_READY = {'R', 0, 0, 0, 8, 0, 0, 0, 0, 'Z', 0, 0, 0, 5, 'I'};
+    private static final byte[] QUERY = {'Q', 0, 0, 0, 13, 'S', 'E', 'L', 'E', 'C', 'T', ' ', '1', 0};
+    private static final byte[] READY = {'Z', 0, 0, 0, 5, 'I'};
+    private static final byte[] MOCKED_QUERY = {'Q', 0, 0, 0, 13, 'S', 'E', 'L', 'E', 'C', 'T', ' ', '2', 0};
+    private static final byte[] CANNED = {'C', 0, 0, 0, 13, 'S', 'E', 'L', 'E', 'C', 'T', ' ', '1', 0, 'Z', 0, 0, 0, 5, 'I'};
 
     private final List<LogEntry> logged = new CopyOnWriteArrayList<>();
     private ClientAndServer mockServer;
@@ -65,6 +77,12 @@ public class BinaryExpectationsOnProxiedConnectionIntegrationTest {
         // a clone: the event log clears the entry it is handed once it has copied it
         MockServerLogger.setGlobalLogEventListener(logEntry -> logged.add(logEntry.clone()));
         mockServer = upstream == null ? startClientAndServer(configuration) : startClientAndServer(configuration, "127.0.0.1", upstream.port());
+        return connect();
+    }
+
+    private Socket clientThrough(Configuration configuration, StartTlsUpstream upstream) throws IOException {
+        MockServerLogger.setGlobalLogEventListener(logEntry -> logged.add(logEntry.clone()));
+        mockServer = startClientAndServer(configuration, "127.0.0.1", upstream.port());
         return connect();
     }
 
@@ -101,6 +119,22 @@ public class BinaryExpectationsOnProxiedConnectionIntegrationTest {
             }
         }
         return line.toString(StandardCharsets.UTF_8.name());
+    }
+
+    private static void exchange(Socket socket, byte[] message, byte[] expectedReply) throws IOException {
+        socket.getOutputStream().write(message);
+        socket.getOutputStream().flush();
+        assertThat("reply to " + ByteBufUtil.hexDump(message), ByteBufUtil.hexDump(socket.getInputStream().readNBytes(expectedReply.length)), is(ByteBufUtil.hexDump(expectedReply)));
+    }
+
+    private static StartTlsUpstream postgresLikeUpstream() throws IOException {
+        return new StartTlsUpstream()
+            .answering(STARTUP, AUTHENTICATION_OK_AND_READY)
+            .answering(QUERY, READY);
+    }
+
+    private void mock(byte[] request, byte[] response) {
+        mockServer.upsert(new Expectation(binaryRequest(request)).thenRespondWithBinary(binaryResponse(response)));
     }
 
     private List<LogEntry> logged(String containing) {
@@ -303,6 +337,112 @@ public class BinaryExpectationsOnProxiedConnectionIntegrationTest {
 
             tryWaitForSuccess(() -> assertThat(warnings("binary expectations are not matched"), hasSize(1)));
         }
+    }
+
+    @Test
+    public void shouldMatchOneExpectationBothBeforeAndAfterTheUpstreamIsUpgradedToTls() throws Exception {
+        try (StartTlsUpstream upstream = postgresLikeUpstream();
+             Socket client = clientThrough(matchingExpectations(), upstream)) {
+            mock(MOCKED_QUERY, CANNED);
+
+            exchange(client, MOCKED_QUERY, CANNED);
+            exchange(client, SSL_REQUEST, new byte[]{'S'});
+            SSLSocket tls = StartTlsUpstream.startTlsAsClient(client, "127.0.0.1", "TLSv1.3", false);
+            exchange(tls, MOCKED_QUERY, CANNED);
+            exchange(tls, QUERY, READY);
+
+            StartTlsUpstream.Connection connection = upstream.awaitConnection(1, 10_000);
+            assertThat(upstream.connections().size(), is(1));
+            assertThat("the answered message reached the upstream neither in the clear nor over TLS", connection.messages(), contains(
+                "clear " + ByteBufUtil.hexDump(SSL_REQUEST),
+                "TLS " + ByteBufUtil.hexDump(QUERY)
+            ));
+            assertThat(ByteBufUtil.hexDump(connection.receivedInTheClear()), is(ByteBufUtil.hexDump(SSL_REQUEST)));
+            tryWaitForSuccess(() -> assertThat(logged("returning binary mock response"), hasSize(2)));
+        }
+    }
+
+    /**
+     * Answering the {@code SSLRequest} locally means the upstream never agreed to TLS, so MockServer's handshake with
+     * it fails: both connections close and nothing the client sent over TLS reaches the upstream. The consumer
+     * documentation says not to answer it.
+     */
+    @Test
+    public void shouldCloseBothConnectionsWhenTheSslRequestIsAnsweredLocally() throws Exception {
+        try (StartTlsUpstream upstream = postgresLikeUpstream();
+             Socket client = clientThrough(matchingExpectations().socketConnectionTimeoutInMillis(3_000L), upstream)) {
+            mock(SSL_REQUEST, new byte[]{'S'});
+            exchange(client, SSL_REQUEST, new byte[]{'S'});
+
+            String outcome;
+            try {
+                SSLSocket tls = StartTlsUpstream.startTlsAsClient(client, "127.0.0.1", "TLSv1.3", false);
+                tls.getOutputStream().write(STARTUP);
+                tls.getOutputStream().flush();
+                int read = tls.getInputStream().read();
+                outcome = read == -1 ? "closed" : "read " + read;
+            } catch (IOException closed) {
+                outcome = "closed";
+            }
+
+            assertThat(outcome, is("closed"));
+            StartTlsUpstream.Connection connection = upstream.awaitConnection(1, 10_000);
+            assertThat("the upstream connection is ended", connection.awaitEnded(20_000), is(true));
+            assertThat("nothing decrypted reached it", connection.receivedOverTls().length, is(0));
+            byte[] inTheClear = connection.receivedInTheClear();
+            assertThat("it saw no SSLRequest, only MockServer's handshake", inTheClear.length > 0 && inTheClear[0] == 0x16, is(true));
+            assertThat(ByteBufUtil.hexDump(inTheClear).contains(ByteBufUtil.hexDump(STARTUP)), is(false));
+            tryWaitForSuccess(() -> assertThat(warnings("unable to start TLS with upstream"), hasSize(1)));
+        }
+    }
+
+    /**
+     * While MockServer's handshake with the upstream runs, a message that matches an expectation is answered at once;
+     * a forwarded one is held, and with it the client's connection, until the handshake has completed.
+     */
+    @Test
+    public void shouldAnswerAMatchedMessageWhileTheUpstreamHandshakeRunsAndHoldOnlyAForwardedOne() throws Exception {
+        CountDownLatch handshake = new CountDownLatch(1);
+        try (StartTlsUpstream upstream = postgresLikeUpstream().holdingTlsUntil(handshake);
+             Socket client = clientThrough(matchingExpectations(), upstream)) {
+            mock(MOCKED_QUERY, CANNED);
+            exchange(client, SSL_REQUEST, new byte[]{'S'});
+            SSLSocket tls = StartTlsUpstream.startTlsAsClient(client, "127.0.0.1", "TLSv1.3", false);
+            StartTlsUpstream.Connection connection = upstream.awaitConnection(1, 10_000);
+
+            exchange(tls, MOCKED_QUERY, CANNED);
+            assertThat("answered while the upstream's handshake was held", connection.upgraded(), is(false));
+
+            // the log is written off the event loop: once the reply's entry is in, so is its message's
+            tryWaitForSuccess(() -> assertThat(logged("returning binary mock response"), hasSize(1)));
+            int received = logged("received binary request").size();
+            tls.getOutputStream().write(QUERY);
+            tls.getOutputStream().flush();
+            tryWaitForSuccess(() -> assertThat(logged("received binary request"), hasSize(received + 1)));
+            tls.getOutputStream().write(MOCKED_QUERY);
+            tls.getOutputStream().flush();
+            TimeUnit.MILLISECONDS.sleep(500);
+            assertThat("not read behind the held message", logged("returning binary mock response"), hasSize(1));
+            assertThat(connection.upgraded(), is(false));
+
+            handshake.countDown();
+
+            String replies = ByteBufUtil.hexDump(tls.getInputStream().readNBytes(CANNED.length + READY.length));
+            assertThat("the two in either order: nothing orders a local reply against the upstream's", replies, is(oneOf(
+                ByteBufUtil.hexDump(concat(CANNED, READY)),
+                ByteBufUtil.hexDump(concat(READY, CANNED))
+            )));
+            assertThat(connection.messages(), contains(
+                "clear " + ByteBufUtil.hexDump(SSL_REQUEST),
+                "TLS " + ByteBufUtil.hexDump(QUERY)
+            ));
+        }
+    }
+
+    private static byte[] concat(byte[] first, byte[] second) {
+        byte[] both = Arrays.copyOf(first, first.length + second.length);
+        System.arraycopy(second, 0, both, first.length, second.length);
+        return both;
     }
 
     /**
