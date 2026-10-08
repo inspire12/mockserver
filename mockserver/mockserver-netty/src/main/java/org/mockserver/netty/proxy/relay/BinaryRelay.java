@@ -9,6 +9,7 @@ import io.netty.util.AttributeKey;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.ScheduledFuture;
 import org.mockserver.configuration.Configuration;
+import org.mockserver.httpclient.HeaderLimitExceededException;
 import org.mockserver.httpclient.NettyHttpClient;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.log.model.SensitiveLogValue;
@@ -54,8 +55,9 @@ import static org.mockserver.netty.unification.PortUnificationHandler.isSslEnabl
  * connection, so what was sent before goes up in the clear and everything after over TLS. A client whose connection
  * was TLS from its first byte gets an upstream connection that is TLS from its first byte too.
  * <p>
- * A connection this cannot carry is left to the caller, which forwards each of its messages on an upstream
- * connection of its own: see {@link #forwardedPerMessageBecause()}.
+ * The upstream connection is made directly or through a tunnel ({@code forwardSocksProxy}, {@code forwardHttpsProxy}).
+ * A connection this cannot carry, one whose only upstream proxy is {@code forwardHttpProxy}, is left to the caller,
+ * which forwards each of its messages on an upstream connection of its own: see {@link #decideOnce()}.
  */
 public final class BinaryRelay {
 
@@ -63,7 +65,7 @@ public final class BinaryRelay {
     private static final String SETTING = "forwardBinaryRequestsUseSingleConnection";
     /**
      * The client connection is not read while more messages than this wait to be reported to the listener, and is
-     * read again once no more than half as many do.
+     * read again once no more than half as many do; the same bound applies to the upstream's reads.
      */
     static final int MAX_PENDING_LISTENER_CALLS = 64;
 
@@ -79,6 +81,7 @@ public final class BinaryRelay {
     private final Scheduler scheduler;
     private final NettyHttpClient httpClient;
     private final BinaryProxyListener listener;
+    private final boolean listenerHearsUpstreamMessages;
     private final EnumSet<ClientHold> clientHolds = EnumSet.noneOf(ClientHold.class);
     private final Deque<Exchange> waitingForConnect = new ArrayDeque<>(1);
     private final boolean clientStartedWithTls;
@@ -91,11 +94,14 @@ public final class BinaryRelay {
     // the upstream closed while the client was open: its close then closes the client before a handshake reports it
     private boolean upstreamClosedFirst;
     private boolean finished;
+    private boolean decided;
     private boolean perMessage;
     private boolean upstreamHeldForClient;
+    private boolean upstreamHeldForListener;
     private Exchange latest;
     private String latestCorrelationId;
     private int pendingListenerCalls;
+    private int pendingUpstreamMessageCalls;
     private ScheduledFuture<?> upstreamStallCheck;
     private long bytesWaitingAtLastStallCheck;
 
@@ -107,7 +113,20 @@ public final class BinaryRelay {
         this.scheduler = scheduler;
         this.httpClient = httpClient;
         this.listener = listener;
+        this.listenerHearsUpstreamMessages = overridesOnUpstreamMessage(listener);
         this.clientStartedWithTls = isSslEnabledUpstream(client);
+    }
+
+    /** A listener that keeps the interface's empty default is not called for each upstream read. */
+    private static boolean overridesOnUpstreamMessage(BinaryProxyListener listener) {
+        if (listener == null) {
+            return false;
+        }
+        try {
+            return listener.getClass().getMethod("onUpstreamMessage", BinaryMessage.class, SocketAddress.class, SocketAddress.class).getDeclaringClass() != BinaryProxyListener.class;
+        } catch (NoSuchMethodException | SecurityException cannotTell) {
+            return true;
+        }
     }
 
     /**
@@ -127,7 +146,8 @@ public final class BinaryRelay {
      */
     public static boolean relaysOnOneConnection(ChannelHandlerContext ctx, InetSocketAddress target, Configuration configuration, MockServerLogger mockServerLogger, Scheduler scheduler, NettyHttpClient httpClient, BinaryProxyListener listener) {
         BinaryRelay relay = relayOf(ctx, target, configuration, mockServerLogger, scheduler, httpClient, listener);
-        return !relay.perMessage && relay.forwardedPerMessageBecause() == null;
+        relay.decideOnce();
+        return !relay.perMessage;
     }
 
     /**
@@ -211,12 +231,7 @@ public final class BinaryRelay {
 
     private boolean fromClient(BinaryMessage binaryRequest, String logCorrelationId) {
         latestCorrelationId = logCorrelationId;
-        if (!perMessage) {
-            String reason = forwardedPerMessageBecause();
-            if (reason != null) {
-                forwardPerMessageFromNowOn(reason);
-            }
-        }
+        decideOnce();
         if (perMessage) {
             return false;
         }
@@ -238,6 +253,8 @@ public final class BinaryRelay {
             latest.response.complete(null);
         }
         latest = exchange;
+        // its response is an upstream read, which a listener call waiting for it must not be kept from
+        releaseUpstreamForListener();
         reportToListener(exchange);
         if (connected) {
             writeToUpstream(exchange);
@@ -248,35 +265,27 @@ public final class BinaryRelay {
     }
 
     /**
-     * Why this connection's messages are each forwarded on an upstream connection of their own, as all are when
-     * the setting is off, or null if it is relayed on one. The upstream connection is made directly, so it cannot
-     * go through an upstream proxy.
+     * Decides, at the connection's first message and once for its life, whether it is relayed on one upstream
+     * connection or each of its messages is forwarded on one of its own, as all are when the setting is off: the
+     * one it cannot be relayed through is an upstream proxy that does not tunnel.
      */
-    private String forwardedPerMessageBecause() {
-        if (httpClient.forwardsThroughProxy()) {
-            return "an upstream proxy is configured";
+    private void decideOnce() {
+        if (decided) {
+            return;
         }
-        return null;
-    }
-
-    /**
-     * The reason is known at the first message, before an upstream connection is made; one that exists is ended
-     * once what was sent on it has been delivered, and the client's connection is kept.
-     */
-    private void forwardPerMessageFromNowOn(String reason) {
-        perMessage = true;
-        if (mockServerLogger.isEnabledForInstance(Level.DEBUG)) {
-            mockServerLogger.logEvent(
-                new LogEntry()
-                    .setLogLevel(Level.DEBUG)
-                    .setCorrelationId(latestCorrelationId)
-                    .setMessageFormat("forwarding each message of binary connection from:{}to:{}on an upstream connection of its own, as when " + SETTING + " is false, because:{}")
-                    .setArguments(client.remoteAddress(), target, reason)
-            );
-        }
-        releaseEveryHold();
-        if (connected && !finished) {
-            RelayLegClose.afterFlush(upstream);
+        decided = true;
+        String reason = httpClient.binaryRelayUnavailableBecause(target, clientStartedWithTls);
+        if (reason != null) {
+            perMessage = true;
+            if (mockServerLogger.isEnabledForInstance(Level.DEBUG)) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.DEBUG)
+                        .setCorrelationId(latestCorrelationId)
+                        .setMessageFormat("forwarding each message of binary connection from:{}to:{}on an upstream connection of its own, as when " + SETTING + " is false, because:{}")
+                        .setArguments(client.remoteAddress(), target, reason)
+                );
+            }
         }
     }
 
@@ -291,7 +300,7 @@ public final class BinaryRelay {
         }
         ChannelFuture connect;
         try {
-            connect = httpClient.connectBinaryRelay(client.eventLoop(), target, new BinaryRelayUpstreamHandler(this, mockServerLogger));
+            connect = httpClient.connectBinaryRelay(client.eventLoop(), target, clientStartedWithTls, new BinaryRelayUpstreamHandler(this, mockServerLogger));
         } catch (RuntimeException notPermitted) {
             releaseUnused(tlsFromTheStart);
             refuse(notPermitted.getMessage());
@@ -318,10 +327,12 @@ public final class BinaryRelay {
 
     private void connectCompleted(Throwable failure) {
         if (failure != null) {
-            if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+            // a proxy's CONNECT answer over maxHeaderSize was logged as a warning where it was refused
+            Level level = HeaderLimitExceededException.in(failure) != null ? Level.INFO : Level.WARN;
+            if (mockServerLogger.isEnabledForInstance(level)) {
                 mockServerLogger.logEvent(
                     new LogEntry()
-                        .setLogLevel(Level.WARN)
+                        .setLogLevel(level)
                         .setCorrelationId(latestCorrelationId)
                         .setMessageFormat("unable to connect to:{}for binary connection from:{}closing connection:{}")
                         .setArguments(target, client.remoteAddress(), boundedFaultMessage(failure))
@@ -352,8 +363,8 @@ public final class BinaryRelay {
             startUpstreamTls();
         }
         clearBeforeUpgrade = -1;
-        if (clientClosed || perMessage) {
-            RelayLegClose.afterFlush(upstream);
+        if (clientClosed) {
+            endUpstream();
         }
     }
 
@@ -429,8 +440,12 @@ public final class BinaryRelay {
 
     private void addUpstreamTls(SslHandler sslHandler) {
         upstreamTls = sslHandler;
-        // first: the relay's handler then only ever sees what was decrypted
-        upstream.pipeline().addFirst("binary-relay-tls", sslHandler);
+        // nearest the socket after a tunnel's handler: the relay's handler then only ever sees what was decrypted
+        if (upstream.pipeline().get(NettyHttpClient.BINARY_RELAY_TUNNEL) != null) {
+            upstream.pipeline().addAfter(NettyHttpClient.BINARY_RELAY_TUNNEL, "binary-relay-tls", sslHandler);
+        } else {
+            upstream.pipeline().addFirst("binary-relay-tls", sslHandler);
+        }
         sslHandler.handshakeFuture().addListener(handshake -> {
             if (handshake.isSuccess()) {
                 release(ClientHold.UPSTREAM_HANDSHAKING);
@@ -467,16 +482,17 @@ public final class BinaryRelay {
         }
     }
 
+    /** False until the connect, through a tunnel too, has succeeded; a failure before then is logged here. */
+    boolean upstreamConnected() {
+        return connected;
+    }
+
     /** True from the upgrade until MockServer's handshake with the upstream has succeeded; its faults are logged here. */
     boolean upstreamTlsNotEstablished() {
         return clearBeforeUpgrade >= 0 || upstreamTls != null && !upstreamTls.handshakeFuture().isSuccess();
     }
 
     void fromUpstream(byte[] bytesRead) {
-        if (perMessage) {
-            // the client is no longer this connection's: its messages have their own upstream connections
-            return;
-        }
         BinaryMessage binaryResponse = bytes(bytesRead);
         Exchange answered = latest != null && latest.written ? latest : null;
         LogEntry logEntry = new LogEntry()
@@ -496,6 +512,8 @@ public final class BinaryRelay {
         if (answered != null) {
             latest = null;
             answered.response.complete(binaryResponse);
+        } else if (listenerHearsUpstreamMessages) {
+            reportUpstreamMessage(binaryResponse);
         }
         if (client.isActive()) {
             client.write(Unpooled.wrappedBuffer(bytesRead));
@@ -573,18 +591,36 @@ public final class BinaryRelay {
             hold(ClientHold.LISTENER_BEHIND);
         }
         SocketAddress clientAddress = SocketAddresses.clientAddress(client);
+        callListener(() -> listener.onProxy(exchange.request, exchange.response, target, clientAddress), false);
+    }
+
+    /**
+     * A listener slower than the upstream slows the upstream down, as one slower than the client does the client,
+     * except while a message is waiting for its response: the upstream read that answers it is never held back from
+     * a listener call that may be waiting for it.
+     */
+    private void reportUpstreamMessage(BinaryMessage upstreamMessage) {
+        if (++pendingUpstreamMessageCalls > MAX_PENDING_LISTENER_CALLS && latest == null && !upstreamHeldForListener) {
+            upstreamHeldForListener = true;
+            ChannelReadPause.pause(upstream);
+        }
+        SocketAddress clientAddress = SocketAddresses.clientAddress(client);
+        callListener(() -> listener.onUpstreamMessage(upstreamMessage, target, clientAddress), true);
+    }
+
+    private void callListener(Runnable onListener, boolean upstreamMessage) {
         CompletableFuture<Void> called = new CompletableFuture<>();
-        // one chain with the per-message forwarder's, so a connection handed back to it keeps its calls in order
+        // one chain with the per-message forwarder's, as the listener is told of a connection's messages in order
         CompletableFuture<Void> previousCalled = client.attr(BinaryRequestProxyingHandler.PREVIOUS_LISTENER_CALL).getAndSet(called);
         Runnable call = () -> scheduler.scheduleLocalCallback(() -> {
             Throwable thrown = null;
             try {
-                listener.onProxy(exchange.request, exchange.response, target, clientAddress);
+                onListener.run();
             } catch (Throwable throwable) {
                 thrown = throwable;
             } finally {
                 called.complete(null);
-                listenerReturned(thrown);
+                listenerReturned(thrown, upstreamMessage);
             }
         }, false);
         if (previousCalled == null) {
@@ -594,10 +630,14 @@ public final class BinaryRelay {
         }
     }
 
-    private void listenerReturned(Throwable thrown) {
+    private void listenerReturned(Throwable thrown, boolean upstreamMessage) {
         try {
             client.eventLoop().execute(() -> {
-                if (--pendingListenerCalls <= MAX_PENDING_LISTENER_CALLS / 2) {
+                if (upstreamMessage) {
+                    if (--pendingUpstreamMessageCalls <= MAX_PENDING_LISTENER_CALLS / 2) {
+                        releaseUpstreamForListener();
+                    }
+                } else if (--pendingListenerCalls <= MAX_PENDING_LISTENER_CALLS / 2) {
                     release(ClientHold.LISTENER_BEHIND);
                 }
                 if (thrown != null) {
@@ -608,6 +648,13 @@ public final class BinaryRelay {
             });
         } catch (RejectedExecutionException serverStopping) {
             // the event loop has shut down, and the connection with it
+        }
+    }
+
+    private void releaseUpstreamForListener() {
+        if (upstreamHeldForListener) {
+            upstreamHeldForListener = false;
+            ChannelReadPause.resume(upstream);
         }
     }
 
@@ -638,10 +685,8 @@ public final class BinaryRelay {
             latest.response.complete(null);
             latest = null;
         }
-        if (!perMessage) {
-            // what the upstream sent before it closed is delivered first
-            closeOnFlush(client);
-        }
+        // what the upstream sent before it closed is delivered first
+        closeOnFlush(client);
     }
 
     private void clientClosed() {
@@ -651,14 +696,26 @@ public final class BinaryRelay {
         clientClosed = true;
         // the upstream is read again so that its close is seen
         releaseEveryHold();
-        if (connected && !finished && !perMessage) {
+        if (connected && !finished) {
             // what the client sent before it closed is delivered first
+            endUpstream();
+        }
+    }
+
+    /**
+     * Ends the upstream connection's output once what was written to it has been sent: after a TLS
+     * {@code close_notify} when MockServer's handshake with the upstream has succeeded.
+     */
+    private void endUpstream() {
+        if (upstreamTls != null && upstreamTls.handshakeFuture().isSuccess() && upstream.isActive()) {
+            RelayLegClose.afterWritten(upstreamTls.closeOutbound());
+        } else {
             RelayLegClose.afterFlush(upstream);
         }
     }
 
     private void hold(ClientHold reason) {
-        if (!clientClosed && !finished && !perMessage && clientHolds.add(reason)) {
+        if (!clientClosed && !finished && clientHolds.add(reason)) {
             ChannelReadPause.pause(client);
         }
     }
@@ -677,6 +734,7 @@ public final class BinaryRelay {
             upstreamHeldForClient = false;
             ChannelReadPause.resume(upstream);
         }
+        releaseUpstreamForListener();
     }
 
     /** A message read from the client and the future its listener call is given. */

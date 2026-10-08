@@ -816,7 +816,7 @@ public abstract class LifeCycle implements Stoppable {
                 new LogEntry()
                     .setType(SERVER_CONFIGURATION)
                     .setLogLevel(INFO)
-                    .setMessageFormat("forwardBinaryRequestsWithoutWaitingForResponse is set but has no effect on a binary connection that is given one upstream connection, which forwardBinaryRequestsUseSingleConnection (on by default) gives every binary connection unless an upstream proxy is configured; it is deprecated and applies only then, or to all with forwardBinaryRequestsUseSingleConnection set to false")
+                    .setMessageFormat("forwardBinaryRequestsWithoutWaitingForResponse is set but has no effect on a binary connection that is given one upstream connection, which forwardBinaryRequestsUseSingleConnection (on by default) gives every binary connection except one whose only upstream proxy is forwardHttpProxy; it is deprecated and applies only then, or to all with forwardBinaryRequestsUseSingleConnection set to false")
             );
         }
     }

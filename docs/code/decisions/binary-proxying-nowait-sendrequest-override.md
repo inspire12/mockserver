@@ -10,7 +10,7 @@ that 4-argument overload.
 
 **Status:** Decided 2026-10-05 (owner). Closes performance-programme row 147.
 
-**Scope since `forwardBinaryRequestsUseSingleConnection`.** Everything below is about forwarding one message per upstream connection, which is no longer the default: it applies only when `forwardBinaryRequestsUseSingleConnection` is `false`, or to a connection that setting forwards that way (its client uses TLS, or an upstream proxy is configured). `forwardBinaryRequestsWithoutWaitingForResponse` is deprecated and is read only there. A connection given one upstream connection calls neither `sendRequest` overload: it connects through `NettyHttpClient.connectBinaryRelay`, so a subclass that overrides `sendRequest` to intercept binary sends is not called for it either.
+**Scope since `forwardBinaryRequestsUseSingleConnection`.** Everything below is about forwarding one message per upstream connection, which is no longer the default: it applies only when `forwardBinaryRequestsUseSingleConnection` is `false`, or to a connection that setting forwards that way (one whose only upstream proxy is `forwardHttpProxy`). `forwardBinaryRequestsWithoutWaitingForResponse` is deprecated and is read only there. A connection given one upstream connection calls neither `sendRequest` overload: it connects through `NettyHttpClient.connectBinaryRelay`, so a subclass that overrides `sendRequest` to intercept binary sends is not called for it either.
 
 ## Context
 

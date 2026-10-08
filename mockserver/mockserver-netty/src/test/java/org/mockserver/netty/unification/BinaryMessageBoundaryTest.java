@@ -512,8 +512,8 @@ public class BinaryMessageBoundaryTest {
     /** Relays binary connections on one upstream connection each, an embedded channel that takes everything. */
     private void relayToAnUpstreamThatTakesEverything() {
         configuration.forwardBinaryRequestsUseSingleConnection(true);
-        when(httpClient.connectBinaryRelay(any(EventLoop.class), any(InetSocketAddress.class), any(ChannelHandler.class))).thenAnswer(invocation -> {
-            EmbeddedChannel upstream = new EmbeddedChannel(invocation.<ChannelHandler>getArgument(2));
+        when(httpClient.connectBinaryRelay(any(EventLoop.class), any(InetSocketAddress.class), anyBoolean(), any(ChannelHandler.class))).thenAnswer(invocation -> {
+            EmbeddedChannel upstream = new EmbeddedChannel(invocation.<ChannelHandler>getArgument(3));
             relayUpstreams.add(upstream);
             return upstream.newSucceededFuture();
         });

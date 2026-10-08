@@ -47,6 +47,11 @@ final class BinaryRelayUpstreamHandler extends SimpleChannelInboundHandler<ByteB
 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+        if (!relay.upstreamConnected()) {
+            // a tunnel the upstream proxy would not open: the relay reports it as the connect's failure
+            RelayLegClose.now(ctx.channel());
+            return;
+        }
         if (isSslOrDecoderFault(cause)) {
             // a fault of MockServer's handshake with the upstream is logged once, by the relay
             if (!relay.upstreamTlsNotEstablished() && mockServerLogger.isEnabledForInstance(Level.WARN)) {

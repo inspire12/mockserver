@@ -35,6 +35,7 @@ import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -290,7 +291,7 @@ public class BinaryRelayAnsweredLocallyTest {
 
     @Test
     public void shouldNotMatchOnAConnectionHandedBackToPerMessageForwarding() {
-        when(relay.httpClient.forwardsThroughProxy()).thenReturn(true);
+        when(relay.httpClient.binaryRelayUnavailableBecause(any(InetSocketAddress.class), anyBoolean())).thenReturn("its upstream proxy is forwardHttpProxy, which does not tunnel a connection");
         clientConnection();
 
         relay.clientSends("mocked");

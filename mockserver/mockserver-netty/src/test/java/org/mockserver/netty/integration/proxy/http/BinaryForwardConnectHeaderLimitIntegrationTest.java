@@ -34,11 +34,12 @@ import static org.mockserver.stop.Stop.stopQuietly;
 import static org.mockserver.testing.tls.SSLSocketFactory.sslSocketFactory;
 
 /**
- * A binary (not HTTP) message forwarded over TLS through an upstream proxy ({@code forwardHttpsProxy}) reads the
+ * A binary (not HTTP) connection forwarded over TLS through an upstream proxy ({@code forwardHttpsProxy}) reads the
  * proxy's answer to {@code CONNECT} up to the {@code maxHeaderSize} of the server that forwards it, not the JVM-wide
- * setting. Two servers in this JVM are given a limit below and a limit above the JVM-wide default of 262,144 bytes,
- * and forward to one TLS upstream on 127.0.0.1 through one proxy, whose {@code CONNECT} answer is the size each
- * test sets.
+ * setting. Two servers in this JVM, which relay each connection on one tunnelled upstream connection, are given a
+ * limit below and a limit above the JVM-wide default of 262,144 bytes; a third forwards each message on an upstream
+ * connection of its own. All forward to one TLS upstream on 127.0.0.1 through one proxy, whose {@code CONNECT}
+ * answer is the size each test sets.
  */
 public class BinaryForwardConnectHeaderLimitIntegrationTest {
 
@@ -64,7 +65,7 @@ public class BinaryForwardConnectHeaderLimitIntegrationTest {
         smallClient = new MockServerClient("127.0.0.1", small.getLocalPort());
         large = new MockServer(throughTheProxy().maxHeaderSize(LARGE_LIMIT), upstream.port(), "127.0.0.1", 0);
         largeClient = new MockServerClient("127.0.0.1", large.getLocalPort());
-        notWaiting = new MockServer(throughTheProxy().maxHeaderSize(SMALL_LIMIT).forwardBinaryRequestsWithoutWaitingForResponse(true), upstream.port(), "127.0.0.1", 0);
+        notWaiting = new MockServer(throughTheProxy().maxHeaderSize(SMALL_LIMIT).forwardBinaryRequestsUseSingleConnection(false).forwardBinaryRequestsWithoutWaitingForResponse(true), upstream.port(), "127.0.0.1", 0);
         notWaitingClient = new MockServerClient("127.0.0.1", notWaiting.getLocalPort());
     }
 
@@ -145,7 +146,8 @@ public class BinaryForwardConnectHeaderLimitIntegrationTest {
 
     /**
      * The servers log at WARN, so after the refused message's own record (received requests are recorded at any
-     * level) the refusal is the only entry: the connection it closes is logged below WARN, and nothing logs it again.
+     * level) the refusal is the only entry: the connection it closes, relayed or not, is logged below WARN, and
+     * nothing logs it again.
      */
     private static void assertRefusedOnce(MockServerClient client, int limit) {
         List<String> logged = Arrays.asList(client.retrieveLogMessagesArray(null));

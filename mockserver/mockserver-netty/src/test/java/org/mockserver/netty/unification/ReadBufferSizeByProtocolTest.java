@@ -219,8 +219,8 @@ public class ReadBufferSizeByProtocolTest {
         try (ServerSocket upstream = new ServerSocket(0, 1, InetAddress.getByAddress(new byte[]{127, 0, 0, 1}))) {
             InetSocketAddress upstreamAddress = new InetSocketAddress(InetAddress.getByAddress(new byte[]{127, 0, 0, 1}), upstream.getLocalPort());
             NettyHttpClient direct = new NettyHttpClient(configuration, new MockServerLogger(), (EventLoopGroup) null, null, false);
-            when(httpClient.connectBinaryRelay(any(EventLoop.class), any(InetSocketAddress.class), any(ChannelHandler.class)))
-                .thenAnswer(invocation -> direct.connectBinaryRelay(invocation.getArgument(0), upstreamAddress, invocation.getArgument(2)));
+            when(httpClient.connectBinaryRelay(any(EventLoop.class), any(InetSocketAddress.class), anyBoolean(), any(ChannelHandler.class)))
+                .thenAnswer(invocation -> direct.connectBinaryRelay(invocation.getArgument(0), upstreamAddress, invocation.getArgument(2), invocation.getArgument(3)));
             Socket socket = connect();
             send(socket, BINARY_MESSAGE);
             awaitHandler(BinaryRequestProxyingHandler.class);

@@ -75,9 +75,9 @@ final class BinaryRelayHarness {
      */
     BinaryRelayHarness(boolean connectAtOnce) {
         when(mockServerLogger.isEnabledForInstance(any(Level.class))).thenReturn(true);
-        when(httpClient.connectBinaryRelay(any(EventLoop.class), any(InetSocketAddress.class), any(ChannelHandler.class))).thenAnswer(invocation -> {
+        when(httpClient.connectBinaryRelay(any(EventLoop.class), any(InetSocketAddress.class), anyBoolean(), any(ChannelHandler.class))).thenAnswer(invocation -> {
             upstreamConnections++;
-            upstream = new EmbeddedChannel(upstreamFlushGate, invocation.<ChannelHandler>getArgument(2));
+            upstream = new EmbeddedChannel(upstreamFlushGate, invocation.<ChannelHandler>getArgument(3));
             // any write that is not flushed makes the upstream unwritable
             upstream.config().setWriteBufferWaterMark(new WriteBufferWaterMark(8, 32));
             connect = upstream.newPromise();
@@ -107,7 +107,7 @@ final class BinaryRelayHarness {
      * at once, or, as when Netty's global executor runs the listeners, when the test fails {@link #connect}.
      */
     void connectFailsBeforeRegistration(Throwable cause, boolean atOnce) {
-        when(httpClient.connectBinaryRelay(any(EventLoop.class), any(InetSocketAddress.class), any(ChannelHandler.class))).thenAnswer(invocation -> {
+        when(httpClient.connectBinaryRelay(any(EventLoop.class), any(InetSocketAddress.class), anyBoolean(), any(ChannelHandler.class))).thenAnswer(invocation -> {
             upstreamConnections++;
             upstream = new EmbeddedChannel(false, false);
             upstream.unsafe().closeForcibly();

@@ -2440,7 +2440,7 @@ Waiting mode is unchanged: forwards are not queued and the listener is called fr
 
 ### One Upstream Connection for a Binary Connection
 
-With `forwardBinaryRequestsUseSingleConnection`, **on by default since 9.0.0**, a binary connection that has an upstream target gets **one upstream connection for its life**, and bytes are relayed both ways as they arrive, in the clear. It is what a stateful protocol needs: a session's messages on one connection, and whatever the server sends, asked for or not. Everything above this heading (the forward queue, waiting and non-waiting modes, `forwardBinaryRequestsWithoutWaitingForResponse`, which is deprecated) describes forwarding one message per upstream connection, which now happens only when the setting is `false` or for a connection the relay hands back (below). A client that turns TLS on part way through has its upstream connection upgraded to TLS too ([below](#the-in-band-tls-upgrade-of-the-upstream-connection)), and a client that is TLS from its first byte gets an upstream connection that is TLS from its first byte ([below](#a-client-that-is-tls-from-its-first-byte)).
+With `forwardBinaryRequestsUseSingleConnection`, **on by default since 9.0.0**, a binary connection that has an upstream target gets **one upstream connection for its life**, and bytes are relayed both ways as they arrive, in the clear. It is what a stateful protocol needs: a session's messages on one connection, and whatever the server sends, asked for or not. Everything above this heading (the forward queue, waiting and non-waiting modes, `forwardBinaryRequestsWithoutWaitingForResponse`, which is deprecated) describes forwarding one message per upstream connection, which now happens only when the setting is `false` or for a connection the relay hands back (below). The upstream connection is made directly or, when the target goes through `forwardSocksProxy` or `forwardHttpsProxy`, tunnelled through that proxy ([below](#through-an-upstream-proxy)). A client that turns TLS on part way through has its upstream connection upgraded to TLS too ([below](#the-in-band-tls-upgrade-of-the-upstream-connection)), and a client that is TLS from its first byte gets an upstream connection that is TLS from its first byte ([below](#a-client-that-is-tls-from-its-first-byte)).
 
 ```mermaid
 flowchart TD
@@ -2449,22 +2449,23 @@ target set"]) --> ON{"forwardBinaryRequests
 UseSingleConnection?"}
     ON -->|"false"| PER["One upstream connection
 for this message (as 8.0.0)"]
-    ON -->|"true (default)"| WHY{"Upstream proxy
-configured?"}
+    ON -->|"true (default)"| WHY{"Only upstream proxy
+is forwardHttpProxy?"}
     WHY -->|"Yes"| DEBUG["DEBUG once for the connection"] --> PER
     WHY -->|"No"| RELAY["BinaryRelay: written to the
-connection's one upstream connection"]
+connection's one upstream connection,
+direct or through a SOCKS or CONNECT tunnel"]
     RELAY --> BACK["Every upstream read
 written back to the client"]
 ```
 
 | Part | Where | What it does |
 |------|-------|--------------|
-| The branch | `BinaryRequestProxyingHandler.sendMessage`, first statement | Setting on and `BinaryRelay.forward(...)` returns true: done. Otherwise the per-message code below it runs unchanged. `channelWritabilityChanged` and `channelInactive` pass the client's writability and close to the relay |
+| The branch | `BinaryRequestProxyingHandler.sendMessage`, first statement | Setting on and `BinaryRelay.forward(...)` returns true: done. Otherwise the per-message code below it runs unchanged. The setting is read once per connection, at its first message (`usesSingleConnection`, a channel attribute), so a connection keeps one mode for its life. `channelWritabilityChanged` and `channelInactive` pass the client's writability and close to the relay |
 | `BinaryRelay` | `netty/proxy/relay`, one per client connection, in a channel attribute | The upstream channel, the messages held until it is connected, the holds on each connection's reads, the listener calls outstanding, the close wiring, and whether the connection is forwarded per message instead |
-| `BinaryRelay.forwardedPerMessageBecause` | One small method | The policy: the reasons a connection is not relayed. Returns the reason logged, or null |
+| `BinaryRelay.decideOnce` | One small method | Asks `NettyHttpClient.binaryRelayUnavailableBecause(target, clientStartedWithTls)` once, at the connection's first message, whether the connection can be relayed; the reason, if any, is logged once at DEBUG |
 | `BinaryRelayUpstreamHandler` | The upstream channel's only handler | Hands each read to the relay, flushes the client at the end of a read cycle, reports writability, closes on an exception |
-| `NettyHttpClient.connectBinaryRelay` | `mockserver-core` | The connect: the binary forward's socket options, on the event loop it is given. Throws rather than connect around an upstream proxy or to a blocked target |
+| `NettyHttpClient.connectBinaryRelay` | `mockserver-core` | The connect: the binary forward's socket options, on the event loop it is given, directly or through a tunnel ([below](#through-an-upstream-proxy)). Throws rather than connect around `forwardHttpProxy` or to a blocked target |
 | `BinaryRequestProxyingHandler.userEventTriggered`, `BinaryRelay.clientStartedTls` | The handler and the relay | A `SniCompletionEvent` without a cause (the client's certificate lookup succeeded) upgrades the upstream connection |
 | `NettyHttpClient.newBinaryRelaySslHandler` | `mockserver-core` | The upstream `SslHandler`: the forward client's TLS context for the upstream's name (below), `socketConnectionTimeoutInMillis` as its handshake timeout, no ALPN |
 
@@ -2476,7 +2477,38 @@ Both connections are on the **client connection's event loop** (as in `RelayConn
 
 | Connection | Why | What happens |
 |------------|-----|--------------|
-| Any, when an upstream proxy is configured (`NettyHttpClient.forwardsThroughProxy()`) | A direct connection would go around the operator's egress path | Each message through `NettyHttpClient.sendRequest`, as in 8.0.0 (with an HTTP proxy, clear binary goes to the proxy's address as if it were the target; an HTTPS proxy is used, by CONNECT, only for a TLS connection; a SOCKS proxy for every connection) |
+| One whose only upstream proxy is `forwardHttpProxy` (`NettyHttpClient.binaryRelayUnavailableBecause`) | MockServer does not ask a plain HTTP proxy to tunnel, and a direct connection would go around the operator's egress path | Each message through `NettyHttpClient.sendRequest`, as in 8.0.0: clear binary goes to the proxy's address as if it were the target, and a TLS connection goes direct, since `forwardHttpsProxy` is not set |
+
+#### Through an Upstream Proxy
+
+**Outcome:** a relayed connection whose target goes through an upstream proxy keeps its one upstream connection through that proxy, as a tunnel: SOCKS5 for `forwardSocksProxy`, `CONNECT` for `forwardHttpsProxy`. Only a target whose one upstream proxy is `forwardHttpProxy` is handed back (above).
+
+```mermaid
+flowchart TD
+    FIRST(["Connection's first message"]) --> LIST{"Target on
+noProxyHosts?"}
+    LIST -->|"Yes, or no proxy set"| DIRECT["Direct connection
+to the address checked"]
+    LIST -->|"No"| PICK{"Proxy for the relay"}
+    PICK -->|"forwardSocksProxy or
+forwardHttpsProxy"| TUNNEL["Tunnel handler first,
+connect completes when
+the tunnel is open"]
+    PICK -->|"Only forwardHttpProxy"| BACK["Handed back to
+per-message forwarding"]
+```
+
+| Concern | Rule |
+|---------|------|
+| Which proxy | As any forward chooses (`HttpClientInitializer.tunnelProxy`): `forwardHttpsProxy` for a client that is TLS from its first byte when it is set, otherwise `forwardSocksProxy`; and else `forwardHttpsProxy`, whose `CONNECT` carries any bytes, so a clear connection is tunnelled through it too. Configuration refuses `forwardSocksProxy` together with either HTTP proxy, so in practice it is whichever tunnelling proxy is set. Per message, a clear connection with only `forwardHttpsProxy` set went direct |
+| `noProxyHosts` | Asked per target (`upstreamProxiesFor`), as for HTTP forwards: a listed target is relayed directly |
+| `forwardProxyBlockPrivateNetworks` | Checked before any tunnel is opened (`InetAddressValidator.validateForwardTarget`); a blocked target opens nothing, not even a connection to the proxy. The tunnel is then opened by name for the proxy to resolve, as an HTTP forward's is |
+| What the proxy is sent | The target's host string, unresolved unless it is an IP literal (`unresolvedUnlessIpLiteral`) |
+| Pipeline | The tunnel's handler (`Socks5ProxyHandler`, or `HttpConnectProxyHandler` for `CONNECT`) is first, named `NettyHttpClient.BINARY_RELAY_TUNNEL`, then the relay's `SslHandler` when there is one, then `BinaryRelayUpstreamHandler`. The channel is registered, the tunnel's handler added, and only then connected, because the handler must take the connect to send it to the proxy |
+| When the connect completes | When the tunnel is open (the handler's `connectFuture`), so the relay writes nothing and holds the client until then. A TLS-from-the-start handshake begins at the TCP connect; the tunnel's handler keeps its first record until the tunnel is open |
+| Time limit | `socketConnectionTimeoutInMillis` for the TCP connect, and for the tunnel's handshake with the proxy (`ProxyHandler.setConnectTimeoutMillis`) |
+| Failure | The relay's one connect-failure WARN, naming the target and the proxy's answer (INFO for a `CONNECT` answer over `maxHeaderSize`, which is logged as a warning where it is refused, as per-message forwarding does); the upstream handler logs nothing more for a failure before the connect has succeeded. A proxy that cannot be reached is `UpstreamProxyUnreachableException`, with the forward client's WARN once per proxy |
+| Pinned | The route is decided once, at the connection's first message; a later change to `noProxyHosts` affects new connections only. A connect made after such a change that finds only `forwardHttpProxy` refuses (WARN, client closed) rather than go around it |
 
 #### A Client That Is TLS From Its First Byte
 
@@ -2512,13 +2544,13 @@ sequenceDiagram
 | Step | Rule |
 |------|------|
 | Trigger | `SniCompletionEvent` with no cause, which Netty's `AbstractSniHandler` fires once MockServer's server certificate is chosen: after the message sent in the clear and before anything decrypted (`BinaryInBandTlsUpgradeEventTest`). Backstop: a client message arriving while the client leg is TLS and the upstream leg is not starts the same upgrade |
-| The upstream `SslHandler` | Added first in the upstream pipeline, so `BinaryRelayUpstreamHandler` only sees decrypted bytes. Certificate checks as for any forwarded TLS (the default trust type, `ANY`, accepts any certificate; `JVM` or `CUSTOM` verify it): `forwardProxyTLSX509CertificatesTrustManagerType`, `forwardProxyTLSCustomTrustX509Certificates`, `forwardProxyTLSHostnameVerificationEnabled`; MockServer presents `forwardProxyPrivateKey` / `forwardProxyCertificateChain` (or the per-host pair) to an upstream that asks for a client certificate. SNI and host name: [the upstream's name](#a-client-that-is-tls-from-its-first-byte) |
+| The upstream `SslHandler` | Added first in the upstream pipeline, or straight after the tunnel's handler when there is one, so `BinaryRelayUpstreamHandler` only sees decrypted bytes. Certificate checks as for any forwarded TLS (the default trust type, `ANY`, accepts any certificate; `JVM` or `CUSTOM` verify it): `forwardProxyTLSX509CertificatesTrustManagerType`, `forwardProxyTLSCustomTrustX509Certificates`, `forwardProxyTLSHostnameVerificationEnabled`; MockServer presents `forwardProxyPrivateKey` / `forwardProxyCertificateChain` (or the per-host pair) to an upstream that asks for a client certificate. SNI and host name: [the upstream's name](#a-client-that-is-tls-from-its-first-byte) |
 | Upgrade before the connect completes | What was waiting for the connect from before the upgrade is written in the clear, then the handler is added, then what came after it |
 | Holding the client | A fourth `ClientHold`, `UPSTREAM_HANDSHAKING`: from the first decrypted message until the upstream handshake succeeds. That message is written into the `SslHandler`, which keeps it until the handshake is done, so at most one read is held |
 | Handshake fails or times out (`socketConnectionTimeoutInMillis`) | One WARN from the relay naming target and client, with the cause bounded by `ExceptionHandling.boundedFault` (a `NotSslRecordException` carries a hex dump of what the upstream sent); an upstream that closes the connection during the handshake is named as `upstream closed the connection during the TLS handshake` (`ExceptionHandling.upstreamHandshakeFailure`); both connections closed. The upstream handler does not log the same fault again. A client that closed first is not a fault: no WARN. An upstream that closed first is, although its close has closed the client before the handshake reports it (`upstreamClosedFirst`) |
 | Client closes during the handshake | The hold is given up; what the client sent is kept by the `SslHandler`, delivered once the handshake completes, and the upstream connection is then ended as for any client close. A handshake that then fails is not logged as a fault |
 | An upstream that answered `N` | A client that then starts TLS anyway gets MockServer's handshake with the upstream failing or timing out, and both closed; nothing it sent over TLS reaches the upstream |
-| End of the session | As for a clear relay: the upstream leg's output is ended at the socket after a flush (`RelayLegClose.afterFlush`), so no TLS `close_notify` is sent upstream; PostgreSQL ends a session on `Terminate`, before it reads the end of the stream |
+| End of the session | When the client closes after MockServer's handshake with the upstream has succeeded, the session is ended with a TLS `close_notify` (`SslHandler.closeOutbound`), after what the client sent, and the leg's output is then ended at the socket (`RelayLegClose.afterWritten`). A client that closes while that handshake is still running has its leg ended as a clear relay's is, without a `close_notify` |
 
 **SCRAM channel binding** (PostgreSQL's `SCRAM-SHA-256-PLUS`, `tls-server-end-point`) binds authentication to a hash of the certificate the client sees. Through MockServer the client sees MockServer's certificate, so channel binding fails unless the client turns it off (pgjdbc `channelBinding=disable`, libpq `channel_binding=disable`) or MockServer presents the server's own certificate: `privateKeyPath` and `x509CertificatePath` set to the server's key and certificate, and `certificateAuthorityCertificate` to the authority that signed it (MockServer refuses a fixed certificate its configured authority did not sign). The tested case is `PostgresThroughMockServerIntegrationTest`. A client certificate the client presents to MockServer cannot be passed on, so PostgreSQL `cert` authentication sees MockServer's identity. PostgreSQL 17's direct TLS (`sslnegotiation=direct`, ALPN `postgresql`) is not supported: no ALPN is offered upstream.
 
@@ -2527,7 +2559,7 @@ sequenceDiagram
 | Event log, client to upstream | `RECEIVED_REQUEST` per read, as before |
 | Event log, upstream to client | One `FORWARDED_REQUEST` entry per upstream read, with the correlation id of the latest client message. "for forwarded binary request" is left out for a read that follows no message, or follows one already answered |
 | `binaryProxyListener.onProxy` | Once per client message, at once, off the event loop, one at a time and in arrival order. The response future completes with the first upstream read after that message was written; with `null` when the next client message arrives first or the upstream connection closes; exceptionally when the message could not be connected or written |
-| Upstream bytes that answer no message | Relayed and logged, not reported to the listener (`onProxy` has no shape for them) |
+| Upstream bytes that answer no message | Relayed and logged, and reported to `binaryProxyListener.onUpstreamMessage` (a default method that does nothing): bytes the upstream sent unprompted, and each read after the first that followed a message. In the same chain as `onProxy`, so in order with it. Not scheduled at all for a listener that keeps the default (checked once, by reflection, when the relay is made) |
 | Binary expectations | Not consulted by default. With `forwardBinaryRequestsMatchExpectations`, matched first, and a match is answered and not relayed: see [below](#binary-expectations-on-a-relayed-connection) |
 | `forwardBinaryRequestsWithoutWaitingForResponse` | No effect. `LifeCycle.startedServer` logs one INFO entry at start-up when it is on while this setting is on |
 | A `NettyHttpClient` subclass overriding `sendRequest(BinaryMessage, ...)` | Not called: the relay connects through `connectBinaryRelay` |
@@ -2538,6 +2570,7 @@ sequenceDiagram
 | Client faster than upstream | One `ChannelReadPause` hold on the client while the upstream channel is not writable |
 | Upstream faster than client | One hold on the upstream while the client channel is not writable |
 | Listener slower than client | Calls not yet returned are counted; above 64 the client is not read, until 32 remain |
+| Listener slower than upstream | `onUpstreamMessage` calls are counted apart: above 64 the upstream is not read, until 32 remain, except while a forwarded message is still waiting for its response. That hold is given up when the client's next message is forwarded and taken again at the next unprompted read, so a listener call waiting on a response future is never kept from the read that completes it |
 | Message size | What `BinaryMessageGatherer` joins from one read loop, at most 256 KiB, is one write to the upstream and one listener call; the 64 KiB read floor (`BinaryAwareRecvByteBufAllocator`) applies as for per-message forwarding |
 | Memory for one connection | One gathered message (at most 256 KiB) from the client and one read from the upstream in flight, each channel's write buffer, and the messages of at most 64 listener calls plus one read. No message queue: `ForwardQueue` is not created |
 | During the upstream TLS handshake | One hold on the client from its first decrypted message until the handshake succeeds ([above](#the-in-band-tls-upgrade-of-the-upstream-connection)) |
@@ -2545,20 +2578,20 @@ sequenceDiagram
 | Client closes | Driven by the handler's `channelInactive`, not the close future, which completes before `PortUnificationHandler.decodeLast` and `BinaryMessageGatherer.channelInactive` hand over bytes they still hold. What is queued for the upstream is flushed, then `RelayLegClose.afterFlush`: end of output, and a wait of up to 5 seconds for the upstream to close. A client that closes before the connect completes still has its messages delivered |
 | Upstream closes | `closeOnFlush` on the client: what the upstream sent is delivered first. Not an error, and no WARN |
 | Upstream fault | Both closed. An SSL or decoder fault: WARN with the cause. A reset by the upstream: WARN with its message (8.0.0 logged one too). Anything else: ERROR with the stack trace, as `connectionClosedException` classifies it (the scheme of `Http2ConnectionExceptionHandler`) |
-| Listener order across a hand-back | The relay and the per-message forwarder chain listener calls through one channel attribute (`BinaryRequestProxyingHandler.PREVIOUS_LISTENER_CALL`), so a connection that changes mode part way through (the setting turned off while it is open) keeps its calls in order. Waiting mode calls its listener when each response arrives, outside that chain, as in 8.0.0 |
+| Listener order | The relay and the per-message forwarder chain listener calls through one channel attribute (`BinaryRequestProxyingHandler.PREVIOUS_LISTENER_CALL`). A connection no longer changes mode part way through, so the two never share a connection |
 | No upstream connection opened (`connectBinaryRelay` returned none) | WARN, the client is closed |
 | Half-close | Not kept on either leg: a FIN is a close. Upstream bytes still in flight after the client's FIN are not relayed |
 | Connect failure or timeout (`socketConnectionTimeoutInMillis`) | WARN naming the target and the cause, without a stack trace for a failure of the connection itself; the relay closes the client and gives up its holds itself, since a connect that failed before its channel was registered (no socket could be opened) has a close future that never completes; the message held fails its response future. Such a failure completes on Netty's global executor, so the relay moves to the client's event loop first. A TLS handler made for a connect that has already failed is released rather than added to that channel's pipeline |
 | Stalled upstream | A timer runs while the upstream is not writable. If it took none of the bytes waiting for it for `responseWriteStallTimeoutMillis`, WARN and both are closed. Without it a stalled upstream would hold a client that is never timed out (it is marked long-lived) |
 | Stalled client | The existing `WriteStallTimeoutHandler` closes the client connection, which closes the upstream |
 | Idle | No read timeout on the upstream leg: a database session may sit idle. TCP keep-alive as for other forwards (`forwardSocketKeepAlive`) |
-| `forwardProxyBlockPrivateNetworks` | `InetAddressValidator.validateForwardTarget(Configuration, InetSocketAddress)` runs before the connect and returns the address to connect to, so the address checked is the one connected to. A blocked target: WARN, the client is closed. Per-message binary forwarding makes the same check (`NettyHttpClient.sendRequest(BinaryMessage, ...)`); in 8.0.0 it did not |
-| The setting changed while a connection is open | It is read for each message. Turned off, later messages are forwarded one per connection while the relay's upstream connection stays open until either end closes |
+| `forwardProxyBlockPrivateNetworks` | `InetAddressValidator.validateForwardTarget(Configuration, InetSocketAddress)` runs before the connect and returns the address to connect to, so the address checked is the one connected to; through a tunnel the name is checked and then sent to the proxy. A blocked target: WARN, the client is closed. Per-message binary forwarding makes the same check (`NettyHttpClient.sendRequest(BinaryMessage, ...)`); in 8.0.0 it did not |
+| The setting changed while a connection is open | It is read once per connection, at its first message: an open connection keeps its mode, and connections opened after the change get the new one |
 | Server stop | The upstream channels are on the worker group and close with it |
 
 **What a relayed connection does differently from 8.0.0** (the reason the default is a BREAKING change): the upstream sees one connection per client connection, held for the client connection's life; there is no time limit on an answer (per message, `maxFutureTimeoutInMillis` closed the client), and no idle bound either, by choice: a database session may sit idle, and TCP keep-alive finds a dead upstream; the event log has one `FORWARDED_REQUEST` per upstream read rather than per message; every upstream byte is relayed, not just the first read of each per-message connection; the upstream closing closes the client (per message, the client stayed open after an answered message and its next message opened a new upstream connection); the listener is called at once rather than once the response has arrived, and its response can be `null`; an upstream that closes without answering is not an error (waiting mode raised one and closed the client with a WARN); the upstream connection is opened on the client connection's worker event loop, not the forward client's; `forwardProxyBlockPrivateNetworks` applies.
 
-**Not supported**: relaying through an upstream SOCKS5 or HTTP CONNECT proxy; protocols in which the server speaks first (a connection is not known to be binary until the client sends).
+**Not supported**: relaying through a plain HTTP proxy (`forwardHttpProxy` alone: per-message forwarding); protocols in which the server speaks first (a connection is not known to be binary until the client sends).
 
 #### Binary Expectations on a Relayed Connection
 

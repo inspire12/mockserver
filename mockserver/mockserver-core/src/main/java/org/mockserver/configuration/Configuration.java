@@ -3325,8 +3325,10 @@ public class Configuration {
     /**
      * If true (the default) a proxied binary (non-HTTP) connection is given one upstream connection for its life,
      * and bytes are relayed both ways as they arrive. forwardBinaryRequestsWithoutWaitingForResponse then has no
-     * effect. If false each message is forwarded on an upstream connection of its own, as in 8.0.0; any connection
-     * is forwarded that way too when an upstream proxy is configured. A client that turns TLS on part way through
+     * effect. If false each message is forwarded on an upstream connection of its own, as in 8.0.0. The upstream
+     * connection goes through forwardSocksProxy or forwardHttpsProxy (CONNECT) when one applies; a connection whose
+     * only upstream proxy is forwardHttpProxy is forwarded one message per connection whatever this setting. The
+     * setting is read once per connection, at its first message. A client that turns TLS on part way through
      * has its upstream connection upgraded to TLS as well, and one that starts with TLS gets an upstream connection
      * that starts with TLS.
      * <p>

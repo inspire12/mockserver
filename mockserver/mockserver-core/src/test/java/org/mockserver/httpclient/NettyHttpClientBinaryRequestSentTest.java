@@ -75,7 +75,7 @@ public class NettyHttpClientBinaryRequestSentTest {
         }
 
         private Throwable await() throws InterruptedException {
-            assertThat("the client reports what became of the request", once.await(10, TimeUnit.SECONDS), is(true));
+            assertThat("the client reports what became of the request", once.await(30, TimeUnit.SECONDS), is(true));
             return failure.get();
         }
     }
@@ -104,10 +104,11 @@ public class NettyHttpClientBinaryRequestSentTest {
             notListening.bind(new InetSocketAddress(LOOPBACK, 0));
             Reported reported = new Reported();
 
-            CompletableFuture<BinaryMessage> response = client(new MockServerLogger()).sendRequest(MESSAGE, false, new InetSocketAddress(LOOPBACK, notListening.getLocalPort()), 10000L, reported::accept);
+            // a connect timeout well inside the wait, so a refusal slowed down by a loaded machine is still reported
+            CompletableFuture<BinaryMessage> response = client(new MockServerLogger()).sendRequest(MESSAGE, false, new InetSocketAddress(LOOPBACK, notListening.getLocalPort()), 2000L, reported::accept);
 
             assertThat("the failed attempt is reported, so the caller does not wait for it", reported.await(), is(notNullValue()));
-            assertThrows(ExecutionException.class, () -> response.get(10, TimeUnit.SECONDS));
+            assertThrows(ExecutionException.class, () -> response.get(30, TimeUnit.SECONDS));
             assertThat(reported.times.get(), is(1));
         }
     }

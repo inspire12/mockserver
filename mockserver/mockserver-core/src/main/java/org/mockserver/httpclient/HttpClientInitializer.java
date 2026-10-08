@@ -8,6 +8,7 @@ import io.netty.handler.codec.http.HttpClientCodec;
 import io.netty.handler.codec.http.HttpObjectDecoder;
 import io.netty.handler.codec.http2.*;
 import io.netty.handler.logging.LogLevel;
+import io.netty.handler.proxy.ProxyHandler;
 import io.netty.handler.proxy.Socks5ProxyHandler;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.timeout.ReadTimeoutHandler;
@@ -91,6 +92,21 @@ public class HttpClientInitializer extends ChannelInitializer<SocketChannel> {
         return proxyConfigurations.get(ProxyConfiguration.Type.SOCKS5);
     }
 
+    /**
+     * The handler that opens a tunnel through this upstream proxy: {@code CONNECT} for {@code forwardHttpsProxy},
+     * SOCKS5 for {@code forwardSocksProxy}.
+     */
+    static ProxyHandler tunnelHandler(ProxyConfiguration tunnelProxy, MockServerLogger mockServerLogger, int maxHeaderSize) {
+        if (tunnelProxy.getType() == ProxyConfiguration.Type.HTTPS) {
+            boolean credentials = isNotBlank(tunnelProxy.getUsername()) && isNotBlank(tunnelProxy.getPassword());
+            return new HttpConnectProxyHandler(tunnelProxy.getProxyAddress(), credentials ? tunnelProxy.getUsername() : null, credentials ? tunnelProxy.getPassword() : null, mockServerLogger, maxHeaderSize);
+        } else if (isNotBlank(tunnelProxy.getUsername()) && isNotBlank(tunnelProxy.getPassword())) {
+            return new Socks5ProxyHandler(tunnelProxy.getProxyAddress(), tunnelProxy.getUsername(), tunnelProxy.getPassword());
+        } else {
+            return new Socks5ProxyHandler(tunnelProxy.getProxyAddress());
+        }
+    }
+
     @Override
     public void initChannel(SocketChannel channel) {
         try {
@@ -126,14 +142,7 @@ public class HttpClientInitializer extends ChannelInitializer<SocketChannel> {
 
         ProxyConfiguration tunnelProxy = tunnelProxy(proxyConfigurations, secure);
         if (tunnelProxy != null) {
-            if (tunnelProxy.getType() == ProxyConfiguration.Type.HTTPS) {
-                boolean credentials = isNotBlank(tunnelProxy.getUsername()) && isNotBlank(tunnelProxy.getPassword());
-                pipeline.addLast(new HttpConnectProxyHandler(tunnelProxy.getProxyAddress(), credentials ? tunnelProxy.getUsername() : null, credentials ? tunnelProxy.getPassword() : null, mockServerLogger, maxHeaderSize()));
-            } else if (isNotBlank(tunnelProxy.getUsername()) && isNotBlank(tunnelProxy.getPassword())) {
-                pipeline.addLast(new Socks5ProxyHandler(tunnelProxy.getProxyAddress(), tunnelProxy.getUsername(), tunnelProxy.getPassword()));
-            } else {
-                pipeline.addLast(new Socks5ProxyHandler(tunnelProxy.getProxyAddress()));
-            }
+            pipeline.addLast(tunnelHandler(tunnelProxy, mockServerLogger, maxHeaderSize()));
         }
         pipeline.addLast(httpClientConnectionHandler);
 

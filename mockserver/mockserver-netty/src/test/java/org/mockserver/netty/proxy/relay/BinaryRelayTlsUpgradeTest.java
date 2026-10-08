@@ -3,13 +3,17 @@ package org.mockserver.netty.proxy.relay;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.Unpooled;
+import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelException;
+import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.EventLoop;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.ssl.SniCompletionEvent;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
+import io.netty.handler.ssl.SslCloseCompletionEvent;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.SslProvider;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
@@ -18,6 +22,7 @@ import io.netty.util.ReferenceCounted;
 import org.junit.After;
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.mockserver.httpclient.NettyHttpClient;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.netty.unification.PortUnificationHandler;
@@ -32,10 +37,12 @@ import java.net.ConnectException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.hasSize;
@@ -45,6 +52,7 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -67,6 +75,7 @@ public class BinaryRelayTlsUpgradeTest {
     private BinaryRelayHarness relay;
     private EmbeddedChannel tlsServer;
     private final StringBuilder decryptedByUpstream = new StringBuilder();
+    private final List<Object> closeEventsAtUpstream = new ArrayList<>();
 
     @BeforeClass
     public static void createTlsContexts() throws Exception {
@@ -98,6 +107,13 @@ public class BinaryRelayTlsUpgradeTest {
             @Override
             protected void channelRead0(ChannelHandlerContext ctx, ByteBuf decrypted) {
                 decryptedByUpstream.append(decrypted.toString(StandardCharsets.UTF_8));
+            }
+
+            @Override
+            public void userEventTriggered(ChannelHandlerContext ctx, Object event) {
+                if (event instanceof SslCloseCompletionEvent) {
+                    closeEventsAtUpstream.add(event);
+                }
             }
         });
         return relay.clientConnection();
@@ -310,7 +326,7 @@ public class BinaryRelayTlsUpgradeTest {
     @Test
     public void shouldLeaveAConnectionForwardedPerMessageAloneWhenItsClientTurnsTlsOn() {
         relay = new BinaryRelayHarness(true);
-        when(relay.httpClient.forwardsThroughProxy()).thenReturn(true);
+        when(relay.httpClient.binaryRelayUnavailableBecause(any(InetSocketAddress.class), anyBoolean())).thenReturn("its upstream proxy is forwardHttpProxy, which does not tunnel a connection");
         EmbeddedChannel client = relay.clientConnection();
         relay.clientSends("SSLRequest");
 
@@ -359,6 +375,8 @@ public class BinaryRelayTlsUpgradeTest {
         assertThat("nothing is forwarded on a connection of its own", relay.forwardedPerMessage, is(empty()));
         assertThat("nor said to be", relay.logged(Level.DEBUG).stream().filter(entry -> entry.getMessageFormat().contains("on an upstream connection of its own")).count(), is(0L));
         assertThat(relay.logged(Level.WARN), is(empty()));
+        verify(relay.httpClient).binaryRelayUnavailableBecause(BinaryRelayHarness.TARGET, true);
+        verify(relay.httpClient).connectBinaryRelay(any(EventLoop.class), eq(BinaryRelayHarness.TARGET), eq(true), any(ChannelHandler.class));
         client.checkException();
     }
 
@@ -460,8 +478,44 @@ public class BinaryRelayTlsUpgradeTest {
         exchangeWithUpstream();
 
         assertThat(decryptedByUpstream.toString(), is("startupterminate"));
+        assertThat("the TLS session is ended with a close_notify", closeEventsAtUpstream, contains(SslCloseCompletionEvent.SUCCESS));
         assertThat(relay.upstream.isOpen(), is(false));
         assertThat(relay.logged(Level.WARN), is(empty()));
+    }
+
+    @Test
+    public void shouldEndAnUpgradedUpstreamSessionWithCloseNotifyWhenTheClientCloses() {
+        EmbeddedChannel client = relay(true);
+        relay.clientSends("SSLRequest");
+        relay.receivedByUpstream();
+        clientTurnsTlsOn(client, true);
+        relay.clientSends("startup");
+        exchangeWithUpstream();
+        relay.clientSends("terminate");
+
+        client.close();
+        exchangeWithUpstream();
+
+        assertThat(decryptedByUpstream.toString(), is("startupterminate"));
+        assertThat("after what the client sent, the TLS session is ended with a close_notify", closeEventsAtUpstream, contains(SslCloseCompletionEvent.SUCCESS));
+        assertThat(relay.upstream.isOpen(), is(false));
+        assertThat(relay.logged(Level.WARN), is(empty()));
+    }
+
+    @Test
+    public void shouldAddTheUpstreamTlsHandlerAfterTheTunnelsWhenTheConnectionGoesThroughOne() {
+        EmbeddedChannel client = relay(false);
+        relay.clientSends("SSLRequest");
+        relay.upstream.pipeline().addFirst(NettyHttpClient.BINARY_RELAY_TUNNEL, new ChannelDuplexHandler());
+        relay.connect.setSuccess();
+        relay.receivedByUpstream();
+
+        clientTurnsTlsOn(client, true);
+
+        assertThat("nearest the socket after the tunnel's handler", relay.upstream.pipeline().names().get(0), is(NettyHttpClient.BINARY_RELAY_TUNNEL));
+        assertThat(relay.upstream.pipeline().names().get(1), is("binary-relay-tls"));
+        assertThat(relay.upstream.pipeline().get("binary-relay-tls"), instanceOf(SslHandler.class));
+        client.checkException();
     }
 
     @Test

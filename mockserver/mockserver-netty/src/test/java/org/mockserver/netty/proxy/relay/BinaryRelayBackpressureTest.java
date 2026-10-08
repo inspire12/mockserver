@@ -4,11 +4,15 @@ import io.netty.channel.embedded.EmbeddedChannel;
 import org.junit.After;
 import org.junit.Test;
 import org.mockserver.log.model.LogEntry;
+import org.mockserver.model.BinaryMessage;
+import org.mockserver.model.BinaryProxyListener;
 import org.mockserver.socket.ChannelReadPause;
 import org.slf4j.event.Level;
 
 import java.net.ConnectException;
+import java.net.SocketAddress;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
@@ -146,6 +150,100 @@ public class BinaryRelayBackpressureTest {
         relay.runNextListenerCall();
         assertThat("read again with half the limit waiting", isReading(client), is(true));
         assertThat(ChannelReadPause.holds(client), is(0));
+    }
+
+    /** A listener that hears what the upstream sends unprompted, and whose calls the test runs. */
+    private EmbeddedChannel relayHeardByAListenerOfUpstreamMessages() {
+        relay = new BinaryRelayHarness(true);
+        relay.configuration.binaryProxyListener(new BinaryProxyListener() {
+            @Override
+            public void onProxy(BinaryMessage binaryRequest, CompletableFuture<BinaryMessage> binaryResponse, SocketAddress serverAddress, SocketAddress clientAddress) {
+            }
+
+            @Override
+            public void onUpstreamMessage(BinaryMessage upstreamMessage, SocketAddress serverAddress, SocketAddress clientAddress) {
+            }
+        });
+        EmbeddedChannel client = relay.clientConnection();
+        relay.clientSends("request");
+        relay.upstreamSends("answer");
+        return client;
+    }
+
+    @Test
+    public void shouldNotReadTheUpstreamWhileMoreOfItsReadsThanTheLimitWaitForTheListener() {
+        EmbeddedChannel client = relayHeardByAListenerOfUpstreamMessages();
+
+        for (int read = 0; read < MAX_PENDING_LISTENER_CALLS; read++) {
+            relay.upstreamSends("u");
+        }
+        assertThat("at the limit the upstream is still read", isReading(relay.upstream), is(true));
+        relay.upstreamSends("u");
+        assertThat("one more than the limit and it is not", isReading(relay.upstream), is(false));
+        relay.upstreamSends("u");
+        assertThat("the hold is taken once", ChannelReadPause.holds(relay.upstream), is(1));
+        assertThat("the client is still read", isReading(client), is(true));
+        assertThat("everything still reached the client", relay.receivedByClient().length(), is("answer".length() + MAX_PENDING_LISTENER_CALLS + 2));
+
+        relay.runNextListenerCall();
+        for (int waiting = MAX_PENDING_LISTENER_CALLS + 2; waiting > MAX_PENDING_LISTENER_CALLS / 2 + 1; waiting--) {
+            relay.runNextListenerCall();
+            assertThat("still not read with " + (waiting - 1) + " waiting", isReading(relay.upstream), is(false));
+        }
+        relay.runNextListenerCall();
+        assertThat("read again with half the limit waiting", isReading(relay.upstream), is(true));
+        assertThat(ChannelReadPause.holds(relay.upstream), is(0));
+    }
+
+    @Test
+    public void shouldReadTheUpstreamWhileAMessageWaitsForItsResponseHoweverFarBehindTheListenerIs() {
+        EmbeddedChannel client = relayHeardByAListenerOfUpstreamMessages();
+        for (int read = 0; read <= MAX_PENDING_LISTENER_CALLS; read++) {
+            relay.upstreamSends("u");
+        }
+        assertThat(isReading(relay.upstream), is(false));
+        // so the message is not yet written, and what the upstream sends next is no answer to it
+        relay.upstreamFlushGate.blocked = true;
+
+        relay.clientSends("next");
+        assertThat("its response is an upstream read, which a listener call may be waiting for", isReading(relay.upstream), is(true));
+        relay.upstreamSends("u");
+        assertThat("not held again while the message still waits", isReading(relay.upstream), is(true));
+
+        client.close();
+        assertThat("no hold is left behind", ChannelReadPause.holds(relay.upstream), is(0));
+    }
+
+    @Test
+    public void shouldHoldTheUpstreamForTheListenerAgainOnceTheWaitingMessageHasItsResponse() {
+        relayHeardByAListenerOfUpstreamMessages();
+        for (int read = 0; read <= MAX_PENDING_LISTENER_CALLS; read++) {
+            relay.upstreamSends("u");
+        }
+        relay.clientSends("next");
+        assertThat(isReading(relay.upstream), is(true));
+
+        relay.receivedByUpstream();
+        relay.upstreamSends("answer to next");
+        assertThat("the answer adds no call", isReading(relay.upstream), is(true));
+        relay.upstreamSends("u");
+
+        assertThat("held again", isReading(relay.upstream), is(false));
+        assertThat(ChannelReadPause.holds(relay.upstream), is(1));
+    }
+
+    @Test
+    public void shouldGiveUpTheUpstreamsHoldForTheListenerWhenTheUpstreamCloses() {
+        EmbeddedChannel client = relayHeardByAListenerOfUpstreamMessages();
+        for (int read = 0; read <= MAX_PENDING_LISTENER_CALLS; read++) {
+            relay.upstreamSends("u");
+        }
+        assertThat(ChannelReadPause.holds(relay.upstream), is(1));
+
+        relay.upstream.close();
+
+        assertThat(ChannelReadPause.holds(relay.upstream), is(0));
+        assertThat(client.isOpen(), is(false));
     }
 
     @Test

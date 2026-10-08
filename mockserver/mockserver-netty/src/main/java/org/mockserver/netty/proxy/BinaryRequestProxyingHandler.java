@@ -63,6 +63,7 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
     private static final AttributeKey<ForwardQueue> FORWARD_QUEUE = AttributeKey.valueOf("BINARY_FORWARD_QUEUE");
     public static final AttributeKey<CompletableFuture<Void>> PREVIOUS_LISTENER_CALL = AttributeKey.valueOf("PREVIOUS_BINARY_PROXY_LISTENER_CALL");
     private static final AttributeKey<Boolean> EXPECTATIONS_NOT_MATCHED_WARNED = AttributeKey.valueOf("BINARY_EXPECTATIONS_NOT_MATCHED_WARNED");
+    private static final AttributeKey<Boolean> USE_SINGLE_CONNECTION = AttributeKey.valueOf("BINARY_USE_SINGLE_CONNECTION");
     /**
      * The client connection is not read while more than either of these wait to be forwarded, and is read again
      * once no more than half of each do. The queue only has to absorb what a client sends while one message is
@@ -190,7 +191,7 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
         if (httpState == null || !configuration.forwardBinaryRequestsMatchExpectations()) {
             return false;
         }
-        if (!configuration.forwardBinaryRequestsUseSingleConnection()
+        if (!usesSingleConnection(ctx)
             || !BinaryRelay.relaysOnOneConnection(ctx, remoteAddress, configuration, mockServerLogger, scheduler, httpClient, binaryExchangeCallback)) {
             warnOnceThatExpectationsAreNotMatched(ctx, remoteAddress, logCorrelationId);
             return false;
@@ -217,6 +218,19 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
         }
         replyFromExpectation(ctx, matchedExpectation, binaryRequest, logCorrelationId, () -> BinaryRelay.answeredLocally(ctx.channel(), logCorrelationId));
         return true;
+    }
+
+    /**
+     * forwardBinaryRequestsUseSingleConnection as it was at the connection's first message: a connection is relayed
+     * or forwarded one message per upstream connection for its whole life.
+     */
+    private boolean usesSingleConnection(ChannelHandlerContext ctx) {
+        Boolean pinned = ctx.channel().attr(USE_SINGLE_CONNECTION).get();
+        if (pinned == null) {
+            pinned = Boolean.TRUE.equals(configuration.forwardBinaryRequestsUseSingleConnection());
+            ctx.channel().attr(USE_SINGLE_CONNECTION).set(pinned);
+        }
+        return pinned;
     }
 
     private void warnOnceThatExpectationsAreNotMatched(ChannelHandlerContext ctx, InetSocketAddress remoteAddress, String logCorrelationId) {
@@ -250,7 +264,7 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
     }
 
     private void sendMessage(ChannelHandlerContext ctx, BinaryMessage binaryRequest, String logCorrelationId, InetSocketAddress remoteAddress) {
-        if (configuration.forwardBinaryRequestsUseSingleConnection()
+        if (usesSingleConnection(ctx)
             && BinaryRelay.forward(ctx, binaryRequest, logCorrelationId, remoteAddress, configuration, mockServerLogger, scheduler, httpClient, binaryExchangeCallback)) {
             return;
         }

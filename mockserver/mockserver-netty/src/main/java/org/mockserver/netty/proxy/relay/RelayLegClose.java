@@ -2,6 +2,7 @@ package org.mockserver.netty.proxy.relay;
 
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelFuture;
 import io.netty.channel.socket.DuplexChannel;
 import org.mockserver.socket.LingeringClose;
 import org.mockserver.socket.ReadAfterFailedWrite;
@@ -40,6 +41,13 @@ final class RelayLegClose {
         } else {
             now(channel);
         }
+    }
+
+    /**
+     * As {@link #afterFlush}, once this write, the last the leg is given, has completed.
+     */
+    static void afterWritten(ChannelFuture lastWrite) {
+        lastWrite.addListener(future -> endOutput(lastWrite.channel()));
     }
 
     private static void endOutput(Channel channel) {

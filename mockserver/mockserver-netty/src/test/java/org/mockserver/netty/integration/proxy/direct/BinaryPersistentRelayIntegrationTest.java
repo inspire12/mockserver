@@ -401,7 +401,7 @@ public class BinaryPersistentRelayIntegrationTest {
                         .collect(Collectors.toList());
                     if (configuration.forwardBinaryRequestsUseSingleConnection()) {
                         assertThat("said once for the connection", fallBacks, hasSize(1));
-                        assertThat(fallBacks.get(0).getArguments()[2], is("an upstream proxy is configured"));
+                        assertThat(fallBacks.get(0).getArguments()[2], is("its upstream proxy is forwardHttpProxy, which does not tunnel a connection"));
                     } else {
                         assertThat(fallBacks, hasSize(0));
                     }

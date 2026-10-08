@@ -12,11 +12,12 @@ import java.util.concurrent.CompletableFuture;
  * {@code binaryResponse}. The messages of one connection are reported one at a time, in the order they arrived;
  * messages of different connections are reported concurrently, so the listener must be thread-safe. A call can
  * come after the response has already been written to the client, or after the client has closed its connection.
- * A listener that throws closes the client's connection. Bytes the upstream sends that follow no message are not
- * reported.
+ * A listener that throws closes the client's connection. What the upstream sends that is not a message's
+ * {@code binaryResponse} is reported to {@link #onUpstreamMessage}, in the same order and one at a time with
+ * {@link #onProxy}.
  * <p>
- * With that setting false, or for a connection it does not carry (any connection when an upstream proxy is
- * configured), each message is forwarded on an upstream connection of its own. The deprecated
+ * With that setting false, or for a connection it does not carry (one whose only upstream proxy is
+ * {@code forwardHttpProxy}), each message is forwarded on an upstream connection of its own. The deprecated
  * {@code forwardBinaryRequestsWithoutWaitingForResponse} applies only then: with it the listener is called as
  * described above, and without it the listener is called once the upstream's response has arrived, before it is
  * written to the client.
@@ -34,5 +35,19 @@ public interface BinaryProxyListener {
      * @param clientAddress  the client that sent it
      */
     public void onProxy(BinaryMessage binaryRequest, CompletableFuture<BinaryMessage> binaryResponse, SocketAddress serverAddress, SocketAddress clientAddress);
+
+    /**
+     * Called, on a connection with one upstream connection, for each read from the upstream that completes no
+     * {@code binaryResponse}: bytes it sent unprompted, and each read after the first that followed a message. Not
+     * called for a connection whose messages each have an upstream connection of their own. Does nothing unless
+     * overridden; a listener that overrides it and returns more slowly than the upstream sends slows the upstream
+     * down, except while a message is waiting for its response.
+     *
+     * @param upstreamMessage the bytes read from the upstream, which are also written to the client
+     * @param serverAddress   the upstream that sent them
+     * @param clientAddress   the client they are written to
+     */
+    default void onUpstreamMessage(BinaryMessage upstreamMessage, SocketAddress serverAddress, SocketAddress clientAddress) {
+    }
 
 }
