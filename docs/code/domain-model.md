@@ -862,7 +862,7 @@ Central registry configuring Jackson `ObjectMapper` with all custom serializers,
 
 ### Java Code Serializers
 
-`serialization/java/` package generates Java client API code from domain objects (e.g., `ExpectationToJavaSerializer` produces Java code that recreates an expectation programmatically: `client.when(...).respond(...)` for one action, or `client.upsert(new Expectation(...).thenRespond(...).thenForward(...))` with `.withPrimary(true)` on the primary action when there is more than one).
+`serialization/java/` package generates Java client API code from domain objects (e.g., `ExpectationToJavaSerializer` produces Java code that recreates an expectation programmatically: `client.when(...).respond(...)` for one action, or `client.upsert(new Expectation(...).thenRespond(...).thenForward(...))` with `.withPrimary(true)` on the primary action when there is more than one, or when the action is a forward-validate, which `when(...)` has no terminal for). Every action type has a serializer, as do before and after actions; the newer ones (SSE, LLM, WebSocket, gRPC, binary, DNS, forward-validate, forward-with-fallback, after actions) are written through the package-private `FluentJavaBuilder`, which emits a call only for a value that is set and writes enum constants fully qualified. Object callbacks cannot be generated and are marked with a `NOT POSSIBLE` comment. `GeneratedJavaCodeRoundTripTest` (mockserver-client-java) compiles and runs the generated code against a capturing client and compares the submitted expectation's JSON with the original's.
 
 ## OpenAPI
 

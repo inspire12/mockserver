@@ -139,7 +139,9 @@ public class ProxyServlet extends HttpServlet implements ServletContextListener 
         } catch (Throwable throwable) {
             if (request == null) {
                 request = httpServletRequestToMockServerRequestDecoder.mapUndecodableServletRequest(httpServletRequest);
-                dataPlane = !HttpState.isControlPlanePathCandidate(request.getPath().getValue());
+                // as HttpRequestHandler classifies a request: the liveness path is control plane too
+                dataPlane = !HttpState.isControlPlanePathCandidate(request.getPath().getValue())
+                    && !(isNotBlank(configuration.livenessHttpGetPath()) && request.matches("GET", configuration.livenessHttpGetPath()));
             }
             if (dataPlane) {
                 // answered as a mock response, as HttpRequestHandler answers a data-plane failure

@@ -7,6 +7,7 @@ import org.junit.Before;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
+import org.mockserver.configuration.Configuration;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.mappers.HttpServletRequestToMockServerHttpRequestDecoder;
@@ -54,6 +55,7 @@ public class MockServerServletControlPlaneFailureTest {
     private MockServerLogger mockServerLogger;
     private HttpServletRequestToMockServerHttpRequestDecoder httpServletRequestToMockServerRequestDecoder;
     private HttpActionHandler actionHandler;
+    private Configuration configuration;
 
     @InjectMocks
     private MockServerServlet servlet;
@@ -72,6 +74,7 @@ public class MockServerServletControlPlaneFailureTest {
         httpStateHandler = spy(realHttpState);
         mockServerLogger = mock(MockServerLogger.class);
         actionHandler = mock(HttpActionHandler.class);
+        configuration = spy(configuration().livenessHttpGetPath("/liveness/probe"));
         httpServletRequestToMockServerRequestDecoder = spy(new HttpServletRequestToMockServerHttpRequestDecoder(configuration(), new MockServerLogger()));
         servlet = new MockServerServlet();
         openMocks(this);
@@ -246,6 +249,21 @@ public class MockServerServletControlPlaneFailureTest {
         assertThat(response.getStatus(), is(500));
         assertThat(new String(response.getContentAsByteArray(), UTF_8), startsWith(UNEXPECTED_FAILURE_MESSAGE));
         assertThat(response.getHeader("Access-Control-Allow-Origin"), nullValue());
+    }
+
+    @Test
+    public void shouldAnswerALivenessRequestTheDecoderRejectsAsABadRequestWithItsMessage() {
+        // given
+        doThrow(new IllegalArgumentException("request line not understood"))
+            .when(httpServletRequestToMockServerRequestDecoder).mapHttpServletRequestToMockServerRequest(any());
+
+        // when
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        servlet.service(new MockHttpServletRequest("GET", "/liveness/probe"), response);
+
+        // then - answered as the control plane, not as a mock
+        assertThat(response.getStatus(), is(400));
+        assertThat(new String(response.getContentAsByteArray(), UTF_8), is("request line not understood"));
     }
 
     private static class FailingServletInputStream extends ServletInputStream {

@@ -4,6 +4,7 @@ import com.google.common.base.Strings;
 import org.apache.commons.text.StringEscapeUtils;
 import org.mockserver.mock.Expectation;
 import org.mockserver.model.Action;
+import org.mockserver.model.AfterAction;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.model.OpenAPIDefinition;
@@ -54,7 +55,8 @@ public class ExpectationToJavaSerializer implements ToJavaSerializer<Expectation
     public String serialize(int numberOfSpacesToIndent, Expectation expectation) {
         StringBuffer output = new StringBuffer();
         if (expectation != null) {
-            boolean upsert = generatedActionCount(expectation) > 1;
+            // when(...) takes one terminal action and has none for forward-validate
+            boolean upsert = generatedActionCount(expectation) > 1 || expectation.getHttpForwardValidateAction() != null;
             int indent = upsert ? numberOfSpacesToIndent + 1 : numberOfSpacesToIndent;
             appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append("new MockServerClient(\"localhost\", 1080)");
             if (upsert) {
@@ -66,6 +68,7 @@ public class ExpectationToJavaSerializer implements ToJavaSerializer<Expectation
             String respond = upsert ? ".thenRespond(" : ".respond(";
             String forward = upsert ? ".thenForward(" : ".forward(";
             String error = upsert ? ".thenError(" : ".error(";
+            String respondWith = upsert ? ".thenRespondWith" : ".respondWith";
             RequestDefinition requestDefinition = expectation.getHttpRequest();
             if (requestDefinition instanceof HttpRequest) {
                 output.append(new HttpRequestToJavaSerializer().serialize(indent + 1, (HttpRequest) requestDefinition));
@@ -119,6 +122,8 @@ public class ExpectationToJavaSerializer implements ToJavaSerializer<Expectation
             if (expectation.getSwitchAfter() != null) {
                 appendNewLineAndIndent(indent * INDENT_SIZE, output).append(".withSwitchAfter(").append(expectation.getSwitchAfter()).append(")");
             }
+            appendAfterActions(indent, ".withBeforeActions(", expectation.getBeforeActions(), output);
+            appendAfterActions(indent, ".withAfterActions(", expectation.getAfterActions(), output);
             if (expectation.getHttpResponses() != null && !expectation.getHttpResponses().isEmpty()) {
                 HttpResponseToJavaSerializer responseSerializer = new HttpResponseToJavaSerializer();
                 appendNewLineAndIndent(indent * INDENT_SIZE, output).append(respond).append("java.util.Arrays.asList(");
@@ -158,11 +163,35 @@ public class ExpectationToJavaSerializer implements ToJavaSerializer<Expectation
             if (expectation.getHttpForwardObjectCallback() != null) {
                 appendNewLineAndIndent(indent * INDENT_SIZE, output).append("/*NOT POSSIBLE TO GENERATE CODE FOR OBJECT CALLBACK*/");
             }
+            if (expectation.getHttpForwardValidateAction() != null) {
+                appendAction(indent, ".thenForwardValidate(", new HttpForwardValidateActionToJavaSerializer().serialize(indent + 1, expectation.getHttpForwardValidateAction()), expectation.getHttpForwardValidateAction(), output);
+            }
             if (expectation.getHttpForwardWithFallback() != null) {
-                appendNewLineAndIndent(indent * INDENT_SIZE, output).append("/*NOT POSSIBLE TO GENERATE CODE FOR FORWARD WITH FALLBACK*/");
+                appendAction(indent, upsert ? ".thenForwardWithFallback(" : ".forwardWithFallback(", new HttpForwardWithFallbackToJavaSerializer().serialize(indent + 1, expectation.getHttpForwardWithFallback()), expectation.getHttpForwardWithFallback(), output);
             }
             if (expectation.getHttpError() != null) {
                 appendAction(indent, error, new HttpErrorToJavaSerializer().serialize(indent + 1, expectation.getHttpError()), expectation.getHttpError(), output);
+            }
+            if (expectation.getHttpSseResponse() != null) {
+                appendAction(indent, respondWith + "Sse(", new HttpSseResponseToJavaSerializer().serialize(indent + 1, expectation.getHttpSseResponse()), expectation.getHttpSseResponse(), output);
+            }
+            if (expectation.getHttpLlmResponse() != null) {
+                appendAction(indent, respondWith + "Llm(", new HttpLlmResponseToJavaSerializer().serialize(indent + 1, expectation.getHttpLlmResponse()), expectation.getHttpLlmResponse(), output);
+            }
+            if (expectation.getHttpWebSocketResponse() != null) {
+                appendAction(indent, respondWith + "WebSocket(", new HttpWebSocketResponseToJavaSerializer().serialize(indent + 1, expectation.getHttpWebSocketResponse()), expectation.getHttpWebSocketResponse(), output);
+            }
+            if (expectation.getGrpcStreamResponse() != null) {
+                appendAction(indent, respondWith + "GrpcStream(", new GrpcStreamResponseToJavaSerializer().serialize(indent + 1, expectation.getGrpcStreamResponse()), expectation.getGrpcStreamResponse(), output);
+            }
+            if (expectation.getGrpcBidiResponse() != null) {
+                appendAction(indent, respondWith + "GrpcBidi(", new GrpcBidiResponseToJavaSerializer().serialize(indent + 1, expectation.getGrpcBidiResponse()), expectation.getGrpcBidiResponse(), output);
+            }
+            if (expectation.getBinaryResponse() != null) {
+                appendAction(indent, respondWith + "Binary(", new BinaryResponseToJavaSerializer().serialize(indent + 1, expectation.getBinaryResponse()), expectation.getBinaryResponse(), output);
+            }
+            if (expectation.getDnsResponse() != null) {
+                appendAction(indent, respondWith + "Dns(", new DnsResponseToJavaSerializer().serialize(indent + 1, expectation.getDnsResponse()), expectation.getDnsResponse(), output);
             }
             if (upsert) {
                 appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(")");
@@ -185,13 +214,33 @@ public class ExpectationToJavaSerializer implements ToJavaSerializer<Expectation
             expectation.getHttpOverrideForwardedRequest(),
             expectation.getHttpForwardTemplate(),
             expectation.getHttpForwardClassCallback(),
-            expectation.getHttpError()
+            expectation.getHttpForwardValidateAction(),
+            expectation.getHttpForwardWithFallback(),
+            expectation.getHttpError(),
+            expectation.getHttpSseResponse(),
+            expectation.getHttpLlmResponse(),
+            expectation.getHttpWebSocketResponse(),
+            expectation.getGrpcStreamResponse(),
+            expectation.getGrpcBidiResponse(),
+            expectation.getBinaryResponse(),
+            expectation.getDnsResponse()
         )) {
             if (action != null) {
                 count++;
             }
         }
         return count;
+    }
+
+    private void appendAfterActions(int numberOfSpacesToIndent, String method, List<AfterAction> afterActions, StringBuffer output) {
+        if (afterActions != null && !afterActions.isEmpty()) {
+            AfterActionToJavaSerializer afterActionSerializer = new AfterActionToJavaSerializer();
+            appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(method);
+            for (int i = 0; i < afterActions.size(); i++) {
+                output.append(i > 0 ? "," : "").append(afterActionSerializer.serialize(numberOfSpacesToIndent + 1, afterActions.get(i)));
+            }
+            appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(")");
+        }
     }
 
     private void appendAction(int numberOfSpacesToIndent, String method, String serializedAction, Action<?> action, StringBuffer output) {

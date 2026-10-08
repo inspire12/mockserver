@@ -277,34 +277,39 @@ var mockServerClient;
             }
         };
 
-        var makeRequest = (runningInNode() ? require('./sendRequest').sendRequest(tls, caCertPemFilePath, options) : function (host, port, path, jsonBody) {
-            var body = (typeof jsonBody === "string" ? jsonBody : JSON.stringify(jsonBody || ""));
-            var url = (tls ? 'https' : 'http') + '://' + host + ':' + port + (contextPath ? (contextPath.indexOf("/") === 0 ? contextPath : "/" + contextPath) : "") + path;
+        var _browserUrl = function (host, port, path) {
+            return (tls ? 'https' : 'http') + '://' + host + ':' + port + (contextPath ? (contextPath.indexOf("/") === 0 ? contextPath : "/" + contextPath) : "") + path;
+        };
 
+        // The browser (XMLHttpRequest) transport, settling as the Node transport in sendRequest.js does: a 4xx or
+        // 5xx rejects ("404 Not Found" for a 404, otherwise the response body) and never reaches the success
+        // callback, unless resolveEveryStatus; and a request that gets no response rejects.
+        var _browserRequest = function (method, host, port, path, contentType, body, resolveEveryStatus) {
             return {
                 then: function (sucess, error) {
                     try {
                         var xmlhttp = new XMLHttpRequest();
-                        xmlhttp.addEventListener("load", (function (sucess, error) {
-                            return function () {
-                                if (error && this.status >= 400 && this.status < 600) {
-                                    if (this.statusCode === 404) {
-                                        error("404 Not Found");
-                                    } else {
-                                        error(this.responseText);
-                                    }
-                                } else {
-                                    if (sucess) {
-                                        sucess({
-                                            statusCode: this.status,
-                                            body: this.responseText
-                                        });
-                                    }
+                        xmlhttp.addEventListener("load", function () {
+                            if (!resolveEveryStatus && this.status >= 400 && this.status < 600) {
+                                if (error) {
+                                    error(this.status === 404 ? "404 Not Found" : this.responseText);
                                 }
-                            };
-                        })(sucess, error));
-                        xmlhttp.open('PUT', url);
-                        xmlhttp.setRequestHeader("Content-Type", "application/json; charset=utf-8");
+                            } else if (sucess) {
+                                sucess({
+                                    statusCode: this.status,
+                                    body: this.responseText
+                                });
+                            }
+                        });
+                        xmlhttp.addEventListener("error", function () {
+                            if (error) {
+                                error("Can't connect to MockServer running on host: \"" + host + "\" and port: \"" + port + "\"");
+                            }
+                        });
+                        xmlhttp.open(method, _browserUrl(host, port, path));
+                        if (contentType) {
+                            xmlhttp.setRequestHeader("Content-Type", contentType);
+                        }
                         _setBrowserAuthHeader(xmlhttp);
                         xmlhttp.send(body);
                     } catch (e) {
@@ -314,118 +319,23 @@ var mockServerClient;
                     }
                 }
             };
+        };
+
+        var makeRequest = (runningInNode() ? require('./sendRequest').sendRequest(tls, caCertPemFilePath, options) : function (host, port, path, jsonBody) {
+            var body = (typeof jsonBody === "string" ? jsonBody : JSON.stringify(jsonBody || ""));
+            return _browserRequest('PUT', host, port, path, "application/json; charset=utf-8", body);
         });
 
         var makeGetRequest = (runningInNode() ? require('./sendRequest').sendGetRequest(tls, caCertPemFilePath, options) : function (host, port, path) {
-            var url = (tls ? 'https' : 'http') + '://' + host + ':' + port + (contextPath ? (contextPath.indexOf("/") === 0 ? contextPath : "/" + contextPath) : "") + path;
-
-            return {
-                then: function (sucess, error) {
-                    try {
-                        var xmlhttp = new XMLHttpRequest();
-                        xmlhttp.addEventListener("load", (function (sucess, error) {
-                            return function () {
-                                if (error && this.status >= 400 && this.status < 600) {
-                                    if (this.statusCode === 404) {
-                                        error("404 Not Found");
-                                    } else {
-                                        error(this.responseText);
-                                    }
-                                } else {
-                                    if (sucess) {
-                                        sucess({
-                                            statusCode: this.status,
-                                            body: this.responseText
-                                        });
-                                    }
-                                }
-                            };
-                        })(sucess, error));
-                        xmlhttp.open('GET', url);
-                        _setBrowserAuthHeader(xmlhttp);
-                        xmlhttp.send();
-                    } catch (e) {
-                        if (error) {
-                            error(e);
-                        }
-                    }
-                }
-            };
+            return _browserRequest('GET', host, port, path);
         });
 
         var makeBinaryRequest = (runningInNode() ? require('./sendRequest').sendBinaryRequest(tls, caCertPemFilePath, options) : function (host, port, path, bodyBuffer, contentType) {
-            var url = (tls ? 'https' : 'http') + '://' + host + ':' + port + (contextPath ? (contextPath.indexOf("/") === 0 ? contextPath : "/" + contextPath) : "") + path;
-
-            return {
-                then: function (sucess, error) {
-                    try {
-                        var xmlhttp = new XMLHttpRequest();
-                        xmlhttp.addEventListener("load", (function (sucess, error) {
-                            return function () {
-                                if (error && this.status >= 400 && this.status < 600) {
-                                    if (this.statusCode === 404) {
-                                        error("404 Not Found");
-                                    } else {
-                                        error(this.responseText);
-                                    }
-                                } else {
-                                    if (sucess) {
-                                        sucess({
-                                            statusCode: this.status,
-                                            body: this.responseText
-                                        });
-                                    }
-                                }
-                            };
-                        })(sucess, error));
-                        xmlhttp.open('PUT', url);
-                        xmlhttp.setRequestHeader("Content-Type", contentType || "application/octet-stream");
-                        _setBrowserAuthHeader(xmlhttp);
-                        xmlhttp.send(bodyBuffer);
-                    } catch (e) {
-                        if (error) {
-                            error(e);
-                        }
-                    }
-                }
-            };
+            return _browserRequest('PUT', host, port, path, contentType || "application/octet-stream", bodyBuffer);
         });
 
         var makeDeleteRequest = (runningInNode() ? require('./sendRequest').sendDeleteRequest(tls, caCertPemFilePath, options) : function (host, port, path) {
-            var url = (tls ? 'https' : 'http') + '://' + host + ':' + port + (contextPath ? (contextPath.indexOf("/") === 0 ? contextPath : "/" + contextPath) : "") + path;
-
-            return {
-                then: function (sucess, error) {
-                    try {
-                        var xmlhttp = new XMLHttpRequest();
-                        xmlhttp.addEventListener("load", (function (sucess, error) {
-                            return function () {
-                                if (error && this.status >= 400 && this.status < 600) {
-                                    if (this.statusCode === 404) {
-                                        error("404 Not Found");
-                                    } else {
-                                        error(this.responseText);
-                                    }
-                                } else {
-                                    if (sucess) {
-                                        sucess({
-                                            statusCode: this.status,
-                                            body: this.responseText
-                                        });
-                                    }
-                                }
-                            };
-                        })(sucess, error));
-                        xmlhttp.open('DELETE', url);
-                        _setBrowserAuthHeader(xmlhttp);
-                        xmlhttp.send();
-                    } catch (e) {
-                        if (error) {
-                            error(e);
-                        }
-                    }
-                }
-            };
+            return _browserRequest('DELETE', host, port, path);
         });
 
         // PUT that resolves {statusCode, body} for EVERY status (never rejects on
@@ -433,33 +343,7 @@ var mockServerClient;
         // outcomes carrying a meaningful body (files/retrieve 404, pact/verify 406).
         var makeRawRequest = (runningInNode() ? require('./sendRequest').sendRawRequest(tls, caCertPemFilePath, options) : function (host, port, path, body, contentType) {
             var requestBody = (typeof body === "string" ? body : JSON.stringify(body || ""));
-            var url = (tls ? 'https' : 'http') + '://' + host + ':' + port + (contextPath ? (contextPath.indexOf("/") === 0 ? contextPath : "/" + contextPath) : "") + path;
-
-            return {
-                then: function (sucess, error) {
-                    try {
-                        var xmlhttp = new XMLHttpRequest();
-                        xmlhttp.addEventListener("load", (function (sucess) {
-                            return function () {
-                                if (sucess) {
-                                    sucess({
-                                        statusCode: this.status,
-                                        body: this.responseText
-                                    });
-                                }
-                            };
-                        })(sucess));
-                        xmlhttp.open('PUT', url);
-                        xmlhttp.setRequestHeader("Content-Type", contentType || "application/json; charset=utf-8");
-                        _setBrowserAuthHeader(xmlhttp);
-                        xmlhttp.send(requestBody);
-                    } catch (e) {
-                        if (error) {
-                            error(e);
-                        }
-                    }
-                }
-            };
+            return _browserRequest('PUT', host, port, path, contentType || "application/json; charset=utf-8", requestBody, true);
         });
 
         var cleanedContextPath = (function (contextPath) {
