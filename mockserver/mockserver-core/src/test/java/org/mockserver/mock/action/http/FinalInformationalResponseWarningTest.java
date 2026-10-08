@@ -53,6 +53,30 @@ public class FinalInformationalResponseWarningTest {
     }
 
     @Test
+    public void shouldWarnOnceForAnExpectationsFinalInformationalResponseOverHttp3() {
+        HttpResponse action = expectationResponse("one", 103);
+
+        for (int request = 0; request < 3; request++) {
+            warning.warnOnce(mockServerLogger, request().withProtocol(Protocol.HTTP_3), action, action);
+        }
+
+        ArgumentCaptor<LogEntry> logged = ArgumentCaptor.forClass(LogEntry.class);
+        verify(mockServerLogger, times(1)).logEvent(logged.capture());
+        LogEntry entry = logged.getValue();
+        assertThat(entry.getLogLevel(), is(Level.WARN));
+        assertThat(entry.getExpectationId(), is("one"));
+        assertThat(entry.getMessage(), org.hamcrest.Matchers.containsString("over HTTP/3"));
+        assertThat(entry.getMessage(), org.hamcrest.Matchers.containsString("reset the stream with H3_NO_ERROR"));
+    }
+
+    @Test
+    public void shouldWarnForA101OverHttp3WhichHasNoUpgrade() {
+        warning.warnOnce(mockServerLogger, request().withProtocol(Protocol.HTTP_3), response().withStatusCode(101), expectationResponse("one", 101));
+
+        verify(mockServerLogger, times(1)).logEvent(any(LogEntry.class));
+    }
+
+    @Test
     public void shouldWarnForEachExpectationEvenWhenTheirResponsesAreEqual() {
         warning.warnOnce(mockServerLogger, request().withProtocol(Protocol.HTTP_2), response().withStatusCode(103), expectationResponse("one", 103));
         warning.warnOnce(mockServerLogger, request().withProtocol(Protocol.HTTP_2), response().withStatusCode(103), expectationResponse("two", 103));
@@ -68,7 +92,7 @@ public class FinalInformationalResponseWarningTest {
 
         warning.warnOnce(mockServerLogger, request().withProtocol(Protocol.HTTP_1_1), response().withStatusCode(102), action);
         warning.warnOnce(mockServerLogger, request(), response().withStatusCode(102), action);
-        warning.warnOnce(mockServerLogger, request().withProtocol(Protocol.HTTP_3), response().withStatusCode(102), action);
+        warning.warnOnce(mockServerLogger, request().withProtocol(Protocol.HTTP_3), response().withStatusCode(200), action);
         warning.warnOnce(mockServerLogger, request().withProtocol(Protocol.HTTP_2), response().withStatusCode(101), action);
         warning.warnOnce(mockServerLogger, request().withProtocol(Protocol.HTTP_2), response().withStatusCode(200), action);
         warning.warnOnce(mockServerLogger, request().withProtocol(Protocol.HTTP_2), response(), action);

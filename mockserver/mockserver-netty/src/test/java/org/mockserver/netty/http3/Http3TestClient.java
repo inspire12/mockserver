@@ -23,6 +23,7 @@ import io.netty.handler.codec.quic.QuicConnectionCloseEvent;
 import io.netty.handler.codec.quic.QuicSslContext;
 import io.netty.handler.codec.quic.QuicSslContextBuilder;
 import io.netty.handler.codec.quic.QuicStreamChannel;
+import io.netty.handler.codec.quic.QuicStreamResetException;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.netty.util.ReferenceCountUtil;
 import org.mockserver.netty.MockServer;
@@ -202,6 +203,7 @@ public final class Http3TestClient implements AutoCloseable {
 
             @Override
             protected void channelInputClosed(ChannelHandlerContext ctx) {
+                exchange.resetCode.completeExceptionally(new IllegalStateException("stream ended, not reset"));
                 exchange.body.complete(new String(exchange.receivedByteArray(), StandardCharsets.UTF_8));
                 ctx.close();
             }
@@ -213,10 +215,14 @@ public final class Http3TestClient implements AutoCloseable {
                 exchange.status.completeExceptionally(closed);
                 exchange.body.completeExceptionally(closed);
                 exchange.trailers.completeExceptionally(closed);
+                exchange.resetCode.completeExceptionally(closed);
             }
 
             @Override
             public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+                if (cause instanceof QuicStreamResetException) {
+                    exchange.resetCode.complete(((QuicStreamResetException) cause).applicationProtocolCode());
+                }
                 exchange.headers.completeExceptionally(cause);
                 exchange.status.completeExceptionally(cause);
                 exchange.body.completeExceptionally(cause);
@@ -235,6 +241,7 @@ public final class Http3TestClient implements AutoCloseable {
         private final CompletableFuture<Integer> status = new CompletableFuture<>();
         private final CompletableFuture<String> body = new CompletableFuture<>();
         private final CompletableFuture<Http3Headers> trailers = new CompletableFuture<>();
+        private final CompletableFuture<Long> resetCode = new CompletableFuture<>();
         private final ByteArrayOutputStream received = new ByteArrayOutputStream();
         private final AtomicInteger dataFrames = new AtomicInteger();
         private volatile QuicStreamChannel stream;
@@ -313,6 +320,13 @@ public final class Http3TestClient implements AutoCloseable {
             synchronized (received) {
                 received.writeBytes(bytes);
             }
+        }
+
+        /**
+         * @return the error code the server reset the response's stream with; fails if the stream ended or closed
+         */
+        public long resetErrorCode() throws Exception {
+            return resetCode.get(WAIT_SECONDS, TimeUnit.SECONDS);
         }
 
         public int status() throws Exception {

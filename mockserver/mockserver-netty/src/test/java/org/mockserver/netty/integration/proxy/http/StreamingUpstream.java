@@ -35,6 +35,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * A plain HTTP/1.1 server, independent of MockServer, whose responses are streamed: tokens sent at an interval, a
  * large body sent as fast as it is taken, and a response cut off part way. Each request names itself with an
  * {@code id} query parameter, by which a test reads what was written for it and whether its connection has closed.
+ * A {@code coding} query parameter labels the response with that {@code Content-Encoding} without encoding it.
  */
 final class StreamingUpstream implements AutoCloseable {
 
@@ -141,6 +142,10 @@ final class StreamingUpstream implements AutoCloseable {
             connections.put(id, ctx.channel());
             HttpResponse head = new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK);
             head.headers().set(HttpHeaderNames.CONTENT_TYPE, "text/event-stream");
+            if (query.parameters().containsKey("coding")) {
+                // a label alone: the bytes are sent as they are
+                head.headers().set(HttpHeaderNames.CONTENT_ENCODING, parameter(query, "coding", ""));
+            }
             HttpUtil.setTransferEncodingChunked(head, true);
             ctx.writeAndFlush(head);
             if (query.path().endsWith("/tokens")) {

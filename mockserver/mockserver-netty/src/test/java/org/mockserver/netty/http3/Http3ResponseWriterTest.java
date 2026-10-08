@@ -479,6 +479,62 @@ public class Http3ResponseWriterTest {
     }
 
     @Test
+    public void shouldSendAFinalInformationalResponseAsItsHeadersAloneAndResetTheStreamInALaterTask() {
+        // given
+        QuicStreamChannel stream = mock(QuicStreamChannel.class);
+        ChannelHandlerContext ctx = mockCtxWithListenerFiringChannel(new ArrayList<>(), stream);
+        List<Runnable> tasks = new ArrayList<>();
+        io.netty.util.concurrent.EventExecutor executor = mock(io.netty.util.concurrent.EventExecutor.class);
+        doAnswer(invocation -> tasks.add(invocation.getArgument(0))).when(executor).execute(any(Runnable.class));
+        when(ctx.executor()).thenReturn(executor);
+        HttpResponse resp = response().withStatusCode(102).withBody("a body no 1xx carries").withTrailer("x-checksum", "abc123");
+
+        // when
+        new Http3ResponseWriter(CONFIGURATION, LOGGER, ctx).sendResponse(request().withPath("/processing"), resp);
+
+        // then -- the headers alone, and no reset until the task that follows the write
+        ArgumentCaptor<Object> written = ArgumentCaptor.forClass(Object.class);
+        verify(ctx).writeAndFlush(written.capture());
+        verify(ctx, never()).write(any());
+        assertThat(((DefaultHttp3HeadersFrame) written.getValue()).headers().status().toString(), is("102"));
+        verify(stream, never()).shutdownOutput(anyInt());
+        assertThat(tasks.size(), is(1));
+
+        tasks.get(0).run();
+
+        verify(stream).shutdownOutput((int) Http3ErrorCode.H3_NO_ERROR.code());
+        verify(stream, never()).shutdownOutput();
+    }
+
+    @Test
+    public void shouldDiscardTheStreamedBodyOfAFinalInformationalResponse() {
+        // given
+        QuicStreamChannel stream = mock(QuicStreamChannel.class);
+        ChannelHandlerContext ctx = mockCtxWithListenerFiringChannel(new ArrayList<>(), stream);
+        io.netty.util.concurrent.EventExecutor executor = mock(io.netty.util.concurrent.EventExecutor.class);
+        doAnswer(invocation -> {
+            invocation.<Runnable>getArgument(0).run();
+            return null;
+        }).when(executor).execute(any(Runnable.class));
+        when(ctx.executor()).thenReturn(executor);
+        StreamingBody streamingBody = new StreamingBody(8192);
+        boolean[] upstreamClosed = {false};
+        streamingBody.setUpstreamCloser(() -> upstreamClosed[0] = true);
+
+        // when
+        new Http3ResponseWriter(CONFIGURATION, LOGGER, ctx).sendResponse(request().withPath("/stream"), response().withStatusCode(103).withStreamingBody(streamingBody));
+        ByteBuf chunk = Unpooled.buffer(16).writeZero(16);
+        streamingBody.addChunk(chunk);
+        chunk.release();
+
+        // then
+        verify(ctx, times(1)).writeAndFlush(any(DefaultHttp3HeadersFrame.class));
+        verify(ctx, times(1)).writeAndFlush(any());
+        verify(stream).shutdownOutput((int) Http3ErrorCode.H3_NO_ERROR.code());
+        assertThat("nothing will take the stream, so the upstream is closed", upstreamClosed[0], is(true));
+    }
+
+    @Test
     public void shouldHandleNullResponse() {
         // given
         ChannelHandlerContext ctx = mockCtxWithActiveChannel();

@@ -14,6 +14,8 @@ import io.netty.handler.codec.http2.Http2Headers;
 import io.netty.handler.codec.http2.Http2LocalFlowController;
 import io.netty.handler.codec.http2.Http2Stream;
 
+import static org.mockserver.codec.BoundedZstdHttpContentDecompressor.decodes;
+
 /**
  * Hands a response of undeclared length on from the CONNECT/SOCKS relay's HTTP/2 loopback frame by frame, as a
  * {@link StreamedHttp2ResponsePart} each, instead of holding it whole: server-sent events, a gRPC stream. A DATA
@@ -101,8 +103,9 @@ final class LoopbackHttp2ResponseStreamer {
         if (HttpStatusClass.valueOf(headers.status()) == HttpStatusClass.INFORMATIONAL) {
             return true;
         }
-        // a response with a content coding is decoded, so it is held whole: nothing else bounds what it decodes to
-        boolean streamed = !headers.contains(HttpHeaderNames.CONTENT_LENGTH) && !headers.contains(HttpHeaderNames.CONTENT_ENCODING);
+        // a response in a coding the loopback decodes is held whole: nothing else bounds what it decodes to. One in a
+        // coding it does not decode is passed on as it is, with its content-encoding, so it can be streamed.
+        boolean streamed = !headers.contains(HttpHeaderNames.CONTENT_LENGTH) && !decodes(headers.get(HttpHeaderNames.CONTENT_ENCODING));
         if (streamed) {
             stream.setProperty(streamedKey, Boolean.TRUE);
         }

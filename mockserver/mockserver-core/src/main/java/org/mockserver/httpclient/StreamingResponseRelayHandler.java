@@ -66,14 +66,14 @@ public class StreamingResponseRelayHandler extends ChannelInboundHandlerAdapter 
                 mockResponse.withStatusCode(nettyResponse.status().code());
                 mockResponse.withReasonPhrase(nettyResponse.status().reasonPhrase());
 
-                // Map headers, stripping Content-Encoding and Content-Length
-                // (chunks are decompressed by HttpContentDecompressor upstream)
+                // Content-Length is dropped: a streamed body's length is not known when its head is written. The
+                // decompressor before this handler removes the Content-Encoding of a body it decodes, so one still
+                // here names a coding the chunks are still in, and is kept.
                 Set<String> headerNames = nettyResponse.headers().names();
                 if (!headerNames.isEmpty()) {
                     Headers headers = new Headers();
                     for (String headerName : headerNames) {
-                        String lowerName = headerName.toLowerCase();
-                        if (lowerName.equals("content-encoding") || lowerName.equals("content-length")) {
+                        if (CONTENT_LENGTH.contentEqualsIgnoreCase(headerName)) {
                             continue;
                         }
                         // Literal name and values - see the note in

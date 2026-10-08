@@ -3,10 +3,17 @@ package org.mockserver.codec;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.codec.compression.Brotli;
 import io.netty.handler.codec.compression.Zstd;
 import io.netty.handler.codec.compression.ZstdDecoder;
 import io.netty.handler.codec.http.HttpContentDecompressor;
 
+import static io.netty.handler.codec.http.HttpHeaderValues.BR;
+import static io.netty.handler.codec.http.HttpHeaderValues.DEFLATE;
+import static io.netty.handler.codec.http.HttpHeaderValues.GZIP;
+import static io.netty.handler.codec.http.HttpHeaderValues.SNAPPY;
+import static io.netty.handler.codec.http.HttpHeaderValues.X_DEFLATE;
+import static io.netty.handler.codec.http.HttpHeaderValues.X_GZIP;
 import static io.netty.handler.codec.http.HttpHeaderValues.ZSTD;
 
 /**
@@ -33,6 +40,23 @@ public class BoundedZstdHttpContentDecompressor extends HttpContentDecompressor 
     protected EmbeddedChannel newContentDecoder(String contentEncoding) throws Exception {
         EmbeddedChannel zstd = boundedZstdDecoder(ctx.channel(), contentEncoding);
         return zstd != null ? zstd : super.newContentDecoder(contentEncoding);
+    }
+
+    /**
+     * Whether a body in {@code contentEncoding}, one {@code Content-Encoding} value, is decoded by this decompressor and
+     * by {@link BoundedZstdDecompressorFrameListener}: compared whole, so a list of codings such as {@code gzip, br} is
+     * not, and {@code br} or {@code zstd} only when its native library is on the classpath.
+     */
+    public static boolean decodes(CharSequence contentEncoding) {
+        if (contentEncoding == null) {
+            return false;
+        }
+        String coding = contentEncoding.toString().trim();
+        return GZIP.contentEqualsIgnoreCase(coding) || X_GZIP.contentEqualsIgnoreCase(coding)
+            || DEFLATE.contentEqualsIgnoreCase(coding) || X_DEFLATE.contentEqualsIgnoreCase(coding)
+            || SNAPPY.contentEqualsIgnoreCase(coding)
+            || (BR.contentEqualsIgnoreCase(coding) && Brotli.isAvailable())
+            || (ZSTD.contentEqualsIgnoreCase(coding) && Zstd.isAvailable());
     }
 
     /**

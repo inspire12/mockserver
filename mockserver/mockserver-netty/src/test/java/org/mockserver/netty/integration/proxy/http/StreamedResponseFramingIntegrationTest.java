@@ -14,6 +14,7 @@ import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.Locale;
 import java.util.zip.GZIPOutputStream;
 
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -79,6 +80,27 @@ public class StreamedResponseFramingIntegrationTest {
     @Test
     public void shouldCompleteACloseDelimitedGzipStream() throws IOException {
         assertComplete("/gzip", 20);
+    }
+
+    @Test
+    public void shouldDropTheContentEncodingOfAStreamItDecoded() throws IOException {
+        String received = readAll("/chunkedclean-gzip");
+        assertThat(head(received), not(containsString("content-encoding")));
+    }
+
+    @Test
+    public void shouldKeepTheContentEncodingOfAStreamItDoesNotDecode() throws IOException {
+        String received = readAll("/chunkedclean-unknown-coding");
+        assertThat(head(received), containsString("content-encoding: x-unknown\r\n"));
+        assertThat("the bytes are the upstream's", dechunk(received), is(new String(events(20), StandardCharsets.US_ASCII)));
+    }
+
+    @Test
+    public void shouldKeepTheContentEncodingOfACloseDelimitedStreamItDoesNotDecode() throws IOException {
+        String received = readAll("/unknown-coding");
+        assertThat(received, endsWith(TERMINATING_CHUNK));
+        assertThat(head(received), containsString("content-encoding: x-unknown\r\n"));
+        assertThat(dechunk(received), is(new String(events(20), StandardCharsets.US_ASCII)));
     }
 
     @Test
@@ -161,6 +183,9 @@ public class StreamedResponseFramingIntegrationTest {
             if (path.contains("gzip")) {
                 body = gzip(body);
                 headers += "Content-Encoding: gzip\r\n";
+            } else if (path.contains("unknown-coding")) {
+                // a label alone: the bytes are what MockServer must pass on unchanged
+                headers += "Content-Encoding: x-unknown\r\n";
             }
             if (path.contains("badchunk")) {
                 byte[] first = path.contains("gzip") ? body : events(1);
@@ -218,6 +243,10 @@ public class StreamedResponseFramingIntegrationTest {
             }
             return received.toString(StandardCharsets.ISO_8859_1);
         }
+    }
+
+    private static String head(String response) {
+        return response.substring(0, Math.max(0, response.indexOf("\r\n\r\n") + 2)).toLowerCase(Locale.ROOT);
     }
 
     private static String dechunk(String response) {

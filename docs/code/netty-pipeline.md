@@ -939,7 +939,9 @@ sequenceDiagram
 |---|---|---|
 | HTTP/1.1, direct or in a tunnel | the `1xx` status line and headers; the connection stays open | the exchange is counted as ended (`HttpExchangeEndedEvent`), so the connection is closed as idle |
 | HTTP/2, direct or in a tunnel | `HEADERS` without `END_STREAM`, then `RST_STREAM NO_ERROR` | the connection is closed as idle |
-| HTTP/3 | `HEADERS`, then the stream's output is shut down (a QUIC `FIN`), by `Http3ResponseWriter.writeStaticResponse` (read from the code, not tried with a client) | QUIC's own `http3MaxIdleTimeout`; an open stream does not hold a QUIC connection open |
+| HTTP/3 | `HEADERS` alone (no body, no trailers), then `RESET_STREAM H3_NO_ERROR`; `101` included, as HTTP/3 has no upgrade | QUIC's own `http3MaxIdleTimeout`; an open stream does not hold a QUIC connection open |
+
+**Over HTTP/3** `Http3ResponseWriter.writeInformationalResponse` writes a `1xx` (any, `101` included: RFC 9114 has no upgrade) as its header section alone and then resets the stream with `H3_NO_ERROR`, for a direct request, a response to `HEAD`, a delayed one and one with a streamed body (discarded, its upstream closed). Before, it wrote the `1xx` and ended the stream with a `FIN`, which RFC 9114 section 4.1 does not allow either, and a `1xx` with a body or trailers closed the whole QUIC connection: Netty's encoder takes a DATA frame or trailers after an interim response as `H3_FRAME_UNEXPECTED`, a connection error (in `mockserver-8.0.0`). The reset is made in a task after the header section's write: a QUIC reset drops what the stream has not yet sent, and a write made while the connection is being read is sent only when that read completes, so a reset in the write's own listener reached Netty's HTTP/3 client with no `1xx` before it. Deferred, the `1xx` reached it before the reset in every local run, but that is not guaranteed: QUIC does not retransmit a reset stream's data. `HttpActionHandler` warns once per expectation, as for HTTP/2, naming `H3_NO_ERROR` (`Http3FinalInformationalResponseIntegrationTest`, with Netty's HTTP/3 client on macOS).
 
 #### gRPC Pipeline (over HTTP/2)
 
@@ -1119,7 +1121,7 @@ The request-intent (`EXPECT_STREAMING_RESPONSE`) signal is threaded onto **all t
 
 | Event | Action |
 |-------|--------|
-| `HttpResponse` (head) | Builds a head-only `org.mockserver.model.HttpResponse` with a `StreamingBody` sink. Completes `RESPONSE_FUTURE` immediately. |
+| `HttpResponse` (head) | Builds a head-only `org.mockserver.model.HttpResponse` with a `StreamingBody` sink, without the upstream's `content-length`. A `content-encoding` still on the head names a coding the decompressor before it did not decode (it removes the header of one it decodes), so it is kept and the chunks are passed on as the upstream sent them. Before, it was dropped too, so a client was sent a body still in, say, `br` with nothing saying so (in `mockserver-8.0.0`). Completes `RESPONSE_FUTURE` immediately. |
 | `HttpContent` | Forwards the chunk to the downstream (client) channel. Appends to `StreamingBody` capture buffer (bounded to `maxStreamingCaptureBytes`). If the chunk takes the bytes not yet written to the client past the aggregator's `maxContentLength` (`maxResponseBodySize`), `StreamingBody` refuses it and fails the stream, and the handler logs a `WARN` and closes the upstream; the rest of that read is released as it is decoded. |
 | `LastHttpContent` | Closes the sink. Signals `HttpActionHandler` to write the `FORWARDED_REQUEST` log entry using the captured bytes. |
 | `channelInactive` (mid-stream) | Calls `onError` on the sink with `StreamAbortedException`, so the client's response ends incomplete. Emits a `FORWARDED_REQUEST` log entry flagged as truncated/aborted. A body the upstream delimits by closing its connection reaches here already complete (the codec emits its `LastHttpContent` first). |
@@ -1757,7 +1759,7 @@ response of declared length is still held whole, as before.
 ```mermaid
 flowchart LR
     MS["MockServer\n(loopback server side)"] -->|"HEADERS, DATA, trailers"| ST["LoopbackHttp2ResponseStreamer"]
-    ST -->|"declared length,\nor a content coding"| AG["LoopbackAggregatingListener\ndecompressor, InboundHttp2ToHttpAdapter\n(whole response)"]
+    ST -->|"declared length,\nor a coding it decodes"| AG["LoopbackAggregatingListener\ndecompressor, InboundHttp2ToHttpAdapter\n(whole response)"]
     ST -->|"undeclared length, a 1xx,\nor ended by its headers"| PT["StreamedHttp2ResponsePart\nper frame"]
     AG --> RM["LoopbackHttp2StreamIdRemapper"]
     PT --> RM
@@ -1773,7 +1775,8 @@ flowchart LR
 | Final headers that do not end the stream and carry neither `content-length` nor `content-encoding` | frame by frame, as read |
 | Final headers that end the stream (`204`, `304`, a response to `HEAD`, any response with no body) | as the header block MockServer wrote, as a direct connection is sent it. Before, `InboundHttp2ToHttpAdapter` set `content-length` to the length of the body it had aggregated, so a response to `HEAD` declaring `content-length: 6` reached the client with `content-length: 0` (in `mockserver-8.0.0` too) |
 | Final headers with `content-length` that do not end the stream | whole, by `InboundHttp2ToHttpAdapter`, as before; trailers that end it go with it |
-| Final headers with `content-encoding` that do not end the stream | decoded and whole, as before |
+| Final headers with a `content-encoding` the loopback decodes that do not end the stream | decoded and whole, as before |
+| Final headers with a `content-encoding` it does not decode (an unknown coding, a list of codings, `br` without the brotli library) and no `content-length` | frame by frame, as read, still encoded and with their `content-encoding`. Before, they were held whole |
 | A `1xx` | as read, as the interim response it is: its headers do not end the client's stream. MockServer resets the loopback stream of a `1xx` it mocks, and the reset is relayed with its code (see [A mocked final `1xx`](#a-mocked-final-1xx)) |
 
 **Why the length decides.** MockServer writes a response it produces as it goes without `content-length`, and one
@@ -1788,9 +1791,12 @@ has. Flow control counts the bytes MockServer sent, and a few kilobytes of a com
 inside one read, so only the aggregator's `maxRequestBodySize` bounds what a decoded response comes to. A decoded
 stream would have needed a bound of its own and a second failure mode (a response refused part way, after its
 headers had gone). It is not needed for a stream MockServer forwards: its forward client decodes the upstream's
-response (`BoundedZstdHttpContentDecompressor` in both forward pipelines) and removes `content-encoding` from every
-streamed head (`StreamingResponseRelayHandler`), so what reaches the loopback has no content coding. `LoopbackHttp2ResponseStreamer` therefore goes before the decompressing listener, and a
-streamed response never reaches it.
+response (`BoundedZstdHttpContentDecompressor` in both forward pipelines), which removes the `content-encoding` of a
+body it decodes, so what reaches the loopback has no content coding it could decode. A coding neither decodes keeps its
+`content-encoding` (`StreamingResponseRelayHandler` drops only `content-length`) and is passed on undecoded, so it needs
+no bound and is streamed: `BoundedZstdHttpContentDecompressor.decodes` names the codings both decoders decode, and
+`BoundedZstdHttpContentDecompressorDecodesTest` checks it against what the decoder does. `LoopbackHttp2ResponseStreamer`
+goes before the decompressing listener, and a streamed response never reaches it.
 
 **A compressed response cut short logs nothing.** When the loopback stream of a response with a content coding is
 reset before its body ends (MockServer reset it, or the body failed to decode), Netty's `DelegatingDecompressorFrameListener`
@@ -1836,9 +1842,10 @@ its code after the parts already sent; a loopback that closes resets the stream 
 a response is being streamed now reset the stream `PROTOCOL_ERROR`, as on a direct connection: the `431` a tunnel
 answered there existed only because no response had yet reached the client (`Http2TrailerListLimitIntegrationTest`).
 
-**What remains.** A streamed response that declares `content-length`, or that has a `content-encoding`, is still
-held whole. MockServer writes neither today unless a mocked stream's expectation sets the header itself: a forwarded
-stream reaches the loopback with neither, whatever its upstream sent. Nothing here ran on Linux.
+**What remains.** A streamed response that declares `content-length`, or that has a `content-encoding` the loopback
+decodes, is still held whole. MockServer writes neither today unless a mocked stream's expectation sets the header
+itself: a forwarded stream reaches the loopback with no `content-length`, and with a `content-encoding` only in a coding
+neither decoder decodes. Nothing here ran on Linux.
 
 ### HTTP/2 `Expect` on the relay
 

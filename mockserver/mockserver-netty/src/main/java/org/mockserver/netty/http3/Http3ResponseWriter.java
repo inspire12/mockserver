@@ -39,7 +39,8 @@ import java.util.List;
  * chunk write completion reports its bytes, which requests the next upstream read
  * once the unwritten backlog has drained.
  * <p>
- * A response to {@code HEAD} is its header section alone, static or streamed, keeping {@code content-length}.
+ * A response to {@code HEAD} is its header section alone, static or streamed, keeping {@code content-length}. A
+ * {@code 1xx} that ends the exchange is its header section alone, and its stream is reset with {@code H3_NO_ERROR}.
  */
 public class Http3ResponseWriter extends ResponseWriter implements StreamErrorWriter {
 
@@ -106,7 +107,9 @@ public class Http3ResponseWriter extends ResponseWriter implements StreamErrorWr
 
         warnIfConnectionOptionsIgnored(response);
 
-        if (isHead(request)) {
+        if (isInformational(response)) {
+            writeInformationalResponse(response);
+        } else if (isHead(request)) {
             writeResponseToHead(response);
         } else if (response.getStreamingBody() != null) {
             writeStreamingResponse(request, response);
@@ -127,6 +130,29 @@ public class Http3ResponseWriter extends ResponseWriter implements StreamErrorWr
     }
 
     /**
+     * Whether a response's status is {@code 1xx}, which over HTTP/3 can only be an interim response (RFC 9114
+     * section 4.1): {@code 101} included, as HTTP/3 has no upgrade.
+     */
+    static boolean isInformational(HttpResponse response) {
+        Integer statusCode = response.getStatusCode();
+        return statusCode != null && statusCode >= 100 && statusCode < 200;
+    }
+
+    /**
+     * Write a mocked {@code 1xx} that ends the exchange: its header section alone, then the stream reset with
+     * {@code H3_NO_ERROR}, as HTTP/2 resets it with {@code NO_ERROR}. Ending the stream after an interim response is
+     * malformed, and Netty's codec takes a DATA frame or trailers after one as a connection error.
+     */
+    private void writeInformationalResponse(HttpResponse response) {
+        StreamingBody streamingBody = response.getStreamingBody();
+        // reset in a later task: a reset drops what the stream has not sent, and a write made while the connection
+        // is being read is sent only when that read completes
+        ctx.writeAndFlush(Http3RequestBridge.toHttp3HeadersFrame(response, true))
+            .addListener(future -> ctx.executor().execute(() -> writeStreamError(Http3ErrorCode.H3_NO_ERROR.code())));
+        discard(streamingBody);
+    }
+
+    /**
      * Write a response to {@code HEAD}: the header section a {@code GET} is sent, ending the stream, with no
      * DATA frame and no trailers. A streamed body is discarded as it arrives and its upstream closed.
      */
@@ -139,7 +165,17 @@ public class Http3ResponseWriter extends ResponseWriter implements StreamErrorWr
         }
         ctx.writeAndFlush(Http3RequestBridge.toHttp3HeadersFrame(response, true))
             .addListener(future -> shutdownQuicStreamOutput());
-        // the client's response is already whole, so neither the end of the body nor an error can change it
+        discard(streamingBody);
+    }
+
+    /**
+     * Take a streamed body that will not be sent as it arrives, and close its upstream: the client's response is
+     * already whole, so neither the end of the body nor an error can change it.
+     */
+    private static void discard(StreamingBody streamingBody) {
+        if (streamingBody == null) {
+            return;
+        }
         streamingBody.subscribe(chunk -> streamingBody.chunkWritten(chunk.readableBytes()), () -> {
         }, error -> {
         });

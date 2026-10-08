@@ -158,6 +158,24 @@ public class Http2TunnelStreamedResponseIntegrationTest {
         assertThat(warningsAndErrors(), is(empty()));
     }
 
+    /**
+     * A stream in a coding MockServer does not decode is passed on in it, with its content-encoding, and still streamed.
+     */
+    @Test
+    public void shouldRelayAForwardedStreamInACodingItDoesNotDecodeWithItsCoding() throws Exception {
+        String path = tokens(EVENTS, EVENT_GAP_MILLIS) + "&coding=x-unknown";
+        try (Http2TestClient direct = direct(); Http2TestClient tunnel = tunnel()) {
+            Http2TestClient.Exchange expected = direct.send(headers(direct, HttpMethod.GET, path).add("accept", "text/event-stream"), true);
+            Http2TestClient.Exchange streamed = tunnel.send(headers(tunnel, HttpMethod.GET, path).add("accept", "text/event-stream"), true);
+
+            assertStreamedAsOnADirectConnection(streamed, expected);
+            assertThat("the bytes are the upstream's", streamed.body(), is(StreamingUpstream.tokens(EVENTS)));
+            assertThat(expected.header("content-encoding"), is("x-unknown"));
+            assertThat(streamed.header("content-encoding"), is("x-unknown"));
+        }
+        assertThat(warningsAndErrors(), is(empty()));
+    }
+
     @Test
     public void shouldRelayAStreamedResponseThatFollowsAnInterimResponse() throws Exception {
         try (Http2TestClient tunnel = tunnel()) {
