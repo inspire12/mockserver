@@ -265,6 +265,10 @@ async function test() {
     requestResponse = await client.respondWithBinary('/binary', {
         binaryData: Buffer.from('hello').toString('base64')
     });
+    requestResponse = await client.respondWithBinary('/binary', {
+        binaryData: Buffer.from('hello').toString('base64'),
+        upstream: 'ANSWER_AND_FORWARD'
+    });
     requestResponse = await client.respondWithGrpcStream('/my.Service/Stream', {
         statusName: 'OK',
         messages: [{json: '{"value":"first"}'}],

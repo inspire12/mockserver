@@ -77,6 +77,8 @@ import {
   type StandardSseState,
   type StandardSseEventDraft,
   type StandardBinaryResponseState,
+  type BinaryUpstreamName,
+  BINARY_UPSTREAM_NAMES,
   type StandardDnsState,
   type DnsResponseCodeName,
   type StandardForwardTemplateState,
@@ -1593,9 +1595,10 @@ function actionFromExpectation(item: JsonListItem): ActionPrefill | null {
     const bin = v['binaryResponse'] as Record<string, unknown>;
     // binaryData is a byte[] serialised as base64 by Jackson
     const data = typeof bin['binaryData'] === 'string' ? (bin['binaryData'] as string) : '';
+    const upstream = BINARY_UPSTREAM_NAMES.find((u) => u === bin['upstream']);
     return {
       type: 'binary_response',
-      binaryResponseState: { binaryData: data },
+      binaryResponseState: upstream ? { binaryData: data, upstream } : { binaryData: data },
     };
   }
 
@@ -2726,6 +2729,22 @@ function BinaryResponsePanel({
         placeholder="SGVsbG8sIFdvcmxkIQ=="
         slotProps={{ input: { sx: { fontFamily: monospaceFontFamily, fontSize: '0.78rem' } } }}
       />
+      <TextField
+        label="Upstream"
+        size="small"
+        select
+        value={state.upstream ?? 'ANSWER_ONLY'}
+        onChange={(e) => {
+          const upstream = e.target.value as BinaryUpstreamName;
+          setState(upstream === 'ANSWER_ONLY' ? { binaryData: state.binaryData } : { ...state, upstream });
+        }}
+        helperText="Only on a binary connection MockServer relays to an upstream (forwardBinaryRequestsMatchExpectations). Forwarding needs binaryMessageFraming POSTGRESQL; without it the match answers only."
+        sx={{ width: { xs: '100%', sm: 360 } }}
+      >
+        <MenuItem value="ANSWER_ONLY">Answer only (default)</MenuItem>
+        <MenuItem value="ANSWER_AND_FORWARD">Answer and forward (drop the upstream reply)</MenuItem>
+        <MenuItem value="FORWARD_AND_REPLACE">Forward and replace the upstream reply</MenuItem>
+      </TextField>
     </Box>
   );
 }

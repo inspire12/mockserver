@@ -220,6 +220,11 @@ const crossProtocolPreserved = {
 // (d) Side-effect (before/after webhook) + wasm body matcher + connectionOptions-only.
 const extras = [
   {
+    name: 'binary_response_upstream',
+    matcher: httpMatcher(),
+    action: { type: 'binary_response', binaryResponse: { binaryData: 'VXBzdHJlYW0=', upstream: 'FORWARD_AND_REPLACE' } },
+  },
+  {
     name: 'side_effects',
     matcher: httpMatcher(),
     action: {

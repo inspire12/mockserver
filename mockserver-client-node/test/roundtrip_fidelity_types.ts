@@ -197,6 +197,17 @@ export const binaryLiteral: Expectation = {
     binaryResponse: { binaryData: 'SGVsbG8gV29ybGQh', delay: { timeUnit: 'MILLISECONDS', value: 3 } }
 };
 
+export const binaryUpstreamLiteral: Expectation = {
+    httpRequest: { path: '/download/upstream' },
+    binaryResponse: { binaryData: 'VXBzdHJlYW0=', upstream: 'FORWARD_AND_REPLACE' }
+};
+
+export const binaryUpstreamUnknownValueLiteral: Expectation = {
+    httpRequest: { path: '/download/upstream' },
+    // @ts-expect-error upstream is limited to the server's three names
+    binaryResponse: { binaryData: 'VXBzdHJlYW0=', upstream: 'REPLACE' }
+};
+
 export const dnsResponseLiteral: Expectation = {
     httpRequest: { path: '/dns' },
     dnsResponse: {

@@ -37,6 +37,15 @@ public sealed class BinaryResponseBuilder
         return this;
     }
 
+    /// <summary>
+    /// Sets what happens upstream to the matched message on a relayed connection.
+    /// </summary>
+    public BinaryResponseBuilder WithUpstream(BinaryUpstream upstream)
+    {
+        _response.Upstream = upstream;
+        return this;
+    }
+
     public BinaryResponse Build() => _response;
 
     public static implicit operator BinaryResponse(BinaryResponseBuilder builder) => builder.Build();

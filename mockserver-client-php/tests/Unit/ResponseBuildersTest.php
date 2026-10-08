@@ -127,6 +127,21 @@ class ResponseBuildersTest extends TestCase
         );
     }
 
+    public function testBinaryResponseUpstreamRoundTrips(): void
+    {
+        $fixture = ['binaryData' => 'VXBzdHJlYW0=', 'upstream' => 'FORWARD_AND_REPLACE'];
+        $built = BinaryResponse::response()
+            ->binaryData('VXBzdHJlYW0=')
+            ->upstream(BinaryResponse::FORWARD_AND_REPLACE)
+            ->toArray();
+        $this->assertSame($fixture, $built);
+        $this->assertSame($fixture, json_decode((string) json_encode(BinaryResponse::response()
+            ->binaryData('VXBzdHJlYW0=')->upstream(BinaryResponse::FORWARD_AND_REPLACE)), true));
+        $this->assertSame('ANSWER_ONLY', BinaryResponse::ANSWER_ONLY);
+        $this->assertSame('ANSWER_AND_FORWARD', BinaryResponse::ANSWER_AND_FORWARD);
+        $this->assertArrayNotHasKey('upstream', BinaryResponse::response()->binaryData('AQID')->toArray());
+    }
+
     public function testDnsRecordFactories(): void
     {
         $this->assertSame(

@@ -275,11 +275,18 @@ export interface StandardSseState {
 
 // ---------------------------------------------------------------------------
 // Binary response state (JSON key: binaryResponse)
-// BinaryResponse fields: binaryData (byte[], serialised as base64)
+// BinaryResponse fields: binaryData (byte[], serialised as base64), upstream (enum)
 // ---------------------------------------------------------------------------
+
+/** BinaryResponse.Upstream: what happens upstream to the matched message on a relayed connection. */
+export type BinaryUpstreamName = 'ANSWER_ONLY' | 'ANSWER_AND_FORWARD' | 'FORWARD_AND_REPLACE';
+
+export const BINARY_UPSTREAM_NAMES: readonly BinaryUpstreamName[] = ['ANSWER_ONLY', 'ANSWER_AND_FORWARD', 'FORWARD_AND_REPLACE'];
 
 export interface StandardBinaryResponseState {
   binaryData: string; // base64-encoded
+  /** Absent means the server default, ANSWER_ONLY. */
+  upstream?: BinaryUpstreamName;
 }
 
 // ---------------------------------------------------------------------------
@@ -1324,6 +1331,7 @@ export function buildExpectationJson(
         if (action.binaryResponse.binaryData.trim()) {
           binPayload['binaryData'] = action.binaryResponse.binaryData.trim();
         }
+        if (action.binaryResponse.upstream) binPayload['upstream'] = action.binaryResponse.upstream;
         out['binaryResponse'] = binPayload;
       }
       break;
@@ -2389,6 +2397,7 @@ function actionToJava(action: StandardActionPayload): string {
       if (bin.binaryData.trim()) {
         lines.push(`        .withBinaryData(Base64.getDecoder().decode("${escapeJava(bin.binaryData.trim())}"))`);
       }
+      if (bin.upstream) lines.push(`        .withUpstream(Upstream.${bin.upstream})`);
       lines.push(')');
       return lines.join('\n');
     }
@@ -2977,6 +2986,7 @@ function collectJavaImports(
     case 'binary_response':
       imp.add('import static org.mockserver.model.BinaryResponse.binaryResponse;');
       imp.add('import java.util.Base64;');
+      if (action.binaryResponse?.upstream) imp.add('import org.mockserver.model.BinaryResponse.Upstream;');
       break;
     case 'dns_response':
       imp.add('import static org.mockserver.model.DnsResponse.dnsResponse;');

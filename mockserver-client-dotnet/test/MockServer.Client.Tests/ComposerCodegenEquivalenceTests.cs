@@ -409,6 +409,23 @@ public class ComposerCodegenEquivalenceTests
         @"{""httpRequest"":{""path"":""/api"",""method"":""GET""},""binaryResponse"":{""binaryData"":""SGVsbG8=""}}");
 
     [Fact]
+    public void Strict_binary_response_upstream() => AssertStrict(
+        new Expectation
+        {
+            HttpRequest = new HttpRequest
+            {
+                Method = "GET",
+                Path = "/api",
+            },
+            BinaryResponse = new BinaryResponse
+            {
+                BinaryData = "VXBzdHJlYW0=",
+                Upstream = BinaryUpstream.FORWARD_AND_REPLACE,
+            },
+        },
+        @"{""httpRequest"":{""path"":""/api"",""method"":""GET""},""binaryResponse"":{""binaryData"":""VXBzdHJlYW0="",""upstream"":""FORWARD_AND_REPLACE""}}");
+
+    [Fact]
     public void Strict_callback() => AssertStrict(
         new Expectation
         {

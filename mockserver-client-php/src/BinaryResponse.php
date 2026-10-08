@@ -8,16 +8,26 @@ namespace MockServer;
  * Fluent builder for a raw binary (TCP/binary-proxy) response action.
  *
  * Produces the {@code binaryResponse} action JSON. Wire keys:
- * binaryData (base64-encoded), delay, primary.
+ * binaryData (base64-encoded), delay, primary, upstream.
  *
  * @example
  *   BinaryResponse::response()->fromBytes("\x00\x01\x02");
  */
 class BinaryResponse implements \JsonSerializable
 {
+    /** Write the binary data; do not forward the message (the server's default). */
+    public const ANSWER_ONLY = 'ANSWER_ONLY';
+
+    /** Write the binary data, forward the message and drop the upstream's reply. */
+    public const ANSWER_AND_FORWARD = 'ANSWER_AND_FORWARD';
+
+    /** Forward the message and write the binary data in place of the upstream's reply. */
+    public const FORWARD_AND_REPLACE = 'FORWARD_AND_REPLACE';
+
     private ?string $binaryData = null;
     private ?Delay $delay = null;
     private ?bool $primary = null;
+    private ?string $upstream = null;
 
     public static function response(): self
     {
@@ -57,6 +67,19 @@ class BinaryResponse implements \JsonSerializable
     }
 
     /**
+     * What happens upstream to the matched message on a connection MockServer
+     * relays to an upstream (forwardBinaryRequestsMatchExpectations). The last
+     * two values need binaryMessageFraming POSTGRESQL on the server.
+     *
+     * @param string $upstream ANSWER_ONLY, ANSWER_AND_FORWARD or FORWARD_AND_REPLACE
+     */
+    public function upstream(string $upstream): self
+    {
+        $this->upstream = $upstream;
+        return $this;
+    }
+
+    /**
      * @return array<string, mixed>
      */
     public function jsonSerialize(): array
@@ -78,6 +101,9 @@ class BinaryResponse implements \JsonSerializable
         }
         if ($this->primary !== null) {
             $data['primary'] = $this->primary;
+        }
+        if ($this->upstream !== null) {
+            $data['upstream'] = $this->upstream;
         }
         return $data;
     }

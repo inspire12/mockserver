@@ -2588,10 +2588,31 @@ pub struct BinaryResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary: Option<bool>,
 
+    /// What happens upstream to the matched message on a relayed connection;
+    /// `None` means the server's default, [`BinaryUpstream::AnswerOnly`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<BinaryUpstream>,
+
     /// Catch-all for server fields this client does not model yet, so a
     /// retrieve -> re-submit cycle cannot silently destroy them.
     #[serde(flatten, default)]
     pub extra: Extra,
+}
+
+/// What happens upstream to a message a binary expectation matches on a
+/// connection MockServer relays to an upstream
+/// (`forwardBinaryRequestsMatchExpectations`). `AnswerAndForward` and
+/// `ForwardAndReplace` need `binaryMessageFraming` `POSTGRESQL`; without it
+/// the server answers as `AnswerOnly`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum BinaryUpstream {
+    /// Write the binary data; do not forward the message (the default).
+    AnswerOnly,
+    /// Write the binary data, forward the message and drop the upstream's reply.
+    AnswerAndForward,
+    /// Forward the message and write the binary data in place of the upstream's reply.
+    ForwardAndReplace,
 }
 
 impl BinaryResponse {
@@ -2633,6 +2654,12 @@ impl BinaryResponse {
     /// Mark this action as the primary action of the expectation.
     pub fn primary(mut self, primary: bool) -> Self {
         self.primary = Some(primary);
+        self
+    }
+
+    /// Set what happens upstream to the matched message on a relayed connection.
+    pub fn upstream(mut self, upstream: BinaryUpstream) -> Self {
+        self.upstream = Some(upstream);
         self
     }
 }

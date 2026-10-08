@@ -239,6 +239,7 @@ const STRUCTS: Record<string, FieldSpec[]> = {
     ['binaryData', 'BinaryData', 'string'],
     ['delay', 'Delay', 'struct:Delay'],
     ['primary', 'Primary', 'boolPtr'],
+    ['upstream', 'Upstream', 'string'],
   ],
   DnsResponse: [
     ['responseCode', 'ResponseCode', 'string'],

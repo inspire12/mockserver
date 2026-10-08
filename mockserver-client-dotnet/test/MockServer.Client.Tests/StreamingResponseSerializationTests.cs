@@ -137,6 +137,26 @@ public class StreamingResponseSerializationTests
         bin.GetProperty("delay").GetProperty("timeUnit").GetString().Should().Be("SECONDS");
     }
 
+    [Fact]
+    public void BinaryResponse_UpstreamRoundTrips()
+    {
+        var response = BinaryResponse.Response()
+            .WithBase64("VXBzdHJlYW0=")
+            .WithUpstream(BinaryUpstream.FORWARD_AND_REPLACE)
+            .Build();
+
+        var json = JsonSerializer.Serialize(response, JsonOptions);
+        json.Should().Be(@"{""binaryData"":""VXBzdHJlYW0="",""upstream"":""FORWARD_AND_REPLACE""}");
+
+        var decoded = JsonSerializer.Deserialize<BinaryResponse>(json, JsonOptions)!;
+        decoded.Upstream.Should().Be(BinaryUpstream.FORWARD_AND_REPLACE);
+        JsonSerializer.Serialize(decoded, JsonOptions).Should().Be(json);
+
+        Enum.GetNames<BinaryUpstream>().Should().Equal("ANSWER_ONLY", "ANSWER_AND_FORWARD", "FORWARD_AND_REPLACE");
+        JsonSerializer.Serialize(BinaryResponse.Response().WithBase64("AQID").Build(), JsonOptions)
+            .Should().NotContain("upstream");
+    }
+
     // ---------------------------------------------------------------- DNS
 
     [Fact]

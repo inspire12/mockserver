@@ -1242,6 +1242,18 @@ describe('mock server node client (no proxy)', { concurrency: 1 }, function () {
         assert.ok(!expectations[0].httpResponse, 'no httpResponse action should be set');
     });
 
+    it('should round-trip binaryResponse upstream through the server', async function () {
+        await client.respondWithBinary('/binary-upstream', {
+            binaryData: 'VXBzdHJlYW0=',
+            upstream: 'FORWARD_AND_REPLACE'
+        });
+
+        var expectations = await client.retrieveActiveExpectations('/binary-upstream');
+        assert.equal(expectations.length, 1);
+        assert.equal(expectations[0].binaryResponse.binaryData, 'VXBzdHJlYW0=');
+        assert.equal(expectations[0].binaryResponse.upstream, 'FORWARD_AND_REPLACE');
+    });
+
     it('should setup a gRPC stream response expectation using respondWithGrpcStream', async function () {
         await client.respondWithGrpcStream('/my.Service/StreamItems', {
             statusName: 'OK',

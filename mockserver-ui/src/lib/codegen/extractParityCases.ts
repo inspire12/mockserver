@@ -142,6 +142,12 @@ export const combos: Combo[] = [
     baseUrl: BASE_URL,
   },
   {
+    name: 'binary-response-upstream',
+    matcher: baseMatcher(),
+    action: { type: 'binary_response', binaryResponse: { binaryData: 'VXBzdHJlYW0=', upstream: 'FORWARD_AND_REPLACE' } },
+    baseUrl: BASE_URL,
+  },
+  {
     name: 'dns',
     matcher: baseMatcher({ dns: { dnsName: 'example.com', dnsType: 'A', dnsClass: 'IN' } }),
     action: { type: 'dns_response', dnsResponse: { responseCode: 'NOERROR', answerRecords: '[{"name":"example.com","type":"A","ttl":300,"value":"1.2.3.4"}]' } },

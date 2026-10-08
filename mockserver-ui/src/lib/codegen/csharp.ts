@@ -505,11 +505,12 @@ function renderSse(sse: Record<string, unknown>, indent: number, ctx: Ctx): stri
 }
 
 function renderBinary(bin: Record<string, unknown>, indent: number, ctx: Ctx): string {
-  const known = new Set(['binaryData', 'delay']);
+  const known = new Set(['binaryData', 'delay', 'upstream']);
   if (Object.keys(bin).some((k) => !known.has(k))) return rawTyped('BinaryResponse', bin, ctx);
   const props: string[] = [];
   if (typeof bin['binaryData'] === 'string') props.push(`BinaryData = ${csStr(bin['binaryData'] as string)}`);
   if (isObject(bin['delay'])) props.push(`Delay = ${renderDelay(bin['delay'] as Record<string, unknown>)}`);
+  if (typeof bin['upstream'] === 'string') props.push(`Upstream = BinaryUpstream.${bin['upstream']}`);
   return csObjectInit('BinaryResponse', props, indent);
 }
 

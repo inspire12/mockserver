@@ -2609,6 +2609,23 @@ RSpec.describe 'MockServer models' do
       expect(roundtrip.to_h).to eq(original.to_h)
     end
 
+    it 'round-trips upstream' do
+      data = { 'binaryData' => 'VXBzdHJlYW0=', 'upstream' => 'FORWARD_AND_REPLACE' }
+      resp = MockServer::BinaryResponse.from_hash(data)
+      expect(resp.upstream).to eq(MockServer::BinaryUpstream::FORWARD_AND_REPLACE)
+      expect(resp.to_h).to eq(data)
+    end
+
+    it 'names upstream values as the server does' do
+      expect(MockServer::BinaryUpstream::ANSWER_ONLY).to eq('ANSWER_ONLY')
+      expect(MockServer::BinaryUpstream::ANSWER_AND_FORWARD).to eq('ANSWER_AND_FORWARD')
+      expect(MockServer::BinaryUpstream::FORWARD_AND_REPLACE).to eq('FORWARD_AND_REPLACE')
+    end
+
+    it 'omits upstream when unset' do
+      expect(MockServer::BinaryResponse.new(binary_data: 'AQID').to_h).not_to have_key('upstream')
+    end
+
     it 'serializes under binaryResponse key in expectation' do
       exp = MockServer::Expectation.new(
         http_request: MockServer::HttpRequest.new(path: '/bin'),

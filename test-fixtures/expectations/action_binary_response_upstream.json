@@ -1,0 +1,9 @@
+{
+  "httpRequest": {
+    "path": "/download/upstream"
+  },
+  "binaryResponse": {
+    "binaryData": "VXBzdHJlYW0=",
+    "upstream": "FORWARD_AND_REPLACE"
+  }
+}

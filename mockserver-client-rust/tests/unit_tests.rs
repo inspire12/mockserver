@@ -1158,6 +1158,25 @@ fn test_binary_response_from_base64_passthrough() {
 }
 
 #[test]
+fn test_binary_response_upstream_round_trip() {
+    let resp = BinaryResponse::from_base64("VXBzdHJlYW0=").upstream(BinaryUpstream::ForwardAndReplace);
+    let json = serde_json::to_value(&resp).unwrap();
+    assert_eq!(json, serde_json::json!({"binaryData": "VXBzdHJlYW0=", "upstream": "FORWARD_AND_REPLACE"}));
+    let decoded: BinaryResponse = serde_json::from_value(json).unwrap();
+    assert_eq!(decoded.upstream, Some(BinaryUpstream::ForwardAndReplace));
+    assert!(decoded.extra.is_empty());
+    for (value, name) in [
+        (BinaryUpstream::AnswerOnly, "ANSWER_ONLY"),
+        (BinaryUpstream::AnswerAndForward, "ANSWER_AND_FORWARD"),
+        (BinaryUpstream::ForwardAndReplace, "FORWARD_AND_REPLACE"),
+    ] {
+        assert_eq!(serde_json::to_value(value).unwrap(), name);
+    }
+    let unset = serde_json::to_value(BinaryResponse::from_base64("AQID")).unwrap();
+    assert!(unset.get("upstream").is_none());
+}
+
+#[test]
 fn test_expectation_with_binary_response() {
     let expectation = Expectation::new(HttpRequest::new().path("/raw"))
         .respond_binary(BinaryResponse::from_bytes([0x00, 0xFF]));

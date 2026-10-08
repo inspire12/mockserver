@@ -385,6 +385,7 @@ function httpSseResponse(w: Obj, indent: number): string {
 function binaryResponse(w: Obj, indent: number): string {
   const args: Arg[] = [];
   if ('binaryData' in w) args.push({ name: 'binary_data', value: rb(String(w['binaryData'])) });
+  if (typeof w['upstream'] === 'string') args.push({ name: 'upstream', value: rb(w['upstream']) });
   return ctor('BinaryResponse', args, indent);
 }
 

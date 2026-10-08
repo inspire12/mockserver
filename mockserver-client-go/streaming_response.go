@@ -272,10 +272,26 @@ func (b *GrpcStreamResponseBuilder) Build() GrpcStreamResponse {
 // BinaryResponse represents a raw binary response action. BinaryData must be a
 // base64-encoded string (matching the MockServer wire format).
 type BinaryResponse struct {
-	BinaryData string `json:"binaryData,omitempty"`
-	Delay      *Delay `json:"delay,omitempty"`
-	Primary    *bool  `json:"primary,omitempty"`
+	BinaryData string         `json:"binaryData,omitempty"`
+	Delay      *Delay         `json:"delay,omitempty"`
+	Primary    *bool          `json:"primary,omitempty"`
+	Upstream   BinaryUpstream `json:"upstream,omitempty"`
 }
+
+// BinaryUpstream says what happens upstream to a message a binary expectation
+// matches on a connection MockServer relays to an upstream
+// (forwardBinaryRequestsMatchExpectations). Empty means the server's default,
+// BinaryUpstreamAnswerOnly. The other two need binaryMessageFraming POSTGRESQL.
+type BinaryUpstream string
+
+const (
+	// BinaryUpstreamAnswerOnly writes the binary data and does not forward the message.
+	BinaryUpstreamAnswerOnly BinaryUpstream = "ANSWER_ONLY"
+	// BinaryUpstreamAnswerAndForward writes the binary data, forwards the message and drops the upstream's reply.
+	BinaryUpstreamAnswerAndForward BinaryUpstream = "ANSWER_AND_FORWARD"
+	// BinaryUpstreamForwardAndReplace forwards the message and writes the binary data in place of the upstream's reply.
+	BinaryUpstreamForwardAndReplace BinaryUpstream = "FORWARD_AND_REPLACE"
+)
 
 // BinaryResponseBuilder provides a fluent API for building BinaryResponse actions.
 type BinaryResponseBuilder struct {
@@ -296,6 +312,12 @@ func (b *BinaryResponseBuilder) WithDelay(timeUnit string, value int) *BinaryRes
 // Primary marks this response as the primary action when multiple are present.
 func (b *BinaryResponseBuilder) Primary(primary bool) *BinaryResponseBuilder {
 	b.response.Primary = &primary
+	return b
+}
+
+// WithUpstream sets what happens upstream to the matched message on a relayed connection.
+func (b *BinaryResponseBuilder) WithUpstream(upstream BinaryUpstream) *BinaryResponseBuilder {
+	b.response.Upstream = upstream
 	return b
 }
 

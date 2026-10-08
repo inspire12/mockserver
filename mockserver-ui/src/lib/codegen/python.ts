@@ -385,6 +385,7 @@ class PyBuilder {
     const kw: Kw[] = typeof o['binaryData'] === 'string' && o['binaryData'] !== ''
       ? [['binary_data', pyStr(o['binaryData'])]]
       : [];
+    if (typeof o['upstream'] === 'string') kw.push(['upstream', pyStr(o['upstream'])]);
     return renderCall('BinaryResponse', kw, indent);
   }
 

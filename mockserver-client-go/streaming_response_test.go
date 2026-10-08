@@ -210,6 +210,31 @@ func TestBinaryResponseBuilder_JSON(t *testing.T) {
 	}
 }
 
+func TestBinaryResponseBuilder_Upstream_RoundTrip(t *testing.T) {
+	resp := Binary("VXBzdHJlYW0=").WithUpstream(BinaryUpstreamForwardAndReplace).Build()
+	m := marshalToMap(t, resp)
+	if m["upstream"] != "FORWARD_AND_REPLACE" {
+		t.Errorf("expected upstream FORWARD_AND_REPLACE, got %v", m["upstream"])
+	}
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded BinaryResponse
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Upstream != BinaryUpstreamForwardAndReplace {
+		t.Errorf("expected decoded upstream FORWARD_AND_REPLACE, got %q", decoded.Upstream)
+	}
+	if string(BinaryUpstreamAnswerOnly) != "ANSWER_ONLY" || string(BinaryUpstreamAnswerAndForward) != "ANSWER_AND_FORWARD" {
+		t.Errorf("upstream constants do not match the server's names")
+	}
+	if _, present := marshalToMap(t, Binary("AQID").Build())["upstream"]; present {
+		t.Errorf("expected upstream omitted when unset")
+	}
+}
+
 func TestForwardChain_RespondBinary_Body(t *testing.T) {
 	var receivedBody []byte
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

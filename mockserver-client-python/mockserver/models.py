@@ -1967,11 +1967,27 @@ class GrpcBidiResponse:
         )
 
 
+class BinaryUpstream:
+    """Constants for :attr:`BinaryResponse.upstream`: what happens upstream to a message a
+    binary expectation matches on a relayed connection (forwardBinaryRequestsMatchExpectations).
+
+    ``ANSWER_ONLY`` (the server's default) writes the binary data and does not forward the
+    message; ``ANSWER_AND_FORWARD`` also forwards it and drops the upstream's reply;
+    ``FORWARD_AND_REPLACE`` forwards it and writes the binary data in place of the upstream's
+    reply. The last two need binaryMessageFraming POSTGRESQL on the server.
+    """
+
+    ANSWER_ONLY = "ANSWER_ONLY"
+    ANSWER_AND_FORWARD = "ANSWER_AND_FORWARD"
+    FORWARD_AND_REPLACE = "FORWARD_AND_REPLACE"
+
+
 @dataclass
 class BinaryResponse:
     binary_data: str | None = None
     delay: Delay | None = None
     primary: bool | None = None
+    upstream: str | None = None
 
     def to_dict(self) -> dict:
         result: dict = {}
@@ -1981,6 +1997,8 @@ class BinaryResponse:
             result["delay"] = self.delay.to_dict()
         if self.primary is not None:
             result["primary"] = self.primary
+        if self.upstream is not None:
+            result["upstream"] = self.upstream
         return result
 
     @classmethod
@@ -1991,6 +2009,7 @@ class BinaryResponse:
             binary_data=data.get("binaryData"),
             delay=Delay.from_dict(data.get("delay")),
             primary=data.get("primary"),
+            upstream=data.get("upstream"),
         )
 
 

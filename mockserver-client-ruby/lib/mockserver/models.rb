@@ -1672,13 +1672,23 @@ module MockServer
     end
   end
 
-  class BinaryResponse
-    attr_accessor :binary_data, :delay, :primary
+  # Values for BinaryResponse#upstream: what happens upstream to a message a binary
+  # expectation matches on a relayed connection (forwardBinaryRequestsMatchExpectations).
+  # ANSWER_ONLY is the server's default; the other two need binaryMessageFraming POSTGRESQL.
+  module BinaryUpstream
+    ANSWER_ONLY         = 'ANSWER_ONLY'
+    ANSWER_AND_FORWARD  = 'ANSWER_AND_FORWARD'
+    FORWARD_AND_REPLACE = 'FORWARD_AND_REPLACE'
+  end
 
-    def initialize(binary_data: nil, delay: nil, primary: nil)
+  class BinaryResponse
+    attr_accessor :binary_data, :delay, :primary, :upstream
+
+    def initialize(binary_data: nil, delay: nil, primary: nil, upstream: nil)
       @binary_data = binary_data
       @delay = delay
       @primary = primary
+      @upstream = upstream
     end
 
     def to_h
@@ -1686,6 +1696,7 @@ module MockServer
       result['binaryData'] = @binary_data unless @binary_data.nil?
       result['delay'] = @delay.to_h if @delay
       result['primary'] = @primary unless @primary.nil?
+      result['upstream'] = @upstream unless @upstream.nil?
       result
     end
 
@@ -1695,7 +1706,8 @@ module MockServer
       new(
         binary_data: data['binaryData'],
         delay:       Delay.from_hash(data['delay']),
-        primary:     data['primary']
+        primary:     data['primary'],
+        upstream:    data['upstream']
       )
     end
   end

@@ -8,6 +8,7 @@ from mockserver.models import (
     AfterAction,
     AllOfBody,
     BinaryResponse,
+    BinaryUpstream,
     Body,
     CaptureRule,
     CaptureSource,
@@ -2892,6 +2893,20 @@ class TestBinaryResponse:
 
     def test_from_dict_none(self):
         assert BinaryResponse.from_dict(None) is None
+
+    def test_upstream_round_trip(self):
+        data = {"binaryData": "VXBzdHJlYW0=", "upstream": "FORWARD_AND_REPLACE"}
+        resp = BinaryResponse.from_dict(data)
+        assert resp.upstream == BinaryUpstream.FORWARD_AND_REPLACE
+        assert resp.to_dict() == data
+
+    def test_upstream_constants_match_server_names(self):
+        assert BinaryUpstream.ANSWER_ONLY == "ANSWER_ONLY"
+        assert BinaryUpstream.ANSWER_AND_FORWARD == "ANSWER_AND_FORWARD"
+        assert BinaryUpstream.FORWARD_AND_REPLACE == "FORWARD_AND_REPLACE"
+
+    def test_upstream_omitted_when_unset(self):
+        assert "upstream" not in BinaryResponse(binary_data="AQID").to_dict()
 
     def test_round_trip(self):
         original = BinaryResponse(

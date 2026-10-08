@@ -125,6 +125,30 @@ describe('buildExpectationJson binary response', () => {
     expect(bin).toBeDefined();
     expect(bin['binaryData']).toBeUndefined();
   });
+
+  it('emits upstream only when it is set', () => {
+    const withUpstream = buildExpectationJson(baseMatcher(), {
+      type: 'binary_response',
+      binaryResponse: { binaryData: 'VXBzdHJlYW0=', upstream: 'ANSWER_AND_FORWARD' },
+    });
+    expect(withUpstream['binaryResponse']).toEqual({ binaryData: 'VXBzdHJlYW0=', upstream: 'ANSWER_AND_FORWARD' });
+    const withoutUpstream = buildExpectationJson(baseMatcher(), {
+      type: 'binary_response',
+      binaryResponse: { binaryData: 'VXBzdHJlYW0=' },
+    });
+    expect(withoutUpstream['binaryResponse']).toEqual({ binaryData: 'VXBzdHJlYW0=' });
+  });
+
+  it('emits withUpstream and its import in the Java code', () => {
+    const java = standardToJava(baseMatcher(), {
+      type: 'binary_response',
+      binaryResponse: { binaryData: 'VXBzdHJlYW0=', upstream: 'FORWARD_AND_REPLACE' },
+    });
+    expect(java).toContain('import org.mockserver.model.BinaryResponse.Upstream;');
+    expect(java).toContain('.withUpstream(Upstream.FORWARD_AND_REPLACE)');
+    const plain = standardToJava(baseMatcher(), { type: 'binary_response', binaryResponse: { binaryData: 'AQID' } });
+    expect(plain).not.toContain('Upstream');
+  });
 });
 
 // ---------------------------------------------------------------------------
