@@ -40,7 +40,7 @@ public class OpenAPI31FeaturesTest {
         );
 
         // when
-        OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, mockServerLogger);
+        OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, mockServerLogger, null);
 
         // then - spec parsed without error
         assertThat(openAPI, is(notNullValue()));
@@ -58,7 +58,7 @@ public class OpenAPI31FeaturesTest {
         );
 
         // when
-        OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, mockServerLogger);
+        OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, mockServerLogger, null);
 
         // then - verify the schema was parsed with nullable type info
         Schema<?> itemSchema = openAPI.getComponents().getSchemas().get("Item");
@@ -232,7 +232,7 @@ public class OpenAPI31FeaturesTest {
         );
 
         // when
-        OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, mockServerLogger);
+        OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, mockServerLogger, null);
 
         // then - webhooks should be parsed
         Map<String, PathItem> webhooks = openAPI.getWebhooks();
@@ -315,7 +315,7 @@ public class OpenAPI31FeaturesTest {
         );
 
         // when
-        OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, mockServerLogger);
+        OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, mockServerLogger, null);
         OpenAPISerialiser serialiser = new OpenAPISerialiser(mockServerLogger);
         Map<String, List<Pair<String, io.swagger.v3.oas.models.Operation>>> operations =
             serialiser.retrieveOperations(openAPI, null);

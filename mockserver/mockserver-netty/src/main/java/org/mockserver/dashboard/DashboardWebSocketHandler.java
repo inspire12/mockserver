@@ -1019,11 +1019,11 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
         // Client-requested log-row limit for THIS connection (DEFAULT when it requested nothing).
         // Expectations are NOT governed by it - they keep the fixed EXPECTATION_UPDATE_ITEM_LIMIT.
         final int logItemLimit = logItemLimitFor(ctx);
-        DescriptionProcessor activeExpectationsDescriptionProcessor = new DescriptionProcessor();
-        DescriptionProcessor logMessagesDescriptionProcessor = new DescriptionProcessor();
-        DescriptionProcessor recordedRequestsDescriptionProcessor = new DescriptionProcessor();
-        DescriptionProcessor proxiedRequestsDescriptionProcessor = new DescriptionProcessor();
         Configuration configuration = httpState.getConfiguration();
+        DescriptionProcessor activeExpectationsDescriptionProcessor = new DescriptionProcessor(configuration);
+        DescriptionProcessor logMessagesDescriptionProcessor = new DescriptionProcessor(configuration);
+        DescriptionProcessor recordedRequestsDescriptionProcessor = new DescriptionProcessor(configuration);
+        DescriptionProcessor proxiedRequestsDescriptionProcessor = new DescriptionProcessor(configuration);
         Map<String, String> overrides = configuration.logLevelOverrides();
         Level globalLevel = configuration.logLevel();
         mockServerEventLog

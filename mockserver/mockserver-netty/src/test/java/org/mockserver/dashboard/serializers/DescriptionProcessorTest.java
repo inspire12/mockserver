@@ -4,15 +4,24 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectWriter;
 import org.apache.commons.lang3.StringUtils;
 import org.junit.Test;
+import org.mockserver.configuration.ConfigurationProperties;
 import org.mockserver.dashboard.model.DashboardLogEntryDTO;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.serialization.ObjectMapperFactory;
 
+import com.sun.net.httpserver.HttpServer;
+import java.io.OutputStream;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.mockserver.configuration.Configuration.configuration;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.core.Is.is;
 import static org.mockserver.character.Character.NEW_LINE;
@@ -34,7 +43,7 @@ public class DescriptionProcessorTest {
     @Test
     public void shouldSerialiseMultipleLogMessageDescriptions() throws JsonProcessingException {
         // given
-        DescriptionProcessor descriptionProcessor = new DescriptionProcessor();
+        DescriptionProcessor descriptionProcessor = new DescriptionProcessor(configuration());
         List<Description> logMessageDescriptions = Arrays.asList(
             descriptionProcessor.description(new DashboardLogEntryDTO(new LogEntry().setEpochTime(epochTime).setType(EXPECTATION_RESPONSE))),
             descriptionProcessor.description(new DashboardLogEntryDTO(new LogEntry().setEpochTime(epochTime).setType(DEBUG))),
@@ -55,7 +64,7 @@ public class DescriptionProcessorTest {
     @Test
     public void shouldSerialiseMultipleOpenAPIDefinitions() throws JsonProcessingException {
         // given
-        DescriptionProcessor descriptionProcessor = new DescriptionProcessor();
+        DescriptionProcessor descriptionProcessor = new DescriptionProcessor(configuration());
         List<Description> logMessageDescriptions = Arrays.asList(
             descriptionProcessor.description(
                 openAPI()
@@ -145,9 +154,56 @@ public class DescriptionProcessorTest {
     }
 
     @Test
+    public void shouldDescribeAnInlineSpecThatCannotBeParsedByName() throws JsonProcessingException {
+        // given
+        DescriptionProcessor descriptionProcessor = new DescriptionProcessor(configuration());
+
+        // when
+        Description description = descriptionProcessor.description(openAPI().withSpecUrlOrPayload("not a spec").withOperationId("listPets"), "some-id");
+
+        // then
+        assertThat(objectWriter.writeValueAsString(description), is("\"some-id: spec  listPets\""));
+    }
+
+    @Test
+    public void shouldNotFetchARemoteRefFromAPrivateAddressWithTheServersSettingOn() throws Exception {
+        assertThat("the global property must be off for this test to mean anything", ConfigurationProperties.forwardProxyBlockPrivateNetworks(), is(false));
+        AtomicInteger fetches = new AtomicInteger();
+        HttpServer specServer = HttpServer.create(new InetSocketAddress(InetAddress.getByName("localhost"), 0), 0);
+        specServer.createContext("/", exchange -> {
+            fetches.incrementAndGet();
+            byte[] body = "{\"Pet\":{\"type\":\"object\"}}".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write(body);
+            }
+            exchange.close();
+        });
+        specServer.start();
+        try {
+            String spec = "{\"openapi\":\"3.0.0\",\"info\":{\"title\":\"pets\",\"version\":\"1\"},"
+                + "\"paths\":{\"/pets\":{\"get\":{\"operationId\":\"listPets\",\"responses\":{\"200\":{\"description\":\"ok\","
+                + "\"content\":{\"application/json\":{\"schema\":{\"$ref\":\"http://127.0.0.1:" + specServer.getAddress().getPort()
+                + "/" + UUID.randomUUID() + "/pet.json#/Pet\"}}}}}}}}}";
+
+            Description refused = new DescriptionProcessor(configuration().forwardProxyBlockPrivateNetworks(true)).description(openAPI(spec, "listPets"), "some-id");
+
+            assertThat(objectWriter.writeValueAsString(refused), is("\"some-id: spec  listPets\""));
+            assertThat(fetches.get(), is(0));
+
+            Description parsed = new DescriptionProcessor(configuration().forwardProxyBlockPrivateNetworks(false)).description(openAPI(spec, "listPets"), "some-id");
+
+            assertThat(parsed instanceof RequestDefinitionObjectDescription, is(true));
+            assertThat(fetches.get() > 0, is(true));
+        } finally {
+            specServer.stop(0);
+        }
+    }
+
+    @Test
     public void shouldSerialiseMultipleHttpRequestDefinitions() throws JsonProcessingException {
         // given
-        DescriptionProcessor descriptionProcessor = new DescriptionProcessor();
+        DescriptionProcessor descriptionProcessor = new DescriptionProcessor(configuration());
         List<Description> logMessageDescriptions = Arrays.asList(
             descriptionProcessor.description(
                 request()
@@ -187,7 +243,7 @@ public class DescriptionProcessorTest {
     @Test
     public void shouldSerialiseMultipleHttpRequestAndOpenAPIDefinitions() throws JsonProcessingException {
         // given
-        DescriptionProcessor descriptionProcessor = new DescriptionProcessor();
+        DescriptionProcessor descriptionProcessor = new DescriptionProcessor(configuration());
         List<Description> logMessageDescriptions = Arrays.asList(
             descriptionProcessor.description(
                 request()

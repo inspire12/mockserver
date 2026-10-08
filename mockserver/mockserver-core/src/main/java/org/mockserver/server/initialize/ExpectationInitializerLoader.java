@@ -41,7 +41,7 @@ public class ExpectationInitializerLoader {
 
     public ExpectationInitializerLoader(Configuration configuration, MockServerLogger mockServerLogger, RequestMatchers requestMatchers) {
         this.configuration = configuration;
-        this.expectationSerializer = new ExpectationSerializer(mockServerLogger);
+        this.expectationSerializer = new ExpectationSerializer(mockServerLogger, configuration);
         this.openAPIConverter = new OpenAPIConverter(mockServerLogger, configuration);
         this.mockServerLogger = mockServerLogger;
         this.requestMatchers = requestMatchers;

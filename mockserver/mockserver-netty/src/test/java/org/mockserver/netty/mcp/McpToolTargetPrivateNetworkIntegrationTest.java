@@ -9,6 +9,7 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.mockserver.configuration.Configuration;
+import org.mockserver.configuration.ConfigurationProperties;
 import org.mockserver.integration.ClientAndServer;
 import org.mockserver.lifecycle.LifeCycle;
 import org.mockserver.log.model.LogEntry;
@@ -24,6 +25,7 @@ import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.Collectors;
 
@@ -172,6 +174,29 @@ public class McpToolTargetPrivateNetworkIntegrationTest {
         assertThat(result.toString(), result.path("totalOperations").asInt(), is(1));
         assertThat(result.toString(), result.path("results").get(0).path("statusCode").asInt(), is(201));
         target.verify(request(), exactly(1));
+    }
+
+    /** raw_expectation turns an OpenAPI expectation into expectations, fetching its spec under the server's setting. */
+    @Test
+    public void rawExpectationIsRefusedASpecAtALoopbackAddressOnlyWithTheSettingOn() {
+        assertThat("the global property must be off for this test to mean anything", ConfigurationProperties.forwardProxyBlockPrivateNetworks(), is(false));
+        String specPath = "/" + UUID.randomUUID() + "/spec.json";
+        target.reset();
+        target.when(request().withPath(specPath)).respond(response().withHeader("content-type", "application/json").withBody(SPEC));
+        ObjectNode params = objectMapper.createObjectNode();
+        params.putObject("expectation").put("specUrlOrPayload", "http://127.0.0.1:" + targetPort + specPath);
+
+        McpToolRegistry blocking = registry(configuration().forwardProxyBlockPrivateNetworks(true));
+        JsonNode refused = blocking.callTool("raw_expectation", params);
+
+        assertThat(refused.toString(), refused.path("error").asBoolean(), is(true));
+        assertThat(httpStates.get(0).getRequestMatchers().retrieveActiveExpectations(null), is(empty()));
+        target.verify(request().withPath(specPath), exactly(0));
+
+        JsonNode created = registry(configuration().forwardProxyBlockPrivateNetworks(false)).callTool("raw_expectation", params);
+
+        assertThat(created.toString(), created.path("count").asInt(), is(1));
+        target.verify(request().withPath(specPath), atLeast(1));
     }
 
     private void assertRefusedOnlyWithTheSettingOn(String tool, ObjectNode params) {

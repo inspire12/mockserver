@@ -14,6 +14,7 @@ import org.apache.commons.lang3.tuple.Pair;
 import org.mockserver.cache.LRUCache;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.logging.MockServerLogger;
+import org.mockserver.proxyconfiguration.InetAddressValidator;
 
 import javax.annotation.Nullable;
 import java.util.ArrayList;
@@ -30,12 +31,20 @@ import static org.apache.commons.lang3.StringUtils.isNotBlank;
 
 public class OpenAPIParser {
 
-    private final static LRUCache<String, OpenAPI> openAPILRUCache = new LRUCache<>(new MockServerLogger(), 250, MINUTES.toMillis(30));
+    private final static LRUCache<CacheKey, OpenAPI> openAPILRUCache = new LRUCache<>(new MockServerLogger(), 250, MINUTES.toMillis(30));
 
     public static final String OPEN_API_LOAD_ERROR = "Unable to load API spec";
 
+    /**
+     * A parse made with forwardProxyBlockPrivateNetworks off fetched without the check, so it must never answer a
+     * parse for a server with the setting on: the setting is part of the key.
+     */
+    private record CacheKey(String specUrlOrPayload, boolean fetchesChecked) {
+    }
+
     public static void clearCache(String specUrlOrPayload) {
-        openAPILRUCache.delete(specUrlOrPayload);
+        openAPILRUCache.delete(new CacheKey(specUrlOrPayload, false));
+        openAPILRUCache.delete(new CacheKey(specUrlOrPayload, true));
     }
 
     /**
@@ -49,20 +58,21 @@ public class OpenAPIParser {
         );
     }
 
-    public static OpenAPI buildOpenAPI(String specUrlOrPayload, MockServerLogger mockServerLogger) {
-        return buildOpenAPI(specUrlOrPayload, mockServerLogger, null);
-    }
-
     /**
-     * @param configuration whose forwardProxyBlockPrivateNetworks applies to the spec URL, each remote $ref and each
-     *                      redirect fetched; null for the global properties
+     * @param configuration the running server's configuration, whose forwardProxyBlockPrivateNetworks applies to the
+     *                      spec URL, each remote $ref and each redirect fetched; null only where no server is running
+     *                      (a client), for the global properties
      */
     public static OpenAPI buildOpenAPI(String specUrlOrPayload, MockServerLogger mockServerLogger, @Nullable Configuration configuration) {
+        if (specUrlOrPayload == null) {
+            return SpecFetchGuard.whileParsing(InetAddressValidator.isEnabled(configuration), () -> parseOpenAPI(null, mockServerLogger));
+        }
         // getOrCompute is atomic (ConcurrentHashMap.computeIfAbsent semantics): for an absent key the
         // parse + addMissingOperationIds runs at most once and the single resulting OpenAPI is shared by
         // all racing callers. A previous get-then-put allowed two threads to each parse and then mutate
         // (operationId dedup) their own copy and clobber the cache, racing on the shared instance.
-        return openAPILRUCache.getOrCompute(specUrlOrPayload, key -> SpecFetchGuard.whileParsing(configuration, () -> parseOpenAPI(key, mockServerLogger)));
+        CacheKey cacheKey = new CacheKey(specUrlOrPayload, InetAddressValidator.isEnabled(configuration));
+        return openAPILRUCache.getOrCompute(cacheKey, key -> SpecFetchGuard.whileParsing(key.fetchesChecked(), () -> parseOpenAPI(key.specUrlOrPayload(), mockServerLogger)));
     }
 
     private static OpenAPI parseOpenAPI(String specUrlOrPayload, MockServerLogger mockServerLogger) {

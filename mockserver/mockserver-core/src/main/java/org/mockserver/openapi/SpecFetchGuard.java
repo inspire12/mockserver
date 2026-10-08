@@ -36,6 +36,7 @@ import static org.apache.commons.lang3.StringUtils.isBlank;
 final class SpecFetchGuard extends ProxySelector {
 
     private static final ThreadLocal<Parse> PARSING = new ThreadLocal<>();
+    private static final Configuration CHECK_ON = Configuration.configuration().forwardProxyBlockPrivateNetworks(true);
 
     private final ProxySelector wrapped;
 
@@ -44,28 +45,24 @@ final class SpecFetchGuard extends ProxySelector {
     }
 
     private static final class Parse {
-        private final Configuration configuration;
         private ForwardTargetBlockedException refusal;
-
-        private Parse(Configuration configuration) {
-            this.configuration = configuration;
-        }
     }
 
     /**
      * Runs {@code parse} with every connection it opens on this thread checked, and refuses the spec if any was
      * blocked, whatever the parser made of the failed fetch.
      *
-     * @param configuration MockServer configuration (may be null to fall back to global properties)
+     * @param fetchesChecked whether forwardProxyBlockPrivateNetworks was on when the parse began; a later change to the
+     *                       configuration does not change it for this parse, whose result is cached under it
      * @throws IllegalArgumentException naming the blocked target, when a fetch was blocked
      */
-    static <T> T whileParsing(@Nullable Configuration configuration, Supplier<T> parse) {
-        if (!InetAddressValidator.isEnabled(configuration)) {
+    static <T> T whileParsing(boolean fetchesChecked, Supplier<T> parse) {
+        if (!fetchesChecked) {
             return parse.get();
         }
         install();
         Parse outer = PARSING.get();
-        Parse current = new Parse(configuration);
+        Parse current = new Parse();
         PARSING.set(current);
         T parsed;
         try {
@@ -110,7 +107,7 @@ final class SpecFetchGuard extends ProxySelector {
                     // HttpURLConnection reads the host from the URL more leniently than URI does, so refuse rather than skip
                     throw new ForwardTargetBlockedException("OpenAPI spec fetch from \"" + uri + "\" names no host that can be checked");
                 }
-                InetAddressValidator.validateForwardTarget(parse.configuration, host);
+                InetAddressValidator.validateForwardTarget(CHECK_ON, host);
             } catch (ForwardTargetBlockedException blocked) {
                 if (parse.refusal == null) {
                     parse.refusal = blocked;

@@ -69,7 +69,7 @@ public class OpenAPISerialiserContextPathPrefixTest {
             "  \"/pets/{petId}\":" + NEW_LINE +
             "    get:" + NEW_LINE +
             "      operationId: showPetById" + NEW_LINE;
-        OpenAPI openAPI = buildOpenAPI(spec, mockServerLogger);
+        OpenAPI openAPI = buildOpenAPI(spec, mockServerLogger, null);
 
         // when
         Map<String, List<Pair<String, Operation>>> operations = serialiser.retrieveOperations(openAPI, null, "/api/v1");
@@ -91,7 +91,7 @@ public class OpenAPISerialiserContextPathPrefixTest {
             "  \"/pets\":" + NEW_LINE +
             "    get:" + NEW_LINE +
             "      operationId: listPets" + NEW_LINE;
-        OpenAPI openAPI = buildOpenAPI(spec, mockServerLogger);
+        OpenAPI openAPI = buildOpenAPI(spec, mockServerLogger, null);
 
         // when
         Map<String, List<Pair<String, Operation>>> operations = serialiser.retrieveOperations(openAPI, null, "");
@@ -110,7 +110,7 @@ public class OpenAPISerialiserContextPathPrefixTest {
             "  \"/pets\":" + NEW_LINE +
             "    get:" + NEW_LINE +
             "      operationId: listPets" + NEW_LINE;
-        OpenAPI openAPI = buildOpenAPI(spec, mockServerLogger);
+        OpenAPI openAPI = buildOpenAPI(spec, mockServerLogger, null);
 
         // when
         Map<String, List<Pair<String, Operation>>> operations = serialiser.retrieveOperations(openAPI, null, null);
@@ -131,7 +131,7 @@ public class OpenAPISerialiserContextPathPrefixTest {
             "  \"/pets\":" + NEW_LINE +
             "    get:" + NEW_LINE +
             "      operationId: listPets" + NEW_LINE;
-        OpenAPI openAPI = buildOpenAPI(spec, mockServerLogger);
+        OpenAPI openAPI = buildOpenAPI(spec, mockServerLogger, null);
 
         // when
         Map<String, List<Pair<String, Operation>>> operations = serialiser.retrieveOperations(openAPI, null, "/api/v1");
@@ -150,7 +150,7 @@ public class OpenAPISerialiserContextPathPrefixTest {
             "  \"/pets\":" + NEW_LINE +
             "    get:" + NEW_LINE +
             "      operationId: listPets" + NEW_LINE;
-        OpenAPI openAPI = buildOpenAPI(spec, mockServerLogger);
+        OpenAPI openAPI = buildOpenAPI(spec, mockServerLogger, null);
 
         // when - using two-arg overload
         Map<String, List<Pair<String, Operation>>> operations = serialiser.retrieveOperations(openAPI, null);
@@ -165,7 +165,8 @@ public class OpenAPISerialiserContextPathPrefixTest {
         OpenAPISerialiser serialiser = new OpenAPISerialiser(mockServerLogger);
         OpenAPI openAPI = buildOpenAPI(
             FileReader.readFileFromClassPathOrPath("org/mockserver/openapi/openapi_31_webhooks_only.yaml"),
-            mockServerLogger
+            mockServerLogger,
+            null
         );
 
         // when - getPaths() is null; must not NPE

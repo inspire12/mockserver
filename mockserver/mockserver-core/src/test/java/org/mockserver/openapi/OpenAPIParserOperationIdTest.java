@@ -42,7 +42,7 @@ public class OpenAPIParserOperationIdTest {
         );
 
         // when
-        OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, mockServerLogger);
+        OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, mockServerLogger, null);
 
         // then - every operationId is non-blank and globally unique
         List<String> ids = allOperationIds(openAPI);
@@ -65,7 +65,7 @@ public class OpenAPIParserOperationIdTest {
         );
 
         // when
-        OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, mockServerLogger);
+        OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, mockServerLogger, null);
 
         // then - author ids are untouched (no spurious " (n)" suffixes)
         List<String> ids = allOperationIds(openAPI);

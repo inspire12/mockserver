@@ -25,6 +25,7 @@ import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+import static org.mockserver.configuration.Configuration.configuration;
 import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.not;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -49,7 +50,7 @@ public class DashboardLogEntryDTOSerializerTest {
     private final String timeStamp = StringUtils.substringAfter(fullTimeStamp, "-");
 
     private Description getDescription(LogEntry logEntry) {
-        return new LogMessageDescription(StringUtils.substringAfter(logEntry.getTimestamp(), "-"), logEntry.getType().name(), new DescriptionProcessor());
+        return new LogMessageDescription(StringUtils.substringAfter(logEntry.getTimestamp(), "-"), logEntry.getType().name(), new DescriptionProcessor(configuration()));
     }
 
     @Test

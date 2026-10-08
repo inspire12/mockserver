@@ -7713,21 +7713,21 @@ public class HttpState {
 
     private ExpectationSerializer getExpectationSerializer() {
         if (this.expectationSerializer == null) {
-            this.expectationSerializer = new ExpectationSerializer(mockServerLogger);
+            this.expectationSerializer = new ExpectationSerializer(mockServerLogger, configuration);
         }
         return expectationSerializer;
     }
 
     private ExpectationSerializer getExpectationSerializerThatSerializesBodyDefault() {
         if (this.expectationSerializerThatSerializesBodyDefault == null) {
-            this.expectationSerializerThatSerializesBodyDefault = new ExpectationSerializer(mockServerLogger, true);
+            this.expectationSerializerThatSerializesBodyDefault = new ExpectationSerializer(mockServerLogger, true, configuration);
         }
         return expectationSerializerThatSerializesBodyDefault;
     }
 
     private OpenAPIExpectationSerializer getOpenAPIExpectationSerializer() {
         if (this.openAPIExpectationSerializer == null) {
-            this.openAPIExpectationSerializer = new OpenAPIExpectationSerializer(mockServerLogger);
+            this.openAPIExpectationSerializer = new OpenAPIExpectationSerializer(mockServerLogger, configuration);
         }
         return openAPIExpectationSerializer;
     }

@@ -25,6 +25,8 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.Assert.assertThrows;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.spy;
 import static org.mockserver.configuration.Configuration.configuration;
 
 /**
@@ -132,6 +134,60 @@ public class OpenAPIParserFetchCheckTest {
 
         assertThat(openAPI.getPaths().get("/pets"), notNullValue());
         assertThat(requestsFor(prefix + "/spec.json") > 0, is(true));
+    }
+
+    @Test
+    public void shouldRefuseASpecUrlParsedEarlierWithTheSettingOff() {
+        documents.put(prefix + "/spec.json", openApi3("#/components/schemas/Pet"));
+        String specUrl = url("127.0.0.1", prefix + "/spec.json");
+        OpenAPIParser.buildOpenAPI(specUrl, LOGGER, blocking(false));
+        int fetched = requestsFor(prefix + "/spec.json");
+
+        IllegalArgumentException refused = assertThrows(IllegalArgumentException.class,
+            () -> OpenAPIParser.buildOpenAPI(specUrl, LOGGER, blocking(true)));
+
+        assertThat(refused.getMessage(), containsString("loopback"));
+        assertThat(requestsFor(prefix + "/spec.json"), is(fetched));
+    }
+
+    /** The setting is read once per parse: turning it off while a spec is parsed does not let that parse fetch unchecked. */
+    @Test
+    public void shouldRefuseASpecUrlWhenTheSettingIsTurnedOffDuringTheParse() {
+        documents.put(prefix + "/spec.json", openApi3("#/components/schemas/Pet"));
+        Configuration configuration = spy(blocking(true));
+        doReturn(true, false).when(configuration).forwardProxyBlockPrivateNetworks();
+
+        IllegalArgumentException refused = assertThrows(IllegalArgumentException.class,
+            () -> OpenAPIParser.buildOpenAPI(url("127.0.0.1", prefix + "/spec.json"), LOGGER, configuration));
+
+        assertThat(refused.getMessage(), containsString("loopback"));
+        assertThat(requestsFor(prefix + "/spec.json"), is(0));
+    }
+
+    @Test
+    public void shouldAnswerASpecUrlParsedEarlierWithTheSettingOnFromTheCache() {
+        documents.put(prefix + "/spec.json", openApi3("#/components/schemas/Pet"));
+        String specUrl = url("localhost", prefix + "/spec.json");
+        try (HostLookups ignored = HostLookups.answer("localhost", PUBLIC)) {
+            OpenAPI first = OpenAPIParser.buildOpenAPI(specUrl, LOGGER, blocking(true));
+            int fetched = requestsFor(prefix + "/spec.json");
+
+            assertThat(OpenAPIParser.buildOpenAPI(specUrl, LOGGER, blocking(true)) == first, is(true));
+            assertThat(requestsFor(prefix + "/spec.json"), is(fetched));
+        }
+    }
+
+    @Test
+    public void shouldParseAgainAfterTheCacheIsClearedForASpecUrlParsedWithTheSettingOn() {
+        documents.put(prefix + "/spec.json", openApi3("#/components/schemas/Pet"));
+        String specUrl = url("localhost", prefix + "/spec.json");
+        try (HostLookups ignored = HostLookups.answer("localhost", PUBLIC)) {
+            OpenAPI first = OpenAPIParser.buildOpenAPI(specUrl, LOGGER, blocking(true));
+
+            OpenAPIParser.clearCache(specUrl);
+
+            assertThat(OpenAPIParser.buildOpenAPI(specUrl, LOGGER, blocking(true)) == first, is(false));
+        }
     }
 
     @Test

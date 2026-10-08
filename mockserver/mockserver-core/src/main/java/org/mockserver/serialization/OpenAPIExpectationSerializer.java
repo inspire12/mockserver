@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectWriter;
 import com.google.common.base.Joiner;
 import org.apache.commons.lang3.Strings;
+import org.mockserver.configuration.Configuration;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.mock.Expectation;
@@ -13,6 +14,7 @@ import org.mockserver.serialization.model.OpenAPIExpectationDTO;
 import org.mockserver.validator.jsonschema.JsonSchemaOpenAPIExpectationValidator;
 import org.slf4j.event.Level;
 
+import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -35,8 +37,16 @@ public class OpenAPIExpectationSerializer implements Serializer<OpenAPIExpectati
     private OpenAPIConverter openAPIConverter;
 
     public OpenAPIExpectationSerializer(MockServerLogger mockServerLogger) {
+        this(mockServerLogger, null);
+    }
+
+    /**
+     * @param configuration the running server's configuration, which applies to what parsing an expectation's spec
+     *                      fetches; null only where no server is running (a client), for the global properties
+     */
+    public OpenAPIExpectationSerializer(MockServerLogger mockServerLogger, @Nullable Configuration configuration) {
         this.mockServerLogger = mockServerLogger;
-        this.openAPIConverter = new OpenAPIConverter(mockServerLogger);
+        this.openAPIConverter = new OpenAPIConverter(mockServerLogger, configuration);
     }
 
     private JsonSchemaOpenAPIExpectationValidator getValidator() {

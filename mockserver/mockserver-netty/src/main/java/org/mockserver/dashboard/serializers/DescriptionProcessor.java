@@ -2,6 +2,7 @@ package org.mockserver.dashboard.serializers;
 
 import io.swagger.v3.oas.models.OpenAPI;
 import org.apache.commons.lang3.StringUtils;
+import org.mockserver.configuration.Configuration;
 import org.mockserver.dashboard.model.DashboardLogEntryDTO;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpRequest;
@@ -14,10 +15,18 @@ import static org.mockserver.openapi.OpenAPIParser.buildOpenAPI;
 public class DescriptionProcessor {
 
     private static final MockServerLogger MOCK_SERVER_LOGGER = new MockServerLogger();
+    private final Configuration configuration;
     private int maxHttpRequestLength;
     private int maxOpenAPILength;
     private int maxOpenAPIObjectLength;
     private int maxLogEventLength;
+
+    /**
+     * @param configuration the running server's configuration, which applies to what parsing an OpenAPI spec fetches
+     */
+    public DescriptionProcessor(Configuration configuration) {
+        this.configuration = configuration;
+    }
 
     public int getMaxHttpRequestLength() {
         return maxHttpRequestLength;
@@ -52,13 +61,14 @@ public class DescriptionProcessor {
             OpenAPIDefinition openAPIDefinition = (OpenAPIDefinition) object;
             String operationId = isNotBlank(openAPIDefinition.getOperationId()) ? openAPIDefinition.getOperationId() : "";
             String specUrlOrPayload = openAPIDefinition.getSpecUrlOrPayload().trim();
-            if (OpenAPIParser.isSpecUrl(specUrlOrPayload)) {
-                description = new RequestDefinitionDescription(idMessage + StringUtils.substringAfterLast(specUrlOrPayload, "/"), operationId, this, true);
+            OpenAPI openAPI = OpenAPIParser.isSpecUrl(specUrlOrPayload) ? null : parse(specUrlOrPayload);
+            if (openAPI == null) {
+                String name = OpenAPIParser.isSpecUrl(specUrlOrPayload) ? StringUtils.substringAfterLast(specUrlOrPayload, "/") : "spec";
+                description = new RequestDefinitionDescription(idMessage + name, operationId, this, true);
                 if (description.length() >= maxOpenAPILength) {
                     maxOpenAPILength = description.length();
                 }
             } else {
-                OpenAPI openAPI = buildOpenAPI(specUrlOrPayload, MOCK_SERVER_LOGGER);
                 description = new RequestDefinitionObjectDescription(idMessage + "spec ", openAPI, operationId, this);
                 if (description.length() >= maxOpenAPIObjectLength) {
                     maxOpenAPIObjectLength = description.length();
@@ -73,5 +83,17 @@ public class DescriptionProcessor {
         }
 
         return description;
+    }
+
+    /**
+     * A spec that cannot be parsed, a refused fetch included, is described by name alone rather than failing the
+     * whole dashboard update.
+     */
+    private OpenAPI parse(String specUrlOrPayload) {
+        try {
+            return buildOpenAPI(specUrlOrPayload, MOCK_SERVER_LOGGER, configuration);
+        } catch (IllegalArgumentException unparseable) {
+            return null;
+        }
     }
 }

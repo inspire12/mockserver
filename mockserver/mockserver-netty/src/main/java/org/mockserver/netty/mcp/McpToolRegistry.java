@@ -89,7 +89,7 @@ public class McpToolRegistry {
 
     private ExpectationSerializer getExpectationSerializer() {
         if (expectationSerializer == null) {
-            expectationSerializer = new ExpectationSerializer(mockServerLogger);
+            expectationSerializer = new ExpectationSerializer(mockServerLogger, httpState.getConfiguration());
         }
         return expectationSerializer;
     }

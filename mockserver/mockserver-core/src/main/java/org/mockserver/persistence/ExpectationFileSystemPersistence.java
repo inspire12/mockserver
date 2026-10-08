@@ -273,7 +273,7 @@ public class ExpectationFileSystemPersistence implements MockServerMatcherListen
                 logEvent(INFO, "persisted expectations blob at key " + blobKey + " is empty - nothing to restore", null);
                 return;
             }
-            Expectation[] expectations = new ExpectationSerializer(mockServerLogger).deserializeArray(json, true);
+            Expectation[] expectations = new ExpectationSerializer(mockServerLogger, configuration).deserializeArray(json, true);
             if (expectations == null || expectations.length == 0) {
                 logEvent(INFO, "persisted expectations blob at key " + blobKey + " contained no expectations - nothing to restore", null);
                 return;

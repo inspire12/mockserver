@@ -14,6 +14,7 @@ import org.slf4j.event.Level;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 
+import static org.mockserver.configuration.Configuration.configuration;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.core.Is.is;
 import static org.mockserver.character.Character.NEW_LINE;
@@ -38,7 +39,7 @@ public class DashboardLogEntryDTOGroupSerializerTest {
 
     @Before
     public void resetDescriptionProcessor() {
-        descriptionProcessor = new DescriptionProcessor();
+        descriptionProcessor = new DescriptionProcessor(configuration());
     }
 
     @Test

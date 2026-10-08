@@ -2575,7 +2575,7 @@ public class DashboardWebSocketHandlerTest {
         DashboardWebSocketHandler.populateLogSections(
             reverse.stream(), true, 5,
             logMessages, recordedRequests, proxiedRequests,
-            new DescriptionProcessor(), new DescriptionProcessor(), new DescriptionProcessor());
+            new DescriptionProcessor(configuration()), new DescriptionProcessor(configuration()), new DescriptionProcessor(configuration()));
 
         assertThat("recorded rows capped at the client limit", recordedRequests.size(), is(5));
         assertThat("proxied rows capped at the client limit", proxiedRequests.size(), is(5));
@@ -2591,7 +2591,7 @@ public class DashboardWebSocketHandlerTest {
         DashboardWebSocketHandler.populateLogSections(
             many.stream(), true, 130,
             new LinkedList<>(), recordedAbove100, new LinkedList<>(),
-            new DescriptionProcessor(), new DescriptionProcessor(), new DescriptionProcessor());
+            new DescriptionProcessor(configuration()), new DescriptionProcessor(configuration()), new DescriptionProcessor(configuration()));
         assertThat("a limit above 100 admits more than 100 rows", recordedAbove100.size(), is(130));
     }
 
@@ -2631,7 +2631,7 @@ public class DashboardWebSocketHandlerTest {
         DashboardWebSocketHandler.populateLogSections(
             reverseOrdered.stream(), shortCircuit, 100,
             logMessages, recordedRequests, proxiedRequests,
-            new DescriptionProcessor(), new DescriptionProcessor(), new DescriptionProcessor());
+            new DescriptionProcessor(configuration()), new DescriptionProcessor(configuration()), new DescriptionProcessor(configuration()));
         Map<String, Object> sections = new LinkedHashMap<>();
         sections.put("logMessages", logMessages);
         sections.put("recordedRequests", recordedRequests);
@@ -2802,7 +2802,7 @@ public class DashboardWebSocketHandlerTest {
         DashboardWebSocketHandler.populateLogSections(
             reverseOrdered.stream().peek(ignored -> pulled.incrementAndGet()), shortCircuit, 100,
             new LinkedList<>(), new LinkedList<>(), new LinkedList<>(),
-            new DescriptionProcessor(), new DescriptionProcessor(), new DescriptionProcessor());
+            new DescriptionProcessor(configuration()), new DescriptionProcessor(configuration()), new DescriptionProcessor(configuration()));
         return pulled.get();
     }
 

@@ -111,7 +111,7 @@ public class DashboardFrameBodyCapTest {
         DashboardWebSocketHandler.populateLogSections(
             reverse.stream(), true, 100, budget,
             logMessages, recordedRequests, proxiedRequests,
-            new DescriptionProcessor(), new DescriptionProcessor(), new DescriptionProcessor());
+            new DescriptionProcessor(configuration()), new DescriptionProcessor(configuration()), new DescriptionProcessor(configuration()));
         Map<String, Object> sections = new LinkedHashMap<>();
         sections.put("logMessages", logMessages);
         sections.put("recordedRequests", recordedRequests);
