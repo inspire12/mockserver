@@ -341,6 +341,25 @@ matches a request that presented no client certificate. See
 
 Control plane endpoints (`/mockserver/expectation`, `/mockserver/verify`, etc.) can require mTLS authentication. When configured, `HttpState.controlPlaneRequestAuthenticated()` delegates to `MTLSAuthenticationHandler`, which validates the presented client-certificate chain against the configured trust store (`controlPlaneTLSMutualAuthenticationCAChain`).
 
+**Which CAs the server trusts for control-plane client certificates** (`ControlPlaneAuthenticationHandlerFactory.controlPlaneClientCertificateTrust`):
+
+| `controlPlaneTLSMutualAuthenticationCAChain` | MockServer's CA certificate | Trusted |
+|---|---|---|
+| set | any | only the certificates in the chain; MockServer's CA is **not** added. A WARN is logged if the chain contains the bundled default CA. |
+| not set | your own, or dynamically created (`dynamicallyCreateCertificateAuthorityCertificate`) | MockServer's CA certificate only (unchanged) |
+| not set | the bundled default CA | refused: see below |
+
+Before this, the server always added MockServer's CA certificate to the chain, so setting a chain never narrowed which client certificates were accepted. The bundled CA's private key is published in the jar, so it must never be the trust for control-plane client certificates. A deployment whose control-plane client certificates are signed by MockServer's CA must now put that CA in the chain; if that CA is the bundled default, it should use its own CA instead.
+
+**The unusable set-up is refused.** Control-plane mTLS required, no chain, and the bundled CA as MockServer's CA (not dynamically created; detected by comparing the certificate, so a copy of the bundled PEM at another path counts) is rejected by `ControlPlaneAuthenticationHandlerFactory.requireUsableControlPlaneMutualTls`, which throws `ControlPlaneMutualTlsConfigurationException` (an `IllegalArgumentException`) naming both fixes: set the chain, or give MockServer its own CA with `certificateAuthorityCertificate` and `certificateAuthorityPrivateKey`.
+
+| Path | Result |
+|---|---|
+| `MockServer` construction (CLI, `ClientAndServer`, JUnit rule and extension, Spring, Maven plugin) | refuses to start before binding a port (`createServerBootstrap`, which stops what it allocated); the CLI prints the message alone |
+| `MockServerServlet` / `ProxyServlet` construction (WAR) | the constructor throws, so the servlet does not start |
+| `PUT /mockserver/configuration` | the update is checked as it would leave the configuration (each value from the update, else the current one) before any of it is applied, and answered `400` with the message |
+| any other runtime change (a `Configuration` setter, the static store) | cannot be refused: building the handler fails, an ERROR is logged and every control-plane request is denied (`DenyAllAuthenticationHandler`) |
+
 For each presented certificate, paired with each configured CA, the handler:
 
 | Check | How | Failure |
@@ -351,6 +370,8 @@ For each presented certificate, paired with each configured CA, the handler:
 A presented certificate authenticates if any (certificate, CA) pair passes both checks; otherwise the handler throws `AuthenticationException`. Revocation (CRL/OCSP) is intentionally disabled so validation never makes a network call, consistent with the rest of the codebase. Because a certificate with no EKU is accepted, existing client certificates (including those that carry `serverAuth`+`clientAuth`, as MockServer's own generated certificates do) keep working unchanged.
 
 The same property has a second, client-side use: `MockServerClient` with control-plane mTLS required trusts only the certificates in its own `controlPlaneTLSMutualAuthenticationCAChain` for MockServer's server certificate (`NettySslContextFactory.controlPlaneTrustCertificates`). It does not add MockServer's CA certificate, so a client given a chain trusts nothing outside it, and the chain must contain the CA that signed MockServer's certificate.
+
+`MockServerClient`'s callback WebSocket (`WebSocketClient`, used by object callbacks) and breakpoint WebSocket (`BreakpointWebSocketClient`) use the same TLS context as its HTTP requests (`MockServerClient.webSocketSslContext()`, built by the one factory the HTTP client uses): they verify MockServer's certificate against the same certificates and, with control-plane mTLS, present the same client certificate. They used to trust any server certificate and present none. `WebSocketClient`'s three-argument constructor, which has no client to share a context with, uses `NettySslContextFactory.forMockServerClient` over the global configuration.
 
 ## Control Plane Authentication
 

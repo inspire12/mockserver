@@ -129,6 +129,10 @@ public class MockServerClient implements Stoppable {
     private ProxyConfiguration proxyConfiguration;
     private Supplier<String> controlPlaneJWTSupplier;
     private volatile NettyHttpClient nettyHttpClient;
+    private NettySslContextFactory controlPlaneSslContextFactory;
+    // not this client's monitor: a WebSocket reconnect on an event loop reads the factory while
+    // addBreakpoint holds that monitor waiting for the WebSocket to register
+    private final Object controlPlaneSslContextFactoryLock = new Object();
     private RequestDefinitionSerializer requestDefinitionSerializer = new RequestDefinitionSerializer(MOCK_SERVER_LOGGER);
     private ExpectationIdSerializer expectationIdSerializer = new ExpectationIdSerializer(MOCK_SERVER_LOGGER);
     private LogEventRequestAndResponseSerializer httpRequestResponseSerializer = new LogEventRequestAndResponseSerializer(MOCK_SERVER_LOGGER);
@@ -593,41 +597,67 @@ public class MockServerClient implements Stoppable {
             if (nettyHttpClient != null) {
                 return nettyHttpClient;
             }
-            NettySslContextFactory nettySslContextFactory = NettySslContextFactory.forMockServerClient(configuration.toServerConfiguration(), MOCK_SERVER_LOGGER);
-            Function<SslContextBuilder, SslContext> clientSslContextBuilderFunction = NettySslContextFactory.clientSslContextBuilderFunction;
-            if (configuration.controlPlaneTLSMutualAuthenticationRequired()) {
-                if (isBlank(configuration.controlPlanePrivateKeyPath()) || isBlank(configuration.controlPlaneX509CertificatePath()) || isBlank(configuration.controlPlaneTLSMutualAuthenticationCAChain())) {
-                    throw new IllegalArgumentException(
-                        "when 'controlPlaneTLSMutualAuthenticationRequired' is enabled 'controlPlanePrivateKeyPath', 'controlPlaneX509CertificatePath' and 'controlPlaneTLSMutualAuthenticationCAChain' must all be specified,\n\tfound controlPlanePrivateKeyPath: \"" + configuration.controlPlanePrivateKeyPath() + "\"\n\tand controlPlaneX509CertificatePath: \"" + configuration.controlPlaneX509CertificatePath() + "\"\n\tand controlPlaneTLSMutualAuthenticationCAChain: \"" + configuration.controlPlaneTLSMutualAuthenticationCAChain() + "\"");
-                }
-                clientSslContextBuilderFunction =
-                    sslContextBuilder -> {
-                        try {
-                            PrivateKey key = privateKeyFromPEMFile(configuration.controlPlanePrivateKeyPath());
-                            X509Certificate[] keyCertChain = x509ChainFromPEMFile(configuration.controlPlaneX509CertificatePath()).toArray(new X509Certificate[0]);
-                            X509Certificate[] trustCertCollection = NettySslContextFactory.controlPlaneTrustCertificates(configuration.controlPlaneTLSMutualAuthenticationCAChain());
-                            sslContextBuilder
-                                .keyManager(
-                                    key,
-                                    keyCertChain
-                                )
-                                .trustManager(trustCertCollection);
-                            return sslContextBuilder.build();
-                        } catch (SSLException e) {
-                            throw new RuntimeException(e);
-                        }
-                    };
-            }
             this.nettyHttpClient = new NettyHttpClient(
                 configuration.toServerConfiguration(),
                 MOCK_SERVER_LOGGER,
                 eventLoopGroup,
                 proxyConfiguration != null ? ImmutableList.of(proxyConfiguration) : null,
                 false,
-                nettySslContextFactory.withClientSslContextBuilderFunction(clientSslContextBuilderFunction)
+                controlPlaneSslContextFactory()
             );
             return nettyHttpClient;
         }
+    }
+
+    /**
+     * The TLS context factory for every connection this client makes to MockServer: its HTTP requests and its
+     * callback and breakpoint WebSockets all verify MockServer's certificate against the same certificates and,
+     * with control-plane mTLS, present the same client certificate.
+     */
+    private NettySslContextFactory controlPlaneSslContextFactory() {
+        synchronized (controlPlaneSslContextFactoryLock) {
+            if (controlPlaneSslContextFactory == null) {
+                controlPlaneSslContextFactory = newControlPlaneSslContextFactory();
+            }
+            return controlPlaneSslContextFactory;
+        }
+    }
+
+    private NettySslContextFactory newControlPlaneSslContextFactory() {
+        NettySslContextFactory nettySslContextFactory = NettySslContextFactory.forMockServerClient(configuration.toServerConfiguration(), MOCK_SERVER_LOGGER);
+        Function<SslContextBuilder, SslContext> clientSslContextBuilderFunction = NettySslContextFactory.clientSslContextBuilderFunction;
+        if (configuration.controlPlaneTLSMutualAuthenticationRequired()) {
+            if (isBlank(configuration.controlPlanePrivateKeyPath()) || isBlank(configuration.controlPlaneX509CertificatePath()) || isBlank(configuration.controlPlaneTLSMutualAuthenticationCAChain())) {
+                throw new IllegalArgumentException(
+                    "when 'controlPlaneTLSMutualAuthenticationRequired' is enabled 'controlPlanePrivateKeyPath', 'controlPlaneX509CertificatePath' and 'controlPlaneTLSMutualAuthenticationCAChain' must all be specified,\n\tfound controlPlanePrivateKeyPath: \"" + configuration.controlPlanePrivateKeyPath() + "\"\n\tand controlPlaneX509CertificatePath: \"" + configuration.controlPlaneX509CertificatePath() + "\"\n\tand controlPlaneTLSMutualAuthenticationCAChain: \"" + configuration.controlPlaneTLSMutualAuthenticationCAChain() + "\"");
+            }
+            clientSslContextBuilderFunction =
+                sslContextBuilder -> {
+                    try {
+                        PrivateKey key = privateKeyFromPEMFile(configuration.controlPlanePrivateKeyPath());
+                        X509Certificate[] keyCertChain = x509ChainFromPEMFile(configuration.controlPlaneX509CertificatePath()).toArray(new X509Certificate[0]);
+                        X509Certificate[] trustCertCollection = NettySslContextFactory.controlPlaneTrustCertificates(configuration.controlPlaneTLSMutualAuthenticationCAChain());
+                        sslContextBuilder
+                            .keyManager(
+                                key,
+                                keyCertChain
+                            )
+                            .trustManager(trustCertCollection);
+                        return sslContextBuilder.build();
+                    } catch (SSLException e) {
+                        throw new RuntimeException(e);
+                    }
+                };
+        }
+        return nettySslContextFactory.withClientSslContextBuilderFunction(clientSslContextBuilderFunction);
+    }
+
+    /**
+     * The TLS context for this client's callback and breakpoint WebSockets to MockServer: the same trust and
+     * client certificate as its HTTP requests, without ALPN because a WebSocket upgrade is HTTP/1.1.
+     */
+    SslContext webSocketSslContext() {
+        return controlPlaneSslContextFactory().createClientSslContext(false, false, remoteAddress().getHostName());
     }
 
     private HttpResponse sendRequest(HttpRequest request, boolean ignoreErrors, boolean throwClientException) {
@@ -4146,7 +4176,8 @@ public class MockServerClient implements Stoppable {
                     new Scheduler.SchedulerThreadFactory("BreakpointWSClient-eventLoop")
                 ),
                 bpClientId,
-                MOCK_SERVER_LOGGER
+                MOCK_SERVER_LOGGER,
+                this::webSocketSslContext
             );
             wsClient.register(
                 remoteAddress(),

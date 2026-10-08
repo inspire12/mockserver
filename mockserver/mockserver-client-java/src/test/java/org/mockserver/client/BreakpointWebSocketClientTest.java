@@ -388,7 +388,10 @@ public class BreakpointWebSocketClientTest {
         BreakpointWebSocketClient client = new BreakpointWebSocketClient(
             embeddedChannel.eventLoop().parent(),
             "test-client-id",
-            LOGGER
+            LOGGER,
+            () -> {
+                throw new AssertionError("no TLS connection is made");
+            }
         );
         // Inject the channel via reflection since the field is package-private
         try {

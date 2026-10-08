@@ -5,6 +5,7 @@ import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
+import org.mockserver.authentication.mtls.MTLSAuthenticationHandler;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.configuration.ConfigurationProperties;
 import org.mockserver.logging.MockServerLogger;
@@ -17,6 +18,7 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiConsumer;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
 import static org.mockserver.model.HttpRequest.request;
 
@@ -53,6 +55,9 @@ public class ControlPlaneAuthenticationRouteDenialTest {
         JWT, MTLS, OIDC
     }
 
+    // a chain, so the mTLS rows exercise the mTLS handler rather than the refusal of an unusable mTLS set-up
+    private static final String CONTROL_PLANE_CA_CHAIN = "org/mockserver/authentication/mtls/ca.pem";
+
     @Parameterized.Parameters(name = "{0} via {1}")
     public static Collection<Object[]> routes() {
         return Arrays.asList(new Object[][]{
@@ -63,12 +68,14 @@ public class ControlPlaneAuthenticationRouteDenialTest {
             {Mechanism.JWT, "ConfigurationDTO.applyTo", (Route) (configuration, mechanism) ->
                 new ConfigurationDTO().setControlPlaneJWTAuthenticationRequired(true).applyTo(configuration)},
 
-            {Mechanism.MTLS, "system property", (Route) (configuration, mechanism) ->
-                ConfigurationProperties.controlPlaneTLSMutualAuthenticationRequired(true)},
+            {Mechanism.MTLS, "system property", (Route) (configuration, mechanism) -> {
+                ConfigurationProperties.controlPlaneTLSMutualAuthenticationCAChain(CONTROL_PLANE_CA_CHAIN);
+                ConfigurationProperties.controlPlaneTLSMutualAuthenticationRequired(true);
+            }},
             {Mechanism.MTLS, "Configuration instance", (Route) (configuration, mechanism) ->
-                configuration.controlPlaneTLSMutualAuthenticationRequired(true)},
+                configuration.controlPlaneTLSMutualAuthenticationCAChain(CONTROL_PLANE_CA_CHAIN).controlPlaneTLSMutualAuthenticationRequired(true)},
             {Mechanism.MTLS, "ConfigurationDTO.applyTo", (Route) (configuration, mechanism) ->
-                new ConfigurationDTO().setControlPlaneTLSMutualAuthenticationRequired(true).applyTo(configuration)},
+                new ConfigurationDTO().setControlPlaneTLSMutualAuthenticationCAChain(CONTROL_PLANE_CA_CHAIN).setControlPlaneTLSMutualAuthenticationRequired(true).applyTo(configuration)},
 
             {Mechanism.OIDC, "system property", (Route) (configuration, mechanism) ->
                 ConfigurationProperties.controlPlaneOidcAuthenticationRequired(true)},
@@ -154,7 +161,9 @@ public class ControlPlaneAuthenticationRouteDenialTest {
         ConfigurationProperties.controlPlaneJWTAuthenticationRequired(false);
         ConfigurationProperties.controlPlaneTLSMutualAuthenticationRequired(false);
         ConfigurationProperties.controlPlaneOidcAuthenticationRequired(false);
+        ConfigurationProperties.controlPlaneTLSMutualAuthenticationCAChain("");
         System.clearProperty("mockserver.controlPlaneJWTAuthenticationRequired");
+        System.clearProperty("mockserver.controlPlaneTLSMutualAuthenticationCAChain");
         System.clearProperty("mockserver.controlPlaneTLSMutualAuthenticationRequired");
         System.clearProperty("mockserver.controlPlaneOidcAuthenticationRequired");
     }
@@ -177,6 +186,10 @@ public class ControlPlaneAuthenticationRouteDenialTest {
                 + " authentication is enabled via " + routeName,
             httpState.evaluateControlPlaneAuthentication(request().withPath("/mockserver/retrieve")).isAllowed(),
             is(false));
+        if (mechanism == Mechanism.MTLS) {
+            assertThat("the mTLS handler, not a deny-all fallback, must make the decision",
+                httpState.getControlPlaneAuthenticationHandler(), instanceOf(MTLSAuthenticationHandler.class));
+        }
     }
 
     @Test

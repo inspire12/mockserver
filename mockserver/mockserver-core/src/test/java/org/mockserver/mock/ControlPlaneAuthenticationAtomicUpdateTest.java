@@ -8,6 +8,7 @@ import org.junit.Test;
 import org.mockserver.authentication.AuthenticationHandler;
 import org.mockserver.authentication.AuthenticationResult;
 import org.mockserver.authentication.authorization.ControlPlaneRole;
+import org.mockserver.authentication.mtls.MTLSAuthenticationHandler;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.configuration.ControlPlaneAuthenticationSettings;
 import org.mockserver.logging.MockServerLogger;
@@ -31,6 +32,7 @@ import java.util.concurrent.locks.LockSupport;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
+import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
 import static org.mockserver.model.HttpRequest.request;
 
@@ -63,6 +65,8 @@ public class ControlPlaneAuthenticationAtomicUpdateTest {
         GatedConfiguration configuration = new GatedConfiguration();
         configuration
             .controlPlaneTLSMutualAuthenticationRequired(true)
+            // a chain, so the mTLS handler, not the refusal of an unusable mTLS set-up, rejects the request
+            .controlPlaneTLSMutualAuthenticationCAChain("org/mockserver/authentication/mtls/ca.pem")
             .controlPlaneJWTAuthenticationRequired(false)
             .controlPlaneJWTAuthenticationJWKSource(jwkSource)
             .controlPlaneOidcAuthenticationRequired(false)
@@ -108,6 +112,7 @@ public class ControlPlaneAuthenticationAtomicUpdateTest {
         GatedConfiguration configuration = mtlsRequired();
         HttpState httpState = httpState(configuration);
         assertThat("a request without a client certificate must be rejected before the switch", allowedWithoutCredentials(httpState), is(false));
+        assertThat("the mTLS handler, not a deny-all fallback, must reject it", httpState.getControlPlaneAuthenticationHandler(), instanceOf(MTLSAuthenticationHandler.class));
 
         CountDownLatch paused = new CountDownLatch(1);
         CountDownLatch resume = new CountDownLatch(1);

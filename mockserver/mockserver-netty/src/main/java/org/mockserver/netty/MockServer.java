@@ -11,6 +11,7 @@ import io.netty.channel.WriteBufferWaterMark;
 import io.netty.channel.socket.DatagramChannel;
 import io.netty.handler.codec.dns.DatagramDnsQueryDecoder;
 import io.netty.handler.codec.dns.DatagramDnsResponseEncoder;
+import org.mockserver.authentication.ControlPlaneAuthenticationHandlerFactory;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.lifecycle.ExpectationsListener;
 import org.mockserver.lifecycle.Ipv4UdpPortProbe;
@@ -180,6 +181,12 @@ public class MockServer extends LifeCycle {
         // would leak a listening socket per failed construction, on what this change deliberately makes
         // a COMMON user state. stop() still runs because LifeCycle's constructor has already built the
         // boss/worker event-loop groups by the time we get here; hoisting alone would not release those.
+        try {
+            ControlPlaneAuthenticationHandlerFactory.requireUsableControlPlaneMutualTls(configuration);
+        } catch (Throwable throwable) {
+            stopRefusedStart();
+            throw throwable;
+        }
         Integer configuredHttp3Port = configuration.http3Port();
         if (configuredHttp3Port != null && configuredHttp3Port > 0) {
             try {

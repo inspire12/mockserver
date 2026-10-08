@@ -7,6 +7,7 @@ import org.junit.AfterClass;
 import org.junit.Assume;
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.mockserver.authentication.ControlPlaneMutualTlsConfigurationException;
 import org.mockserver.client.MockServerClient;
 import org.mockserver.httpclient.NettyHttpClient;
 import org.mockserver.configuration.ConfigurationProperties;
@@ -455,6 +456,14 @@ public class MainTest {
 
         assertThat(printed, containsString("HTTP/3 is enabled (http3Port=8443) but UDP port 8443 could not be bound, so MockServer cannot start:"
             + " free the port if another application holds it, choose a different http3Port, or remove http3Port to run without HTTP/3 (underlying error: BindException: Address already in use)"));
+        assertThat("the fix must not be buried in a stack trace", printed, not(containsString("\tat ")));
+    }
+
+    @Test
+    public void shouldPrintTheMessageAloneWhenControlPlaneMutualTlsIsRefused() {
+        String printed = printedToSystemErr(() -> Main.logStartupFailure(new RuntimeException("wrapped by the caller", new ControlPlaneMutualTlsConfigurationException()), true));
+
+        assertThat(printed, containsString("controlPlaneTLSMutualAuthenticationRequired is enabled without controlPlaneTLSMutualAuthenticationCAChain"));
         assertThat("the fix must not be buried in a stack trace", printed, not(containsString("\tat ")));
     }
 

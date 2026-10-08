@@ -3,6 +3,7 @@ package org.mockserver.mockservlet;
 import com.google.common.collect.ImmutableSet;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
+import org.mockserver.authentication.ControlPlaneAuthenticationHandlerFactory;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.log.MockServerEventLog;
 import org.mockserver.logging.MockServerLogger;
@@ -53,6 +54,7 @@ public class MockServerServlet extends HttpServlet implements ServletContextList
     @SuppressWarnings("WeakerAccess")
     public MockServerServlet() {
         this.configuration = configuration();
+        ControlPlaneAuthenticationHandlerFactory.requireUsableControlPlaneMutualTls(this.configuration);
         this.mockServerLogger = new MockServerLogger(MockServerEventLog.class);
         this.httpServletRequestToMockServerRequestDecoder = new HttpServletRequestToMockServerHttpRequestDecoder(this.configuration, this.mockServerLogger);
         this.scheduler = new Scheduler(this.configuration, mockServerLogger);

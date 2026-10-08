@@ -24,6 +24,7 @@ import org.mockserver.netty.responsewriter.NettyResponseWriter;
 import org.mockserver.responsewriter.ControlPlaneFailureResponse;
 import org.mockserver.responsewriter.ResponseWriter;
 import org.mockserver.scheduler.Scheduler;
+import org.mockserver.authentication.ControlPlaneAuthenticationHandlerFactory;
 import org.mockserver.authentication.ProxyAuthenticationValidator;
 import org.mockserver.serialization.Base64Converter;
 import org.mockserver.serialization.ConfigurationSerializer;
@@ -338,6 +339,8 @@ public class HttpRequestHandler extends SimpleChannelInboundHandler<HttpRequest>
                         try {
                             ConfigurationDTO configurationDTO = ObjectMapperFactory.createObjectMapper().readValue(request.getBodyAsText(), ConfigurationDTO.class);
                             synchronized (configuration) {
+                                // refused whole, before any of it is applied
+                                ControlPlaneAuthenticationHandlerFactory.requireUsableControlPlaneMutualTls(configurationDTO, configuration);
                                 // audit (but do not block) a runtime TLS-posture downgrade BEFORE applying,
                                 // while the configuration still holds the pre-change values to compare against
                                 httpState.warnIfLoweringTlsPosture(configurationDTO);

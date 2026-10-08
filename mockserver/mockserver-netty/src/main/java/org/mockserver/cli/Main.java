@@ -2,6 +2,7 @@ package org.mockserver.cli;
 
 import com.google.common.base.Joiner;
 import org.apache.commons.lang3.exception.ExceptionUtils;
+import org.mockserver.authentication.ControlPlaneMutualTlsConfigurationException;
 import org.mockserver.client.MockServerClient;
 import org.mockserver.configuration.ConfigurationProperties;
 import org.mockserver.mock.Expectation;
@@ -229,8 +230,9 @@ public class Main {
     }
 
     /**
-     * A missing HTTP/3 native, and an HTTP/3 or DNS port that cannot be used, are configuration problems whose
-     * fixes the message already spells out, so print just that message: a stack trace buries the fix.
+     * A missing HTTP/3 native, an HTTP/3 or DNS port that cannot be used, and an unusable control-plane mTLS
+     * set-up are configuration problems whose fixes the message already spells out, so print just that
+     * message: a stack trace buries the fix.
      */
     static void logStartupFailure(Throwable throwable, boolean disableSystemOut) {
         String http3Failure = http3FailureItsMessageExplains(throwable);
@@ -241,6 +243,11 @@ public class Main {
         String dnsFailure = dnsFailureItsMessageExplains(throwable);
         if (dnsFailure != null) {
             logFailureItsMessageExplains(new LogEntry().setMessageFormat("DNS start-up failed:{}"), dnsFailure, disableSystemOut);
+            return;
+        }
+        ControlPlaneMutualTlsConfigurationException controlPlaneMutualTls = ExceptionUtils.throwableOfType(throwable, ControlPlaneMutualTlsConfigurationException.class);
+        if (controlPlaneMutualTls != null) {
+            logFailureItsMessageExplains(new LogEntry().setMessageFormat("control plane mTLS configuration refused:{}"), controlPlaneMutualTls.getMessage(), disableSystemOut);
             return;
         }
         MOCK_SERVER_LOGGER.logEvent(

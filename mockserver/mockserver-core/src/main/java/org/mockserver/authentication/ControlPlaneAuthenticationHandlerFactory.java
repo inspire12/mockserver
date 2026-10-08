@@ -4,14 +4,22 @@ import org.mockserver.authentication.jwt.JWTAuthenticationHandler;
 import org.mockserver.authentication.mtls.MTLSAuthenticationHandler;
 import org.mockserver.authentication.oidc.OidcAuthenticationHandler;
 import org.mockserver.configuration.Configuration;
+import org.mockserver.configuration.ConfigurationProperties;
 import org.mockserver.configuration.ControlPlaneAuthenticationSettings;
+import org.mockserver.configuration.ServerTlsSettings;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
+import org.mockserver.serialization.model.ConfigurationDTO;
 import org.mockserver.socket.tls.NettySslContextFactory;
+import org.mockserver.socket.tls.PEMToFile;
 import org.slf4j.event.Level;
 
+import java.security.cert.X509Certificate;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
 
 /**
  * Builds the control-plane {@link AuthenticationHandler} chain from a {@link Configuration}.
@@ -66,7 +74,8 @@ public class ControlPlaneAuthenticationHandlerFactory {
      * Build the control-plane authentication handler from one settings snapshot, so every mechanism it
      * enables and every value it is configured with come from the same configuration update.
      *
-     * @param configuration supplies the certificate authority the mTLS trust chain is completed with
+     * @param configuration supplies MockServer's CA certificate, which control-plane mTLS trusts only when no
+     *                      {@code controlPlaneTLSMutualAuthenticationCAChain} is set
      */
     public static AuthenticationHandler build(ControlPlaneAuthenticationSettings settings, Configuration configuration, MockServerLogger mockServerLogger) {
         if (!settings.authenticationRequired()) {
@@ -77,8 +86,7 @@ public class ControlPlaneAuthenticationHandlerFactory {
             if (Boolean.TRUE.equals(settings.controlPlaneTLSMutualAuthenticationRequired())) {
                 handlers.add(new MTLSAuthenticationHandler(
                     mockServerLogger,
-                    new NettySslContextFactory(configuration, mockServerLogger, true)
-                        .trustCertificateChain(settings.controlPlaneTLSMutualAuthenticationCAChain())
+                    controlPlaneClientCertificateTrust(settings.controlPlaneTLSMutualAuthenticationCAChain(), configuration, mockServerLogger)
                 ));
             }
             if (Boolean.TRUE.equals(settings.controlPlaneJWTAuthenticationRequired())) {
@@ -115,6 +123,91 @@ public class ControlPlaneAuthenticationHandlerFactory {
             }
             return new DenyAllAuthenticationHandler();
         }
+    }
+
+    /**
+     * The certificate authorities a control-plane client certificate must chain to. With a
+     * {@code controlPlaneTLSMutualAuthenticationCAChain}, only the certificates in it: MockServer's CA is not
+     * added. Without one, MockServer's CA certificate, unless that is the bundled CA, whose private key is
+     * published in the jar; then construction fails, so every control-plane request is denied.
+     */
+    static X509Certificate[] controlPlaneClientCertificateTrust(String controlPlaneTLSMutualAuthenticationCAChain, Configuration configuration, MockServerLogger mockServerLogger) {
+        if (isNotBlank(controlPlaneTLSMutualAuthenticationCAChain)) {
+            X509Certificate[] trusted = NettySslContextFactory.controlPlaneTrustCertificates(controlPlaneTLSMutualAuthenticationCAChain);
+            if (mockServerLogger != null && Arrays.asList(trusted).contains(bundledCertificateAuthority())) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.WARN)
+                        .setMessageFormat("controlPlaneTLSMutualAuthenticationCAChain includes the bundled default Certificate Authority, whose private key is published in the MockServer jar, so anyone can create a client certificate the control plane accepts; remove it from the chain:{}")
+                        .setArguments(controlPlaneTLSMutualAuthenticationCAChain)
+                );
+            }
+            return trusted;
+        }
+        X509Certificate[] mockServerCertificateAuthority = new NettySslContextFactory(configuration, mockServerLogger, true).trustCertificateChain(null);
+        if (Arrays.asList(mockServerCertificateAuthority).contains(bundledCertificateAuthority())) {
+            throw new ControlPlaneMutualTlsConfigurationException();
+        }
+        return mockServerCertificateAuthority;
+    }
+
+    /**
+     * Refuses a configuration that requires control-plane mTLS with no {@code controlPlaneTLSMutualAuthenticationCAChain}
+     * while MockServer's CA certificate is the bundled CA. Every start path calls this before binding a port.
+     *
+     * @throws ControlPlaneMutualTlsConfigurationException naming both fixes
+     */
+    public static void requireUsableControlPlaneMutualTls(Configuration configuration) {
+        ControlPlaneAuthenticationSettings controlPlane = ControlPlaneAuthenticationSettings.of(configuration);
+        ServerTlsSettings tls = ServerTlsSettings.of(configuration);
+        requireUsableControlPlaneMutualTls(
+            controlPlane.controlPlaneTLSMutualAuthenticationRequired(),
+            controlPlane.controlPlaneTLSMutualAuthenticationCAChain(),
+            tls.dynamicallyCreateCertificateAuthorityCertificate(),
+            tls.certificateAuthorityCertificate()
+        );
+    }
+
+    /**
+     * The same check for the configuration {@code update} would leave, so {@code PUT /mockserver/configuration} can
+     * refuse it before applying any of it.
+     *
+     * @throws ControlPlaneMutualTlsConfigurationException naming both fixes
+     */
+    public static void requireUsableControlPlaneMutualTls(ConfigurationDTO update, Configuration configuration) {
+        ControlPlaneAuthenticationSettings controlPlane = ControlPlaneAuthenticationSettings.of(configuration);
+        ServerTlsSettings tls = ServerTlsSettings.of(configuration);
+        requireUsableControlPlaneMutualTls(
+            update.getControlPlaneTLSMutualAuthenticationRequired() != null ? update.getControlPlaneTLSMutualAuthenticationRequired() : controlPlane.controlPlaneTLSMutualAuthenticationRequired(),
+            update.getControlPlaneTLSMutualAuthenticationCAChain() != null ? update.getControlPlaneTLSMutualAuthenticationCAChain() : controlPlane.controlPlaneTLSMutualAuthenticationCAChain(),
+            update.getDynamicallyCreateCertificateAuthorityCertificate() != null ? update.getDynamicallyCreateCertificateAuthorityCertificate() : tls.dynamicallyCreateCertificateAuthorityCertificate(),
+            update.getCertificateAuthorityCertificate() != null ? update.getCertificateAuthorityCertificate() : tls.certificateAuthorityCertificate()
+        );
+    }
+
+    private static void requireUsableControlPlaneMutualTls(Boolean mutualTlsRequired, String controlPlaneTLSMutualAuthenticationCAChain, Boolean dynamicallyCreateCertificateAuthorityCertificate, String certificateAuthorityCertificate) {
+        if (Boolean.TRUE.equals(mutualTlsRequired)
+            && !isNotBlank(controlPlaneTLSMutualAuthenticationCAChain)
+            && !Boolean.TRUE.equals(dynamicallyCreateCertificateAuthorityCertificate)
+            && isBundledCertificateAuthority(certificateAuthorityCertificate)) {
+            throw new ControlPlaneMutualTlsConfigurationException();
+        }
+    }
+
+    private static boolean isBundledCertificateAuthority(String certificateAuthorityCertificate) {
+        if (ConfigurationProperties.DEFAULT_CERTIFICATE_AUTHORITY_X509_CERTIFICATE.equals(certificateAuthorityCertificate)) {
+            return true;
+        }
+        try {
+            return bundledCertificateAuthority().equals(PEMToFile.x509FromPEMFile(certificateAuthorityCertificate));
+        } catch (RuntimeException unreadable) {
+            // an unreadable CA certificate fails the server's own TLS set-up with its own message
+            return false;
+        }
+    }
+
+    private static X509Certificate bundledCertificateAuthority() {
+        return PEMToFile.x509FromPEMFile(ConfigurationProperties.DEFAULT_CERTIFICATE_AUTHORITY_X509_CERTIFICATE);
     }
 
     /**

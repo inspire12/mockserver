@@ -25,9 +25,7 @@ import io.netty.handler.codec.http.websocketx.WebSocketClientHandshaker;
 import io.netty.handler.codec.http.websocketx.WebSocketClientHandshakerFactory;
 import io.netty.handler.codec.http.websocketx.WebSocketFrame;
 import io.netty.handler.codec.http.websocketx.WebSocketVersion;
-import io.netty.handler.ssl.SslContextBuilder;
-import io.netty.handler.ssl.SslProvider;
-import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
+import io.netty.handler.ssl.SslContext;
 import io.netty.util.AttributeKey;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
@@ -43,13 +41,13 @@ import org.mockserver.serialization.model.WebSocketErrorDTO;
 import org.mockserver.socket.NettyAllocator;
 import org.slf4j.event.Level;
 
-import javax.net.ssl.SSLException;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Future;
+import java.util.function.Supplier;
 
 import static org.mockserver.closurecallback.websocketregistry.WebSocketClientRegistry.BREAKPOINT_ID_HEADER_NAME;
 import static org.mockserver.closurecallback.websocketregistry.WebSocketClientRegistry.WEB_SOCKET_CORRELATION_ID_HEADER_NAME;
@@ -91,6 +89,7 @@ class BreakpointWebSocketClient {
     private final WebSocketMessageSerializer webSocketMessageSerializer;
     private final EventLoopGroup eventLoopGroup;
     private final String clientId;
+    private final Supplier<SslContext> sslContextSupplier;
     private volatile Channel channel;
     private volatile boolean isStopped = false;
 
@@ -99,11 +98,16 @@ class BreakpointWebSocketClient {
     private final ConcurrentHashMap<String, BreakpointResponseHandler> responseHandlers = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, BreakpointStreamFrameHandler> streamFrameHandlers = new ConcurrentHashMap<>();
 
-    BreakpointWebSocketClient(EventLoopGroup eventLoopGroup, String clientId, MockServerLogger mockServerLogger) {
+    /**
+     * @param sslContextSupplier the TLS context for a secure connection: the one {@code MockServerClient} uses for
+     *                           its HTTP requests, so both trust the same server certificates
+     */
+    BreakpointWebSocketClient(EventLoopGroup eventLoopGroup, String clientId, MockServerLogger mockServerLogger, Supplier<SslContext> sslContextSupplier) {
         this.eventLoopGroup = eventLoopGroup;
         this.clientId = clientId;
         this.mockServerLogger = mockServerLogger;
         this.webSocketMessageSerializer = new WebSocketMessageSerializer(mockServerLogger);
+        this.sslContextSupplier = sslContextSupplier;
     }
 
     String getClientId() {
@@ -164,6 +168,7 @@ class BreakpointWebSocketClient {
     private Future<String> register(InetSocketAddress serverAddress, String contextPath, boolean isSecure, int reconnectAttempts) {
         CompletableFuture<String> registrationFuture = new CompletableFuture<>();
         try {
+            final SslContext sslContext = isSecure ? sslContextSupplier.get() : null;
             new Bootstrap()
                 .group(this.eventLoopGroup)
                 .channel(NioSocketChannel.class)
@@ -172,19 +177,8 @@ class BreakpointWebSocketClient {
                 .handler(new ChannelInitializer<SocketChannel>() {
                     @Override
                     protected void initChannel(SocketChannel ch) throws URISyntaxException {
-                        if (isSecure) {
-                            try {
-                                ch.pipeline().addLast(
-                                    SslContextBuilder
-                                        .forClient()
-                                        .sslProvider(SslProvider.JDK)
-                                        .trustManager(InsecureTrustManagerFactory.INSTANCE)
-                                        .build()
-                                        .newHandler(ch.alloc(), serverAddress.getHostName(), serverAddress.getPort())
-                                );
-                            } catch (SSLException e) {
-                                throw new RuntimeException("Exception when configuring SSL Handler", e);
-                            }
+                        if (sslContext != null) {
+                            ch.pipeline().addLast(sslContext.newHandler(ch.alloc(), serverAddress.getHostName(), serverAddress.getPort()));
                         }
 
                         ch.pipeline().addLast(new HttpClientCodec());

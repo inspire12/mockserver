@@ -1,5 +1,6 @@
 package org.mockserver.closurecallback.websocketclient;
 
+import com.google.common.base.Suppliers;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFutureListener;
@@ -11,9 +12,7 @@ import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.handler.codec.http.HttpClientCodec;
 import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
-import io.netty.handler.ssl.SslContextBuilder;
-import io.netty.handler.ssl.SslProvider;
-import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
+import io.netty.handler.ssl.SslContext;
 import io.netty.util.AttributeKey;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.LoggingHandler;
@@ -28,15 +27,17 @@ import org.mockserver.serialization.WebSocketMessageSerializer;
 import org.mockserver.serialization.model.WebSocketClientIdDTO;
 import org.mockserver.serialization.model.WebSocketErrorDTO;
 import org.mockserver.socket.NettyAllocator;
+import org.mockserver.socket.tls.NettySslContextFactory;
 import org.slf4j.event.Level;
 
-import javax.net.ssl.SSLException;
 import java.net.InetSocketAddress;
 import java.net.URISyntaxException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Future;
+import java.util.function.Supplier;
 
 import static org.mockserver.closurecallback.websocketregistry.WebSocketClientRegistry.WEB_SOCKET_CORRELATION_ID_HEADER_NAME;
+import static org.mockserver.configuration.Configuration.configuration;
 import static org.slf4j.event.Level.TRACE;
 import static org.slf4j.event.Level.WARN;
 
@@ -55,18 +56,38 @@ public class WebSocketClient<T extends HttpMessage> {
     private boolean isStopped = false;
     private final EventLoopGroup eventLoopGroup;
     private final String clientId;
+    private final Supplier<SslContext> sslContextSupplier;
     public static final String CLIENT_REGISTRATION_ID_HEADER = "X-CLIENT-REGISTRATION-ID";
 
+    /**
+     * A client that, over TLS, verifies MockServer's certificate as {@code MockServerClient} does for the
+     * global configuration. Its TLS context factory is built on the first secure connection and reused.
+     */
     public WebSocketClient(final EventLoopGroup eventLoopGroup, final String clientId, final MockServerLogger mockServerLogger) {
+        this(eventLoopGroup, clientId, mockServerLogger, mockServerClientSslContext(mockServerLogger));
+    }
+
+    private static Supplier<SslContext> mockServerClientSslContext(final MockServerLogger mockServerLogger) {
+        Supplier<NettySslContextFactory> factory = Suppliers.memoize(() -> NettySslContextFactory.forMockServerClient(configuration(), mockServerLogger));
+        return () -> factory.get().createClientSslContext(false, false);
+    }
+
+    /**
+     * @param sslContextSupplier the TLS context for a secure connection, which decides which server certificates
+     *                           are trusted and which client certificate is presented
+     */
+    public WebSocketClient(final EventLoopGroup eventLoopGroup, final String clientId, final MockServerLogger mockServerLogger, final Supplier<SslContext> sslContextSupplier) {
         this.eventLoopGroup = eventLoopGroup;
         this.clientId = clientId;
         this.mockServerLogger = mockServerLogger;
         this.webSocketMessageSerializer = new WebSocketMessageSerializer(mockServerLogger);
+        this.sslContextSupplier = sslContextSupplier;
     }
 
     private Future<String> register(final InetSocketAddress serverAddress, final String contextPath, final boolean isSecure, int reconnectAttempts) {
         CompletableFuture<String> registrationFuture = new CompletableFuture<>();
         try {
+            final SslContext sslContext = isSecure ? sslContextSupplier.get() : null;
             new Bootstrap()
                 .group(this.eventLoopGroup)
                 .channel(NioSocketChannel.class)
@@ -75,19 +96,8 @@ public class WebSocketClient<T extends HttpMessage> {
                 .handler(new ChannelInitializer<SocketChannel>() {
                     @Override
                     protected void initChannel(SocketChannel ch) throws URISyntaxException {
-                        if (isSecure) {
-                            try {
-                                ch.pipeline().addLast(
-                                    SslContextBuilder
-                                        .forClient()
-                                        .sslProvider(SslProvider.JDK)
-                                        .trustManager(InsecureTrustManagerFactory.INSTANCE)
-                                        .build()
-                                        .newHandler(ch.alloc(), serverAddress.getHostName(), serverAddress.getPort())
-                                );
-                            } catch (SSLException e) {
-                                throw new WebSocketException("Exception when configuring SSL Handler", e);
-                            }
+                        if (sslContext != null) {
+                            ch.pipeline().addLast(sslContext.newHandler(ch.alloc(), serverAddress.getHostName(), serverAddress.getPort()));
                         }
 
                         ch.pipeline().addLast(new HttpClientCodec());

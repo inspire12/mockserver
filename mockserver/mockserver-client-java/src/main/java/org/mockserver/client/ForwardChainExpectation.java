@@ -555,7 +555,8 @@ public class ForwardChainExpectation {
             webSocketClient = new WebSocketClient<>(
                 new NioEventLoopGroup(configuration.webSocketClientEventLoopThreadCount(), new Scheduler.SchedulerThreadFactory(WebSocketClient.class.getSimpleName() + "-eventLoop")),
                 clientId,
-                mockServerLogger
+                mockServerLogger,
+                () -> mockServerClient.webSocketSslContext()
             );
             final Future<String> register = webSocketClient.registerExpectationCallback(
                 expectationCallback,

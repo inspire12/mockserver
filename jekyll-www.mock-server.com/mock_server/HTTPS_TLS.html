@@ -498,6 +498,8 @@ curl --cacert certs/ca.pem \
      -H "Content-Type: application/json" \
      -d '[{"httpRequest": {"path": "/test"}, "httpResponse": {"body": "ok"}}]'</code></pre>
 
+<p>MockServer accepts only client certificates signed by a CA in <code class="inline_code">controlPlaneTLSMutualAuthenticationCAChain</code>. <strong>Changed:</strong> earlier versions also accepted client certificates signed by MockServer's own CA certificate. If your control-plane client certificates are signed by MockServer's CA, add that CA to the chain; if it is the CA bundled with MockServer, whose private key is published, sign them with your own CA instead. With no chain set, MockServer accepts client certificates signed by its own CA certificate, unless that is the bundled CA, in which case it refuses to start: set the chain, or give MockServer its own CA with <code class="inline_code">mockserver.certificateAuthorityCertificate</code> and <code class="inline_code">mockserver.certificateAuthorityPrivateKey</code>.</p>
+
 <a id="java_client_trust" class="anchor" href="#java_client_trust">&nbsp;</a>
 
 <h3>Which Certificates the Java Client Trusts</h3>
@@ -507,6 +509,8 @@ curl --cacert certs/ca.pem \
 <p><strong>Changed:</strong> earlier versions also trusted MockServer's CA certificate (<code class="inline_code">mockserver.certificateAuthorityCertificate</code>) when <code class="inline_code">controlPlaneTLSMutualAuthenticationCAChain</code> was set. If MockServer's certificate is signed by MockServer's CA (the default) and you use control-plane mTLS, add MockServer's CA certificate to the chain the client uses, or the client fails the TLS handshake.</p>
 
 <p>The client logs this at INFO the first time it sends a request. Server forwarding settings, such as <code class="inline_code">mockserver.forwardProxyTLSX509CertificatesTrustManagerType</code>, do not affect the client.</p>
+
+<p>The WebSocket connections the client opens for callbacks and breakpoints check MockServer's certificate in the same way and, with control-plane mTLS, present the same client certificate. Earlier versions accepted any certificate on these connections.</p>
 
 <a id="mtls_java_client" class="anchor" href="#mtls_java_client">&nbsp;</a>
 

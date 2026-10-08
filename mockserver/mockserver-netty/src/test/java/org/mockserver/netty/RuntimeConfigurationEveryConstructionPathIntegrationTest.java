@@ -80,6 +80,9 @@ public class RuntimeConfigurationEveryConstructionPathIntegrationTest {
     private static final String SENSITIVE_CREDENTIAL = "Bearer runtime-config-split-secret";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final int RUNTIME_DELAY_MILLIS = 750;
+    // with a chain: control-plane mTLS without one, while MockServer's CA is the bundled CA, is refused with 400
+    private static final String ENABLE_CONTROL_PLANE_MUTUAL_TLS = "{\"controlPlaneTLSMutualAuthenticationRequired\": true, "
+        + "\"controlPlaneTLSMutualAuthenticationCAChain\": \"org/mockserver/netty/integration/tls/ca.pem\"}";
 
     /** A started server, whichever API built it. {@code liveConfiguration} is null where none is exposed. */
     private static final class Started {
@@ -162,7 +165,7 @@ public class RuntimeConfigurationEveryConstructionPathIntegrationTest {
         assertThat("baseline: the control plane is open by default",
             send("PUT", "/mockserver/clear", "").statusCode, is(200));
 
-        Response put = send("PUT", "/mockserver/configuration", "{\"controlPlaneTLSMutualAuthenticationRequired\": true}");
+        Response put = send("PUT", "/mockserver/configuration", ENABLE_CONTROL_PLANE_MUTUAL_TLS);
         assertThat(put.body, put.statusCode, is(200));
 
         assertThat("PUT /mockserver/configuration reported control-plane mTLS as enabled, so a control-plane "
@@ -242,7 +245,7 @@ public class RuntimeConfigurationEveryConstructionPathIntegrationTest {
             assertThat("baseline: the control plane is open by default over h2c",
                 h2c.send("PUT", "/mockserver/clear", "").status, is("200"));
 
-            H2cResponse put = h2c.send("PUT", "/mockserver/configuration", "{\"controlPlaneTLSMutualAuthenticationRequired\": true}");
+            H2cResponse put = h2c.send("PUT", "/mockserver/configuration", ENABLE_CONTROL_PLANE_MUTUAL_TLS);
             assertThat(put.body, put.status, is("200"));
 
             assertThat("the next control-plane call on the same h2c connection, without a client certificate, must be rejected",
