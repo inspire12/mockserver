@@ -23,6 +23,7 @@ import ConfirmDialog from './ConfirmDialog';
 import TruncatedText from './TruncatedText';
 import { humanizeError } from '../lib/errorMessage';
 import { useHeldItems } from '../hooks/useHeldItems';
+import { useWithWholeExpectation } from '../hooks/useWithWholeExpectation';
 import { useDashboardStore } from '../store';
 import {
   buildScenarioGraphModel,
@@ -197,6 +198,15 @@ export default function ScenarioPanel({ connectionParams }: ScenarioPanelProps) 
   // form and switches to view:'composer' (navigates from the standalone
   // Scenarios nav view; the Mocks view flips to its Compose tab, see below).
   const editExpectation = useDashboardStore((s) => s.editExpectation);
+  const withWholeExpectation = useWithWholeExpectation();
+  // A bound value may be shortened in the live update, so the Composer gets the whole expectation.
+  const handleEditBound = useCallback(
+    (value: Record<string, unknown>) => {
+      const item = heldExpectations.find((e) => e.value === value) ?? { key: String(value['id'] ?? ''), value };
+      withWholeExpectation(item, (whole) => editExpectation(whole.value));
+    },
+    [heldExpectations, withWholeExpectation, editExpectation],
+  );
 
   // Per-scenario detail: what each scenario IS — its states and the expectations
   // bound to each state. The server list annotates each with its live current
@@ -371,7 +381,7 @@ export default function ScenarioPanel({ connectionParams }: ScenarioPanelProps) 
         <ScenarioDetailsSection
           details={scenarioDetails}
           selectedScenario={scenarioName.trim()}
-          onEdit={(value) => editExpectation(value)}
+          onEdit={handleEditBound}
         />
       )}
 

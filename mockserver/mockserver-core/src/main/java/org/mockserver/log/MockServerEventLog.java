@@ -867,29 +867,73 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
      */
     private void truncateBodiesForLog(LogEntry logEntry) {
         int maxLoggedBodyBytes = configuration.maxLoggedBodyBytes();
+        // one cut copy per original, so an expectation and its clone (which share their request and response)
+        // keep one copy between them, the one the weigher charges with the named expectation
+        Map<Object, Object> cutCopies = new IdentityHashMap<>();
         RequestDefinition requestDefinition = logEntry.getHttpRequest();
         if (requestDefinition instanceof HttpRequest) {
             HttpRequest httpRequest = (HttpRequest) requestDefinition;
-            byte[] body = httpRequest.getBodyAsRawBytes();
-            if (body != null && body.length > maxLoggedBodyBytes) {
-                HttpRequest truncated = httpRequest
-                    .clone()
-                    .withBody(Arrays.copyOf(body, maxLoggedBodyBytes))
-                    .withHeader(TRUNCATED_BODY_HEADER, String.valueOf(body.length));
+            HttpRequest truncated = (HttpRequest) cutOnce(httpRequest, maxLoggedBodyBytes, cutCopies);
+            if (truncated != httpRequest) {
                 logEntry.setHttpRequest(truncated).replaceQuoted(httpRequest, truncated);
             }
         }
         HttpResponse httpResponse = logEntry.getHttpResponse();
-        if (httpResponse != null) {
-            byte[] body = httpResponse.getBodyAsRawBytes();
-            if (body != null && body.length > maxLoggedBodyBytes) {
-                HttpResponse truncated = httpResponse
-                    .clone()
-                    .withBody(Arrays.copyOf(body, maxLoggedBodyBytes))
-                    .withHeader(TRUNCATED_BODY_HEADER, String.valueOf(body.length));
-                logEntry.setHttpResponse(truncated).replaceQuoted(httpResponse, truncated);
-            }
+        HttpResponse truncatedResponse = (HttpResponse) cutOnce(httpResponse, maxLoggedBodyBytes, cutCopies);
+        if (truncatedResponse != httpResponse) {
+            logEntry.setHttpResponse(truncatedResponse).replaceQuoted(httpResponse, truncatedResponse);
         }
+        // An expectation or action the entry names or quotes, and a matcher's "because", copy whole bodies too;
+        // once the expectation is removed only the log holds them.
+        logEntry.boundQuotedBodies(quoted -> cutOnce(quoted, maxLoggedBodyBytes, cutCopies), maxLoggedBodyBytes);
+    }
+
+    private static Object cutOnce(Object quoted, int maxLoggedBodyBytes, Map<Object, Object> cutCopies) {
+        if (quoted == null) {
+            return null;
+        }
+        Object cut = cutCopies.get(quoted);
+        if (cut == null) {
+            if (quoted instanceof HttpRequest) {
+                cut = truncatedForLog((HttpRequest) quoted, maxLoggedBodyBytes);
+            } else if (quoted instanceof HttpResponse) {
+                cut = truncatedForLog((HttpResponse) quoted, maxLoggedBodyBytes);
+            } else if (quoted instanceof Expectation) {
+                Expectation expectation = (Expectation) quoted;
+                RequestDefinition request = expectation.getHttpRequest();
+                Object cutRequest = request instanceof HttpRequest ? cutOnce(request, maxLoggedBodyBytes, cutCopies) : request;
+                Object cutResponse = cutOnce(expectation.getHttpResponse(), maxLoggedBodyBytes, cutCopies);
+                cut = cutRequest == request && cutResponse == expectation.getHttpResponse()
+                    ? expectation
+                    : expectation.cloneWith((RequestDefinition) cutRequest, (HttpResponse) cutResponse);
+            } else {
+                cut = quoted;
+            }
+            cutCopies.put(quoted, cut);
+        }
+        return cut;
+    }
+
+    private static HttpRequest truncatedForLog(HttpRequest httpRequest, int maxLoggedBodyBytes) {
+        byte[] body = httpRequest.getBodyAsRawBytes();
+        if (body == null || body.length <= maxLoggedBodyBytes) {
+            return httpRequest;
+        }
+        return httpRequest
+            .clone()
+            .withBody(Arrays.copyOf(body, maxLoggedBodyBytes))
+            .withHeader(TRUNCATED_BODY_HEADER, String.valueOf(body.length));
+    }
+
+    private static HttpResponse truncatedForLog(HttpResponse httpResponse, int maxLoggedBodyBytes) {
+        byte[] body = httpResponse == null ? null : httpResponse.getBodyAsRawBytes();
+        if (body == null || body.length <= maxLoggedBodyBytes) {
+            return httpResponse;
+        }
+        return httpResponse
+            .clone()
+            .withBody(Arrays.copyOf(body, maxLoggedBodyBytes))
+            .withHeader(TRUNCATED_BODY_HEADER, String.valueOf(body.length));
     }
 
     /**

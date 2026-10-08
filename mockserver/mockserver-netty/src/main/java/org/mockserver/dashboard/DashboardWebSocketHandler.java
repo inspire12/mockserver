@@ -1084,13 +1084,16 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
                             // Description is recomputed every time (it is cheap for the common
                             // HttpRequest case and its padding depends on the batch's max length,
                             // so it must be derived from the CURRENT set, not memoised per item).
-                            JsonNode expectationJsonNode = activeExpectationValue(requestMatcher);
+                            ActiveExpectationJson expectationJson = activeExpectationValue(requestMatcher);
                             Description description = activeExpectationsDescriptionProcessor.description(requestMatcher.getExpectation().getHttpRequest(), requestMatcher.getExpectation().getId());
-                            return ImmutableMap.of(
-                                "key", requestMatcher.getExpectation().getId(),
-                                "description", description != null ? description : requestMatcher.getExpectation().getId(),
-                                "value", expectationJsonNode
-                            );
+                            ImmutableMap.Builder<String, Object> item = ImmutableMap.<String, Object>builder()
+                                .put("key", requestMatcher.getExpectation().getId())
+                                .put("description", description != null ? description : requestMatcher.getExpectation().getId())
+                                .put("value", expectationJson.value);
+                            if (expectationJson.truncation != null) {
+                                item.put("truncatedExpectation", expectationJson.truncation);
+                            }
+                            return item.build();
                         })
                         .collect(Collectors.toList());
                     List<Map<String, Object>> proxiedRequests = new LinkedList<>();
@@ -1382,7 +1385,8 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
     }
 
     /**
-     * Returns the serialised JSON tree for the given matcher's expectation, reusing the cached tree
+     * Returns the serialised JSON tree for the given matcher's expectation, its long bodies cut, and the
+     * marker saying so (null when nothing was cut), reusing the cached tree
      * when the expectation is unchanged. "Unchanged" is judged conservatively against the CURRENT
      * matcher state: the same Expectation object reference AND the same remaining Times as when the
      * tree was built. A control-plane edit swaps the reference; the serving path only ever changes
@@ -1392,21 +1396,25 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
      * byte-identical for the same (reference, remainingTimes) — and the cached tree is thereafter only
      * ever read (Jackson serialisation does not mutate it), so sharing it across connections is safe.
      */
-    private JsonNode activeExpectationValue(HttpRequestMatcher requestMatcher) {
+    private ActiveExpectationJson activeExpectationValue(HttpRequestMatcher requestMatcher) {
         Expectation expectation = requestMatcher.getExpectation();
         String id = expectation.getId();
         int remainingTimes = remainingTimesOf(expectation);
         synchronized (activeExpectationJsonCacheLock) {
             ActiveExpectationJson cached = activeExpectationJsonCache().get(id);
             if (cached != null && cached.expectation == expectation && cached.remainingTimes == remainingTimes) {
-                return cached.value;
+                return cached;
             }
         }
         JsonNode value = serialiseActiveExpectation(requestMatcher);
+        // a cut body would be saved back cut, so the UI loads the whole expectation by id before editing it
+        long longestCut = DashboardBodyCap.capExpectationTree(value);
+        Map<String, Object> truncation = longestCut > 0 ? DashboardBodyCap.expectationTruncationMarker(id, longestCut) : null;
+        ActiveExpectationJson json = new ActiveExpectationJson(expectation, remainingTimes, value, truncation);
         synchronized (activeExpectationJsonCacheLock) {
-            activeExpectationJsonCache().put(id, new ActiveExpectationJson(expectation, remainingTimes, value));
+            activeExpectationJsonCache().put(id, json);
         }
-        return value;
+        return json;
     }
 
     // Remaining Times is the ONLY serialised field a live Expectation mutates on the serving path
@@ -1443,17 +1451,19 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
     }
 
     // Immutable memo entry: the Expectation reference it was built from, the remaining Times at that
-    // moment, and the resulting JSON tree. Identity + remainingTimes together are the conservative
+    // moment, the resulting (cut) JSON tree and its truncation marker. Identity + remainingTimes together are the conservative
     // "still current?" signal (see activeExpectationValue).
     private static final class ActiveExpectationJson {
         private final Expectation expectation;
         private final int remainingTimes;
         private final JsonNode value;
+        private final Map<String, Object> truncation;
 
-        private ActiveExpectationJson(Expectation expectation, int remainingTimes, JsonNode value) {
+        private ActiveExpectationJson(Expectation expectation, int remainingTimes, JsonNode value, Map<String, Object> truncation) {
             this.expectation = expectation;
             this.remainingTimes = remainingTimes;
             this.value = value;
+            this.truncation = truncation;
         }
     }
 

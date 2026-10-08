@@ -804,6 +804,22 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **`maxLoggedBodyBytes` now also limits the bodies of expectations a log entry names or quotes.** With the
+  setting on, the log still kept whole bodies in some entries: an entry saying which expectation a request
+  did not match (or came closest to) kept that expectation's request and response bodies and a "because"
+  that quoted them, and an entry recording a removed expectation kept its body, so the bodies stayed in
+  memory after the expectation itself was gone. These are now cut to `maxLoggedBodyBytes` too, as are any
+  other request, response or text an entry quotes; cut text ends with how many characters were left out.
+  The expectations themselves are not changed. The explanation of why a request did not match now also
+  counts towards `maxEventLogSizeInBytes`, with or without `maxLoggedBodyBytes`.
+- **The dashboard no longer sends every expectation whole in each update.** Active Expectations was sent
+  whole about once a second, so a set of expectations with large bodies (for example recorded LLM
+  conversations) made every update very large. In the live view, any value in an expectation longer than
+  64K characters (a body, an LLM completion, a template) is now shortened to its first 64K characters, and
+  an expanded expectation says so and offers no Copy button. Edit, Duplicate and Test, picking an expectation
+  in the Mocks composer, and editing an LLM conversation load the whole expectation from MockServer first, so
+  an edit never saves a shortened value; if the expectation has been removed meanwhile, nothing is done and
+  the dashboard says why.
 - **A request pipelined on an HTTP/1.1 CONNECT or SOCKS tunnel is no longer lost when the client leaves.** A client that sent a request behind a response it had not read, and then closed or half-closed its connection, could have that request dropped: the tunnel closed its internal connection to MockServer while MockServer was still sending the unread response, which reset that connection before MockServer had read the whole request. The tunnel now ends that connection only after MockServer has finished reading what the client sent, waiting up to 5 seconds.
 - **More control-plane endpoints now answer a fault inside MockServer `500`, not `400`.** The `GET` endpoints for
   the clock, proxy configuration, service, TCP and gRPC chaos, gRPC health, chaos experiments and their history, load

@@ -10,6 +10,7 @@ import type {
 } from '../types';
 import { ACTION_TYPES, LLM_PROVIDERS } from '../lib/clientFilters';
 import { withFullMessages, type FullMessages } from '../lib/fullBody';
+import { isShortenedExpectation, rememberShortenedExpectations } from '../lib/fullExpectation';
 
 export type ViewMode = 'dashboard' | 'traffic' | 'sessions' | 'composer' | 'library' | 'chaos' | 'performance' | 'metrics' | 'drift' | 'verification' | 'slo' | 'async' | 'grpc' | 'breakpoints' | 'contract' | 'cluster' | 'optimise' | 'mcp-health' | 'scenarios' | 'audit' | 'get-started';
 
@@ -447,6 +448,11 @@ function reconcileByKey<T extends { key: string }>(prev: T[], next: T[], cache: 
   return result;
 }
 
+function rememberedShortened(items: JsonListItem[]): JsonListItem[] {
+  rememberShortenedExpectations(items);
+  return items;
+}
+
 function withLoadedMessages(items: JsonListItem[], fullMessages: Record<string, FullMessages>): JsonListItem[] {
   if (Object.keys(fullMessages).length === 0) return items;
   return items.map((item) => {
@@ -844,7 +850,7 @@ export const useDashboardStore = create<DashboardState>()((set) => ({
             ? message.activeExpectationsIncludeLlm
             : s.activeExpectationsIncludeLlm,
         activeExpectations: message.activeExpectations !== undefined
-          ? reconcileByKey(s.activeExpectations, message.activeExpectations, activeExpectationsCache)
+          ? reconcileByKey(s.activeExpectations, rememberedShortened(message.activeExpectations), activeExpectationsCache)
           : s.activeExpectations,
         recordedRequests: message.recordedRequests !== undefined
           ? reconcileByKey(s.recordedRequests, withLoadedMessages(message.recordedRequests, s.fullMessages), recordedRequestsCache)
@@ -979,6 +985,11 @@ export const useDashboardStore = create<DashboardState>()((set) => ({
   }),
   setSelectedTrafficKey: (key) => set({ selectedTrafficKey: key }),
   editExpectation: (expectation) => {
+    // A shortened Active Expectations value would be saved back shortened; callers load the whole one first.
+    if (isShortenedExpectation(expectation)) {
+      set({ notification: { message: 'This expectation was shortened in the live update and could not be opened for editing; try again', severity: 'error' } });
+      return;
+    }
     persistView('composer');
     set({ pendingEditExpectation: expectation, view: 'composer' as ViewMode, selectedTrafficKey: null });
   },

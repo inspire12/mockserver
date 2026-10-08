@@ -272,6 +272,40 @@ describe('ScenarioPanel — scenario details + Edit hand-off', () => {
     expect(arg['newScenarioState']).toBe('PAID');
   });
 
+  it('per-row Edit of an expectation the update shortened hands over the whole expectation', async () => {
+    const user = userEvent.setup();
+    const whole = { ...checkoutExpectations[0]!.value, httpResponse: { statusCode: 200, body: 'the-whole-body' } };
+    const retrieved: unknown[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown, init?: RequestInit) => {
+        if (String(input).includes('/mockserver/retrieve')) {
+          retrieved.push(JSON.parse(String(init?.body)));
+          return { ok: true, status: 200, json: async () => [whole] };
+        }
+        return { ok: true, status: 200, json: async () => ({ scenarios: [] }) };
+      }),
+    );
+    const editSpy = vi.fn();
+    useDashboardStore.setState({
+      activeExpectations: [{
+        key: 'e-start',
+        value: { ...checkoutExpectations[0]!.value, httpResponse: { statusCode: 200, body: 'the-wh' } },
+        truncatedExpectation: { expectationId: 'e-start', part: 'expectation', originalLength: 14, shownLength: 6 },
+      }],
+      editExpectation: editSpy,
+    });
+
+    renderPanel();
+
+    await user.click(await screen.findByRole('button', { name: 'Expand scenario' }));
+    await user.click(screen.getByRole('button', { name: 'Edit expectation' }));
+
+    await waitFor(() => expect(editSpy).toHaveBeenCalledTimes(1));
+    expect(editSpy.mock.calls[0]![0]).toEqual(whole);
+    expect(retrieved).toEqual([{ id: 'e-start' }]);
+  });
+
   it('scenario-level Edit on a single-mock scenario edits it directly', async () => {
     const user = userEvent.setup();
     stubEmptyScenarioList();

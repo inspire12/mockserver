@@ -19,6 +19,7 @@ import OpenApiImportDialog from './OpenApiImportDialog';
 import { useExpansion } from '../hooks/useExpansion';
 import { useHeldItems } from '../hooks/useHeldItems';
 import { useConnectionParams } from '../hooks/useConnectionParams';
+import { useWithWholeExpectation } from '../hooks/useWithWholeExpectation';
 import { applyClientFilters } from '../lib/clientFilters';
 import { matchesItemSearch } from '../lib/searchMatcher';
 import { buildTurnPositionMap } from '../lib/scenarioState';
@@ -126,17 +127,19 @@ function ExpectationPanel() {
   const [scrolledAway, setScrolledAway] = useState(false);
   const shown = useHeldItems(filtered, keyOf, scrolledAway || expansion.anyExpanded);
 
+  const withWholeExpectation = useWithWholeExpectation();
+
   const handleEdit = useCallback(
     (item: JsonListItem) => {
-      editExpectation(item.value);
+      withWholeExpectation(item, (whole) => editExpectation(whole.value));
     },
-    [editExpectation],
+    [editExpectation, withWholeExpectation],
   );
 
   // Open the matcher playground seeded with this row's exact expectation JSON.
   const handleTest = useCallback((item: JsonListItem) => {
-    setTestExpectation(item);
-  }, []);
+    withWholeExpectation(item, setTestExpectation);
+  }, [withWholeExpectation]);
 
   // Duplicate: load a COPY of the expectation into the Composer with its id
   // stripped so saving creates a new expectation. Reuses the same Composer
@@ -144,9 +147,9 @@ function ExpectationPanel() {
   // draft rather than an update.
   const handleDuplicate = useCallback(
     (item: JsonListItem) => {
-      editExpectation(duplicateValueWithoutId(item.value));
+      withWholeExpectation(item, (whole) => editExpectation(duplicateValueWithoutId(whole.value)));
     },
-    [editExpectation],
+    [editExpectation, withWholeExpectation],
   );
 
   const handleConfirmDelete = useCallback(async () => {

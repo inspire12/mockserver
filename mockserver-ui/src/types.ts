@@ -88,6 +88,19 @@ export interface JsonListItem {
     httpRequest?: TruncatedBody;
     httpResponse?: TruncatedBody;
   };
+  /**
+   * Set on an Active Expectations item whose long bodies (or other long strings) the server shortened.
+   * The value must never be edited or saved as it is: load the whole expectation by id first.
+   */
+  truncatedExpectation?: TruncatedExpectation;
+}
+
+export interface TruncatedExpectation {
+  expectationId: string;
+  part: 'expectation';
+  /** The longest shortened value's full length, in characters. */
+  originalLength: number;
+  shownLength: number;
 }
 
 export interface WebSocketMessage {

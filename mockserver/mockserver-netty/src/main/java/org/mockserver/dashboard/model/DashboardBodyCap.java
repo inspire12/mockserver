@@ -2,6 +2,8 @@ package org.mockserver.dashboard.model;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.mockserver.mock.Expectation;
 import org.mockserver.model.Body;
 import org.mockserver.model.HttpRequest;
@@ -11,8 +13,12 @@ import org.mockserver.model.RequestDefinition;
 
 import java.io.IOException;
 import java.io.Writer;
+import java.util.ArrayList;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 /**
  * Shortens the bodies the dashboard sends in its live updates. A row carries its exchange's bodies about eight
@@ -207,6 +213,65 @@ public final class DashboardBodyCap {
             sizes.displayed(256);
             return argument;
         }
+    }
+
+    /**
+     * Cuts, in place, an expectation's serialised tree for the dashboard's expectations section: every {@code body}
+     * longer than the cap (a JSON or binary body is measured and cut as its serialised text) and every other string
+     * longer than the cap. Returns the longest original length cut, or 0 when nothing was cut. The dashboard loads
+     * the whole expectation by id before editing it, so a cut tree is only ever shown.
+     */
+    public static long capExpectationTree(JsonNode node) {
+        long longest = 0;
+        if (node instanceof ObjectNode) {
+            ObjectNode object = (ObjectNode) node;
+            List<String> names = new ArrayList<>();
+            object.fieldNames().forEachRemaining(names::add);
+            for (String name : names) {
+                JsonNode child = object.get(name);
+                if ("body".equals(name) && child != null && child.isContainerNode()) {
+                    PrefixWriter writer = new PrefixWriter(MAX_BODY_CHARACTERS);
+                    try {
+                        JSON.writeValue(writer, child);
+                    } catch (IOException e) {
+                        writer.length = 0;
+                    }
+                    if (writer.length > MAX_BODY_CHARACTERS) {
+                        object.put(name, prefix(writer.prefix, writer.prefix.length()));
+                        longest = Math.max(longest, writer.length);
+                        continue;
+                    }
+                }
+                longest = Math.max(longest, capChild(child, value -> object.put(name, value)));
+            }
+        } else if (node instanceof ArrayNode) {
+            ArrayNode array = (ArrayNode) node;
+            for (int i = 0; i < array.size(); i++) {
+                int index = i;
+                longest = Math.max(longest, capChild(array.get(i), value -> array.set(index, array.textNode(value))));
+            }
+        }
+        return longest;
+    }
+
+    private static long capChild(JsonNode child, Consumer<String> replace) {
+        if (child != null && child.isTextual() && child.textValue().length() > MAX_BODY_CHARACTERS) {
+            replace.accept(prefix(child.textValue(), MAX_BODY_CHARACTERS));
+            return child.textValue().length();
+        }
+        return capExpectationTree(child);
+    }
+
+    /**
+     * What the dashboard needs to say an expectation in its expectations section was cut, and to load it whole by id.
+     */
+    public static Map<String, Object> expectationTruncationMarker(String expectationId, long originalLength) {
+        Map<String, Object> marker = new LinkedHashMap<>();
+        marker.put("expectationId", expectationId);
+        marker.put("part", "expectation");
+        marker.put("originalLength", originalLength);
+        marker.put("shownLength", (long) MAX_BODY_CHARACTERS);
+        return marker;
     }
 
     // Keeps the first characters written and counts the rest without holding them.

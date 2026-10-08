@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import Box from '@mui/material/Box';
 import Paper from '@mui/material/Paper';
 import Typography from '@mui/material/Typography';
@@ -21,6 +21,8 @@ import {
 import { callMcpTool, buildBaseUrl } from '../lib/mcpClient';
 import { humanizeError } from '../lib/errorMessage';
 import { useDashboardStore } from '../store';
+import { loadWholeExpectation } from '../lib/fullExpectation';
+import type { JsonListItem } from '../types';
 import ConversationWizardStep1 from './ConversationWizardStep1';
 import ConversationWizardStep2 from './ConversationWizardStep2';
 import ConversationWizardStep3 from './ConversationWizardStep3';
@@ -65,28 +67,70 @@ function idsForScenario(all: unknown[], scenarioName: string): string[] {
   return ids;
 }
 
+/**
+ * Loads the selected scenario's turns before the editor builds its draft from them. A turn the live update
+ * shortened (`truncatedExpectation`) is loaded whole by id first, because the editor re-registers every turn
+ * and would otherwise save the shortened completion text or tool-call arguments.
+ */
 export default function LlmConversationForm({
   connectionParams,
   initialScenarioName,
 }: LlmConversationFormProps) {
-  const activeExpectations = useDashboardStore((s) => s.activeExpectations);
-  const scenarios = useMemo(
-    () => listConversationScenarios(activeExpectations),
-    [activeExpectations],
-  );
+  // Read once at mount: the parent remounts via `key` when the selection changes.
+  const [listedTurns] = useState<JsonListItem[] | null>(() => {
+    if (!initialScenarioName) return null;
+    const scenario = listConversationScenarios(useDashboardStore.getState().activeExpectations)
+      .find((s) => s.scenarioName === initialScenarioName);
+    return scenario ? (scenario.expectations as JsonListItem[]) : null;
+  });
+  const anyShortened = !!listedTurns && listedTurns.some((turn) => !!turn.truncatedExpectation);
+  const [wholeTurns, setWholeTurns] = useState<JsonListItem[] | null>(anyShortened ? null : listedTurns);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
-  // Compute initial draft + ids once at mount based on initialScenarioName.
-  // Parent remounts via `key` prop when the selection changes.
-  const initial = useMemo(() => {
-    if (initialScenarioName) {
-      const scenario = scenarios.find((s) => s.scenarioName === initialScenarioName);
-      if (scenario) {
-        return draftFromScenarioExpectations(scenario.expectations);
-      }
-    }
-    return { draft: emptyDraft(), ids: [] as string[] };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  useEffect(() => {
+    if (!anyShortened || !listedTurns) return;
+    let current = true;
+    Promise.all(listedTurns.map((turn) => loadWholeExpectation(connectionParams, turn))).then(
+      (turns) => { if (current) setWholeTurns(turns); },
+      (e: unknown) => { if (current) setLoadError(humanizeError(e).message); },
+    );
+    return () => { current = false; };
+  }, [anyShortened, listedTurns, connectionParams]);
+
+  if (loadError) {
+    return (
+      <Alert severity="error" variant="outlined" data-testid="llm-conversation-load-error">
+        Could not load the whole conversation, so it cannot be edited: {loadError}
+      </Alert>
+    );
+  }
+  if (anyShortened && !wholeTurns) {
+    return (
+      <Typography variant="body2" color="text.secondary" data-testid="llm-conversation-loading">
+        Loading the whole conversation…
+      </Typography>
+    );
+  }
+  return (
+    <LlmConversationEditor
+      connectionParams={connectionParams}
+      initialScenarioName={initialScenarioName}
+      scenarioTurns={wholeTurns}
+    />
+  );
+}
+
+function LlmConversationEditor({
+  connectionParams,
+  initialScenarioName,
+  scenarioTurns,
+}: LlmConversationFormProps & { scenarioTurns: JsonListItem[] | null }) {
+  // Built once: the parent remounts via `key` when the selection changes.
+  const [initial] = useState(() =>
+    scenarioTurns && scenarioTurns.length > 0
+      ? draftFromScenarioExpectations(scenarioTurns)
+      : { draft: emptyDraft(), ids: [] as string[] },
+  );
 
   const [draft, setDraft] = useState<ConversationDraft>(initial.draft);
   const [existingIds] = useState<string[]>(initial.ids);

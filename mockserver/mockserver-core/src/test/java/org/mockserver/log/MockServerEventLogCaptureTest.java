@@ -3,24 +3,29 @@ package org.mockserver.log;
 import org.junit.After;
 import org.junit.Test;
 import org.mockserver.configuration.Configuration;
+import org.mockserver.log.model.DeferredLogArgument;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
+import org.mockserver.mock.Expectation;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.model.RequestDefinition;
 import org.mockserver.scheduler.Scheduler;
+import org.mockserver.serialization.curl.HttpRequestToCurlSerializer;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 import static java.util.concurrent.TimeUnit.SECONDS;
+import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.notNullValue;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.Assert.fail;
 import static org.mockito.Mockito.mock;
 import static org.mockserver.configuration.Configuration.configuration;
+import static org.mockserver.log.model.LogEntry.LogMessageType.EXPECTATION_NOT_MATCHED;
 import static org.mockserver.log.model.LogEntry.LogMessageType.FORWARDED_REQUEST;
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
@@ -120,6 +125,100 @@ public class MockServerEventLogCaptureTest {
         assertThat(((HttpRequest) arguments[1]).getBodyAsString(), is(base64("01234")));
         assertThat(retained.getMessage().contains("0123456789ABCDEF"), is(false));
         assertThat(liveRequest.getBodyAsRawBytes().length, is(16));
+    }
+
+    @Test
+    public void shouldTruncateTheExpectationsAnEntryNamesOrQuotesAndALongBecause() {
+        // given
+        MockServerEventLog log = synchronousEventLog(configuration().maxLoggedBodyBytes(5));
+        Expectation live = new Expectation(request("/match").withBody("0123456789ABCDEF"))
+            .withId("live-expectation")
+            .thenRespond(response().withBody("a-very-long-response-body"));
+        HttpRequest request = request("/match").withBody("FEDCBA9876543210");
+
+        // when
+        log.add(new LogEntry()
+            .setType(EXPECTATION_NOT_MATCHED)
+            .setHttpRequest(request)
+            .setExpectation(live)
+            .setMessageFormat("request:{}didn't match expectation:{}because:{}")
+            .setArguments(request, live.clone(), "body didn't match")
+            .setBecause("body didn't match: 0123456789ABCDEF"));
+
+        // then - the retained entry quotes no whole body, and the live expectation is untouched
+        LogEntry retained = retrieveMessageLogEntries(log, null).get(0);
+        assertThat(((HttpRequest) retained.getExpectation().getHttpRequest()).getBodyAsRawBytes().length, is(5));
+        assertThat(retained.getExpectation().getHttpResponse().getBodyAsRawBytes().length, is(5));
+        assertThat(retained.getExpectation().getId(), is("live-expectation"));
+        Expectation quoted = (Expectation) retained.getArguments()[1];
+        assertThat(((HttpRequest) quoted.getHttpRequest()).getBodyAsRawBytes().length, is(5));
+        assertThat(quoted.getHttpResponse().getFirstHeader("x-mockserver-body-truncated"), is("25"));
+        // one cut copy, the one the weigher charges with the named expectation
+        assertThat(quoted.getHttpRequest() == retained.getExpectation().getHttpRequest(), is(true));
+        assertThat(quoted.getHttpResponse() == retained.getExpectation().getHttpResponse(), is(true));
+        assertThat(retained.getArguments()[2], is("body ... (12 more characters not logged)"));
+        assertThat(retained.getBecause(), is("body ... (30 more characters not logged)"));
+        assertThat(retained.getMessage().contains("0123456789ABCDEF"), is(false));
+        assertThat(((HttpRequest) live.getHttpRequest()).getBodyAsRawBytes().length, is(16));
+        assertThat(live.getHttpResponse().getBodyAsRawBytes().length, is(25));
+    }
+
+    @Test
+    public void shouldTruncateAnActionAndACurlCommandForAnotherRequest() {
+        // given
+        MockServerEventLog log = synchronousEventLog(configuration().maxLoggedBodyBytes(5));
+        HttpResponse action = response().withBody("a-very-long-response-body");
+        HttpResponse served = action.clone();
+        HttpRequest original = request("/original").withHeader("host", "localhost:1080").withBody("0123456789ABCDEF");
+        MockServerLogger logger = new MockServerLogger(MockServerEventLogCaptureTest.class);
+
+        // when
+        log.add(new LogEntry()
+            .setType(FORWARDED_REQUEST)
+            .setHttpRequest(request("/forwarded"))
+            .setHttpResponse(served)
+            .setMessageFormat("returning response:{}for request:{}as curl:{}for action:{}")
+            .setArguments(served, original, DeferredLogArgument.curl(new HttpRequestToCurlSerializer(logger), original, null), action));
+
+        // then
+        LogEntry retained = retrieveMessageLogEntries(log, null).get(0);
+        Object[] arguments = retained.getArguments();
+        assertThat(((HttpRequest) arguments[1]).getBodyAsString(), is(base64("01234")));
+        assertThat((String) arguments[2], containsString("curl -v 'http://localhost:1080/original'"));
+        assertThat(((String) arguments[2]).contains("0123456789ABCDEF"), is(false));
+        assertThat(((HttpResponse) arguments[3]).getBodyAsString(), is(base64("a-ver")));
+        assertThat(action.getBodyAsRawBytes().length, is(25));
+    }
+
+    @Test
+    public void shouldWeighAMatchersBecause() {
+        LogEntry withoutBecause = new LogEntry().setType(EXPECTATION_NOT_MATCHED).setHttpRequest(request("/match"));
+        LogEntry withBecause = new LogEntry().setType(EXPECTATION_NOT_MATCHED).setHttpRequest(request("/match"))
+            .setBecause("x".repeat(10_000));
+
+        assertThat(withBecause.estimatedHeapSize() - withoutBecause.estimatedHeapSize(), is(10_000L));
+    }
+
+    @Test
+    public void shouldKeepExpectationsAndTextWithinMaxLoggedBodyBytesAsTheyAre() {
+        // given
+        MockServerEventLog log = synchronousEventLog(configuration().maxLoggedBodyBytes(100));
+        Expectation live = new Expectation(request("/match").withBody("short")).thenRespond(response().withBody("short"));
+
+        // when
+        log.add(new LogEntry()
+            .setType(EXPECTATION_NOT_MATCHED)
+            .setHttpRequest(request("/match"))
+            .setExpectation(live)
+            .setMessageFormat("didn't match expectation:{}because:{}")
+            .setArguments(live, "short reason")
+            .setBecause("short reason"));
+
+        // then
+        LogEntry retained = retrieveMessageLogEntries(log, null).get(0);
+        assertThat(retained.getExpectation() == live, is(true));
+        assertThat(retained.getArguments()[0] == live, is(true));
+        assertThat(retained.getBecause(), is("short reason"));
     }
 
     @Test

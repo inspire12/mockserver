@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import Box from '@mui/material/Box';
 import Paper from '@mui/material/Paper';
 import Tabs from '@mui/material/Tabs';
@@ -33,6 +33,8 @@ import List from '@mui/material/List';
 import ListItemButton from '@mui/material/ListItemButton';
 import ListItemText from '@mui/material/ListItemText';
 import type { ConnectionParams } from '../hooks/useConnectionParams';
+import { notifyWholeExpectationLoadFailed } from '../hooks/useWithWholeExpectation';
+import { isShortenedExpectation, loadWholeExpectation } from '../lib/fullExpectation';
 import { useDashboardStore } from '../store';
 import { humanizeError, type HumanError } from '../lib/errorMessage';
 import { monospaceFontFamily } from '../theme';
@@ -315,6 +317,9 @@ async function registerExpectation(
   matcher: MatcherState,
   action: StandardActionPayload,
 ): Promise<void> {
+  if (action.editOriginal && isShortenedExpectation(action.editOriginal)) {
+    throw new Error('This expectation was shortened in the live update, so it was not saved: load it again from the list');
+  }
   const url = `${baseUrl(connectionParams)}/mockserver/expectation`;
   const body = buildExpectationJson(matcher, action);
   const res = await fetch(url, {
@@ -4055,12 +4060,14 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
   const originalExpectationJson = useMemo(() => {
     const id = matcher.id.trim();
     if (!id) return undefined;
+    // the loaded original is whole; the listed one may be shortened
+    if (editOriginal && editOriginal['id'] === id) return JSON.stringify(editOriginal, null, 2);
     const item =
       activeExpectations.find((e) => e.key === loadFromKey) ??
       activeExpectations.find((e) => e.value?.['id'] === id);
     if (!item) return undefined;
     return JSON.stringify(item.value, null, 2);
-  }, [matcher.id, loadFromKey, activeExpectations]);
+  }, [matcher.id, loadFromKey, activeExpectations, editOriginal]);
 
   // Single register helper — builds a StandardActionPayload from current
   // state and PUTs via registerExpectation, which itself uses
@@ -4091,12 +4098,8 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
     [connectionParams, matcher],
   );
 
-  const handleLoadExisting = useCallback(
-    (key: string) => {
-      setLoadFromKey(key);
-      if (!key) return;
-      const item = activeExpectations.find((e) => e.key === key);
-      if (!item) return;
+  const loadExistingItem = useCallback(
+    (item: JsonListItem) => {
       setMatcher(matcherFromExpectation(item));
 
       // Retain the original expectation JSON so Register/preview overlays the
@@ -4194,7 +4197,35 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
         setCaptureRules([]);
       }
     },
-    [activeExpectations, prefillScenarioBinding],
+    [prefillScenarioBinding],
+  );
+
+  // Counts picker selections, so a whole expectation that loads after a later pick is ignored.
+  const loadSelectionRef = useRef(0);
+  const handleLoadExisting = useCallback(
+    (key: string) => {
+      const selection = ++loadSelectionRef.current;
+      setLoadFromKey(key);
+      if (!key) return;
+      const item = activeExpectations.find((e) => e.key === key);
+      if (!item) return;
+      if (!item.truncatedExpectation) {
+        loadExistingItem(item);
+        return;
+      }
+      // a shortened value would be saved back shortened, so load the whole expectation first
+      loadWholeExpectation(connectionParams, item).then(
+        (whole) => {
+          if (selection === loadSelectionRef.current) loadExistingItem(whole);
+        },
+        (e: unknown) => {
+          if (selection !== loadSelectionRef.current) return;
+          setLoadFromKey('');
+          notifyWholeExpectationLoadFailed(e);
+        },
+      );
+    },
+    [activeExpectations, connectionParams, loadExistingItem],
   );
 
   // Reset the whole form to a blank HTTP static mock. Shared by the
@@ -4259,7 +4290,10 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
     // its now-prefilled Scenario section) is actually visible.
     setComposerTab(0);
     if (inList) {
-      handleLoadExisting(inList.key);
+      // the handed-off value is whole; the listed one may be shortened
+      loadSelectionRef.current++;
+      setLoadFromKey(inList.key);
+      loadExistingItem({ key: inList.key, value });
     } else {
       const item: JsonListItem = { key, value };
       setMatcher(matcherFromExpectation(item));
@@ -4310,7 +4344,7 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
     }
     // Consume the hand-off so re-renders don't reload it.
     clearPendingEditExpectation();
-  }, [pendingEditExpectation, activeExpectations, handleLoadExisting, clearPendingEditExpectation, prefillScenarioBinding]);
+  }, [pendingEditExpectation, activeExpectations, loadExistingItem, clearPendingEditExpectation, prefillScenarioBinding]);
 
   // Standard kind picker only lists expectations that AREN'T LLM
   // Conversation scenarios — those have their own picker on the

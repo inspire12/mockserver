@@ -47,3 +47,27 @@ export async function deleteExpectation(params: ConnectionParams, id: string): P
   });
   await ensureOk(res);
 }
+
+/**
+ * The whole registered expectation with this id, as `PUT /mockserver/retrieve?type=active_expectations`
+ * returns it. Throws when the request fails or the expectation is no longer registered.
+ */
+export async function fetchExpectation(
+  params: ConnectionParams,
+  id: string,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+  const res = await fetch(`${buildBaseUrl(params)}/mockserver/retrieve?type=active_expectations&format=json`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id }),
+    signal,
+  });
+  await ensureOk(res);
+  const expectations = (await res.json().catch(() => null)) as unknown;
+  const found = Array.isArray(expectations)
+    ? expectations.find((e): e is Record<string, unknown> => !!e && typeof e === 'object' && (e as Record<string, unknown>)['id'] === id)
+    : undefined;
+  if (!found) throw new Error(`Expectation ${id} is no longer registered`);
+  return found;
+}

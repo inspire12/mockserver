@@ -662,7 +662,20 @@ function JsonListItem({ item, index, turnPosition, expanded: expandedProp, onTog
               }}
             />
           )}
-          <JsonViewer data={item.value} collapsed={1} enableClipboard={true} />
+          {item.truncatedExpectation && (
+            // Edit, Duplicate and Test load the whole expectation, so only this view is shortened.
+            <TruncatedBodyNotice
+              marker={{
+                logEntryId: '',
+                part: 'expectation',
+                originalLength: item.truncatedExpectation.originalLength,
+                shownLength: item.truncatedExpectation.shownLength,
+                loadable: false,
+              }}
+            />
+          )}
+          {/* a shortened expectation is not offered for copying: the copy would be pasted or saved shortened */}
+          <JsonViewer data={item.value} collapsed={1} enableClipboard={!item.truncatedExpectation} />
         </Box>
       )}
     </Box>

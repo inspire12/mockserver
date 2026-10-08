@@ -180,7 +180,7 @@ public class LogEntry implements EventTranslator<LogEntry> {
      * a REAL expectation has been attached via {@link #setExpectation(Expectation)} — that expectation's
      * own {@link Expectation#estimatedHeapSize()}. A served request's expectation is synthetic and derived
      * lazily (nothing is retained), so it adds nothing; a closest-match expectation attached to a
-     * not-matched entry is genuinely retained and is counted.
+     * not-matched entry is genuinely retained and is counted, as is the length of its matcher's "because".
      * <p>
      * The constants were derived from a live class-histogram (compressed oops) of a filled event log:
      * at {@code WARN} the estimate closely tracks the real retained heap. It errs slightly high for
@@ -250,6 +250,10 @@ public class LogEntry implements EventTranslator<LogEntry> {
             // (it is derived lazily in getExpectation and never retained), so it adds nothing.
             if (expectation != null) {
                 size += expectation.estimatedHeapSize();
+            }
+            // a matcher's "because" quotes the values it compared, a whole body among them
+            if (because != null && hasHttpMessage) {
+                size += because.length();
             }
             estimatedHeapSize = size;
         }
@@ -1178,6 +1182,59 @@ public class LogEntry implements EventTranslator<LogEntry> {
     }
 
     /**
+     * Bounds the copies of bodies this entry quotes besides its own request and response: a real expectation and
+     * each request, response or expectation argument are replaced by {@code cutBodies}'s copy, and the "because" and
+     * each text argument longer than {@code maxCharacters} are cut to that length, saying how much was left out.
+     */
+    public LogEntry boundQuotedBodies(UnaryOperator<Object> cutBodies, int maxCharacters) {
+        if (expectation != null) {
+            Expectation cut = (Expectation) cutBodies.apply(expectation);
+            if (cut != expectation) {
+                setExpectation(cut);
+            }
+        }
+        if (because != null && because.length() > maxCharacters) {
+            because = cutText(because, maxCharacters);
+            this.renderedMessage = null;
+            this.hashCode = 0;
+            this.estimatedHeapSize = -1;
+        }
+        if (arguments != null) {
+            Object[] bounded = null;
+            for (int i = 0; i < arguments.length; i++) {
+                Object argument = arguments[i];
+                Object replacement = argument;
+                if (argument instanceof Expectation || argument instanceof HttpRequest || argument instanceof HttpResponse) {
+                    replacement = cutBodies.apply(argument);
+                } else if (argument instanceof DeferredLogArgument && ((DeferredLogArgument) argument).getRequest() != null) {
+                    HttpRequest request = ((DeferredLogArgument) argument).getRequest();
+                    Object cut = cutBodies.apply(request);
+                    replacement = cut == request ? argument : ((DeferredLogArgument) argument).withRequest((HttpRequest) cut);
+                } else if (argument instanceof String && ((String) argument).length() > maxCharacters) {
+                    replacement = cutText((String) argument, maxCharacters);
+                }
+                if (replacement != argument) {
+                    // a copy: a cloned entry shares its arguments array with the entry it was cloned from
+                    bounded = bounded == null ? arguments.clone() : bounded;
+                    bounded[i] = replacement;
+                }
+            }
+            if (bounded != null) {
+                this.arguments = bounded;
+                this.renderedMessage = null;
+                this.hashCode = 0;
+                this.estimatedHeapSize = -1;
+            }
+        }
+        return this;
+    }
+
+    private static String cutText(String text, int maxCharacters) {
+        int end = maxCharacters > 0 && Character.isHighSurrogate(text.charAt(maxCharacters - 1)) ? maxCharacters - 1 : maxCharacters;
+        return text.substring(0, end) + "... (" + (text.length() - end) + " more characters not logged)";
+    }
+
+    /**
      * An argument as it may be shown with redaction on: requests and responses (also inside a collection, an
      * array or a {@link LogEventRequestAndResponse}) as redacted copies, and free text — a matcher's
      * "because", a template's output — with this entry's own credential values scrubbed. Any other argument
@@ -1480,6 +1537,7 @@ public class LogEntry implements EventTranslator<LogEntry> {
 
     public LogEntry setBecause(String because) {
         this.because = because;
+        this.estimatedHeapSize = -1;
         return this;
     }
 
