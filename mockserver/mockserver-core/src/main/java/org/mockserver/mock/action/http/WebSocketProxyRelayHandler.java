@@ -1,11 +1,14 @@
 package org.mockserver.mock.action.http;
 
 import io.netty.bootstrap.Bootstrap;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.*;
 import io.netty.handler.codec.http.*;
 import io.netty.handler.codec.http.websocketx.*;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.SslHandshakeCompletionEvent;
+import io.netty.util.AttributeKey;
+import io.netty.util.ReferenceCountUtil;
 import org.mockserver.codec.HttpLineEndSplitGuard;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.log.model.LogEntry;
@@ -19,6 +22,7 @@ import org.mockserver.model.HttpResponse;
 import org.mockserver.model.NottableString;
 import org.mockserver.proxyconfiguration.InetAddressValidator;
 import org.mockserver.socket.ChannelReadPause;
+import org.mockserver.socket.LingeringClose;
 import org.mockserver.socket.NettyAllocator;
 import org.mockserver.socket.NettyTransport;
 import org.mockserver.socket.tls.NettySslContextFactory;
@@ -77,6 +81,7 @@ public class WebSocketProxyRelayHandler {
      */
     static final int MAX_TRANSCRIPT_JSON_CHARS = 8 * 1024 * 1024;
     private static final int MAX_FRAME_PAYLOAD_LENGTH = 65536;
+    private static final AttributeKey<Boolean> ENDING = AttributeKey.valueOf("mockserver.webSocketRelayEnding");
 
     private final Configuration configuration;
     private final MockServerLogger mockServerLogger;
@@ -471,11 +476,13 @@ public class WebSocketProxyRelayHandler {
                     if (future.isSuccess()) {
                         removeHttpServerHandlers(clientCtx);
                         maybeAddIdleHandler(clientChannel.pipeline());
-                        clientChannel.pipeline().addLast(new FrameRelayHandler(
-                            upstreamChannel, clientChannel, FrameDirection.CLIENT_TO_UPSTREAM, transcript, request));
-                        // ensure both halves tear down together and the transcript is flushed exactly once
-                        clientChannel.closeFuture().addListener(f -> closeQuietly(upstreamChannel));
-                        upstreamChannel.closeFuture().addListener(f -> closeQuietly(clientChannel));
+                        FrameRelayHandler clientRelay = new FrameRelayHandler(
+                            upstreamChannel, clientChannel, FrameDirection.CLIENT_TO_UPSTREAM, transcript, request);
+                        clientChannel.pipeline().addLast(clientRelay);
+                        // each handler ends the other leg when its own channel closes; one closed already never tells it
+                        if (!clientChannel.isActive()) {
+                            clientRelay.ownChannelEnded();
+                        }
                         transcript.flushOnClose(clientChannel, upstreamChannel, () ->
                             recordUpgrade(request, negotiatedSubprotocol, responseHeaders, transcript));
 
@@ -530,8 +537,10 @@ public class WebSocketProxyRelayHandler {
         private final FrameDirection direction;
         private final FrameTranscript transcript;
         private final HttpRequest request;
-        // whether this half holds a read pause on the peer (released when this channel drains)
+        // whether this half holds a read pause on the peer (released when this channel drains or closes)
         private boolean pausingPeer;
+        private boolean closeFrameRelayed;
+        private boolean ended;
 
         private FrameRelayHandler(Channel peerChannel, Channel ownChannel, FrameDirection direction,
                                   FrameTranscript transcript, HttpRequest request) {
@@ -544,16 +553,45 @@ public class WebSocketProxyRelayHandler {
 
         @Override
         protected void channelRead0(ChannelHandlerContext ctx, WebSocketFrame frame) {
+            if (isEnding(ownChannel) || isEnding(peerChannel)) {
+                // a leg is being ended: nothing more is relayed, so what the side still being read sends
+                // is not queued for a side that has stopped reading
+                return;
+            }
             transcript.record(direction, frame);
             WebSocketFrame relayed = cloneFrame(frame);
-            if (peerChannel.isActive()) {
+            if (frame instanceof CloseWebSocketFrame) {
+                closeFrameRelayed = true;
+                releasePeer();
+                endAfterFlush(peerChannel, relayed);
+                endAfterFlush(ownChannel, null);
+            } else if (peerChannel.isActive()) {
                 peerChannel.writeAndFlush(relayed);
             } else {
                 relayed.release();
             }
-            if (frame instanceof CloseWebSocketFrame) {
-                closeQuietly(peerChannel);
-                closeQuietly(ownChannel);
+        }
+
+        /**
+         * Ends the peer once what this channel sent it has been written, after a close frame: the one this channel sent,
+         * or 1001 (going away) for a channel that ended without one.
+         */
+        private void ownChannelEnded() {
+            if (ended) {
+                return;
+            }
+            ended = true;
+            releasePeer();
+            endAfterFlush(peerChannel, closeFrameRelayed ? null : new CloseWebSocketFrame(WebSocketCloseStatus.ENDPOINT_UNAVAILABLE));
+        }
+
+        /**
+         * Lets the peer be read again, so that it is read to its end as it ends rather than reset with input unread.
+         */
+        private void releasePeer() {
+            if (pausingPeer) {
+                pausingPeer = false;
+                ChannelReadPause.resume(peerChannel);
             }
         }
 
@@ -605,7 +643,8 @@ public class WebSocketProxyRelayHandler {
 
         @Override
         public void channelInactive(ChannelHandlerContext ctx) {
-            closeQuietly(peerChannel);
+            ownChannelEnded();
+            ctx.fireChannelInactive();
         }
 
         @Override
@@ -619,7 +658,6 @@ public class WebSocketProxyRelayHandler {
                         .setArguments(direction, cause.getMessage())
                 );
             }
-            closeQuietly(peerChannel);
             ctx.close();
         }
     }
@@ -641,6 +679,28 @@ public class WebSocketProxyRelayHandler {
         } else {
             return new ContinuationWebSocketFrame(fin, rsv, content);
         }
+    }
+
+    /**
+     * Ends a relay leg once what has been written to it is flushed, the last frame (if any) included: its output is
+     * ended, what it still sends is read and dropped, and its socket closes when the other end closes, or
+     * {@link LingeringClose#LINGER_MILLIS} after this is called, flushed or not. Closed at once, the frames still queued
+     * for it would be dropped, and a socket closed with input unread sends a reset, which discards what the kernel has
+     * not yet sent.
+     */
+    private static void endAfterFlush(Channel channel, WebSocketFrame lastFrame) {
+        if (!channel.isActive() || channel.attr(ENDING).setIfAbsent(Boolean.TRUE) != null) {
+            ReferenceCountUtil.release(lastFrame);
+            return;
+        }
+        // bounded from now, as a side that has stopped reading would otherwise hold the leg open for ever
+        LingeringClose.closeSocketUnlessClosedWithinLinger(channel);
+        Object last = lastFrame != null ? lastFrame : Unpooled.EMPTY_BUFFER;
+        channel.writeAndFlush(last).addListener(written -> LingeringClose.close(channel));
+    }
+
+    private static boolean isEnding(Channel channel) {
+        return channel.attr(ENDING).get() != null;
     }
 
     private static void closeQuietly(Channel channel) {

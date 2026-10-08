@@ -2196,6 +2196,22 @@ frames are relayed but not recorded and the transcript is flagged truncated.
 closes the relay (flushing the transcript) once neither side has sent a frame for that period. Default `0` (off) —
 legitimately idle long-lived WebSocket connections are left to TCP keep-alive and peer-close propagation.
 
+**When one side leaves.** When either connection closes (a close, a reset, an error), `FrameRelayHandler` ends the other
+once everything already written to it has been flushed: a close frame follows the last relayed frame (`1001`, going
+away, when the side that left sent none), its output is ended (after a TLS `close_notify`), and what it still sends is
+read and dropped until it closes. Its socket is closed at most `LingeringClose.LINGER_MILLIS` (5 s) after the end
+begins, whether or not the flush has finished, so a side that has stopped reading cannot hold the connection, and
+what is queued for it, open. The relay's read pause on it is
+released first, so it is read to its end. A close frame from either side is relayed the same way and both connections
+are then ended so. Once a leg is being ended nothing more is relayed (Netty's decoder already discards what a side
+sends after its own close frame), so what the remaining side sends, now read again, is not queued for a side that has
+stopped reading. Before, the remaining connection was closed at once:
+frames still queued for it were dropped and, when the relay had stopped reading it because the side that left was not
+reading, the close sent a reset, and the kernel discarded relayed frames it had not yet sent. Idle reaping still closes
+both connections at once. `WebSocketRelayEndOfConnectionIntegrationTest` pins each direction, with and without a close
+frame, against a remaining side that reads slowly, that the remaining side is read on after the other leaves, and that
+a client that never reads is closed within the limit.
+
 **Handshake response limit.** The upstream leg's `HttpClientCodec` reads the handshake response's headers up to `maxHeaderSize` (read from the `Configuration` for each relay), as the forward client does for any other response; its status line keeps Netty's 4,096 bytes. Over the limit the codec hands on what it had read with a `TooLongHttpHeaderException` and discards the rest, so `UpstreamHandshakeHandler` checks the decoder result before it treats the response as a handshake: the client is answered `502` with `upstream WebSocket handshake response headers are larger than maxHeaderSize (N bytes)` as the body, one `WARN` (`WebSocket proxy passthrough failed: ...`) is logged and the upstream connection is closed. Before, the limit was Netty's 8,192 bytes whatever the property was set to, and what a larger response did depended on where its large header was: before the handshake's own headers, `502` with `Invalid handshake response upgrade: null`; after them and one more header (Netty adds a header once it has read the line after it), the cut-short response passed verification, the client was sent `101`, and any of the response's header bytes that arrived after that were decoded as WebSocket frames and relayed to the client. `WebSocketProxyHandshakeHeaderLimitIntegrationTest` pins the limit, each order, the status line's own limit and that the limit is read again for the next relay.
 
 **Any other response the codec cannot decode fails the relay the same way.** Netty hands on a response it stopped decoding with whatever it had read, and that can be every header a handshake needs: a header line ended by a bare line feed, a connection closed part-way through the headers, or a status line over 4,096 bytes. `UpstreamHandshakeHandler` therefore refuses any response whose decoder result is a failure: `502` with `upstream WebSocket handshake response could not be read: ` and the decoder's reason (the exception's class name when it has no message), one `WARN`, upstream closed. Before, the first two were answered `101`, and for the bare line feed the bytes that followed were read as WebSocket frames.
