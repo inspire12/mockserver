@@ -196,7 +196,7 @@ public class NettySslContextFactory {
         LogEntry logEntry = new LogEntry().setLogLevel(Level.INFO);
         if (Boolean.TRUE.equals(controlPlane.controlPlaneTLSMutualAuthenticationRequired())) {
             logEntry
-                .setMessageFormat("MockServerClient verifies MockServer's TLS certificate against the certificate authorities in controlPlaneTLSMutualAuthenticationCAChain plus MockServer's CA certificate (mockserver.certificateAuthorityCertificate); to change them set controlPlaneTLSMutualAuthenticationCAChain on the client's ClientConfiguration or mockserver.controlPlaneTLSMutualAuthenticationCAChain, and mockserver.certificateAuthorityCertificate, in the client JVM. Server forwarding settings such as mockserver.forwardProxyTLSX509CertificatesTrustManagerType do not apply to MockServerClient. controlPlaneTLSMutualAuthenticationCAChain is:{}")
+                .setMessageFormat("MockServerClient verifies MockServer's TLS certificate against only the certificate authorities in controlPlaneTLSMutualAuthenticationCAChain, not MockServer's CA certificate (mockserver.certificateAuthorityCertificate), so that chain must include the CA that signed MockServer's certificate; to change it set controlPlaneTLSMutualAuthenticationCAChain on the client's ClientConfiguration or mockserver.controlPlaneTLSMutualAuthenticationCAChain in the client JVM. Server forwarding settings such as mockserver.forwardProxyTLSX509CertificatesTrustManagerType do not apply to MockServerClient. controlPlaneTLSMutualAuthenticationCAChain is:{}")
                 .setArguments(controlPlane.controlPlaneTLSMutualAuthenticationCAChain());
         } else {
             logEntry
@@ -885,6 +885,15 @@ public class NettySslContextFactory {
         } else if (SslProvider.isAlpnSupported(SslProvider.OPENSSL)) {
             configureALPN.accept(sslContextBuilder.sslProvider(SslProvider.OPENSSL));
         }
+    }
+
+    /**
+     * The certificates {@code MockServerClient} trusts for MockServer's own certificate when control-plane mTLS
+     * is required: only those in {@code controlPlaneTLSMutualAuthenticationCAChain}. MockServer's CA certificate
+     * is not added, so a client given a control-plane CA chain trusts nothing outside it.
+     */
+    public static X509Certificate[] controlPlaneTrustCertificates(String controlPlaneTLSMutualAuthenticationCAChain) {
+        return x509ChainFromPEMFile(controlPlaneTLSMutualAuthenticationCAChain).toArray(new X509Certificate[0]);
     }
 
     public X509Certificate[] trustCertificateChain(String tlsMutualAuthenticationCertificateChain) {

@@ -13,6 +13,8 @@ import org.mockserver.logging.MockServerLogger;
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.security.cert.X509Certificate;
+import java.util.Arrays;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
@@ -341,6 +343,17 @@ public class NettySslContextFactoryTest {
         assertThat("the context advertising h2 is not served once HTTP/2 is disabled", http1Context, is(not(sameInstance(http2Context))));
         assertThat(http1Context.applicationProtocolNegotiator().protocols(), not(hasItem(ApplicationProtocolNames.HTTP_2)));
         assertThat(http1Context.applicationProtocolNegotiator().protocols(), hasItem(ApplicationProtocolNames.HTTP_1_1));
+    }
+
+    @Test
+    public void shouldTrustOnlyTheControlPlaneCaChainForMockServerClientMutualTls() {
+        String controlPlaneCaChain = "org/mockserver/authentication/mtls/separateca/ca.pem";
+        X509Certificate mockServerCa = PEMToFile.x509FromPEMFile(configuration().certificateAuthorityCertificate());
+
+        X509Certificate[] trusted = NettySslContextFactory.controlPlaneTrustCertificates(controlPlaneCaChain);
+
+        assertThat(Arrays.asList(trusted), contains(PEMToFile.x509ChainFromPEMFile(controlPlaneCaChain).toArray()));
+        assertThat(Arrays.asList(trusted), not(hasItem(mockServerCa)));
     }
 
     /**

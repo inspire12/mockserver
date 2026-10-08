@@ -65,10 +65,9 @@ public class AuthenticatedControlPlaneUsingMTLSClientNotAuthenticatedIntegration
     private static final String SERVER_PRIVATE_KEY = "org/mockserver/netty/integration/tls/leaf-key-pkcs8.pem";
     private static final String SERVER_X509_CERTIFICATE = "org/mockserver/netty/integration/tls/leaf-cert.pem";
     /**
-     * A DIFFERENT CA, and a leaf signed by it. The client presents this leaf, so it chains to an
-     * authority the server does not trust — which is the whole point of this test.
+     * A leaf signed by a DIFFERENT CA. The client presents this leaf, so it chains to an authority the
+     * server does not trust — which is the whole point of this test.
      */
-    private static final String CLIENT_CA_CHAIN = "org/mockserver/netty/integration/tls/separateca/ca.pem";
     private static final String CLIENT_PRIVATE_KEY = "org/mockserver/netty/integration/tls/separateca/leaf-key-pkcs8.pem";
     private static final String CLIENT_X509_CERTIFICATE = "org/mockserver/netty/integration/tls/separateca/leaf-cert.pem";
 
@@ -105,12 +104,14 @@ public class AuthenticatedControlPlaneUsingMTLSClientNotAuthenticatedIntegration
 
         clientAndServer = ClientAndServer.startClientAndServer(serverConfiguration);
         clientAndServer.hasStarted();
+        // the client trusts only its control-plane CA chain for the server's certificate, which MockServer's CA signed
+        String clientCaChain = serverConfiguration.certificateAuthorityCertificate();
 
         // The client is configured entirely on its own Configuration instance, presenting a leaf signed by
         // a CA the server does not trust. No global state is touched, so the server's trust anchor stays
         // pinned to SERVER_CA_CHAIN for the lifetime of this test.
         Configuration clientConfiguration = configuration()
-            .controlPlaneTLSMutualAuthenticationCAChain(CLIENT_CA_CHAIN)
+            .controlPlaneTLSMutualAuthenticationCAChain(clientCaChain)
             .controlPlanePrivateKeyPath(CLIENT_PRIVATE_KEY)
             .controlPlaneX509CertificatePath(CLIENT_X509_CERTIFICATE)
             .controlPlaneTLSMutualAuthenticationRequired(true);
@@ -123,7 +124,7 @@ public class AuthenticatedControlPlaneUsingMTLSClientNotAuthenticatedIntegration
                 try {
                     PrivateKey key = privateKeyFromPEMFile(CLIENT_PRIVATE_KEY);
                     X509Certificate[] keyCertChain = x509ChainFromPEMFile(CLIENT_X509_CERTIFICATE).toArray(new X509Certificate[0]);
-                    X509Certificate[] trustCertCollection = nettySslContextFactory.trustCertificateChain(CLIENT_CA_CHAIN);
+                    X509Certificate[] trustCertCollection = NettySslContextFactory.controlPlaneTrustCertificates(clientCaChain);
                     sslContextBuilder
                         .keyManager(
                             key,

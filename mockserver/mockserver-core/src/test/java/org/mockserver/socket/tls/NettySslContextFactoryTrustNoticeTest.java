@@ -49,7 +49,7 @@ public class NettySslContextFactoryTrustNoticeTest {
 
         assertThat(logger.messages(null), not(hasItem(containsString(FORWARD_PROXY_NOTICE))));
         assertThat(logger.messages(Level.INFO), contains(allOf(
-            containsString(CLIENT_NOTICE + " against the certificate authorities in controlPlaneTLSMutualAuthenticationCAChain plus MockServer's CA certificate (mockserver.certificateAuthorityCertificate)"),
+            containsString(CLIENT_NOTICE + " against only the certificate authorities in controlPlaneTLSMutualAuthenticationCAChain, not MockServer's CA certificate (mockserver.certificateAuthorityCertificate), so that chain must include the CA that signed MockServer's certificate"),
             containsString("org/mockserver/authentication/mtls/separateca/ca.pem"),
             containsString("do not apply to MockServerClient")
         )));

@@ -144,7 +144,7 @@ constructor always targets `localhost` with an empty context path). The `Builder
 | `withRequestOverride(HttpRequest)` | Default headers for control-plane requests |
 | `withProxyConfiguration(ProxyConfiguration)` | Route via proxy |
 
-**TLS trust.** Over TLS the client verifies MockServer's certificate against the JVM's default trusted CAs plus MockServer's CA certificate (`certificateAuthorityCertificate`, or the dynamically created CA). When control-plane mTLS is required it trusts `controlPlaneTLSMutualAuthenticationCAChain` plus MockServer's CA certificate (`certificateAuthorityCertificate`). The server's forward-proxy trust setting (`forwardProxyTLSX509CertificatesTrustManagerType`) does not apply. `MockServerClient` builds its TLS factory with `NettySslContextFactory.forMockServerClient(...)`, which logs this trust at INFO on the first request instead of the server's forward-proxy WARN.
+**TLS trust.** Over TLS the client verifies MockServer's certificate against the JVM's default trusted CAs plus MockServer's CA certificate (`certificateAuthorityCertificate`, or the dynamically created CA). When control-plane mTLS is required it trusts only `controlPlaneTLSMutualAuthenticationCAChain` (`NettySslContextFactory.controlPlaneTrustCertificates`), not MockServer's CA certificate, so the client's chain must include the CA that signed MockServer's certificate. The server's forward-proxy trust setting (`forwardProxyTLSX509CertificatesTrustManagerType`) does not apply. `MockServerClient` builds its TLS factory with `NettySslContextFactory.forMockServerClient(...)`, which logs this trust at INFO on the first request instead of the server's forward-proxy WARN.
 
 #### gRPC
 

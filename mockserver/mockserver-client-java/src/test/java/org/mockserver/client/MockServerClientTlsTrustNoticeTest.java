@@ -86,7 +86,7 @@ public class MockServerClientTlsTrustNoticeTest {
 
         assertThat(messages(null), not(hasItem(containsString(FORWARD_PROXY_NOTICE))));
         assertThat(messages(Level.INFO), hasItem(allOf(
-            containsString("MockServerClient verifies MockServer's TLS certificate against the certificate authorities in controlPlaneTLSMutualAuthenticationCAChain plus MockServer's CA certificate (mockserver.certificateAuthorityCertificate)"),
+            containsString("MockServerClient verifies MockServer's TLS certificate against only the certificate authorities in controlPlaneTLSMutualAuthenticationCAChain, not MockServer's CA certificate"),
             containsString(caChain)
         )));
     }

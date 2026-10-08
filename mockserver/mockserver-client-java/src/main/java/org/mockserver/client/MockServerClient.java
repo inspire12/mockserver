@@ -605,7 +605,7 @@ public class MockServerClient implements Stoppable {
                         try {
                             PrivateKey key = privateKeyFromPEMFile(configuration.controlPlanePrivateKeyPath());
                             X509Certificate[] keyCertChain = x509ChainFromPEMFile(configuration.controlPlaneX509CertificatePath()).toArray(new X509Certificate[0]);
-                            X509Certificate[] trustCertCollection = nettySslContextFactory.trustCertificateChain(configuration.controlPlaneTLSMutualAuthenticationCAChain());
+                            X509Certificate[] trustCertCollection = NettySslContextFactory.controlPlaneTrustCertificates(configuration.controlPlaneTLSMutualAuthenticationCAChain());
                             sslContextBuilder
                                 .keyManager(
                                     key,

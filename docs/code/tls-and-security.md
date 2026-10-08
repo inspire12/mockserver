@@ -350,6 +350,8 @@ For each presented certificate, paired with each configured CA, the handler:
 
 A presented certificate authenticates if any (certificate, CA) pair passes both checks; otherwise the handler throws `AuthenticationException`. Revocation (CRL/OCSP) is intentionally disabled so validation never makes a network call, consistent with the rest of the codebase. Because a certificate with no EKU is accepted, existing client certificates (including those that carry `serverAuth`+`clientAuth`, as MockServer's own generated certificates do) keep working unchanged.
 
+The same property has a second, client-side use: `MockServerClient` with control-plane mTLS required trusts only the certificates in its own `controlPlaneTLSMutualAuthenticationCAChain` for MockServer's server certificate (`NettySslContextFactory.controlPlaneTrustCertificates`). It does not add MockServer's CA certificate, so a client given a chain trusts nothing outside it, and the chain must contain the CA that signed MockServer's certificate.
+
 ## Control Plane Authentication
 
 ```mermaid

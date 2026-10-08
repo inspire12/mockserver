@@ -21,6 +21,7 @@
 <button id="button_configuration_control_plane_mtls_authentication_ca_chain" class="accordion title"><strong>Control Plane mTLS Authentication CA Chain</strong></button>
 <div class="panel title">
     <p>File system path or classpath location of the CA (i.e. trust) chain to use to validate client X509 certificates if <a href="#button_configuration_control_plane_mtls_authentication_required">controlPlaneTLSMutualAuthenticationRequired</a> is enabled</p>
+    <p>In the JVM running MockServerClient the same property holds the only CAs the client trusts for MockServer's own certificate, so the client's value must include the CA that signed MockServer's certificate (MockServer's CA certificate unless MockServer is given its own certificate). Earlier versions also trusted MockServer's CA certificate automatically.</p>
     <p>Type: <span class="keyword">string</span> Default: <span class="this_value">null</span></p>
     <p>Java Code:</p>
     <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.controlPlaneTLSMutualAuthenticationCAChain(String controlPlaneTLSMutualAuthenticationCAChain)</code></pre>
