@@ -600,6 +600,12 @@ public class ConfigurationDTOTest {
                 return org.mockserver.socket.tls.ForwardProxyTLSX509CertificatesTrustManager.CUSTOM;
             case "binaryMessageFraming":
                 return org.mockserver.configuration.BinaryMessageFraming.POSTGRESQL;
+            case "binaryMessageLengthPrefixBytes":
+                return 2;               // validated 1, 2, 4 or 8 (default 4)
+            case "binaryMessageLengthPrefixByteOrder":
+                return java.nio.ByteOrder.LITTLE_ENDIAN;
+            case "binaryMessageLengthPrefixOffset":
+                return 3;               // validated zero or more (default 0)
             case "forwardHttpProxy":
                 return java.net.InetSocketAddress.createUnresolved("http-proxy.example", 8081);
             case "forwardHttpsProxy":

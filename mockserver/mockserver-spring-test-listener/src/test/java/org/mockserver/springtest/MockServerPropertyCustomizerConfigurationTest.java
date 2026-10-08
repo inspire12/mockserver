@@ -101,6 +101,24 @@ public class MockServerPropertyCustomizerConfigurationTest {
     }
 
     @Test
+    public void shouldApplyBinaryMessageLengthPrefixProperties() {
+        Configuration config = MockServerPropertyCustomizer.buildConfiguration(
+            Arrays.asList(
+                "mockserver.binaryMessageFraming=length_prefix",
+                "mockserver.binaryMessageLengthPrefixBytes=2",
+                "mockserver.binaryMessageLengthPrefixByteOrder=little_endian",
+                "mockserver.binaryMessageLengthPrefixOffset=3",
+                "mockserver.binaryMessageLengthIncludesPrefix=true"
+            )
+        );
+        assertThat(config.binaryMessageFraming(), is(BinaryMessageFraming.LENGTH_PREFIX));
+        assertThat(config.binaryMessageLengthPrefixBytes(), is(2));
+        assertThat(config.binaryMessageLengthPrefixByteOrder(), is(java.nio.ByteOrder.LITTLE_ENDIAN));
+        assertThat(config.binaryMessageLengthPrefixOffset(), is(3));
+        assertThat(config.binaryMessageLengthIncludesPrefix(), is(true));
+    }
+
+    @Test
     public void shouldApplyIntegerProperties() {
         Configuration config = MockServerPropertyCustomizer.buildConfiguration(
             Arrays.asList(

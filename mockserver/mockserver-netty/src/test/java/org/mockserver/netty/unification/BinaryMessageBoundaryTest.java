@@ -92,6 +92,8 @@ public class BinaryMessageBoundaryTest {
     private final List<EmbeddedChannel> relayUpstreams = new ArrayList<>();
     private final List<Consumer<Throwable>> notYetAccepted = new ArrayList<>();
     private boolean upstreamAccepts;
+    // what a client sends, in the clear, before turning TLS on part way through
+    private byte[] tlsUpgradeRequest = SSL_REQUEST;
     private MockServerUnificationInitializer initializer;
 
     @BeforeClass
@@ -217,7 +219,7 @@ public class BinaryMessageBoundaryTest {
             }
             channel.pipeline().addLast(initializer);
             if (transport == Transport.TLS_TURNED_ON_PART_WAY) {
-                clientWrites(SSL_REQUEST);
+                clientWrites(tlsUpgradeRequest);
                 serverReads();
             }
             if (transport != Transport.IN_THE_CLEAR) {
@@ -287,6 +289,12 @@ public class BinaryMessageBoundaryTest {
         }
 
         private void handshake() throws Exception {
+            handshake(new byte[0]);
+        }
+
+        /** A handshake whose ClientHello is put on the wire right behind the bytes given, to be read with them. */
+        private void handshake(byte[] sentJustBeforeTheClientHello) throws Exception {
+            onTheWire(sentJustBeforeTheClientHello);
             tls = clientTls.createSSLEngine();
             tls.setUseClientMode(true);
             tls.setEnabledProtocols(new String[]{"TLSv1.3"});
@@ -850,5 +858,193 @@ public class BinaryMessageBoundaryTest {
         reply.release();
         assertThat("the others go upstream, each whole and alone", relayedWrites(), contains(describe(sync), describe(forwarded)));
         assertThat("nothing went the per-message way", messages, is(new ArrayList<String>()));
+    }
+
+    private static final BinaryMessageFraming[] LENGTH_FRAMINGS = {BinaryMessageFraming.MYSQL, BinaryMessageFraming.REDIS, BinaryMessageFraming.LENGTH_PREFIX};
+
+    /**
+     * A message of the framing given, exactly {@code length} bytes long, whose body is the letter given: a MySQL
+     * packet, a Redis bulk string, or a type byte and a 4-byte little-endian length that counts the whole message.
+     */
+    private static byte[] framedMessage(BinaryMessageFraming framing, char letter, int length) {
+        byte[] message = message(letter, length);
+        switch (framing) {
+            case MYSQL:
+                ByteBuffer.wrap(message).order(java.nio.ByteOrder.LITTLE_ENDIAN).putInt(length - 4);
+                message[3] = 0;
+                return message;
+            case REDIS:
+                int bodyBytes = length - 5;
+                while (1 + String.valueOf(bodyBytes).length() + 2 + bodyBytes + 2 > length) {
+                    bodyBytes--;
+                }
+                byte[] header = ("$" + bodyBytes + "\r\n").getBytes(StandardCharsets.US_ASCII);
+                System.arraycopy(header, 0, message, 0, header.length);
+                message[length - 2] = '\r';
+                message[length - 1] = '\n';
+                return message;
+            default:
+                message[0] = 'T';
+                ByteBuffer.wrap(message, 1, 4).order(java.nio.ByteOrder.LITTLE_ENDIAN).putInt(length);
+                return message;
+        }
+    }
+
+    private static int headerBytes(BinaryMessageFraming framing, byte[] message) {
+        switch (framing) {
+            case MYSQL:
+                return 4;
+            case REDIS:
+                return new String(message, StandardCharsets.US_ASCII).indexOf('\n') + 1;
+            default:
+                return 5;
+        }
+    }
+
+    /** A MySQL SSLRequest: a 32-byte payload, sequence id 1, whose capability flags include CLIENT_SSL. */
+    private static byte[] mysqlSslRequest() {
+        byte[] request = new byte[36];
+        request[0] = 32;
+        request[3] = 1;
+        request[4] = (byte) 0x0d;
+        request[5] = (byte) 0xaa;
+        return request;
+    }
+
+    private void frameWith(BinaryMessageFraming framing) {
+        configuration.binaryMessageFraming(framing)
+            .binaryMessageLengthPrefixOffset(1)
+            .binaryMessageLengthPrefixBytes(4)
+            .binaryMessageLengthPrefixByteOrder(java.nio.ByteOrder.LITTLE_ENDIAN)
+            .binaryMessageLengthIncludesPrefix(true);
+        tlsUpgradeRequest = framing == BinaryMessageFraming.MYSQL ? mysqlSslRequest() : framedMessage(framing, 'u', 20);
+    }
+
+    /** A connection framed as given that has carried one message, so MockServer knows it is binary. */
+    private Connection connectWithFramingAndStartTheSession(BinaryMessageFraming framing, Transport transport) throws Exception {
+        frameWith(framing);
+        Connection connection = connect(transport);
+        byte[] first = framedMessage(framing, 's', 23);
+        connection.clientWrites(first);
+        connection.serverReads();
+        assertThat(framing + " " + transport + ": the first message is one message", messagesTaken(), is("[" + describe(first) + "]"));
+        messages.clear();
+        connection.readLoops = 0;
+        return connection;
+    }
+
+    @Test
+    public void shouldTakeAMessageThatArrivesOverSeveralReadLoopsAsOneMessageWithEachFraming() throws Exception {
+        for (BinaryMessageFraming framing : LENGTH_FRAMINGS) {
+            for (Transport transport : Transport.values()) {
+                Connection connection = connectWithFramingAndStartTheSession(framing, transport);
+                byte[] query = framedMessage(framing, 'q', 800);
+                byte[] onTheWire = connection.tls == null ? query : connection.encrypted(query);
+
+                connection.onTheWire(Arrays.copyOfRange(onTheWire, 0, onTheWire.length / 2));
+                connection.serverReads();
+                connection.timePasses(50);
+                connection.onTheWire(Arrays.copyOfRange(onTheWire, onTheWire.length / 2, onTheWire.length));
+                connection.serverReads();
+
+                assertThat(framing + " " + transport, messagesTaken(), is("[" + describe(query) + "]"));
+                assertThat(framing + " " + transport, connection.readLoops, is(2));
+                messages.clear();
+            }
+        }
+    }
+
+    @Test
+    public void shouldTakeAMessageLargerThanTheGatheringLimitAsOneMessageWithEachFraming() throws Exception {
+        for (BinaryMessageFraming framing : LENGTH_FRAMINGS) {
+            for (Transport transport : Transport.values()) {
+                Connection connection = connectWithFramingAndStartTheSession(framing, transport);
+                byte[] large = framedMessage(framing, 'd', 24 * BINARY_READ_SIZE);
+
+                connection.clientWrites(large);
+                connection.serverReads();
+
+                assertThat(framing + " " + transport, connection.readLoops, is(2));
+                assertThat(framing + " " + transport, messagesTaken(), is("[" + describe(large) + "]"));
+                messages.clear();
+            }
+        }
+    }
+
+    @Test
+    public void shouldTakeMessagesWaitingTogetherAsSeparateMessagesWithEachFraming() throws Exception {
+        for (BinaryMessageFraming framing : LENGTH_FRAMINGS) {
+            for (Transport transport : Transport.values()) {
+                Connection connection = connectWithFramingAndStartTheSession(framing, transport);
+                byte[] first = framedMessage(framing, 'p', 40);
+                byte[] second = framedMessage(framing, 'b', 30);
+                byte[] third = framedMessage(framing, 'e', 12);
+
+                connection.clientWrites(first);
+                connection.clientWrites(second);
+                connection.clientWrites(third);
+                connection.serverReads();
+
+                assertThat(framing + " " + transport, connection.readLoops, is(1));
+                assertThat(framing + " " + transport, messagesTaken(), is("[" + describe(first) + "], [" + describe(second) + "], [" + describe(third) + "]"));
+                messages.clear();
+            }
+        }
+    }
+
+    @Test
+    public void shouldCloseAConnectionThatDeclaresAMessageOverMaxRequestBodySizeWithEachFraming() throws Exception {
+        configuration.maxRequestBodySize(1000);
+        for (BinaryMessageFraming framing : LENGTH_FRAMINGS) {
+            for (Transport transport : Transport.values()) {
+                Connection connection = connectWithFramingAndStartTheSession(framing, transport);
+                byte[] tooLong = framedMessage(framing, 'q', 1001);
+
+                connection.clientWrites(Arrays.copyOf(tooLong, headerBytes(framing, tooLong)));
+                connection.serverReads();
+
+                assertThat(framing + " " + transport, connection.channel.isOpen(), is(false));
+                assertThat(framing + " " + transport, messagesTaken(), is(""));
+            }
+        }
+    }
+
+    @Test
+    public void shouldNotTakeAMysqlPacketThatStartsLikeAHandshakeForOneUnlessItFollowsAnSslRequest() throws Exception {
+        Connection connection = connectWithFramingAndStartTheSession(BinaryMessageFraming.MYSQL, Transport.IN_THE_CLEAR);
+        // a packet whose header and first two payload bytes are those of a ClientHello
+        byte[] hello = clientHello();
+        byte[] execute = message('x', 4 + ((hello[0] & 0xff) | (hello[1] & 0xff) << 8 | (hello[2] & 0xff) << 16));
+        System.arraycopy(hello, 0, execute, 0, 6);
+
+        connection.clientWrites(execute);
+        connection.serverReads();
+
+        assertThat("a packet at a message boundary is a packet unless an SSLRequest came just before it", messagesTaken(), is("[" + describe(execute) + "]"));
+        assertThat(PortUnificationHandler.isSslEnabledUpstream(connection.channel), is(false));
+        assertThat(connection.channel.<ByteBuf>readOutbound(), is(nullValue()));
+        assertThat(connection.channel.isOpen(), is(true));
+    }
+
+    @Test
+    public void shouldTurnTlsOnWhenAMysqlClientHelloIsReadTogetherWithTheSslRequestBeforeIt() throws Exception {
+        for (boolean firstBytesOfTheConnection : new boolean[]{true, false}) {
+            Connection connection;
+            if (firstBytesOfTheConnection) {
+                frameWith(BinaryMessageFraming.MYSQL);
+                connection = connect(Transport.IN_THE_CLEAR);
+            } else {
+                connection = connectWithFramingAndStartTheSession(BinaryMessageFraming.MYSQL, Transport.IN_THE_CLEAR);
+            }
+
+            connection.handshake(mysqlSslRequest());
+            byte[] query = framedMessage(BinaryMessageFraming.MYSQL, 'q', 800);
+            connection.clientWrites(query);
+            connection.serverReads();
+
+            assertThat("first bytes " + firstBytesOfTheConnection, messagesTaken(), is("[" + describe(mysqlSslRequest()) + "], [" + describe(query) + "]"));
+            assertThat("the SSLRequest in the clear, the query over TLS", forwardedOverTls.subList(forwardedOverTls.size() - 2, forwardedOverTls.size()), contains(false, true));
+            messages.clear();
+        }
     }
 }

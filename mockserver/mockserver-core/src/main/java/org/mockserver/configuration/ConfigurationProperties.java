@@ -24,6 +24,7 @@ import java.lang.reflect.Modifier;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.nio.ByteOrder;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -31,6 +32,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -276,6 +278,13 @@ public class ConfigurationProperties {
     private static final String MOCKSERVER_FORWARD_BINARY_SERVER_FIRST_WAIT_MILLIS = "mockserver.forwardBinaryServerFirstWaitMillis";
     private static final String MOCKSERVER_BINARY_MESSAGE_FRAMING = "mockserver.binaryMessageFraming";
     private static final AtomicReference<String> REPORTED_INVALID_BINARY_MESSAGE_FRAMING = new AtomicReference<>();
+    private static final String MOCKSERVER_BINARY_MESSAGE_LENGTH_PREFIX_BYTES = "mockserver.binaryMessageLengthPrefixBytes";
+    private static final AtomicReference<String> REPORTED_INVALID_BINARY_MESSAGE_LENGTH_PREFIX_BYTES = new AtomicReference<>();
+    private static final String MOCKSERVER_BINARY_MESSAGE_LENGTH_PREFIX_BYTE_ORDER = "mockserver.binaryMessageLengthPrefixByteOrder";
+    private static final AtomicReference<String> REPORTED_INVALID_BINARY_MESSAGE_LENGTH_PREFIX_BYTE_ORDER = new AtomicReference<>();
+    private static final String MOCKSERVER_BINARY_MESSAGE_LENGTH_PREFIX_OFFSET = "mockserver.binaryMessageLengthPrefixOffset";
+    private static final AtomicReference<String> REPORTED_INVALID_BINARY_MESSAGE_LENGTH_PREFIX_OFFSET = new AtomicReference<>();
+    private static final String MOCKSERVER_BINARY_MESSAGE_LENGTH_INCLUDES_PREFIX = "mockserver.binaryMessageLengthIncludesPrefix";
 
     // streaming proxy
     private static final String MOCKSERVER_STREAMING_RESPONSES_ENABLED = "mockserver.streamingResponsesEnabled";
@@ -4318,15 +4327,16 @@ public class ConfigurationProperties {
 
     /**
      * How a binary (non-HTTP) connection is cut into messages before each is matched, forwarded or logged.
-     * RAW (the default) takes everything one read loop delivers as one message. POSTGRESQL reads the PostgreSQL
-     * frontend/backend protocol's own length fields, so a message that arrives over several reads is one message
-     * and messages read together are separate. A framed message may be at most maxRequestBodySize bytes: a
-     * connection that declares a longer one, or a length the protocol does not allow, is closed. The setting is
-     * read once per connection, when it is found to be binary. An unrecognised value is read as RAW.
+     * RAW (the default) takes everything one read loop delivers as one message. POSTGRESQL, MYSQL and REDIS read
+     * that protocol's own framing, and LENGTH_PREFIX a length field described by the binaryMessageLengthPrefix*
+     * properties, so a message that arrives over several reads is one message and messages read together are
+     * separate. A framed message may be at most maxRequestBodySize bytes: a connection that declares a longer one,
+     * or bytes the framing does not allow, is closed. The setting is read once per connection, when it is found to
+     * be binary. An unrecognised value is read as RAW.
      * <p>
      * The default is RAW
      *
-     * @param binaryMessageFraming RAW or POSTGRESQL
+     * @param binaryMessageFraming RAW, POSTGRESQL, MYSQL, REDIS or LENGTH_PREFIX
      */
     public static void binaryMessageFraming(BinaryMessageFraming binaryMessageFraming) {
         setProperty(MOCKSERVER_BINARY_MESSAGE_FRAMING, binaryMessageFraming.name());
@@ -4334,27 +4344,146 @@ public class ConfigurationProperties {
 
     public static BinaryMessageFraming binaryMessageFraming() {
         String value = readPropertyHierarchically(PROPERTIES, MOCKSERVER_BINARY_MESSAGE_FRAMING, "MOCKSERVER_BINARY_MESSAGE_FRAMING", BinaryMessageFraming.RAW.name());
-        return binaryMessageFraming(value, REPORTED_INVALID_BINARY_MESSAGE_FRAMING, invalid -> LoggerHolder.LOGGER.logEvent(
-            new LogEntry()
-                .setLogLevel(Level.ERROR)
-                .setMessageFormat("invalid value{}for " + MOCKSERVER_BINARY_MESSAGE_FRAMING + ", the supported values are RAW and POSTGRESQL: using RAW")
-                .setArguments(invalid)
-        ));
+        return binaryMessageFraming(value, REPORTED_INVALID_BINARY_MESSAGE_FRAMING, invalid -> reportInvalidValue(MOCKSERVER_BINARY_MESSAGE_FRAMING, invalid, Arrays.toString(BinaryMessageFraming.values()), BinaryMessageFraming.RAW));
+    }
+
+    static BinaryMessageFraming binaryMessageFraming(String value, AtomicReference<String> reported, Consumer<String> report) {
+        return readOnceReported(value, framing -> BinaryMessageFraming.valueOf(framing.trim().toUpperCase(Locale.ROOT)), BinaryMessageFraming.RAW, reported, report);
     }
 
     /**
-     * RAW for a value that names no framing. The getter is read for every binary connection and every
+     * With binaryMessageFraming LENGTH_PREFIX, how many bytes the length field has: 1, 2, 4 or 8, read as an unsigned
+     * number. Any other value is read as 4.
+     * <p>
+     * The default is 4
+     *
+     * @param binaryMessageLengthPrefixBytes 1, 2, 4 or 8
+     */
+    public static void binaryMessageLengthPrefixBytes(int binaryMessageLengthPrefixBytes) {
+        setProperty(MOCKSERVER_BINARY_MESSAGE_LENGTH_PREFIX_BYTES, "" + binaryMessageLengthPrefixBytes);
+    }
+
+    public static int binaryMessageLengthPrefixBytes() {
+        String value = readPropertyHierarchically(PROPERTIES, MOCKSERVER_BINARY_MESSAGE_LENGTH_PREFIX_BYTES, "MOCKSERVER_BINARY_MESSAGE_LENGTH_PREFIX_BYTES", "4");
+        return binaryMessageLengthPrefixBytes(value, REPORTED_INVALID_BINARY_MESSAGE_LENGTH_PREFIX_BYTES, invalid -> reportInvalidValue(MOCKSERVER_BINARY_MESSAGE_LENGTH_PREFIX_BYTES, invalid, "1, 2, 4 and 8", 4));
+    }
+
+    static int binaryMessageLengthPrefixBytes(String value, AtomicReference<String> reported, Consumer<String> report) {
+        return readOnceReported(value, bytes -> {
+            int parsed = Integer.parseInt(bytes.trim());
+            if (!isBinaryMessageLengthPrefixBytes(parsed)) {
+                throw new IllegalArgumentException("not 1, 2, 4 or 8");
+            }
+            return parsed;
+        }, 4, reported, report);
+    }
+
+    public static boolean isBinaryMessageLengthPrefixBytes(int bytes) {
+        return bytes == 1 || bytes == 2 || bytes == 4 || bytes == 8;
+    }
+
+    /**
+     * With binaryMessageFraming LENGTH_PREFIX, the byte order of the length field: BIG_ENDIAN or LITTLE_ENDIAN. Any
+     * other value is read as BIG_ENDIAN.
+     * <p>
+     * The default is BIG_ENDIAN
+     *
+     * @param binaryMessageLengthPrefixByteOrder ByteOrder.BIG_ENDIAN or ByteOrder.LITTLE_ENDIAN
+     */
+    public static void binaryMessageLengthPrefixByteOrder(ByteOrder binaryMessageLengthPrefixByteOrder) {
+        setProperty(MOCKSERVER_BINARY_MESSAGE_LENGTH_PREFIX_BYTE_ORDER, binaryMessageLengthPrefixByteOrder.toString());
+    }
+
+    public static ByteOrder binaryMessageLengthPrefixByteOrder() {
+        String value = readPropertyHierarchically(PROPERTIES, MOCKSERVER_BINARY_MESSAGE_LENGTH_PREFIX_BYTE_ORDER, "MOCKSERVER_BINARY_MESSAGE_LENGTH_PREFIX_BYTE_ORDER", ByteOrder.BIG_ENDIAN.toString());
+        return binaryMessageLengthPrefixByteOrder(value, REPORTED_INVALID_BINARY_MESSAGE_LENGTH_PREFIX_BYTE_ORDER, invalid -> reportInvalidValue(MOCKSERVER_BINARY_MESSAGE_LENGTH_PREFIX_BYTE_ORDER, invalid, "BIG_ENDIAN and LITTLE_ENDIAN", ByteOrder.BIG_ENDIAN));
+    }
+
+    static ByteOrder binaryMessageLengthPrefixByteOrder(String value, AtomicReference<String> reported, Consumer<String> report) {
+        return readOnceReported(value, ConfigurationProperties::parseByteOrder, ByteOrder.BIG_ENDIAN, reported, report);
+    }
+
+    /**
+     * BIG_ENDIAN or LITTLE_ENDIAN, in any case, as the byte order of that name.
+     *
+     * @throws IllegalArgumentException for any other value
+     */
+    public static ByteOrder parseByteOrder(String value) {
+        String name = value.trim().toUpperCase(Locale.ROOT);
+        if (name.equals(ByteOrder.BIG_ENDIAN.toString())) {
+            return ByteOrder.BIG_ENDIAN;
+        }
+        if (name.equals(ByteOrder.LITTLE_ENDIAN.toString())) {
+            return ByteOrder.LITTLE_ENDIAN;
+        }
+        throw new IllegalArgumentException("not BIG_ENDIAN or LITTLE_ENDIAN: " + value);
+    }
+
+    /**
+     * With binaryMessageFraming LENGTH_PREFIX, how many bytes of each message come before its length field (a type
+     * byte or a magic number, say). They are part of the message. A negative or non-numeric value is read as 0.
+     * <p>
+     * The default is 0
+     *
+     * @param binaryMessageLengthPrefixOffset zero or more
+     */
+    public static void binaryMessageLengthPrefixOffset(int binaryMessageLengthPrefixOffset) {
+        setProperty(MOCKSERVER_BINARY_MESSAGE_LENGTH_PREFIX_OFFSET, "" + binaryMessageLengthPrefixOffset);
+    }
+
+    public static int binaryMessageLengthPrefixOffset() {
+        String value = readPropertyHierarchically(PROPERTIES, MOCKSERVER_BINARY_MESSAGE_LENGTH_PREFIX_OFFSET, "MOCKSERVER_BINARY_MESSAGE_LENGTH_PREFIX_OFFSET", "0");
+        return binaryMessageLengthPrefixOffset(value, REPORTED_INVALID_BINARY_MESSAGE_LENGTH_PREFIX_OFFSET, invalid -> reportInvalidValue(MOCKSERVER_BINARY_MESSAGE_LENGTH_PREFIX_OFFSET, invalid, "zero or more", 0));
+    }
+
+    static int binaryMessageLengthPrefixOffset(String value, AtomicReference<String> reported, Consumer<String> report) {
+        return readOnceReported(value, offset -> {
+            int parsed = Integer.parseInt(offset.trim());
+            if (parsed < 0) {
+                throw new IllegalArgumentException("negative");
+            }
+            return parsed;
+        }, 0, reported, report);
+    }
+
+    /**
+     * With binaryMessageFraming LENGTH_PREFIX, whether the length counts the whole message, the bytes before the
+     * length field and the field itself included (true), or only the bytes after the field (false).
+     * <p>
+     * The default is false
+     *
+     * @param binaryMessageLengthIncludesPrefix target value
+     */
+    public static void binaryMessageLengthIncludesPrefix(boolean binaryMessageLengthIncludesPrefix) {
+        setProperty(MOCKSERVER_BINARY_MESSAGE_LENGTH_INCLUDES_PREFIX, "" + binaryMessageLengthIncludesPrefix);
+    }
+
+    public static boolean binaryMessageLengthIncludesPrefix() {
+        return Boolean.parseBoolean(readPropertyHierarchically(PROPERTIES, MOCKSERVER_BINARY_MESSAGE_LENGTH_INCLUDES_PREFIX, "MOCKSERVER_BINARY_MESSAGE_LENGTH_INCLUDES_PREFIX", "false"));
+    }
+
+    /**
+     * The fallback for a value that parse refuses. These getters are read for every binary connection and every
      * configuration request, so an invalid value is reported once, and again only when it changes.
      */
-    static BinaryMessageFraming binaryMessageFraming(String value, AtomicReference<String> reported, Consumer<String> report) {
+    private static <T> T readOnceReported(String value, Function<String, T> parse, T fallback, AtomicReference<String> reported, Consumer<String> report) {
         try {
-            return BinaryMessageFraming.valueOf(value.trim().toUpperCase(Locale.ROOT));
+            return parse.apply(value);
         } catch (IllegalArgumentException | NullPointerException invalid) {
             if (!String.valueOf(value).equals(reported.getAndSet(String.valueOf(value)))) {
                 report.accept(value);
             }
-            return BinaryMessageFraming.RAW;
+            return fallback;
         }
+    }
+
+    private static void reportInvalidValue(String key, String invalid, String supported, Object fallback) {
+        LoggerHolder.LOGGER.logEvent(
+            new LogEntry()
+                .setLogLevel(Level.ERROR)
+                .setMessageFormat("invalid value{}for " + key + ", the supported values are{}so it is read as{}")
+                .setArguments(invalid, supported, fallback)
+        );
     }
 
     // CORS

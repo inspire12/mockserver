@@ -2216,10 +2216,80 @@ public class ConfigurationTest {
             Configuration updated = new Configuration();
             new org.mockserver.serialization.model.ConfigurationDTO().setBinaryMessageFraming("postgresql").applyTo(updated);
             assertThat(updated.binaryMessageFraming(), equalTo(BinaryMessageFraming.POSTGRESQL));
-            IllegalArgumentException refused = assertThrows(IllegalArgumentException.class, () -> new org.mockserver.serialization.model.ConfigurationDTO().setBinaryMessageFraming("MYSQL").applyTo(new Configuration()));
-            assertThat(refused.getMessage(), startsWith("Invalid binaryMessageFraming: \"MYSQL\""));
+            IllegalArgumentException refused = assertThrows(IllegalArgumentException.class, () -> new org.mockserver.serialization.model.ConfigurationDTO().setBinaryMessageFraming("MONGODB").applyTo(new Configuration()));
+            assertThat(refused.getMessage(), startsWith("Invalid binaryMessageFraming: \"MONGODB\""));
+            new org.mockserver.serialization.model.ConfigurationDTO().setBinaryMessageFraming("redis").applyTo(updated);
+            assertThat(updated.binaryMessageFraming(), equalTo(BinaryMessageFraming.REDIS));
         } finally {
             ConfigurationProperties.binaryMessageFraming(original);
+        }
+    }
+
+    @Test
+    public void shouldSetAndGetBinaryMessageLengthPrefixProperties() {
+        int originalBytes = ConfigurationProperties.binaryMessageLengthPrefixBytes();
+        java.nio.ByteOrder originalOrder = ConfigurationProperties.binaryMessageLengthPrefixByteOrder();
+        int originalOffset = ConfigurationProperties.binaryMessageLengthPrefixOffset();
+        boolean originalIncludes = ConfigurationProperties.binaryMessageLengthIncludesPrefix();
+        try {
+            // then - default values
+            assertThat(configuration.binaryMessageLengthPrefixBytes(), equalTo(4));
+            assertThat(configuration.binaryMessageLengthPrefixByteOrder(), equalTo(java.nio.ByteOrder.BIG_ENDIAN));
+            assertThat(configuration.binaryMessageLengthPrefixOffset(), equalTo(0));
+            assertThat(configuration.binaryMessageLengthIncludesPrefix(), equalTo(false));
+
+            // when - system property setters
+            ConfigurationProperties.binaryMessageLengthPrefixBytes(2);
+            ConfigurationProperties.binaryMessageLengthPrefixByteOrder(java.nio.ByteOrder.LITTLE_ENDIAN);
+            ConfigurationProperties.binaryMessageLengthPrefixOffset(3);
+            ConfigurationProperties.binaryMessageLengthIncludesPrefix(true);
+
+            // then - system property getters
+            assertThat(System.getProperty("mockserver.binaryMessageLengthPrefixBytes"), equalTo("2"));
+            assertThat(System.getProperty("mockserver.binaryMessageLengthPrefixByteOrder"), equalTo("LITTLE_ENDIAN"));
+            assertThat(System.getProperty("mockserver.binaryMessageLengthPrefixOffset"), equalTo("3"));
+            assertThat(System.getProperty("mockserver.binaryMessageLengthIncludesPrefix"), equalTo("true"));
+            assertThat(configuration.binaryMessageLengthPrefixBytes(), equalTo(2));
+            assertThat(configuration.binaryMessageLengthPrefixByteOrder(), equalTo(java.nio.ByteOrder.LITTLE_ENDIAN));
+            assertThat(configuration.binaryMessageLengthPrefixOffset(), equalTo(3));
+            assertThat(configuration.binaryMessageLengthIncludesPrefix(), equalTo(true));
+            ConfigurationProperties.binaryMessageLengthPrefixBytes(originalBytes);
+            ConfigurationProperties.binaryMessageLengthPrefixByteOrder(originalOrder);
+            ConfigurationProperties.binaryMessageLengthPrefixOffset(originalOffset);
+            ConfigurationProperties.binaryMessageLengthIncludesPrefix(originalIncludes);
+
+            // when - setters
+            configuration
+                .binaryMessageLengthPrefixBytes(8)
+                .binaryMessageLengthPrefixByteOrder(java.nio.ByteOrder.LITTLE_ENDIAN)
+                .binaryMessageLengthPrefixOffset(1)
+                .binaryMessageLengthIncludesPrefix(true);
+
+            // then - getters, and carried by the configuration the REST API reads and writes
+            Configuration roundTripped = new org.mockserver.serialization.model.ConfigurationDTO(configuration).buildObject();
+            assertThat(roundTripped.binaryMessageLengthPrefixBytes(), equalTo(8));
+            assertThat(roundTripped.binaryMessageLengthPrefixByteOrder(), equalTo(java.nio.ByteOrder.LITTLE_ENDIAN));
+            assertThat(roundTripped.binaryMessageLengthPrefixOffset(), equalTo(1));
+            assertThat(roundTripped.binaryMessageLengthIncludesPrefix(), equalTo(true));
+            Configuration updated = new Configuration();
+            new org.mockserver.serialization.model.ConfigurationDTO().setBinaryMessageLengthPrefixByteOrder("little_endian").setBinaryMessageLengthPrefixBytes(1).applyTo(updated);
+            assertThat(updated.binaryMessageLengthPrefixByteOrder(), equalTo(java.nio.ByteOrder.LITTLE_ENDIAN));
+            assertThat(updated.binaryMessageLengthPrefixBytes(), equalTo(1));
+
+            // then - refused when invalid, through the REST API and the setters
+            assertThat(assertThrows(IllegalArgumentException.class, () -> new org.mockserver.serialization.model.ConfigurationDTO().setBinaryMessageLengthPrefixBytes(3).applyTo(new Configuration())).getMessage(),
+                startsWith("binaryMessageLengthPrefixBytes must be 1, 2, 4 or 8"));
+            assertThat(assertThrows(IllegalArgumentException.class, () -> new org.mockserver.serialization.model.ConfigurationDTO().setBinaryMessageLengthPrefixByteOrder("MIDDLE").applyTo(new Configuration())).getMessage(),
+                startsWith("Invalid binaryMessageLengthPrefixByteOrder: \"MIDDLE\""));
+            assertThat(assertThrows(IllegalArgumentException.class, () -> new org.mockserver.serialization.model.ConfigurationDTO().setBinaryMessageLengthPrefixOffset(-1).applyTo(new Configuration())).getMessage(),
+                startsWith("binaryMessageLengthPrefixOffset must be zero or more"));
+            assertThrows(IllegalArgumentException.class, () -> new Configuration().binaryMessageLengthPrefixBytes(16));
+            assertThrows(IllegalArgumentException.class, () -> new Configuration().binaryMessageLengthPrefixOffset(-2));
+        } finally {
+            ConfigurationProperties.binaryMessageLengthPrefixBytes(originalBytes);
+            ConfigurationProperties.binaryMessageLengthPrefixByteOrder(originalOrder);
+            ConfigurationProperties.binaryMessageLengthPrefixOffset(originalOffset);
+            ConfigurationProperties.binaryMessageLengthIncludesPrefix(originalIncludes);
         }
     }
 

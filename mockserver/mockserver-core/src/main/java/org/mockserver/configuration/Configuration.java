@@ -12,6 +12,7 @@ import org.mockserver.socket.tls.ForwardProxyTLSX509CertificatesTrustManager;
 import org.slf4j.event.Level;
 
 import java.net.InetSocketAddress;
+import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.Deque;
 import java.util.List;
@@ -229,6 +230,10 @@ public class Configuration {
     private volatile Boolean forwardBinaryRequestsMatchExpectations;
     private volatile Long forwardBinaryServerFirstWaitMillis;
     private volatile BinaryMessageFraming binaryMessageFraming;
+    private volatile Integer binaryMessageLengthPrefixBytes;
+    private volatile ByteOrder binaryMessageLengthPrefixByteOrder;
+    private volatile Integer binaryMessageLengthPrefixOffset;
+    private volatile Boolean binaryMessageLengthIncludesPrefix;
     private volatile BinaryProxyListener binaryProxyListener;
 
     // CORS
@@ -3398,18 +3403,104 @@ public class Configuration {
 
     /**
      * How a binary (non-HTTP) connection is cut into messages before each is matched, forwarded or logged.
-     * RAW (the default) takes everything one read loop delivers as one message. POSTGRESQL reads the PostgreSQL
-     * frontend/backend protocol's own length fields, so a message that arrives over several reads is one message
-     * and messages read together are separate. A framed message may be at most maxRequestBodySize bytes: a
-     * connection that declares a longer one, or a length the protocol does not allow, is closed. The setting is
-     * read once per connection, when it is found to be binary.
+     * RAW (the default) takes everything one read loop delivers as one message. POSTGRESQL, MYSQL and REDIS read
+     * that protocol's own framing, and LENGTH_PREFIX a length field described by the binaryMessageLengthPrefix*
+     * settings, so a message that arrives over several reads is one message and messages read together are
+     * separate. A framed message may be at most maxRequestBodySize bytes: a connection that declares a longer one,
+     * or bytes the framing does not allow, is closed. The setting is read once per connection, when it is found to
+     * be binary.
      * <p>
      * The default is RAW
      *
-     * @param binaryMessageFraming RAW or POSTGRESQL
+     * @param binaryMessageFraming RAW, POSTGRESQL, MYSQL, REDIS or LENGTH_PREFIX
      */
     public Configuration binaryMessageFraming(BinaryMessageFraming binaryMessageFraming) {
         this.binaryMessageFraming = binaryMessageFraming;
+        return this;
+    }
+
+    public Integer binaryMessageLengthPrefixBytes() {
+        if (binaryMessageLengthPrefixBytes == null) {
+            return ConfigurationProperties.binaryMessageLengthPrefixBytes();
+        }
+        return binaryMessageLengthPrefixBytes;
+    }
+
+    /**
+     * With binaryMessageFraming LENGTH_PREFIX, how many bytes the length field has: 1, 2, 4 or 8. It is read as an
+     * unsigned number.
+     * <p>
+     * The default is 4
+     *
+     * @param binaryMessageLengthPrefixBytes 1, 2, 4 or 8
+     */
+    public Configuration binaryMessageLengthPrefixBytes(Integer binaryMessageLengthPrefixBytes) {
+        if (binaryMessageLengthPrefixBytes != null && !ConfigurationProperties.isBinaryMessageLengthPrefixBytes(binaryMessageLengthPrefixBytes)) {
+            throw new IllegalArgumentException("binaryMessageLengthPrefixBytes must be 1, 2, 4 or 8, got: " + binaryMessageLengthPrefixBytes);
+        }
+        this.binaryMessageLengthPrefixBytes = binaryMessageLengthPrefixBytes;
+        return this;
+    }
+
+    public ByteOrder binaryMessageLengthPrefixByteOrder() {
+        if (binaryMessageLengthPrefixByteOrder == null) {
+            return ConfigurationProperties.binaryMessageLengthPrefixByteOrder();
+        }
+        return binaryMessageLengthPrefixByteOrder;
+    }
+
+    /**
+     * With binaryMessageFraming LENGTH_PREFIX, the byte order of the length field.
+     * <p>
+     * The default is BIG_ENDIAN
+     *
+     * @param binaryMessageLengthPrefixByteOrder ByteOrder.BIG_ENDIAN or ByteOrder.LITTLE_ENDIAN
+     */
+    public Configuration binaryMessageLengthPrefixByteOrder(ByteOrder binaryMessageLengthPrefixByteOrder) {
+        this.binaryMessageLengthPrefixByteOrder = binaryMessageLengthPrefixByteOrder;
+        return this;
+    }
+
+    public Integer binaryMessageLengthPrefixOffset() {
+        if (binaryMessageLengthPrefixOffset == null) {
+            return ConfigurationProperties.binaryMessageLengthPrefixOffset();
+        }
+        return binaryMessageLengthPrefixOffset;
+    }
+
+    /**
+     * With binaryMessageFraming LENGTH_PREFIX, how many bytes of each message come before its length field (a type
+     * byte or a magic number, say). They are part of the message.
+     * <p>
+     * The default is 0
+     *
+     * @param binaryMessageLengthPrefixOffset zero or more
+     */
+    public Configuration binaryMessageLengthPrefixOffset(Integer binaryMessageLengthPrefixOffset) {
+        if (binaryMessageLengthPrefixOffset != null && binaryMessageLengthPrefixOffset < 0) {
+            throw new IllegalArgumentException("binaryMessageLengthPrefixOffset must be zero or more, got: " + binaryMessageLengthPrefixOffset);
+        }
+        this.binaryMessageLengthPrefixOffset = binaryMessageLengthPrefixOffset;
+        return this;
+    }
+
+    public Boolean binaryMessageLengthIncludesPrefix() {
+        if (binaryMessageLengthIncludesPrefix == null) {
+            return ConfigurationProperties.binaryMessageLengthIncludesPrefix();
+        }
+        return binaryMessageLengthIncludesPrefix;
+    }
+
+    /**
+     * With binaryMessageFraming LENGTH_PREFIX, whether the length counts the whole message, the bytes before the
+     * length field and the field itself included (true), or only the bytes after the field (false).
+     * <p>
+     * The default is false
+     *
+     * @param binaryMessageLengthIncludesPrefix target value
+     */
+    public Configuration binaryMessageLengthIncludesPrefix(Boolean binaryMessageLengthIncludesPrefix) {
+        this.binaryMessageLengthIncludesPrefix = binaryMessageLengthIncludesPrefix;
         return this;
     }
 

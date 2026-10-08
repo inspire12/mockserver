@@ -2,6 +2,7 @@ package org.mockserver.springtest;
 
 import org.mockserver.configuration.BinaryMessageFraming;
 import org.mockserver.configuration.Configuration;
+import org.mockserver.configuration.ConfigurationProperties;
 import org.mockserver.integration.ClientAndServer;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
@@ -285,6 +286,9 @@ public class MockServerPropertyCustomizer implements ContextCustomizer {
             case "forwardBinaryServerFirstWaitMillis":
                 config.forwardBinaryServerFirstWaitMillis(Long.parseLong(value));
                 break;
+            case "binaryMessageLengthIncludesPrefix":
+                config.binaryMessageLengthIncludesPrefix(parseStrictBoolean(value, key));
+                break;
             case "enableCORSForAPI":
                 config.enableCORSForAPI(parseStrictBoolean(value, key));
                 break;
@@ -401,6 +405,12 @@ public class MockServerPropertyCustomizer implements ContextCustomizer {
             case "maximumNumberOfRequestToReturnInVerificationFailure":
                 config.maximumNumberOfRequestToReturnInVerificationFailure(Integer.parseInt(value));
                 break;
+            case "binaryMessageLengthPrefixBytes":
+                config.binaryMessageLengthPrefixBytes(Integer.parseInt(value.trim()));
+                break;
+            case "binaryMessageLengthPrefixOffset":
+                config.binaryMessageLengthPrefixOffset(Integer.parseInt(value.trim()));
+                break;
 
             // --- Long properties (note: property names differ from setter names) ---
             case "maxFutureTimeout":
@@ -439,6 +449,9 @@ public class MockServerPropertyCustomizer implements ContextCustomizer {
                 break;
             case "binaryMessageFraming":
                 config.binaryMessageFraming(BinaryMessageFraming.valueOf(value.trim().toUpperCase(Locale.ROOT)));
+                break;
+            case "binaryMessageLengthPrefixByteOrder":
+                config.binaryMessageLengthPrefixByteOrder(ConfigurationProperties.parseByteOrder(value));
                 break;
 
             // --- Set<String> properties (comma-separated) ---

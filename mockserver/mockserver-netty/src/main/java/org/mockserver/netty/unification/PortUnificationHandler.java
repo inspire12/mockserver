@@ -21,7 +21,6 @@ import org.mockserver.codec.HttpObjectAggregators;
 import org.mockserver.codec.MockServerHttpContentDecompressor;
 import org.mockserver.codec.MockServerHttpServerCodec;
 import org.mockserver.codec.PreserveHeadersNettyRemoves;
-import org.mockserver.configuration.BinaryMessageFraming;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.configuration.ConfigurationProperties;
 import org.mockserver.configuration.ControlPlaneAuthenticationSettings;
@@ -49,9 +48,9 @@ import org.mockserver.netty.proxy.relay.RelayLoopbackAddresses;
 import org.mockserver.netty.mcp.McpStreamableHttpHandler;
 import org.mockserver.netty.grpc.GrpcToHttpRequestHandler;
 import org.mockserver.netty.grpc.GrpcToHttpResponseHandler;
+import org.mockserver.netty.proxy.BinaryMessageFramer;
 import org.mockserver.netty.proxy.BinaryMessageGatherer;
 import org.mockserver.netty.proxy.BinaryRequestProxyingHandler;
-import org.mockserver.netty.proxy.PostgresqlMessageFramer;
 import org.mockserver.netty.proxy.socks.Socks4ProxyHandler;
 import org.mockserver.netty.proxy.socks.Socks5ProxyHandler;
 import org.mockserver.netty.proxy.socks.SocksDetector;
@@ -333,7 +332,7 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
     protected void decode(ChannelHandlerContext ctx, ByteBuf msg, List<Object> out) {
         ctx.channel().attr(NETTY_SSL_CONTEXT_FACTORY).set(nettySslContextFactory);
         if (binaryInTheClear) {
-            if (!takeBytesReceivedAsTheyAre && atMessageBoundary(ctx) && startsTlsClientHello(msg)) {
+            if (!takeBytesReceivedAsTheyAre && tlsMayStartHere(ctx) && startsTlsClientHello(msg)) {
                 // a protocol that turns TLS on part way through: what is decrypted from here on is binary
                 logStage(ctx, "adding TLS decoders to a binary connection");
                 // what this read loop brought before the handshake is a message sent in the clear: it is handled,
@@ -353,6 +352,14 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
                     ctx.fireChannelRead(msg.readBytes(held));
                     // it arrived in an earlier read than what follows it, so it is not joined to that
                     ctx.fireChannelReadComplete();
+                    endedByWhatWasPassedOn(ctx, msg);
+                    return;
+                }
+                int beforeTls = bytesBeforeTlsMayStart(ctx, msg);
+                if (beforeTls > 0) {
+                    // a message after which the client may start its handshake without waiting for a reply: what
+                    // follows it is looked at next, as the start of a read
+                    ctx.fireChannelRead(msg.readBytes(beforeTls));
                     endedByWhatWasPassedOn(ctx, msg);
                     return;
                 }
@@ -439,10 +446,15 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
         return false;
     }
 
-    private static boolean atMessageBoundary(ChannelHandlerContext ctx) {
+    private int bytesBeforeTlsMayStart(ChannelHandlerContext ctx, ByteBuf msg) {
+        BinaryMessageFramer framer = ctx.pipeline().get(BinaryMessageFramer.class);
+        return framer == null ? 0 : framer.bytesBeforeTlsMayStart(msg, actualReadableBytes());
+    }
+
+    private static boolean tlsMayStartHere(ChannelHandlerContext ctx) {
         // with a protocol's framing, bytes in the middle of a message are never a handshake, whatever they look like
-        PostgresqlMessageFramer framer = ctx.pipeline().get(PostgresqlMessageFramer.class);
-        return framer == null || framer.atMessageBoundary();
+        BinaryMessageFramer framer = ctx.pipeline().get(BinaryMessageFramer.class);
+        return framer == null || framer.tlsMayStartHere();
     }
 
     /**
@@ -839,18 +851,19 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
 
     private void switchToBinaryRequestProxying(ChannelHandlerContext ctx, ByteBuf msg) {
         addBinaryRequestProxying(ctx);
-        // fire message back through pipeline
-        ctx.fireChannelRead(msg.readBytes(actualReadableBytes()));
+        // fire message back through pipeline, up to where a handshake may follow it in the same read
+        int beforeTls = binaryInTheClear ? bytesBeforeTlsMayStart(ctx, msg) : 0;
+        ctx.fireChannelRead(msg.readBytes(beforeTls > 0 ? beforeTls : actualReadableBytes()));
+        if (beforeTls > 0) {
+            endedByWhatWasPassedOn(ctx, msg);
+        }
     }
 
     private void addBinaryRequestProxying(ChannelHandlerContext ctx) {
         // a raw TCP protocol (a database, a broker) may legitimately stay silent for long periods
         InboundConnectionActivity.markLongLived(ctx.channel());
-        if (configuration.binaryMessageFraming() == BinaryMessageFraming.POSTGRESQL) {
-            addLastIfNotPresent(ctx.pipeline(), new PostgresqlMessageFramer(configuration.maxRequestBodySize(), mockServerLogger));
-        } else {
-            addLastIfNotPresent(ctx.pipeline(), new BinaryMessageGatherer());
-        }
+        BinaryMessageFramer framer = BinaryMessageFramer.forConfiguration(configuration, mockServerLogger);
+        addLastIfNotPresent(ctx.pipeline(), framer != null ? framer : new BinaryMessageGatherer());
         addLastIfNotPresent(ctx.pipeline(), new BinaryRequestProxyingHandler(configuration, httpState.getMockServerLogger(), httpState.getScheduler(), actionHandler.getHttpClient(), httpState));
         // what a read loop brings is one message from here on, so no read may be cut short by a buffer sized
         // for earlier ones

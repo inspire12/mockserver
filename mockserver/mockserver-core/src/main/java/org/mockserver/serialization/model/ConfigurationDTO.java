@@ -11,6 +11,7 @@ import org.mockserver.socket.tls.ForwardProxyTLSX509CertificatesTrustManager;
 import org.slf4j.event.Level;
 
 import java.net.InetSocketAddress;
+import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.Locale;
 import java.util.Map;
@@ -84,6 +85,10 @@ public class ConfigurationDTO implements DTO<Configuration> {
     private Boolean forwardBinaryRequestsMatchExpectations;
     private Long forwardBinaryServerFirstWaitMillis;
     private String binaryMessageFraming;
+    private Integer binaryMessageLengthPrefixBytes;
+    private String binaryMessageLengthPrefixByteOrder;
+    private Integer binaryMessageLengthPrefixOffset;
+    private Boolean binaryMessageLengthIncludesPrefix;
 
     private Boolean enableCORSForAPI;
     private Boolean enableCORSForAllResponses;
@@ -439,6 +444,10 @@ public class ConfigurationDTO implements DTO<Configuration> {
             this.forwardBinaryRequestsMatchExpectations = configuration.forwardBinaryRequestsMatchExpectations();
             this.forwardBinaryServerFirstWaitMillis = configuration.forwardBinaryServerFirstWaitMillis();
             this.binaryMessageFraming = configuration.binaryMessageFraming().name();
+            this.binaryMessageLengthPrefixBytes = configuration.binaryMessageLengthPrefixBytes();
+            this.binaryMessageLengthPrefixByteOrder = configuration.binaryMessageLengthPrefixByteOrder().toString();
+            this.binaryMessageLengthPrefixOffset = configuration.binaryMessageLengthPrefixOffset();
+            this.binaryMessageLengthIncludesPrefix = configuration.binaryMessageLengthIncludesPrefix();
 
             this.enableCORSForAPI = configuration.enableCORSForAPI();
             this.enableCORSForAllResponses = configuration.enableCORSForAllResponses();
@@ -762,6 +771,15 @@ public class ConfigurationDTO implements DTO<Configuration> {
         if (binaryMessageFraming != null) {
             parseBinaryMessageFraming(binaryMessageFraming);
         }
+        if (binaryMessageLengthPrefixBytes != null && !ConfigurationProperties.isBinaryMessageLengthPrefixBytes(binaryMessageLengthPrefixBytes)) {
+            throw new IllegalArgumentException("binaryMessageLengthPrefixBytes must be 1, 2, 4 or 8, got: " + binaryMessageLengthPrefixBytes);
+        }
+        if (binaryMessageLengthPrefixByteOrder != null) {
+            parseBinaryMessageLengthPrefixByteOrder(binaryMessageLengthPrefixByteOrder);
+        }
+        if (binaryMessageLengthPrefixOffset != null && binaryMessageLengthPrefixOffset < 0) {
+            throw new IllegalArgumentException("binaryMessageLengthPrefixOffset must be zero or more, got: " + binaryMessageLengthPrefixOffset);
+        }
         if (forwardProxyTLSX509CertificatesTrustManagerType != null) {
             try {
                 ForwardProxyTLSX509CertificatesTrustManager.valueOf(forwardProxyTLSX509CertificatesTrustManagerType);
@@ -884,6 +902,12 @@ public class ConfigurationDTO implements DTO<Configuration> {
         if (binaryMessageFraming != null) {
             configuration.binaryMessageFraming(parseBinaryMessageFraming(binaryMessageFraming));
         }
+        configuration.binaryMessageLengthPrefixBytes(binaryMessageLengthPrefixBytes);
+        if (binaryMessageLengthPrefixByteOrder != null) {
+            configuration.binaryMessageLengthPrefixByteOrder(parseBinaryMessageLengthPrefixByteOrder(binaryMessageLengthPrefixByteOrder));
+        }
+        configuration.binaryMessageLengthPrefixOffset(binaryMessageLengthPrefixOffset);
+        configuration.binaryMessageLengthIncludesPrefix(binaryMessageLengthIncludesPrefix);
 
         configuration.enableCORSForAPI(enableCORSForAPI);
         configuration.enableCORSForAllResponses(enableCORSForAllResponses);
@@ -1474,6 +1498,18 @@ public class ConfigurationDTO implements DTO<Configuration> {
         }
         if (binaryMessageFraming != null) {
             target.binaryMessageFraming(parseBinaryMessageFraming(binaryMessageFraming));
+        }
+        if (binaryMessageLengthPrefixBytes != null) {
+            target.binaryMessageLengthPrefixBytes(binaryMessageLengthPrefixBytes);
+        }
+        if (binaryMessageLengthPrefixByteOrder != null) {
+            target.binaryMessageLengthPrefixByteOrder(parseBinaryMessageLengthPrefixByteOrder(binaryMessageLengthPrefixByteOrder));
+        }
+        if (binaryMessageLengthPrefixOffset != null) {
+            target.binaryMessageLengthPrefixOffset(binaryMessageLengthPrefixOffset);
+        }
+        if (binaryMessageLengthIncludesPrefix != null) {
+            target.binaryMessageLengthIncludesPrefix(binaryMessageLengthIncludesPrefix);
         }
         if (enableCORSForAPI != null) {
             target.enableCORSForAPI(enableCORSForAPI);
@@ -2854,6 +2890,50 @@ public class ConfigurationDTO implements DTO<Configuration> {
     public ConfigurationDTO setBinaryMessageFraming(String binaryMessageFraming) {
         this.binaryMessageFraming = binaryMessageFraming;
         return this;
+    }
+
+    public Integer getBinaryMessageLengthPrefixBytes() {
+        return binaryMessageLengthPrefixBytes;
+    }
+
+    public ConfigurationDTO setBinaryMessageLengthPrefixBytes(Integer binaryMessageLengthPrefixBytes) {
+        this.binaryMessageLengthPrefixBytes = binaryMessageLengthPrefixBytes;
+        return this;
+    }
+
+    public String getBinaryMessageLengthPrefixByteOrder() {
+        return binaryMessageLengthPrefixByteOrder;
+    }
+
+    public ConfigurationDTO setBinaryMessageLengthPrefixByteOrder(String binaryMessageLengthPrefixByteOrder) {
+        this.binaryMessageLengthPrefixByteOrder = binaryMessageLengthPrefixByteOrder;
+        return this;
+    }
+
+    public Integer getBinaryMessageLengthPrefixOffset() {
+        return binaryMessageLengthPrefixOffset;
+    }
+
+    public ConfigurationDTO setBinaryMessageLengthPrefixOffset(Integer binaryMessageLengthPrefixOffset) {
+        this.binaryMessageLengthPrefixOffset = binaryMessageLengthPrefixOffset;
+        return this;
+    }
+
+    public Boolean getBinaryMessageLengthIncludesPrefix() {
+        return binaryMessageLengthIncludesPrefix;
+    }
+
+    public ConfigurationDTO setBinaryMessageLengthIncludesPrefix(Boolean binaryMessageLengthIncludesPrefix) {
+        this.binaryMessageLengthIncludesPrefix = binaryMessageLengthIncludesPrefix;
+        return this;
+    }
+
+    private static ByteOrder parseBinaryMessageLengthPrefixByteOrder(String value) {
+        try {
+            return ConfigurationProperties.parseByteOrder(value);
+        } catch (IllegalArgumentException invalid) {
+            throw new IllegalArgumentException("Invalid binaryMessageLengthPrefixByteOrder: \"" + value + "\", the supported values are [BIG_ENDIAN, LITTLE_ENDIAN]");
+        }
     }
 
     private static BinaryMessageFraming parseBinaryMessageFraming(String value) {

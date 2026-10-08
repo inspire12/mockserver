@@ -2,25 +2,15 @@ package org.mockserver.netty.proxy;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.handler.codec.ByteToMessageDecoder;
-import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
-import org.slf4j.event.Level;
-
-import java.util.List;
 
 /**
  * Cuts a binary connection into the messages of the PostgreSQL frontend/backend protocol (version 3), as a client
- * sends them, so that each is matched, forwarded and logged as one message however it was read. Until the startup
- * message a message is an int32 length (itself included) then an int32 code; SSLRequest, GSSENCRequest and
- * CancelRequest are such messages too and leave the next one untyped. From the startup message on a message is a
- * type byte then an int32 length (itself included). One per connection, in front of
- * {@link BinaryRequestProxyingHandler}, in place of {@link BinaryMessageGatherer}.
- * <p>
- * At most {@code maxMessageBytes} are held: a connection that declares a longer message, or a length the protocol
- * does not allow, is closed and the rest of what it sends is dropped.
+ * sends them. Until the startup message a message is an int32 length (itself included) then an int32 code;
+ * SSLRequest, GSSENCRequest and CancelRequest are such messages too and leave the next one untyped. From the startup
+ * message on a message is a type byte then an int32 length (itself included).
  */
-public class PostgresqlMessageFramer extends ByteToMessageDecoder {
+public class PostgresqlMessageFramer extends BinaryMessageFramer {
 
     static final int SSL_REQUEST_CODE = 80877103;
     static final int GSSENC_REQUEST_CODE = 80877104;
@@ -28,79 +18,42 @@ public class PostgresqlMessageFramer extends ByteToMessageDecoder {
     private static final int UNTYPED_HEADER_BYTES = 8;
     private static final int TYPED_HEADER_BYTES = 5;
 
-    private final int maxMessageBytes;
-    private final MockServerLogger mockServerLogger;
     private boolean typed;
-    private boolean refused;
 
     public PostgresqlMessageFramer(int maxMessageBytes, MockServerLogger mockServerLogger) {
-        this.maxMessageBytes = Math.max(1, maxMessageBytes);
-        this.mockServerLogger = mockServerLogger;
-    }
-
-    /**
-     * True when no part of a message is held: what is read next starts a message. Anything else is the middle of
-     * one, whatever its bytes look like.
-     */
-    public boolean atMessageBoundary() {
-        return !refused && actualReadableBytes() == 0;
+        super(maxMessageBytes, mockServerLogger, "PostgreSQL");
     }
 
     @Override
-    protected void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) {
-        while (!refused && in.isReadable()) {
-            int start = in.readerIndex();
-            long messageBytes;
-            if (typed) {
-                if (in.readableBytes() < TYPED_HEADER_BYTES) {
-                    return;
-                }
-                int length = in.getInt(start + 1);
-                if (length < 4) {
-                    refuse(ctx, in, "a length of " + length + " after type byte " + in.getUnsignedByte(start));
-                    return;
-                }
-                messageBytes = 1L + length;
-            } else {
-                if (in.readableBytes() < 4) {
-                    return;
-                }
-                int length = in.getInt(start);
-                if (length < UNTYPED_HEADER_BYTES) {
-                    refuse(ctx, in, "a startup-phase length of " + length);
-                    return;
-                }
-                messageBytes = length;
+    protected long messageBytes(ChannelHandlerContext ctx, ByteBuf in) {
+        int start = in.readerIndex();
+        if (typed) {
+            if (in.readableBytes() < TYPED_HEADER_BYTES) {
+                return NOT_YET_KNOWN;
             }
-            if (messageBytes > maxMessageBytes) {
-                refuse(ctx, in, "a message of " + messageBytes + " bytes, over the limit of " + maxMessageBytes + " bytes (maxRequestBodySize)");
-                return;
+            int length = in.getInt(start + 1);
+            if (length < 4) {
+                refuse(ctx, in, "a length of " + length + " after type byte " + in.getUnsignedByte(start));
+                return NOT_YET_KNOWN;
             }
-            if (in.readableBytes() < messageBytes) {
-                return;
-            }
-            if (!typed) {
-                int code = in.getInt(start + 4);
-                typed = code != SSL_REQUEST_CODE && code != GSSENC_REQUEST_CODE && code != CANCEL_REQUEST_CODE;
-            }
-            out.add(in.readRetainedSlice((int) messageBytes));
+            return 1L + length;
         }
-        if (refused) {
-            in.skipBytes(in.readableBytes());
+        if (in.readableBytes() < 4) {
+            return NOT_YET_KNOWN;
         }
+        int length = in.getInt(start);
+        if (length < UNTYPED_HEADER_BYTES) {
+            refuse(ctx, in, "a startup-phase length of " + length);
+            return NOT_YET_KNOWN;
+        }
+        return length;
     }
 
-    private void refuse(ChannelHandlerContext ctx, ByteBuf in, String declared) {
-        refused = true;
-        in.skipBytes(in.readableBytes());
-        if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
-            mockServerLogger.logEvent(
-                new LogEntry()
-                    .setLogLevel(Level.WARN)
-                    .setMessageFormat("closing binary connection from:{}because it declared{}which PostgreSQL message framing (binaryMessageFraming) does not accept")
-                    .setArguments(ctx.channel().remoteAddress(), declared)
-            );
+    @Override
+    protected void messageTaken(ByteBuf message) {
+        if (!typed) {
+            int code = message.getInt(message.readerIndex() + 4);
+            typed = code != SSL_REQUEST_CODE && code != GSSENC_REQUEST_CODE && code != CANCEL_REQUEST_CODE;
         }
-        ctx.close();
     }
 }
