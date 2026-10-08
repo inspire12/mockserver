@@ -12,8 +12,10 @@ import java.net.Proxy;
 import java.net.Socket;
 import java.util.Arrays;
 import java.util.Map;
+import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -24,6 +26,7 @@ import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static java.nio.charset.StandardCharsets.US_ASCII;
 import static java.util.concurrent.TimeUnit.SECONDS;
@@ -47,6 +50,7 @@ public class StopWithBlockedConsoleIntegrationTest {
     // finished from one that timed out, and well above the 2 s the event log may wait for its writer
     private static final long STOP_BOUND_SECONDS = 15;
     private static final long CONSOLE_RELEASE_DEADLINE_SECONDS = 120;
+    private static final String EVENT_LOOP_NOTICE = "event loop threads still running";
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor(runnable -> {
         Thread thread = new Thread(runnable, StopWithBlockedConsoleIntegrationTest.class.getSimpleName());
@@ -73,7 +77,26 @@ public class StopWithBlockedConsoleIntegrationTest {
     @Test
     public void stopCompletesWhileTheConsoleIsBlocked() throws Exception {
         // given - a running server, at the default INFO level, with a client still connected
-        MockServer mockServer = new MockServer(configuration().logLevel(org.slf4j.event.Level.INFO), 0);
+        stopCompletesWhileTheConsoleIsBlocked(org.slf4j.event.Level.INFO);
+    }
+
+    @Test
+    public void stopCompletesWhileTheConsoleIsBlockedAtTrace() throws Exception {
+        // given - at TRACE every connection logs its wire trace on the Netty event loops, so closing the
+        // connected client's channel blocks its event loop on the console
+        stopCompletesWhileTheConsoleIsBlocked(org.slf4j.event.Level.TRACE);
+
+        // and - the notice that the event loops outlived stop() reaches the console once it drains
+        long deadline = System.nanoTime() + SECONDS.toNanos(STOP_BOUND_SECONDS);
+        while (console.messages().noneMatch(message -> message.contains(EVENT_LOOP_NOTICE)) && System.nanoTime() < deadline) {
+            Thread.sleep(50);
+        }
+        assertThat("the console was told the event loops were still running",
+            console.messages().anyMatch(message -> message.contains(EVENT_LOOP_NOTICE)), is(true));
+    }
+
+    private void stopCompletesWhileTheConsoleIsBlocked(org.slf4j.event.Level logLevel) throws Exception {
+        MockServer mockServer = new MockServer(configuration().logLevel(logLevel), 0);
         CompletableFuture<Void> stopped = null;
         try (Socket client = new Socket(Proxy.NO_PROXY)) {
             client.setSoTimeout(10_000);
@@ -121,9 +144,11 @@ public class StopWithBlockedConsoleIntegrationTest {
         private final CountDownLatch released = new CountDownLatch(1);
         private final AtomicInteger blockedWrites = new AtomicInteger();
         private final Map<Thread, String> blocked = new ConcurrentHashMap<>();
+        private final Queue<String> messages = new ConcurrentLinkedQueue<>();
 
         @Override
         public void publish(LogRecord record) {
+            messages.add(String.valueOf(record.getMessage()));
             if (released.getCount() == 0) {
                 return;
             }
@@ -136,6 +161,10 @@ public class StopWithBlockedConsoleIntegrationTest {
             } finally {
                 blocked.remove(Thread.currentThread());
             }
+        }
+
+        Stream<String> messages() {
+            return messages.stream();
         }
 
         int blockedWrites() {

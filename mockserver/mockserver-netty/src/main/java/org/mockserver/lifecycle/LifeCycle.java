@@ -27,6 +27,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.apache.commons.lang3.StringUtils.isBlank;
 import static org.mockserver.configuration.Configuration.configuration;
@@ -45,6 +46,8 @@ public abstract class LifeCycle implements Stoppable {
     private static final long SHADOW_PROBE_ACCEPT_TIMEOUT_EXPLICIT_MILLIS = 5000;
     private static final long SHADOW_PROBE_ACCEPT_TIMEOUT_EPHEMERAL_INITIAL_MILLIS = 250;
     static final int SHADOW_PROBE_MAX_EPHEMERAL_ATTEMPTS = 10;
+    // well inside the 30 s after which stop() gives up, and the budget the AsyncAPI broker closes get
+    static final long EVENT_LOOP_TERMINATION_WAIT_MILLIS = 5_000;
 
     /**
      * Seam over {@link LoopbackShadowProbe} so tests in this package can force a shadowed verdict or a
@@ -494,17 +497,37 @@ public abstract class LifeCycle implements Stoppable {
                     forwardGroupToStop.shutdownGracefully(0, 5, MILLISECONDS);
                 }
 
-                // Wait until all threads are terminated.
-                bossGroup.terminationFuture().syncUninterruptibly();
-                workerGroup.terminationFuture().syncUninterruptibly();
-                if (forwardGroupToStop != null) {
-                    forwardGroupToStop.terminationFuture().syncUninterruptibly();
-                }
+                awaitEventLoopTermination(bossGroup, workerGroup, forwardGroupToStop);
 
                 stopFuture.complete(message);
             }).start();
         }
         return stopFuture;
+    }
+
+    /**
+     * Waits, at most {@link #EVENT_LOOP_TERMINATION_WAIT_MILLIS} in all, for the event loops to terminate. A loop is
+     * held by a task that does not return, such as a TRACE wire-trace line written to a console nobody drains, and
+     * the listening sockets are already closed, so {@code stop()} does not wait for it: the loop ends when the task
+     * returns. The notice goes straight to the console, as the event log has stopped, from a daemon thread of its
+     * own, so a blocked console cannot hold the caller.
+     */
+    private void awaitEventLoopTermination(EventLoopGroup... groups) {
+        long deadline = System.nanoTime() + MILLISECONDS.toNanos(EVENT_LOOP_TERMINATION_WAIT_MILLIS);
+        for (EventLoopGroup group : groups) {
+            if (group != null && !group.terminationFuture().awaitUninterruptibly(Math.max(0, deadline - System.nanoTime()), NANOSECONDS)) {
+                if (mockServerLogger != null && mockServerLogger.isEnabledForInstance(WARN)) {
+                    MockServerLogger console = new MockServerLogger(configuration, LifeCycle.class);
+                    new Scheduler.SchedulerThreadFactory("Stop-notice", true).newThread(() -> console.logEvent(
+                        new LogEntry()
+                            .setType(SERVER_CONFIGURATION)
+                            .setLogLevel(WARN)
+                            .setMessageFormat("event loop threads still running " + EVENT_LOOP_TERMINATION_WAIT_MILLIS + "ms after stop, each ends when its current task returns (a task writing to a console nobody reads does not return); the ports are already closed")
+                    )).start();
+                }
+                return;
+            }
+        }
     }
 
     public void stop() {

@@ -4,17 +4,29 @@ import org.junit.After;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
+import org.mockito.MockedStatic;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.file.FileStore;
+import org.mockserver.grpc.GrpcHealthRegistry;
 import org.mockserver.grpc.GrpcProtoDescriptorStore;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
+import org.mockserver.mock.action.http.ChaosExperimentOrchestrator;
 import org.mockserver.mock.action.http.ChaosProfileLibrary;
+import org.mockserver.mock.action.http.GrpcChaosRegistry;
 import org.mockserver.mock.action.http.LoadScenarioRegistry;
+import org.mockserver.mock.action.http.PreemptionSimulator;
+import org.mockserver.mock.action.http.ServiceChaosRegistry;
+import org.mockserver.mock.action.http.TcpChaosRegistry;
+import org.mockserver.mock.audit.AuditStore;
+import org.mockserver.mock.drift.DriftStore;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.responsewriter.ResponseWriter;
 import org.mockserver.scheduler.Scheduler;
+import org.mockserver.socket.tls.KeyAndCertificateFactoryFactory;
+import org.mockserver.state.StateBackend;
+import org.mockserver.time.TimeService;
 import org.slf4j.event.Level;
 
 import java.lang.reflect.Field;
@@ -23,12 +35,17 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.responsewriter.ControlPlaneFailureResponse.UNEXPECTED_FAILURE_MESSAGE;
@@ -171,16 +188,53 @@ public class HttpStateEndpointFailureTest {
             badInput("PUT", "/mockserver/trafficValidate", UNREADABLE_JSON, "Unexpected character"),
             badInput("PUT", "/mockserver/trafficValidate", UNLOADABLE_SPEC, "Unable to load API spec"),
             fault("PUT", "/mockserver/replay"),
-            badInput("PUT", "/mockserver/replay", UNREADABLE_JSON, "incorrect")
+            badInput("PUT", "/mockserver/replay", UNREADABLE_JSON, "incorrect"),
+            // endpoints that read no input: every exception is a fault
+            singletonFault("GET", "/mockserver/clock", TimeService.class, TimeService::now, null),
+            singletonFault("GET", "/mockserver/proxyConfiguration", KeyAndCertificateFactoryFactory.class,
+                () -> KeyAndCertificateFactoryFactory.createKeyAndCertificateFactory(any(), any()), null),
+            singletonFault("GET", "/mockserver/serviceChaos", ServiceChaosRegistry.class, ServiceChaosRegistry::getInstance,
+                registry -> when(registry.entries()).thenThrow(new IllegalStateException(FAULT_DETAIL))),
+            singletonFault("GET", "/mockserver/tcpChaos", TcpChaosRegistry.class, TcpChaosRegistry::getInstance,
+                registry -> when(registry.entries()).thenThrow(new IllegalStateException(FAULT_DETAIL))),
+            singletonFault("GET", "/mockserver/grpcChaos", GrpcChaosRegistry.class, GrpcChaosRegistry::getInstance,
+                registry -> when(registry.entries()).thenThrow(new IllegalStateException(FAULT_DETAIL))),
+            singletonFault("GET", "/mockserver/grpc/health", GrpcHealthRegistry.class, GrpcHealthRegistry::getInstance,
+                registry -> when(registry.entries()).thenThrow(new IllegalStateException(FAULT_DETAIL))),
+            singletonFault("GET", "/mockserver/chaosExperiment", ChaosExperimentOrchestrator.class, ChaosExperimentOrchestrator::getInstance,
+                orchestrator -> when(orchestrator.getStatus()).thenThrow(new IllegalStateException(FAULT_DETAIL))),
+            singletonFault("GET", "/mockserver/chaosExperiment/history", ChaosExperimentOrchestrator.class, ChaosExperimentOrchestrator::getInstance,
+                orchestrator -> when(orchestrator.getHistory(anyInt())).thenThrow(new IllegalStateException(FAULT_DETAIL))),
+            singletonFault("DELETE", "/mockserver/chaosExperiment", ChaosExperimentOrchestrator.class, ChaosExperimentOrchestrator::getInstance,
+                orchestrator -> doThrow(new IllegalStateException(FAULT_DETAIL)).when(orchestrator).stop()),
+            singletonFault("GET", "/mockserver/preemption", PreemptionSimulator.class, PreemptionSimulator::getInstance,
+                simulator -> when(simulator.state()).thenThrow(new IllegalStateException(FAULT_DETAIL))),
+            singletonFault("GET", "/mockserver/drift", DriftStore.class, DriftStore::getInstance,
+                store -> when(store.getRecent(anyInt())).thenThrow(new IllegalStateException(FAULT_DETAIL))),
+            singletonFault("GET", "/mockserver/audit", AuditStore.class, AuditStore::getInstance,
+                store -> when(store.getRecent(anyInt())).thenThrow(new IllegalStateException(FAULT_DETAIL))),
+            storeFault("GET", "/mockserver/loadScenario", "loadScenarioRegistry", LoadScenarioRegistry.class,
+                registry -> when(registry.list()).thenThrow(new IllegalStateException(FAULT_DETAIL))),
+            storeFault("GET", "/mockserver/cluster", "stateBackend", StateBackend.class,
+                backend -> when(backend.clusterInfo()).thenThrow(new IllegalStateException(FAULT_DETAIL))),
+            // endpoints that read input
+            fault("PUT", "/mockserver/preemption"),
+            badInput("PUT", "/mockserver/preemption", UNREADABLE_JSON, "invalid preemption request: Unexpected character"),
+            fault("PUT", "/mockserver/generateExpectation"),
+            badInput("PUT", "/mockserver/generateExpectation", UNREADABLE_JSON, "failed to generate expectation: Unexpected character")
         );
     }
 
     private final List<LogEntry> logged = new CopyOnWriteArrayList<>();
     private HttpState httpState;
     private Scheduler scheduler;
+    private AutoCloseable arranged;
 
     @After
-    public void stop() {
+    public void stop() throws Exception {
+        if (arranged != null) {
+            arranged.close();
+        }
         if (httpState != null) {
             httpState.stop();
         }
@@ -198,7 +252,7 @@ public class HttpStateEndpointFailureTest {
         httpState = new HttpState(configuration, capturingLogger(), scheduler);
         httpState.setReplayHandler(outbound -> new CompletableFuture<>());
         if (testCase.arrange != null) {
-            testCase.arrange.accept(httpState);
+            arranged = testCase.arrange.apply(httpState);
         }
         CapturingResponseWriter responseWriter = new CapturingResponseWriter(configuration);
 
@@ -251,6 +305,25 @@ public class HttpStateEndpointFailureTest {
             T store = mock(type);
             stubbing.accept(store);
             replaceField(httpState, field, store);
+            return null;
+        });
+    }
+
+    /**
+     * A fault in a process-wide singleton or static the endpoint reads, stubbed only on the test's thread (static
+     * mocks are thread-local), where the endpoint runs. With no {@code stubbing} the static itself throws.
+     */
+    private static <T> Case singletonFault(String method, String pathAndQuery, Class<T> type, MockedStatic.Verification staticCall, Consumer<T> stubbing) {
+        return new Case(method, pathAndQuery, "", null, httpState -> {
+            MockedStatic<T> mockedStatic = mockStatic(type);
+            if (stubbing == null) {
+                mockedStatic.when(staticCall).thenThrow(new IllegalStateException(FAULT_DETAIL));
+            } else {
+                T instance = mock(type);
+                stubbing.accept(instance);
+                mockedStatic.when(staticCall).thenReturn(instance);
+            }
+            return mockedStatic;
         });
     }
 
@@ -269,9 +342,9 @@ public class HttpStateEndpointFailureTest {
         private final String pathAndQuery;
         private final Object body;
         private final String clientErrorFragment;
-        private final Consumer<HttpState> arrange;
+        private final Function<HttpState, AutoCloseable> arrange;
 
-        private Case(String method, String pathAndQuery, Object body, String clientErrorFragment, Consumer<HttpState> arrange) {
+        private Case(String method, String pathAndQuery, Object body, String clientErrorFragment, Function<HttpState, AutoCloseable> arrange) {
             this.method = method;
             this.pathAndQuery = pathAndQuery;
             this.body = body;

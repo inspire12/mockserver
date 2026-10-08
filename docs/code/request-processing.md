@@ -258,9 +258,18 @@ descriptor set (a protobuf `InvalidProtocolBufferException` or `DescriptorValida
 the endpoint's `400` and its own message format. Anything else is answered `500` through
 `ControlPlaneFailureResponse.writeUnexpectedFailure` (text endpoints) or `HttpState.unexpectedFailure` (JSON endpoints,
 `{"error": "<the same generic message>"}`), logged once with the stack trace. An endpoint that reads no input (for
-example `PUT /mockserver/files/list`, `PUT /mockserver/grpc/services`, `GET /mockserver/wasm/modules`) answers every
-exception `500`. `AsyncApiControlPlaneImpl.load` reports a spec or broker configuration it cannot read as an
+example `PUT /mockserver/files/list`, `PUT /mockserver/grpc/services`, `GET /mockserver/wasm/modules`, and the `GET`
+status routes for the clock, proxy configuration, service, TCP and gRPC chaos, gRPC health, chaos experiments and
+their history, load scenarios, preemption, cluster, drift and audit, plus `DELETE /mockserver/chaosExperiment`)
+answers every exception `500`; drift and audit read only a `limit` whose parse errors fall back to the default. When
+the JSON body describing a caller's error cannot itself be written, the error builders (`serviceChaosError`,
+`loadScenarioError`, `sloError` and the rest) answer `500` the same way rather than `400` with a fixed message.
+`AsyncApiControlPlaneImpl.load` reports a spec or broker configuration it cannot read as an
 `IllegalArgumentException`, so only a failure after that, such as a broker connection, is a `500`.
+
+`PUT /mockserver/contractTest` and `PUT /mockserver/trafficValidate` run their blocking work on the scheduler's
+executor, off the event loop. A synchronous `Scheduler` has no executor, so with one they run it on the calling
+thread (`HttpState.runOffTheEventLoop`). The servlets build an asynchronous `Scheduler`, so a WAR offloads too.
 
 ## Expectation Matching
 

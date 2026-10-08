@@ -799,6 +799,19 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **More control-plane endpoints now answer a fault inside MockServer `500`, not `400`.** The `GET` endpoints for
+  the clock, proxy configuration, service, TCP and gRPC chaos, gRPC health, chaos experiments and their history, load
+  scenarios, preemption, cluster, drift and audit, `DELETE /mockserver/chaosExperiment`, `PUT /mockserver/preemption`
+  and `PUT /mockserver/generateExpectation` answered any failure `400` with a fixed message such as `failed to get
+  cluster status`, and most of them logged nothing, so a fault in MockServer read as a problem with your request and
+  left no trace. Now a fault is answered `500` with `unexpected error processing request, see the MockServer log for
+  correlation id: <id>` in the JSON `error` field, and the MockServer log holds one `ERROR` entry with the stack trace
+  under that id. A request body that cannot be read is still `400`, and `PUT /mockserver/generateExpectation` now says
+  what was wrong with it.
+- **Stopping MockServer at `TRACE` no longer waits for a console that is slow to drain.** At `TRACE` every connection
+  logs its traffic on MockServer's network threads, and stopping waited for those threads to finish, so while stdout
+  was blocked `stop()` waited until it gave up after 30 seconds. Stopping now waits for them at most 5 seconds, after
+  the ports are already closed, then logs a warning and returns; each thread ends once its log line is written.
 - **Java code generated for an expectation now includes every kind of action, and its before and after actions.** Retrieving expectations with `format=JAVA` left out SSE, LLM, WebSocket, gRPC stream, gRPC bidirectional, binary, DNS and forward-validate actions without a trace, wrote only a "not possible" comment for a forward with fallback, and dropped `beforeActions` and `afterActions`, so the code recreated a different expectation, or one the server rejected for having no primary action. Each is now generated with the Java client's builders, and running the code recreates each action, and its before and after actions, as it was. Object callbacks still cannot be generated and are marked with a comment.
 - **The Node client in a browser now rejects a 404 with "404 Not Found", as it does in Node, and never treats a 4xx or 5xx answer as success.** Its browser transport rejected a 404 with the response body, sent a 4xx or 5xx answer to the success callback when no error callback was passed, and never settled when the request got no response at all; it now rejects with "Can't connect to MockServer running on host: ... and port: ...", as the Node transport does.
 - **An HTTP/3 client that allows more than 2,147,483,647 blocked QPACK streams is now served when the QPACK dynamic table is enabled.** With `http3QpackMaxTableCapacity` above 0, a client whose `SETTINGS_QPACK_BLOCKED_STREAMS` was larger than that, which the HTTP/3 specification allows, had its connection closed with `QPACK_ENCODER_STREAM_ERROR`, and the failure was logged with a stack trace outside MockServer's log. MockServer now blocks at most 2,147,483,647 streams for such a client, which an encoder may always do, and notes it once at `DEBUG`.

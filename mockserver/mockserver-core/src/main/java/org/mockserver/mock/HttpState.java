@@ -1127,9 +1127,7 @@ public class HttpState {
                     .withStatusCode(BAD_REQUEST.code())
                     .withBody(errorMapper.writerWithDefaultPrettyPrinter().writeValueAsString(errorNode), MediaType.JSON_UTF_8);
             } catch (Exception jsonError) {
-                return response()
-                    .withStatusCode(BAD_REQUEST.code())
-                    .withBody("{\"error\":\"failed to debug request mismatch\"}", MediaType.JSON_UTF_8);
+                return unexpectedFailure(request, jsonError);
             }
         }
     }
@@ -3227,7 +3225,7 @@ public class HttpState {
 
             if (request.matches("GET", PATH_PREFIX + "/clock", "/clock")) {
                 if (controlPlaneRequestAuthenticated(request, responseWriter)) {
-                    responseWriter.writeResponse(request, handleClockGet(), true);
+                    responseWriter.writeResponse(request, handleClockGet(request), true);
                 }
                 return true;
             }
@@ -3273,19 +3271,19 @@ public class HttpState {
             }
             if (request.matches("GET", PATH_PREFIX + "/chaosExperiment/history", "/chaosExperiment/history")) {
                 if (controlPlaneRequestAuthenticated(request, responseWriter)) {
-                    responseWriter.writeResponse(request, withDashboardCORS(request, handleChaosExperimentHistoryGet()), true);
+                    responseWriter.writeResponse(request, withDashboardCORS(request, handleChaosExperimentHistoryGet(request)), true);
                 }
                 return true;
             }
             if (request.matches("GET", PATH_PREFIX + "/chaosExperiment", "/chaosExperiment")) {
                 if (controlPlaneRequestAuthenticated(request, responseWriter)) {
-                    responseWriter.writeResponse(request, withDashboardCORS(request, handleChaosExperimentGet()), true);
+                    responseWriter.writeResponse(request, withDashboardCORS(request, handleChaosExperimentGet(request)), true);
                 }
                 return true;
             }
             if (request.matches("GET", PATH_PREFIX + "/loadScenario", "/loadScenario")) {
                 if (controlPlaneRequestAuthenticated(request, responseWriter)) {
-                    responseWriter.writeResponse(request, withDashboardCORS(request, handleLoadScenarioGet()), true);
+                    responseWriter.writeResponse(request, withDashboardCORS(request, handleLoadScenarioGet(request)), true);
                 }
                 return true;
             }
@@ -3303,25 +3301,25 @@ public class HttpState {
             }
             if (request.matches("GET", PATH_PREFIX + "/serviceChaos", "/serviceChaos")) {
                 if (controlPlaneRequestAuthenticated(request, responseWriter)) {
-                    responseWriter.writeResponse(request, withDashboardCORS(request, handleServiceChaosGet()), true);
+                    responseWriter.writeResponse(request, withDashboardCORS(request, handleServiceChaosGet(request)), true);
                 }
                 return true;
             }
             if (request.matches("GET", PATH_PREFIX + "/tcpChaos", "/tcpChaos")) {
                 if (controlPlaneRequestAuthenticated(request, responseWriter)) {
-                    responseWriter.writeResponse(request, withDashboardCORS(request, handleTcpChaosGet()), true);
+                    responseWriter.writeResponse(request, withDashboardCORS(request, handleTcpChaosGet(request)), true);
                 }
                 return true;
             }
             if (request.matches("GET", PATH_PREFIX + "/preemption", "/preemption")) {
                 if (controlPlaneRequestAuthenticated(request, responseWriter)) {
-                    responseWriter.writeResponse(request, withDashboardCORS(request, handlePreemptionGet()), true);
+                    responseWriter.writeResponse(request, withDashboardCORS(request, handlePreemptionGet(request)), true);
                 }
                 return true;
             }
             if (request.matches("GET", PATH_PREFIX + "/grpcChaos", "/grpcChaos")) {
                 if (controlPlaneRequestAuthenticated(request, responseWriter)) {
-                    responseWriter.writeResponse(request, withDashboardCORS(request, handleGrpcChaosGet()), true);
+                    responseWriter.writeResponse(request, withDashboardCORS(request, handleGrpcChaosGet(request)), true);
                 }
                 return true;
             }
@@ -3386,13 +3384,13 @@ public class HttpState {
             }
             if (request.matches("GET", PATH_PREFIX + "/grpc/health", "/grpc/health")) {
                 if (controlPlaneRequestAuthenticated(request, responseWriter)) {
-                    responseWriter.writeResponse(request, withDashboardCORS(request, handleGrpcHealthGet()), true);
+                    responseWriter.writeResponse(request, withDashboardCORS(request, handleGrpcHealthGet(request)), true);
                 }
                 return true;
             }
             if (request.matches("GET", PATH_PREFIX + "/cluster", "/cluster")) {
                 if (controlPlaneRequestAuthenticated(request, responseWriter)) {
-                    responseWriter.writeResponse(request, withDashboardCORS(request, handleClusterGet()), true);
+                    responseWriter.writeResponse(request, withDashboardCORS(request, handleClusterGet(request)), true);
                 }
                 return true;
             }
@@ -3459,7 +3457,7 @@ public class HttpState {
             }
             if (request.matches("DELETE", PATH_PREFIX + "/chaosExperiment", "/chaosExperiment")) {
                 if (controlPlaneRequestAuthenticated(request, responseWriter)) {
-                    responseWriter.writeResponse(request, withDashboardCORS(request, handleChaosExperimentDelete()), true);
+                    responseWriter.writeResponse(request, withDashboardCORS(request, handleChaosExperimentDelete(request)), true);
                 }
                 return true;
             }
@@ -3800,9 +3798,7 @@ public class HttpState {
                     .withBody(errorMapper.writerWithDefaultPrettyPrinter().writeValueAsString(
                         errorMapper.createObjectNode().put("error", "failed to process clock request: " + e.getMessage())), MediaType.JSON_UTF_8);
             } catch (Exception jsonError) {
-                return response()
-                    .withStatusCode(BAD_REQUEST.code())
-                    .withBody("{\"error\":\"failed to process clock request\"}", MediaType.JSON_UTF_8);
+                return unexpectedFailure(request, jsonError);
             }
         }
     }
@@ -3816,7 +3812,7 @@ public class HttpState {
         }
     }
 
-    private HttpResponse handleClockGet() {
+    private HttpResponse handleClockGet(HttpRequest request) {
         try {
             com.fasterxml.jackson.databind.ObjectMapper objectMapper = ObjectMapperFactory.createObjectMapper();
             java.time.Instant currentInstant = TimeService.now();
@@ -3828,9 +3824,7 @@ public class HttpState {
                 .withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(resultNode), MediaType.JSON_UTF_8);
         } catch (Exception e) {
-            return response()
-                .withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to get clock status\"}", MediaType.JSON_UTF_8);
+            return unexpectedFailure(request, e);
         }
     }
 
@@ -3883,18 +3877,9 @@ public class HttpState {
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(resultNode), MediaType.JSON_UTF_8);
         } catch (Throwable throwable) {
             // Throwable (not just Exception) so a third-party custom KeyAndCertificateFactory that throws
-            // AbstractMethodError/Error still yields a 400 here rather than propagating (matches the
+            // AbstractMethodError/Error still yields a response here rather than propagating (matches the
             // fail-soft LifeCycle.logProxySetup path).
-            mockServerLogger.logEvent(
-                new LogEntry()
-                    .setLogLevel(Level.ERROR)
-                    .setMessageFormat("exception handling request for proxy configuration:{}")
-                    .setArguments(throwable.getMessage())
-                    .setThrowable(throwable)
-            );
-            return response()
-                .withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to get proxy configuration\"}", MediaType.JSON_UTF_8);
+            return unexpectedFailure(request, throwable);
         }
     }
 
@@ -4023,7 +4008,7 @@ public class HttpState {
         return response;
     }
 
-    private HttpResponse handleServiceChaosGet() {
+    private HttpResponse handleServiceChaosGet(HttpRequest request) {
         com.fasterxml.jackson.databind.ObjectMapper objectMapper = ObjectMapperFactory.createObjectMapper();
         try {
             org.mockserver.mock.action.http.ServiceChaosRegistry registry = org.mockserver.mock.action.http.ServiceChaosRegistry.getInstance();
@@ -4040,8 +4025,7 @@ public class HttpState {
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(result), MediaType.JSON_UTF_8);
         } catch (Exception e) {
-            return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to get service chaos\"}", MediaType.JSON_UTF_8);
+            return unexpectedFailure(request, e);
         }
     }
 
@@ -4065,8 +4049,7 @@ public class HttpState {
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(
                     objectMapper.createObjectNode().put("error", message)), MediaType.JSON_UTF_8);
         } catch (Exception jsonError) {
-            return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to process service chaos request\"}", MediaType.JSON_UTF_8);
+            return unexpectedFailure(null, jsonError);
         }
     }
 
@@ -4162,17 +4145,15 @@ public class HttpState {
     private HttpResponse sloError(com.fasterxml.jackson.databind.ObjectMapper objectMapper, int statusCode, String message) {
         com.fasterxml.jackson.databind.node.ObjectNode errorNode = objectMapper.createObjectNode();
         errorNode.put("error", message);
-        String body;
         try {
-            body = objectMapper.writeValueAsString(errorNode);
-        } catch (Exception e) {
-            body = "{\"error\":\"failed to render SLO error\"}";
+            return response().withStatusCode(statusCode)
+                .withBody(objectMapper.writeValueAsString(errorNode), MediaType.JSON_UTF_8);
+        } catch (Exception jsonError) {
+            return unexpectedFailure(null, jsonError);
         }
-        return response().withStatusCode(statusCode)
-            .withBody(body, MediaType.JSON_UTF_8);
     }
 
-    private HttpResponse handleChaosExperimentGet() {
+    private HttpResponse handleChaosExperimentGet(HttpRequest request) {
         com.fasterxml.jackson.databind.ObjectMapper objectMapper = ObjectMapperFactory.createObjectMapper();
         try {
             org.mockserver.mock.action.http.ChaosExperimentOrchestrator orchestrator =
@@ -4187,12 +4168,11 @@ public class HttpState {
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(status.toJson()), MediaType.JSON_UTF_8);
         } catch (Exception e) {
-            return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to get chaos experiment status\"}", MediaType.JSON_UTF_8);
+            return unexpectedFailure(request, e);
         }
     }
 
-    private HttpResponse handleChaosExperimentHistoryGet() {
+    private HttpResponse handleChaosExperimentHistoryGet(HttpRequest request) {
         com.fasterxml.jackson.databind.ObjectMapper objectMapper = ObjectMapperFactory.createObjectMapper();
         try {
             org.mockserver.mock.action.http.ChaosExperimentOrchestrator orchestrator =
@@ -4208,12 +4188,11 @@ public class HttpState {
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(result), MediaType.JSON_UTF_8);
         } catch (Exception e) {
-            return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to get chaos experiment history\"}", MediaType.JSON_UTF_8);
+            return unexpectedFailure(request, e);
         }
     }
 
-    private HttpResponse handleChaosExperimentDelete() {
+    private HttpResponse handleChaosExperimentDelete(HttpRequest request) {
         com.fasterxml.jackson.databind.ObjectMapper objectMapper = ObjectMapperFactory.createObjectMapper();
         try {
             org.mockserver.mock.action.http.ChaosExperimentOrchestrator orchestrator =
@@ -4232,8 +4211,7 @@ public class HttpState {
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(result), MediaType.JSON_UTF_8);
         } catch (Exception e) {
-            return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to stop chaos experiment\"}", MediaType.JSON_UTF_8);
+            return unexpectedFailure(request, e);
         }
     }
 
@@ -4243,8 +4221,7 @@ public class HttpState {
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(
                     objectMapper.createObjectNode().put("error", message)), MediaType.JSON_UTF_8);
         } catch (Exception jsonError) {
-            return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to process chaos experiment request\"}", MediaType.JSON_UTF_8);
+            return unexpectedFailure(null, jsonError);
         }
     }
 
@@ -4550,7 +4527,7 @@ public class HttpState {
      * lifecycle {@code state}, {@code startDelayMillis}, full {@code definition} and — when active or
      * recently run — the live status fields.
      */
-    private HttpResponse handleLoadScenarioGet() {
+    private HttpResponse handleLoadScenarioGet(HttpRequest request) {
         com.fasterxml.jackson.databind.ObjectMapper objectMapper = ObjectMapperFactory.createObjectMapper();
         try {
             com.fasterxml.jackson.databind.node.ObjectNode result = objectMapper.createObjectNode();
@@ -4561,8 +4538,7 @@ public class HttpState {
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(result), MediaType.JSON_UTF_8);
         } catch (Exception e) {
-            return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to list load scenarios\"}", MediaType.JSON_UTF_8);
+            return unexpectedFailure(request, e);
         }
     }
 
@@ -5049,8 +5025,7 @@ public class HttpState {
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(
                     objectMapper.createObjectNode().put("error", message)), MediaType.JSON_UTF_8);
         } catch (Exception jsonError) {
-            return response().withStatusCode(statusCode)
-                .withBody("{\"error\":\"failed to process load scenario request\"}", MediaType.JSON_UTF_8);
+            return unexpectedFailure(null, jsonError);
         }
     }
 
@@ -5323,7 +5298,7 @@ public class HttpState {
         }
     }
 
-    private HttpResponse handleTcpChaosGet() {
+    private HttpResponse handleTcpChaosGet(HttpRequest request) {
         com.fasterxml.jackson.databind.ObjectMapper objectMapper = ObjectMapperFactory.createObjectMapper();
         try {
             org.mockserver.mock.action.http.TcpChaosRegistry registry = org.mockserver.mock.action.http.TcpChaosRegistry.getInstance();
@@ -5339,8 +5314,7 @@ public class HttpState {
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(result), MediaType.JSON_UTF_8);
         } catch (Exception e) {
-            return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to get TCP chaos\"}", MediaType.JSON_UTF_8);
+            return unexpectedFailure(request, e);
         }
     }
 
@@ -5364,8 +5338,7 @@ public class HttpState {
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(
                     objectMapper.createObjectNode().put("error", message)), MediaType.JSON_UTF_8);
         } catch (Exception jsonError) {
-            return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to process TCP chaos request\"}", MediaType.JSON_UTF_8);
+            return unexpectedFailure(null, jsonError);
         }
     }
 
@@ -5401,23 +5374,22 @@ public class HttpState {
             }
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(preemptionStatusNode(objectMapper)), MediaType.JSON_UTF_8);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+        } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             return response().withStatusCode(BAD_REQUEST.code())
                 .withBody("{\"error\":\"invalid preemption request: " + sanitizeJsonError(e.getMessage()) + "\"}", MediaType.JSON_UTF_8);
-        } catch (Exception e) {
-            return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to process preemption request\"}", MediaType.JSON_UTF_8);
         }
     }
 
-    private HttpResponse handlePreemptionGet() {
+    private HttpResponse handlePreemptionGet(HttpRequest request) {
         com.fasterxml.jackson.databind.ObjectMapper objectMapper = ObjectMapperFactory.createObjectMapper();
         try {
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(preemptionStatusNode(objectMapper)), MediaType.JSON_UTF_8);
         } catch (Exception e) {
-            return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to get preemption status\"}", MediaType.JSON_UTF_8);
+            return unexpectedFailure(request, e);
         }
     }
 
@@ -5555,7 +5527,7 @@ public class HttpState {
         }
     }
 
-    private HttpResponse handleGrpcChaosGet() {
+    private HttpResponse handleGrpcChaosGet(HttpRequest request) {
         com.fasterxml.jackson.databind.ObjectMapper objectMapper = ObjectMapperFactory.createObjectMapper();
         try {
             org.mockserver.mock.action.http.GrpcChaosRegistry registry = org.mockserver.mock.action.http.GrpcChaosRegistry.getInstance();
@@ -5571,8 +5543,7 @@ public class HttpState {
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(result), MediaType.JSON_UTF_8);
         } catch (Exception e) {
-            return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to get gRPC chaos\"}", MediaType.JSON_UTF_8);
+            return unexpectedFailure(request, e);
         }
     }
 
@@ -5596,8 +5567,7 @@ public class HttpState {
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(
                     objectMapper.createObjectNode().put("error", message)), MediaType.JSON_UTF_8);
         } catch (Exception jsonError) {
-            return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to process gRPC chaos request\"}", MediaType.JSON_UTF_8);
+            return unexpectedFailure(null, jsonError);
         }
     }
 
@@ -5865,8 +5835,7 @@ public class HttpState {
             return response().withStatusCode(BAD_REQUEST.code())
                 .withBody(objectMapper.writeValueAsString(objectMapper.createObjectNode().put("error", message)), MediaType.JSON_UTF_8);
         } catch (Exception jsonError) {
-            return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to process cassette request\"}", MediaType.JSON_UTF_8);
+            return unexpectedFailure(null, jsonError);
         }
     }
 
@@ -5889,8 +5858,7 @@ public class HttpState {
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(
                     objectMapper.createObjectNode().put("error", message)), MediaType.JSON_UTF_8);
         } catch (Exception jsonError) {
-            return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to process scenario request\"}", MediaType.JSON_UTF_8);
+            return unexpectedFailure(null, jsonError);
         }
     }
 
@@ -6003,6 +5971,9 @@ public class HttpState {
 
             return buildGenerateExpectationResponse(objectMapper, suggestions, suggestions.isEmpty() ? 0.0 : 0.75, preview, null);
         } catch (Exception e) {
+            if (!isClientError(e)) {
+                return unexpectedFailure(request, e);
+            }
             if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
                 mockServerLogger.logEvent(
                     new LogEntry()
@@ -6011,7 +5982,7 @@ public class HttpState {
                         .setThrowable(e)
                 );
             }
-            return generateExpectationError(objectMapper, "failed to generate expectation");
+            return generateExpectationError(objectMapper, "failed to generate expectation: " + e.getMessage());
         }
     }
 
@@ -6032,8 +6003,7 @@ public class HttpState {
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(result), MediaType.JSON_UTF_8);
         } catch (Exception jsonError) {
-            return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to serialize response\"}", MediaType.JSON_UTF_8);
+            return unexpectedFailure(null, jsonError);
         }
     }
 
@@ -6073,8 +6043,7 @@ public class HttpState {
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(
                     objectMapper.createObjectNode().put("error", message)), MediaType.JSON_UTF_8);
         } catch (Exception jsonError) {
-            return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to generate expectation\"}", MediaType.JSON_UTF_8);
+            return unexpectedFailure(null, jsonError);
         }
     }
 
@@ -6131,7 +6100,7 @@ public class HttpState {
         }
     }
 
-    private HttpResponse handleGrpcHealthGet() {
+    private HttpResponse handleGrpcHealthGet(HttpRequest request) {
         com.fasterxml.jackson.databind.ObjectMapper objectMapper = ObjectMapperFactory.createObjectMapper();
         try {
             org.mockserver.grpc.GrpcHealthRegistry registry = org.mockserver.grpc.GrpcHealthRegistry.getInstance();
@@ -6141,12 +6110,11 @@ public class HttpState {
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(result), MediaType.JSON_UTF_8);
         } catch (Exception e) {
-            return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to get gRPC health status\"}", MediaType.JSON_UTF_8);
+            return unexpectedFailure(request, e);
         }
     }
 
-    private HttpResponse handleClusterGet() {
+    private HttpResponse handleClusterGet(HttpRequest request) {
         com.fasterxml.jackson.databind.ObjectMapper objectMapper = ObjectMapperFactory.createObjectMapper();
         try {
             org.mockserver.state.ClusterInfo clusterInfo = stateBackend.clusterInfo();
@@ -6170,8 +6138,7 @@ public class HttpState {
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(result), MediaType.JSON_UTF_8);
         } catch (Exception e) {
-            return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to get cluster status\"}", MediaType.JSON_UTF_8);
+            return unexpectedFailure(request, e);
         }
     }
 
@@ -6198,8 +6165,7 @@ public class HttpState {
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(result), MediaType.JSON_UTF_8);
         } catch (Exception e) {
-            return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to retrieve drift records\"}", MediaType.JSON_UTF_8);
+            return unexpectedFailure(request, e);
         }
     }
 
@@ -6726,8 +6692,7 @@ public class HttpState {
             return response().withStatusCode(OK.code())
                 .withBody(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(entries), MediaType.JSON_UTF_8);
         } catch (Exception e) {
-            return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to retrieve audit entries\"}", MediaType.JSON_UTF_8);
+            return unexpectedFailure(request, e);
         }
     }
 
@@ -7157,7 +7122,7 @@ public class HttpState {
             // maxSocketTimeout × operationCount, starving every connection pinned to that thread.
             // Offload the entire run onto the scheduler's (non-I/O) executor and complete canHandle /
             // write the response from that worker, mirroring the async pattern of handleReplay.
-            scheduler.getExecutorService().submit(() -> {
+            runOffTheEventLoop(() -> {
                 try {
                     // HTTP sender: targets each example request at the service-under-test and blocks on
                     // the wired async HTTP client. Runs on the off-loop worker thread; no breakpoints apply.
@@ -7265,6 +7230,19 @@ public class HttpState {
     }
 
     /**
+     * Runs blocking control-plane work on the scheduler's executor, or inline on the calling thread when the scheduler
+     * is synchronous and so has no executor (a caller that blocks for its response anyway).
+     */
+    private void runOffTheEventLoop(Runnable work) {
+        java.util.concurrent.ScheduledExecutorService executor = scheduler.getExecutorService();
+        if (executor == null) {
+            work.run();
+        } else {
+            executor.submit(work);
+        }
+    }
+
+    /**
      * Package-private test hook: invokes {@link #handleContractTest} directly so tests can observe
      * that the handler offloads its blocking per-operation work off the calling (event-loop) thread
      * rather than running it inline.
@@ -7351,7 +7329,7 @@ public class HttpState {
             // remote spec URL (blocking I/O) and must not run on the worker event loop.
             mockServerLog.retrieveRequestResponses(null, pairs -> {
               try {
-                scheduler.getExecutorService().submit(() -> {
+                runOffTheEventLoop(() -> {
                 try {
                     List<org.apache.commons.lang3.tuple.Pair<HttpRequest, HttpResponse>> requestResponsePairs = new java.util.ArrayList<>();
                     for (LogEventRequestAndResponse pair : pairs) {
@@ -8485,8 +8463,7 @@ public class HttpState {
             return response().withStatusCode(BAD_REQUEST.code())
                 .withBody(objectMapper.writeValueAsString(errNode), MediaType.JSON_UTF_8);
         } catch (Exception jsonEx) {
-            return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"internal error building response\"}", MediaType.JSON_UTF_8);
+            return unexpectedFailure(request, jsonEx);
         }
     }
 }

@@ -1048,8 +1048,8 @@ paths:
                     type: array
                     items:
                       type: object
-        '400':
-          description: failed to retrieve drift records
+        '500':
+          description: an unexpected failure inside MockServer; the error field names a correlation id for the MockServer log
   /mockserver/drift/clear:
     put:
       tags:
@@ -1119,8 +1119,8 @@ paths:
                     summary:
                       type: string
                       nullable: true
-        '400':
-          description: failed to retrieve audit entries
+        '500':
+          description: an unexpected failure inside MockServer; the error field names a correlation id for the MockServer log
   /mockserver/logEntryBody:
     get:
       tags:
@@ -1898,8 +1898,8 @@ paths:
             application/json:
               schema:
                 type: object
-        '400':
-          description: failed to get gRPC health status
+        '500':
+          description: an unexpected failure inside MockServer; the error field names a correlation id for the MockServer log
   /mockserver/mode:
     put:
       tags:
@@ -3059,8 +3059,8 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/LoadScenarioListEntry"
-        '400':
-          description: failed to list load scenarios
+        '500':
+          description: an unexpected failure inside MockServer; the error field names a correlation id for the MockServer log
           content:
             application/json:
               schema:
@@ -4025,8 +4025,8 @@ paths:
               schema:
                 type: string
                 description: copy-paste proxy setup snippet, returned when the Accept header requests text/plain
-        '400':
-          description: failed to determine the proxy configuration
+        '500':
+          description: an unexpected failure inside MockServer; the error field names a correlation id for the MockServer log
           content:
             application/json:
               schema:
@@ -4118,8 +4118,8 @@ paths:
                           type: boolean
                         local:
                           type: boolean
-        '400':
-          description: failed to determine cluster status
+        '500':
+          description: an unexpected failure inside MockServer; the error field names a correlation id for the MockServer log
           content:
             application/json:
               schema:
@@ -4149,8 +4149,8 @@ paths:
                     type: array
                     items:
                       type: object
-        '400':
-          description: failed to retrieve the chaos experiment history
+        '500':
+          description: an unexpected failure inside MockServer; the error field names a correlation id for the MockServer log
           content:
             application/json:
               schema:
