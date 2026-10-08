@@ -107,3 +107,34 @@ from [performance-programme.md](performance-programme.md) on 2026-10-07.
 | id | title | next step |
 |---|---|---|
 | 91a | Netty PR: make HttpObjectDecoder's chunk-size line limit count the line's own bytes, not what is buffered | after 9.0.0: build and test the change against Netty's `4.2` branch locally, show the owner the diff and PR text, and open the PR only with their approval (they sign Netty's contributor agreement). MockServer keeps the accepted 64 KiB bound (row 91) until a Netty release includes it. |
+| 540a | Netty issue: let an application add a handler to the HTTP/3 control and QPACK streams Netty opens locally | after 9.0.0: file the draft below on netty/netty only with the owner's approval. |
+
+
+#### Draft Netty issue for row 540a
+
+    Title: HTTP/3: no way to add a handler to locally created control and QPACK streams
+
+    Netty version: 4.2.18.Final (netty-codec-http3, netty-codec-classes-quic)
+
+    Http3ConnectionHandler and Http3ControlStreamInboundHandler create the local control stream and the
+    QPACK encoder and decoder streams with QuicChannel.createStream(QuicStreamType.UNIDIRECTIONAL, handler).
+    QuicheQuicChannel.connectStream adds that handler, registers the stream and fires channelRegistered and
+    channelActive in the same call, and the streams are never passed down the QuicChannel's pipeline. So an
+    application cannot put a handler of its own on those streams before they can fire anything, and an
+    exception fired on one reaches the tail of the stream's pipeline, where DefaultChannelPipeline logs it at
+    WARN ("An exceptionCaught() event was fired, and it reached at the tail of the pipeline").
+
+    Example: with the QPACK dynamic table enabled, a peer whose SETTINGS_QPACK_BLOCKED_STREAMS does not fit
+    an int (RFC 9204 allows up to 2^62-1) makes QPackEncoderStreamInitializer.streamAvailable fire
+    Http3Exception(QPACK_ENCODER_STREAM_ERROR, "Dynamic table configuration failed.") from
+    toIntOrThrow(blockedStreams). The connection is closed, and the only record is that tail warning.
+
+    Http3ServerConnectionHandler is final, and the hooks of Http3ConnectionHandler, QpackAttributes and the
+    stream initializers are package-private or private, so this cannot be done by extending the codec. For remote streams
+    QuicServerCodecBuilder.streamHandler(...) and the connection pipeline give applications that point.
+
+    Request: an optional handler (or ChannelInitializer) on the Http3ServerConnectionHandler /
+    Http3ClientConnectionHandler constructors (or a builder) that the codec adds to every unidirectional stream
+    it creates itself, after its own handler. Separately, the encoder could clamp
+    SETTINGS_QPACK_BLOCKED_STREAMS to Integer.MAX_VALUE rather than fail, since an encoder may block fewer
+    streams than the peer allows.

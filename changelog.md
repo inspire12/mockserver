@@ -799,6 +799,7 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **An HTTP/3 client that allows more than 2,147,483,647 blocked QPACK streams is now served when the QPACK dynamic table is enabled.** With `http3QpackMaxTableCapacity` above 0, a client whose `SETTINGS_QPACK_BLOCKED_STREAMS` was larger than that, which the HTTP/3 specification allows, had its connection closed with `QPACK_ENCODER_STREAM_ERROR`, and the failure was logged with a stack trace outside MockServer's log. MockServer now blocks at most 2,147,483,647 streams for such a client, which an encoder may always do, and notes it once at `DEBUG`.
 - **Stopping MockServer no longer waits for AsyncAPI broker connections that are slow to close.** Stopping the
   server, or `PUT /mockserver/reset`, closes the Kafka, AMQP and MQTT connections of a loaded AsyncAPI mock, and
   it used to wait for every one to finish: a broker that was slow to answer a disconnect, or a slowly drained

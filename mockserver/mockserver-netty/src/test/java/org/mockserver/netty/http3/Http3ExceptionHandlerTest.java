@@ -4,6 +4,7 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.DecoderException;
+import io.netty.handler.codec.http3.DefaultHttp3SettingsFrame;
 import io.netty.handler.codec.http3.Http3ErrorCode;
 import io.netty.handler.codec.http3.Http3Exception;
 import io.netty.handler.codec.quic.QuicConnectionCloseEvent;
@@ -279,6 +280,40 @@ public class Http3ExceptionHandlerTest {
         assertThat(logged.get(0).getMessageFormat(), is("stream of HTTP/3 connection from:{}closed or reset by its client:{}"));
         assertThat(logged.get(1).getLogLevel(), is(Level.WARN));
         assertThat(logged.get(1).getMessageFormat(), is("closing HTTP/3 connection from:{}for connection error:{}"));
+        assertHandledWithoutClosing(stream);
+        connection.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldLimitTheBlockedQpackStreamsAClientAllowsToWhatNettysEncoderTakesAndLogItOnceAtDebug() {
+        EmbeddedChannel stream = new EmbeddedChannel();
+        QuicStreamChannel unidirectional = mock(QuicStreamChannel.class);
+        when(unidirectional.type()).thenReturn(QuicStreamType.UNIDIRECTIONAL);
+        when(unidirectional.pipeline()).thenReturn(stream.pipeline());
+        EmbeddedChannel connection = new EmbeddedChannel(Http3ExceptionHandler.forConnection(mockServerLogger, null, clientTlsHandshakeFailureLog));
+        connection.pipeline().fireChannelRead(unidirectional);
+        List<Object> passedOn = new ArrayList<>();
+        // as Netty's control-stream handler, which configures its QPACK encoder from the SETTINGS
+        stream.pipeline().addLast(recorder(passedOn));
+        DefaultHttp3SettingsFrame tooMany = new DefaultHttp3SettingsFrame();
+        tooMany.settings().qpackBlockedStreams(Integer.MAX_VALUE + 1L).qpackMaxTableCapacity(4096L);
+        DefaultHttp3SettingsFrame asMany = new DefaultHttp3SettingsFrame();
+        asMany.settings().qpackBlockedStreams(Integer.MAX_VALUE);
+        DefaultHttp3SettingsFrame none = new DefaultHttp3SettingsFrame();
+
+        stream.pipeline().fireChannelRead(tooMany);
+        stream.pipeline().fireChannelRead(asMany);
+        stream.pipeline().fireChannelRead(none);
+
+        assertThat(passedOn, contains(sameInstance(tooMany), sameInstance(asMany), sameInstance(none)));
+        assertThat(tooMany.settings().qpackBlockedStreams(), is((long) Integer.MAX_VALUE));
+        assertThat("the rest is left as the client sent it", tooMany.settings().qpackMaxTableCapacity(), is(4096L));
+        assertThat(asMany.settings().qpackBlockedStreams(), is((long) Integer.MAX_VALUE));
+        assertThat(none.settings().qpackBlockedStreams(), is(nullValue()));
+        assertThat(logged, hasSize(1));
+        assertThat(logged.get(0).getLogLevel(), is(Level.DEBUG));
+        assertThat(logged.get(0).getMessageFormat(), is("HTTP/3 connection from:{}allows more blocked QPACK streams:{}than MockServer's encoder supports, which blocks at most:{}"));
+        assertThat(Arrays.asList(logged.get(0).getArguments()), contains(stream.remoteAddress(), Integer.MAX_VALUE + 1L, Integer.MAX_VALUE));
         assertHandledWithoutClosing(stream);
         connection.finishAndReleaseAll();
     }
