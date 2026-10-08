@@ -449,7 +449,11 @@ class MyClient {
 1. `MockServerAutoConfiguration` is listed in `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports` and is gated by `@ConditionalOnProperty(prefix = "mockserver", name = "enabled", havingValue = "true")`
 2. `MockServerProperties` (`@ConfigurationProperties(prefix = "mockserver")`) binds the `mockserver.*` values
 3. A single `ClientAndServer` bean is created (`@ConditionalOnMissingBean`, so you can override it) with `destroyMethod = "stop"`; because `ClientAndServer extends MockServerClient` the one bean satisfies both `ClientAndServer` and `MockServerClient` injection points
-4. The server starts on context refresh and stops on context close
+4. The server starts on context refresh and stops on context close. A refused start (a port in use, or a `dnsPort` or `http3Port` that cannot be opened) is not caught, so the context fails with a `BeanCreationException` whose cause is MockServer's exception (`MockServerAutoConfigurationTest`)
+
+### Maven Plugin: A Refused Start Fails the Build
+
+The `start`, `run` and `runForked` goals fail the build when MockServer does not start. `start` lets `InstanceHolder.start`'s exception reach Maven; `run` wraps it in a `MojoExecutionException` (before 9.0.0 it logged it and returned, so the build carried on without a server). `runForked` fails when the forked JVM cannot be launched, when it exits before `PUT /mockserver/status` answers (the CLI exits non-zero on a refused start; the message carries the exit status), and when nothing answers within `startAttempts` (150) checks 500 ms apart, after stopping the forked JVM.
 
 ### Maven Plugin Glob Support
 

@@ -19,6 +19,8 @@ import org.mockserver.mock.HttpState;
 import org.mockserver.model.BinaryMessage;
 import org.mockserver.model.BinaryProxyListener;
 import org.mockserver.model.BinaryRequestDefinition;
+import org.mockserver.model.BinaryResponse;
+import org.mockserver.model.Delay;
 import org.mockserver.netty.proxy.relay.BinaryRelay;
 import org.mockserver.proxyconfiguration.ForwardTargetBlockedException;
 import org.mockserver.scheduler.Scheduler;
@@ -88,6 +90,10 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
 
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, ByteBuf byteBuf) {
+        if (BinaryLocalReplies.closing(ctx.channel())) {
+            // the connection closes once the replies before this message are written, so this one is not answered
+            return;
+        }
         BinaryMessage binaryRequest = bytes(ByteBufUtil.getBytes(byteBuf));
         String logCorrelationId = UUIDService.getNonSecureUUID();
         mockServerLogger.logEvent(
@@ -106,7 +112,7 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
         } else if (httpState != null) {
             Expectation matchedExpectation = firstMatchingBinaryExpectation(binaryRequest, logCorrelationId);
             if (matchedExpectation != null && matchedExpectation.getBinaryResponse() != null) {
-                replyFromExpectation(ctx, matchedExpectation, binaryRequest, logCorrelationId);
+                replyFromExpectation(ctx, matchedExpectation, binaryRequest, logCorrelationId, null);
             } else {
                 if (matchedExpectation != null) {
                     httpState.postProcess(matchedExpectation);
@@ -135,16 +141,16 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
 
     /**
      * Post-processes a matched expectation, which removes one that its Times have used up, and writes its binary
-     * response if that has data.
+     * response if that has data: after the response's delay, and after every earlier reply on the connection.
      *
-     * @return whether anything was written
+     * @param afterWrite run once the response has been written, or null
      */
-    private boolean replyFromExpectation(ChannelHandlerContext ctx, Expectation matchedExpectation, BinaryMessage binaryRequest, String logCorrelationId) {
+    private void replyFromExpectation(ChannelHandlerContext ctx, Expectation matchedExpectation, BinaryMessage binaryRequest, String logCorrelationId, Runnable afterWrite) {
         // before the write, so a client that has its reply finds the expectation's state already updated
         httpState.postProcess(matchedExpectation);
-        byte[] reply = matchedExpectation.getBinaryResponse().getBinaryData();
-        boolean written = reply != null && reply.length > 0;
-        if (!written) {
+        BinaryResponse binaryResponse = matchedExpectation.getBinaryResponse();
+        byte[] reply = binaryResponse.getBinaryData();
+        if (reply == null || reply.length == 0) {
             // a message that has no reply. Null and empty mean the same: an empty array is not serialised, so one
             // set through the Java client arrives as null, while raw JSON can still deliver it empty
             if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
@@ -168,9 +174,9 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
                         .setArguments(SensitiveLogValue.of(formatBytes(reply, configuration.maxLoggedBodyBytes())), SensitiveLogValue.of(formatBytes(binaryRequest.getBytes(), configuration.maxLoggedBodyBytes())))
                 );
             }
-            ctx.writeAndFlush(Unpooled.copiedBuffer(reply));
+            Delay delay = binaryResponse.getDelay();
+            BinaryLocalReplies.write(ctx, reply, delay != null ? delay.sampleValueMillis() : 0, false, afterWrite);
         }
-        return written;
     }
 
     /**
@@ -209,9 +215,7 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
             }
             return false;
         }
-        if (replyFromExpectation(ctx, matchedExpectation, binaryRequest, logCorrelationId)) {
-            BinaryRelay.answeredLocally(ctx.channel(), logCorrelationId);
-        }
+        replyFromExpectation(ctx, matchedExpectation, binaryRequest, logCorrelationId, () -> BinaryRelay.answeredLocally(ctx.channel(), logCorrelationId));
         return true;
     }
 
@@ -239,10 +243,10 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
                     .setArguments(SensitiveLogValue.of(hexDumpForLog(binaryRequest.getBytes(), configuration.maxLoggedBodyBytes())), SensitiveLogValue.of(utf8ForLog(binaryRequest.getBytes(), configuration.maxLoggedBodyBytes())))
             );
         }
-        ctx.writeAndFlush(Unpooled.copiedBuffer(
-            "unknown message format, only HTTP requests are supported for mocking or HTTP & binary requests for proxying, but request is not being proxied and request is not valid HTTP".getBytes(StandardCharsets.UTF_8)
-        ));
-        ctx.close();
+        // behind any reply still waiting for its delay, which is written before the connection closes
+        BinaryLocalReplies.write(ctx,
+            "unknown message format, only HTTP requests are supported for mocking or HTTP & binary requests for proxying, but request is not being proxied and request is not valid HTTP".getBytes(StandardCharsets.UTF_8),
+            0, true, null);
     }
 
     private void sendMessage(ChannelHandlerContext ctx, BinaryMessage binaryRequest, String logCorrelationId, InetSocketAddress remoteAddress) {
@@ -298,6 +302,7 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
     @Override
     public void handlerRemoved(ChannelHandlerContext ctx) {
         // nothing read from now on reaches this handler, so it has no reason left to hold reads back
+        BinaryLocalReplies.discard(ctx.channel());
         ForwardQueue queue = ctx.channel().attr(FORWARD_QUEUE).get();
         if (queue != null && queue.readsPaused) {
             queue.readsPaused = false;
@@ -531,6 +536,7 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
 
     @Override
     public void channelInactive(ChannelHandlerContext ctx) {
+        BinaryLocalReplies.discard(ctx.channel());
         BinaryRelay.clientInactive(ctx.channel());
         ctx.fireChannelInactive();
     }

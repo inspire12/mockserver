@@ -3,15 +3,22 @@ package org.mockserver.springboot;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.mockserver.client.MockServerClient;
+import org.mockserver.configuration.ConfigurationProperties;
 import org.mockserver.integration.ClientAndServer;
+import org.mockserver.netty.dns.DnsStartupException;
 import org.mockserver.socket.PortFactory;
+import org.springframework.beans.factory.BeanCreationException;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.core.env.MapPropertySource;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.StandardProtocolFamily;
 import java.net.URL;
+import java.nio.channels.DatagramChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
@@ -20,6 +27,7 @@ import java.util.stream.Collectors;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
@@ -74,6 +82,39 @@ class MockServerAutoConfigurationTest {
 
         ClientAndServer server = context.getBean(ClientAndServer.class);
         assertEquals(fixedPort, server.getPort().intValue());
+    }
+
+    @Test
+    void failsTheApplicationContextWhenThePortIsInUse() throws Exception {
+        try (ServerSocket otherApplication = new ServerSocket(PortFactory.findFreePort())) {
+            Map<String, Object> properties = Map.of("mockserver.enabled", "true", "mockserver.port", String.valueOf(otherApplication.getLocalPort()));
+
+            BeanCreationException failed = assertThrows(BeanCreationException.class, () -> context = run(properties));
+
+            assertEquals("mockServerClientAndServer", failed.getBeanName());
+        }
+    }
+
+    @Test
+    void failsTheApplicationContextWhenTheDnsPortIsInUse() throws Exception {
+        boolean dnsEnabled = ConfigurationProperties.dnsEnabled();
+        int dnsPort = ConfigurationProperties.dnsPort();
+        try (DatagramChannel otherApplication = DatagramChannel.open(StandardProtocolFamily.INET)) {
+            otherApplication.bind(new InetSocketAddress("127.0.0.1", 0));
+            ConfigurationProperties.dnsEnabled(true);
+            ConfigurationProperties.dnsPort(((InetSocketAddress) otherApplication.getLocalAddress()).getPort());
+
+            BeanCreationException failed = assertThrows(BeanCreationException.class, () -> context = run(Map.of("mockserver.enabled", "true")));
+
+            Throwable cause = failed;
+            while (cause != null && !(cause instanceof DnsStartupException)) {
+                cause = cause.getCause();
+            }
+            assertNotNull(cause, "the context fails because of MockServer's refusal to start: " + failed);
+        } finally {
+            ConfigurationProperties.dnsEnabled(dnsEnabled);
+            ConfigurationProperties.dnsPort(dnsPort);
+        }
     }
 
     private static AnnotationConfigApplicationContext run(Map<String, Object> properties) {

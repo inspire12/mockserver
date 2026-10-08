@@ -1,6 +1,7 @@
 package org.mockserver.maven;
 
 import org.apache.maven.artifact.Artifact;
+import org.apache.maven.plugin.MojoExecutionException;
 import org.apache.maven.repository.RepositorySystem;
 import org.junit.Before;
 import org.junit.Test;
@@ -8,10 +9,16 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockserver.client.MockServerClient;
 
+import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.concurrent.TimeUnit;
 
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.instanceOf;
+import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.startsWith;
 import static org.junit.Assert.*;
 import static org.mockito.Mockito.*;
 import static org.mockito.MockitoAnnotations.openMocks;
@@ -48,7 +55,7 @@ public class MockServerRunForkedMojoTest {
     }
 
     @Test
-    public void shouldRunMockServerForkedLocalPortSpecified() {
+    public void shouldRunMockServerForkedLocalPortSpecified() throws Exception {
         // given
         mockServerRunForkedMojo.serverPort = "1,2";
         mockServerRunForkedMojo.logLevel = "LEVEL";
@@ -76,7 +83,7 @@ public class MockServerRunForkedMojoTest {
     }
 
     @Test
-    public void shouldRunMockServerForkedPortForwarding() {
+    public void shouldRunMockServerForkedPortForwarding() throws Exception {
         // given
         mockServerRunForkedMojo.serverPort = "1,2";
         mockServerRunForkedMojo.proxyRemotePort = 3;
@@ -108,7 +115,7 @@ public class MockServerRunForkedMojoTest {
     }
 
     @Test
-    public void shouldRunMockServerWithInitializer() {
+    public void shouldRunMockServerWithInitializer() throws Exception {
         // given
         ExampleInitializationClass.mockServerClient = null;
         mockServerRunForkedMojo.serverPort = "1,2";
@@ -139,21 +146,63 @@ public class MockServerRunForkedMojoTest {
     }
 
     @Test
-    public void shouldHandleProcessException() {
+    public void shouldFailTheBuildWhenTheForkedJvmCannotBeStarted() throws Exception {
         // given
         when(mockProcessBuildFactory.create(anyList())).thenReturn(new ProcessBuilder("TEST FAIL"));
 
         // when
-        try {
-            mockServerRunForkedMojo.execute();
-        } catch (Throwable t) {
-            // then
-            fail();
-        }
+        MojoExecutionException failed = assertThrows(MojoExecutionException.class, () -> mockServerRunForkedMojo.execute());
+
+        // then
+        assertThat(failed.getMessage(), startsWith("MockServer did not start: "));
+        assertThat(failed.getCause(), instanceOf(IOException.class));
     }
 
     @Test
-    public void shouldRunMockServerForkedAndNotPipeToConsole() {
+    public void shouldFailTheBuildWhenTheForkedJvmExitsBeforeMockServerStarts() throws Exception {
+        // given: a forked JVM that refuses to start, as the command line does, exits with a non-zero status
+        mockServerRunForkedMojo.serverPort = "1";
+        mockServerRunForkedMojo.pipeLogToConsole = true;
+        when(mockProcessBuildFactory.create(anyList())).thenReturn(new ProcessBuilder("sh", "-c", "exit 3"));
+        when(mockServerClient.hasStarted(anyInt(), anyLong(), any(TimeUnit.class))).thenReturn(false);
+
+        // when
+        MojoExecutionException failed = assertThrows(MojoExecutionException.class, () -> mockServerRunForkedMojo.execute());
+
+        // then
+        assertThat(failed.getMessage(), is("MockServer did not start: its JVM exited with status 3, see its output above"));
+    }
+
+    @Test
+    public void shouldFailTheBuildAndStopTheForkedJvmWhenMockServerDoesNotStartInTime() throws Exception {
+        // given
+        mockServerRunForkedMojo.serverPort = "1";
+        mockServerRunForkedMojo.startAttempts = 2;
+        when(mockProcessBuildFactory.create(anyList())).thenReturn(new ProcessBuilder("sleep", "60"));
+        when(mockServerClient.hasStarted(anyInt(), anyLong(), any(TimeUnit.class))).thenReturn(false);
+
+        // when
+        MojoExecutionException failed = assertThrows(MojoExecutionException.class, () -> mockServerRunForkedMojo.execute());
+
+        // then
+        assertThat(failed.getMessage(), is("MockServer did not start: timed out waiting for it on serverPort [1]"));
+        verify(mockServerClient, times(2)).hasStarted(anyInt(), anyLong(), any(TimeUnit.class));
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (sleepingChildren() > 0 && System.currentTimeMillis() < deadline) {
+            MILLISECONDS.sleep(50);
+        }
+        assertThat("the forked JVM is stopped", sleepingChildren(), is(0L));
+    }
+
+    private static long sleepingChildren() {
+        return ProcessHandle.current().children()
+            .filter(ProcessHandle::isAlive)
+            .filter(child -> child.info().command().map(command -> command.endsWith("sleep")).orElse(false))
+            .count();
+    }
+
+    @Test
+    public void shouldRunMockServerForkedAndNotPipeToConsole() throws Exception {
         // given
         mockServerRunForkedMojo.serverPort = "1,2";
         mockServerRunForkedMojo.pipeLogToConsole = false;
@@ -169,7 +218,7 @@ public class MockServerRunForkedMojoTest {
     }
 
     @Test
-    public void shouldHandleIncorrectInitializationClassName() {
+    public void shouldHandleIncorrectInitializationClassName() throws Exception {
         // given
         ExampleInitializationClass.mockServerClient = null;
         mockServerRunForkedMojo.serverPort = "1,2";
@@ -185,7 +234,7 @@ public class MockServerRunForkedMojoTest {
     }
 
     @Test
-    public void shouldSkipStoppingMockServer() {
+    public void shouldSkipStoppingMockServer() throws Exception {
         // given
         mockServerRunForkedMojo.skip = true;
 

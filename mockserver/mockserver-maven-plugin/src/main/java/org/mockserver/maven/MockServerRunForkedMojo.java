@@ -7,6 +7,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.maven.artifact.Artifact;
 import org.apache.maven.artifact.resolver.ArtifactResolutionRequest;
 import org.apache.maven.model.Dependency;
+import org.apache.maven.plugin.MojoExecutionException;
 import org.apache.maven.plugins.annotations.Component;
 import org.apache.maven.plugins.annotations.Mojo;
 import org.apache.maven.plugins.annotations.Parameter;
@@ -51,6 +52,8 @@ public class MockServerRunForkedMojo extends MockServerAbstractMojo {
     @Component
     protected RepositorySystem repositorySystem;
     private ProcessBuildFactory processBuildFactory = new ProcessBuildFactory();
+    @VisibleForTesting
+    int startAttempts = 150;
 
     private MockServerClient mockServerClient = getServerPorts() != null && getServerPorts().length > 0 ? new MockServerClient("localhost", getServerPorts()[0]) : null;
 
@@ -66,7 +69,7 @@ public class MockServerRunForkedMojo extends MockServerAbstractMojo {
         return ret.toString();
     }
 
-    public void execute() {
+    public void execute() throws MojoExecutionException {
         if (skip) {
             getLog().info("Skipping plugin execution");
         } else {
@@ -124,29 +127,48 @@ public class MockServerRunForkedMojo extends MockServerAbstractMojo {
             if (pipeLogToConsole) {
                 processBuilder.inheritIO();
             }
+            Process process;
             try {
-                processBuilder.start();
+                process = processBuilder.start();
             } catch (IOException e) {
-                getLog().error("Exception while starting MockServer", e);
+                throw new MojoExecutionException("MockServer did not start: " + e.getMessage(), e);
             }
             if (getServerPorts() != null && getServerPorts().length > 0) {
                 if (mockServerClient == null) {
                     mockServerClient = new MockServerClient("localhost", getServerPorts()[0]);
                 }
-                boolean hasStarted = mockServerClient.hasStarted(150, 500L, MILLISECONDS);
-                if (hasStarted) {
-                    getLog().info("mockserver:runForked MockServer is running on: "
-                            + (getServerPorts() != null ? " serverPort " + Arrays.toString(getServerPorts()) : "")
-                    );
-                } else {
-                    getLog().info("mockserver:runForked Timed out waiting for MockServer to run on: "
-                            + (getServerPorts() != null ? " serverPort " + Arrays.toString(getServerPorts()) : "")
-                    );
-                }
+                waitUntilStarted(process);
+                getLog().info("mockserver:runForked MockServer is running on: "
+                        + (getServerPorts() != null ? " serverPort " + Arrays.toString(getServerPorts()) : "")
+                );
             }
             runInitialization(getServerPorts(), createInitializerClass(), createInitializerJson());
         }
 
+    }
+
+    /**
+     * Fails the build, as the start goal does, when the forked JVM exits before MockServer answers (it refused to
+     * start, for example because a port it was given is in use) or does not answer in time, when it is stopped.
+     */
+    private void waitUntilStarted(Process process) throws MojoExecutionException {
+        for (int attempt = 0; attempt < startAttempts; attempt++) {
+            if (mockServerClient.hasStarted(0, 0, MILLISECONDS)) {
+                return;
+            }
+            if (!process.isAlive()) {
+                throw new MojoExecutionException("MockServer did not start: its JVM exited with status " + process.exitValue()
+                    + (pipeLogToConsole ? ", see its output above" : ", set pipeLogToConsole to see its output"));
+            }
+            try {
+                MILLISECONDS.sleep(500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        process.destroy();
+        throw new MojoExecutionException("MockServer did not start: timed out waiting for it on serverPort " + Arrays.toString(getServerPorts()));
     }
 
     @VisibleForTesting

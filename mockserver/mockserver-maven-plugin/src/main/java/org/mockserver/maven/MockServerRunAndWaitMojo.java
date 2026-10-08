@@ -1,11 +1,12 @@
 package org.mockserver.maven;
 
+import org.apache.maven.plugin.MojoExecutionException;
 import org.apache.maven.plugins.annotations.Mojo;
-import org.mockserver.client.initialize.ExpectationInitializer;
 import org.mockserver.configuration.ConfigurationProperties;
 
 import java.util.Arrays;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
@@ -24,7 +25,7 @@ public class MockServerRunAndWaitMojo extends MockServerAbstractMojo {
     @SuppressWarnings("FieldMayBeFinal")
     private CompletableFuture<Object> settableFuture = new CompletableFuture<>();
 
-    public void execute() {
+    public void execute() throws MojoExecutionException {
         if (isNotBlank(logLevel)) {
             ConfigurationProperties.logLevel(logLevel);
         }
@@ -37,24 +38,25 @@ public class MockServerRunAndWaitMojo extends MockServerAbstractMojo {
                 );
             }
             try {
-                ExpectationInitializer initializerClass = createInitializerClass();
-                String initializerJson = createInitializerJson();
+                getLocalMockServerInstance().start(getServerPorts(), proxyRemotePort, proxyRemoteHost, logLevel, createInitializerClass(), createInitializerJson());
+            } catch (RuntimeException e) {
+                // as the start goal does: a build that asked for MockServer does not carry on without it
+                throw new MojoExecutionException("MockServer did not start: " + e.getMessage(), e);
+            }
+            try {
                 if (timeout != null && timeout > 0) {
-                    getLocalMockServerInstance().start(getServerPorts(), proxyRemotePort, proxyRemoteHost, logLevel, initializerClass, initializerJson);
-                    try {
-                        settableFuture.get(timeout, TimeUnit.SECONDS);
-                    } catch (TimeoutException te) {
-                        // do nothing this is an expected exception when the timeout expires
-                    }
+                    settableFuture.get(timeout, TimeUnit.SECONDS);
                 } else {
-                    getLocalMockServerInstance().start(getServerPorts(), proxyRemotePort, proxyRemoteHost, logLevel, initializerClass, initializerJson);
                     settableFuture.get();
                 }
-            } catch (Exception e) {
-                getLog().error("Exception while running MockServer", e);
+            } catch (TimeoutException te) {
+                // do nothing this is an expected exception when the timeout expires
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            } catch (ExecutionException ee) {
+                getLog().error("Exception while running MockServer", ee);
             }
         }
 
     }
-
 }

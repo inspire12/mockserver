@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
@@ -58,6 +59,7 @@ public class BinaryRelayAnsweredLocallyTest {
     private final Expectation mocked = new Expectation(binaryRequest(bytes("mocked"))).thenRespondWithBinary(binaryResponse(bytes(CANNED)));
     private final Expectation noReply = new Expectation(binaryRequest(bytes("no reply"))).thenRespondWithBinary(binaryResponse(new byte[0]));
     private final Expectation notBinary = new Expectation(binaryRequest(bytes("http"))).thenRespond(response());
+    private final Expectation delayed = new Expectation(binaryRequest(bytes("slow"))).thenRespondWithBinary(binaryResponse(bytes("SLOW")).withDelay(MILLISECONDS, 500));
     private final List<String> reported = new ArrayList<>();
     private final List<CompletableFuture<BinaryMessage>> responses = new ArrayList<>();
     private BinaryRelayHarness relay;
@@ -67,7 +69,7 @@ public class BinaryRelayAnsweredLocallyTest {
         when(httpState.hasBinaryExpectations()).thenReturn(true);
         when(httpState.firstMatchingExpectation(any(BinaryRequestDefinition.class))).thenAnswer(invocation -> {
             String received = new String(invocation.<BinaryRequestDefinition>getArgument(0).getBinaryData(), StandardCharsets.UTF_8);
-            for (Expectation expectation : new Expectation[]{mocked, noReply, notBinary}) {
+            for (Expectation expectation : new Expectation[]{mocked, noReply, notBinary, delayed}) {
                 if (received.equals(new String(((BinaryRequestDefinition) expectation.getHttpRequest()).getBinaryData(), StandardCharsets.UTF_8))) {
                     return expectation;
                 }
@@ -195,6 +197,24 @@ public class BinaryRelayAnsweredLocallyTest {
         relay.clientSends("another");
         relay.clientSends("mocked");
         assertThat("a later forwarded message is warned about too", warnings(), hasSize(2));
+    }
+
+    @Test
+    public void shouldWriteADelayedLocalReplyOnceItsDelayHasPassedAndCheckItsOrderThen() {
+        EmbeddedChannel client = clientConnection();
+        client.freezeTime();
+
+        relay.clientSends("slow");
+        relay.clientSends("one");
+        assertThat("not before its delay", relay.receivedByClient(), is(""));
+        assertThat(relay.receivedByUpstream(), is("one"));
+
+        client.advanceTimeBy(500, MILLISECONDS);
+        client.runScheduledPendingTasks();
+
+        assertThat(relay.receivedByClient(), is("SLOW"));
+        assertThat("written while the message forwarded after it has no answer", warnings(), hasSize(1));
+        assertThat(relay.upstreamConnections, is(1));
     }
 
     @Test

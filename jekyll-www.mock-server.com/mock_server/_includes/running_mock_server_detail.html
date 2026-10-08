@@ -131,6 +131,8 @@
 		<strong>stopForked</strong> - stop a forked MockServer, previously started by a runForked goal
 	</li>
 </ul>
+
+<p>If MockServer refuses to start (for example because a port it was given is already in use, or because the <span class="inline_code">dnsPort</span> or <span class="inline_code">http3Port</span> it was given cannot be opened), the <strong>start</strong>, <strong>run</strong> and <strong>runForked</strong> goals <strong>fail the build</strong> with the reason, rather than carry on without a running MockServer. The <strong>runForked</strong> goal also fails the build, and stops the forked JVM, if MockServer has not started within about 75 seconds.</p>
 <p>The Maven plugin can be configured with the following properties:</p>
 
 <ul>
