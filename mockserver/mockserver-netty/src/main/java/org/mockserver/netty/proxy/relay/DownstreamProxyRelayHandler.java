@@ -202,17 +202,14 @@ public class DownstreamProxyRelayHandler extends SimpleChannelInboundHandler<Htt
      * The loopback's socket is closed directly ({@link RelayLegClose}): its streams can no longer complete, and an
      * HTTP/2 loopback closed through its pipeline would wait for them.
      * <p>
-     * A proxy client that has gone had sent whole any request still being written to the loopback, so that loopback is
-     * left to {@link UpstreamProxyRelayHandler} to close, and is read (and dropped) meanwhile: an HTTP/2 request body
-     * waits for MockServer's window updates. So is the loopback of a proxy client whose output a failed write has ended:
-     * that client is read to the end of its input ({@link ReadAfterFailedWrite}), and what it sent goes on to MockServer.
+     * The loopback of a proxy client that has gone, or whose output a failed write has ended (it is read to the end of
+     * its input, {@link ReadAfterFailedWrite}), is left to {@link UpstreamProxyRelayHandler}, which ends it when that
+     * client's leg closes, and is read (and dropped) meanwhile. A request written to the loopback may not yet have been
+     * read by MockServer, and closing the loopback's socket with responses unread resets it, which drops that request.
      */
     private void endRelay(ChannelHandlerContext ctx) {
         relayEnded = true;
-        if (!upstreamChannel.isActive() && UpstreamProxyRelayHandler.isWritingRequestTo(ctx.channel())) {
-            return;
-        }
-        if (ReadAfterFailedWrite.isReadingOn(upstreamChannel)) {
+        if (!upstreamChannel.isActive() || ReadAfterFailedWrite.isReadingOn(upstreamChannel)) {
             return;
         }
         // never released: it also stops a read in progress from going on to read the socket closed below

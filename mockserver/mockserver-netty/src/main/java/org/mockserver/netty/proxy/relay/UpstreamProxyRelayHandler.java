@@ -12,7 +12,6 @@ import io.netty.handler.codec.http2.Http2Error;
 import io.netty.handler.codec.http2.Http2Exception;
 import io.netty.handler.codec.http2.Http2Stream;
 import io.netty.handler.ssl.SslHandler;
-import io.netty.util.AttributeKey;
 import org.mockserver.codec.HttpChunkLineLimiter;
 import org.mockserver.codec.StreamingAwareHttpObjectAggregator;
 import org.mockserver.log.model.LogEntry;
@@ -39,8 +38,6 @@ import static org.mockserver.socket.tls.SniHandler.getALPNProtocol;
 
 public class UpstreamProxyRelayHandler extends SimpleChannelInboundHandler<FullHttpRequest> {
 
-    // kept on the loopback: a closed proxy client channel's pipeline no longer holds this handler
-    private static final AttributeKey<UpstreamProxyRelayHandler> REQUEST_WRITER = AttributeKey.valueOf("mockserver.relayRequestWriter");
     private final MockServerLogger mockServerLogger;
     private final Channel upstreamChannel;
     private final Channel downstreamChannel;
@@ -62,20 +59,6 @@ public class UpstreamProxyRelayHandler extends SimpleChannelInboundHandler<FullH
         this.host = host;
         this.port = port;
         this.mockServerLogger = mockServerLogger;
-    }
-
-    @Override
-    public void handlerAdded(ChannelHandlerContext ctx) {
-        downstreamChannel.attr(REQUEST_WRITER).set(this);
-    }
-
-    /**
-     * Whether a request is still being written to this loopback. While one is, {@link #channelInactive} and the listener
-     * of the last such write close the loopback of a proxy client that has gone, so the relay's end leaves it to them.
-     */
-    static boolean isWritingRequestTo(Channel loopback) {
-        UpstreamProxyRelayHandler requestWriter = loopback.attr(REQUEST_WRITER).get();
-        return requestWriter != null && requestWriter.requestWritesInProgress > 0;
     }
 
     @Override
@@ -192,11 +175,13 @@ public class UpstreamProxyRelayHandler extends SimpleChannelInboundHandler<FullH
         if (requestWritesInProgress == 0) {
             // no response the loopback still has in flight can be delivered
             RelayLegClose.afterFlush(downstreamChannel);
-        } else {
-            // a request still being written (HTTP/2 DATA waiting for flow-control window is not in the socket's
-            // buffer) would be lost to a socket close, so the socket is closed by the last such write's listener
+        } else if (downstreamChannel.pipeline().get(Http2ConnectionHandler.class) != null) {
+            // the last request write's listener ends the loopback; this graceful close bounds the wait for HTTP/2 DATA
+            // held for flow-control window, which a socket close would fail
             closeOnFlush(downstreamChannel);
         }
+        // an HTTP/1.1 loopback is left to that listener: closed as soon as the request is flushed, with a response
+        // unread, it would be reset before MockServer had read the request
     }
 
     @Override

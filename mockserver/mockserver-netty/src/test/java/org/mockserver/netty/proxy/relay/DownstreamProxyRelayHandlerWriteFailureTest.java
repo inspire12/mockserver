@@ -30,10 +30,12 @@ import org.slf4j.event.Level;
 
 import javax.net.ssl.SSLException;
 import java.io.IOException;
+import java.nio.channels.ClosedChannelException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -228,6 +230,7 @@ public class DownstreamProxyRelayHandlerWriteFailureTest {
         };
         Http2ProxyClient proxyClient = new Http2ProxyClient();
         EmbeddedChannel loopback = new EmbeddedChannel(new DownstreamProxyRelayHandler(logger, proxyClient.channel));
+        proxyClient.channel.pipeline().addLast(new UpstreamProxyRelayHandler(logger, proxyClient.channel, loopback, "localhost", 80, 1024));
         int streamId = proxyClient.request();
         loopback.writeInbound(responseOnStream(streamId, 16 * Http2ProxyClient.STREAM_WINDOW));
         proxyClient.exchange();
@@ -238,8 +241,7 @@ public class DownstreamProxyRelayHandlerWriteFailureTest {
         proxyClient.channel.runPendingTasks();
 
         assertThat("nothing logged above DEBUG", logged.stream().filter(entry -> entry.getLogLevel().toInt() > Level.DEBUG.toInt()).count(), is(0L));
-        assertThat("the loopback was closed", loopback.isOpen(), is(false));
-        assertThat("the loopback stopped reading", loopback.config().isAutoRead(), is(false));
+        assertThat("the loopback was closed, by the client's leg", loopback.isOpen(), is(false));
         loopback.finishAndReleaseAll();
         proxyClient.release();
     }
@@ -262,12 +264,13 @@ public class DownstreamProxyRelayHandlerWriteFailureTest {
             }
         });
         EmbeddedChannel loopback = new EmbeddedChannel(new DownstreamProxyRelayHandler(logger, proxyClient));
+        proxyClient.pipeline().addLast(new UpstreamProxyRelayHandler(logger, proxyClient, loopback, "localhost", 80, 1024));
 
         // one stream's failure by its cause and stream id, but every stream of a closed connection fails this way
         loopback.writeInbound(responseOnStream(3));
+        proxyClient.runPendingTasks();
 
-        assertThat("the loopback was closed", loopback.isOpen(), is(false));
-        assertThat("the loopback stopped reading", loopback.config().isAutoRead(), is(false));
+        assertThat("the loopback was closed, by the client's leg", loopback.isOpen(), is(false));
         assertThat("nothing logged above DEBUG", logged.stream().filter(entry -> entry.getLogLevel().toInt() > Level.DEBUG.toInt()).count(), is(0L));
         loopback.finishAndReleaseAll();
         proxyClient.finishAndReleaseAll();
@@ -288,7 +291,7 @@ public class DownstreamProxyRelayHandlerWriteFailureTest {
         proxyClient.pipeline().addLast(new UpstreamProxyRelayHandler(logger, proxyClient, loopback, "localhost", 80, 1024));
         FullHttpRequest request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, "/pipelined", Unpooled.copiedBuffer("upload", StandardCharsets.UTF_8));
         proxyClient.writeInbound(request);
-        assertThat("the request is still being written", UpstreamProxyRelayHandler.isWritingRequestTo(loopback), is(true));
+        assertThat("the request is still being written", loopbackSocket.messages, hasItem(sameInstance(request)));
         proxyClient.close();
         FullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK, Unpooled.copiedBuffer("body", StandardCharsets.UTF_8));
 
@@ -303,6 +306,62 @@ public class DownstreamProxyRelayHandlerWriteFailureTest {
 
         assertThat("the request was written", new ArrayList<>(loopback.outboundMessages()), hasItem(sameInstance(request)));
         assertThat("and the loopback then closed", loopback.isOpen(), is(false));
+        // closed through its pipeline once flushed, an HTTP/1.1 loopback would reset MockServer's end before it had read
+        // the request, if a response were then unread
+        assertThat("by ending its output, not through its pipeline", loopbackSocket.closesThroughThePipeline, is(0));
+        assertThat("nothing logged above DEBUG", logged.stream().filter(entry -> entry.getLogLevel().toInt() > Level.DEBUG.toInt()).count(), is(0L));
+        loopback.finishAndReleaseAll();
+        proxyClient.finishAndReleaseAll();
+    }
+
+    @Test
+    public void shouldLeaveTheLoopbackToTheClientsLegWhenAWriteFailsToAProxyClientThatHasGoneWithNoRequestBeingWritten() {
+        List<LogEntry> logged = new CopyOnWriteArrayList<>();
+        MockServerLogger logger = new MockServerLogger(DownstreamProxyRelayHandlerWriteFailureTest.class) {
+            @Override
+            public void logEvent(LogEntry logEntry) {
+                logged.add(logEntry);
+            }
+        };
+        AtomicBoolean socketClosed = new AtomicBoolean();
+        // a socket that has closed, whose channelInactive has not yet run: writes to it fail
+        EmbeddedChannel proxyClient = new EmbeddedChannel() {
+            @Override
+            public boolean isActive() {
+                return !socketClosed.get() && super.isActive();
+            }
+        };
+        proxyClient.pipeline().addLast(new ChannelOutboundHandlerAdapter() {
+            @Override
+            public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
+                if (socketClosed.get()) {
+                    ReferenceCountUtil.release(msg);
+                    promise.setFailure(new ClosedChannelException());
+                } else {
+                    ctx.write(msg, promise);
+                }
+            }
+        });
+        EmbeddedChannel loopback = new EmbeddedChannel(new DownstreamProxyRelayHandler(logger, proxyClient));
+        proxyClient.pipeline().addLast(new UpstreamProxyRelayHandler(logger, proxyClient, loopback, "localhost", 80, 1024));
+        FullHttpRequest request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, "/pipelined", Unpooled.copiedBuffer("upload", StandardCharsets.UTF_8));
+        proxyClient.writeInbound(request);
+        assertThat("the request was written", new ArrayList<>(loopback.outboundMessages()), hasItem(sameInstance(request)));
+        socketClosed.set(true);
+        FullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK, Unpooled.copiedBuffer("body", StandardCharsets.UTF_8));
+
+        loopback.writeInbound(response);
+
+        assertThat(response.refCnt(), is(0));
+        // MockServer may not yet have read the request, which a close with the response unread would reset
+        assertThat("left open for the client's leg to end", loopback.isOpen(), is(true));
+        assertThat("and still read", loopback.config().isAutoRead(), is(true));
+
+        socketClosed.set(false);
+        proxyClient.unsafe().close(proxyClient.unsafe().voidPromise());
+        proxyClient.runPendingTasks();
+
+        assertThat("ended by the client's leg", loopback.isOpen(), is(false));
         assertThat("nothing logged above DEBUG", logged.stream().filter(entry -> entry.getLogLevel().toInt() > Level.DEBUG.toInt()).count(), is(0L));
         loopback.finishAndReleaseAll();
         proxyClient.finishAndReleaseAll();
@@ -323,7 +382,7 @@ public class DownstreamProxyRelayHandlerWriteFailureTest {
         proxyClient.pipeline().addLast(new UpstreamProxyRelayHandler(new MockServerLogger(), proxyClient, loopback, "localhost", 80, 1024));
         FullHttpRequest request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, "/pipelined", Unpooled.copiedBuffer("upload", StandardCharsets.UTF_8));
         proxyClient.writeInbound(request);
-        assertThat("the request is still being written", UpstreamProxyRelayHandler.isWritingRequestTo(loopback), is(true));
+        assertThat("the request is still being written", loopbackSocket.messages, hasItem(sameInstance(request)));
 
         loopback.writeInbound(new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK, Unpooled.copiedBuffer("body", StandardCharsets.UTF_8)));
 
@@ -345,6 +404,13 @@ public class DownstreamProxyRelayHandlerWriteFailureTest {
         private final List<ChannelPromise> promises = new ArrayList<>();
         private ChannelHandlerContext ctx;
         private boolean drained;
+        private int closesThroughThePipeline;
+
+        @Override
+        public void close(ChannelHandlerContext ctx, ChannelPromise promise) {
+            closesThroughThePipeline++;
+            ctx.close(promise);
+        }
 
         @Override
         public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) {

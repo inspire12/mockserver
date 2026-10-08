@@ -799,6 +799,7 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **A request pipelined on an HTTP/1.1 CONNECT or SOCKS tunnel is no longer lost when the client leaves.** A client that sent a request behind a response it had not read, and then closed or half-closed its connection, could have that request dropped: the tunnel closed its internal connection to MockServer while MockServer was still sending the unread response, which reset that connection before MockServer had read the whole request. The tunnel now ends that connection only after MockServer has finished reading what the client sent, waiting up to 5 seconds.
 - **More control-plane endpoints now answer a fault inside MockServer `500`, not `400`.** The `GET` endpoints for
   the clock, proxy configuration, service, TCP and gRPC chaos, gRPC health, chaos experiments and their history, load
   scenarios, preemption, cluster, drift and audit, `DELETE /mockserver/chaosExperiment`, `PUT /mockserver/preemption`

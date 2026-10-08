@@ -138,6 +138,10 @@ public class LoopbackHttp2StreamedResponseRelayTest {
         // lost, not closed gracefully: a graceful close waits for a stream the client has not finished taking
         proxyClient.unsafe().close(proxyClient.voidPromise());
         proxyClient.finishAndReleaseAll();
+        // the relay leaves a gone client's loopback for the client's leg to end, and there is no such leg here: what the
+        // failed writes made the loopback write (its window updates) is released here
+        loopback.unsafe().close(loopback.voidPromise());
+        loopback.finishAndReleaseAll();
         writtenToProxyClient.close();
         writtenToServer.close();
         writtenByServer.close();

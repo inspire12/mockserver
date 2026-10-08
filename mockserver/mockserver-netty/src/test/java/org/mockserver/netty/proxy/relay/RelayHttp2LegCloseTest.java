@@ -334,18 +334,24 @@ public class RelayHttp2LegCloseTest {
     }
 
     @Test
-    public void shouldCloseTheLoopbackAtOnceWhenAResponseFailsBeforeTheClientLegSeesItsClientLeaveWithNoRequestBeingWritten() throws Exception {
+    public void shouldLeaveTheLoopbackToTheClientLegWhenAResponseFailsBeforeItSeesItsClientLeaveWithNoRequestBeingWritten() throws Exception {
         relay(3, "/answered");
         relay(5, "/unanswered");
 
         closeProxyClientSocket();
         answer(1);
 
-        assertThat("closed at once: no request is waiting to be written", loopback.isOpen(), is(false));
-        assertThat("the relay stopped reading the loopback", loopback.config().isAutoRead(), is(false));
+        // a request already written may not yet have been read by MockServer, which closing the loopback could lose
+        assertThat("left open for the client's leg to end", loopback.isOpen(), is(true));
+        assertThat("and still read, so that MockServer's close is seen", loopback.config().isAutoRead(), is(true));
+        assertThat("the undelivered response was released", refCnts(responsesHandedToTheRelay), contains(0));
+
+        fireProxyClientInactive();
+        pump();
+
+        assertThat(loopback.isOpen(), is(false));
         assertThat(loopbackConnection.numActiveStreams(), is(0));
         assertThat("nothing logged above DEBUG for a client that went away", loggedAboveDebug(), is(empty()));
-        assertThat("the undelivered response was released", refCnts(responsesHandedToTheRelay), contains(0));
     }
 
     @Test
@@ -412,7 +418,6 @@ public class RelayHttp2LegCloseTest {
 
         assertThat(loopback.isOpen(), is(false));
         assertThat(loopbackConnection.numActiveStreams(), is(0));
-        assertThat("no request is still being written", UpstreamProxyRelayHandler.isWritingRequestTo(loopback), is(false));
         assertThat(upload.refCnt(), is(0));
         assertRelayedResponseReleased();
     }
@@ -442,7 +447,6 @@ public class RelayHttp2LegCloseTest {
 
         assertThat("closed by the graceful shutdown's timeout", loopback.isOpen(), is(false));
         assertThat(loopbackConnection.numActiveStreams(), is(0));
-        assertThat("no request is still being written", UpstreamProxyRelayHandler.isWritingRequestTo(loopback), is(false));
         assertThat("the request that was never written is reported", logged(Level.ERROR), contains("exception while returning response for request:{}"));
         // the part of the request written before the window ran out, which no one took
         loopback.releaseOutbound();

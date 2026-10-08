@@ -812,7 +812,7 @@ completes; a request read in more than one pass whose first pass ended with a fl
 |---|---|
 | `ReadAfterFailedWrite.install` (`mockserver-core` `o.m.socket`), from `MockServerUnificationInitializer` | Turns `autoClose` off on every accepted connection, so a failed write shuts the socket's output down and fires `ChannelOutputShutdownEvent`. Its handler then closes the socket after `LINGER_MILLIS` unless it has closed, or at once if the channel's reads are paused, as nothing would be read |
 | The server HTTP/2 handlers (`Http2RequestHeaderLimit.frameCodecBuilder`, the tunnel's client-facing handler) | Skip `onConnectionError` for a write that failed as the output ended (no `Http2Exception`, output ended, channel active): Netty would send a `GOAWAY`, after which it ignores the streams the client opens later, and close. A close asked of them while the output has ended (the `CLOSE_ON_FAILURE` on their `SETTINGS`) waits for the input to end |
-| `DownstreamProxyRelayHandler.endRelay` | When a write to the proxy client fails because its output ended, leaves the loopback open (read, and its responses dropped) so that what the client sent goes on to MockServer; `UpstreamProxyRelayHandler` closes it when the client's leg closes |
+| `DownstreamProxyRelayHandler.endRelay` | When a write to the proxy client fails because its output ended, or its connection has closed, leaves the loopback open (read, and its responses dropped) so that what the client sent goes on to MockServer; `UpstreamProxyRelayHandler` ends it when the client's leg closes |
 | `ReadAfterFailedWrite.endOutput` | Used by `LingeringClose` and `RelayLegClose`, which end an output on purpose and close the socket themselves; the handler leaves those alone |
 
 On a reset connection the read after the failed write returns the bytes still unread and then the error, or the end of
@@ -1582,16 +1582,17 @@ cleartext).
 ### Relay write failure
 
 When a write to the proxy client fails because the connection has failed, `DownstreamProxyRelayHandler` ends the relay at the
-first failure: it logs that failure once (`exception while returning writing`, or nothing once the proxy client's connection has closed or its client has closed its TLS session, `SslClosedEngineException`), stops reading the loopback
-with a `ChannelReadPause` hold it never releases, closes both legs, and releases whatever the loopback still delivers,
-response by response and, for a response relayed as it is streamed, part by part.
+first failure: it logs that failure once (`exception while returning writing`, or nothing once the proxy client's connection has closed or its client has closed its TLS session, `SslClosedEngineException`), and releases whatever the
+loopback still delivers, response by response and, for a response relayed as it is streamed, part by part. While the
+client's leg is open it also stops reading the loopback with a `ChannelReadPause` hold it never releases, and closes
+both legs.
 Every write already queued behind the failed one fails the same way and is not logged. Exceeding the streamed-bytes
 bound (`maxRequestBodySize` of unwritten streamed content, raw bytes not counted) ends the relay the same way.
 
 The loopback's socket is closed directly and the client's leg through its pipeline (see [Relay close](#relay-close)).
-One case keeps the loopback open: a client that has gone with a request still being written to the loopback. The relay
+The loopback of a client that has gone, or whose output the failed write has ended, is not closed there: the relay
 still ends, and everything the loopback delivers from then on is released unwritten, but the loopback is read until
-that request has been written (see [Relay close](#relay-close)).
+`UpstreamProxyRelayHandler` ends it as the client's leg closes (see [Relay close](#relay-close)).
 
 A failure of one HTTP/2 stream does not end the relay. When the response carries the client's stream id
 (`x-http2-stream-id`, read before the write, or the stream id of a part of a streamed response), the failure is an
@@ -1621,10 +1622,10 @@ the socket when MockServer's side closes, which it does on reading the end of th
 
 | The relay ends because | Loopback leg | Client leg |
 |---|---|---|
-| A write to the client failed, or too much streamed content was waiting (`DownstreamProxyRelayHandler.endRelay`), with the client's leg still open, or with no request still being written to the loopback | socket closed at once | `close()` through the pipeline |
-| The same, with the client's connection already closed and a request still being written to the loopback | left open and read, what it delivers dropped; closed as in the row below for a request still being written | already closed |
+| A write to the client failed, or too much streamed content was waiting (`DownstreamProxyRelayHandler.endRelay`), with the client's leg still open | socket closed at once | `close()` through the pipeline |
+| A write to the client failed with the client's connection already closed, or its output ended by the failure | left open and read, what it delivers dropped; ended as in the two rows below when the client's leg closes | already closed, or read to the end of its input |
 | The client's connection closed with no request still being written to the loopback (`UpstreamProxyRelayHandler.channelInactive`, or a listener on its close for a tunnel that has no relay handlers yet) | `afterFlush`: flushed, output shut down, socket closed when MockServer's side closes | already closed |
-| The client's connection closed with a request still being written to the loopback (`UpstreamProxyRelayHandler.channelInactive`) | `closeOnFlush` through the pipeline; `afterFlush` when the last such write completes or fails | already closed |
+| The client's connection closed with a request still being written to the loopback (`UpstreamProxyRelayHandler.channelInactive`) | HTTP/2: `closeOnFlush` through the pipeline; HTTP/1.1: left as it is. `afterFlush` when the last such write completes or fails | already closed |
 | The loopback closed (`DownstreamProxyRelayHandler.channelInactive`) | already closed | open streams ended as in [Relay loopback connection loss](#relay-loopback-connection-loss-http2), then `closeOnFlush` |
 | The loopback closed before the tunnel's protocol was known (`RelayConnectHandler`) | already closed | `closeOnFlush` |
 
@@ -1643,40 +1644,52 @@ MockServer had answered every stream, or for 30 s.
 A request is received whole even when the client leaves the moment it has sent it. `UpstreamProxyRelayHandler` counts
 its writes of requests to the loopback that have not completed. An HTTP/2 request body above the stream's flow-control
 window (65,535 bytes by default) waits in the loopback's flow controller, not in the socket's outbound buffer, so a
-socket close would fail it however the buffer was flushed first. While the count is above zero the loopback is
+socket close would fail it however the buffer was flushed first. While the count is above zero an HTTP/2 loopback is
 therefore closed through its pipeline, which goes on writing as MockServer extends the window, and the listener of
-the last write to complete, or fail, closes the socket. That wait has the graceful shutdown's 30 s bound (an HTTP/1.1
-loopback has none: it waits for its socket to take the request — accepted as unbounded, see
+the last write to complete, or fail, ends it with `afterFlush`. That wait has the graceful shutdown's 30 s bound. An
+HTTP/1.1 loopback is not closed through its pipeline, which closes its socket the moment the request is flushed (see
+below why that loses it): it is left to that listener, and has no bound — it waits for its socket to take the
+request, accepted as unbounded, see
 [decisions/http11-tunnel-loopback-wait-unbounded.md](decisions/http11-tunnel-loopback-wait-unbounded.md)). The count
 covers requests only: a response the loopback is still reading has no one to go to. The listener on the client
 channel's close future acts only while the tunnel has no `UpstreamProxyRelayHandler`: it runs before
 `channelInactive` and would close the socket whatever the count (`RelayHttp2LegCloseTest`,
 `RelayHttp2TunnelCloseIntegrationTest`).
 
-`endRelay` consults the count too (`UpstreamProxyRelayHandler.isWritingRequestTo`). On a tunnel carrying several
-requests, a response on another stream is often still being written to the client when it leaves (queued behind the
-client's flow-control window, or in the socket's buffer), or arrives just afterwards. That write fails and ends the
-relay. When the client's connection has closed and a request is still being written, `endRelay` marks the relay ended
-and does nothing else: the loopback stays open and is still read, because the request's DATA waits for MockServer's
-`WINDOW_UPDATE`s, and each response it delivers is released without a write. `UpstreamProxyRelayHandler` then closes
-the loopback exactly as if no write had failed: gracefully from `channelInactive` (the 30 s bound), and at its socket
-from the listener of the last request write to complete or fail, which also covers a loopback that closes first.
+`endRelay` never closes the loopback of a client that has gone. On a tunnel carrying several requests, a response on
+another stream is often still being written to the client when it leaves (queued behind the client's flow-control
+window, or in the socket's buffer), or arrives just afterwards. That write fails and ends the relay. A request the
+client sent may not yet have been read by MockServer even when its write has completed: its last bytes can still be in
+the loopback socket's send buffer, or, over HTTP/2, waiting in the flow controller for MockServer's `WINDOW_UPDATE`s.
+A socket closed with bytes it has received still unread sends a reset, not a FIN, and the kernel then discards what is
+still in its send buffer; MockServer is still sending such bytes whenever a response to an earlier request is on its
+way. So `endRelay` marks the relay ended and does nothing else: the loopback stays open and is still
+read, and each response it delivers is released without a write. `UpstreamProxyRelayHandler` then ends the loopback
+exactly as if no write had failed: with `afterFlush` (a FIN once flushed, the socket closed when MockServer's side
+closes, which it does on reading the end of its input) once no request is being written, and, over HTTP/2, gracefully
+from `channelInactive` meanwhile (the 30 s bound), which also covers a loopback that closes first.
 
 | When the write to the client fails | Loopback |
 |---|---|
 | The client's leg is open (refusing writes, its close perhaps held behind a TLS `close_notify`) | socket closed at once, whatever is being written: that leg's `channelInactive` may never come |
-| The client's connection has closed, no request being written | socket closed at once |
-| The client's connection has closed, a request being written | left to `UpstreamProxyRelayHandler` |
+| The client's connection has closed, or its output has ended | left to `UpstreamProxyRelayHandler` |
+
+Before (plan item 370), an HTTP/1.1 loopback with a request still being written was closed through its pipeline,
+which closes its socket the moment that request is flushed, and `endRelay` closed the loopback's socket at once when no
+request was still being written. Either close could come while MockServer was still sending a response pipelined ahead
+of the request, which the relay had not yet read: a client that sent `GET` for a large response and a `POST` behind
+it, then half-closed, sometimes had the `POST` lost, with the relay's end of the loopback failing mid-response
+(`PrematureChannelClosureException`) and MockServer's end reset.
 
 A client leg whose own `Http2ConnectionHandler` closed it on the failed write has closed by the time `endRelay` runs,
 so it counts as closed. Both orders of the client's close are handled. A socket's close fails the writes in its
 outbound buffer, and lets the event loop read the loopback, before the task that fires `channelInactive` runs, so
 `endRelay` can run before `UpstreamProxyRelayHandler` has seen the client leave: it therefore tests the channel, and
-`channelInactive` follows and finds the count. Writes waiting in the HTTP/2 flow controller fail inside
-`channelInactive`, after that handler has run. The handler is found through an attribute on the loopback channel,
-since a closed channel's pipeline has been emptied. The rule does not depend on the protocol: on an HTTP/1.1 tunnel
-the request still being written is one pipelined behind a response, which the loopback's socket has not yet taken
-(`RelayHttp2LegCloseTest`, `DownstreamProxyRelayHandlerWriteFailureTest`, `RelayHttp2TunnelCloseIntegrationTest`).
+`channelInactive` follows. Writes waiting in the HTTP/2 flow controller fail inside `channelInactive`, after that
+handler has run. The rule does not depend on the protocol: on an HTTP/1.1 tunnel the request is one pipelined behind a
+response (`RelayHttp2LegCloseTest`, `DownstreamProxyRelayHandlerWriteFailureTest`, `RelayHttp2TunnelCloseIntegrationTest`,
+and `RelayHttp1PipelinedRequestIntegrationTest`, which holds MockServer's end of the loopback while an HTTP/1.1 client
+sends a 16 MB request behind a response it never reads and half-closes).
 
 Until the client's first bytes show which protocol the tunnel carries, neither leg has a relay handler, so each is
 tied to the other's close by `RelayConnectHandler` itself. Before, a client that connected and left without sending
