@@ -1,5 +1,6 @@
 package org.mockserver.log;
 
+import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.Test;
@@ -40,6 +41,11 @@ public class MockServerEventLogRequestLogEntryVerificationSequenceTest {
         // so keep detailed failures off by default; the diff-specific tests opt in explicitly
         configuration.detailedVerificationFailures(false);
         mockServerEventLog = new MockServerEventLog(configuration, new MockServerLogger(configuration, MockServerLogger.class), scheduler, true);
+    }
+
+    @After
+    public void stopEventLog() {
+        mockServerEventLog.stop();
     }
 
     @AfterClass

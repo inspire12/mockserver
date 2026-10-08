@@ -1,5 +1,6 @@
 package org.mockserver.log;
 
+import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.Test;
@@ -49,6 +50,11 @@ public class MockServerEventLogRequestLogEntryVerificationTest {
     public void setupTestFixture() {
         configuration.detailedVerificationFailures(false);
         mockServerEventLog = new MockServerEventLog(configuration, new MockServerLogger(configuration, MockServerLogger.class), scheduler, true);
+    }
+
+    @After
+    public void stopEventLog() {
+        mockServerEventLog.stop();
     }
 
     @AfterClass

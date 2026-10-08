@@ -1,5 +1,6 @@
 package org.mockserver.log;
 
+import org.junit.After;
 import org.junit.ClassRule;
 import org.junit.Test;
 import org.mockserver.configuration.Configuration;
@@ -45,10 +46,19 @@ public class MockServerEventLogEvictionSignalTest {
     @ClassRule
     public static final MetricsLock metricsLock = new MetricsLock();
 
+    private final List<MockServerEventLog> eventLogs = new ArrayList<>();
+
+    @After
+    public void stopEventLogs() {
+        eventLogs.forEach(MockServerEventLog::stop);
+    }
+
     private MockServerEventLog synchronousEventLog(Configuration configuration) {
         // synchronous (false) so add() runs processLogEntry inline on the calling thread — warnings and
         // eviction accounting are then deterministic without draining the disruptor.
-        return new MockServerEventLog(configuration, new MockServerLogger(configuration, MockServerLogger.class), mock(Scheduler.class), false);
+        MockServerEventLog eventLog = new MockServerEventLog(configuration, new MockServerLogger(configuration, MockServerLogger.class), mock(Scheduler.class), false);
+        eventLogs.add(eventLog);
+        return eventLog;
     }
 
     private List<LogEntry> retrieveMessageLogEntries(MockServerEventLog log, RequestDefinition requestDefinition) {

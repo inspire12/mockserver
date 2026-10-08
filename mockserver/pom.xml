@@ -78,9 +78,16 @@
              replaces a pom value outright. It comes last in every argLine, so its -D flags beat the
              argLine's own, but not a systemPropertyVariables entry (surefire applies those later). -->
         <mockserver.testArgLine/>
-        <!-- A module's own Netty leak-detector flags (set in mockserver-netty), kept apart from
-             mockserver.testArgLine so that passing that one cannot remove the detector. -->
+        <!-- Netty ByteBuf leak gate (see the clean/print/check-netty-leaks executions below). A module
+             opts in by setting mockserver.leakArgLine to ${mockserver.nettyLeakDetectorArgLine}; kept
+             apart from mockserver.testArgLine so that passing that one cannot remove the detector.
+             -Dmockserver.leakArgLine= on the command line turns the detector and the gate off. -->
         <mockserver.leakArgLine/>
+        <mockserver.leakReportDir>${project.build.directory}/netty-leaks</mockserver.leakReportDir>
+        <mockserver.nettyLeakDetectorArgLine>-Dio.netty.leakDetection.level=paranoid -Dio.netty.customResourceLeakDetector=org.mockserver.test.FailOnLeakResourceLeakDetector -Dmockserver.leakReportDir=${mockserver.leakReportDir}</mockserver.nettyLeakDetectorArgLine>
+        <!-- false downgrades a recorded leak to a warning while it is triaged; detection and
+             recording stay on, and a gate whose detector never ran still fails. -->
+        <mockserver.failOnNettyLeak>true</mockserver.failOnNettyLeak>
         <!-- Empty default so the surefire/failsafe @{argLine} token always resolves. jacoco's
              prepare-agent prepends its agent to it; without this default, invoking surefire:test or
              failsafe:integration-test directly (no prepare-agent) passes a literal @{argLine} to the
@@ -1792,6 +1799,123 @@
                             <goal>integration-test</goal>
                             <goal>verify</goal>
                         </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- Netty ByteBuf leak gate, active in modules that set mockserver.leakArgLine. The detector
+                 (org.mockserver.test.FailOnLeakResourceLeakDetector) writes an empty installed-<pid>.marker
+                 per fork and one leak-<pid>.txt per leaking fork to ${mockserver.leakReportDir}. A file is
+                 used because throwing from a JUnit RunListener does not fail surefire, and a leak is
+                 logged on an arbitrary thread long after the test that caused it. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-antrun-plugin</artifactId>
+                <version>3.2.0</version>
+                <executions>
+                    <!-- empty the directory before the tests run, and stamp the start so the check can
+                         tell whether any test fork ran in this build -->
+                    <execution>
+                        <id>clean-netty-leaks</id>
+                        <phase>process-test-classes</phase>
+                        <goals>
+                            <goal>run</goal>
+                        </goals>
+                        <configuration>
+                            <target xmlns:if="ant:if" xmlns:unless="ant:unless">
+                                <condition property="netty.leak.gate.on">
+                                    <not>
+                                        <equals arg1="${mockserver.leakArgLine}" arg2=""/>
+                                    </not>
+                                </condition>
+                                <delete dir="${mockserver.leakReportDir}" quiet="true" if:set="netty.leak.gate.on"/>
+                                <mkdir dir="${mockserver.leakReportDir}" if:set="netty.leak.gate.on"/>
+                                <tstamp if:set="netty.leak.gate.on">
+                                    <format property="netty.leak.started" pattern="yyyyMMddHHmmssSSS"/>
+                                </tstamp>
+                                <echo file="${mockserver.leakReportDir}/tests-started.properties" message="netty.leak.started=${netty.leak.started}" if:set="netty.leak.gate.on"/>
+                            </target>
+                        </configuration>
+                    </execution>
+                    <!-- print the records once both test phases have run: a failed integration test stops
+                         the build at failsafe:verify, before check-netty-leaks. Never fails the build. -->
+                    <execution>
+                        <id>print-netty-leaks</id>
+                        <phase>post-integration-test</phase>
+                        <goals>
+                            <goal>run</goal>
+                        </goals>
+                        <configuration>
+                            <target>
+                                <concat>
+                                    <header>Netty ByteBuf leak records in ${mockserver.leakReportDir}:${line.separator}</header>
+                                    <fileset dir="${mockserver.leakReportDir}" includes="leak-*.txt" erroronmissingdir="false">
+                                        <size value="0" when="more"/>
+                                    </fileset>
+                                </concat>
+                            </target>
+                        </configuration>
+                    </execution>
+                    <!-- after surefire AND failsafe: fail on any recorded leak, and fail if a test fork ran
+                         (a surefire or failsafe report written after clean-netty-leaks) but no fork
+                         installed the detector, which would otherwise pass having checked nothing -->
+                    <execution>
+                        <id>check-netty-leaks</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>run</goal>
+                        </goals>
+                        <configuration>
+                            <target xmlns:if="ant:if">
+                                <condition property="netty.leak.gate.on">
+                                    <not>
+                                        <equals arg1="${mockserver.leakArgLine}" arg2=""/>
+                                    </not>
+                                </condition>
+                                <fileset id="netty.leak.files" dir="${mockserver.leakReportDir}" includes="leak-*.txt" erroronmissingdir="false">
+                                    <size value="0" when="more"/>
+                                </fileset>
+                                <resourcecount property="netty.leak.file.count" refid="netty.leak.files"/>
+                                <concat>
+                                    <resources refid="netty.leak.files"/>
+                                </concat>
+                                <fail message="Netty ByteBuf leak(s) detected during the ${project.artifactId} test run - a reference-counted buffer was allocated and never released (see the LEAK records above and ${mockserver.leakReportDir}). This is a real memory-leak / double-release hazard. To downgrade this gate to a warning while triaging pre-existing leaks, pass -Dmockserver.failOnNettyLeak=false.">
+                                    <condition>
+                                        <and>
+                                            <istrue value="${mockserver.failOnNettyLeak}"/>
+                                            <not>
+                                                <equals arg1="${netty.leak.file.count}" arg2="0"/>
+                                            </not>
+                                        </and>
+                                    </condition>
+                                </fail>
+                                <property file="${mockserver.leakReportDir}/tests-started.properties"/>
+                                <fail if:set="netty.leak.gate.on" unless="netty.leak.started" message="Netty leak gate has no start time in ${mockserver.leakReportDir}/tests-started.properties: clean-netty-leaks did not run before the tests."/>
+                                <resourcecount property="netty.leak.reports.since.start" if:set="netty.leak.gate.on">
+                                    <union>
+                                        <fileset dir="${project.build.directory}/surefire-reports" erroronmissingdir="false">
+                                            <date datetime="${netty.leak.started}" pattern="yyyyMMddHHmmssSSS" when="after" granularity="0"/>
+                                        </fileset>
+                                        <fileset dir="${project.build.directory}/failsafe-reports" erroronmissingdir="false">
+                                            <date datetime="${netty.leak.started}" pattern="yyyyMMddHHmmssSSS" when="after" granularity="0"/>
+                                        </fileset>
+                                    </union>
+                                </resourcecount>
+                                <resourcecount property="netty.leak.marker.count">
+                                    <fileset dir="${mockserver.leakReportDir}" includes="installed-*.marker" erroronmissingdir="false"/>
+                                </resourcecount>
+                                <fail message="Netty leak gate checked nothing: tests ran in ${project.artifactId} but no test fork installed the leak detector (no installed-*.marker in ${mockserver.leakReportDir}). Check that the surefire/failsafe argLine still carries the mockserver.leakArgLine property, or, for a narrowed run whose tests never allocate a Netty buffer, pass -Dmockserver.leakArgLine= to turn the detector and this gate off.">
+                                    <condition>
+                                        <and>
+                                            <isset property="netty.leak.gate.on"/>
+                                            <not>
+                                                <equals arg1="${netty.leak.reports.since.start}" arg2="0"/>
+                                            </not>
+                                            <equals arg1="${netty.leak.marker.count}" arg2="0"/>
+                                        </and>
+                                    </condition>
+                                </fail>
+                            </target>
+                        </configuration>
                     </execution>
                 </executions>
             </plugin>

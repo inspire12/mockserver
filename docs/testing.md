@@ -612,7 +612,7 @@ The `scripts/buildkite_quick_build.sh` script runs the full build inside a `mock
 | Test output redirection | Enabled (`-DredirectTestOutputToFile=true`) |
 | Test log level | `INFO` (`-Dmockserver.testLogLevel=INFO`) |
 | Event log and expectation caps | 10,000 log entries and 5,000 expectations per test server, through `-Dmockserver.testArgLine`, which overrides the poms' `-Dmockserver.maxLogEntries=1000` |
-| Netty leak gate | On: `mockserver-netty`'s forks run the leak detector at `paranoid` and `check-netty-leaks` fails the build on a leaked buffer. `-Dmockserver.testArgLine` does not remove it (see [ByteBuf Leak Detection in Tests](code/netty-pipeline.md#bytebuf-leak-detection-in-tests)) |
+| Netty leak gate | On: the forks of `mockserver-core` and `mockserver-netty` run the leak detector at `paranoid` and `check-netty-leaks` fails the build on a leaked buffer, or when tests ran but no fork installed the detector. `-Dmockserver.testArgLine` does not remove it (see [ByteBuf Leak Detection in Tests](code/netty-pipeline.md#bytebuf-leak-detection-in-tests)) |
 | Timeout | 90 minutes |
 | Build artefacts | `**/*.log` files collected |
 

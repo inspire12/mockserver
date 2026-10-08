@@ -74,5 +74,8 @@ public class HttpErrorActionHandlerStreamErrorTest {
 
         // then - it falls back to dropping the connection rather than throwing
         assertThat(channel.isOpen(), is(false));
+
+        // the SETTINGS preface and the GOAWAY stay queued outbound until released
+        channel.finishAndReleaseAll();
     }
 }

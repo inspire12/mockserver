@@ -31,8 +31,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p>
  * <b>How it lets the build fail.</b> Every leak Netty reports to this detector is (a) counted,
  * (b) still logged by Netty at ERROR via {@code super}, and (c) <em>written to a file</em>
- * {@code <leakReportDir>/leak-<pid>.txt}. A Maven {@code antrun} step (see mockserver-netty's
- * pom) then fails the build if that directory contains any non-empty file. A file survives the
+ * {@code <leakReportDir>/leak-<pid>.txt}. A Maven {@code antrun} step (see the parent pom's
+ * {@code check-netty-leaks}) then fails the build if that directory contains any non-empty file,
+ * or if tests ran and no fork wrote an installed marker (see {@link #INSTALLED_MARKER_PREFIX}). A file survives the
  * fork exiting, so this does not depend on JUnit/surefire notification semantics (throwing from
  * a RunListener does NOT fail surefire — it is caught and reported as a listener warning).
  * <p>
@@ -57,6 +58,10 @@ public class FailOnLeakResourceLeakDetector<T> extends ResourceLeakDetector<T> {
 
     /** System property naming the directory that per-fork leak report files are written to. */
     public static final String LEAK_REPORT_DIR_PROPERTY = "mockserver.leakReportDir";
+
+    /** Each fork that loads this detector writes an empty {@code installed-<pid>.marker} to the report directory. */
+    public static final String INSTALLED_MARKER_PREFIX = "installed-";
+    public static final String INSTALLED_MARKER_SUFFIX = ".marker";
 
     private static final AtomicInteger LEAK_COUNT = new AtomicInteger();
     private static final Queue<String> LEAK_RECORDS = new ConcurrentLinkedQueue<>();
@@ -119,7 +124,22 @@ public class FailOnLeakResourceLeakDetector<T> extends ResourceLeakDetector<T> {
         File reportDir = new File(dir);
         //noinspection ResultOfMethodCallIgnored
         reportDir.mkdirs();
+        writeInstalledMarker(reportDir);
         return new File(reportDir, "leak-" + ProcessHandle.current().pid() + ".txt");
+    }
+
+    /**
+     * Writes an empty {@code installed-<pid>.marker} so the build can tell a fork whose detector was
+     * installed from one whose detector never ran (which would otherwise look like a fork with no leaks).
+     */
+    private static void writeInstalledMarker(File reportDir) {
+        File marker = new File(reportDir, INSTALLED_MARKER_PREFIX + ProcessHandle.current().pid() + INSTALLED_MARKER_SUFFIX);
+        try {
+            //noinspection ResultOfMethodCallIgnored
+            marker.createNewFile();
+        } catch (IOException e) {
+            System.err.println("WARNING: could not write Netty leak detector marker " + marker + ": " + e);
+        }
     }
 
     /**

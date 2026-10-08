@@ -17,6 +17,9 @@
     <properties>
         <module.name>org.mockserver.core</module.name>
         <mockserver.failIfNoIntegrationTests>true</mockserver.failIfNoIntegrationTests>
+        <!-- ByteBuf leak detection for this module's test JVMs: paranoid tracking with the
+             parent pom's file-based gate (check-netty-leaks), which fails the build on a leak. -->
+        <mockserver.leakArgLine>${mockserver.nettyLeakDetectorArgLine}</mockserver.leakArgLine>
     </properties>
 
     <dependencies>

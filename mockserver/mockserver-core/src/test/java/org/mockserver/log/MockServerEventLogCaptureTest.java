@@ -1,5 +1,6 @@
 package org.mockserver.log;
 
+import org.junit.After;
 import org.junit.Test;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.log.model.LogEntry;
@@ -32,13 +33,22 @@ import static org.mockserver.model.HttpResponse.response;
  */
 public class MockServerEventLogCaptureTest {
 
+    private final List<MockServerEventLog> eventLogs = new ArrayList<>();
+
+    @After
+    public void stopEventLogs() {
+        eventLogs.forEach(MockServerEventLog::stop);
+    }
+
     private static String base64(String text) {
         return java.util.Base64.getEncoder().encodeToString(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
 
     private MockServerEventLog synchronousEventLog(Configuration configuration) {
         // synchronous processing (false) so add() runs processLogEntry inline and assertions are deterministic
-        return new MockServerEventLog(configuration, new MockServerLogger(configuration, MockServerLogger.class), mock(Scheduler.class), false);
+        MockServerEventLog eventLog = new MockServerEventLog(configuration, new MockServerLogger(configuration, MockServerLogger.class), mock(Scheduler.class), false);
+        eventLogs.add(eventLog);
+        return eventLog;
     }
 
     private List<LogEntry> retrieveMessageLogEntries(MockServerEventLog log, RequestDefinition requestDefinition) {

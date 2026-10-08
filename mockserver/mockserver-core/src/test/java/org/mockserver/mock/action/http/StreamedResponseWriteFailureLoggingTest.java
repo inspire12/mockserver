@@ -11,6 +11,7 @@ import io.netty.handler.codec.EncoderException;
 import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.ssl.SslClosedEngineException;
 import io.netty.util.ReferenceCountUtil;
+import org.junit.After;
 import org.junit.Test;
 import org.mockserver.closurecallback.websocketregistry.WebSocketClientRegistry;
 import org.mockserver.grpc.GrpcProtoDescriptorStore;
@@ -29,6 +30,7 @@ import javax.net.ssl.SSLException;
 import java.io.IOException;
 import java.nio.channels.ClosedChannelException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -54,6 +56,14 @@ import static org.mockserver.model.HttpRequest.request;
 public class StreamedResponseWriteFailureLoggingTest {
 
     private static final String SECOND = "second-part";
+
+    private final List<EmbeddedChannel> channels = new ArrayList<>();
+
+    @After
+    public void releaseChannels() {
+        // the parts written before the failing one stay queued outbound until released
+        channels.forEach(EmbeddedChannel::finishAndReleaseAll);
+    }
 
     /**
      * A cause of a client that has gone, and how the DEBUG entry names it.
@@ -140,7 +150,7 @@ public class StreamedResponseWriteFailureLoggingTest {
         assertThat(logger.at(Level.DEBUG, "client left before"), is(0L));
     }
 
-    private static CapturingLogger sse(Throwable cause) {
+    private CapturingLogger sse(Throwable cause) {
         CapturingLogger logger = new CapturingLogger();
         ChannelHandlerContext ctx = context(new EmbeddedChannel(new FailingWrite(cause), new ChannelInboundHandlerAdapter()));
         new HttpSseResponseActionHandler(logger, mock(Scheduler.class), configuration()).handle(
@@ -151,7 +161,7 @@ public class StreamedResponseWriteFailureLoggingTest {
         return logger;
     }
 
-    private static CapturingLogger grpc(Throwable cause) {
+    private CapturingLogger grpc(Throwable cause) {
         CapturingLogger logger = new CapturingLogger();
         ChannelHandlerContext ctx = context(new EmbeddedChannel(new FailingWrite(cause), new ChannelInboundHandlerAdapter()));
         new GrpcStreamResponseActionHandler(logger, mock(Scheduler.class), mock(GrpcProtoDescriptorStore.class), configuration(), mock(WebSocketClientRegistry.class)).handle(
@@ -162,7 +172,7 @@ public class StreamedResponseWriteFailureLoggingTest {
         return logger;
     }
 
-    private static CapturingLogger webSocket(Throwable cause) {
+    private CapturingLogger webSocket(Throwable cause) {
         CapturingLogger logger = new CapturingLogger();
         ChannelHandlerContext ctx = context(new EmbeddedChannel(new FailingWrite(cause), new HttpServerCodec(), new ChannelInboundHandlerAdapter()));
         new HttpWebSocketResponseActionHandler(logger, mock(Scheduler.class), configuration(), mock(WebSocketClientRegistry.class)).handle(
@@ -180,7 +190,8 @@ public class StreamedResponseWriteFailureLoggingTest {
         return logger;
     }
 
-    private static ChannelHandlerContext context(EmbeddedChannel channel) {
+    private ChannelHandlerContext context(EmbeddedChannel channel) {
+        channels.add(channel);
         return channel.pipeline().lastContext();
     }
 
