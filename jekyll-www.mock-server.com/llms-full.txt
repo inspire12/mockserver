@@ -1075,6 +1075,11 @@ On a binary connection relayed on one upstream connection (forwardBinaryRequests
 - Default: false
 - Environment variable: MOCKSERVER_FORWARD_BINARY_REQUESTS_MATCH_EXPECTATIONS
 
+**binaryMessageFraming**
+How a binary (non-HTTP) connection is cut into messages before each is matched against binary expectations, forwarded or logged. RAW takes everything read in one go, up to 256 KiB, as one message, so a message that arrives over time can be split and messages sent together are joined. POSTGRESQL reads the PostgreSQL frontend/backend protocol's own length fields (the startup, SSLRequest, GSSENCRequest and CancelRequest messages without a type byte, then a type byte and a length), so each message the client sends is matched as one message however it arrives, and messages sent together are matched one by one. A framed message may be at most maxRequestBodySize bytes; a connection that declares a longer one, or a length the protocol does not allow, is closed. Applies to every binary connection, mocked or proxied; read when a connection is found to be binary.
+- Default: RAW
+- Environment variable: MOCKSERVER_BINARY_MESSAGE_FRAMING
+
 **forwardBinaryRequestsWithoutWaitingForResponse**
 Deprecated, and applies only when forwardBinaryRequestsUseSingleConnection is false (or to a connection that setting forwards one message at a time, as every connection when an upstream proxy is configured). Then, if true, each binary message is forwarded without waiting for the upstream's response. Has no effect on a connection with a single upstream connection. To be removed in the next major release.
 - Default: false
@@ -2509,6 +2514,7 @@ Or by expectation IDs:
 | MOCKSERVER_ATTEMPT_TO_PROXY_IF_NO_MATCHING_EXPECTATION | mockserver.attemptToProxyIfNoMatchingExpectation | true |
 | MOCKSERVER_FORWARD_BINARY_REQUESTS_USE_SINGLE_CONNECTION | mockserver.forwardBinaryRequestsUseSingleConnection | true |
 | MOCKSERVER_FORWARD_BINARY_REQUESTS_MATCH_EXPECTATIONS | mockserver.forwardBinaryRequestsMatchExpectations | false |
+| MOCKSERVER_BINARY_MESSAGE_FRAMING | mockserver.binaryMessageFraming | RAW |
 | MOCKSERVER_FORWARD_BINARY_REQUESTS_WITHOUT_WAITING_FOR_RESPONSE (deprecated; only when forwardBinaryRequestsUseSingleConnection is false) | mockserver.forwardBinaryRequestsWithoutWaitingForResponse | false |
 | MOCKSERVER_FORWARD_HTTP_PROXY | mockserver.forwardHttpProxy | null |
 | MOCKSERVER_FORWARD_HTTPS_PROXY | mockserver.forwardHttpsProxy | null |

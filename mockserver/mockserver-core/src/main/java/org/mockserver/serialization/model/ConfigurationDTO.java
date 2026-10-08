@@ -4,12 +4,15 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import org.mockserver.configuration.AtomicConfigurationUpdate;
+import org.mockserver.configuration.BinaryMessageFraming;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.configuration.ConfigurationProperties;
 import org.mockserver.socket.tls.ForwardProxyTLSX509CertificatesTrustManager;
 import org.slf4j.event.Level;
 
 import java.net.InetSocketAddress;
+import java.util.Arrays;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -79,6 +82,7 @@ public class ConfigurationDTO implements DTO<Configuration> {
     private Boolean forwardBinaryRequestsWithoutWaitingForResponse;
     private Boolean forwardBinaryRequestsUseSingleConnection;
     private Boolean forwardBinaryRequestsMatchExpectations;
+    private String binaryMessageFraming;
 
     private Boolean enableCORSForAPI;
     private Boolean enableCORSForAllResponses;
@@ -432,6 +436,7 @@ public class ConfigurationDTO implements DTO<Configuration> {
             this.forwardBinaryRequestsWithoutWaitingForResponse = configuration.forwardBinaryRequestsWithoutWaitingForResponse();
             this.forwardBinaryRequestsUseSingleConnection = configuration.forwardBinaryRequestsUseSingleConnection();
             this.forwardBinaryRequestsMatchExpectations = configuration.forwardBinaryRequestsMatchExpectations();
+            this.binaryMessageFraming = configuration.binaryMessageFraming().name();
 
             this.enableCORSForAPI = configuration.enableCORSForAPI();
             this.enableCORSForAllResponses = configuration.enableCORSForAllResponses();
@@ -752,6 +757,9 @@ public class ConfigurationDTO implements DTO<Configuration> {
         if (webSocketProxyIdleTimeoutSeconds != null && (webSocketProxyIdleTimeoutSeconds < 0 || webSocketProxyIdleTimeoutSeconds > 86400)) {
             throw new IllegalArgumentException("webSocketProxyIdleTimeoutSeconds must be between 0 and 86400, got: " + webSocketProxyIdleTimeoutSeconds);
         }
+        if (binaryMessageFraming != null) {
+            parseBinaryMessageFraming(binaryMessageFraming);
+        }
         if (forwardProxyTLSX509CertificatesTrustManagerType != null) {
             try {
                 ForwardProxyTLSX509CertificatesTrustManager.valueOf(forwardProxyTLSX509CertificatesTrustManagerType);
@@ -870,6 +878,9 @@ public class ConfigurationDTO implements DTO<Configuration> {
         configuration.forwardBinaryRequestsWithoutWaitingForResponse(forwardBinaryRequestsWithoutWaitingForResponse);
         configuration.forwardBinaryRequestsUseSingleConnection(forwardBinaryRequestsUseSingleConnection);
         configuration.forwardBinaryRequestsMatchExpectations(forwardBinaryRequestsMatchExpectations);
+        if (binaryMessageFraming != null) {
+            configuration.binaryMessageFraming(parseBinaryMessageFraming(binaryMessageFraming));
+        }
 
         configuration.enableCORSForAPI(enableCORSForAPI);
         configuration.enableCORSForAllResponses(enableCORSForAllResponses);
@@ -1454,6 +1465,9 @@ public class ConfigurationDTO implements DTO<Configuration> {
         }
         if (forwardBinaryRequestsMatchExpectations != null) {
             target.forwardBinaryRequestsMatchExpectations(forwardBinaryRequestsMatchExpectations);
+        }
+        if (binaryMessageFraming != null) {
+            target.binaryMessageFraming(parseBinaryMessageFraming(binaryMessageFraming));
         }
         if (enableCORSForAPI != null) {
             target.enableCORSForAPI(enableCORSForAPI);
@@ -2816,6 +2830,23 @@ public class ConfigurationDTO implements DTO<Configuration> {
     public ConfigurationDTO setForwardBinaryRequestsMatchExpectations(Boolean forwardBinaryRequestsMatchExpectations) {
         this.forwardBinaryRequestsMatchExpectations = forwardBinaryRequestsMatchExpectations;
         return this;
+    }
+
+    public String getBinaryMessageFraming() {
+        return binaryMessageFraming;
+    }
+
+    public ConfigurationDTO setBinaryMessageFraming(String binaryMessageFraming) {
+        this.binaryMessageFraming = binaryMessageFraming;
+        return this;
+    }
+
+    private static BinaryMessageFraming parseBinaryMessageFraming(String value) {
+        try {
+            return BinaryMessageFraming.valueOf(value.trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException invalid) {
+            throw new IllegalArgumentException("Invalid binaryMessageFraming: \"" + value + "\", the supported values are " + Arrays.toString(BinaryMessageFraming.values()));
+        }
     }
 
     public Boolean getEnableCORSForAPI() {

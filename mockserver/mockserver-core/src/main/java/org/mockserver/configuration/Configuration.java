@@ -227,6 +227,7 @@ public class Configuration {
     private volatile Boolean forwardBinaryRequestsWithoutWaitingForResponse;
     private volatile Boolean forwardBinaryRequestsUseSingleConnection;
     private volatile Boolean forwardBinaryRequestsMatchExpectations;
+    private volatile BinaryMessageFraming binaryMessageFraming;
     private volatile BinaryProxyListener binaryProxyListener;
 
     // CORS
@@ -3360,6 +3361,30 @@ public class Configuration {
      */
     public Configuration forwardBinaryRequestsMatchExpectations(Boolean forwardBinaryRequestsMatchExpectations) {
         this.forwardBinaryRequestsMatchExpectations = forwardBinaryRequestsMatchExpectations;
+        return this;
+    }
+
+    public BinaryMessageFraming binaryMessageFraming() {
+        if (binaryMessageFraming == null) {
+            return ConfigurationProperties.binaryMessageFraming();
+        }
+        return binaryMessageFraming;
+    }
+
+    /**
+     * How a binary (non-HTTP) connection is cut into messages before each is matched, forwarded or logged.
+     * RAW (the default) takes everything one read loop delivers as one message. POSTGRESQL reads the PostgreSQL
+     * frontend/backend protocol's own length fields, so a message that arrives over several reads is one message
+     * and messages read together are separate. A framed message may be at most maxRequestBodySize bytes: a
+     * connection that declares a longer one, or a length the protocol does not allow, is closed. The setting is
+     * read once per connection, when it is found to be binary.
+     * <p>
+     * The default is RAW
+     *
+     * @param binaryMessageFraming RAW or POSTGRESQL
+     */
+    public Configuration binaryMessageFraming(BinaryMessageFraming binaryMessageFraming) {
+        this.binaryMessageFraming = binaryMessageFraming;
         return this;
     }
 

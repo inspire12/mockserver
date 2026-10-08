@@ -2327,7 +2327,7 @@ What one read loop brings is one binary message, however short and up to 256 KiB
 
 ### One Read Loop Is One Message
 
-**Outcome:** MockServer has no knowledge of any binary protocol's framing. The nearest thing to a message boundary it has is the read loop, which ends when the socket has nothing more to give. On a binary connection, everything one read loop delivers is one message, up to 256 KiB. Two things make that so: the connection is read 64 KiB at a time (a small buffer no longer cuts a message), and the reads of one loop are joined (`BinaryMessageGatherer`). A message whose bytes arrive across two read loops is still two messages, and two messages that one loop reads are still one; only the protocol's framing could tell those apart.
+**Outcome:** Unless `binaryMessageFraming` names a protocol (see [Named-protocol framing](#named-protocol-framing-postgresql)), MockServer has no knowledge of any binary protocol's framing. The nearest thing to a message boundary it has is the read loop, which ends when the socket has nothing more to give. On a binary connection, everything one read loop delivers is one message, up to 256 KiB. Two things make that so: the connection is read 64 KiB at a time (a small buffer no longer cuts a message), and the reads of one loop are joined (`BinaryMessageGatherer`). A message whose bytes arrive across two read loops is still two messages, and two messages that one loop reads are still one; only the protocol's framing could tell those apart.
 
 ```mermaid
 flowchart TD
@@ -2414,7 +2414,49 @@ So the transient cost is at most 256 KiB of read buffers per binary connection t
 - **One TLS record is never split.** TLS gives nothing up until a record is whole. With the OpenSSL engine in its non-JDK-compatible mode (`sslContext.newHandler(alloc)` in `SniHandler`) a record whose tail arrived in a later socket read used to be delivered in two pieces, because the plaintext buffer is sized from the current read; both pieces come out in the same read loop, so gathering makes them one message.
 - **Messages sent without waiting** for a reply (a message that has no reply followed at once by the next, or a pipelined batch) are one message when one read loop reads them, wherever the read buffers happened to end. An expectation for them must hold the bytes of all of them.
 
-The real fix for both is the protocol's own framing, which MockServer does not have; it is open in the performance programme plan.
+The fix for both is the protocol's own framing, which `binaryMessageFraming` supplies for PostgreSQL (below); for any other protocol the read loop remains the boundary.
+
+### Named-Protocol Framing (PostgreSQL)
+
+**Outcome:** with `binaryMessageFraming=POSTGRESQL` (default `RAW`), a binary connection's client-to-MockServer bytes are cut where the PostgreSQL frontend/backend protocol (v3) says each message ends, by `PostgresqlMessageFramer` in place of `BinaryMessageGatherer`. A message that arrives over several reads or read loops is one message, messages read together are separate messages, and a message may exceed 256 KiB. One message is held at most `maxRequestBodySize` bytes; a declared length over that, or one the protocol does not allow, closes the connection.
+
+```mermaid
+flowchart TD
+    BIN["PortUnificationHandler:
+binary"] --> WHICH{"binaryMessageFraming"}
+    WHICH -->|"RAW (default)"| GATHER["BinaryMessageGatherer:
+one read loop is one message"]
+    WHICH -->|"POSTGRESQL"| FRAME["PostgresqlMessageFramer:
+untyped until the startup message,
+then type byte and int32 length"]
+    FRAME --> CHECK{"Declared length
+allowed and at most
+maxRequestBodySize?"}
+    CHECK -->|"No"| CLOSE["WARN, drop the rest,
+close the connection"]
+    CHECK -->|"Yes, whole"| HANDLE["BinaryRequestProxyingHandler:
+one message each"]
+    CHECK -->|"Yes, part"| WAIT["Hold until the rest arrives"]
+    GATHER --> HANDLE
+```
+
+| Choice | Decision | Why |
+|--------|----------|-----|
+| Where framing is set | One configuration property, read per connection in `switchToBinaryRequestProxying` | Message boundaries are an input to matching, so they cannot come from the expectation being matched; a property needs no change to the expectation schema, the OpenAPI spec, the seven clients or the UI, and serves the relay and the per-message forwarder too |
+| Per port | Not offered | All ports share one `Configuration`; a MockServer that mocks PostgreSQL is a dedicated instance in practice |
+| Bound | `maxRequestBodySize` (10 MiB default), the existing inbound-body limit | A framed message is the binary counterpart of an aggregated HTTP body; no new property |
+| Oversize | Refused on the header alone, before the body is buffered | A client cannot make MockServer wait for, or hold, more than the bound |
+| Direction | Client to MockServer only | Matching and forwarding need the client's messages; the upstream's bytes are relayed as they arrive |
+
+**The state machine.** Until the startup message a message is untyped: `int32 length` (itself included, at least 8) then `int32 code`. `SSLRequest` (80877103), `GSSENCRequest` (80877104) and `CancelRequest` (80877102) keep the next message untyped; any other code is a startup message, and from then on a message is `byte type` then `int32 length` (itself included, at least 4). The state survives a TLS upgrade, because the `SniHandler` is added at the head of the pipeline and the framer sees what it decrypts: after `SSLRequest` and the handshake, the encrypted startup message is still read as untyped. PostgreSQL 17's direct TLS (`sslnegotiation=direct`) starts with a ClientHello and is detected as TLS before the connection is binary, so the framer starts on the decrypted startup message.
+
+**Holding and releasing.** `PostgresqlMessageFramer` is a `ByteToMessageDecoder`: the partial message is its cumulation, each whole message is passed on as a retained slice of it (no copy beyond the cumulation's own), and the cumulation is released when the connection closes or the handler is removed. A partial message at close is dropped, not passed on: it is not a message. After a refusal everything else the connection sends is skipped. One instance per connection, not sharable.
+
+**In-band TLS only at a message boundary.** In the clear, `PortUnificationHandler` stays in front of binary handling to spot a TLS ClientHello at the start of a read. With the framer present it looks only when the framer holds nothing (`atMessageBoundary()`), so a read that begins in the middle of a message with bytes like `16 03 01 .. .. 01` is part of that message, not a handshake. At a boundary no PostgreSQL message looks like a ClientHello (an untyped one starts with `00`, a typed one with an ASCII letter).
+
+**Interaction with backpressure.** The forward queue's 256 KiB bound counts messages that wait to be forwarded; with framing one message can be larger than that bound, so the queue may hold one framed message of up to `maxRequestBodySize` past it. `ByteToMessageDecoder` requests one more read when a read loop delivered no whole message and auto-read is off; while the forward queue holds reads (`ChannelReadPause`), the pause's read gate drops that request, so a part message waits for reads to resume. Either way what is held is bounded by `maxRequestBodySize`.
+
+**Tests.** `PostgresqlMessageFramerTest` (state machine, limits, refusal, release), the framing cases at the end of `BinaryMessageBoundaryTest` (read by read on the real pipeline, in the clear and over TLS from the start and turned on part way), and `PostgresqlMessageFramingIntegrationTest` (real sockets: a message written in two parts with a pause, a pipelined batch, an oversize declaration, and the raw default unchanged).
 
 ### Forwarding Without Waiting for a Response
 

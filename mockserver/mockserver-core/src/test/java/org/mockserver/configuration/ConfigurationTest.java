@@ -34,6 +34,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.startsWith;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.mockserver.configuration.ConfigurationProperties.logLevel;
@@ -2147,6 +2148,41 @@ public class ConfigurationTest {
             assertThat("the other binary setting is a separate one", updated.forwardBinaryRequestsUseSingleConnection(), equalTo(false));
         } finally {
             ConfigurationProperties.forwardBinaryRequestsMatchExpectations(original);
+        }
+    }
+
+    @Test
+    public void shouldSetAndGetBinaryMessageFraming() {
+        BinaryMessageFraming original = ConfigurationProperties.binaryMessageFraming();
+        try {
+            // then - default value
+            assertThat(configuration.binaryMessageFraming(), equalTo(BinaryMessageFraming.RAW));
+
+            // when - system property setter
+            ConfigurationProperties.binaryMessageFraming(BinaryMessageFraming.POSTGRESQL);
+
+            // then - system property getter
+            assertThat(ConfigurationProperties.binaryMessageFraming(), equalTo(BinaryMessageFraming.POSTGRESQL));
+            assertThat(System.getProperty("mockserver.binaryMessageFraming"), equalTo("POSTGRESQL"));
+            assertThat(configuration.binaryMessageFraming(), equalTo(BinaryMessageFraming.POSTGRESQL));
+            ConfigurationProperties.binaryMessageFraming(original);
+
+            // when - setter
+            configuration.binaryMessageFraming(BinaryMessageFraming.POSTGRESQL);
+
+            // then - getter
+            assertThat(configuration.binaryMessageFraming(), equalTo(BinaryMessageFraming.POSTGRESQL));
+
+            // then - carried by the configuration the REST API reads and writes, in any case, and refused when unknown
+            Configuration roundTripped = new org.mockserver.serialization.model.ConfigurationDTO(configuration).buildObject();
+            assertThat(roundTripped.binaryMessageFraming(), equalTo(BinaryMessageFraming.POSTGRESQL));
+            Configuration updated = new Configuration();
+            new org.mockserver.serialization.model.ConfigurationDTO().setBinaryMessageFraming("postgresql").applyTo(updated);
+            assertThat(updated.binaryMessageFraming(), equalTo(BinaryMessageFraming.POSTGRESQL));
+            IllegalArgumentException refused = assertThrows(IllegalArgumentException.class, () -> new org.mockserver.serialization.model.ConfigurationDTO().setBinaryMessageFraming("MYSQL").applyTo(new Configuration()));
+            assertThat(refused.getMessage(), startsWith("Invalid binaryMessageFraming: \"MYSQL\""));
+        } finally {
+            ConfigurationProperties.binaryMessageFraming(original);
         }
     }
 

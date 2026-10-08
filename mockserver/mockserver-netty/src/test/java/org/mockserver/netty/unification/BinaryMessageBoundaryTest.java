@@ -13,6 +13,7 @@ import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.mockserver.configuration.BinaryMessageFraming;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.httpclient.NettyHttpClient;
 import org.mockserver.lifecycle.LifeCycle;
@@ -702,5 +703,152 @@ public class BinaryMessageBoundaryTest {
         assertThat("everything sent was forwarded, in the order sent", messagesTaken(), is(
             "[a*" + MAX_GATHERED_BYTES + "], [b*" + MAX_GATHERED_BYTES + "], [c*" + MAX_GATHERED_BYTES + "], [d*2048], [d*" + (MAX_GATHERED_BYTES - 2048) + "]"
         ));
+    }
+
+    /** A PostgreSQL startup message: its length (itself included), protocol 3.0, then parameters, as letters. */
+    private static byte[] postgresqlStartup(int length) {
+        ByteBuffer message = ByteBuffer.allocate(length).putInt(length).putInt(196608);
+        while (message.hasRemaining()) {
+            message.put((byte) 's');
+        }
+        return message.array();
+    }
+
+    /** A PostgreSQL message after the startup message: a type byte, its length (itself included), then a body. */
+    private static byte[] postgresqlMessage(char type, int length) {
+        ByteBuffer message = ByteBuffer.allocate(length).put((byte) type).putInt(length - 1);
+        while (message.hasRemaining()) {
+            message.put((byte) Character.toLowerCase(type));
+        }
+        return message.array();
+    }
+
+    /** A connection whose PostgreSQL startup message has been taken, so that what follows is typed. */
+    private Connection connectWithPostgresqlFramingAndStartTheSession(Transport transport) throws Exception {
+        configuration.binaryMessageFraming(BinaryMessageFraming.POSTGRESQL);
+        Connection connection = connect(transport);
+        byte[] startup = postgresqlStartup(23);
+        connection.clientWrites(startup);
+        connection.serverReads();
+        assertThat(transport.name() + ": the startup message is one message", messagesTaken(), is("[" + describe(startup) + "]"));
+        messages.clear();
+        connection.readLoops = 0;
+        return connection;
+    }
+
+    @Test
+    public void shouldTakeAPostgresqlMessageThatArrivesOverSeveralReadLoopsAsOneMessage() throws Exception {
+        for (Transport transport : Transport.values()) {
+            Connection connection = connectWithPostgresqlFramingAndStartTheSession(transport);
+            byte[] query = postgresqlMessage('Q', 800);
+            byte[] onTheWire = connection.tls == null ? query : connection.encrypted(query);
+
+            connection.onTheWire(Arrays.copyOfRange(onTheWire, 0, onTheWire.length / 2));
+            connection.serverReads();
+            connection.timePasses(50);
+            connection.onTheWire(Arrays.copyOfRange(onTheWire, onTheWire.length / 2, onTheWire.length));
+            connection.serverReads();
+
+            assertThat(transport.name(), messagesTaken(), is("[" + describe(query) + "]"));
+            assertThat(transport.name(), connection.readLoops, is(2));
+            messages.clear();
+        }
+    }
+
+    @Test
+    public void shouldTakeAPostgresqlMessageLargerThanTheGatheringLimitAsOneMessage() throws Exception {
+        for (Transport transport : Transport.values()) {
+            Connection connection = connectWithPostgresqlFramingAndStartTheSession(transport);
+            byte[] copyData = postgresqlMessage('D', 24 * BINARY_READ_SIZE);
+
+            connection.clientWrites(copyData);
+            connection.serverReads();
+
+            assertThat(transport.name(), connection.readLoops, is(2));
+            assertThat(transport.name(), messagesTaken(), is("[" + describe(copyData) + "]"));
+            messages.clear();
+        }
+    }
+
+    @Test
+    public void shouldTakePostgresqlMessagesWaitingTogetherAsSeparateMessages() throws Exception {
+        for (Transport transport : Transport.values()) {
+            Connection connection = connectWithPostgresqlFramingAndStartTheSession(transport);
+            byte[] parse = postgresqlMessage('P', 40);
+            byte[] bind = postgresqlMessage('B', 30);
+            byte[] sync = postgresqlMessage('S', 5);
+
+            connection.clientWrites(parse);
+            connection.clientWrites(bind);
+            connection.clientWrites(sync);
+            connection.serverReads();
+
+            assertThat(transport.name(), connection.readLoops, is(1));
+            assertThat(transport.name(), messagesTaken(), is("[" + describe(parse) + "], [" + describe(bind) + "], [" + describe(sync) + "]"));
+            messages.clear();
+        }
+    }
+
+    @Test
+    public void shouldNotTakeBytesInTheMiddleOfAPostgresqlMessageForAHandshake() throws Exception {
+        Connection connection = connectWithPostgresqlFramingAndStartTheSession(Transport.IN_THE_CLEAR);
+        byte[] hello = clientHello();
+        byte[] query = postgresqlMessage('Q', 20 + hello.length);
+        System.arraycopy(hello, 0, query, 10, hello.length);
+
+        connection.onTheWire(Arrays.copyOfRange(query, 0, 10));
+        connection.serverReads();
+        connection.onTheWire(Arrays.copyOfRange(query, 10, query.length));
+        connection.serverReads();
+
+        assertThat("a read that starts like a handshake, in the middle of a message, is part of it", messagesTaken(), is("[" + describe(query) + "]"));
+        assertThat(PortUnificationHandler.isSslEnabledUpstream(connection.channel), is(false));
+        assertThat(connection.channel.<ByteBuf>readOutbound(), is(nullValue()));
+        assertThat(connection.channel.isOpen(), is(true));
+    }
+
+    @Test
+    public void shouldCloseAConnectionThatDeclaresAPostgresqlMessageOverMaxRequestBodySize() throws Exception {
+        configuration.maxRequestBodySize(1000);
+        for (Transport transport : Transport.values()) {
+            Connection connection = connectWithPostgresqlFramingAndStartTheSession(transport);
+            byte[] header = Arrays.copyOf(postgresqlMessage('Q', 1001), 5);
+
+            connection.clientWrites(header);
+            connection.serverReads();
+
+            assertThat(transport.name(), connection.channel.isOpen(), is(false));
+            assertThat(transport.name(), messagesTaken(), is(""));
+        }
+    }
+
+    @Test
+    public void shouldFramePostgresqlMessagesOnARelayedConnectionAndMatchOrForwardEachOnItsOwn() throws Exception {
+        configuration.binaryMessageFraming(BinaryMessageFraming.POSTGRESQL).forwardBinaryRequestsMatchExpectations(true);
+        relayToAnUpstreamThatTakesEverything();
+        byte[] answered = postgresqlMessage('Q', 60);
+        httpState.add(new Expectation(binaryRequest(answered)).thenRespondWithBinary(binaryResponse(message('c', 3))));
+        Connection connection = connect(Transport.IN_THE_CLEAR);
+        byte[] startup = postgresqlStartup(23);
+        connection.clientWrites(startup);
+        connection.serverReads();
+        assertThat(relayedWrites(), contains(describe(startup)));
+        byte[] sync = postgresqlMessage('S', 5);
+        byte[] forwarded = postgresqlMessage('Q', 800);
+
+        // one read loop brings the answered message, the next and half of a third; the rest comes later
+        connection.clientWrites(answered);
+        connection.clientWrites(sync);
+        connection.onTheWire(Arrays.copyOfRange(forwarded, 0, 400));
+        connection.serverReads();
+        connection.timePasses(50);
+        connection.onTheWire(Arrays.copyOfRange(forwarded, 400, forwarded.length));
+        connection.serverReads();
+
+        ByteBuf reply = connection.channel.readOutbound();
+        assertThat("the matched message is answered by its expectation", describe(ByteBufUtil.getBytes(reply)), is("c*3"));
+        reply.release();
+        assertThat("the others go upstream, each whole and alone", relayedWrites(), contains(describe(sync), describe(forwarded)));
+        assertThat("nothing went the per-message way", messages, is(new ArrayList<String>()));
     }
 }

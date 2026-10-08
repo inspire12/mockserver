@@ -29,6 +29,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -271,6 +273,8 @@ public class ConfigurationProperties {
     private static final String MOCKSERVER_FORWARD_BINARY_REQUESTS_WITHOUT_WAITING_FOR_RESPONSE = "mockserver.forwardBinaryRequestsWithoutWaitingForResponse";
     private static final String MOCKSERVER_FORWARD_BINARY_REQUESTS_USE_SINGLE_CONNECTION = "mockserver.forwardBinaryRequestsUseSingleConnection";
     private static final String MOCKSERVER_FORWARD_BINARY_REQUESTS_MATCH_EXPECTATIONS = "mockserver.forwardBinaryRequestsMatchExpectations";
+    private static final String MOCKSERVER_BINARY_MESSAGE_FRAMING = "mockserver.binaryMessageFraming";
+    private static final AtomicReference<String> REPORTED_INVALID_BINARY_MESSAGE_FRAMING = new AtomicReference<>();
 
     // streaming proxy
     private static final String MOCKSERVER_STREAMING_RESPONSES_ENABLED = "mockserver.streamingResponsesEnabled";
@@ -3269,6 +3273,9 @@ public class ConfigurationProperties {
      * large uploads; very large limits make MockServer susceptible to memory exhaustion.
      * <p>
      * The smallest limit is 1 byte: zero or a negative value is read as 1, never as "no limit".
+     * <p>
+     * With binaryMessageFraming set to a protocol it is also the longest binary message held whole: a connection
+     * that declares a longer one is closed.
      *
      * @param size maximum inbound request body size in bytes
      */
@@ -4286,6 +4293,47 @@ public class ConfigurationProperties {
 
     public static boolean forwardBinaryRequestsMatchExpectations() {
         return Boolean.parseBoolean(readPropertyHierarchically(PROPERTIES, MOCKSERVER_FORWARD_BINARY_REQUESTS_MATCH_EXPECTATIONS, "MOCKSERVER_FORWARD_BINARY_REQUESTS_MATCH_EXPECTATIONS", "false"));
+    }
+
+    /**
+     * How a binary (non-HTTP) connection is cut into messages before each is matched, forwarded or logged.
+     * RAW (the default) takes everything one read loop delivers as one message. POSTGRESQL reads the PostgreSQL
+     * frontend/backend protocol's own length fields, so a message that arrives over several reads is one message
+     * and messages read together are separate. A framed message may be at most maxRequestBodySize bytes: a
+     * connection that declares a longer one, or a length the protocol does not allow, is closed. The setting is
+     * read once per connection, when it is found to be binary. An unrecognised value is read as RAW.
+     * <p>
+     * The default is RAW
+     *
+     * @param binaryMessageFraming RAW or POSTGRESQL
+     */
+    public static void binaryMessageFraming(BinaryMessageFraming binaryMessageFraming) {
+        setProperty(MOCKSERVER_BINARY_MESSAGE_FRAMING, binaryMessageFraming.name());
+    }
+
+    public static BinaryMessageFraming binaryMessageFraming() {
+        String value = readPropertyHierarchically(PROPERTIES, MOCKSERVER_BINARY_MESSAGE_FRAMING, "MOCKSERVER_BINARY_MESSAGE_FRAMING", BinaryMessageFraming.RAW.name());
+        return binaryMessageFraming(value, REPORTED_INVALID_BINARY_MESSAGE_FRAMING, invalid -> LoggerHolder.LOGGER.logEvent(
+            new LogEntry()
+                .setLogLevel(Level.ERROR)
+                .setMessageFormat("invalid value{}for " + MOCKSERVER_BINARY_MESSAGE_FRAMING + ", the supported values are RAW and POSTGRESQL: using RAW")
+                .setArguments(invalid)
+        ));
+    }
+
+    /**
+     * RAW for a value that names no framing. The getter is read for every binary connection and every
+     * configuration request, so an invalid value is reported once, and again only when it changes.
+     */
+    static BinaryMessageFraming binaryMessageFraming(String value, AtomicReference<String> reported, Consumer<String> report) {
+        try {
+            return BinaryMessageFraming.valueOf(value.trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException | NullPointerException invalid) {
+            if (!String.valueOf(value).equals(reported.getAndSet(String.valueOf(value)))) {
+                report.accept(value);
+            }
+            return BinaryMessageFraming.RAW;
+        }
     }
 
     // CORS

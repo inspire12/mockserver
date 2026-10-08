@@ -1,6 +1,7 @@
 package org.mockserver.springtest;
 
 import org.junit.Test;
+import org.mockserver.configuration.BinaryMessageFraming;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.socket.tls.ForwardProxyTLSX509CertificatesTrustManager;
 
@@ -81,6 +82,14 @@ public class MockServerPropertyCustomizerConfigurationTest {
             Collections.singletonList("mockserver.forwardBinaryRequestsMatchExpectations=true")
         );
         assertThat(config.forwardBinaryRequestsMatchExpectations(), is(true));
+    }
+
+    @Test
+    public void shouldApplyBinaryMessageFraming() {
+        Configuration config = MockServerPropertyCustomizer.buildConfiguration(
+            Collections.singletonList("mockserver.binaryMessageFraming=postgresql")
+        );
+        assertThat(config.binaryMessageFraming(), is(BinaryMessageFraming.POSTGRESQL));
     }
 
     @Test

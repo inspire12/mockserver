@@ -919,6 +919,7 @@
                         <exclude>**/PrometheusRemoteWriteExporterTest.java</exclude>
                         <!-- Sets/clears the mockserver.prometheusRemoteWriteProtocolVersion JVM system property and property cache -->
                         <exclude>**/PrometheusRemoteWriteProtocolVersionConfigurationTest.java</exclude>
+                        <exclude>**/BinaryMessageFramingConfigurationTest.java</exclude>
                         <!-- Mutates mockserver.driftDetectionEnabled/driftSampleRate global ConfigurationProperties -->
                         <exclude>**/DriftDetectionConfigTest.java</exclude>
                         <!-- Mutates the JVM-global java.security.Security provider list (removes/re-adds the BC provider)
@@ -1124,6 +1125,7 @@
                                 <include>**/OtelEndpointConfigurationTest.java</include>
                                 <include>**/PrometheusRemoteWriteExporterTest.java</include>
                                 <include>**/PrometheusRemoteWriteProtocolVersionConfigurationTest.java</include>
+                                <include>**/BinaryMessageFramingConfigurationTest.java</include>
                                 <include>**/DriftDetectionConfigTest.java</include>
                                 <include>**/BCKeyAndCertificateFactoryLazyProviderTest.java</include>
                                 <include>**/OpenAiResponsesStateTest.java</include>

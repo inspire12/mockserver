@@ -1,5 +1,6 @@
 package org.mockserver.springtest;
 
+import org.mockserver.configuration.BinaryMessageFraming;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.integration.ClientAndServer;
 import org.mockserver.log.model.LogEntry;
@@ -432,6 +433,9 @@ public class MockServerPropertyCustomizer implements ContextCustomizer {
             case "forwardProxyTLSX509CertificatesTrustManagerType":
                 config.forwardProxyTLSX509CertificatesTrustManagerType(
                     ForwardProxyTLSX509CertificatesTrustManager.valueOf(value));
+                break;
+            case "binaryMessageFraming":
+                config.binaryMessageFraming(BinaryMessageFraming.valueOf(value.trim().toUpperCase(Locale.ROOT)));
                 break;
 
             // --- Set<String> properties (comma-separated) ---

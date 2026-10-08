@@ -21,6 +21,7 @@ import org.mockserver.codec.HttpObjectAggregators;
 import org.mockserver.codec.MockServerHttpContentDecompressor;
 import org.mockserver.codec.MockServerHttpServerCodec;
 import org.mockserver.codec.PreserveHeadersNettyRemoves;
+import org.mockserver.configuration.BinaryMessageFraming;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.configuration.ConfigurationProperties;
 import org.mockserver.configuration.ControlPlaneAuthenticationSettings;
@@ -50,6 +51,7 @@ import org.mockserver.netty.grpc.GrpcToHttpRequestHandler;
 import org.mockserver.netty.grpc.GrpcToHttpResponseHandler;
 import org.mockserver.netty.proxy.BinaryMessageGatherer;
 import org.mockserver.netty.proxy.BinaryRequestProxyingHandler;
+import org.mockserver.netty.proxy.PostgresqlMessageFramer;
 import org.mockserver.netty.proxy.socks.Socks4ProxyHandler;
 import org.mockserver.netty.proxy.socks.Socks5ProxyHandler;
 import org.mockserver.netty.proxy.socks.SocksDetector;
@@ -272,7 +274,7 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
     protected void decode(ChannelHandlerContext ctx, ByteBuf msg, List<Object> out) {
         ctx.channel().attr(NETTY_SSL_CONTEXT_FACTORY).set(nettySslContextFactory);
         if (binaryInTheClear) {
-            if (!takeBytesReceivedAsTheyAre && startsTlsClientHello(msg)) {
+            if (!takeBytesReceivedAsTheyAre && atMessageBoundary(ctx) && startsTlsClientHello(msg)) {
                 // a protocol that turns TLS on part way through: what is decrypted from here on is binary
                 logStage(ctx, "adding TLS decoders to a binary connection");
                 // what this read loop brought before the handshake is a message sent in the clear: it is handled,
@@ -376,6 +378,12 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
             waitForMoreBytes(msg);
         }
         return false;
+    }
+
+    private static boolean atMessageBoundary(ChannelHandlerContext ctx) {
+        // with a protocol's framing, bytes in the middle of a message are never a handshake, whatever they look like
+        PostgresqlMessageFramer framer = ctx.pipeline().get(PostgresqlMessageFramer.class);
+        return framer == null || framer.atMessageBoundary();
     }
 
     /**
@@ -772,7 +780,11 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
     private void switchToBinaryRequestProxying(ChannelHandlerContext ctx, ByteBuf msg) {
         // a raw TCP protocol (a database, a broker) may legitimately stay silent for long periods
         InboundConnectionActivity.markLongLived(ctx.channel());
-        addLastIfNotPresent(ctx.pipeline(), new BinaryMessageGatherer());
+        if (configuration.binaryMessageFraming() == BinaryMessageFraming.POSTGRESQL) {
+            addLastIfNotPresent(ctx.pipeline(), new PostgresqlMessageFramer(configuration.maxRequestBodySize(), mockServerLogger));
+        } else {
+            addLastIfNotPresent(ctx.pipeline(), new BinaryMessageGatherer());
+        }
         addLastIfNotPresent(ctx.pipeline(), new BinaryRequestProxyingHandler(configuration, httpState.getMockServerLogger(), httpState.getScheduler(), actionHandler.getHttpClient(), httpState));
         // what a read loop brings is one message from here on, so no read may be cut short by a buffer sized
         // for earlier ones
