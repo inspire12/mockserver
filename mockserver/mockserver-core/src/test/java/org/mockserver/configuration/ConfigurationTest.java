@@ -2152,6 +2152,43 @@ public class ConfigurationTest {
     }
 
     @Test
+    public void shouldSetAndGetForwardBinaryServerFirstWaitMillis() {
+        long original = ConfigurationProperties.forwardBinaryServerFirstWaitMillis();
+        try {
+            // then - default value: off
+            assertThat(configuration.forwardBinaryServerFirstWaitMillis(), equalTo(0L));
+
+            // when - system property setter
+            ConfigurationProperties.forwardBinaryServerFirstWaitMillis(250L);
+
+            // then - system property getter
+            assertThat(ConfigurationProperties.forwardBinaryServerFirstWaitMillis(), equalTo(250L));
+            assertThat(System.getProperty("mockserver.forwardBinaryServerFirstWaitMillis"), equalTo("250"));
+            assertThat(configuration.forwardBinaryServerFirstWaitMillis(), equalTo(250L));
+            ConfigurationProperties.forwardBinaryServerFirstWaitMillis(-1L);
+            assertThat("a negative wait is off", ConfigurationProperties.forwardBinaryServerFirstWaitMillis(), equalTo(0L));
+            ConfigurationProperties.forwardBinaryServerFirstWaitMillis(original);
+
+            // when - setter
+            configuration.forwardBinaryServerFirstWaitMillis(500L);
+
+            // then - getter
+            assertThat(configuration.forwardBinaryServerFirstWaitMillis(), equalTo(500L));
+            assertThat("a negative wait is off", new Configuration().forwardBinaryServerFirstWaitMillis(-5L).forwardBinaryServerFirstWaitMillis(), equalTo(0L));
+
+            // then - carried by the configuration the REST API reads and writes, alone
+            Configuration roundTripped = new org.mockserver.serialization.model.ConfigurationDTO(configuration).buildObject();
+            assertThat(roundTripped.forwardBinaryServerFirstWaitMillis(), equalTo(500L));
+            Configuration updated = new Configuration().forwardBinaryRequestsMatchExpectations(true);
+            new org.mockserver.serialization.model.ConfigurationDTO().setForwardBinaryServerFirstWaitMillis(500L).applyTo(updated);
+            assertThat(updated.forwardBinaryServerFirstWaitMillis(), equalTo(500L));
+            assertThat("the other binary setting is a separate one", updated.forwardBinaryRequestsMatchExpectations(), equalTo(true));
+        } finally {
+            ConfigurationProperties.forwardBinaryServerFirstWaitMillis(original);
+        }
+    }
+
+    @Test
     public void shouldSetAndGetBinaryMessageFraming() {
         BinaryMessageFraming original = ConfigurationProperties.binaryMessageFraming();
         try {

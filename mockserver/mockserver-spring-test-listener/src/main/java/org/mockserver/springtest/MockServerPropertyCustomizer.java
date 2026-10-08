@@ -282,6 +282,9 @@ public class MockServerPropertyCustomizer implements ContextCustomizer {
             case "forwardBinaryRequestsMatchExpectations":
                 config.forwardBinaryRequestsMatchExpectations(parseStrictBoolean(value, key));
                 break;
+            case "forwardBinaryServerFirstWaitMillis":
+                config.forwardBinaryServerFirstWaitMillis(Long.parseLong(value));
+                break;
             case "enableCORSForAPI":
                 config.enableCORSForAPI(parseStrictBoolean(value, key));
                 break;

@@ -2,6 +2,7 @@ package org.mockserver.formatting;
 
 import com.google.common.base.Joiner;
 import com.google.common.base.Splitter;
+import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufUtil;
 import org.mockserver.mock.Expectation;
 import org.mockserver.model.Action;
@@ -163,6 +164,17 @@ public class StringFormatter {
             return formatBytes(bytes);
         }
         return newLineJoiner.join(fixedLengthSplitter.split(ByteBufUtil.hexDump(bytes, 0, maxBytes))) + bytesLeftOut(bytes.length, maxBytes);
+    }
+
+    /**
+     * As {@link #formatBytes(byte[], int)}, of the buffer's readable bytes, read in place: neither copied nor
+     * consumed.
+     */
+    public static String formatBytes(ByteBuf buffer, int maxBytes) {
+        int length = buffer.readableBytes();
+        int shown = maxBytes <= 0 ? length : Math.min(length, maxBytes);
+        String formatted = newLineJoiner.join(fixedLengthSplitter.split(ByteBufUtil.hexDump(buffer, buffer.readerIndex(), shown)));
+        return shown < length ? formatted + bytesLeftOut(length, shown) : formatted;
     }
 
     /**

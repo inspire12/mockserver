@@ -221,6 +221,20 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
     }
 
     /**
+     * Opens the upstream connection of a connection whose client has sent nothing, for a server that speaks first
+     * (forwardBinaryServerFirstWaitMillis). Must be called on the connection's event loop.
+     *
+     * @return false, having opened nothing, for a connection with no target or one not relayed on one upstream
+     * connection
+     */
+    public boolean connectBeforeClientSpeaks(ChannelHandlerContext ctx) {
+        InetSocketAddress remoteAddress = getRemoteAddress(ctx);
+        return remoteAddress != null
+            && usesSingleConnection(ctx)
+            && BinaryRelay.openBeforeClientSpeaks(ctx, remoteAddress, configuration, mockServerLogger, scheduler, httpClient, binaryExchangeCallback);
+    }
+
+    /**
      * forwardBinaryRequestsUseSingleConnection as it was at the connection's first message: a connection is relayed
      * or forwarded one message per upstream connection for its whole life.
      */

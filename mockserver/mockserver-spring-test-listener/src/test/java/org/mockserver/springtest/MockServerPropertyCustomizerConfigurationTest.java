@@ -85,6 +85,14 @@ public class MockServerPropertyCustomizerConfigurationTest {
     }
 
     @Test
+    public void shouldApplyForwardBinaryServerFirstWaitMillis() {
+        Configuration config = MockServerPropertyCustomizer.buildConfiguration(
+            Collections.singletonList("mockserver.forwardBinaryServerFirstWaitMillis=250")
+        );
+        assertThat(config.forwardBinaryServerFirstWaitMillis(), is(250L));
+    }
+
+    @Test
     public void shouldApplyBinaryMessageFraming() {
         Configuration config = MockServerPropertyCustomizer.buildConfiguration(
             Collections.singletonList("mockserver.binaryMessageFraming=postgresql")

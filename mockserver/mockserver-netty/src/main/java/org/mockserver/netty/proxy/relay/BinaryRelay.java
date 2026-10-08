@@ -1,9 +1,12 @@
 package org.mockserver.netty.proxy.relay;
 
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ConnectTimeoutException;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.util.AttributeKey;
 import io.netty.util.ReferenceCountUtil;
@@ -89,6 +92,9 @@ public final class BinaryRelay {
     private SslHandler upstreamTls;
     // the upgrade came before the connect completed: how many waiting messages were sent before it, in the clear
     private int clearBeforeUpgrade = -1;
+    private boolean connectStarted;
+    private boolean lookingUp;
+    private ScheduledFuture<?> lookUpTimeout;
     private boolean connected;
     private boolean clientClosed;
     // the upstream closed while the client was open: its close then closes the client before a handshake reports it
@@ -148,6 +154,25 @@ public final class BinaryRelay {
         BinaryRelay relay = relayOf(ctx, target, configuration, mockServerLogger, scheduler, httpClient, listener);
         relay.decideOnce();
         return !relay.perMessage;
+    }
+
+    /**
+     * Opens the upstream connection of a client that has sent nothing yet, so that a server that speaks first
+     * (forwardBinaryServerFirstWaitMillis) is heard: what it sends is relayed to the client as any upstream read is.
+     * Must be called on the client connection's event loop.
+     *
+     * @return false if the connection is not relayed on one upstream connection, so nothing was opened
+     */
+    public static boolean openBeforeClientSpeaks(ChannelHandlerContext ctx, InetSocketAddress target, Configuration configuration, MockServerLogger mockServerLogger, Scheduler scheduler, NettyHttpClient httpClient, BinaryProxyListener listener) {
+        BinaryRelay relay = relayOf(ctx, target, configuration, mockServerLogger, scheduler, httpClient, listener);
+        relay.decideOnce();
+        if (relay.perMessage) {
+            return false;
+        }
+        if (!relay.finished && !relay.connectStarted) {
+            relay.connect();
+        }
+        return true;
     }
 
     /**
@@ -235,7 +260,7 @@ public final class BinaryRelay {
         if (perMessage) {
             return false;
         }
-        if (finished || upstream == null && !connect()) {
+        if (finished || !connectStarted && !connect()) {
             return true;
         }
         if (isSslEnabledUpstream(client)) {
@@ -290,6 +315,68 @@ public final class BinaryRelay {
     }
 
     private boolean connect() {
+        connectStarted = true;
+        if (!target.isUnresolved()) {
+            return connectTo(target);
+        }
+        // a lookup blocks, and the event loop serves other connections too
+        hold(ClientHold.UPSTREAM_CONNECTING);
+        lookingUp = true;
+        try {
+            scheduler.scheduleLocalCallback(() -> {
+                InetSocketAddress found = null;
+                Exception failure = null;
+                try {
+                    found = httpClient.lookUpBinaryRelayTarget(target, clientStartedWithTls);
+                } catch (Exception lookUpFailed) {
+                    failure = lookUpFailed;
+                }
+                InetSocketAddress address = found;
+                Exception cause = failure;
+                onClientEventLoop(() -> lookedUp(address, cause));
+            }, false);
+        } catch (RejectedExecutionException serverStopping) {
+            lookingUp = false;
+            connectCompleted(serverStopping);
+            return false;
+        }
+        Long timeoutMillis = configuration.socketConnectionTimeoutInMillis();
+        if (lookingUp && timeoutMillis != null && timeoutMillis > 0) {
+            // the resolver's own limit can be far longer; the lookup thread is left to finish, its answer ignored
+            lookUpTimeout = client.eventLoop().schedule(() -> {
+                if (lookingUp) {
+                    lookingUp = false;
+                    connectCompleted(new ConnectTimeoutException("looking up " + target.getHostString() + " took longer than socketConnectionTimeoutInMillis: " + timeoutMillis + "ms"));
+                }
+            }, timeoutMillis, MILLISECONDS);
+        }
+        return !finished;
+    }
+
+    private void lookedUp(InetSocketAddress address, Exception failure) {
+        if (!lookingUp) {
+            // timed out already
+            return;
+        }
+        lookingUp = false;
+        if (lookUpTimeout != null) {
+            lookUpTimeout.cancel(false);
+            lookUpTimeout = null;
+        }
+        if (finished) {
+            return;
+        }
+        if (failure instanceof RuntimeException) {
+            // refused, as connectBinaryRelay refuses a target it may not connect to
+            refuse(failure.getMessage());
+        } else if (failure != null) {
+            connectCompleted(failure);
+        } else {
+            connectTo(address);
+        }
+    }
+
+    private boolean connectTo(InetSocketAddress address) {
         SslHandler tlsFromTheStart = null;
         if (clientStartedWithTls) {
             // made before connecting, so a connection that could not be encrypted is never opened
@@ -300,7 +387,7 @@ public final class BinaryRelay {
         }
         ChannelFuture connect;
         try {
-            connect = httpClient.connectBinaryRelay(client.eventLoop(), target, clientStartedWithTls, new BinaryRelayUpstreamHandler(this, mockServerLogger));
+            connect = httpClient.connectBinaryRelay(client.eventLoop(), address, clientStartedWithTls, new BinaryRelayUpstreamHandler(this, mockServerLogger));
         } catch (RuntimeException notPermitted) {
             releaseUnused(tlsFromTheStart);
             refuse(notPermitted.getMessage());
@@ -339,11 +426,7 @@ public final class BinaryRelay {
                         .setThrowable(upstreamConnectionFailure(failure) ? null : boundedFault(failure))
                 );
             }
-            for (Exchange notSent : waitingForConnect) {
-                notSent.response.completeExceptionally(failure);
-            }
-            waitingForConnect.clear();
-            latest = null;
+            failWaitingForConnect(failure);
             // not left to the failed channel's close: one never registered has a close future that never completes
             finished = true;
             releaseEveryHold();
@@ -492,9 +575,15 @@ public final class BinaryRelay {
         return clearBeforeUpgrade >= 0 || upstreamTls != null && !upstreamTls.handshakeFuture().isSuccess();
     }
 
-    void fromUpstream(byte[] bytesRead) {
-        BinaryMessage binaryResponse = bytes(bytesRead);
+    /**
+     * One upstream read: logged, given to the listener when it has one that takes it, and written to the client.
+     * The read's bytes are copied only for the listener; the log entry is formatted from the buffer, and the buffer
+     * itself is what is written to the client.
+     */
+    void fromUpstream(ByteBuf read) {
         Exchange answered = latest != null && latest.written ? latest : null;
+        boolean listenerTakesIt = answered != null ? listener != null : listenerHearsUpstreamMessages;
+        BinaryMessage binaryResponse = listenerTakesIt ? bytes(ByteBufUtil.getBytes(read)) : null;
         LogEntry logEntry = new LogEntry()
             .setType(FORWARDED_REQUEST)
             .setLogLevel(Level.INFO)
@@ -502,21 +591,21 @@ public final class BinaryRelay {
         if (answered != null) {
             logEntry
                 .setMessageFormat("returning binary response:{}from:{}for forwarded binary request:{}")
-                .setArguments(SensitiveLogValue.of(formatBytes(bytesRead, configuration.maxLoggedBodyBytes())), target, SensitiveLogValue.of(formatBytes(answered.request.getBytes(), configuration.maxLoggedBodyBytes())));
+                .setArguments(SensitiveLogValue.of(formatBytes(read, configuration.maxLoggedBodyBytes())), target, SensitiveLogValue.of(formatBytes(answered.request.getBytes(), configuration.maxLoggedBodyBytes())));
         } else {
             logEntry
                 .setMessageFormat("returning binary response:{}from:{}")
-                .setArguments(SensitiveLogValue.of(formatBytes(bytesRead, configuration.maxLoggedBodyBytes())), target);
+                .setArguments(SensitiveLogValue.of(formatBytes(read, configuration.maxLoggedBodyBytes())), target);
         }
         mockServerLogger.logEvent(logEntry);
         if (answered != null) {
             latest = null;
             answered.response.complete(binaryResponse);
-        } else if (listenerHearsUpstreamMessages) {
+        } else if (listenerTakesIt) {
             reportUpstreamMessage(binaryResponse);
         }
         if (client.isActive()) {
-            client.write(Unpooled.wrappedBuffer(bytesRead));
+            client.write(read.retain());
             if (!client.isWritable() && !upstreamHeldForClient) {
                 upstreamHeldForClient = true;
                 ChannelReadPause.pause(upstream);
@@ -669,10 +758,21 @@ public final class BinaryRelay {
             );
         }
         finished = true;
+        // messages read while the target was looked up
+        failWaitingForConnect(new IllegalStateException(reason));
+        releaseEveryHold();
         if (upstream != null) {
             RelayLegClose.now(upstream);
         }
         closeOnFlush(client);
+    }
+
+    private void failWaitingForConnect(Throwable failure) {
+        for (Exchange notSent : waitingForConnect) {
+            notSent.response.completeExceptionally(failure);
+        }
+        waitingForConnect.clear();
+        latest = null;
     }
 
     private void upstreamClosed() {

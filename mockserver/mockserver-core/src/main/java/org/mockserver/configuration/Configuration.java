@@ -227,6 +227,7 @@ public class Configuration {
     private volatile Boolean forwardBinaryRequestsWithoutWaitingForResponse;
     private volatile Boolean forwardBinaryRequestsUseSingleConnection;
     private volatile Boolean forwardBinaryRequestsMatchExpectations;
+    private volatile Long forwardBinaryServerFirstWaitMillis;
     private volatile BinaryMessageFraming binaryMessageFraming;
     private volatile BinaryProxyListener binaryProxyListener;
 
@@ -3361,6 +3362,30 @@ public class Configuration {
      */
     public Configuration forwardBinaryRequestsMatchExpectations(Boolean forwardBinaryRequestsMatchExpectations) {
         this.forwardBinaryRequestsMatchExpectations = forwardBinaryRequestsMatchExpectations;
+        return this;
+    }
+
+    public Long forwardBinaryServerFirstWaitMillis() {
+        if (forwardBinaryServerFirstWaitMillis == null) {
+            return ConfigurationProperties.forwardBinaryServerFirstWaitMillis();
+        }
+        return Math.max(0L, forwardBinaryServerFirstWaitMillis);
+    }
+
+    /**
+     * How long, in milliseconds, a connection that has a forward target (port forwarding, the transparent proxy, a
+     * PROXY protocol header) waits for its client's first byte before MockServer takes it as a binary connection and
+     * opens its upstream connection, so that a protocol in which the server speaks first (MySQL, SMTP, FTP) can be
+     * proxied: the server's first bytes are relayed to the client. Applies only to a connection that
+     * forwardBinaryRequestsUseSingleConnection relays on one upstream connection. A client that sends HTTP only
+     * after this long is then relayed as binary, not mocked.
+     * <p>
+     * The default is 0, which never does: a connection waits for its client
+     *
+     * @param forwardBinaryServerFirstWaitMillis wait in milliseconds, 0 to disable
+     */
+    public Configuration forwardBinaryServerFirstWaitMillis(Long forwardBinaryServerFirstWaitMillis) {
+        this.forwardBinaryServerFirstWaitMillis = forwardBinaryServerFirstWaitMillis;
         return this;
     }
 

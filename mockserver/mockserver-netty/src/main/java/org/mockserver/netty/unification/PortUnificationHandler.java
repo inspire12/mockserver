@@ -152,6 +152,8 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
     private final MockServerHttpResponseToFullHttpResponse mockServerHttpResponseToFullHttpResponse;
     private final ClientTlsHandshakeFailureLog clientTlsHandshakeFailureLog;
     private ScheduledFuture<?> undecidedProtocolWait;
+    private ScheduledFuture<?> serverFirstWait;
+    private boolean clientSpoke;
     private boolean takeBytesReceivedAsTheyAre;
     // the connection is binary and in the clear: only a TLS handshake beginning on it is still looked for
     private boolean binaryInTheClear;
@@ -257,11 +259,68 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
             ChannelReadPause.pause(ctx.channel());
             ctx.executor().schedule(() -> ChannelReadPause.resume(ctx.channel()), delayMillis, java.util.concurrent.TimeUnit.MILLISECONDS);
         }
+        Long serverFirstWaitMillis = configuration.forwardBinaryServerFirstWaitMillis();
+        if (serverFirstWaitMillis != null && serverFirstWaitMillis > 0) {
+            startServerFirstWait(ctx, serverFirstWaitMillis);
+        }
         ctx.fireChannelActive();
+    }
+
+    /**
+     * A client that sends nothing for this long may be waiting for a server that speaks first (MySQL, SMTP): a
+     * connection with a forward target is then taken as binary and its upstream connection opened, so the server's
+     * first bytes reach the client.
+     */
+    private void startServerFirstWait(ChannelHandlerContext ctx, long waitMillis) {
+        serverFirstWait = ctx.executor().schedule(() -> {
+            serverFirstWait = null;
+            if (clientSpoke || ctx.isRemoved() || !ctx.channel().isActive()) {
+                return;
+            }
+            if (!ctx.channel().config().isAutoRead()) {
+                // what the client sent may be waiting unread (connectionDelay), so its silence says nothing yet
+                startServerFirstWait(ctx, waitMillis);
+                return;
+            }
+            connectForServerThatSpeaksFirst(ctx, waitMillis);
+        }, waitMillis, java.util.concurrent.TimeUnit.MILLISECONDS);
+    }
+
+    private void stopServerFirstWait() {
+        if (serverFirstWait != null) {
+            serverFirstWait.cancel(false);
+            serverFirstWait = null;
+        }
+    }
+
+    private void connectForServerThatSpeaksFirst(ChannelHandlerContext ctx, long waitMillis) {
+        InetSocketAddress target = HttpActionHandler.getRemoteAddress(ctx);
+        if (target == null
+            || configuration.assumeAllRequestsAreHttp()
+            || !Boolean.TRUE.equals(configuration.forwardBinaryRequestsUseSingleConnection())
+            || actionHandler.getHttpClient().binaryRelayUnavailableBecause(target, false) != null) {
+            // nothing would be relayed: the connection waits for its client, as without the setting
+            return;
+        }
+        if (mockServerLogger.isEnabledForInstance(Level.DEBUG)) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.DEBUG)
+                    .setMessageFormat("client of connection from:{}sent nothing for:{}ms (forwardBinaryServerFirstWaitMillis), opening its upstream connection to:{}for a server that speaks first")
+                    .setArguments(ctx.channel().remoteAddress(), waitMillis, target)
+            );
+        }
+        addBinaryRequestProxying(ctx);
+        ChannelHandlerContext binaryRequestProxying = ctx.pipeline().context(BinaryRequestProxyingHandler.class);
+        ((BinaryRequestProxyingHandler) binaryRequestProxying.handler()).connectBeforeClientSpeaks(binaryRequestProxying);
     }
 
     @Override
     protected void callDecode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) {
+        if (in.isReadable()) {
+            clientSpoke = true;
+            stopServerFirstWait();
+        }
         stopUndecidedProtocolWait();
         super.callDecode(ctx, in, out);
         // bytes are left over only when decode asked for more before it could tell what they are
@@ -455,6 +514,7 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
     @Override
     protected void handlerRemoved0(ChannelHandlerContext ctx) throws Exception {
         stopUndecidedProtocolWait();
+        stopServerFirstWait();
         super.handlerRemoved0(ctx);
     }
 
@@ -778,6 +838,12 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
     }
 
     private void switchToBinaryRequestProxying(ChannelHandlerContext ctx, ByteBuf msg) {
+        addBinaryRequestProxying(ctx);
+        // fire message back through pipeline
+        ctx.fireChannelRead(msg.readBytes(actualReadableBytes()));
+    }
+
+    private void addBinaryRequestProxying(ChannelHandlerContext ctx) {
         // a raw TCP protocol (a database, a broker) may legitimately stay silent for long periods
         InboundConnectionActivity.markLongLived(ctx.channel());
         if (configuration.binaryMessageFraming() == BinaryMessageFraming.POSTGRESQL) {
@@ -797,9 +863,6 @@ public class PortUnificationHandler extends ReplayingDecoder<Void> {
         } else {
             binaryInTheClear = true;
         }
-
-        // fire message back through pipeline
-        ctx.fireChannelRead(msg.readBytes(actualReadableBytes()));
     }
 
     private Set<String> getLocalAddresses(ChannelHandlerContext ctx) {

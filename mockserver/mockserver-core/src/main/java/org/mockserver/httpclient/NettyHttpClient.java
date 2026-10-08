@@ -40,6 +40,7 @@ import org.slf4j.event.Level;
 import javax.annotation.Nullable;
 import java.io.IOException;
 import java.net.ConnectException;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketException;
 import java.net.UnknownHostException;
@@ -763,6 +764,31 @@ public class NettyHttpClient {
             return "its upstream proxy is forwardHttpProxy, which does not tunnel a connection";
         }
         return null;
+    }
+
+    /**
+     * Looks up the name of a binary relay's destination, which blocks, so it is called off the event loop for a
+     * destination not yet resolved. The address returned is what {@link #connectBinaryRelay} is then given, and it
+     * looks nothing up: a destination reached directly is resolved; one that {@code forwardProxyBlockPrivateNetworks}
+     * checks is resolved and checked; one tunnelled through an upstream proxy without that check is returned as
+     * given, for the proxy to resolve. A resolved address keeps the name, for the tunnel, SNI and the certificate
+     * check.
+     *
+     * @param secure whether the client's connection is TLS from its first byte
+     * @throws ForwardTargetBlockedException if forwardProxyBlockPrivateNetworks blocks the destination or cannot
+     *                                       resolve it
+     * @throws UnknownHostException          if a destination reached directly cannot be resolved
+     */
+    public InetSocketAddress lookUpBinaryRelayTarget(InetSocketAddress remoteAddress, boolean secure) throws UnknownHostException {
+        if (!remoteAddress.isUnresolved()) {
+            return remoteAddress;
+        }
+        InetSocketAddress vetted = InetAddressValidator.validateForwardTarget(configuration, remoteAddress);
+        if (!vetted.isUnresolved() || binaryRelayTunnel(upstreamProxiesFor(remoteAddress.getHostString()), secure) != null) {
+            return vetted;
+        }
+        String host = remoteAddress.getHostString();
+        return new InetSocketAddress(InetAddress.getByAddress(host, InetAddress.getByName(host).getAddress()), remoteAddress.getPort());
     }
 
     /**

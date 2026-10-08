@@ -82,6 +82,7 @@ public class ConfigurationDTO implements DTO<Configuration> {
     private Boolean forwardBinaryRequestsWithoutWaitingForResponse;
     private Boolean forwardBinaryRequestsUseSingleConnection;
     private Boolean forwardBinaryRequestsMatchExpectations;
+    private Long forwardBinaryServerFirstWaitMillis;
     private String binaryMessageFraming;
 
     private Boolean enableCORSForAPI;
@@ -436,6 +437,7 @@ public class ConfigurationDTO implements DTO<Configuration> {
             this.forwardBinaryRequestsWithoutWaitingForResponse = configuration.forwardBinaryRequestsWithoutWaitingForResponse();
             this.forwardBinaryRequestsUseSingleConnection = configuration.forwardBinaryRequestsUseSingleConnection();
             this.forwardBinaryRequestsMatchExpectations = configuration.forwardBinaryRequestsMatchExpectations();
+            this.forwardBinaryServerFirstWaitMillis = configuration.forwardBinaryServerFirstWaitMillis();
             this.binaryMessageFraming = configuration.binaryMessageFraming().name();
 
             this.enableCORSForAPI = configuration.enableCORSForAPI();
@@ -878,6 +880,7 @@ public class ConfigurationDTO implements DTO<Configuration> {
         configuration.forwardBinaryRequestsWithoutWaitingForResponse(forwardBinaryRequestsWithoutWaitingForResponse);
         configuration.forwardBinaryRequestsUseSingleConnection(forwardBinaryRequestsUseSingleConnection);
         configuration.forwardBinaryRequestsMatchExpectations(forwardBinaryRequestsMatchExpectations);
+        configuration.forwardBinaryServerFirstWaitMillis(forwardBinaryServerFirstWaitMillis);
         if (binaryMessageFraming != null) {
             configuration.binaryMessageFraming(parseBinaryMessageFraming(binaryMessageFraming));
         }
@@ -1465,6 +1468,9 @@ public class ConfigurationDTO implements DTO<Configuration> {
         }
         if (forwardBinaryRequestsMatchExpectations != null) {
             target.forwardBinaryRequestsMatchExpectations(forwardBinaryRequestsMatchExpectations);
+        }
+        if (forwardBinaryServerFirstWaitMillis != null) {
+            target.forwardBinaryServerFirstWaitMillis(forwardBinaryServerFirstWaitMillis);
         }
         if (binaryMessageFraming != null) {
             target.binaryMessageFraming(parseBinaryMessageFraming(binaryMessageFraming));
@@ -2829,6 +2835,15 @@ public class ConfigurationDTO implements DTO<Configuration> {
 
     public ConfigurationDTO setForwardBinaryRequestsMatchExpectations(Boolean forwardBinaryRequestsMatchExpectations) {
         this.forwardBinaryRequestsMatchExpectations = forwardBinaryRequestsMatchExpectations;
+        return this;
+    }
+
+    public Long getForwardBinaryServerFirstWaitMillis() {
+        return forwardBinaryServerFirstWaitMillis;
+    }
+
+    public ConfigurationDTO setForwardBinaryServerFirstWaitMillis(Long forwardBinaryServerFirstWaitMillis) {
+        this.forwardBinaryServerFirstWaitMillis = forwardBinaryServerFirstWaitMillis;
         return this;
     }
 

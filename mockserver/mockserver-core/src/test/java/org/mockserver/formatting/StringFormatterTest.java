@@ -1,5 +1,7 @@
 package org.mockserver.formatting;
 
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
 import org.junit.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -278,6 +280,26 @@ public class StringFormatterTest {
         byte[] bytes = new byte[100];
 
         assertThat(formatBytes(bytes, 40), is("0".repeat(64) + NEW_LINE + "0".repeat(16) + "...(100 bytes, only the first 40 logged, maxLoggedBodyBytes)"));
+    }
+
+    @Test
+    public void shouldFormatABuffersReadableBytesAsTheirArrayIsFormattedWithoutConsumingThem() {
+        byte[] bytes = new byte[150];
+        for (int i = 0; i < bytes.length; i++) {
+            bytes[i] = (byte) i;
+        }
+        // the readable bytes start part way into the buffer
+        ByteBuf buffer = Unpooled.buffer().writeZero(7).writeBytes(bytes);
+        buffer.skipBytes(7);
+        try {
+            for (int maxBytes : new int[]{0, 40, 149, 150, 151}) {
+                assertThat(formatBytes(buffer, maxBytes), is(formatBytes(bytes, maxBytes)));
+            }
+            assertThat(buffer.readerIndex(), is(7));
+            assertThat(buffer.readableBytes(), is(150));
+        } finally {
+            buffer.release();
+        }
     }
 
 }

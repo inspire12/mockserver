@@ -347,6 +347,47 @@ public class NettyHttpClientBinaryRelayConnectTest {
         }
     }
 
+    @Test
+    public void shouldResolveADestinationReachedDirectlyKeepingItsName() throws Exception {
+        InetSocketAddress found = client(configuration(), null, null).lookUpBinaryRelayTarget(InetSocketAddress.createUnresolved("localhost", 5432), false);
+
+        assertThat(found.isUnresolved(), is(false));
+        assertThat(found.getAddress().isLoopbackAddress(), is(true));
+        assertThat("the name is kept for SNI and the certificate check", found.getHostString(), is("localhost"));
+        assertThat(found.getPort(), is(5432));
+    }
+
+    @Test
+    public void shouldLeaveTheNameOfATunnelledDestinationToTheProxyWhenItIsNotChecked() throws Exception {
+        InetSocketAddress target = InetSocketAddress.createUnresolved("db.invalid", 5432);
+        NettyHttpClient client = client(configuration(), Collections.singletonList(proxyConfiguration(ProxyConfiguration.Type.SOCKS5, new InetSocketAddress(LOOPBACK, 1080))), null);
+
+        assertThat(client.lookUpBinaryRelayTarget(target, false), is(sameInstance(target)));
+    }
+
+    @Test
+    public void shouldResolveAndCheckADestinationThatMayNotBeForwardedTo() {
+        NettyHttpClient client = client(configuration().forwardProxyBlockPrivateNetworks(true), null, null);
+
+        IllegalArgumentException refused = assertThrows(IllegalArgumentException.class,
+            () -> client.lookUpBinaryRelayTarget(InetSocketAddress.createUnresolved("localhost", 5432), false));
+
+        assertThat(refused.getMessage(), containsString("loopback"));
+    }
+
+    @Test
+    public void shouldFailToResolveADestinationReachedDirectlyThatHasNoAddress() {
+        assertThrows(java.net.UnknownHostException.class,
+            () -> client(configuration(), null, null).lookUpBinaryRelayTarget(InetSocketAddress.createUnresolved("db.invalid", 5432), false));
+    }
+
+    @Test
+    public void shouldLookNothingUpForADestinationAlreadyResolved() throws Exception {
+        InetSocketAddress target = new InetSocketAddress(LOOPBACK, 5432);
+
+        assertThat(client(configuration(), null, null).lookUpBinaryRelayTarget(target, false), is(sameInstance(target)));
+    }
+
     /** The loopback address with no name, so a destination made from it is named by its address. */
     private static InetAddress loopbackByAddress() {
         try {

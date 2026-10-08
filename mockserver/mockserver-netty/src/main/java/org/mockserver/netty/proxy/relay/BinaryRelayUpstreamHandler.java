@@ -1,7 +1,6 @@
 package org.mockserver.netty.proxy.relay;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.ByteBufUtil;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import org.mockserver.log.model.LogEntry;
@@ -30,7 +29,7 @@ final class BinaryRelayUpstreamHandler extends SimpleChannelInboundHandler<ByteB
 
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, ByteBuf byteBuf) {
-        relay.fromUpstream(ByteBufUtil.getBytes(byteBuf));
+        relay.fromUpstream(byteBuf);
     }
 
     @Override

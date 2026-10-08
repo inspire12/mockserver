@@ -273,6 +273,7 @@ public class ConfigurationProperties {
     private static final String MOCKSERVER_FORWARD_BINARY_REQUESTS_WITHOUT_WAITING_FOR_RESPONSE = "mockserver.forwardBinaryRequestsWithoutWaitingForResponse";
     private static final String MOCKSERVER_FORWARD_BINARY_REQUESTS_USE_SINGLE_CONNECTION = "mockserver.forwardBinaryRequestsUseSingleConnection";
     private static final String MOCKSERVER_FORWARD_BINARY_REQUESTS_MATCH_EXPECTATIONS = "mockserver.forwardBinaryRequestsMatchExpectations";
+    private static final String MOCKSERVER_FORWARD_BINARY_SERVER_FIRST_WAIT_MILLIS = "mockserver.forwardBinaryServerFirstWaitMillis";
     private static final String MOCKSERVER_BINARY_MESSAGE_FRAMING = "mockserver.binaryMessageFraming";
     private static final AtomicReference<String> REPORTED_INVALID_BINARY_MESSAGE_FRAMING = new AtomicReference<>();
 
@@ -4293,6 +4294,26 @@ public class ConfigurationProperties {
 
     public static boolean forwardBinaryRequestsMatchExpectations() {
         return Boolean.parseBoolean(readPropertyHierarchically(PROPERTIES, MOCKSERVER_FORWARD_BINARY_REQUESTS_MATCH_EXPECTATIONS, "MOCKSERVER_FORWARD_BINARY_REQUESTS_MATCH_EXPECTATIONS", "false"));
+    }
+
+    /**
+     * How long, in milliseconds, a connection that has a forward target (port forwarding, the transparent proxy, a
+     * PROXY protocol header) waits for its client's first byte before MockServer takes it as a binary connection and
+     * opens its upstream connection, so that a protocol in which the server speaks first (MySQL, SMTP, FTP) can be
+     * proxied: the server's first bytes are relayed to the client. Applies only to a connection that
+     * forwardBinaryRequestsUseSingleConnection relays on one upstream connection. A client that sends HTTP only
+     * after this long is then relayed as binary, not mocked.
+     * <p>
+     * The default is 0, which never does: a connection waits for its client
+     *
+     * @param millis wait in milliseconds, 0 to disable
+     */
+    public static void forwardBinaryServerFirstWaitMillis(long millis) {
+        setProperty(MOCKSERVER_FORWARD_BINARY_SERVER_FIRST_WAIT_MILLIS, "" + millis);
+    }
+
+    public static long forwardBinaryServerFirstWaitMillis() {
+        return Math.max(0L, readLongProperty(MOCKSERVER_FORWARD_BINARY_SERVER_FIRST_WAIT_MILLIS, "MOCKSERVER_FORWARD_BINARY_SERVER_FIRST_WAIT_MILLIS", 0L));
     }
 
     /**
