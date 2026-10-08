@@ -804,6 +804,7 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **An older clustered server no longer loses its chaos and cross-protocol replication when a newer one stops.** With `stateBackend=infinispan` and `clusterEnabled=true`, every server stopped in a JVM, for example one started and stopped by each test, stayed in memory with its whole event log and expectations. And when a newer clustered server stopped, an older one still running wrote its HTTP, TCP and gRPC chaos profiles and its cross-protocol scenarios to the stopped server's store instead of its own, so they no longer reached the rest of its cluster. A stopped server is now released, and an older clustered server still running uses its own store again as soon as the newer one stops.
 - **`maxLoggedBodyBytes` now also limits the bodies of expectations a log entry names or quotes.** With the
   setting on, the log still kept whole bodies in some entries: an entry saying which expectation a request
   did not match (or came closest to) kept that expectation's request and response bodies and a "because"

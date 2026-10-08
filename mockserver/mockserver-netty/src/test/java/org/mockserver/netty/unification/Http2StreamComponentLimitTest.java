@@ -17,7 +17,9 @@ import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http2.DefaultHttp2DataFrame;
 import io.netty.handler.codec.http2.DefaultHttp2Headers;
 import io.netty.handler.codec.http2.DefaultHttp2HeadersFrame;
+import org.junit.After;
 import org.junit.Test;
+import org.mockito.Mockito;
 import org.mockserver.codec.CoalescingHttpObjectAggregator;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.dashboard.DashboardWebSocketHandler;
@@ -31,6 +33,7 @@ import java.util.List;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.withSettings;
 import static org.mockserver.configuration.Configuration.configuration;
 
 /**
@@ -43,6 +46,17 @@ public class Http2StreamComponentLimitTest {
 
     private static final int SIXTEEN_KIB = 16 * 1024;
     private static final int SIXTY_FOUR_MIB = 64 * 1024 * 1024;
+
+    private final List<Object> pipelineMocks = new ArrayList<>();
+
+    /**
+     * A mock handler's last invocation holds its own context, so Mockito would keep the mock, and through it the
+     * channel and everything the channel read, for the rest of the fork.
+     */
+    @After
+    public void releasePipelineMocks() {
+        pipelineMocks.forEach(Mockito.framework()::clearInlineMock);
+    }
 
     @Test
     public void shouldInstallTheStreamComponentLimit() {
@@ -191,11 +205,11 @@ public class Http2StreamComponentLimitTest {
         }
     }
 
-    private static EmbeddedChannel streamChain(Configuration configuration) {
+    private EmbeddedChannel streamChain(Configuration configuration) {
         return streamChain(configuration, null);
     }
 
-    private static EmbeddedChannel streamChain(Configuration configuration, ByteBufAllocator allocator) {
+    private EmbeddedChannel streamChain(Configuration configuration, ByteBufAllocator allocator) {
         EmbeddedChannel channel = new EmbeddedChannel();
         if (allocator != null) {
             channel.config().setAllocator(allocator);
@@ -207,16 +221,23 @@ public class Http2StreamComponentLimitTest {
             false,
             null,
             channel,
-            mock(CallbackWebSocketServerHandler.class),
-            mock(DashboardWebSocketHandler.class),
+            pipelineMock(CallbackWebSocketServerHandler.class),
+            pipelineMock(DashboardWebSocketHandler.class),
             null,
-            mock(TraceContextHandler.class),
+            pipelineMock(TraceContextHandler.class),
             null,
             null,
             null,
-            mock(HttpRequestHandler.class)
+            pipelineMock(HttpRequestHandler.class)
         );
         return channel;
+    }
+
+    // records nothing: the chain sees a read-complete event per frame
+    private <T> T pipelineMock(Class<T> type) {
+        T mock = mock(type, withSettings().stubOnly());
+        pipelineMocks.add(mock);
+        return mock;
     }
 
     private static CapturingHandler captureAfterAggregator(EmbeddedChannel channel) {

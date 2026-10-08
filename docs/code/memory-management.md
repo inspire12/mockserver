@@ -1006,9 +1006,11 @@ the event-log thread, removes the registrations it had made and closes what it h
 reset the process-wide AsyncAPI connections, which it never started (`HttpStateFailedConstructionTest`).
 Tests in every module stop each `HttpState` they construct, and `HttpStateStoppedGuardTest` (in core,
 scanning every module's test sources) fails the build when one does not. The in-flight reader given to `PreemptionSimulator` reads a counter, not the server, so
-it holds nothing. `StoppedServerIsCollectedTest` guards this for the default in-memory state backend; with
-a clustered backend the chaos registries and the cross-protocol bus also keep a store of that backend after
-a stop, which has not been checked for references back to the server.
+it holds nothing. `StoppedServerIsCollectedTest` guards this for the default in-memory state backend. With
+a clustered backend the three chaos registries and the cross-protocol bus also hold a store of that backend,
+which reaches the server through the invalidation listeners the server registered on it; each holds it in a
+`MostRecentRegistration` too, so `stop()` lets go of it and an older clustered server still running gets
+its own store back (`StoppedClusteredServerIsCollectedTest` in `mockserver-state-infinispan`).
 
 **Clearing expectations does NOT clear the log.** `PUT /mockserver/clear?type=EXPECTATIONS` only clears stored expectations; the request/event log is independent and keeps its entries (bounded by `maxLogEntries` and `maxEventLogSizeInBytes`). To free the log, use `PUT /mockserver/clear?type=LOG` (or `?type=ALL`), or `PUT /mockserver/reset` (clears both). Long-running, high-throughput servers should either lower `maxLogEntries`, set a byte budget, or periodically clear the log.
 

@@ -48,7 +48,7 @@ public class CrossProtocolEventBus {
     private final MostRecentRegistration<ScenarioManager> scenarioManager = new MostRecentRegistration<>();
 
     // G11 follow-up: optional clustered backend for fleet replication
-    private volatile KeyValueStore<ObjectNode> backendStore;
+    private final MostRecentRegistration<KeyValueStore<ObjectNode>> backendStore = new MostRecentRegistration<>();
 
     /**
      * Creates a fresh, non-singleton instance. Public for testing (e.g.
@@ -110,11 +110,25 @@ public class CrossProtocolEventBus {
      * an {@link org.mockserver.state.InvalidationListener} is registered to
      * rebuild the node-local bus on remote writes. When the backend is not
      * clustered, this method is a no-op -- the bus stays purely node-local.
+     *
+     * @return the store now in use, to pass to {@link #unsetStateBackendStore} on stop, or {@code null}
      */
-    public void setStateBackend(StateBackend backend) {
+    public KeyValueStore<ObjectNode> setStateBackend(StateBackend backend) {
         if (backend != null && backend.isClustered()) {
-            this.backendStore = backend.crudEntities(BACKEND_NAMESPACE);
+            KeyValueStore<ObjectNode> store = backend.crudEntities(BACKEND_NAMESPACE);
+            this.backendStore.register(store);
+            return store;
         }
+        return null;
+    }
+
+    /**
+     * Stops using {@code store}, the one {@link #setStateBackend} returned to a stopping server, so it no longer
+     * keeps that server in memory; the store of the clustered server still running that wired its backend most
+     * recently is used instead, or none. {@code null} is ignored.
+     */
+    public void unsetStateBackendStore(KeyValueStore<ObjectNode> store) {
+        this.backendStore.unregister(store);
     }
 
     public void register(CrossProtocolScenario scenario) {
@@ -219,7 +233,7 @@ public class CrossProtocolEventBus {
      * No-op when no clustered backend is configured.
      */
     private void writeToBackend(CrossProtocolScenario scenario) {
-        KeyValueStore<ObjectNode> store = this.backendStore;
+        KeyValueStore<ObjectNode> store = this.backendStore.get();
         if (store == null) {
             return;
         }
@@ -246,7 +260,7 @@ public class CrossProtocolEventBus {
      * No-op when no clustered backend is configured.
      */
     private void removeFromBackend(CrossProtocolScenario scenario) {
-        KeyValueStore<ObjectNode> store = this.backendStore;
+        KeyValueStore<ObjectNode> store = this.backendStore.get();
         if (store == null) {
             return;
         }
@@ -263,7 +277,7 @@ public class CrossProtocolEventBus {
      * No-op when no clustered backend is configured.
      */
     private void clearBackend() {
-        KeyValueStore<ObjectNode> store = this.backendStore;
+        KeyValueStore<ObjectNode> store = this.backendStore.get();
         if (store == null) {
             return;
         }
@@ -285,7 +299,7 @@ public class CrossProtocolEventBus {
      * convergence.
      */
     public void reconcileFromBackend() {
-        KeyValueStore<ObjectNode> store = this.backendStore;
+        KeyValueStore<ObjectNode> store = this.backendStore.get();
         if (store == null) {
             return;
         }

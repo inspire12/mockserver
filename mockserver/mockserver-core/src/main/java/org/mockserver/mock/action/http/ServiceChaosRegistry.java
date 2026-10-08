@@ -2,6 +2,7 @@ package org.mockserver.mock.action.http;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.mockserver.collections.MostRecentRegistration;
 import org.mockserver.model.HttpChaosProfile;
 import org.mockserver.serialization.ObjectMapperFactory;
 import org.mockserver.serialization.model.HttpChaosProfileDTO;
@@ -70,7 +71,7 @@ public class ServiceChaosRegistry {
     private final LongSupplier clock;
 
     // G11: optional clustered backend for fleet replication
-    private volatile KeyValueStore<ObjectNode> backendStore;
+    private final MostRecentRegistration<KeyValueStore<ObjectNode>> backendStore = new MostRecentRegistration<>();
 
     public ServiceChaosRegistry(LongSupplier clock) {
         this.clock = clock;
@@ -87,11 +88,25 @@ public class ServiceChaosRegistry {
      * an {@link InvalidationListener} is registered to rebuild the
      * node-local map on remote writes. When the backend is not clustered,
      * this method is a no-op — the registry stays purely node-local.
+     *
+     * @return the store now in use, to pass to {@link #unsetStateBackendStore} on stop, or {@code null}
      */
-    public void setStateBackend(StateBackend backend) {
+    public KeyValueStore<ObjectNode> setStateBackend(StateBackend backend) {
         if (backend != null && backend.isClustered()) {
-            this.backendStore = backend.crudEntities(BACKEND_NAMESPACE);
+            KeyValueStore<ObjectNode> store = backend.crudEntities(BACKEND_NAMESPACE);
+            this.backendStore.register(store);
+            return store;
         }
+        return null;
+    }
+
+    /**
+     * Stops using {@code store}, the one {@link #setStateBackend} returned to a stopping server, so it no longer
+     * keeps that server in memory; the store of the clustered server still running that wired its backend most
+     * recently is used instead, or none. {@code null} is ignored.
+     */
+    public void unsetStateBackendStore(KeyValueStore<ObjectNode> store) {
+        this.backendStore.unregister(store);
     }
 
     /**
@@ -336,7 +351,7 @@ public class ServiceChaosRegistry {
      * No-op when no clustered backend is configured.
      */
     private void writeToBackend(String key, HttpChaosProfile profile, long expiresAtMillis) {
-        KeyValueStore<ObjectNode> store = this.backendStore;
+        KeyValueStore<ObjectNode> store = this.backendStore.get();
         if (store == null) {
             return;
         }
@@ -356,7 +371,7 @@ public class ServiceChaosRegistry {
      * No-op when no clustered backend is configured.
      */
     private void removeFromBackend(String key) {
-        KeyValueStore<ObjectNode> store = this.backendStore;
+        KeyValueStore<ObjectNode> store = this.backendStore.get();
         if (store == null) {
             return;
         }
@@ -372,7 +387,7 @@ public class ServiceChaosRegistry {
      * No-op when no clustered backend is configured.
      */
     private void clearBackend() {
-        KeyValueStore<ObjectNode> store = this.backendStore;
+        KeyValueStore<ObjectNode> store = this.backendStore.get();
         if (store == null) {
             return;
         }
@@ -390,7 +405,7 @@ public class ServiceChaosRegistry {
      * to concurrent gets (ConcurrentHashMap iteration is weakly-consistent).
      */
     public void reconcileFromBackend() {
-        KeyValueStore<ObjectNode> store = this.backendStore;
+        KeyValueStore<ObjectNode> store = this.backendStore.get();
         if (store == null) {
             return;
         }

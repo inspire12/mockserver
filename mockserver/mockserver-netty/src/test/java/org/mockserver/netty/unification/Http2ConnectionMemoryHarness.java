@@ -25,6 +25,7 @@ import io.netty.handler.codec.http2.Http2MultiplexHandler;
 import io.netty.handler.codec.http2.Http2Settings;
 import io.netty.handler.codec.http2.Http2StreamChannel;
 import io.netty.util.ReferenceCountUtil;
+import org.mockito.Mockito;
 import org.mockserver.codec.CoalescingHttpObjectAggregator;
 import org.mockserver.codec.HttpObjectAggregators;
 import org.mockserver.configuration.Configuration;
@@ -171,6 +172,8 @@ final class Http2ConnectionMemoryHarness {
     private final Map<Integer, Integer> streamWindows = new HashMap<>();
     private final Map<Integer, byte[]> received = new HashMap<>();
     private final List<Throwable> failures = new ArrayList<>();
+    // a stub's last invocation holds its own context, so Mockito keeps it, and the whole connection, until cleared
+    private final List<Object> stubs = new ArrayList<>();
     private int connectionWindow = DEFAULT_WINDOW;
     private int initialStreamWindow = DEFAULT_WINDOW;
     private long wireBytes;
@@ -253,8 +256,10 @@ final class Http2ConnectionMemoryHarness {
     /**
      * A mock that records nothing: the handlers after the capture see every read-complete event.
      */
-    private static <T> T stub(Class<T> type) {
-        return mock(type, withSettings().stubOnly());
+    private <T> T stub(Class<T> type) {
+        T stub = mock(type, withSettings().stubOnly());
+        stubs.add(stub);
+        return stub;
     }
 
     /**
@@ -353,6 +358,7 @@ final class Http2ConnectionMemoryHarness {
             encoder.finishAndReleaseAll();
             pendingWire.release();
             serverWire.release();
+            stubs.forEach(Mockito.framework()::clearInlineMock);
         }
     }
 

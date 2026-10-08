@@ -430,6 +430,8 @@ When the state backend is not clustered (default `InMemoryStateBackend` or `Infi
 1. Calls `setStateBackend(stateBackend)` on each singleton registry (ServiceChaos, TcpChaos, GrpcChaos). This is a no-op when the backend is not clustered.
 2. When the backend is clustered, registers a SEPARATE `InvalidationListener` (distinct from the expectations reconcile listener) that calls `reconcileFromBackend()` on all three chaos registries when any remote write is detected.
 
+`setStateBackend` returns the store it now uses, which `HttpState` keeps; on `stop()` it passes each back to `unsetStateBackendStore` on the registry (and on the cross-protocol bus), so a server whose constructor failed creates no store while stopping. Each holds its store in a `MostRecentRegistration`, so a stopped server's store is let go (it reaches the server through the invalidation listeners) and, if another clustered server is still running in the same JVM, the store of the one that wired its backend most recently is used again.
+
 ## Distributed CrossProtocolEventBus (G11 Follow-Up)
 
 When the state backend is clustered, the `CrossProtocolEventBus` replicates its trigger-to-scenario registrations across the fleet. A cross-protocol scenario registered on node A (e.g. "when a DNS query for api.example.com is seen, advance scenario DnsScenario to DnsObserved") becomes effective on all nodes -- any node that observes the matching protocol event will fire the scenario state transition.

@@ -327,6 +327,10 @@ public class HttpState {
     // what this server registered in process-wide places, removed on stop() wherever it is still registered
     private volatile Metrics.LiveStateReaders registeredLiveStateReaders;
     private volatile java.util.function.Function<HttpRequest, CompletableFuture<HttpResponse>> installedRequestSender;
+    private volatile org.mockserver.state.KeyValueStore<com.fasterxml.jackson.databind.node.ObjectNode> serviceChaosStore;
+    private volatile org.mockserver.state.KeyValueStore<com.fasterxml.jackson.databind.node.ObjectNode> tcpChaosStore;
+    private volatile org.mockserver.state.KeyValueStore<com.fasterxml.jackson.databind.node.ObjectNode> grpcChaosStore;
+    private volatile org.mockserver.state.KeyValueStore<com.fasterxml.jackson.databind.node.ObjectNode> crossProtocolBusStore;
     // readiness flag — flipped true once the constructor (incl. synchronous expectation
     // initializers / OpenAPI seeding) has completed. The liveness/status endpoints answer 200 the
     // instant the port binds, but a readiness probe should stay not-ready until seeding finishes so
@@ -401,9 +405,9 @@ public class HttpState {
             // G11: wire chaos registries to the clustered backend for fleet-wide
             // chaos replication. When the backend is not clustered (default), the
             // setStateBackend calls are no-ops and the registries stay node-local.
-            org.mockserver.mock.action.http.ServiceChaosRegistry.getInstance().setStateBackend(stateBackend);
-            org.mockserver.mock.action.http.TcpChaosRegistry.getInstance().setStateBackend(stateBackend);
-            org.mockserver.mock.action.http.GrpcChaosRegistry.getInstance().setStateBackend(stateBackend);
+            this.serviceChaosStore = org.mockserver.mock.action.http.ServiceChaosRegistry.getInstance().setStateBackend(stateBackend);
+            this.tcpChaosStore = org.mockserver.mock.action.http.TcpChaosRegistry.getInstance().setStateBackend(stateBackend);
+            this.grpcChaosStore = org.mockserver.mock.action.http.GrpcChaosRegistry.getInstance().setStateBackend(stateBackend);
             // Install the live configuration on the chaos auto-halt circuit-breaker. Its only production
             // caller is the static Metrics.incrementHttpChaosInjected(...), which has no Configuration in
             // scope, so the settings must be pushed in here instead. This is the same Configuration
@@ -480,7 +484,7 @@ public class HttpState {
             // backend for fleet-wide registration replication. When the backend is
             // not clustered (default), setStateBackend is a no-op and the bus stays
             // node-local. Mirrors the chaos registry wiring pattern above.
-            CrossProtocolEventBus.getInstance().setStateBackend(stateBackend);
+            this.crossProtocolBusStore = CrossProtocolEventBus.getInstance().setStateBackend(stateBackend);
             if (stateBackend.isClustered()) {
                 stateBackend.addInvalidationListener(new InvalidationListener() {
                     @Override
@@ -6988,10 +6992,17 @@ public class HttpState {
         }
         org.mockserver.mock.action.http.LoadScenarioOrchestrator.getInstance().unregisterSender(installedRequestSender);
         org.mockserver.mock.drift.DriftAlertNotifier.getInstance().unregisterSender(installedRequestSender);
-        mockServerLog.stop();
-        // G10 phase 2a: close the state backend (no-op for in-memory)
-        if (stateBackend != null) {
-            stateBackend.close();
+        org.mockserver.mock.action.http.ServiceChaosRegistry.getInstance().unsetStateBackendStore(serviceChaosStore);
+        org.mockserver.mock.action.http.TcpChaosRegistry.getInstance().unsetStateBackendStore(tcpChaosStore);
+        org.mockserver.mock.action.http.GrpcChaosRegistry.getInstance().unsetStateBackendStore(grpcChaosStore);
+        CrossProtocolEventBus.getInstance().unsetStateBackendStore(crossProtocolBusStore);
+        try {
+            mockServerLog.stop();
+        } finally {
+            // G10 phase 2a: close the state backend (no-op for in-memory)
+            if (stateBackend != null) {
+                stateBackend.close();
+            }
         }
     }
 
