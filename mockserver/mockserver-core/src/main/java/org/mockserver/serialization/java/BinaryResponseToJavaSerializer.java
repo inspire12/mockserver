@@ -12,6 +12,7 @@ public class BinaryResponseToJavaSerializer implements ToJavaSerializer<BinaryRe
         return new FluentJavaBuilder(numberOfSpacesToIndent, "BinaryResponse.binaryResponse()")
             .withBytes("withBinaryData", binaryResponse.getBinaryData())
             .withDelay("withDelay", binaryResponse.getDelay())
+            .with("withUpstream", binaryResponse.getUpstream())
             .build();
     }
 }

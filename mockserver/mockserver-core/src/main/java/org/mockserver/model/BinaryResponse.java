@@ -8,6 +8,7 @@ import java.util.Objects;
 public class BinaryResponse extends Action<BinaryResponse> {
     private int hashCode;
     private byte[] binaryData;
+    private Upstream upstream;
 
     public static BinaryResponse binaryResponse() {
         return new BinaryResponse();
@@ -33,6 +34,22 @@ public class BinaryResponse extends Action<BinaryResponse> {
         return this;
     }
 
+    public Upstream getUpstream() {
+        return upstream;
+    }
+
+    /**
+     * What happens upstream when the matched message arrives on a binary connection MockServer relays to an upstream
+     * (forwardBinaryRequestsMatchExpectations). Null means {@link Upstream#ANSWER_ONLY}. The other two need
+     * binaryMessageFraming POSTGRESQL, which says where the upstream's reply ends; without it, and on a connection
+     * that is not relayed, the expectation answers as {@link Upstream#ANSWER_ONLY}.
+     */
+    public BinaryResponse withUpstream(Upstream upstream) {
+        this.upstream = upstream;
+        this.hashCode = 0;
+        return this;
+    }
+
     @Override
     @JsonIgnore
     public Type getType() {
@@ -54,14 +71,33 @@ public class BinaryResponse extends Action<BinaryResponse> {
             return false;
         }
         BinaryResponse that = (BinaryResponse) o;
-        return Arrays.equals(binaryData, that.binaryData);
+        return Arrays.equals(binaryData, that.binaryData) && upstream == that.upstream;
     }
 
     @Override
     public int hashCode() {
         if (hashCode == 0) {
-            hashCode = Objects.hash(super.hashCode(), Arrays.hashCode(binaryData));
+            hashCode = Objects.hash(super.hashCode(), Arrays.hashCode(binaryData), upstream);
         }
         return hashCode;
+    }
+
+    /**
+     * What happens upstream to a message a binary expectation matches on a relayed connection.
+     */
+    public enum Upstream {
+        /**
+         * MockServer writes the binary data and the message is not forwarded.
+         */
+        ANSWER_ONLY,
+        /**
+         * MockServer writes the binary data and also forwards the message, dropping the upstream's reply to it.
+         */
+        ANSWER_AND_FORWARD,
+        /**
+         * The message is forwarded and the upstream's reply to it is dropped; the binary data is written in its place
+         * once that reply has ended.
+         */
+        FORWARD_AND_REPLACE
     }
 }

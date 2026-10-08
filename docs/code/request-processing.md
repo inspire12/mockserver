@@ -1584,7 +1584,7 @@ flowchart TD
 | Backpressure | More than `MAX_WAITING_REPLIES` (64) waiting stops reads (one `ChannelReadPause` hold), released once all are written or on discard |
 | Expectation state | Post-processed when the message is matched, before the delay, as without one |
 | No data | Nothing to write, so nothing to delay or order |
-| Relayed connection | The reply is delayed the same way; `BinaryRelay.answeredLocally` runs after the write. Upstream responses are not held behind a delayed reply |
+| Relayed connection | The reply is delayed the same way; `BinaryRelay.answeredLocally` runs after the write. Upstream responses are not held behind a delayed reply, except behind a `FORWARD_AND_REPLACE` replacement, which the relay writes in the upstream's order |
 
 ### Binary expectations on a proxied connection
 
@@ -1594,12 +1594,15 @@ With `forwardBinaryRequestsMatchExpectations` (default `false`), a message on a 
 |------|--------|
 | Setting off | Expectations not consulted, as in 8.0.0 |
 | Setting on, connection forwarded one message per upstream connection (`forwardBinaryRequestsUseSingleConnection=false`, or the relay hands it back) | Not consulted; one WARN per connection |
-| Matched, `BinaryResponse` with data | Written to the client; event log as without a target (`FORWARDED_REQUEST`, "returning binary mock response") |
-| Matched, `BinaryResponse` without data | Nothing written, nothing forwarded |
+| Matched, `BinaryResponse` with data (`upstream` absent or `ANSWER_ONLY`) | Written to the client; event log as without a target (`FORWARDED_REQUEST`, "returning binary mock response") |
+| Matched, `BinaryResponse` without data (`ANSWER_ONLY`) | Nothing written, nothing forwarded |
+| Matched, `upstream` `ANSWER_AND_FORWARD`, reply tracked | Answered as `ANSWER_ONLY`, then forwarded with `UpstreamReply.drop()`: the upstream's reply is dropped |
+| Matched, `upstream` `FORWARD_AND_REPLACE`, reply tracked | Post-processed, logged ("to write binary mock response ... in place of its response"), forwarded with `UpstreamReply.replaceWith(data, sampled delay)`; nothing is written until the upstream's reply has ended |
+| Matched, `ANSWER_AND_FORWARD` or `FORWARD_AND_REPLACE`, reply not tracked (`BinaryRelay.tracksReplies` false: RAW framing, or tracking given up) | Answered as `ANSWER_ONLY`; one WARN per connection |
 | Matched, any other action | Post-processed, then forwarded, with a WARN |
 | Not matched | Forwarded; the matcher pass adds its usual `EXPECTATION_NOT_MATCHED` entries |
 
-Only "answer locally, do not forward" exists: "forward too, discard or replace the upstream's reply" needs to know where that reply ends, which MockServer cannot tell without the protocol's framing.
+`BinaryResponse.upstream` picks what happens upstream. The two modes that forward need to know where the upstream's reply to one message ends, which only a protocol's framing tells: with `binaryMessageFraming=POSTGRESQL` the relay follows the backend messages (`PostgresqlReplies`, [netty-pipeline.md](netty-pipeline.md#dropped-and-replaced-upstream-replies)). Without a target (plain mocking) the field is ignored and a match is `ANSWER_ONLY`.
 
 ## DNS Mock Processing
 

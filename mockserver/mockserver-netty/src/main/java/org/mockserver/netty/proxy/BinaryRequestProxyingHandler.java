@@ -22,6 +22,7 @@ import org.mockserver.model.BinaryRequestDefinition;
 import org.mockserver.model.BinaryResponse;
 import org.mockserver.model.Delay;
 import org.mockserver.netty.proxy.relay.BinaryRelay;
+import org.mockserver.netty.proxy.relay.UpstreamReply;
 import org.mockserver.proxyconfiguration.ForwardTargetBlockedException;
 import org.mockserver.scheduler.Scheduler;
 import org.mockserver.socket.ChannelReadPause;
@@ -63,6 +64,7 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
     private static final AttributeKey<ForwardQueue> FORWARD_QUEUE = AttributeKey.valueOf("BINARY_FORWARD_QUEUE");
     public static final AttributeKey<CompletableFuture<Void>> PREVIOUS_LISTENER_CALL = AttributeKey.valueOf("PREVIOUS_BINARY_PROXY_LISTENER_CALL");
     private static final AttributeKey<Boolean> EXPECTATIONS_NOT_MATCHED_WARNED = AttributeKey.valueOf("BINARY_EXPECTATIONS_NOT_MATCHED_WARNED");
+    private static final AttributeKey<Boolean> UNTRACKED_REPLIES_WARNED = AttributeKey.valueOf("BINARY_UNTRACKED_REPLIES_WARNED");
     private static final AttributeKey<Boolean> USE_SINGLE_CONNECTION = AttributeKey.valueOf("BINARY_USE_SINGLE_CONNECTION");
     /**
      * The client connection is not read while more than either of these wait to be forwarded, and is read again
@@ -182,10 +184,11 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
 
     /**
      * With forwardBinaryRequestsMatchExpectations, a message on a connection relayed on one upstream connection
-     * whose bytes match a binary expectation is answered here and not forwarded. Any other connection is forwarded
-     * as without the setting, and says so once.
+     * whose bytes match a binary expectation is answered here and not forwarded, or, as the binary response's
+     * {@code upstream} says, answered and forwarded or forwarded with its reply replaced. Any other connection is
+     * forwarded as without the setting, and says so once.
      *
-     * @return whether the message was answered, so is not to be forwarded
+     * @return whether the message was handled here, so is not to be forwarded by the caller
      */
     private boolean answeredByExpectation(ChannelHandlerContext ctx, BinaryMessage binaryRequest, String logCorrelationId, InetSocketAddress remoteAddress) {
         if (httpState == null || !configuration.forwardBinaryRequestsMatchExpectations()) {
@@ -216,7 +219,31 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
             }
             return false;
         }
-        replyFromExpectation(ctx, matchedExpectation, binaryRequest, logCorrelationId, () -> BinaryRelay.answeredLocally(ctx.channel(), logCorrelationId));
+        BinaryResponse binaryResponse = matchedExpectation.getBinaryResponse();
+        switch (upstreamOf(ctx, matchedExpectation, logCorrelationId)) {
+            case ANSWER_AND_FORWARD:
+                // answered first, so a reply written now is checked against the message forwarded before this one
+                replyFromExpectation(ctx, matchedExpectation, binaryRequest, logCorrelationId, () -> BinaryRelay.answeredLocally(ctx.channel(), logCorrelationId));
+                BinaryRelay.forward(ctx, binaryRequest, logCorrelationId, UpstreamReply.drop(), remoteAddress, configuration, mockServerLogger, scheduler, httpClient, binaryExchangeCallback);
+                break;
+            case FORWARD_AND_REPLACE:
+                httpState.postProcess(matchedExpectation);
+                if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
+                    mockServerLogger.logEvent(
+                        new LogEntry()
+                            .setLogLevel(Level.INFO)
+                            .setCorrelationId(logCorrelationId)
+                            .setMessageFormat("forwarding binary request:{}to:{}to write binary mock response:{}in place of its response")
+                            .setArguments(SensitiveLogValue.of(formatBytes(binaryRequest.getBytes(), configuration.maxLoggedBodyBytes())), remoteAddress, SensitiveLogValue.of(formatBytes(binaryResponse.getBinaryData() != null ? binaryResponse.getBinaryData() : new byte[0], configuration.maxLoggedBodyBytes())))
+                    );
+                }
+                Delay delay = binaryResponse.getDelay();
+                UpstreamReply replaced = UpstreamReply.replaceWith(binaryResponse.getBinaryData(), delay != null ? delay.sampleValueMillis() : 0);
+                BinaryRelay.forward(ctx, binaryRequest, logCorrelationId, replaced, remoteAddress, configuration, mockServerLogger, scheduler, httpClient, binaryExchangeCallback);
+                break;
+            default:
+                replyFromExpectation(ctx, matchedExpectation, binaryRequest, logCorrelationId, () -> BinaryRelay.answeredLocally(ctx.channel(), logCorrelationId));
+        }
         return true;
     }
 
@@ -232,6 +259,30 @@ public class BinaryRequestProxyingHandler extends SimpleChannelInboundHandler<By
         return remoteAddress != null
             && usesSingleConnection(ctx)
             && BinaryRelay.openBeforeClientSpeaks(ctx, remoteAddress, configuration, mockServerLogger, scheduler, httpClient, binaryExchangeCallback);
+    }
+
+    /**
+     * The matched expectation's {@code upstream}, or ANSWER_ONLY where the upstream's reply to a message cannot be told
+     * apart: a connection without a protocol's framing, said once per connection.
+     */
+    private BinaryResponse.Upstream upstreamOf(ChannelHandlerContext ctx, Expectation matchedExpectation, String logCorrelationId) {
+        BinaryResponse.Upstream upstream = matchedExpectation.getBinaryResponse().getUpstream();
+        if (upstream == null || upstream == BinaryResponse.Upstream.ANSWER_ONLY) {
+            return BinaryResponse.Upstream.ANSWER_ONLY;
+        }
+        if (BinaryRelay.tracksReplies(ctx.channel())) {
+            return upstream;
+        }
+        if (ctx.channel().attr(UNTRACKED_REPLIES_WARNED).setIfAbsent(Boolean.TRUE) == null && mockServerLogger.isEnabledForInstance(Level.WARN)) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.WARN)
+                    .setCorrelationId(logCorrelationId)
+                    .setMessageFormat("answering binary connection from:{}as ANSWER_ONLY where binary expectation:{}asks for:{}because nothing says where the upstream's reply to a message ends on it; that needs binaryMessageFraming POSTGRESQL")
+                    .setArguments(ctx.channel().remoteAddress(), matchedExpectation.getId(), upstream)
+            );
+        }
+        return BinaryResponse.Upstream.ANSWER_ONLY;
     }
 
     /**

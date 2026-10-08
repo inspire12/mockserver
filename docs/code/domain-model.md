@@ -228,6 +228,7 @@ classDiagram
 
     class BinaryResponse {
         +binaryData: byte[]
+        +upstream: Upstream
     }
     class DnsResponse {
         +answerRecords: List~DnsRecord~

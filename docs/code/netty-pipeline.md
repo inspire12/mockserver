@@ -2462,7 +2462,7 @@ one message each"]
 | Per port | Not offered | All ports share one `Configuration`; a MockServer that mocks PostgreSQL is a dedicated instance in practice |
 | Bound | `maxRequestBodySize` (10 MiB default), the existing inbound-body limit | A framed message is the binary counterpart of an aggregated HTTP body; no new property |
 | Oversize | Refused on the header alone, before the body is buffered | A client cannot make MockServer wait for, or hold, more than the bound |
-| Direction | Client to MockServer only | Matching and forwarding need the client's messages; the upstream's bytes are relayed as they arrive |
+| Direction | Client to MockServer only | Matching and forwarding need the client's messages; the upstream's bytes are relayed as they arrive, and on a relay followed by `PostgresqlReplies` only to tell where each reply ends ([Dropped and Replaced Upstream Replies](#dropped-and-replaced-upstream-replies)) |
 
 **The state machine.** Until the startup message a message is untyped: `int32 length` (itself included, at least 8) then `int32 code`. `SSLRequest` (80877103), `GSSENCRequest` (80877104) and `CancelRequest` (80877102) keep the next message untyped; any other code is a startup message, and from then on a message is `byte type` then `int32 length` (itself included, at least 4). The state survives a TLS upgrade, because the `SniHandler` is added at the head of the pipeline and the framer sees what it decrypts: after `SSLRequest` and the handshake, the encrypted startup message is still read as untyped. PostgreSQL 17's direct TLS (`sslnegotiation=direct`) starts with a ClientHello and is detected as TLS before the connection is binary, so the framer starts on the decrypted startup message.
 
@@ -2639,7 +2639,7 @@ sequenceDiagram
 | Event log, upstream to client | One `FORWARDED_REQUEST` entry per upstream read, with the correlation id of the latest client message. "for forwarded binary request" is left out for a read that follows no message, or follows one already answered |
 | `binaryProxyListener.onProxy` | Once per client message, at once, off the event loop, one at a time and in arrival order. The response future completes with the first upstream read after that message was written; with `null` when the next client message arrives first or the upstream connection closes; exceptionally when the message could not be connected or written |
 | Upstream bytes that answer no message | Relayed and logged, and reported to `binaryProxyListener.onUpstreamMessage` (a default method that does nothing): bytes the upstream sent unprompted, and each read after the first that followed a message. In the same chain as `onProxy`, so in order with it. Not scheduled at all for a listener that keeps the default (checked once, by reflection, when the relay is made) |
-| Binary expectations | Not consulted by default. With `forwardBinaryRequestsMatchExpectations`, matched first, and a match is answered and not relayed: see [below](#binary-expectations-on-a-relayed-connection) |
+| Binary expectations | Not consulted by default. With `forwardBinaryRequestsMatchExpectations`, matched first, and a match is answered and not relayed, or (with the binary response's `upstream` and `binaryMessageFraming=POSTGRESQL`) relayed with its reply dropped or replaced: see [below](#binary-expectations-on-a-relayed-connection) |
 | `forwardBinaryRequestsWithoutWaitingForResponse` | No effect. `LifeCycle.startedServer` logs one INFO entry at start-up when it is on while this setting is on |
 | A `NettyHttpClient` subclass overriding `sendRequest(BinaryMessage, ...)` | Not called: the relay connects through `connectBinaryRelay` |
 
@@ -2716,6 +2716,47 @@ With `forwardBinaryRequestsMatchExpectations` (default `false`) a message on a r
 | The upstream's state | It never sees an answered message, so the canned reply must be true for the session's real state (PostgreSQL's `ReadyForQuery` status byte, prepared statements, portals) |
 | The in-band TLS upgrade | An expectation matches the same bytes before and after the client turns TLS on. A message read while MockServer's handshake with the upstream runs is matched first: a match is answered at once, and only a forwarded message holds the client (`UPSTREAM_HANDSHAKING`) until that handshake succeeds |
 | An answered `SSLRequest` | The upstream never agreed to TLS, so MockServer's handshake with it, the first bytes of the upstream connection, fails or times out (`socketConnectionTimeoutInMillis`): both connections close with a WARN and nothing decrypted is sent. Do not answer the negotiation; the consumer docs say so |
+
+#### Dropped and Replaced Upstream Replies
+
+A binary response's `upstream` (`BinaryResponse.Upstream`) says what happens upstream to a matched message: `ANSWER_ONLY` (absent means this) as above; `ANSWER_AND_FORWARD` answers it the same way and also forwards it, dropping the upstream's reply; `FORWARD_AND_REPLACE` forwards it and writes the expectation's bytes in place of the upstream's reply once that reply has ended. `BinaryRequestProxyingHandler` passes the relay an `UpstreamReply` (`RELAY`, `drop()`, `replaceWith(bytes, delayMillis)`) with each forwarded message.
+
+```mermaid
+flowchart LR
+    C["client message"] --> M{"matched?
+upstream"}
+    M -->|"ANSWER_ONLY"| L["BinaryLocalReplies"]
+    M -->|"ANSWER_AND_FORWARD"| L
+    M -->|"ANSWER_AND_FORWARD"| F["BinaryRelay.forward
+UpstreamReply.drop()"]
+    M -->|"FORWARD_AND_REPLACE"| R["BinaryRelay.forward
+UpstreamReply.replaceWith"]
+    M -->|"no match"| P["BinaryRelay.forward
+UpstreamReply.RELAY"]
+    U["upstream reads"] --> T["PostgresqlReplies
+pieces per reply"]
+    T --> O["ToClient
+relay, drop, replace"]
+```
+
+Only a relay made on a connection whose client side has `PostgresqlMessageFramer` (`binaryMessageFraming=POSTGRESQL`, read from the pipeline when the relay is made, so once per connection) tracks replies (`BinaryRelay.tracksReplies`); on any other the handler answers as `ANSWER_ONLY` with one WARN per connection.
+
+| Concern | Rule |
+|---------|------|
+| Tracking | `PostgresqlReplies` keeps one entry per pending reply, in the order messages are written upstream, and follows the backend's typed messages (type byte, int32 length) without holding them: each read is handed to `ToClient` in pieces, each the longest run belonging to one reply or to none |
+| Where a reply ends | One byte after `SSLRequest` and `GSSENCRequest`; `ReadyForQuery` after `Query`, `FunctionCall` and `Sync`; for the startup message and `p` (password, SASL, GSS), `ReadyForQuery`, `ErrorResponse`, or an `AuthenticationRequest` whose code asks the client (2, 3, 5, 7, 8, 9, 10, 11; not OK 0 or SASL final 12). The first 4 body bytes of an `R` are read for its code, across reads |
+| Extended query | `Parse`, `Bind`, `Describe`, `Execute`, `Close` and `Flush` join one open entry, closed by the next `Sync` (or a `Query` or `FunctionCall` sent before any `Sync`), so the batch has one reply. Its handling is the strongest of its messages': dropped if any is, replacements joined in message order. A batch message dropped or replaced after relayed replies were counted with the batch splits it into an entry of its own. One that joins once the batch's reply has begun drops or replaces only what is still to come. A client that sends `Flush` and waits for that output before its `Sync` (a `Parse` and `Describe` it needs answered first) waits forever under `FORWARD_AND_REPLACE`, as nothing is written before the batch's `ReadyForQuery`; `ANSWER_AND_FORWARD` answers at once, so it does not |
+| No reply | `CancelRequest`, `CopyData`, `CopyDone`, `CopyFail`, `Terminate` and unknown types make no entry, so what a COPY brings stays with its `Query`. A replacement for one is an entry that ends once the replies before it have, never inside an unprompted backend message |
+| Relayed replies | Back-to-back relayed `ReadyForQuery` replies are one entry with a count, so a client that relays only keeps O(1) entries; output is byte-identical to an untracked relay, one write per read when nothing in it is dropped |
+| Unprompted messages | A backend message that starts while no reply is pending (a notice, a `ParameterStatus`) belongs to none and is relayed; one that arrives inside a dropped reply is dropped with it |
+| Malformed backend message | A length under 4 stops tracking for the connection: one WARN, pending entries dropped (no replacement written), everything relayed as it arrives from then on, and later expectations answer as `ANSWER_ONLY` |
+| Delayed replacement | Due at its message's arrival plus its sampled `delay`. Written at its reply's end once due; while it waits, everything after it from the upstream is held in `ToClient` and the upstream is not read (one `ChannelReadPause` hold), so the client gets the upstream's bytes and the replacements in the upstream's order. A timer on the client's event loop; the upstream closing writes what is held at once, before the client is closed; the client closing discards it |
+| Buffer ownership | Upstream reads arrive as the `ByteBuf` the upstream handler releases after `fromUpstream`. A dropped piece is never retained. A relayed piece is retained once (the read itself when it is relayed whole, else a `retainedSlice`) and that reference goes to the client's write, or into `ToClient.held` while a replacement waits ahead of it; `discardEverythingHeld` releases each held piece once when the client closes, and a piece relayed after the client closed is released at once |
+| Tracking given up while a replacement waits | What follows, in the same read or later ones, still goes through `ToClient`, so it stays behind the replacement |
+| Bound | More than `MAX_PENDING_REPLACED_REPLIES` (1024) pending dropped or replaced replies hold the client (`REPLIES_PENDING`) until no more than 512 remain |
+| Ordering against local replies | `ANSWER_AND_FORWARD` writes its answer through `BinaryLocalReplies` as `ANSWER_ONLY` does, then forwards; the ordering WARN in `answeredLocally` skips the message forwarded for that same answer (same correlation id) |
+| Event log | A dropped piece: INFO "dropping binary response ... as a binary expectation answers or replaces it", with the reply's correlation id. A replacement: `FORWARDED_REQUEST` "returning binary mock response ... in place of the response from". Relayed pieces log as before |
+| `binaryProxyListener` | A forwarded message is reported as any relayed one; its response future completes with the first upstream read after it was written, whatever is done with that read |
 
 ## SOCKS Protocol Detection
 

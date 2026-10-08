@@ -20,6 +20,7 @@ import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.BinaryMessage;
 import org.mockserver.model.BinaryProxyListener;
 import org.mockserver.netty.proxy.BinaryRequestProxyingHandler;
+import org.mockserver.netty.proxy.PostgresqlMessageFramer;
 import org.mockserver.scheduler.Scheduler;
 import org.mockserver.socket.ChannelReadPause;
 import org.mockserver.socket.SocketAddresses;
@@ -35,6 +36,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
 
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static org.mockserver.exception.ExceptionHandling.boundedFault;
 import static org.mockserver.exception.ExceptionHandling.boundedFaultMessage;
 import static org.mockserver.exception.ExceptionHandling.closeOnFlush;
@@ -71,10 +73,15 @@ public final class BinaryRelay {
      * read again once no more than half as many do; the same bound applies to the upstream's reads.
      */
     static final int MAX_PENDING_LISTENER_CALLS = 64;
+    /**
+     * The client connection is not read while more replies than this wait to be dropped or replaced, and is read
+     * again once no more than half as many do.
+     */
+    static final int MAX_PENDING_REPLACED_REPLIES = 1024;
 
     /** Why the client connection is not being read; each is one hold on {@link ChannelReadPause}. */
     private enum ClientHold {
-        UPSTREAM_CONNECTING, UPSTREAM_NOT_WRITABLE, LISTENER_BEHIND, UPSTREAM_HANDSHAKING, CLIENT_NOT_WRITABLE
+        UPSTREAM_CONNECTING, UPSTREAM_NOT_WRITABLE, LISTENER_BEHIND, UPSTREAM_HANDSHAKING, CLIENT_NOT_WRITABLE, REPLIES_PENDING
     }
 
     private final Channel client;
@@ -88,6 +95,9 @@ public final class BinaryRelay {
     private final EnumSet<ClientHold> clientHolds = EnumSet.noneOf(ClientHold.class);
     private final Deque<Exchange> waitingForConnect = new ArrayDeque<>(1);
     private final boolean clientStartedWithTls;
+    // null without a protocol's framing: nothing then says where a reply ends
+    private final PostgresqlReplies replies;
+    private final ToClient toClient = new ToClient();
     private Channel upstream;
     private SslHandler upstreamTls;
     // the upgrade came before the connect completed: how many waiting messages were sent before it, in the clear
@@ -121,6 +131,7 @@ public final class BinaryRelay {
         this.listener = listener;
         this.listenerHearsUpstreamMessages = overridesOnUpstreamMessage(listener);
         this.clientStartedWithTls = isSslEnabledUpstream(client);
+        this.replies = client.pipeline().get(PostgresqlMessageFramer.class) != null ? new PostgresqlReplies() : null;
     }
 
     /** A listener that keeps the interface's empty default is not called for each upstream read. */
@@ -142,7 +153,26 @@ public final class BinaryRelay {
      * @return false if the message was not taken: the caller is to forward it on an upstream connection of its own
      */
     public static boolean forward(ChannelHandlerContext ctx, BinaryMessage binaryRequest, String logCorrelationId, InetSocketAddress target, Configuration configuration, MockServerLogger mockServerLogger, Scheduler scheduler, NettyHttpClient httpClient, BinaryProxyListener listener) {
-        return relayOf(ctx, target, configuration, mockServerLogger, scheduler, httpClient, listener).fromClient(binaryRequest, logCorrelationId);
+        return forward(ctx, binaryRequest, logCorrelationId, UpstreamReply.RELAY, target, configuration, mockServerLogger, scheduler, httpClient, listener);
+    }
+
+    /**
+     * As {@link #forward(ChannelHandlerContext, BinaryMessage, String, InetSocketAddress, Configuration, MockServerLogger, Scheduler, NettyHttpClient, BinaryProxyListener)},
+     * with the upstream's reply to this message relayed, dropped or replaced. A reply is dropped or replaced only on a
+     * connection whose replies are tracked ({@link #tracksReplies(Channel)}); on any other it is relayed.
+     */
+    public static boolean forward(ChannelHandlerContext ctx, BinaryMessage binaryRequest, String logCorrelationId, UpstreamReply reply, InetSocketAddress target, Configuration configuration, MockServerLogger mockServerLogger, Scheduler scheduler, NettyHttpClient httpClient, BinaryProxyListener listener) {
+        return relayOf(ctx, target, configuration, mockServerLogger, scheduler, httpClient, listener).fromClient(binaryRequest, logCorrelationId, reply);
+    }
+
+    /**
+     * Whether this connection's relay knows where the upstream's reply to each message ends, so a reply can be
+     * dropped or replaced: one relayed with a protocol's framing (binaryMessageFraming POSTGRESQL) whose tracking has
+     * not been given up on a malformed upstream message. Must be called on the client connection's event loop.
+     */
+    public static boolean tracksReplies(Channel client) {
+        BinaryRelay relay = client.hasAttr(RELAY) ? client.attr(RELAY).get() : null;
+        return relay != null && !relay.perMessage && relay.replies != null && !relay.replies.lost();
     }
 
     /**
@@ -239,7 +269,8 @@ public final class BinaryRelay {
 
     /** A forwarded message that has had no upstream read since is {@link #latest}; each is warned about once. */
     private void repliedLocally(String logCorrelationId) {
-        if (latest != null && !latest.overtakenWarned && mockServerLogger.isEnabledForInstance(Level.WARN)) {
+        // a message answered here and also forwarded is latest itself: its own reply is not what it overtakes
+        if (latest != null && !latest.overtakenWarned && !logCorrelationId.equals(latest.correlationId) && mockServerLogger.isEnabledForInstance(Level.WARN)) {
             latest.overtakenWarned = true;
             mockServerLogger.logEvent(
                 new LogEntry()
@@ -254,7 +285,7 @@ public final class BinaryRelay {
         }
     }
 
-    private boolean fromClient(BinaryMessage binaryRequest, String logCorrelationId) {
+    private boolean fromClient(BinaryMessage binaryRequest, String logCorrelationId, UpstreamReply reply) {
         latestCorrelationId = logCorrelationId;
         decideOnce();
         if (perMessage) {
@@ -273,7 +304,14 @@ public final class BinaryRelay {
                 hold(ClientHold.UPSTREAM_HANDSHAKING);
             }
         }
-        Exchange exchange = new Exchange(binaryRequest);
+        Exchange exchange = new Exchange(binaryRequest, logCorrelationId);
+        if (replies != null && !replies.lost()) {
+            long dueNanos = client.eventLoop().ticker().nanoTime() + MILLISECONDS.toNanos(reply.delayMillis());
+            replies.forwarded(binaryRequest, reply, logCorrelationId, dueNanos, toClient);
+            if (replies.notRelayed() > MAX_PENDING_REPLACED_REPLIES) {
+                hold(ClientHold.REPLIES_PENDING);
+            }
+        }
         if (latest != null) {
             latest.response.complete(null);
         }
@@ -584,6 +622,34 @@ public final class BinaryRelay {
         Exchange answered = latest != null && latest.written ? latest : null;
         boolean listenerTakesIt = answered != null ? listener != null : listenerHearsUpstreamMessages;
         BinaryMessage binaryResponse = listenerTakesIt ? bytes(ByteBufUtil.getBytes(read)) : null;
+        boolean tracked = replies != null && !replies.lost();
+        if (tracked) {
+            // logs and writes each piece as the reply it belongs to says
+            toClient.readStarted(answered, read);
+            replies.read(read, toClient);
+            toClient.readEnded();
+        } else {
+            logRelayed(read, answered);
+        }
+        if (answered != null) {
+            latest = null;
+            answered.response.complete(binaryResponse);
+        } else if (listenerTakesIt) {
+            reportUpstreamMessage(binaryResponse);
+        }
+        if (tracked) {
+            if (replies.lost()) {
+                trackingLost();
+            } else if (replies.notRelayed() <= MAX_PENDING_REPLACED_REPLIES / 2) {
+                release(ClientHold.REPLIES_PENDING);
+            }
+        } else if (client.isActive()) {
+            // behind any replacement still waiting from before tracking was given up
+            toClient.relay(read.retain());
+        }
+    }
+
+    private void logRelayed(ByteBuf read, Exchange answered) {
         LogEntry logEntry = new LogEntry()
             .setType(FORWARDED_REQUEST)
             .setLogLevel(Level.INFO)
@@ -598,18 +664,27 @@ public final class BinaryRelay {
                 .setArguments(SensitiveLogValue.of(formatBytes(read, configuration.maxLoggedBodyBytes())), target);
         }
         mockServerLogger.logEvent(logEntry);
-        if (answered != null) {
-            latest = null;
-            answered.response.complete(binaryResponse);
-        } else if (listenerTakesIt) {
-            reportUpstreamMessage(binaryResponse);
+    }
+
+    /** Takes ownership of {@code bytes}. */
+    private void writeToClient(ByteBuf bytes) {
+        client.write(bytes);
+        if (!client.isWritable() && !upstreamHeldForClient) {
+            upstreamHeldForClient = true;
+            ChannelReadPause.pause(upstream);
         }
-        if (client.isActive()) {
-            client.write(read.retain());
-            if (!client.isWritable() && !upstreamHeldForClient) {
-                upstreamHeldForClient = true;
-                ChannelReadPause.pause(upstream);
-            }
+    }
+
+    private void trackingLost() {
+        release(ClientHold.REPLIES_PENDING);
+        if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.WARN)
+                    .setCorrelationId(latestCorrelationId)
+                    .setMessageFormat("upstream:{}of binary connection from:{}sent a message PostgreSQL message framing (binaryMessageFraming) cannot read; its replies are relayed as they are from now on, none dropped or replaced")
+                    .setArguments(target, client.remoteAddress())
+            );
         }
     }
 
@@ -779,6 +854,8 @@ public final class BinaryRelay {
         upstreamClosedFirst = !clientClosed;
         finished = true;
         stopUpstreamStallCheck();
+        // a replacement waiting for its delay, and what waits behind it, is written now: the upstream has ended
+        toClient.writeEverythingHeld();
         releaseEveryHold();
         // a connection that never connected fails its messages when its connect completes, before or after this
         if (connected && latest != null) {
@@ -794,6 +871,7 @@ public final class BinaryRelay {
             return;
         }
         clientClosed = true;
+        toClient.discardEverythingHeld();
         // the upstream is read again so that its close is seen
         releaseEveryHold();
         if (connected && !finished) {
@@ -835,17 +913,212 @@ public final class BinaryRelay {
             ChannelReadPause.resume(upstream);
         }
         releaseUpstreamForListener();
+        toClient.releaseUpstream();
     }
 
     /** A message read from the client and the future its listener call is given. */
     private static final class Exchange {
         private final BinaryMessage request;
+        private final String correlationId;
         private final CompletableFuture<BinaryMessage> response = new CompletableFuture<>();
         private boolean written;
         private boolean overtakenWarned;
 
-        private Exchange(BinaryMessage request) {
+        private Exchange(BinaryMessage request, String correlationId) {
             this.request = request;
+            this.correlationId = correlationId;
+        }
+    }
+
+    /**
+     * The upstream's bytes on their way to the client when its replies are tracked: relayed, dropped, or replaced once
+     * the reply has ended. A replacement whose delay has not passed holds back everything after it, so the client
+     * gets the upstream's bytes and the replacements in the upstream's order; while it waits the upstream is not read,
+     * so what is held is at most one read.
+     * <p>
+     * Ownership: a dropped piece is never retained, so nothing of it outlives the read. A relayed piece is retained
+     * once, as its own slice, and that reference is given to the client's write or, while something waits ahead of
+     * it, kept in {@link #held} until it is written or released by {@link #discardEverythingHeld()}.
+     */
+    private final class ToClient implements PostgresqlReplies.Output {
+        private final Deque<Object> held = new ArrayDeque<>();
+        private ScheduledFuture<?> timer;
+        private boolean upstreamHeld;
+        private Exchange answered;
+        private ByteBuf currentRead;
+        private int relayedFrom = -1;
+        private int relayedTo;
+
+        void readStarted(Exchange answered, ByteBuf read) {
+            this.answered = answered;
+            this.currentRead = read;
+        }
+
+        void readEnded() {
+            writeRelayed();
+            answered = null;
+            currentRead = null;
+        }
+
+        @Override
+        public void bytes(PostgresqlReplies.Reply reply, ByteBuf read, int index, int length) {
+            if (length == 0) {
+                return;
+            }
+            if (reply == null || reply.handling().relayed()) {
+                if (relayedFrom >= 0 && relayedTo == index) {
+                    relayedTo += length;
+                } else {
+                    writeRelayed();
+                    relayedFrom = index;
+                    relayedTo = index + length;
+                }
+                return;
+            }
+            writeRelayed();
+            if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.INFO)
+                        .setCorrelationId(reply.correlationId())
+                        .setMessageFormat("dropping binary response:{}from:{}for binary request:{}as a binary expectation answers or replaces it")
+                        .setArguments(SensitiveLogValue.of(formatBytes(read.slice(index, length), configuration.maxLoggedBodyBytes())), target, SensitiveLogValue.of(formatBytes(reply.request().getBytes(), configuration.maxLoggedBodyBytes())))
+                );
+            }
+        }
+
+        @Override
+        public void ended(PostgresqlReplies.Reply reply) {
+            byte[] replacement = reply.handling().replacement();
+            if (replacement == null || !client.isActive()) {
+                return;
+            }
+            // what was relayed before the end goes first
+            writeRelayed();
+            Replacement pendingReplacement = new Replacement(reply, replacement);
+            if (held.isEmpty() && client.eventLoop().ticker().nanoTime() >= reply.dueNanos()) {
+                write(pendingReplacement);
+                if (currentRead == null) {
+                    // not inside an upstream read, whose read-complete would flush it: a message without a reply
+                    client.flush();
+                }
+            } else {
+                held.add(pendingReplacement);
+                holdUpstream();
+                if (held.size() == 1) {
+                    writeDue();
+                }
+            }
+        }
+
+        /** Takes ownership of {@code bytes}: written now, or after what is held. */
+        void relay(ByteBuf bytes) {
+            if (held.isEmpty()) {
+                if (client.isActive()) {
+                    writeToClient(bytes);
+                } else {
+                    bytes.release();
+                }
+            } else {
+                held.add(bytes);
+                holdUpstream();
+            }
+        }
+
+        private void writeRelayed() {
+            if (relayedFrom < 0 || currentRead == null) {
+                return;
+            }
+            int from = relayedFrom;
+            int to = relayedTo;
+            relayedFrom = -1;
+            boolean whole = from == currentRead.readerIndex() && to == currentRead.writerIndex();
+            logRelayed(whole ? currentRead : currentRead.slice(from, to - from), answered);
+            answered = null;
+            relay(whole ? currentRead.retain() : currentRead.retainedSlice(from, to - from));
+        }
+
+        private void write(Replacement replacement) {
+            if (!client.isActive()) {
+                return;
+            }
+            if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setType(FORWARDED_REQUEST)
+                        .setLogLevel(Level.INFO)
+                        .setCorrelationId(replacement.reply.correlationId())
+                        .setMessageFormat("returning binary mock response:{}in place of the response from:{}for binary request:{}")
+                        .setArguments(SensitiveLogValue.of(formatBytes(replacement.bytes, configuration.maxLoggedBodyBytes())), target, SensitiveLogValue.of(formatBytes(replacement.reply.request().getBytes(), configuration.maxLoggedBodyBytes())))
+                );
+            }
+            writeToClient(Unpooled.wrappedBuffer(replacement.bytes));
+        }
+
+        private void writeDue() {
+            timer = null;
+            Object next;
+            while ((next = held.peek()) != null) {
+                if (next instanceof Replacement) {
+                    long remaining = ((Replacement) next).reply.dueNanos() - client.eventLoop().ticker().nanoTime();
+                    if (remaining > 0 && !finished) {
+                        timer = client.eventLoop().schedule(this::writeDue, remaining, NANOSECONDS);
+                        return;
+                    }
+                    held.poll();
+                    write((Replacement) next);
+                } else {
+                    held.poll();
+                    // a write to a closed channel releases what it is given
+                    writeToClient((ByteBuf) next);
+                }
+            }
+            client.flush();
+            releaseUpstream();
+        }
+
+        void writeEverythingHeld() {
+            if (timer != null) {
+                timer.cancel(false);
+            }
+            writeDue();
+        }
+
+        /** Releases every relayed piece still held, once each. */
+        void discardEverythingHeld() {
+            if (timer != null) {
+                timer.cancel(false);
+                timer = null;
+            }
+            for (Object item; (item = held.poll()) != null; ) {
+                if (item instanceof ByteBuf) {
+                    ((ByteBuf) item).release();
+                }
+            }
+        }
+
+        private void holdUpstream() {
+            if (!upstreamHeld && upstream != null && !finished) {
+                upstreamHeld = true;
+                ChannelReadPause.pause(upstream);
+            }
+        }
+
+        void releaseUpstream() {
+            if (upstreamHeld) {
+                upstreamHeld = false;
+                ChannelReadPause.resume(upstream);
+            }
+        }
+    }
+
+    private static final class Replacement {
+        private final PostgresqlReplies.Reply reply;
+        private final byte[] bytes;
+
+        private Replacement(PostgresqlReplies.Reply reply, byte[] bytes) {
+            this.reply = reply;
+            this.bytes = bytes;
         }
     }
 }

@@ -7,6 +7,7 @@ import org.mockserver.model.ObjectWithReflectiveEqualsHashCodeToString;
 public class BinaryResponseDTO extends ObjectWithReflectiveEqualsHashCodeToString implements DTO<BinaryResponse> {
     private DelayDTO delay;
     private byte[] binaryData;
+    private BinaryResponse.Upstream upstream;
     @JsonInclude(JsonInclude.Include.NON_DEFAULT)
     private boolean primary;
 
@@ -16,6 +17,7 @@ public class BinaryResponseDTO extends ObjectWithReflectiveEqualsHashCodeToStrin
                 delay = new DelayDTO(binaryResponse.getDelay());
             }
             binaryData = binaryResponse.getBinaryData();
+            upstream = binaryResponse.getUpstream();
             primary = binaryResponse.isPrimary();
         }
     }
@@ -27,6 +29,7 @@ public class BinaryResponseDTO extends ObjectWithReflectiveEqualsHashCodeToStrin
         return new BinaryResponse()
             .withDelay(delay != null ? delay.buildObject() : null)
             .withBinaryData(binaryData)
+            .withUpstream(upstream)
             .withPrimary(primary);
     }
 
@@ -45,6 +48,15 @@ public class BinaryResponseDTO extends ObjectWithReflectiveEqualsHashCodeToStrin
 
     public BinaryResponseDTO setBinaryData(byte[] binaryData) {
         this.binaryData = binaryData;
+        return this;
+    }
+
+    public BinaryResponse.Upstream getUpstream() {
+        return upstream;
+    }
+
+    public BinaryResponseDTO setUpstream(BinaryResponse.Upstream upstream) {
+        this.upstream = upstream;
         return this;
     }
 
