@@ -847,13 +847,98 @@ const JAVA_TIME_UNITS: ReadonlySet<string> = new Set([
   'NANOSECONDS', 'MICROSECONDS', 'MILLISECONDS', 'SECONDS', 'MINUTES', 'HOURS', 'DAYS',
 ]);
 
-/** `withDelay(TimeUnit, long)` arguments for a carried binaryResponse delay, or undefined when it has no numeric value. */
-function javaBinaryDelay(bin: StandardBinaryResponseState): { unit: string; value: number } | undefined {
-  const value = bin.delay?.['value'];
+/**
+ * `TimeUnit.X, value` — the `withDelay(TimeUnit, long)` arguments for a wire delay,
+ * or undefined when it is absent or carries more than a unit and a numeric value.
+ */
+function javaDelayArgs(delay: unknown): string | undefined {
+  if (!delay || typeof delay !== 'object' || Array.isArray(delay)) return undefined;
+  const d = delay as Record<string, unknown>;
+  if (Object.keys(d).some((k) => k !== 'timeUnit' && k !== 'value')) return undefined;
+  const value = d['value'];
   if (typeof value !== 'number' || !isFinite(value)) return undefined;
-  const rawUnit = bin.delay?.['timeUnit'];
+  const rawUnit = d['timeUnit'];
   const unit = typeof rawUnit === 'string' && JAVA_TIME_UNITS.has(rawUnit) ? rawUnit : 'MILLISECONDS';
-  return { unit, value };
+  return `TimeUnit.${unit}, ${value}`;
+}
+
+/** The wire key each composer action type is saved under. */
+const ACTION_WIRE_KEY: Record<StandardActionType, string> = {
+  static: 'httpResponse',
+  forward: 'httpForward',
+  forward_override: 'httpOverrideForwardedRequest',
+  forward_fallback: 'httpForwardWithFallback',
+  callback: 'httpResponseClassCallback',
+  template: 'httpResponseTemplate',
+  error: 'httpError',
+  websocket: 'httpWebSocketResponse',
+  sse: 'httpSseResponse',
+  binary_response: 'binaryResponse',
+  dns_response: 'dnsResponse',
+  forward_template: 'httpForwardTemplate',
+  forward_class_callback: 'httpForwardClassCallback',
+  grpc_stream: 'grpcStreamResponse',
+};
+
+/**
+ * What the Java action builder renders from the saved action JSON rather than from
+ * the form's state, so fields kept through an edit appear in the snippet: the delay
+ * and primary every action inherits, and the message lists with their per-item fields.
+ */
+interface JavaWireAction {
+  /** The saved action object (`json[ACTION_WIRE_KEY[type]]`). */
+  wire: Record<string, unknown>;
+  imports: Set<string>;
+  /** Wire fields the builder could not render, named in a NOTE. */
+  omitted: Set<string>;
+}
+
+/** Fields of the saved action the Java builder renders from the wire (see {@link JavaWireAction}). */
+const JAVA_WIRE_RENDERED_FIELDS: Partial<Record<StandardActionType, readonly string[]>> = {
+  websocket: ['messages', 'matchers'],
+  sse: ['events'],
+  grpc_stream: ['messages'],
+};
+
+/** `.withDelay(…)` / `.withPrimary(…)` for the delay and primary of a saved action. */
+function javaDelayPrimaryCalls(w: JavaWireAction, renderDelay: boolean): string[] {
+  const calls: string[] = [];
+  if (renderDelay && w.wire['delay'] !== undefined) {
+    const args = javaDelayArgs(w.wire['delay']);
+    if (args) {
+      calls.push(`.withDelay(${args})`);
+      w.imports.add('import java.util.concurrent.TimeUnit;');
+    } else {
+      w.omitted.add('delay');
+    }
+  }
+  if (typeof w.wire['primary'] === 'boolean') calls.push(`.withPrimary(${w.wire['primary']})`);
+  return calls;
+}
+
+/** A WebSocket message builder for a saved message; fields it cannot set are added to `w.omitted`. */
+function javaWebSocketMessage(msg: Record<string, unknown>, w: JavaWireAction, where: string): string {
+  for (const k of Object.keys(msg)) if (!['text', 'binary', 'delay'].includes(k)) w.omitted.add(`${where}.${k}`);
+  let expr = typeof msg['text'] === 'string' ? `webSocketMessage("${escapeJava(msg['text'])}")` : 'webSocketMessage()';
+  if (typeof msg['binary'] === 'string') {
+    expr += `.withBinary(Base64.getDecoder().decode("${escapeJava(msg['binary'])}"))`;
+    w.imports.add('import java.util.Base64;');
+  }
+  if (msg['delay'] !== undefined) {
+    const args = javaDelayArgs(msg['delay']);
+    if (args) {
+      expr += `.withDelay(${args})`;
+      w.imports.add('import java.util.concurrent.TimeUnit;');
+    } else {
+      w.omitted.add(`${where}.delay`);
+    }
+  }
+  return expr;
+}
+
+function wireItems(w: JavaWireAction, field: string): Record<string, unknown>[] {
+  const items = w.wire[field];
+  return Array.isArray(items) ? items.filter((i): i is Record<string, unknown> => isPlainObject(i)) : [];
 }
 
 /**
@@ -1659,27 +1744,153 @@ function isDuration(v: unknown): boolean {
   return isPlainObject(v) && 'timeUnit' in v;
 }
 
+function isMergeableObject(v: unknown): v is Record<string, unknown> {
+  return isPlainObject(v) && !isDuration(v);
+}
+
+type FieldPath = (string | number)[];
+
+/** A value the edit merge keeps from the original although the form does not show it as saved. */
+interface KeptLeaf {
+  /** Where the value sits in the merged (saved) value. */
+  path: FieldPath;
+  /** Where the value sits in the original. */
+  originalPath: FieldPath;
+  value: unknown;
+  /** What the form produced there on load; undefined when it produced nothing. */
+  baselineValue: unknown;
+}
+
+function keptLeaf(path: FieldPath, value: unknown, baselineValue: unknown): KeptLeaf {
+  return { path, originalPath: path, value, baselineValue };
+}
+
+function underKey(kept: KeptLeaf[], key: string | number, originalKey: string | number): KeptLeaf[] {
+  return kept.map((k) => ({ ...k, path: [key, ...k.path], originalPath: [originalKey, ...k.originalPath] }));
+}
+
+/** Whether `baselineItem` is what the form loaded from `originalItem` (every field it shows is equal). */
+function loadedFrom(originalItem: unknown, baselineItem: unknown): boolean {
+  if (isMergeableObject(originalItem) && isMergeableObject(baselineItem)) {
+    return Object.keys(baselineItem).every((k) => deepEqualCanonical(originalItem[k], baselineItem[k]));
+  }
+  return deepEqualCanonical(originalItem, baselineItem);
+}
+
+/**
+ * For each baseline item, the index of the original item it was loaded from, in order;
+ * original items the form could not load are skipped. Undefined when they do not line up.
+ */
+function alignItems(original: unknown[], baseline: unknown[]): number[] | undefined {
+  const pairs: number[] = [];
+  let j = 0;
+  for (const item of baseline) {
+    while (j < original.length && !loadedFrom(original[j], item)) j++;
+    if (j === original.length) return undefined;
+    pairs.push(j++);
+  }
+  return pairs;
+}
+
+/** The parts of an untouched `original` that differ from what the form loaded (`baseline`). */
+function keptDiff(original: unknown, baseline: unknown): KeptLeaf[] {
+  if (deepEqualCanonical(original, baseline)) return [];
+  if (isMergeableObject(original) && isMergeableObject(baseline)) {
+    return Object.keys(original).flatMap((k) => (k in baseline
+      ? underKey(keptDiff(original[k], baseline[k]), k, k)
+      : [keptLeaf([k], original[k], undefined)]));
+  }
+  if (Array.isArray(original) && Array.isArray(baseline)) {
+    const pairs = alignItems(original, baseline);
+    if (pairs) {
+      const byOriginal = new Map(pairs.map((j, k) => [j, k]));
+      return original.flatMap((item, j) => {
+        const k = byOriginal.get(j);
+        return k === undefined ? [keptLeaf([j], item, undefined)] : underKey(keptDiff(item, baseline[k]), j, j);
+      });
+    }
+  }
+  return [keptLeaf([], original, baseline)];
+}
+
+interface Merged {
+  value: unknown;
+  kept: KeptLeaf[];
+}
+
 /**
  * Keeps `original` except where the form changed a field: a field whose `form`
  * value differs from the `baseline` (what the form produced on load) takes the
  * form's value, or is removed when the form dropped it. Nested objects merge the
- * same way; arrays, scalars and durations are replaced whole when changed.
+ * same way and so do arrays, item by item (see {@link mergeItems}); scalars and
+ * durations are replaced whole when changed. `kept` lists the original's values
+ * the result carries that the form does not show.
  */
-function mergeUntouched(
-  original: Record<string, unknown>,
-  form: Record<string, unknown>,
-  baseline: Record<string, unknown>,
-): Record<string, unknown> {
-  const out: Record<string, unknown> = structuredClone(original);
-  for (const k of new Set([...Object.keys(form), ...Object.keys(baseline)])) {
-    if (deepEqualCanonical(form[k], baseline[k])) continue;
-    if (!(k in form)) delete out[k];
-    else if (isPlainObject(out[k]) && isPlainObject(form[k]) && isPlainObject(baseline[k])
-      && !isDuration(out[k]) && !isDuration(form[k]) && !isDuration(baseline[k])) {
-      out[k] = mergeUntouched(out[k] as Record<string, unknown>, form[k] as Record<string, unknown>, baseline[k] as Record<string, unknown>);
-    } else out[k] = form[k];
+function mergeTracked(original: unknown, form: unknown, baseline: unknown): Merged {
+  if (deepEqualCanonical(form, baseline)) return { value: structuredClone(original), kept: keptDiff(original, baseline) };
+  if (isMergeableObject(original) && isMergeableObject(form) && isMergeableObject(baseline)) {
+    const value: Record<string, unknown> = structuredClone(original);
+    const kept: KeptLeaf[] = [];
+    const formKeys = new Set([...Object.keys(form), ...Object.keys(baseline)]);
+    for (const k of formKeys) {
+      if (deepEqualCanonical(form[k], baseline[k])) {
+        if (k in original) kept.push(...underKey(keptDiff(original[k], baseline[k]), k, k));
+      } else if (!(k in form)) {
+        delete value[k];
+      } else {
+        const merged = mergeTracked(original[k], form[k], baseline[k]);
+        value[k] = merged.value;
+        kept.push(...underKey(merged.kept, k, k));
+      }
+    }
+    for (const k of Object.keys(original)) if (!formKeys.has(k)) kept.push(keptLeaf([k], original[k], undefined));
+    return { value, kept };
   }
-  return out;
+  if (Array.isArray(original) && Array.isArray(form) && Array.isArray(baseline)) {
+    const merged = mergeItems(original, form, baseline);
+    if (merged) return merged;
+  }
+  return { value: form, kept: [] };
+}
+
+/**
+ * Merges an edited array item by item, so an item keeps the fields the form does not
+ * show. A form item equal to a loaded one (even after a move) is that original item; an
+ * edited item merges with the original at its position; a new item is taken as is.
+ * Original items the form could not load stay after their original predecessor.
+ * Undefined when the baseline does not line up with the original.
+ */
+function mergeItems(original: unknown[], form: unknown[], baseline: unknown[]): Merged | undefined {
+  const pairs = alignItems(original, baseline);
+  if (!pairs) return undefined;
+  const claimed = baseline.map(() => false);
+  const source: (number | undefined)[] = form.map(() => undefined);
+  const claim = (i: number, k: number) => { source[i] = k; claimed[k] = true; };
+  form.forEach((item, i) => { if (i < baseline.length && deepEqualCanonical(item, baseline[i])) claim(i, i); });
+  form.forEach((item, i) => {
+    if (source[i] !== undefined) return;
+    const k = baseline.findIndex((b, bk) => !claimed[bk] && deepEqualCanonical(item, b));
+    if (k >= 0) claim(i, k);
+  });
+  form.forEach((_, i) => { if (source[i] === undefined && i < baseline.length && !claimed[i]) claim(i, i); });
+
+  const items: { value: unknown; kept: KeptLeaf[]; from?: number }[] = form.map((item, i) => {
+    const k = source[i];
+    if (k === undefined) return { value: item, kept: [] };
+    const merged = mergeTracked(original[pairs[k]!], item, baseline[k]);
+    return { ...merged, from: pairs[k] };
+  });
+  const loaded = new Set(pairs);
+  original.forEach((item, j) => {
+    if (loaded.has(j)) return;
+    let at = 0;
+    items.forEach((it, pos) => { if (it.from !== undefined && it.from < j) at = pos + 1; });
+    items.splice(at, 0, { value: structuredClone(item), kept: [keptLeaf([], item, undefined)], from: j });
+  });
+  return {
+    value: items.map((it) => it.value),
+    kept: items.flatMap((it, pos) => (it.from === undefined ? [] : underKey(it.kept, pos, it.from))),
+  };
 }
 
 /**
@@ -1778,13 +1989,73 @@ export function mergeUnmodeledFields(
       const base = opts.actionBaseline?.[k];
       const form = formJson[k];
       result[k] = isPlainObject(orig) && isPlainObject(base) && isPlainObject(form)
-        ? mergeUntouched(orig, form, base)
+        ? mergeTracked(orig, form, base).value
         : form;
     }
   }
   // else: leave the original action family untouched (preserve unmodeled action).
 
   return result;
+}
+
+/** An action field a save keeps from the loaded expectation although the form does not show it. */
+export interface KeptActionField {
+  /** The action-family key, e.g. `httpResponse`. */
+  actionKey: string;
+  /** Where the field sits in the saved action. */
+  path: (string | number)[];
+  /** Where the field sits in the original action (for {@link clearKeptActionField}). */
+  originalPath: (string | number)[];
+  /** The value that will be saved. */
+  value: unknown;
+  /** What the form produced there on load; undefined when it produced nothing. */
+  baselineValue: unknown;
+}
+
+/**
+ * The action fields {@link buildExpectationJson} keeps from `action.editOriginal`
+ * that the form does not show: fields the form does not model, values it loads
+ * lossily, and list items it cannot load. Empty when not editing.
+ */
+export function keptActionFields(matcher: StandardMatcher, action: StandardActionPayload): KeptActionField[] {
+  const original = action.editOriginal;
+  const baseline = action.editActionBaseline;
+  if (!original || !baseline || action.editActionModeled === false) return [];
+  const formJson = buildExpectationJson(matcher, { ...action, editOriginal: undefined });
+  const fields: KeptActionField[] = [];
+  for (const actionKey of ACTION_FAMILY_KEYS) {
+    const orig = original[actionKey];
+    const base = baseline[actionKey];
+    const form = formJson[actionKey];
+    if (!isPlainObject(orig) || !isPlainObject(base) || !isPlainObject(form)) continue;
+    for (const leaf of mergeTracked(orig, form, base).kept) fields.push({ actionKey, ...leaf });
+  }
+  return fields;
+}
+
+/** `path` as `delay`, `messages[1].delay`, … for display. */
+export function keptFieldLabel(field: Pick<KeptActionField, 'path'>): string {
+  return field.path.reduce<string>((label, seg) => (typeof seg === 'number' ? `${label}[${seg}]` : label ? `${label}.${seg}` : seg), '');
+}
+
+/**
+ * The original with `field` reset to what the form showed on load (or removed when
+ * the form showed nothing), so the next save no longer keeps it.
+ */
+export function clearKeptActionField(
+  original: Record<string, unknown>,
+  field: KeptActionField,
+): Record<string, unknown> {
+  const next = structuredClone(original);
+  const path = [field.actionKey, ...field.originalPath];
+  let parent: unknown = next;
+  for (const seg of path.slice(0, -1)) parent = (parent as Record<string | number, unknown> | undefined)?.[seg];
+  if (!parent || typeof parent !== 'object') return next;
+  const last = path[path.length - 1]!;
+  if (field.baselineValue !== undefined) (parent as Record<string | number, unknown>)[last] = structuredClone(field.baselineValue);
+  else if (Array.isArray(parent)) parent.splice(last as number, 1);
+  else delete (parent as Record<string, unknown>)[last as string];
+  return next;
 }
 
 /**
@@ -2258,7 +2529,15 @@ function templateJavaExpr(templateType: string, template: string, templateFile?:
   return `template(TemplateType.${templateType}, "${escapeJava(template)}")`;
 }
 
-function actionToJava(action: StandardActionPayload): string {
+function actionToJava(action: StandardActionPayload, w: JavaWireAction): string {
+  // Builder calls for the delay and primary every action inherits, placed before the closing `)`.
+  const withInherited = (code: string, renderDelay = true): string => {
+    const calls = javaDelayPrimaryCalls(w, renderDelay);
+    if (calls.length === 0) return code;
+    const lines = code.split('\n');
+    const close = lines.pop()!;
+    return [...lines, ...calls.map((c) => `        ${c}`), close].join('\n');
+  };
   switch (action.type) {
     case 'static': {
       const s = action.static;
@@ -2301,9 +2580,13 @@ function actionToJava(action: StandardActionPayload): string {
       } else if (s.body) {
         lines.push(`        .withBody("${escapeJava(s.body)}")`);
       }
-      // Delay — withDelay(TimeUnit, long)
-      if (s.delayValue != null && s.delayValue > 0 && isFinite(s.delayValue)) {
-        lines.push(`        .withDelay(TimeUnit.${s.delayUnit ?? 'MILLISECONDS'}, ${s.delayValue})`);
+      // Delay — withDelay(TimeUnit, long), from the saved JSON so a delay kept through an edit is shown
+      const delayArgs = javaDelayArgs(w.wire['delay']);
+      if (delayArgs) {
+        lines.push(`        .withDelay(${delayArgs})`);
+        w.imports.add('import java.util.concurrent.TimeUnit;');
+      } else if (w.wire['delay'] !== undefined) {
+        w.omitted.add('delay');
       }
       const co = s.connectionOptions;
       if (buildConnectionOptionsJson(co) && co) {
@@ -2319,19 +2602,19 @@ function actionToJava(action: StandardActionPayload): string {
         lines.push('        )');
       }
       lines.push(')');
-      return lines.join('\n');
+      return withInherited(lines.join('\n'), false);
     }
     case 'forward': {
       const f = action.forward;
       if (!f) return '.forward(forward())';
-      return [
+      return withInherited([
         '.forward(',
         '    forward()',
         `        .withScheme(Scheme.${f.scheme})`,
         `        .withHost("${escapeJava(f.host)}")`,
         `        .withPort(${f.port})`,
         ')',
-      ].join('\n');
+      ].join('\n'));
     }
     case 'forward_override': {
       const o = action.forwardOverride;
@@ -2359,33 +2642,34 @@ function actionToJava(action: StandardActionPayload): string {
         }
       }
       if (o.overrideBody) overrideCalls.push(`.withBody("${escapeJava(o.overrideBody)}")`);
+      const inherited = javaDelayPrimaryCalls(w, true);
       return [
         '.forward(',
         '    forwardOverriddenRequest(',
         '      request()',
         ...overrideCalls.map((c) => `        ${c}`),
-        '    )',
+        inherited.length > 0 ? `    )${inherited.join('')}` : '    )',
         ')',
       ].join('\n');
     }
     case 'callback': {
       const c = action.callback;
       if (!c) return '.respond(callback())';
-      return [
+      return withInherited([
         '.respond(',
         '    callback()',
         `        .withCallbackClass("${escapeJava(c.callbackClass)}")`,
         ')',
-      ].join('\n');
+      ].join('\n'));
     }
     case 'template': {
       const t = action.template;
       if (!t) return '.respond(template(TemplateType.VELOCITY, ""))';
-      return [
+      return withInherited([
         '.respond(',
         '    ' + templateJavaExpr(t.templateType, t.template, t.templateFile),
         ')',
-      ].join('\n');
+      ].join('\n'));
     }
     case 'error': {
       const e = action.error;
@@ -2393,9 +2677,16 @@ function actionToJava(action: StandardActionPayload): string {
       const lines = ['.error(', '    error()'];
       if (e.dropConnection) lines.push('        .withDropConnection(true)');
       if (e.responseBytesB64.trim()) lines.push(`        .withResponseBytes(Base64.getDecoder().decode("${escapeJava(e.responseBytesB64.trim())}"))`);
-      if (e.delayValue > 0) lines.push(`        .withDelay(new Delay(TimeUnit.${e.delayUnit}, ${e.delayValue}))`);
+      const errorDelay = javaDelayArgs(w.wire['delay']);
+      if (errorDelay) {
+        lines.push(`        .withDelay(new Delay(${errorDelay}))`);
+        w.imports.add('import org.mockserver.model.Delay;');
+        w.imports.add('import java.util.concurrent.TimeUnit;');
+      } else if (w.wire['delay'] !== undefined) {
+        w.omitted.add('delay');
+      }
       lines.push(')');
-      return lines.join('\n');
+      return withInherited(lines.join('\n'), false);
     }
     case 'forward_fallback': {
       const fb = action.forwardFallback;
@@ -2409,48 +2700,61 @@ function actionToJava(action: StandardActionPayload): string {
       if (codes.length > 0) lines.push(`        .withFallbackOnStatusCodes(${codes.join(', ')})`);
       lines.push(`        .withFallbackOnTimeout(${fb.fallbackOnTimeout})`);
       lines.push(')');
-      return lines.join('\n');
+      return withInherited(lines.join('\n'));
     }
     case 'websocket': {
       const ws = action.websocket;
       if (!ws) return '.respondWithWebSocket(webSocketResponse())';
       const lines = ['.respondWithWebSocket(', '    webSocketResponse()'];
       if (ws.subprotocol.trim()) lines.push(`        .withSubprotocol("${escapeJava(ws.subprotocol.trim())}")`);
-      const msgLines = ws.messages.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-      for (const msg of msgLines) lines.push(`        .withMessage(webSocketMessage("${escapeJava(msg)}"))`);
-      for (const m of ws.matchers) {
+      // Messages and matchers come from the saved JSON so per-message fields kept through an edit are shown.
+      wireItems(w, 'messages').forEach((m, i) => {
+        lines.push(`        .withMessage(${javaWebSocketMessage(m, w, `messages[${i}]`)})`);
+      });
+      wireItems(w, 'matchers').forEach((m, i) => {
         // Emit the nested webSocketMessageMatcher() builder across indented lines.
         lines.push('        .withMatcher(');
         lines.push(`            webSocketMessageMatcher()`);
-        lines.push(`                .withFrameType(WebSocketFrameType.${m.frameType})`);
-        if (m.textMatcher.trim()) lines.push(`                .withTextMatcher(string("${escapeJava(m.textMatcher.trim())}"))`);
-        const respLines = m.responses.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-        for (const r of respLines) lines.push(`                .withResponse(webSocketMessage("${escapeJava(r)}"))`);
+        if (typeof m['frameType'] === 'string') lines.push(`                .withFrameType(WebSocketFrameType.${m['frameType']})`);
+        if (typeof m['textMatcher'] === 'string') lines.push(`                .withTextMatcher(string("${escapeJava(m['textMatcher'])}"))`);
+        else if (m['textMatcher'] !== undefined) w.omitted.add(`matchers[${i}].textMatcher`);
+        for (const k of Object.keys(m)) if (!['frameType', 'textMatcher', 'responses'].includes(k)) w.omitted.add(`matchers[${i}].${k}`);
+        wireItems({ ...w, wire: m }, 'responses').forEach((r, j) => {
+          lines.push(`                .withResponse(${javaWebSocketMessage(r, w, `matchers[${i}].responses[${j}]`)})`);
+        });
         lines.push('        )');
-      }
+      });
       lines.push(`        .withCloseConnection(${ws.closeConnection})`);
       lines.push(')');
-      return lines.join('\n');
+      return withInherited(lines.join('\n'));
     }
     case 'sse': {
       const sse = action.sse;
       if (!sse) return '.respondWithSse(sseResponse())';
       const lines = ['.respondWithSse(', '    sseResponse()'];
       if (sse.statusCode) lines.push(`        .withStatusCode(${sse.statusCode})`);
-      for (const ev of sse.events) {
-        if (ev.data.trim() || ev.event.trim()) {
-          let evChain = 'sseEvent()';
-          if (ev.event.trim()) evChain += `.withEvent("${escapeJava(ev.event.trim())}")`;
-          if (ev.data.trim()) evChain += `.withData("${escapeJava(ev.data.trim())}")`;
-          if (ev.id.trim()) evChain += `.withId("${escapeJava(ev.id.trim())}")`;
-          const retryNum = parseInt(ev.retry, 10);
-          if (!isNaN(retryNum) && retryNum > 0) evChain += `.withRetry(${retryNum})`;
-          lines.push(`        .withEvent(${evChain})`);
+      // Events come from the saved JSON so per-event fields kept through an edit are shown.
+      wireItems(w, 'events').forEach((ev, i) => {
+        let evChain = 'sseEvent()';
+        if (typeof ev['event'] === 'string') evChain += `.withEvent("${escapeJava(ev['event'])}")`;
+        if (typeof ev['data'] === 'string') evChain += `.withData("${escapeJava(ev['data'])}")`;
+        if (typeof ev['id'] === 'string') evChain += `.withId("${escapeJava(ev['id'])}")`;
+        if (typeof ev['retry'] === 'number') evChain += `.withRetry(${ev['retry']})`;
+        if (ev['delay'] !== undefined) {
+          const args = javaDelayArgs(ev['delay']);
+          if (args) {
+            evChain += `.withDelay(${args})`;
+            w.imports.add('import java.util.concurrent.TimeUnit;');
+          } else {
+            w.omitted.add(`events[${i}].delay`);
+          }
         }
-      }
+        for (const k of Object.keys(ev)) if (!['event', 'data', 'id', 'retry', 'delay'].includes(k)) w.omitted.add(`events[${i}].${k}`);
+        lines.push(`        .withEvent(${evChain})`);
+      });
       lines.push(`        .withCloseConnection(${sse.closeConnection})`);
       lines.push(')');
-      return lines.join('\n');
+      return withInherited(lines.join('\n'));
     }
     case 'binary_response': {
       const bin = action.binaryResponse;
@@ -2460,11 +2764,8 @@ function actionToJava(action: StandardActionPayload): string {
         lines.push(`        .withBinaryData(Base64.getDecoder().decode("${escapeJava(bin.binaryData.trim())}"))`);
       }
       if (bin.upstream) lines.push(`        .withUpstream(Upstream.${bin.upstream})`);
-      const binDelay = javaBinaryDelay(bin);
-      if (binDelay) lines.push(`        .withDelay(TimeUnit.${binDelay.unit}, ${binDelay.value})`);
-      if (bin.primary !== undefined) lines.push(`        .withPrimary(${bin.primary})`);
       lines.push(')');
-      return lines.join('\n');
+      return withInherited(lines.join('\n'));
     }
     case 'dns_response': {
       const dns = action.dnsResponse;
@@ -2484,26 +2785,26 @@ function actionToJava(action: StandardActionPayload): string {
         lines.push('        )');
       }
       lines.push(')');
-      return lines.join('\n');
+      return withInherited(lines.join('\n'));
     }
     case 'forward_template': {
       const ft = action.forwardTemplate;
       if (!ft) return '.forward(template(TemplateType.VELOCITY, ""))';
-      return [
+      return withInherited([
         '.forward(',
         '    ' + templateJavaExpr(ft.templateType, ft.template, ft.templateFile),
         ')',
-      ].join('\n');
+      ].join('\n'));
     }
     case 'forward_class_callback': {
       const fc = action.forwardClassCallback;
       if (!fc) return '.forward(callback())';
-      return [
+      return withInherited([
         '.forward(',
         '    callback()',
         `        .withCallbackClass("${escapeJava(fc.callbackClass)}")`,
         ')',
-      ].join('\n');
+      ].join('\n'));
     }
     case 'grpc_stream': {
       const grpc = action.grpcStream;
@@ -2518,11 +2819,33 @@ function actionToJava(action: StandardActionPayload): string {
           lines.push(`        .withHeader("${escapeJava(k)}", ${values})`);
         }
       }
-      const grpcMsgLines = grpc.messages.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-      for (const msg of grpcMsgLines) lines.push(`        .withMessage("${escapeJava(msg)}")`);
+      // Messages come from the saved JSON so per-message fields kept through an edit are shown.
+      wireItems(w, 'messages').forEach((m, i) => {
+        const json = `"${escapeJava(String(m['json'] ?? ''))}"`;
+        let msg = `grpcStreamMessage(${json})`;
+        let typed = false;
+        if (typeof m['templateType'] === 'string') {
+          msg += `.withTemplateType(TemplateType.${m['templateType']})`;
+          w.imports.add('import org.mockserver.model.HttpTemplate.TemplateType;');
+          typed = true;
+        }
+        if (m['delay'] !== undefined) {
+          const args = javaDelayArgs(m['delay']);
+          if (args) {
+            msg += `.withDelay(${args})`;
+            w.imports.add('import java.util.concurrent.TimeUnit;');
+            typed = true;
+          } else {
+            w.omitted.add(`messages[${i}].delay`);
+          }
+        }
+        for (const k of Object.keys(m)) if (!['json', 'templateType', 'delay'].includes(k)) w.omitted.add(`messages[${i}].${k}`);
+        if (typed) w.imports.add('import static org.mockserver.model.GrpcStreamMessage.grpcStreamMessage;');
+        lines.push(`        .withMessage(${typed ? msg : json})`);
+      });
       lines.push(`        .withCloseConnection(${grpc.closeConnection})`);
       lines.push(')');
-      return lines.join('\n');
+      return withInherited(lines.join('\n'));
     }
     default:
       // Exhaustiveness guard: if a new StandardActionType is added without a
@@ -2911,8 +3234,10 @@ function collectJavaImports(
    * These imports replace the `switch (action.type)` action-family imports.
    */
   llmActionImports?: string[],
+  /** Imports the emitted action code needs beyond the form-driven ones. */
+  actionImports: ReadonlySet<string> = new Set(),
 ): string[] {
-  const imp = new Set<string>();
+  const imp = new Set<string>(actionImports);
   const isDns = !!(matcher.dns && matcher.dns.dnsName.trim());
 
   // Request matcher
@@ -3052,7 +3377,6 @@ function collectJavaImports(
       imp.add('import static org.mockserver.model.BinaryResponse.binaryResponse;');
       imp.add('import java.util.Base64;');
       if (action.binaryResponse?.upstream) imp.add('import org.mockserver.model.BinaryResponse.Upstream;');
-      if (action.binaryResponse && javaBinaryDelay(action.binaryResponse)) imp.add('import java.util.concurrent.TimeUnit;');
       break;
     case 'dns_response':
       imp.add('import static org.mockserver.model.DnsResponse.dnsResponse;');
@@ -3287,8 +3611,30 @@ export function standardToJava(matcher: StandardMatcher, action: StandardActionP
   // modifiers above.
   const preservedSequence = Array.isArray(json['httpResponses']) ? (json['httpResponses'] as unknown[]) : undefined;
   const sequenceNotes = new Set<string>();
+  // Emit the terminal action. actionToJava (or llmResponseToJava for a preserved
+  // httpLlmResponse) bundles the call (.respond(/.forward(/.respondWithLlm(...) with
+  // its argument indented 4 spaces; dedent the inner argument lines by 2 so that, after
+  // the 2-space wrapper that nests the call under mockServerClient, the argument aligns at
+  // the same depth (4 spaces) as the matcher inside .when( ... ) — keeping request() and
+  // response()/llmResponse() flush.
+  const wireAction: JavaWireAction = {
+    wire: asJsonObject(json[ACTION_WIRE_KEY[action.type]]) ?? {},
+    imports: new Set(),
+    omitted: new Set(),
+  };
+  let terminalCode: string;
+  if (llmEmit) {
+    terminalCode = llmEmit.code;
+  } else if (preservedSequence) {
+    const responses = preservedSequence
+      .map((r) => wireResponseToJava((r ?? {}) as Record<string, unknown>, sequenceNotes))
+      .map((r) => '    ' + r.split('\n').join('\n    '));
+    terminalCode = ['.respond(Arrays.asList(', responses.join(',\n'), '))'].join('\n');
+  } else {
+    terminalCode = actionToJava(action, wireAction);
+  }
   const lines: string[] = [];
-  for (const imp of collectJavaImports(matcher, action, hasChaos, json, llmEmit?.imports)) lines.push(imp);
+  for (const imp of collectJavaImports(matcher, action, hasChaos, json, llmEmit?.imports, wireAction.imports)) lines.push(imp);
   lines.push('');
   lines.push('mockServerClient');
   const when = whenArgsFromJson(json);
@@ -3337,23 +3683,6 @@ export function standardToJava(matcher: StandardMatcher, action: StandardActionP
     lines.push('    ' + sideEffectToJava(se).split('\n').join('\n    '));
     lines.push('  )');
   }
-  // Emit the terminal action. actionToJava (or llmResponseToJava for a preserved
-  // httpLlmResponse) bundles the call (.respond(/.forward(/.respondWithLlm(...) with
-  // its argument indented 4 spaces; dedent the inner argument lines by 2 so that, after
-  // the 2-space wrapper that nests the call under mockServerClient, the argument aligns at
-  // the same depth (4 spaces) as the matcher inside .when( ... ) — keeping request() and
-  // response()/llmResponse() flush.
-  let terminalCode: string;
-  if (llmEmit) {
-    terminalCode = llmEmit.code;
-  } else if (preservedSequence) {
-    const responses = preservedSequence
-      .map((r) => wireResponseToJava((r ?? {}) as Record<string, unknown>, sequenceNotes))
-      .map((r) => '    ' + r.split('\n').join('\n    '));
-    terminalCode = ['.respond(Arrays.asList(', responses.join(',\n'), '))'].join('\n');
-  } else {
-    terminalCode = actionToJava(action);
-  }
   const actionLines = terminalCode.split('\n');
   const alignedAction = actionLines
     .map((ln, i) => (i === 0 || i === actionLines.length - 1 ? ln : ln.replace(/^ {2}/, '')))
@@ -3365,6 +3694,16 @@ export function standardToJava(matcher: StandardMatcher, action: StandardActionP
   if (llmEmit?.note) lines.push(llmEmit.note);
   if (sequenceNotes.size > 0) {
     lines.push(`// NOTE: the Java preview omits response-sequence field(s) it cannot carry: ${Array.from(sequenceNotes).join(', ')} -- see the JSON tab.`);
+  }
+  // Fields kept through an edit that the builder above renders from form state, not the saved JSON.
+  const wireRendered = new Set(['delay', 'primary', ...(JAVA_WIRE_RENDERED_FIELDS[action.type] ?? [])]);
+  const keptOmitted = keptActionFields(matcher, action)
+    .filter((f) => !wireRendered.has(String(f.path[0])))
+    .map((f) => keptFieldLabel(f));
+  const omitted = [...keptOmitted, ...wireAction.omitted];
+  if (omitted.length > 0 && !llmEmit && !preservedSequence) {
+    const actionKey = ACTION_WIRE_KEY[action.type];
+    lines.push(`// NOTE: the Java preview omits field(s) kept from the loaded expectation: ${omitted.map((f) => `${actionKey}.${f}`).join(', ')} -- see the JSON tab.`);
   }
   // Honest NOTE for preserved top-level fields the Java client API cannot set
   // (rateLimit / timestamp) — never a silent drop.

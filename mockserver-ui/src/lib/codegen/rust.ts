@@ -408,12 +408,44 @@ function renderHttpResponse(resp: Record<string, unknown>, ctx: Ctx, indent: num
 // HttpForward / HttpTemplate / HttpError
 // ---------------------------------------------------------------------------
 
+/** `.delay(…)` / `.primary(…)` for the delay and primary every action inherits. */
+function inheritedCalls(o: Record<string, unknown>): string[] {
+  const calls: string[] = [];
+  if (o['delay'] && typeof o['delay'] === 'object') calls.push(`.delay(${delayExpr(o['delay'] as Record<string, unknown>)})`);
+  if (typeof o['primary'] === 'boolean') calls.push(`.primary(${o['primary']})`);
+  return calls;
+}
+
+/**
+ * `base` with the inherited delay and primary set through struct-update syntax, for
+ * models that expose them as public fields without builder methods.
+ */
+function withInheritedFields(
+  typeName: string,
+  base: (indent: number) => string,
+  o: Record<string, unknown>,
+  indent: number,
+): string {
+  const fields: string[] = [];
+  if (o['delay'] && typeof o['delay'] === 'object') fields.push(`delay: Some(${delayExpr(o['delay'] as Record<string, unknown>)}),`);
+  if (typeof o['primary'] === 'boolean') fields.push(`primary: Some(${o['primary']}),`);
+  if (fields.length === 0) return base(indent);
+  const inner = pad(indent + 4);
+  return `${typeName} {\n${fields.map((f) => inner + f).join('\n')}\n${inner}..${base(indent + 4)}\n${pad(indent)}}`;
+}
+
+/** The Rust HttpTemplate model has no delay or primary: name what the snippet leaves out. */
+function templateGapNote(t: Record<string, unknown>): string {
+  const missing = ['delay', 'primary'].filter((k) => k in t);
+  return missing.length > 0 ? `/* NOTE: the Rust HttpTemplate model has no ${missing.join(', ')}; omitted */ ` : '';
+}
+
 function forwardExpr(f: Record<string, unknown>, indent: number): string {
   const host = rustStr(String(f['host'] ?? ''));
   const port = typeof f['port'] === 'number' ? numLit(f['port']) : '0';
   const calls: string[] = [];
   if (typeof f['scheme'] === 'string') calls.push(`.scheme(${rustStr(f['scheme'])})`);
-  if (f['delay'] && typeof f['delay'] === 'object') calls.push(`.delay(${delayExpr(f['delay'] as Record<string, unknown>)})`);
+  calls.push(...inheritedCalls(f));
   return chain(`HttpForward::new(${host}, ${port})`, calls, indent);
 }
 
@@ -432,7 +464,7 @@ function errorExpr(e: Record<string, unknown>, indent: number): string {
   const calls: string[] = [];
   if (e['dropConnection'] === true) calls.push('.drop_connection(true)');
   if (typeof e['responseBytes'] === 'string') calls.push(`.response_bytes(${rustStr(e['responseBytes'])})`);
-  if (e['delay'] && typeof e['delay'] === 'object') calls.push(`.delay(${delayExpr(e['delay'] as Record<string, unknown>)})`);
+  calls.push(...inheritedCalls(e));
   return chain('HttpError::new()', calls, indent);
 }
 
@@ -466,13 +498,15 @@ function sseExpr(sse: Record<string, unknown>, indent: number): string {
   // (and as "don't close" for gRPC streaming), so dropping an explicit `false` would
   // generate code that closes the connection the user asked to keep open.
   if (typeof sse['closeConnection'] === 'boolean') calls.push(`.close_connection(${sse['closeConnection'] ? 'true' : 'false'})`);
-  if (sse['delay'] && typeof sse['delay'] === 'object') calls.push(`.delay(${delayExpr(sse['delay'] as Record<string, unknown>)})`);
+  calls.push(...inheritedCalls(sse));
   return chain('HttpSseResponse::new()', calls, indent);
 }
 
 function wsMessageExpr(m: Record<string, unknown>): string {
-  if (typeof m['binary'] === 'string') return `WebSocketMessage::binary_base64(${rustStr(m['binary'])})`;
-  return `WebSocketMessage::text(${rustStr(String(m['text'] ?? ''))})`;
+  const base = typeof m['binary'] === 'string'
+    ? `WebSocketMessage::binary_base64(${rustStr(m['binary'])})`
+    : `WebSocketMessage::text(${rustStr(String(m['text'] ?? ''))})`;
+  return m['delay'] && typeof m['delay'] === 'object' ? `${base}.delay(${delayExpr(m['delay'] as Record<string, unknown>)})` : base;
 }
 
 function wsMatcherExpr(m: Record<string, unknown>, indent: number): string {
@@ -493,7 +527,7 @@ function webSocketExpr(ws: Record<string, unknown>, indent: number): string {
   if (Array.isArray(matchers)) for (const m of matchers) calls.push(`.matcher(${wsMatcherExpr(m as Record<string, unknown>, indent + 4)})`);
   // Emitted whenever present, including `false` — see sseExpr.
   if (typeof ws['closeConnection'] === 'boolean') calls.push(`.close_connection(${ws['closeConnection'] ? 'true' : 'false'})`);
-  if (ws['delay'] && typeof ws['delay'] === 'object') calls.push(`.delay(${delayExpr(ws['delay'] as Record<string, unknown>)})`);
+  calls.push(...inheritedCalls(ws));
   return chain('HttpWebSocketResponse::new()', calls, indent);
 }
 
@@ -536,6 +570,7 @@ function dnsResponseExpr(dns: Record<string, unknown>, indent: number): string |
       calls.push(`.${method}(${recExpr})`);
     }
   }
+  calls.push(...inheritedCalls(dns));
   return chain('DnsResponse::new()', calls, indent);
 }
 
@@ -555,12 +590,13 @@ function grpcStreamExpr(grpc: Record<string, unknown>, indent: number): string {
       const mo = m as Record<string, unknown>;
       let call = `GrpcStreamMessage::json(${rustStr(String(mo['json'] ?? ''))})`;
       if (typeof mo['templateType'] === 'string') call += `.template_type(${rustStr(mo['templateType'])})`;
+      if (mo['delay'] && typeof mo['delay'] === 'object') call += `.delay(${delayExpr(mo['delay'] as Record<string, unknown>)})`;
       calls.push(`.message(${call})`);
     }
   }
   // Emitted whenever present, including `false` — see sseExpr.
   if (typeof grpc['closeConnection'] === 'boolean') calls.push(`.close_connection(${grpc['closeConnection'] ? 'true' : 'false'})`);
-  if (grpc['delay'] && typeof grpc['delay'] === 'object') calls.push(`.delay(${delayExpr(grpc['delay'] as Record<string, unknown>)})`);
+  calls.push(...inheritedCalls(grpc));
   return chain('GrpcStreamResponse::new()', calls, indent);
 }
 
@@ -920,23 +956,25 @@ function renderPrimaryAction(key: string, value: unknown, ctx: Ctx, indent: numb
     case 'httpForward':
       return inline(`.forward(${forwardExpr(obj, indent + 4)})`);
     case 'httpResponseTemplate':
-      return inline(`.respond_template(${templateExpr(obj, indent + 4)})`);
+      return inline(`.respond_template(${templateGapNote(obj)}${templateExpr(obj, indent + 4)})`);
     case 'httpForwardTemplate':
-      return inline(`.forward_template(${templateExpr(obj, indent + 4)})`);
+      return inline(`.forward_template(${templateGapNote(obj)}${templateExpr(obj, indent + 4)})`);
     case 'httpError':
       return inline(`.error(${errorExpr(obj, indent + 4)})`);
     case 'httpResponseClassCallback':
-      return inline(`.respond_with_class_callback(${rustStr(String(obj['callbackClass'] ?? ''))})`);
-    case 'httpForwardClassCallback':
-      return inline(`.forward_with_class_callback(${rustStr(String(obj['callbackClass'] ?? ''))})`);
+    case 'httpForwardClassCallback': {
+      const cls = rustStr(String(obj['callbackClass'] ?? ''));
+      const calls = inheritedCalls(obj);
+      const respond = key === 'httpResponseClassCallback';
+      if (calls.length === 0) return inline(`.${respond ? 'respond_with' : 'forward_with'}_class_callback(${cls})`);
+      return inline(`.${respond ? 'respond' : 'forward'}_class_callback(${chain(`HttpClassCallback::new(${cls})`, calls, indent + 4)})`);
+    }
     case 'httpSseResponse':
       return inline(`.respond_sse(${sseExpr(obj, indent + 4)})`);
     case 'httpWebSocketResponse':
       return inline(`.respond_web_socket(${webSocketExpr(obj, indent + 4)})`);
     case 'binaryResponse': {
-      const calls: string[] = [];
-      if (isObjR(obj['delay'])) calls.push(`.delay(${delayExpr(obj['delay'])})`);
-      if (typeof obj['primary'] === 'boolean') calls.push(`.primary(${obj['primary']})`);
+      const calls = inheritedCalls(obj);
       const base = typeof obj['binaryData'] === 'string' && obj['binaryData'] !== ''
         ? `BinaryResponse::from_base64(${rustStr(obj['binaryData'])})`
         : 'BinaryResponse::new()';
@@ -965,7 +1003,8 @@ function renderPrimaryAction(key: string, value: unknown, ctx: Ctx, indent: numb
         setup.push(...r.setup);
         calls.push(`.response_override(${r.expr})`);
       }
-      return { setup, expr: `.override_forwarded_request(${chain('HttpOverrideForwardedRequest::new()', calls, indent + 4)})` };
+      const override = (ind: number) => chain('HttpOverrideForwardedRequest::new()', calls, ind);
+      return { setup, expr: `.override_forwarded_request(${withInheritedFields('HttpOverrideForwardedRequest', override, obj, indent + 4)})` };
     }
     case 'httpForwardWithFallback': {
       const setup: string[] = [];
@@ -980,7 +1019,8 @@ function renderPrimaryAction(key: string, value: unknown, ctx: Ctx, indent: numb
       // on the server, so dropping an explicit `false` would invert the selection.
       if (typeof obj['fallbackOnTimeout'] === 'boolean') calls.push(`.fallback_on_timeout(${obj['fallbackOnTimeout'] ? 'true' : 'false'})`);
       const head = `HttpForwardWithFallback::new(${forwardExpr(fwd, indent + 4)}, ${fbRendered.expr})`;
-      return { setup, expr: `.forward_with_fallback(${chain(head, calls, indent + 4)})` };
+      const fallback = (ind: number) => chain(head, calls, ind);
+      return { setup, expr: `.forward_with_fallback(${withInheritedFields('HttpForwardWithFallback', fallback, obj, indent + 4)})` };
     }
     default:
       return { expectationExtra: [key, value] };

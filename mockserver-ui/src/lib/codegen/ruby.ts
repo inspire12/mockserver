@@ -286,6 +286,13 @@ function httpResponse(className: 'HttpResponse', w: Obj, indent: number): string
 // Action renderers
 // ---------------------------------------------------------------------------
 
+/** The delay and primary every action inherits. */
+function inherited(w: Obj, args: Arg[], indent: number): Arg[] {
+  if ('delay' in w) args.push({ name: 'delay', value: delay(w['delay'] as Obj, indent + 2) });
+  if ('primary' in w) args.push({ name: 'primary', value: scalar(w['primary']) });
+  return args;
+}
+
 function httpForward(w: Obj, indent: number): string {
   const args: Arg[] = [];
   for (const [wk, arg] of [['host', 'host'], ['port', 'port'], ['scheme', 'scheme']] as [string, string][]) {
@@ -301,15 +308,13 @@ function httpTemplate(w: Obj, indent: number): string {
   if ('templateType' in w) args.push({ name: 'template_type', value: rb(String(w['templateType'])) });
   if ('template' in w) args.push({ name: 'template', value: rb(String(w['template'])) });
   if ('templateFile' in w) args.push({ name: 'template_file', value: rb(String(w['templateFile'])) });
-  if ('delay' in w) args.push({ name: 'delay', value: delay(w['delay'] as Obj, indent + 2) });
-  return ctor('HttpTemplate', args, indent);
+  return ctor('HttpTemplate', inherited(w, args, indent), indent);
 }
 
 function httpClassCallback(w: Obj, indent: number): string {
   const args: Arg[] = [];
   if ('callbackClass' in w) args.push({ name: 'callback_class', value: rb(String(w['callbackClass'])) });
-  if ('delay' in w) args.push({ name: 'delay', value: delay(w['delay'] as Obj, indent + 2) });
-  return ctor('HttpClassCallback', args, indent);
+  return ctor('HttpClassCallback', inherited(w, args, indent), indent);
 }
 
 function httpError(w: Obj, indent: number): string {
@@ -317,8 +322,7 @@ function httpError(w: Obj, indent: number): string {
   if ('dropConnection' in w) args.push({ name: 'drop_connection', value: scalar(w['dropConnection']) });
   if ('responseBytes' in w) args.push({ name: 'response_bytes', value: rb(String(w['responseBytes'])) });
   if ('streamError' in w) args.push({ name: 'stream_error', value: scalar(w['streamError']) });
-  if ('delay' in w) args.push({ name: 'delay', value: delay(w['delay'] as Obj, indent + 2) });
-  return ctor('HttpError', args, indent);
+  return ctor('HttpError', inherited(w, args, indent), indent);
 }
 
 function httpForwardWithFallback(w: Obj, indent: number): string {
@@ -327,7 +331,7 @@ function httpForwardWithFallback(w: Obj, indent: number): string {
   if ('fallbackResponse' in w) args.push({ name: 'fallback_response', value: httpResponse('HttpResponse', w['fallbackResponse'] as Obj, indent + 2) });
   if ('fallbackOnStatusCodes' in w) args.push({ name: 'fallback_on_status_codes', value: rbValue(w['fallbackOnStatusCodes'], indent + 2) });
   if ('fallbackOnTimeout' in w) args.push({ name: 'fallback_on_timeout', value: scalar(w['fallbackOnTimeout']) });
-  return ctor('HttpForwardWithFallback', args, indent);
+  return ctor('HttpForwardWithFallback', inherited(w, args, indent), indent);
 }
 
 function webSocketMessage(w: Obj, indent: number): string {
@@ -359,7 +363,7 @@ function httpWebSocketResponse(w: Obj, indent: number): string {
     args.push({ name: 'matchers', value: arrayOf(matchers, indent + 2) });
   }
   if ('closeConnection' in w) args.push({ name: 'close_connection', value: scalar(w['closeConnection']) });
-  return ctor('HttpWebSocketResponse', args, indent);
+  return ctor('HttpWebSocketResponse', inherited(w, args, indent), indent);
 }
 
 function httpSseResponse(w: Obj, indent: number): string {
@@ -374,21 +378,20 @@ function httpSseResponse(w: Obj, indent: number): string {
       if ('data' in eo) ea.push({ name: 'data', value: rb(String(eo['data'])) });
       if ('id' in eo) ea.push({ name: 'id', value: rb(String(eo['id'])) });
       if ('retry' in eo) ea.push({ name: 'retry_ms', value: scalar(eo['retry']) });
+      if ('delay' in eo) ea.push({ name: 'delay', value: delay(eo['delay'] as Obj, indent + 6) });
       return ctor('SseEvent', ea, indent + 4);
     });
     args.push({ name: 'events', value: arrayOf(events, indent + 2) });
   }
   if ('closeConnection' in w) args.push({ name: 'close_connection', value: scalar(w['closeConnection']) });
-  return ctor('HttpSseResponse', args, indent);
+  return ctor('HttpSseResponse', inherited(w, args, indent), indent);
 }
 
 function binaryResponse(w: Obj, indent: number): string {
   const args: Arg[] = [];
   if ('binaryData' in w) args.push({ name: 'binary_data', value: rb(String(w['binaryData'])) });
   if (typeof w['upstream'] === 'string') args.push({ name: 'upstream', value: rb(w['upstream']) });
-  if ('delay' in w) args.push({ name: 'delay', value: delay(w['delay'] as Obj, indent + 2) });
-  if ('primary' in w) args.push({ name: 'primary', value: scalar(w['primary']) });
-  return ctor('BinaryResponse', args, indent);
+  return ctor('BinaryResponse', inherited(w, args, indent), indent);
 }
 
 const DNS_RECORD_FIELDS: [string, string][] = [
@@ -408,7 +411,7 @@ function dnsResponse(w: Obj, indent: number): string {
   if ('answerRecords' in w) args.push({ name: 'answer_records', value: arrayOf(records('answerRecords'), indent + 2) });
   if ('authorityRecords' in w) args.push({ name: 'authority_records', value: arrayOf(records('authorityRecords'), indent + 2) });
   if ('additionalRecords' in w) args.push({ name: 'additional_records', value: arrayOf(records('additionalRecords'), indent + 2) });
-  return ctor('DnsResponse', args, indent);
+  return ctor('DnsResponse', inherited(w, args, indent), indent);
 }
 
 function grpcStreamResponse(w: Obj, indent: number): string {
@@ -422,12 +425,13 @@ function grpcStreamResponse(w: Obj, indent: number): string {
       const ma: Arg[] = [];
       if ('json' in mo) ma.push({ name: 'json', value: rb(String(mo['json'])) });
       if ('templateType' in mo) ma.push({ name: 'template_type', value: rb(String(mo['templateType'])) });
+      if ('delay' in mo) ma.push({ name: 'delay', value: delay(mo['delay'] as Obj, indent + 6) });
       return ctor('GrpcStreamMessage', ma, indent + 4);
     });
     args.push({ name: 'messages', value: arrayOf(msgs, indent + 2) });
   }
   if ('closeConnection' in w) args.push({ name: 'close_connection', value: scalar(w['closeConnection']) });
-  return ctor('GrpcStreamResponse', args, indent);
+  return ctor('GrpcStreamResponse', inherited(w, args, indent), indent);
 }
 
 /** camelCase wire key → snake_case attr, for the flat HttpChaosProfile fields. */

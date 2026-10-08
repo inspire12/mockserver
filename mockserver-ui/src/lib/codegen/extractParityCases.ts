@@ -9,6 +9,7 @@
  * golden harness (./ruby.test.ts against ./__fixtures__/rubyGolden.ts).
  */
 import {
+  buildExpectationJson,
   standardToGo,
   type StandardMatcher,
   type StandardActionPayload,
@@ -418,7 +419,86 @@ export const combos: Combo[] = [
     },
     baseUrl: BASE_URL,
   },
+  // -------------------------------------------------------------------------
+  // Edits whose original action carries fields the form does not show (delay,
+  // primary, per-message delays). The saved JSON keeps them, so every emitter
+  // must render them (or name what its client model cannot hold).
+  // -------------------------------------------------------------------------
+  keptFieldsEdit('kept-static', { type: 'static', static: { statusCode: 200, body: 'ok', contentType: '', bodyFromFile: false, filePath: '', fileTemplateType: '' } }, 'httpResponse',
+    (w) => ({ ...w, delay: { timeUnit: 'HOURS', value: 1 }, primary: true })),
+  keptFieldsEdit('kept-forward', { type: 'forward', forward: { scheme: 'HTTP', host: 'up.example.com', port: 8080 } }, 'httpForward',
+    (w) => ({ ...w, delay: { timeUnit: 'SECONDS', value: 2 }, primary: true })),
+  keptFieldsEdit('kept-error', { type: 'error', error: { dropConnection: true, responseBytesB64: '', delayValue: 0, delayUnit: 'MILLISECONDS' } }, 'httpError',
+    (w) => ({ ...w, delay: { timeUnit: 'DAYS', value: 1 }, primary: true })),
+  keptFieldsEdit('kept-callback', { type: 'callback', callback: { callbackClass: 'com.example.MyCallback' } }, 'httpResponseClassCallback',
+    (w) => ({ ...w, delay: { timeUnit: 'SECONDS', value: 2 }, primary: true })),
+  keptFieldsEdit('kept-template', { type: 'template', template: { templateType: 'MUSTACHE', template: '{"a":1}' } }, 'httpResponseTemplate',
+    (w) => ({ ...w, delay: { timeUnit: 'SECONDS', value: 2 }, primary: true })),
+  keptFieldsEdit('kept-forward-override', {
+    type: 'forward_override',
+    forwardOverride: { overrideMethod: '', overrideHost: '', overrideScheme: '', overridePath: '/v2', overrideQueryString: '', overrideHeaders: '', overrideBody: '' },
+  }, 'httpOverrideForwardedRequest', (w) => ({ ...w, delay: { timeUnit: 'SECONDS', value: 2 }, primary: true })),
+  keptFieldsEdit('kept-forward-fallback', {
+    type: 'forward_fallback',
+    forwardFallback: { scheme: 'HTTP', host: 'up.example.com', port: 80, fallbackStatusCode: 503, fallbackBody: '', fallbackOnStatusCodes: '', fallbackOnTimeout: true },
+  }, 'httpForwardWithFallback', (w) => ({ ...w, delay: { timeUnit: 'SECONDS', value: 2 }, primary: true })),
+  keptFieldsEdit('kept-websocket', {
+    type: 'websocket',
+    websocket: { subprotocol: '', messages: 'hello\nworld', closeConnection: true, matchers: [{ frameType: 'TEXT', textMatcher: 'ping', responses: 'pong' }] },
+  }, 'httpWebSocketResponse', (w) => ({
+    ...w,
+    messages: (w['messages'] as Record<string, unknown>[]).map((m) => ({ ...m, delay: { timeUnit: 'MILLISECONDS', value: 100 } })),
+    matchers: (w['matchers'] as Record<string, unknown>[]).map((m) => ({
+      ...m,
+      responses: (m['responses'] as Record<string, unknown>[]).map((r) => ({ ...r, delay: { timeUnit: 'MILLISECONDS', value: 50 } })),
+    })),
+    delay: { timeUnit: 'SECONDS', value: 1 },
+    primary: true,
+  })),
+  keptFieldsEdit('kept-sse', {
+    type: 'sse',
+    sse: { statusCode: 200, headers: '', events: [{ event: 'tick', data: 'd', id: '', retry: '' }], closeConnection: true },
+  }, 'httpSseResponse', (w) => ({
+    ...w,
+    events: (w['events'] as Record<string, unknown>[]).map((e) => ({ ...e, delay: { timeUnit: 'MILLISECONDS', value: 100 } })),
+    delay: { timeUnit: 'SECONDS', value: 1 },
+    primary: true,
+  })),
+  keptFieldsEdit('kept-grpc-stream', {
+    type: 'grpc_stream',
+    grpcStream: { statusName: 'OK', statusMessage: '', headers: '', messages: '{"a":1}', closeConnection: false },
+  }, 'grpcStreamResponse', (w) => ({
+    ...w,
+    messages: (w['messages'] as Record<string, unknown>[]).map((m) => ({ ...m, delay: { timeUnit: 'MILLISECONDS', value: 100 }, templateType: 'MUSTACHE' })),
+    delay: { timeUnit: 'SECONDS', value: 1 },
+    primary: true,
+  })),
 ];
+
+/**
+ * An edit of a form-modeled action whose original carries extra fields: `addKept`
+ * turns the form's own output (the edit baseline) into the loaded original.
+ */
+function keptFieldsEdit(
+  name: string,
+  form: StandardActionPayload,
+  key: string,
+  addKept: (wire: Record<string, unknown>) => Record<string, unknown>,
+): Combo {
+  const matcher = baseMatcher({ path: '/kept' });
+  const baseline = buildExpectationJson(matcher, form)[key] as Record<string, unknown>;
+  return {
+    name,
+    matcher,
+    action: {
+      ...form,
+      editOriginal: { httpRequest: { method: 'GET', path: '/kept' }, [key]: addKept(structuredClone(baseline)) },
+      editActionModeled: true,
+      editActionBaseline: { [key]: baseline },
+    },
+    baseUrl: BASE_URL,
+  };
+}
 
 // NOTE: `python` is intentionally NOT in this map. The Python emitter was
 // rewritten to build typed client objects (see ../python.ts) rather than embed a

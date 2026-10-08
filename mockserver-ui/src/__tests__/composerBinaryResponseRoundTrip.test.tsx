@@ -125,7 +125,7 @@ describe('editing a binaryResponse expectation', () => {
         <ComposerView connectionParams={params} />
       </ThemeProvider>,
     );
-    const note = await screen.findByTestId('binary-response-kept-fields');
+    const note = await screen.findByTestId('kept-action-fields');
     expect(note).toHaveTextContent('delay 2 SECONDS');
     expect(note).toHaveTextContent('primary');
   });
@@ -149,9 +149,9 @@ describe('editing a binaryResponse expectation', () => {
         <ComposerView connectionParams={params} />
       </ThemeProvider>,
     );
-    await screen.findByTestId('binary-response-kept-fields');
+    await screen.findByTestId('kept-action-fields');
     await user.click(screen.getByRole('button', { name: /New \/ clear/ }));
-    expect(screen.queryByTestId('binary-response-kept-fields')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('kept-action-fields')).not.toBeInTheDocument();
     await user.type(screen.getByLabelText('Path'), '/fresh');
     await user.click(screen.getByRole('button', { name: /Register expectation/ }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
@@ -175,7 +175,7 @@ describe('editing a binaryResponse expectation', () => {
         <ComposerView connectionParams={params} />
       </ThemeProvider>,
     );
-    await screen.findByTestId('binary-response-kept-fields');
+    await screen.findByTestId('kept-action-fields');
     const second = {
       id: 'static-second',
       httpRequest: { method: 'GET', path: '/static' },
@@ -190,7 +190,7 @@ describe('editing a binaryResponse expectation', () => {
     await waitFor(() => expect((screen.getByLabelText('Path') as HTMLInputElement).value).toBe('/static'));
     await user.click(screen.getByRole('radio', { name: /Binary response/ }));
     expect(screen.getByLabelText('Binary data (base64)')).toBeInTheDocument();
-    expect(screen.queryByTestId('binary-response-kept-fields')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('kept-action-fields')).not.toBeInTheDocument();
   });
 
   it('an expectation without delay or primary does not gain them', async () => {
@@ -201,6 +201,6 @@ describe('editing a binaryResponse expectation', () => {
     };
     const sent = await saveUntouched(original);
     expect(sent['binaryResponse']).toEqual(original.binaryResponse);
-    expect(screen.queryByTestId('binary-response-kept-fields')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('kept-action-fields')).not.toBeInTheDocument();
   });
 });

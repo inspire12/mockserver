@@ -124,6 +124,13 @@ class PyBuilder {
     return renderInline('Delay', kw);
   }
 
+  /** The delay and primary every action inherits. */
+  private inherited(o: Json, kw: Kw[]): Kw[] {
+    if (o['delay'] != null) kw.push(['delay', this.delay(o['delay'])]);
+    if (typeof o['primary'] === 'boolean') kw.push(['primary', pyBool(o['primary'])]);
+    return kw;
+  }
+
   /** A request/response body wire value → the typed Body / *Body matcher. */
   private body(v: unknown, indent: number): string {
     if (typeof v === 'string') return pyStr(v);
@@ -271,6 +278,7 @@ class PyBuilder {
     if (o['cookies'] != null) kw.push(['cookies', this.cookieList(o['cookies'], indent + 4)]);
     if (o['delay'] != null) kw.push(['delay', this.delay(o['delay'])]);
     if (o['connectionOptions'] != null) kw.push(['connection_options', this.connectionOptions(o['connectionOptions'], indent + 4)]);
+    if (typeof o['primary'] === 'boolean') kw.push(['primary', pyBool(o['primary'])]);
     return renderCall('HttpResponse', kw, indent);
   }
 
@@ -281,7 +289,7 @@ class PyBuilder {
     if (o['scheme'] != null) kw.push(['scheme', pyStr(o['scheme'])]);
     if (o['host'] != null) kw.push(['host', pyStr(o['host'])]);
     if (o['port'] != null) kw.push(['port', pyNum(o['port'])]);
-    return renderCall('HttpForward', kw, indent);
+    return renderCall('HttpForward', this.inherited(o, kw), indent);
   }
 
   private override(v: unknown, indent: number): string {
@@ -290,13 +298,13 @@ class PyBuilder {
     const req = o['requestOverride'] as Json | undefined;
     const kw: Kw[] = [];
     if (req) kw.push(['http_request', this.request(req, indent + 4)]);
-    return renderCall('HttpOverrideForwardedRequest', kw, indent);
+    return renderCall('HttpOverrideForwardedRequest', this.inherited(o, kw), indent);
   }
 
   private classCallback(v: unknown, indent: number): string {
     this.use('HttpClassCallback');
     const o = v as Json;
-    return renderCall('HttpClassCallback', [['callback_class', pyStr(o['callbackClass'])]], indent);
+    return renderCall('HttpClassCallback', this.inherited(o, [['callback_class', pyStr(o['callbackClass'])]]), indent);
   }
 
   private template(v: unknown, indent: number): string {
@@ -305,7 +313,7 @@ class PyBuilder {
     const kw: Kw[] = [['template_type', pyStr(o['templateType'])]];
     if (o['template'] != null) kw.push(['template', pyStr(o['template'])]);
     if (o['templateFile'] != null) kw.push(['template_file', pyStr(o['templateFile'])]);
-    return renderCall('HttpTemplate', kw, indent);
+    return renderCall('HttpTemplate', this.inherited(o, kw), indent);
   }
 
   private error(v: unknown, indent: number): string {
@@ -314,8 +322,7 @@ class PyBuilder {
     const kw: Kw[] = [];
     if (o['dropConnection'] != null) kw.push(['drop_connection', pyBool(o['dropConnection'])]);
     if (o['responseBytes'] != null) kw.push(['response_bytes', pyStr(o['responseBytes'])]);
-    if (o['delay'] != null) kw.push(['delay', this.delay(o['delay'])]);
-    return renderCall('HttpError', kw, indent);
+    return renderCall('HttpError', this.inherited(o, kw), indent);
   }
 
   private forwardWithFallback(v: unknown, indent: number): string {
@@ -326,7 +333,7 @@ class PyBuilder {
     if (o['fallbackResponse'] != null) kw.push(['fallback_response', this.response(o['fallbackResponse'], indent + 4)]);
     if (o['fallbackOnStatusCodes'] != null) kw.push(['fallback_on_status_codes', intArray(o['fallbackOnStatusCodes'])]);
     if (o['fallbackOnTimeout'] != null) kw.push(['fallback_on_timeout', pyBool(o['fallbackOnTimeout'])]);
-    return renderCall('HttpForwardWithFallback', kw, indent);
+    return renderCall('HttpForwardWithFallback', this.inherited(o, kw), indent);
   }
 
   private webSocket(v: unknown, indent: number): string {
@@ -347,12 +354,16 @@ class PyBuilder {
       });
       kw.push(['matchers', renderList(matchers, indent + 4)]);
     }
-    return renderCall('HttpWebSocketResponse', kw, indent);
+    return renderCall('HttpWebSocketResponse', this.inherited(o, kw), indent);
   }
 
   private wsMessages(v: unknown, indent: number): string {
     this.use('WebSocketMessage');
-    const items = (v as Json[]).map((m) => renderInline('WebSocketMessage', [['text', pyStr(m['text'])]]));
+    const items = (v as Json[]).map((m) => {
+      const mk: Kw[] = [['text', pyStr(m['text'])]];
+      if (m['delay'] != null) mk.push(['delay', this.delay(m['delay'])]);
+      return renderInline('WebSocketMessage', mk);
+    });
     return renderList(items, indent);
   }
 
@@ -370,12 +381,13 @@ class PyBuilder {
         if (e['data'] != null) ek.push(['data', pyStr(e['data'])]);
         if (e['id'] != null) ek.push(['id', pyStr(e['id'])]);
         if (e['retry'] != null) ek.push(['retry', pyNum(e['retry'])]);
+        if (e['delay'] != null) ek.push(['delay', this.delay(e['delay'])]);
         return renderInline('SseEvent', ek);
       });
       kw.push(['events', renderList(events, indent + 4)]);
     }
     if (o['closeConnection'] != null) kw.push(['close_connection', pyBool(o['closeConnection'])]);
-    return renderCall('HttpSseResponse', kw, indent);
+    return renderCall('HttpSseResponse', this.inherited(o, kw), indent);
   }
 
   private binary(v: unknown, indent: number): string {
@@ -412,7 +424,7 @@ class PyBuilder {
       });
       kw.push(['answer_records', renderList(records, indent + 4)]);
     }
-    return renderCall('DnsResponse', kw, indent);
+    return renderCall('DnsResponse', this.inherited(o, kw), indent);
   }
 
   private grpc(v: unknown, indent: number): string {
@@ -424,11 +436,10 @@ class PyBuilder {
     if (o['headers'] != null) kw.push(['headers', this.keyMultiList(o['headers'], indent + 4)]);
     if (o['messages'] != null) {
       this.use('GrpcStreamMessage');
-      const msgs = (o['messages'] as Json[]).map((m) => renderInline('GrpcStreamMessage', [['json', pyStr(m['json'])]]));
-      kw.push(['messages', renderList(msgs, indent + 4)]);
+      kw.push(['messages', this.grpcMessages(o['messages'], indent + 4)]);
     }
     if (o['closeConnection'] != null) kw.push(['close_connection', pyBool(o['closeConnection'])]);
-    return renderCall('GrpcStreamResponse', kw, indent);
+    return renderCall('GrpcStreamResponse', this.inherited(o, kw), indent);
   }
 
   private chaos(v: unknown, indent: number): string {
@@ -734,7 +745,12 @@ class PyBuilder {
 
   private grpcMessages(v: unknown, indent: number): string {
     this.use('GrpcStreamMessage');
-    const items = (v as Json[]).map((m) => renderInline('GrpcStreamMessage', [['json', pyStr(m['json'])]]));
+    const items = (v as Json[]).map((m) => {
+      const mk: Kw[] = [['json', pyStr(m['json'])]];
+      if (m['delay'] != null) mk.push(['delay', this.delay(m['delay'])]);
+      if (m['templateType'] != null) mk.push(['template_type', pyStr(m['templateType'])]);
+      return renderInline('GrpcStreamMessage', mk);
+    });
     return renderList(items, indent);
   }
 

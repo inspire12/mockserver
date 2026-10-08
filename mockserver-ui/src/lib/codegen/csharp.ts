@@ -245,10 +245,18 @@ function renderAllOfSub(sub: unknown): string | null {
   }
 }
 
+/** Action fields the .NET client models do not declare, so deserializing drops them. */
+const DOTNET_MODEL_GAPS: Record<string, readonly string[]> = {
+  HttpTemplate: ['delay', 'primary'],
+  HttpOverrideForwardedRequest: ['primary'],
+};
+
 /** Deserialize a fragment into a typed model (fidelity fallback for shapes not modelled inline). */
 function rawTyped(type: string, value: unknown, ctx: Ctx): string {
   ctx.usings.add('System.Text.Json');
-  return `JsonSerializer.Deserialize<${type}>(${csVerbatim(stableJson(value))})`;
+  const dropped = isObject(value) ? (DOTNET_MODEL_GAPS[type] ?? []).filter((k) => k in value) : [];
+  const note = dropped.length > 0 ? `/* NOTE: the .NET ${type} model has no ${dropped.join(', ')}; omitted */ ` : '';
+  return `${note}JsonSerializer.Deserialize<${type}>(${csVerbatim(stableJson(value))})`;
 }
 
 // ---------------------------------------------------------------------------

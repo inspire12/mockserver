@@ -20,7 +20,7 @@
 import { mkdirSync, writeFileSync, readdirSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { standardToJava } from '../src/lib/standardCodegen.ts';
+import { standardToJava, buildExpectationJson } from '../src/lib/standardCodegen.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 const outDir = resolve(process.argv[2] || join(here, '..', '.tmp', 'java-codegen-samples'));
@@ -243,7 +243,40 @@ const extras = [
   },
 ];
 
-const cases = [kitchenSink, ...terminalActions, editOverlay, llmPreserved, responseSequencePreserved, crossProtocolPreserved, ...extras];
+// (g) Edits whose original carries fields the form does not show (delay, primary,
+//     per-message fields): the Java tab renders them from the saved JSON.
+const WIRE_KEY = {
+  static: 'httpResponse', template: 'httpResponseTemplate', forward: 'httpForward',
+  forward_override: 'httpOverrideForwardedRequest', forward_fallback: 'httpForwardWithFallback',
+  forward_template: 'httpForwardTemplate', forward_class_callback: 'httpForwardClassCallback',
+  callback: 'httpResponseClassCallback', error: 'httpError', websocket: 'httpWebSocketResponse',
+  sse: 'httpSseResponse', binary_response: 'binaryResponse', dns_response: 'dnsResponse',
+  grpc_stream: 'grpcStreamResponse',
+};
+const itemDelay = { timeUnit: 'SECONDS', value: 2 };
+function withKeptFields(type, wire) {
+  const kept = { ...wire, delay: { timeUnit: 'HOURS', value: 1 }, primary: true };
+  if (type === 'websocket') kept.messages = [...wire.messages.map((m) => ({ ...m, delay: itemDelay })), { binary: 'AAE=' }];
+  if (type === 'sse') kept.events = wire.events.map((e) => ({ ...e, delay: itemDelay }));
+  if (type === 'grpc_stream') kept.messages = wire.messages.map((m) => ({ ...m, delay: itemDelay, templateType: 'MUSTACHE' }));
+  return kept;
+}
+const keptFieldEdits = terminalActions.map(({ name, matcher, action }) => {
+  const key = WIRE_KEY[action.type];
+  const baseline = buildExpectationJson(matcher, action)[key];
+  return {
+    name: 'kept_' + name,
+    matcher,
+    action: {
+      ...action,
+      editOriginal: { httpRequest: { path: '/api' }, [key]: withKeptFields(action.type, baseline) },
+      editActionModeled: true,
+      editActionBaseline: { [key]: baseline },
+    },
+  };
+});
+
+const cases = [kitchenSink, ...terminalActions, editOverlay, llmPreserved, responseSequencePreserved, crossProtocolPreserved, ...extras, ...keptFieldEdits];
 
 // Exhaustiveness guard (review INC-12): every StandardActionType member must be
 // exercised by exactly one terminalActions case, so a 15th action type added to

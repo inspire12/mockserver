@@ -49,6 +49,10 @@ import LiveResponseWidget from './LiveResponseWidget';
 import {
   buildExpectationJson,
   unmodeledFieldNames,
+  keptActionFields,
+  keptFieldLabel,
+  clearKeptActionField,
+  type KeptActionField,
   ACTION_FAMILY_KEYS,
   chaosFromExpectation,
   captureFromExpectation,
@@ -2761,9 +2765,6 @@ function BinaryResponsePanel({
   state: StandardBinaryResponseState;
   setState: (s: StandardBinaryResponseState) => void;
 }) {
-  const kept: string[] = [];
-  if (state.delay) kept.push(`delay ${String(state.delay['value'] ?? '')} ${String(state.delay['timeUnit'] ?? '')}`.trim());
-  if (state.primary !== undefined) kept.push(`primary ${state.primary}`);
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
       <Typography variant="body2" color="text.secondary">
@@ -2798,11 +2799,97 @@ function BinaryResponsePanel({
         <MenuItem value="ANSWER_AND_FORWARD">Answer and forward (drop the upstream reply)</MenuItem>
         <MenuItem value="FORWARD_AND_REPLACE">Forward and replace the upstream reply</MenuItem>
       </TextField>
-      {kept.length > 0 && (
-        <Typography variant="caption" color="text.secondary" data-testid="binary-response-kept-fields">
-          Kept unchanged from the loaded expectation: {kept.join(', ')}
-        </Typography>
-      )}
+    </Box>
+  );
+}
+
+/** The binary response fields the form carries from a loaded expectation without editing them. */
+function binaryCarriedFieldItems(
+  state: StandardBinaryResponseState,
+  setState: (update: (s: StandardBinaryResponseState) => StandardBinaryResponseState) => void,
+): KeptFieldItem[] {
+  const without = (field: 'delay' | 'primary') => () => setState((s) => {
+    const next = { ...s };
+    delete next[field];
+    return next;
+  });
+  const items: KeptFieldItem[] = [];
+  if (state.delay) items.push({ label: 'delay', value: state.delay, onRemove: without('delay') });
+  if (state.primary !== undefined) items.push({ label: 'primary', value: state.primary, onRemove: without('primary') });
+  return items;
+}
+
+// ---------------------------------------------------------------------------
+// Kept action fields panel
+// ---------------------------------------------------------------------------
+
+interface KeptFieldItem {
+  label: string;
+  value: unknown;
+  /** What the form shows for this field, when it shows it differently. */
+  formValue?: unknown;
+  onRemove: () => void;
+}
+
+function formatKeptValue(v: unknown): string {
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    const d = v as Record<string, unknown>;
+    if (Object.keys(d).length === 2 && typeof d['value'] === 'number' && typeof d['timeUnit'] === 'string') {
+      return `${d['value']} ${d['timeUnit']}`;
+    }
+  }
+  return JSON.stringify(v);
+}
+
+interface KeptRemovals {
+  original: Record<string, unknown> | null;
+  fields: KeptActionField[];
+}
+
+const NO_KEPT_REMOVALS: KeptRemovals = { original: null, fields: [] };
+
+function keptFieldItems(fields: KeptActionField[], onRemove: (f: KeptActionField) => void): KeptFieldItem[] {
+  return fields.map((f) => ({
+    label: keptFieldLabel(f),
+    value: f.value,
+    formValue: f.baselineValue,
+    onRemove: () => onRemove(f),
+  }));
+}
+
+/**
+ * Action fields a save keeps from the loaded expectation although the form does not
+ * show them (or shows them differently), each with a control that stops keeping it.
+ */
+function KeptFieldsPanel({ items }: { items: KeptFieldItem[] }) {
+  if (items.length === 0) return null;
+  return (
+    <Box data-testid="kept-action-fields" sx={{ mt: 1.5, p: 1.5, border: 1, borderColor: 'divider', borderRadius: 1 }}>
+      <Typography variant="subtitle2" color="text.secondary">Other fields</Typography>
+      <Typography variant="caption" color="text.secondary" component="div" sx={{ mb: 0.5 }}>
+        Kept from the loaded expectation and saved as shown; this form cannot edit them.
+      </Typography>
+      {items.map((item) => {
+        const action = item.formValue === undefined ? `Remove ${item.label}` : `Use the form's ${item.label}`;
+        return (
+          <Box key={item.label} sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            <Typography
+              variant="body2"
+              sx={{ fontFamily: monospaceFontFamily, fontSize: '0.78rem', flex: 1, minWidth: 0, overflowWrap: 'anywhere' }}
+            >
+              {item.label} {formatKeptValue(item.value)}
+              {item.formValue !== undefined && (
+                <Box component="span" sx={{ color: 'text.secondary' }}> (form shows {formatKeptValue(item.formValue)})</Box>
+              )}
+            </Typography>
+            <Tooltip title={action}>
+              <IconButton size="small" aria-label={action} onClick={item.onRemove}>
+                <DeleteIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          </Box>
+        );
+      })}
     </Box>
   );
 }
@@ -3781,6 +3868,8 @@ interface QuickMockFormProps {
   /** Fields the retained original carries that this form does not model; kept on
    *  Update rather than dropped. Drives the "Preserving N fields …" indicator. */
   preservedFields: string[];
+  /** Response fields a save keeps from the loaded expectation that this form does not show. */
+  keptFields: KeptFieldItem[];
   onRegister: () => void;
   onSwitchToAdvanced: () => void;
 }
@@ -3793,6 +3882,7 @@ function QuickMockForm({
   registering,
   editingExisting,
   preservedFields,
+  keptFields,
   onRegister,
   onSwitchToAdvanced,
 }: QuickMockFormProps) {
@@ -3873,6 +3963,7 @@ function QuickMockForm({
             height={160}
           />
         )}
+        <KeptFieldsPanel items={keptFields} />
       </Box>
 
       {preservedFields.length > 0 && (
@@ -4083,6 +4174,21 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
   const [editActionModeled, setEditActionModeled] = useState(true);
   // What the form emitted for the loaded action, so a save keeps the fields left untouched.
   const [editActionBaseline, setEditActionBaseline] = useState<Record<string, unknown> | undefined>(undefined);
+  // Kept action fields removed in the Other fields panel, for the loaded original they belong to.
+  // Reset on every load and New / clear, so re-picking an expectation never reapplies an old removal.
+  const [keptRemovals, setKeptRemovals] = useState<KeptRemovals>(NO_KEPT_REMOVALS);
+  const overlayOriginal = useMemo(
+    () => (editOriginal && keptRemovals.original === editOriginal
+      ? keptRemovals.fields.reduce(clearKeptActionField, editOriginal)
+      : editOriginal),
+    [editOriginal, keptRemovals],
+  );
+  const removeKeptField = useCallback((field: KeptActionField) => {
+    setKeptRemovals((r) => ({
+      original: editOriginal,
+      fields: r.original === editOriginal ? [...r.fields, field] : [field],
+    }));
+  }, [editOriginal]);
   // Whether the Advanced JWT form faithfully owns the original's httpRequest.jwt
   // on edit. False when the original carries a jwt the form cannot round-trip
   // losslessly (e.g. object-form NottableString claims): the jwt is then
@@ -4188,6 +4294,7 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
       // reader, so they count as "modeled" too.
       const existingStepsForFlag = stepsFromExpectation(item.value);
       setEditOriginal(item.value);
+      setKeptRemovals(NO_KEPT_REMOVALS);
       prefillScenarioBinding(item.value);
       setEditJwtModeled(jwtFaithfullyModeled(item.value['httpRequest']));
 
@@ -4328,6 +4435,7 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
     // Drop the edit overlay so a fresh compose does not merge onto a stale
     // original (and cannot resurrect an old expectation's unmodeled fields).
     setEditOriginal(null);
+    setKeptRemovals(NO_KEPT_REMOVALS);
     setEditActionModeled(true);
     setEditJwtModeled(true);
     setScenarioBindingName('');
@@ -4381,6 +4489,7 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
       // Retain the original so Register/preview preserves unmodeled fields.
       const existingStepsForFlag = stepsFromExpectation(value);
       setEditOriginal(value);
+      setKeptRemovals(NO_KEPT_REMOVALS);
       prefillScenarioBinding(value);
       setEditJwtModeled(jwtFaithfullyModeled(value['httpRequest']));
       const prefill = actionFromExpectation(item);
@@ -4480,8 +4589,8 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
     a.scenarioModeled = true;
     // Edit overlay — carry the retained original so buildExpectationJson merges
     // the form output onto it (preserving unmodeled fields).
-    if (editOriginal) {
-      a.editOriginal = editOriginal;
+    if (overlayOriginal) {
+      a.editOriginal = overlayOriginal;
       a.editActionModeled = editActionModeled;
       a.editActionBaseline = editActionBaseline;
       // The Advanced form always renders + prefills the JWT section, so it owns
@@ -4495,7 +4604,7 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
     callbackState, templateState, errorState, websocketState, sseState, binaryResponseState,
     dnsResponseState, forwardTemplateState, forwardClassCallbackState, grpcStreamState,
     chaosEnabled, chaosState, stepsEnabled, stepsState, sideEffectsEnabled, sideEffects,
-    captureEnabled, captureRules, editOriginal, editActionModeled, editActionBaseline, editJwtModeled,
+    captureEnabled, captureRules, overlayOriginal, editActionModeled, editActionBaseline, editJwtModeled,
     scenarioBindingName, scenarioBindingState, scenarioBindingNext,
   ]);
 
@@ -4505,6 +4614,7 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
     () => (kind === 'dns' ? { ...matcher, dns: dnsMatcher } : matcher),
     [kind, matcher, dnsMatcher],
   );
+  const advancedKeptFields = useMemo(() => keptActionFields(effectiveMatcher, draftAction), [effectiveMatcher, draftAction]);
 
   // The exact expectation JSON that would be registered, used to seed the
   // "Test Matcher" playground. Empty string when the draft can't be built yet.
@@ -4609,6 +4719,9 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
             !!editOriginal &&
             'httpResponse' in editOriginal &&
             !ACTION_FAMILY_KEYS.some((k) => k !== 'httpResponse' && k in editOriginal);
+          const quickAction: StandardActionPayload = overlayOriginal
+            ? { type: 'static', static: staticState, editOriginal: overlayOriginal, editActionModeled: quickActionModeled, editActionBaseline }
+            : { type: 'static', static: staticState };
           return (
             <QuickMockForm
               matcher={matcher}
@@ -4618,16 +4731,12 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
               registering={registering}
               editingExisting={matcher.id.trim().length > 0}
               preservedFields={editOriginal ? unmodeledFieldNames(editOriginal, { actionModeled: quickActionModeled }) : []}
+              keptFields={keptFieldItems(keptActionFields(matcher, quickAction), removeKeptField)}
               // Thread the edit overlay through the Quick path too, so a Quick
               // "Update mock" preserves every field this form does not model
               // instead of PUTting form-only JSON under the same id. `editOriginal`
               // is set only when editing/duplicating; new-compose stays unaffected.
-              onRegister={() => void handleRegister(
-                editOriginal
-                  ? { type: 'static', static: staticState, editOriginal, editActionModeled: quickActionModeled, editActionBaseline }
-                  : { type: 'static', static: staticState },
-                matcher,
-              )}
+              onRegister={() => void handleRegister(quickAction, matcher)}
               onSwitchToAdvanced={() => setMode('advanced')}
             />
           );
@@ -4984,6 +5093,12 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
               {actionType === 'grpc_stream' && (
                 <GrpcStreamPanel state={grpcStreamState} setState={setGrpcStreamState} />
               )}
+              <KeptFieldsPanel
+                items={[
+                  ...(actionType === 'binary_response' ? binaryCarriedFieldItems(binaryResponseState, setBinaryResponseState) : []),
+                  ...keptFieldItems(advancedKeptFields, removeKeptField),
+                ]}
+              />
             </Paper>
 
             {/* Chaos / fault injection — optional, cross-cutting. Not shown

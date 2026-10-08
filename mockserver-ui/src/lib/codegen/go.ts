@@ -81,6 +81,7 @@ const STRUCTS: Record<string, FieldSpec[]> = {
     ['recoverAfter', 'RecoverAfter', 'struct:RecoverAfter'],
     ['connectionOptions', 'ConnectionOptions', 'struct:ConnectionOptions'],
     ['delay', 'Delay', 'struct:Delay'],
+    ['primary', 'Primary', 'boolPtr'],
   ],
   RecoverAfter: [
     ['failTimes', 'FailTimes', 'intPtr'],
@@ -117,6 +118,7 @@ const STRUCTS: Record<string, FieldSpec[]> = {
     ['port', 'Port', 'int'],
     ['scheme', 'Scheme', 'string'],
     ['delay', 'Delay', 'struct:Delay'],
+    ['primary', 'Primary', 'boolPtr'],
   ],
   HttpOverrideForwardedRequest: [
     ['requestOverride', 'RequestOverride', 'httpRequestPtr'],
@@ -171,6 +173,7 @@ const STRUCTS: Record<string, FieldSpec[]> = {
     ['responseBytes', 'ResponseBytes', 'string'],
     ['streamError', 'StreamError', 'int64Ptr'],
     ['delay', 'Delay', 'struct:Delay'],
+    ['primary', 'Primary', 'boolPtr'],
   ],
   HttpClassCallback: [
     ['callbackClass', 'CallbackClass', 'string'],
@@ -695,6 +698,9 @@ function renderStructBody(
     const val = obj[wireKey];
     if (val === null || val === undefined) continue;
     lines.push(`${tab(d + 1)}${goField}: ${renderValue(kind, val, ctx, d + 1)},`);
+  }
+  for (const key of Object.keys(obj)) {
+    if (!spec.some(([wireKey]) => wireKey === key)) lines.push(`${tab(d + 1)}// NOTE: wire key "${key}" has no typed Go field — omitted`);
   }
   if (lines.length === 0) return '{}';
   return `{\n${lines.join('\n')}\n${tab(d)}}`;
