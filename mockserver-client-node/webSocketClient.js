@@ -25,45 +25,90 @@
             return deferred;
         };
 
+        // calls back once, with the CA certificates or with (null, reason) when they cannot be had; returns the
+        // download request, if one was made, so it can be abandoned
         var downloadCACert = function (tls, caCertPath, callback) {
             // https://raw.githubusercontent.com/mock-server/mockserver-monorepo/master/mockserver/mockserver-core/src/main/resources/org/mockserver/socket/CertificateAuthorityCertificate.pem
 
             var dest = "CertificateAuthorityCertificate.pem";
-            if (!fs.existsSync('./' + dest)) {
-                var options = {
-                    protocol: 'https:',
-                    method: 'GET',
-                    host: "raw.githubusercontent.com",
-                    path: "/mock-server/mockserver-monorepo/master/mockserver/mockserver-core/src/main/resources/org/mockserver/socket/CertificateAuthorityCertificate.pem",
-                    port: 443,
-                };
-                var req = require('https').request(options);
+            var done = false;
+            var failed = function (reason) {
+                if (!done) {
+                    done = true;
+                    callback(null, reason);
+                }
+            };
+            var readCACert = function (certPath) {
+                var ca;
+                try {
+                    ca = tls ? [fs.readFileSync(certPath, {encoding: 'utf-8'})] : [];
+                } catch (e) {
+                    failed(e.message || String(e));
+                    return;
+                }
+                done = true;
+                callback(ca);
+            };
 
-                req.once('error', function (error) {
-                    console.error('Fetching ' + JSON.stringify(options, null, 2) + ' failed with error ' + error);
-                });
-
-                req.once('response', function (res) {
-                    if (res.statusCode < 200 || res.statusCode >= 300) {
-                        console.error('Fetching ' + JSON.stringify(options, null, 2) + ' failed with HTTP status code ' + res.statusCode);
-                    } else {
-                        var writeStream = fs.createWriteStream(dest);
-                        res.pipe(writeStream);
-
-                        writeStream.on('error', function (error) {
-                            console.error('Saving ' + dest + ' failed with error ' + error);
-                        });
-                        writeStream.on('close', function () {
-                            console.log('Saved ' + dest + ' from ' + JSON.stringify(options, null, 2));
-                            callback(tls ? [fs.readFileSync(caCertPath || "./" + dest, {encoding: 'utf-8'})] : []);
-                        });
-                    }
-                });
-
-                req.end();
-            } else {
-                callback(tls ? [fs.readFileSync(caCertPath || "./" + dest, {encoding: 'utf-8'})] : []);
+            if (!(tls && !caCertPath && !fs.existsSync('./' + dest))) {
+                readCACert(caCertPath || "./" + dest);
+                return null;
             }
+
+            var options = {
+                protocol: 'https:',
+                method: 'GET',
+                host: "raw.githubusercontent.com",
+                path: "/mock-server/mockserver-monorepo/master/mockserver/mockserver-core/src/main/resources/org/mockserver/socket/CertificateAuthorityCertificate.pem",
+                port: 443,
+            };
+            var req = require('https').request(options);
+
+            req.once('error', function (error) {
+                failed('Fetching ' + JSON.stringify(options, null, 2) + ' failed with error ' + error);
+            });
+
+            req.once('response', function (res) {
+                if (res.statusCode < 200 || res.statusCode >= 300) {
+                    res.resume();
+                    failed('Fetching ' + JSON.stringify(options, null, 2) + ' failed with HTTP status code ' + res.statusCode);
+                } else {
+                    // written beside its destination and renamed into place only when complete, so a download
+                    // that is cut off or abandoned never leaves a truncated certificate for later runs to trust
+                    var tempPath = dest.replace(/\.pem$/, '') + '.' + process.pid + '.' + Date.now() + '.tmp.pem';
+                    var writeStream = fs.createWriteStream(tempPath);
+                    var discard = function (reason) {
+                        writeStream.destroy();
+                        fs.unlink(tempPath, function () {
+                        });
+                        failed(reason);
+                    };
+                    res.once('aborted', function () {
+                        discard('Fetching ' + JSON.stringify(options, null, 2) + ' was cut off');
+                    });
+                    res.once('error', function (error) {
+                        discard('Fetching ' + JSON.stringify(options, null, 2) + ' failed with error ' + error);
+                    });
+                    writeStream.once('error', function (error) {
+                        discard('Saving ' + dest + ' failed with error ' + error);
+                    });
+                    // 'finish' follows only the end of a complete response
+                    writeStream.once('finish', function () {
+                        fs.rename(tempPath, dest, function (error) {
+                            if (error) {
+                                discard('Saving ' + dest + ' failed with error ' + error);
+                            } else if (!done) {
+                                console.log('Saved ' + dest + ' from ' + JSON.stringify(options, null, 2));
+                                readCACert("./" + dest);
+                            }
+                        });
+                    });
+                    res.pipe(writeStream);
+                }
+            });
+
+            req.end();
+            return req;
         };
 
         var MAX_RECONNECT_ATTEMPTS = 3;
@@ -250,28 +295,156 @@
             return null;
         };
 
-        var webSocketClient = function (tls, caCertPath) {
+        var DEFAULT_REGISTRATION_TIMEOUT_MILLIS = 10000;
+
+        var registrationTimeoutMillis = function (clientOptions) {
+            var millis = clientOptions && clientOptions.callbackWebSocketTimeoutMillis;
+            return (typeof millis === 'number' && isFinite(millis) && millis > 0) ? millis : DEFAULT_REGISTRATION_TIMEOUT_MILLIS;
+        };
+
+        var connectionFailure = function (error, host, port) {
+            if (error && error.code === "ECONNREFUSED") {
+                return "Can't connect to MockServer running on host: \"" + host + "\" and port: \"" + port + "\"";
+            }
+            // the message, not JSON.stringify (which serialises an Error to "{}"), keeping the string rejection contract
+            return (error && error.message) || String(error);
+        };
+
+        /*
+         * Opens a callback WebSocket. The promise resolves once MockServer has sent the WebSocket's client id,
+         * and rejects if the first connection is refused or fails its handshake, if MockServer closes it before
+         * sending the client id, or if the client id has not arrived within the registration timeout. After the
+         * client id has arrived a dropped connection reconnects, with the same client id, as before.
+         */
+        var webSocketClient = function (tls, caCertPath, clientOptions) {
             return function (host, port, contextPath) {
                 var deferred = defer();
-                downloadCACert(tls, caCertPath, function (ca) {
+                var timeoutMillis = registrationTimeoutMillis(clientOptions);
+                var webSocketLocation = (tls ? "wss" : "ws") + "://" + host + ":" + port + contextPath + "/_mockserver_callback_websocket";
 
-                    var clientId;
-                    var clientIdHandler;
-                    var requestHandler;
-                    var requestAndResponseHandler;
-                    // Per-breakpoint-id handlers for matcher-driven breakpoints
-                    var breakpointRequestHandlers = {};
-                    var breakpointResponseHandlers = {};
-                    var breakpointStreamFrameHandlers = {};
-                    var hasConnectedOnce = false;
-                    var reconnectAttempts = 0;
-                    var closed = false;
-                    var currentConnection = null;
-                    var reconnectTimer = null;
-                    var reconnectWanted = null;
-                    var webSocketLocation = (tls ? "wss" : "ws") + "://" + host + ":" + port + contextPath + "/_mockserver_callback_websocket";
+                var clientId;
+                var clientIdHandler;
+                var requestHandler;
+                var requestAndResponseHandler;
+                // Per-breakpoint-id handlers for matcher-driven breakpoints
+                var breakpointRequestHandlers = {};
+                var breakpointResponseHandlers = {};
+                var breakpointStreamFrameHandlers = {};
+                var registered = false;
+                var reconnectAttempts = 0;
+                var closed = false;
+                var client = null;
+                var caDownload = null;
+                var currentConnection = null;
+                var reconnectTimer = null;
+                var reconnectWanted = null;
+                var registrationTimer = null;
 
-                    var client = new WebSocketClient({
+                // before the client id has arrived: stop for good, releasing the socket, and reject
+                var failRegistration = function (reason) {
+                    if (registered || closed) {
+                        return;
+                    }
+                    closed = true;
+                    clearTimeout(registrationTimer);
+                    if (caDownload) {
+                        caDownload.destroy();
+                    }
+                    if (client) {
+                        client.abort();
+                    }
+                    if (currentConnection && currentConnection.state !== 'closed') {
+                        currentConnection.drop(1000, 'callback WebSocket registration failed', true);
+                    }
+                    deferred.reject(reason);
+                };
+
+                registrationTimer = setTimeout(function () {
+                    failRegistration("MockServer at " + webSocketLocation + " did not register the callback WebSocket with a client id within " + timeoutMillis + "ms");
+                }, timeoutMillis);
+
+                var handle = {
+                    requestCallback: function requestCallback(callback) {
+                        requestHandler = callback;
+                    },
+                    requestAndResponseCallback: function requestAndResponseCallback(callback) {
+                        requestAndResponseHandler = callback;
+                    },
+                    clientIdCallback: function clientIdCallback(callback) {
+                        clientIdHandler = callback;
+                        if (clientId) {
+                            clientIdHandler(clientId);
+                        }
+                    },
+                    setBreakpointRequestHandler: function (breakpointId, handler) {
+                        if (breakpointId && handler) {
+                            breakpointRequestHandlers[breakpointId] = handler;
+                        }
+                    },
+                    setBreakpointResponseHandler: function (breakpointId, handler) {
+                        if (breakpointId && handler) {
+                            breakpointResponseHandlers[breakpointId] = handler;
+                        }
+                    },
+                    setBreakpointStreamFrameHandler: function (breakpointId, handler) {
+                        if (breakpointId && handler) {
+                            breakpointStreamFrameHandlers[breakpointId] = handler;
+                        }
+                    },
+                    removeBreakpointHandlers: function (breakpointId) {
+                        if (breakpointId) {
+                            delete breakpointRequestHandlers[breakpointId];
+                            delete breakpointResponseHandlers[breakpointId];
+                            delete breakpointStreamFrameHandlers[breakpointId];
+                        }
+                    },
+                    clearBreakpointHandlers: function () {
+                        breakpointRequestHandlers = {};
+                        breakpointResponseHandlers = {};
+                        breakpointStreamFrameHandlers = {};
+                    },
+                    // asked, when MockServer drops the connection, whether to reconnect: a promise of false (or false) stops for good
+                    reconnectWhen: function (predicate) {
+                        reconnectWanted = predicate;
+                    },
+                    isClosed: function () {
+                        return closed;
+                    },
+                    // closes the connection for good: no reconnect follows; resolves once it has closed
+                    close: function () {
+                        closed = true;
+                        clearTimeout(registrationTimer);
+                        if (reconnectTimer) {
+                            clearTimeout(reconnectTimer);
+                            reconnectTimer = null;
+                        }
+                        if (client) {
+                            client.abort();
+                        }
+                        var connection = currentConnection;
+                        if (!connection || connection.state === 'closed') {
+                            return Promise.resolve();
+                        }
+                        return new Promise(function (resolve) {
+                            connection.once('close', function () {
+                                resolve();
+                            });
+                            connection.close();
+                        });
+                    }
+                };
+
+                caDownload = downloadCACert(tls, caCertPath, function (ca, caFailure) {
+                    caDownload = null;
+                    if (closed) {
+                        return;
+                    }
+                    if (!ca) {
+                        failRegistration(caFailure);
+                        return;
+                    }
+
+                    client = new WebSocketClient({
                         maxReceivedFrameSize: 64 * 1024 * 1024,   // 64MiB
                         maxReceivedMessageSize: 64 * 1024 * 1024, // 64MiB
                         fragmentOutgoingMessages: false,
@@ -300,16 +473,8 @@
                         if (closed) {
                             return;
                         }
-                        if (!hasConnectedOnce) {
-                            if (error.code && error.code === "ECONNREFUSED") {
-                                deferred.reject("Can't connect to MockServer running on host: \"" + host + "\" and port: \"" + port + "\"");
-                            } else {
-                                // reject with the error message (not JSON.stringify,
-                                // which serialises an Error to "{}" since message/stack
-                                // are non-enumerable) to preserve diagnostic information
-                                // while keeping the string rejection contract
-                                deferred.reject(error.message || String(error));
-                            }
+                        if (!registered) {
+                            failRegistration(connectionFailure(error, host, port));
                         } else {
                             scheduleReconnect();
                         }
@@ -320,22 +485,19 @@
                             connection.close();
                             return;
                         }
-                        hasConnectedOnce = true;
                         reconnectAttempts = 0;
                         currentConnection = connection;
                         connection.on('error', function (error) {
-                            if (error.code && error.code === "ECONNREFUSED") {
-                                deferred.reject("Can't connect to MockServer running on host: \"" + host + "\" and port: \"" + port + "\"");
-                            } else {
-                                // reject with the error message (not JSON.stringify,
-                                // which serialises an Error to "{}" since message/stack
-                                // are non-enumerable) to preserve diagnostic information
-                                // while keeping the string rejection contract
-                                deferred.reject(error.message || String(error));
-                            }
+                            // before registration this fails the registration; after it, the close that follows reconnects
+                            failRegistration(connectionFailure(error, host, port));
                         });
-                        connection.on('close', function () {
+                        connection.on('close', function (reasonCode, description) {
                             if (closed) {
+                                return;
+                            }
+                            if (!registered) {
+                                failRegistration("MockServer at " + webSocketLocation + " closed the callback WebSocket before sending its client id" +
+                                    (reasonCode ? " (" + reasonCode + (description ? " " + description : "") + ")" : ""));
                                 return;
                             }
                             if (!reconnectWanted) {
@@ -364,7 +526,12 @@
                                     var registration = JSON.parse(payload.value);
                                     if (registration.clientId) {
                                         clientId = registration.clientId;
-                                        if (clientIdHandler) {
+                                        if (!registered) {
+                                            registered = true;
+                                            clearTimeout(registrationTimer);
+                                            // the handle's clientIdCallback hands over this client id
+                                            deferred.resolve(handle);
+                                        } else if (clientIdHandler) {
                                             clientIdHandler(clientId);
                                         }
                                     }
@@ -388,75 +555,11 @@
                         });
                     });
 
-                    client.connect(webSocketLocation, []);
-
-                    deferred.resolve({
-                        requestCallback: function requestCallback(callback) {
-                            requestHandler = callback;
-                        },
-                        requestAndResponseCallback: function requestAndResponseCallback(callback) {
-                            requestAndResponseHandler = callback;
-                        },
-                        clientIdCallback: function clientIdCallback(callback) {
-                            clientIdHandler = callback;
-                            if (clientId) {
-                                clientIdHandler(clientId);
-                            }
-                        },
-                        setBreakpointRequestHandler: function (breakpointId, handler) {
-                            if (breakpointId && handler) {
-                                breakpointRequestHandlers[breakpointId] = handler;
-                            }
-                        },
-                        setBreakpointResponseHandler: function (breakpointId, handler) {
-                            if (breakpointId && handler) {
-                                breakpointResponseHandlers[breakpointId] = handler;
-                            }
-                        },
-                        setBreakpointStreamFrameHandler: function (breakpointId, handler) {
-                            if (breakpointId && handler) {
-                                breakpointStreamFrameHandlers[breakpointId] = handler;
-                            }
-                        },
-                        removeBreakpointHandlers: function (breakpointId) {
-                            if (breakpointId) {
-                                delete breakpointRequestHandlers[breakpointId];
-                                delete breakpointResponseHandlers[breakpointId];
-                                delete breakpointStreamFrameHandlers[breakpointId];
-                            }
-                        },
-                        clearBreakpointHandlers: function () {
-                            breakpointRequestHandlers = {};
-                            breakpointResponseHandlers = {};
-                            breakpointStreamFrameHandlers = {};
-                        },
-                        // asked, when MockServer drops the connection, whether to reconnect: a promise of false (or false) stops for good
-                        reconnectWhen: function (predicate) {
-                            reconnectWanted = predicate;
-                        },
-                        isClosed: function () {
-                            return closed;
-                        },
-                        // closes the connection for good: no reconnect follows; resolves once it has closed
-                        close: function () {
-                            closed = true;
-                            if (reconnectTimer) {
-                                clearTimeout(reconnectTimer);
-                                reconnectTimer = null;
-                            }
-                            client.abort();
-                            var connection = currentConnection;
-                            if (!connection || connection.state === 'closed') {
-                                return Promise.resolve();
-                            }
-                            return new Promise(function (resolve) {
-                                connection.once('close', function () {
-                                    resolve();
-                                });
-                                connection.close();
-                            });
-                        }
-                    });
+                    try {
+                        client.connect(webSocketLocation, []);
+                    } catch (e) {
+                        failRegistration(e.message || String(e));
+                    }
                 });
                 return deferred.promise;
             };

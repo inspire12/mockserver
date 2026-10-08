@@ -230,7 +230,8 @@ var mockServerClient;
      *            bearerToken,            // static control-plane JWT attached as `Authorization: Bearer <token>`
      *            bearerTokenSupplier,    // function() => string, evaluated per-request (overrides bearerToken)
      *            clientCertPemFilePath,  // PEM client certificate for mutual TLS
-     *            clientKeyPemFilePath    // PEM private key for mutual TLS
+     *            clientKeyPemFilePath,   // PEM private key for mutual TLS
+     *            callbackWebSocketTimeoutMillis // how long a callback or breakpoint waits for its WebSocket's client id (default 10000)
      *        }
      */
     mockServerClient = function (host, port, contextPath, tls, caCertPemFilePath, options) {
@@ -516,7 +517,8 @@ var mockServerClient;
             };
         };
 
-        var WebSocketClient = (runningInNode() ? require('./webSocketClient').webSocketClient(tls, caCertPemFilePath) : function (host, port, contextPath) {
+        // as the Node transport in webSocketClient.js: settles once MockServer has sent the client id
+        var WebSocketClient = (runningInNode() ? require('./webSocketClient').webSocketClient(tls, caCertPemFilePath, options) : function (host, port, contextPath) {
             var clientId;
             var clientIdHandler;
             var requestHandler;
@@ -524,59 +526,37 @@ var mockServerClient;
             var breakpointRequestHandlers = {};
             var breakpointResponseHandlers = {};
             var breakpointStreamFrameHandlers = {};
-            var browserWebSocket;
+            var socket;
 
             return {
                 then: function (sucess, error) {
+                    var settled = false;
+                    var registrationTimer = null;
+                    var fail = function (reason) {
+                        if (settled) {
+                            return;
+                        }
+                        settled = true;
+                        clearTimeout(registrationTimer);
+                        if (socket && socket.readyState !== socket.CLOSING && socket.readyState !== socket.CLOSED) {
+                            socket.close();
+                        }
+                        if (error) {
+                            error(reason);
+                        }
+                    };
                     try {
-                        if (typeof (window) !== "undefined") {
-                            if (window.WebSocket) {
-                                browserWebSocket = window.WebSocket;
-                            } else if (window.MozWebSocket) {
-                                browserWebSocket = window.MozWebSocket;
-                            } else {
-                                error("Your browser does not support web sockets.");
-                            }
+                        var BrowserWebSocket = (typeof WebSocket !== "undefined") ? WebSocket :
+                            ((typeof window !== "undefined" && window.MozWebSocket) ? window.MozWebSocket : null);
+                        if (!BrowserWebSocket) {
+                            fail("Your browser does not support web sockets.");
+                            return;
                         }
 
-                        if (browserWebSocket) {
-                            var webSocketLocation = (tls ? "wss" : "ws") + "://" + host + ":" + port + contextPath + "/_mockserver_callback_websocket";
-
-                            var socket = new WebSocket(webSocketLocation);
-                            socket.onmessage = function (event) {
-                                var message = JSON.parse(event.data);
-
-                                // Handle client-id registration directly
-                                if (message.type === "org.mockserver.serialization.model.WebSocketClientIdDTO") {
-                                    var registration = JSON.parse(message.value);
-                                    if (registration.clientId) {
-                                        clientId = registration.clientId;
-                                        if (clientIdHandler) {
-                                            clientIdHandler(clientId);
-                                        }
-                                    }
-                                    return;
-                                }
-
-                                // Route breakpoint / callback messages via the shared pure function
-                                var reply = _routeBreakpointMessage(message, {
-                                    breakpointRequestHandlers: breakpointRequestHandlers,
-                                    breakpointResponseHandlers: breakpointResponseHandlers,
-                                    breakpointStreamFrameHandlers: breakpointStreamFrameHandlers,
-                                    requestHandler: requestHandler,
-                                    requestAndResponseHandler: requestAndResponseHandler
-                                });
-                                if (reply && socket.readyState === WebSocket.OPEN) {
-                                    socket.send(JSON.stringify(reply));
-                                }
-                            };
-                            socket.onopen = function (event) {
-                            };
-                            socket.onclose = function (event) {
-                            };
-                        }
-
-                        sucess({
+                        var webSocketLocation = (tls ? "wss" : "ws") + "://" + host + ":" + port + contextPath + "/_mockserver_callback_websocket";
+                        var timeoutMillis = (options && typeof options.callbackWebSocketTimeoutMillis === 'number' && isFinite(options.callbackWebSocketTimeoutMillis) && options.callbackWebSocketTimeoutMillis > 0) ?
+                            options.callbackWebSocketTimeoutMillis : 10000;
+                        var handle = {
                             requestCallback: function requestCallback(callback) {
                                 requestHandler = callback;
                             },
@@ -627,11 +607,54 @@ var mockServerClient;
                                     socket.close();
                                 });
                             }
-                        });
+                        };
+
+                        registrationTimer = setTimeout(function () {
+                            fail("MockServer at " + webSocketLocation + " did not register the callback WebSocket with a client id within " + timeoutMillis + "ms");
+                        }, timeoutMillis);
+                        socket = new BrowserWebSocket(webSocketLocation);
+                        socket.onmessage = function (event) {
+                            var message = JSON.parse(event.data);
+
+                            // Handle client-id registration directly
+                            if (message.type === "org.mockserver.serialization.model.WebSocketClientIdDTO") {
+                                var registration = JSON.parse(message.value);
+                                if (registration.clientId) {
+                                    clientId = registration.clientId;
+                                    if (!settled) {
+                                        settled = true;
+                                        clearTimeout(registrationTimer);
+                                        // the handle's clientIdCallback hands over this client id
+                                        sucess(handle);
+                                    } else if (clientIdHandler) {
+                                        clientIdHandler(clientId);
+                                    }
+                                }
+                                return;
+                            }
+
+                            // Route breakpoint / callback messages via the shared pure function
+                            var reply = _routeBreakpointMessage(message, {
+                                breakpointRequestHandlers: breakpointRequestHandlers,
+                                breakpointResponseHandlers: breakpointResponseHandlers,
+                                breakpointStreamFrameHandlers: breakpointStreamFrameHandlers,
+                                requestHandler: requestHandler,
+                                requestAndResponseHandler: requestAndResponseHandler
+                            });
+                            if (reply && socket.readyState === socket.OPEN) {
+                                socket.send(JSON.stringify(reply));
+                            }
+                        };
+                        // a browser reports no detail of a failed connection; the close that follows has the code
+                        socket.onerror = function () {
+                            fail("Can't connect to MockServer running on host: \"" + host + "\" and port: \"" + port + "\"");
+                        };
+                        socket.onclose = function (event) {
+                            fail("MockServer at " + webSocketLocation + " closed the callback WebSocket before sending its client id" +
+                                (event && event.code ? " (" + event.code + (event.reason ? " " + event.reason : "") + ")" : ""));
+                        };
                     } catch (e) {
-                        if (error) {
-                            error(e);
-                        }
+                        fail(e);
                     }
                 }
             };
@@ -666,6 +689,11 @@ var mockServerClient;
                         }
                     }, function (reason) {
                         settle();
+                        // a WebSocket that never opened has nothing to close
+                        var entries = callbackWebSockets[callbackWebSocketKey];
+                        if (entries && entries.indexOf(entry) !== -1) {
+                            entries.splice(entries.indexOf(entry), 1);
+                        }
                         if (error) {
                             error(reason);
                         }

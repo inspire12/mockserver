@@ -50,6 +50,13 @@ export interface MockServerClientOptions {
      * mutual TLS.
      */
     clientKeyPemFilePath?: string;
+
+    /**
+     * How long registering a callback or breakpoint waits for its WebSocket to
+     * open and receive its client id from MockServer before it rejects.
+     * Defaults to 10000 (10 seconds).
+     */
+    callbackWebSocketTimeoutMillis?: number;
 }
 // Retains backwards compatability.
 export type KeysToMultiValues = KeyToMultiValue;

@@ -428,6 +428,19 @@ reconnects with the same client id and the callback carries on with its remainin
 `times`. A breakpoint's WebSocket is not reopened (MockServer drops a client's
 breakpoints when its WebSocket closes); the next breakpoint opens a new one.
 
+Registering a callback or a breakpoint settles only once its WebSocket is open and
+MockServer has given it a client id. It rejects, and leaves nothing open to keep the
+process running, if the connection is refused, the WebSocket handshake fails,
+MockServer closes the WebSocket before sending the client id, or the client id has
+not arrived within 10 seconds. Change that limit with the
+`callbackWebSocketTimeoutMillis` option:
+
+```js
+const client = mockServerClient('localhost', 1080, undefined, false, undefined, {
+    callbackWebSocketTimeoutMillis: 30000
+});
+```
+
 ## Start / Launch MockServer
 
 This package (`mockserver-client`) is the REST/WebSocket client for communicating with a running MockServer. To **download and launch** a local MockServer instance (no Java or Docker required), use the companion [`mockserver-node`](https://www.npmjs.org/package/mockserver-node) package:
