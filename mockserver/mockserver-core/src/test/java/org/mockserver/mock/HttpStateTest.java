@@ -677,6 +677,41 @@ public class HttpStateTest {
     }
 
     @Test
+    public void shouldRetrieveRecordedExpectationsAsJavaWithoutIdsWhateverRanBefore() {
+        // given
+        httpState.log(
+            new LogEntry()
+                .setType(FORWARDED_REQUEST)
+                .setHttpRequest(request("/recorded_one"))
+                .setHttpResponse(response("response_one"))
+                .setExpectation(new Expectation(request("/recorded_one"), Times.once(), TimeToLive.unlimited(), 0).thenRespond(response("response_one")))
+        );
+        httpState.log(
+            new LogEntry()
+                .setType(FORWARDED_REQUEST)
+                .setHttpRequest(request("/recorded_two"))
+                .setHttpResponse(response("response_two"))
+                .setExpectation(new Expectation(request("/recorded_two"), Times.once(), TimeToLive.unlimited(), 0).withId("key_two").thenRespond(response("response_two")))
+        );
+
+        // when
+        FakeResponseWriter javaBefore = new FakeResponseWriter();
+        assertThat(httpState.handle(retrieveRequest(RetrieveType.RECORDED_EXPECTATIONS, "JAVA", request()), javaBefore, false), is(true));
+        FakeResponseWriter json = new FakeResponseWriter();
+        assertThat(httpState.handle(retrieveRequest(RetrieveType.RECORDED_EXPECTATIONS, "JSON", request()), json, false), is(true));
+        FakeResponseWriter javaAfter = new FakeResponseWriter();
+        assertThat(httpState.handle(retrieveRequest(RetrieveType.RECORDED_EXPECTATIONS, "JAVA", request()), javaAfter, false), is(true));
+
+        // then
+        assertThat(json.response.getBodyAsString(), containsString("\"id\""));
+        String generated = javaBefore.response.getBodyAsString();
+        assertThat(generated, containsString("/recorded_one"));
+        assertThat(generated, containsString("/recorded_two"));
+        assertThat(generated, not(containsString(".withId(")));
+        assertThat(javaAfter.response.getBodyAsString(), is(generated));
+    }
+
+    @Test
     public void shouldHandleRetrieveRequestResponsesAsHar() {
         // given
         httpState.log(

@@ -1541,52 +1541,41 @@ public abstract class AbstractTransportAgnosticSemanticsIntegrationTest extends 
     @Test
     public void shouldRetrieveActiveExpectationsAsJava() {
         // when
-        mockServerClient.when(request().withPath(calculatePath("some_path.*")), exactly(4))
-            .respond(response().withBody("some_body"));
-        mockServerClient.when(request().withPath(calculatePath("some_path.*")))
-            .respond(response().withBody("some_body"));
-        mockServerClient.when(request().withPath(calculatePath("some_other_path")))
-            .respond(response().withBody("some_other_body"));
-        mockServerClient.when(request().withPath(calculatePath("some_forward_path")))
-            .forward(forward());
+        String idOne = mockServerClient.when(request().withPath(calculatePath("some_path.*")), exactly(4))
+            .respond(response().withBody("some_body"))[0].getId();
+        String idTwo = mockServerClient.when(request().withPath(calculatePath("some_path.*")))
+            .respond(response().withBody("some_body"))[0].getId();
+        String idThree = mockServerClient.when(request().withPath(calculatePath("some_other_path")))
+            .respond(response().withBody("some_other_body"))[0].getId();
+        String idFour = mockServerClient.when(request().withPath(calculatePath("some_forward_path")))
+            .forward(forward())[0].getId();
+        Expectation expectationOne = new Expectation(request().withPath(calculatePath("some_path.*")), exactly(4), TimeToLive.unlimited(), 0)
+            .withId(idOne)
+            .thenRespond(response().withBody("some_body"));
+        Expectation expectationTwo = new Expectation(request().withPath(calculatePath("some_path.*")))
+            .withId(idTwo)
+            .thenRespond(response().withBody("some_body"));
+        Expectation expectationThree = new Expectation(request().withPath(calculatePath("some_other_path")))
+            .withId(idThree)
+            .thenRespond(response().withBody("some_other_body"));
+        Expectation expectationFour = new Expectation(request().withPath(calculatePath("some_forward_path")))
+            .withId(idFour)
+            .thenForward(forward());
 
         // then
         assertThat(
             mockServerClient.retrieveActiveExpectations(request().withPath(calculatePath("some_path.*")), Format.JAVA),
-            is(new ExpectationToJavaSerializer().serialize(Arrays.asList(
-                new Expectation(request().withPath(calculatePath("some_path.*")), exactly(4), TimeToLive.unlimited(), 0)
-                    .thenRespond(response().withBody("some_body")),
-                new Expectation(request().withPath(calculatePath("some_path.*")))
-                    .thenRespond(response().withBody("some_body"))
-            )))
+            is(new ExpectationToJavaSerializer().serialize(Arrays.asList(expectationOne, expectationTwo)))
         );
 
         assertThat(
             mockServerClient.retrieveActiveExpectations(null, Format.JAVA),
-            is(new ExpectationToJavaSerializer().serialize(Arrays.asList(
-                new Expectation(request().withPath(calculatePath("some_path.*")), exactly(4), TimeToLive.unlimited(), 0)
-                    .thenRespond(response().withBody("some_body")),
-                new Expectation(request().withPath(calculatePath("some_path.*")))
-                    .thenRespond(response().withBody("some_body")),
-                new Expectation(request().withPath(calculatePath("some_other_path")))
-                    .thenRespond(response().withBody("some_other_body")),
-                new Expectation(request().withPath(calculatePath("some_forward_path")))
-                    .thenForward(forward())
-            )))
+            is(new ExpectationToJavaSerializer().serialize(Arrays.asList(expectationOne, expectationTwo, expectationThree, expectationFour)))
         );
 
         assertThat(
             mockServerClient.retrieveActiveExpectations(request(), Format.JAVA),
-            is(new ExpectationToJavaSerializer().serialize(Arrays.asList(
-                new Expectation(request().withPath(calculatePath("some_path.*")), exactly(4), TimeToLive.unlimited(), 0)
-                    .thenRespond(response().withBody("some_body")),
-                new Expectation(request().withPath(calculatePath("some_path.*")))
-                    .thenRespond(response().withBody("some_body")),
-                new Expectation(request().withPath(calculatePath("some_other_path")))
-                    .thenRespond(response().withBody("some_other_body")),
-                new Expectation(request().withPath(calculatePath("some_forward_path")))
-                    .thenForward(forward())
-            )))
+            is(new ExpectationToJavaSerializer().serialize(Arrays.asList(expectationOne, expectationTwo, expectationThree, expectationFour)))
         );
     }
 

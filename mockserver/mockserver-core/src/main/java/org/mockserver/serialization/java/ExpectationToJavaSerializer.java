@@ -4,10 +4,15 @@ import com.google.common.base.Strings;
 import org.apache.commons.text.StringEscapeUtils;
 import org.mockserver.mock.Expectation;
 import org.mockserver.model.Action;
-import org.mockserver.model.AfterAction;
+import org.mockserver.model.CaptureRule;
+import org.mockserver.model.CrossProtocolScenario;
+import org.mockserver.model.ExpectationStep;
+import org.mockserver.model.HttpChaosProfile;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
+import org.mockserver.model.ObjectWithReflectiveEqualsHashCodeToString;
 import org.mockserver.model.OpenAPIDefinition;
+import org.mockserver.model.RateLimit;
 import org.mockserver.model.RequestDefinition;
 
 import java.io.IOException;
@@ -25,6 +30,20 @@ import static org.mockserver.character.Character.NEW_LINE;
 public class ExpectationToJavaSerializer implements ToJavaSerializer<Expectation> {
 
     public static final int INDENT_SIZE = 8;
+
+    private final boolean writeIds;
+
+    public ExpectationToJavaSerializer() {
+        this(true);
+    }
+
+    /**
+     * @param writeIds false to leave out every expectation's id, as for recorded expectations, which have none
+     *                 until something asks for one; true writes an id that has been set
+     */
+    public ExpectationToJavaSerializer(boolean writeIds) {
+        this.writeIds = writeIds;
+    }
 
     public String serialize(List<Expectation> expectations) {
         StringBuilder output = new StringBuilder();
@@ -55,8 +74,12 @@ public class ExpectationToJavaSerializer implements ToJavaSerializer<Expectation
     public String serialize(int numberOfSpacesToIndent, Expectation expectation) {
         StringBuffer output = new StringBuffer();
         if (expectation != null) {
-            // when(...) takes one terminal action and has none for forward-validate
-            boolean upsert = generatedActionCount(expectation) > 1 || expectation.getHttpForwardValidateAction() != null;
+            // when(...) takes one terminal action, and has none for forward-validate, a rate limit or steps alone
+            int actionCount = generatedActionCount(expectation);
+            boolean upsert = actionCount > 1
+                || expectation.getHttpForwardValidateAction() != null
+                || expectation.getRateLimit() != null
+                || actionCount == 0 && expectation.getSteps() != null;
             int indent = upsert ? numberOfSpacesToIndent + 1 : numberOfSpacesToIndent;
             appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append("new MockServerClient(\"localhost\", 1080)");
             if (upsert) {
@@ -90,6 +113,9 @@ public class ExpectationToJavaSerializer implements ToJavaSerializer<Expectation
             output.append(",");
             appendNewLineAndIndent((indent + 1) * INDENT_SIZE, output).append(expectation.getPriority());
             appendNewLineAndIndent(indent * INDENT_SIZE, output).append(")");
+            if (writeIds && expectation.hasId()) {
+                appendNewLineAndIndent(indent * INDENT_SIZE, output).append(".withId(").append(FluentJavaBuilder.literal(expectation.getId())).append(")");
+            }
             if (expectation.getPercentage() != null) {
                 appendNewLineAndIndent(indent * INDENT_SIZE, output).append(".withPercentage(").append(expectation.getPercentage()).append(")");
             }
@@ -122,8 +148,17 @@ public class ExpectationToJavaSerializer implements ToJavaSerializer<Expectation
             if (expectation.getSwitchAfter() != null) {
                 appendNewLineAndIndent(indent * INDENT_SIZE, output).append(".withSwitchAfter(").append(expectation.getSwitchAfter()).append(")");
             }
-            appendAfterActions(indent, ".withBeforeActions(", expectation.getBeforeActions(), output);
-            appendAfterActions(indent, ".withAfterActions(", expectation.getAfterActions(), output);
+            if (expectation.getChaos() != null) {
+                appendCall(indent, ".withChaos(", serializeChaos(indent + 1, expectation.getChaos()), output);
+            }
+            if (expectation.getRateLimit() != null) {
+                appendCall(indent, ".withRateLimit(", serializeRateLimit(indent + 1, expectation.getRateLimit()), output);
+            }
+            appendEach(indent, ".withCapture(", expectation.getCapture(), ExpectationToJavaSerializer::serializeCaptureRule, ")", output);
+            appendEach(indent, ".withCrossProtocolScenarios(java.util.Arrays.asList(", expectation.getCrossProtocolScenarios(), ExpectationToJavaSerializer::serializeCrossProtocolScenario, "))", output);
+            appendEach(indent, ".withSteps(", expectation.getSteps(), ExpectationToJavaSerializer::serializeStep, ")", output);
+            appendEach(indent, ".withBeforeActions(", expectation.getBeforeActions(), new AfterActionToJavaSerializer(), ")", output);
+            appendEach(indent, ".withAfterActions(", expectation.getAfterActions(), new AfterActionToJavaSerializer(), ")", output);
             if (expectation.getHttpResponses() != null && !expectation.getHttpResponses().isEmpty()) {
                 HttpResponseToJavaSerializer responseSerializer = new HttpResponseToJavaSerializer();
                 appendNewLineAndIndent(indent * INDENT_SIZE, output).append(respond).append("java.util.Arrays.asList(");
@@ -232,15 +267,94 @@ public class ExpectationToJavaSerializer implements ToJavaSerializer<Expectation
         return count;
     }
 
-    private void appendAfterActions(int numberOfSpacesToIndent, String method, List<AfterAction> afterActions, StringBuffer output) {
-        if (afterActions != null && !afterActions.isEmpty()) {
-            AfterActionToJavaSerializer afterActionSerializer = new AfterActionToJavaSerializer();
-            appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(method);
-            for (int i = 0; i < afterActions.size(); i++) {
-                output.append(i > 0 ? "," : "").append(afterActionSerializer.serialize(numberOfSpacesToIndent + 1, afterActions.get(i)));
+    private static String serializeChaos(int numberOfSpacesToIndent, HttpChaosProfile chaos) {
+        return new FluentJavaBuilder(numberOfSpacesToIndent, "HttpChaosProfile.httpChaosProfile()")
+            .with("withErrorStatus", chaos.getErrorStatus())
+            .with("withRetryAfter", chaos.getRetryAfter())
+            .with("withErrorProbability", chaos.getErrorProbability())
+            .with("withDropConnectionProbability", chaos.getDropConnectionProbability())
+            .withDelay("withLatency", chaos.getLatency())
+            .with("withSeed", chaos.getSeed())
+            .with("withSucceedFirst", chaos.getSucceedFirst())
+            .with("withFailRequestCount", chaos.getFailRequestCount())
+            .with("withOutageAfterMillis", chaos.getOutageAfterMillis())
+            .with("withOutageDurationMillis", chaos.getOutageDurationMillis())
+            .with("withTruncateBodyAtFraction", chaos.getTruncateBodyAtFraction())
+            .with("withMalformedBody", chaos.getMalformedBody())
+            .with("withSlowResponseChunkSize", chaos.getSlowResponseChunkSize())
+            .withDelay("withSlowResponseChunkDelay", chaos.getSlowResponseChunkDelay())
+            .with("withQuotaName", chaos.getQuotaName())
+            .with("withQuotaLimit", chaos.getQuotaLimit())
+            .with("withQuotaWindowMillis", chaos.getQuotaWindowMillis())
+            .with("withQuotaErrorStatus", chaos.getQuotaErrorStatus())
+            .with("withDegradationRampMillis", chaos.getDegradationRampMillis())
+            .with("withGraphqlErrors", chaos.getGraphqlErrors())
+            .with("withGraphqlErrorMessage", chaos.getGraphqlErrorMessage())
+            .with("withGraphqlErrorCode", chaos.getGraphqlErrorCode())
+            .with("withGraphqlNullifyData", chaos.getGraphqlNullifyData())
+            .build();
+    }
+
+    private static String serializeRateLimit(int numberOfSpacesToIndent, RateLimit rateLimit) {
+        return new FluentJavaBuilder(numberOfSpacesToIndent, "RateLimit.rateLimit()")
+            .with("withName", rateLimit.getName())
+            .with("withAlgorithm", rateLimit.getAlgorithm())
+            .with("withLimit", rateLimit.getLimit())
+            .with("withWindowMillis", rateLimit.getWindowMillis())
+            .with("withBurst", rateLimit.getBurst())
+            .with("withRefillPerSecond", rateLimit.getRefillPerSecond())
+            .with("withErrorStatus", rateLimit.getErrorStatus())
+            .with("withRetryAfter", rateLimit.getRetryAfter())
+            .build();
+    }
+
+    private static String serializeCaptureRule(int numberOfSpacesToIndent, CaptureRule captureRule) {
+        return new FluentJavaBuilder(numberOfSpacesToIndent, "CaptureRule.captureRule()")
+            .with("withSource", captureRule.getSource())
+            .with("withExpression", captureRule.getExpression())
+            .with("withInto", captureRule.getInto())
+            .build();
+    }
+
+    private static String serializeCrossProtocolScenario(int numberOfSpacesToIndent, CrossProtocolScenario scenario) {
+        return new FluentJavaBuilder(numberOfSpacesToIndent, "CrossProtocolScenario.crossProtocolScenario()")
+            .with("withTrigger", scenario.getTrigger())
+            .with("withScenarioName", scenario.getScenarioName())
+            .with("withTargetState", scenario.getTargetState())
+            .with("withMatchPattern", scenario.getMatchPattern())
+            .build();
+    }
+
+    private static String serializeStep(int numberOfSpacesToIndent, ExpectationStep step) {
+        return new FluentJavaBuilder(numberOfSpacesToIndent, "ExpectationStep.step()")
+            .withObject("withHttpRequest", step.getHttpRequest(), new HttpRequestToJavaSerializer())
+            .withObject("withHttpClassCallback", step.getHttpClassCallback(), new HttpClassCallbackToJavaSerializer())
+            .comment(step.getHttpObjectCallback() != null, "NOT POSSIBLE TO GENERATE CODE FOR OBJECT CALLBACK")
+            .withObject("withHttpForward", step.getHttpForward(), new HttpForwardToJavaSerializer())
+            .withObject("withHttpOverrideForwardedRequest", step.getHttpOverrideForwardedRequest(), new HttpOverrideForwardedRequestToJavaSerializer())
+            .withObject("withHttpResponse", step.getHttpResponse(), new HttpResponseToJavaSerializer())
+            .withObject("withHttpError", step.getHttpError(), new HttpErrorToJavaSerializer())
+            .with("withResponder", step.getResponder())
+            .withDelay("withDelay", step.getDelay())
+            .with("withBlocking", step.getBlocking())
+            .withDelay("withTimeout", step.getTimeout())
+            .with("withFailurePolicy", step.getFailurePolicy())
+            .build();
+    }
+
+    private <T extends ObjectWithReflectiveEqualsHashCodeToString> void appendEach(int numberOfSpacesToIndent, String open, List<T> values, ToJavaSerializer<T> serializer, String close, StringBuffer output) {
+        if (values != null && !values.isEmpty()) {
+            appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(open);
+            for (int i = 0; i < values.size(); i++) {
+                output.append(i > 0 ? "," : "").append(serializer.serialize(numberOfSpacesToIndent + 1, values.get(i)));
             }
-            appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(")");
+            appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(close);
         }
+    }
+
+    private void appendCall(int numberOfSpacesToIndent, String method, String serializedArgument, StringBuffer output) {
+        appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(method).append(serializedArgument);
+        appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(")");
     }
 
     private void appendAction(int numberOfSpacesToIndent, String method, String serializedAction, Action<?> action, StringBuffer output) {

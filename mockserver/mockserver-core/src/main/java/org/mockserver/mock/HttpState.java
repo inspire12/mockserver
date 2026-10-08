@@ -247,6 +247,7 @@ public class HttpState {
     private ExpectationSerializer expectationSerializerThatSerializesBodyDefault;
     private OpenAPIExpectationSerializer openAPIExpectationSerializer;
     private ExpectationToJavaSerializer expectationToJavaSerializer;
+    private ExpectationToJavaSerializer recordedExpectationToJavaSerializer;
     private org.mockserver.serialization.code.ExpectationToJavaScriptSerializer expectationToJavaScriptSerializer;
     private org.mockserver.serialization.code.ExpectationToPythonSerializer expectationToPythonSerializer;
     private org.mockserver.serialization.code.ExpectationToGoSerializer expectationToGoSerializer;
@@ -1671,7 +1672,7 @@ public class HttpState {
                                     consumer -> mockServerLog.retrieveRecordedExpectations(requestDefinition, consumer),
                                     logCorrelationId, request
                                 ), request);
-                                response.withBody(writtenBody(MediaType.create("application", "java").withCharset(UTF_8), writer -> getExpectationToJavaSerializer().serialize(requests, writer)));
+                                response.withBody(writtenBody(MediaType.create("application", "java").withCharset(UTF_8), writer -> getRecordedExpectationToJavaSerializer().serialize(requests, writer)));
                                 if (logEntry != null) {
                                     mockServerLogger.logEvent(logEntry);
                                 }
@@ -7737,6 +7738,13 @@ public class HttpState {
             this.expectationToJavaSerializer = new ExpectationToJavaSerializer();
         }
         return expectationToJavaSerializer;
+    }
+
+    private ExpectationToJavaSerializer getRecordedExpectationToJavaSerializer() {
+        if (this.recordedExpectationToJavaSerializer == null) {
+            this.recordedExpectationToJavaSerializer = new ExpectationToJavaSerializer(false);
+        }
+        return recordedExpectationToJavaSerializer;
     }
 
     private org.mockserver.serialization.code.ExpectationToJavaScriptSerializer getExpectationToJavaScriptSerializer() {

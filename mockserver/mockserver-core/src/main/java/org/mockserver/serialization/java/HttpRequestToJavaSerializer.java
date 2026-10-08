@@ -127,12 +127,12 @@ public class HttpRequestToJavaSerializer implements ToJavaSerializer<HttpRequest
                     output.append(")");
                 } else if (request.getBody() instanceof GraphQLBody graphQLBody) {
                     appendNewLineAndIndent((numberOfSpacesToIndent + 1) * INDENT_SIZE, output);
-                    output.append(".withBody(GraphQLBody.graphQL(\"").append(StringEscapeUtils.escapeJava(graphQLBody.getQuery())).append("\"");
-                    if (isNotBlank(graphQLBody.getOperationName())) {
-                        output.append(", \"").append(StringEscapeUtils.escapeJava(graphQLBody.getOperationName())).append("\"");
-                        if (isNotBlank(graphQLBody.getVariablesSchema())) {
-                            output.append(", \"").append(StringEscapeUtils.escapeJava(graphQLBody.getVariablesSchema())).append("\"");
-                        }
+                    output.append(".withBody(GraphQLBody.graphQL(").append(FluentJavaBuilder.literal(graphQLBody.getQuery()));
+                    if (graphQLBody.getVariablesSchema() != null) {
+                        output.append(", ").append(FluentJavaBuilder.literal(graphQLBody.getOperationName()));
+                        output.append(", ").append(FluentJavaBuilder.literal(graphQLBody.getVariablesSchema()));
+                    } else if (graphQLBody.getOperationName() != null) {
+                        output.append(", ").append(FluentJavaBuilder.literal(graphQLBody.getOperationName()));
                     }
                     output.append(")");
                     if (graphQLBody.getSelectionSetMatchType() != null) {
@@ -149,6 +149,10 @@ public class HttpRequestToJavaSerializer implements ToJavaSerializer<HttpRequest
                             output.append("\"").append(StringEscapeUtils.escapeJava(graphQLBody.getFields().get(fi))).append("\"");
                         }
                         output.append(")");
+                    }
+                    if (graphQLBody.getSchema() != null) {
+                        appendNewLineAndIndent((numberOfSpacesToIndent + 2) * INDENT_SIZE, output);
+                        output.append(".withSchema(").append(FluentJavaBuilder.literal(graphQLBody.getSchema())).append(")");
                     }
                     output.append(")");
                 } else if (request.getBody() instanceof BinaryBody binaryBody) {

@@ -34,7 +34,8 @@ import static org.mockserver.model.HttpResponse.response;
 
 /**
  * The Java generated for an expectation ({@code format=JAVA}) compiles and, run against a client, submits an
- * expectation whose JSON is the original's, for each kind of action and for before and after actions.
+ * expectation whose JSON is the original's, for each kind of action, for before and after actions and for the
+ * expectation-level fields such as id, chaos, rate limit, steps and capture rules.
  */
 public class GeneratedJavaCodeRoundTripTest {
 
@@ -242,7 +243,108 @@ public class GeneratedJavaCodeRoundTripTest {
             .thenRespondWithDns(DnsResponse.dnsResponse().withAnswerRecord(DnsRecord.aRecord("a.example.com", "10.0.0.1"))));
     }
 
+    @Test
+    public void shouldRecreateIdChaosCaptureAndCrossProtocolScenarios() throws Exception {
+        assertRecreated(new Expectation(request().withPath("/chaos"))
+            .withId("expectation-one")
+            .withChaos(chaosProfile())
+            .withCapture(
+                CaptureRule.capture(CaptureRule.Source.jsonPath, "$.user.id", "userId"),
+                CaptureRule.captureRule().withSource(CaptureRule.Source.header).withExpression("x-\"trace\"").withInto("trace")
+            )
+            .withCrossProtocolScenarios(Arrays.asList(
+                CrossProtocolScenario.onDnsQuery("api.example.com", "flow", "DnsSeen"),
+                CrossProtocolScenario.crossProtocolScenario().withTrigger(CrossProtocolTrigger.WEBSOCKET_CONNECT).withScenarioName("flow").withTargetState("Connected")
+            ))
+            .thenRespond(response().withStatusCode(200).withBody("ok")));
+    }
+
+    @Test
+    public void shouldRecreateRateLimit() throws Exception {
+        assertRecreated(new Expectation(request().withPath("/limited"))
+            .withId("expectation-two")
+            .withRateLimit(RateLimit.rateLimit()
+                .withName("shared")
+                .withAlgorithm(RateLimit.Algorithm.TOKEN_BUCKET)
+                .withLimit(5)
+                .withWindowMillis(1000L)
+                .withBurst(10L)
+                .withRefillPerSecond(2.5)
+                .withErrorStatus(503)
+                .withRetryAfter("3"))
+            .thenRespond(response().withStatusCode(201)));
+    }
+
+    @Test
+    public void shouldRecreateSteps() throws Exception {
+        assertRecreated(new Expectation(request().withPath("/steps"))
+            .withSteps(
+                ExpectationStep.step()
+                    .withHttpRequest(request().withMethod("POST").withPath("/audit"))
+                    .withDelay(new Delay(TimeUnit.MILLISECONDS, 5))
+                    .withBlocking(true)
+                    .withTimeout(new Delay(TimeUnit.SECONDS, 1))
+                    .withFailurePolicy(FailurePolicy.FAIL_FAST),
+                ExpectationStep.step().withHttpClassCallback(callback().withCallbackClass("org.example.Step")).withBlocking(false),
+                ExpectationStep.step().withHttpResponse(response().withStatusCode(202).withBody("accepted")).withResponder(true),
+                ExpectationStep.step().withHttpForward(forward().withHost("audit.example.com").withPort(8080)),
+                ExpectationStep.step().withHttpOverrideForwardedRequest(HttpOverrideForwardedRequest.forwardOverriddenRequest(request().withPath("/copy"))),
+                ExpectationStep.step().withHttpError(HttpError.error().withDropConnection(true))
+            )
+            .withAfterActions(AfterAction.afterAction().withHttpRequest(request().withPath("/after"))));
+    }
+
+    @Test
+    public void shouldRecreateExpectationLevelFieldsOfAnExpectationWithSeveralActions() throws Exception {
+        assertRecreated(new Expectation(request().withPath("/several-with-fields"))
+            .withId("expectation-three")
+            .withChaos(HttpChaosProfile.httpChaosProfile().withErrorStatus(500).withErrorProbability(1.0))
+            .withRateLimit(RateLimit.rateLimit().withLimit(1).withWindowMillis(60000L))
+            .withCapture(CaptureRule.capture(CaptureRule.Source.queryStringParameter, "id", "id"))
+            .withCrossProtocolScenario(CrossProtocolScenario.onHttpPath("/next.*", "flow", "Next"))
+            .thenRespond(response().withStatusCode(200))
+            .thenRespondWithBinary(BinaryResponse.binaryResponse(new byte[]{1, 2})));
+    }
+
+    @Test
+    public void shouldRecreateGraphQLBodyWithVariablesSchemaButNoOperationNameAndWithSchema() throws Exception {
+        assertRecreated(new Expectation(request().withPath("/graphql").withBody(
+            GraphQLBody.graphQL("query { a(id: $id) }", null, "{\"type\":\"object\",\"required\":[\"id\"]}")
+                .withSelectionSetMatchType(SelectionSetMatchType.values()[0])
+                .withFields("a")
+                .withSchema("type Query { a(id: ID): String }")))
+            .thenRespond(response().withBody("{\"data\":{\"a\":\"x\"}}")));
+    }
+
+    private static HttpChaosProfile chaosProfile() {
+        return HttpChaosProfile.httpChaosProfile()
+            .withErrorStatus(503)
+            .withRetryAfter("7")
+            .withErrorProbability(0.25)
+            .withDropConnectionProbability(0.1)
+            .withLatency(new Delay(TimeUnit.MILLISECONDS, 40))
+            .withSeed(99L)
+            .withSucceedFirst(2)
+            .withFailRequestCount(3)
+            .withOutageAfterMillis(1000L)
+            .withOutageDurationMillis(5000L)
+            .withTruncateBodyAtFraction(0.5)
+            .withMalformedBody(true)
+            .withSlowResponseChunkSize(16)
+            .withSlowResponseChunkDelay(new Delay(TimeUnit.MILLISECONDS, 3))
+            .withQuotaName("quota")
+            .withQuotaLimit(10)
+            .withQuotaWindowMillis(60000L)
+            .withQuotaErrorStatus(429)
+            .withDegradationRampMillis(2000L)
+            .withGraphqlErrors(true)
+            .withGraphqlErrorMessage("broken \"field\"")
+            .withGraphqlErrorCode("INTERNAL")
+            .withGraphqlNullifyData(false);
+    }
+
     private static void assertRecreated(Expectation original) throws Exception {
+        boolean idSet = original.hasId();
         String generatedCode = new ExpectationToJavaSerializer().serialize(2, original);
         assertThat(generatedCode, containsString(CLIENT_CONSTRUCTION));
         assertThat(generatedCode, not(containsString("NOT POSSIBLE")));
@@ -251,7 +353,11 @@ public class GeneratedJavaCodeRoundTripTest {
         run(generatedCode.replace(CLIENT_CONSTRUCTION, "client"));
 
         assertThat(CLIENT.upserted, hasSize(1));
-        assertThat("generated code:\n" + generatedCode, withoutId(CLIENT.upserted.get(0)), is(withoutId(original)));
+        if (idSet) {
+            assertThat("generated code:\n" + generatedCode, CLIENT.upserted.get(0).toString(), is(original.toString()));
+        } else {
+            assertThat("generated code:\n" + generatedCode, withoutId(CLIENT.upserted.get(0)), is(withoutId(original)));
+        }
     }
 
     private static String withoutId(Expectation expectation) {
@@ -266,7 +372,9 @@ public class GeneratedJavaCodeRoundTripTest {
             "import org.mockserver.model.*;\n" +
             "import java.util.concurrent.TimeUnit;\n" +
             "import static org.mockserver.model.HttpClassCallback.callback;\n" +
+            "import static org.mockserver.model.HttpError.error;\n" +
             "import static org.mockserver.model.HttpForward.forward;\n" +
+            "import static org.mockserver.model.HttpOverrideForwardedRequest.forwardOverriddenRequest;\n" +
             "import static org.mockserver.model.HttpRequest.request;\n" +
             "import static org.mockserver.model.HttpResponse.response;\n" +
             "\n" +

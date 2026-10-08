@@ -359,6 +359,14 @@ public class Expectation extends ObjectWithJsonToString {
         return this;
     }
 
+    /**
+     * @return whether an id has been set, without assigning one as {@link #getId()} does
+     */
+    @JsonIgnore
+    public boolean hasId() {
+        return id != null;
+    }
+
     public String getId() {
         if (id == null) {
             withId(UUIDService.getUUID());
