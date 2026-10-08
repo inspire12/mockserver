@@ -766,6 +766,28 @@ public class Http3RequestBridgeTest {
     }
 
     @Test
+    public void shouldWrapTheSegmentsOfASegmentedBinaryBodyAsTheDataFrame() {
+        byte[] data = new byte[10_000];
+        for (int i = 0; i < data.length; i++) {
+            data[i] = (byte) i;
+        }
+        org.mockserver.model.SegmentedBytes bytes = new org.mockserver.model.SegmentedBytes();
+        bytes.write(data, 0, data.length);
+        HttpResponse response = HttpResponse.response()
+            .withBody(org.mockserver.model.BinaryBody.fromSegmentedBytes(bytes, null));
+
+        DefaultHttp3DataFrame dataFrame = Http3RequestBridge.toHttp3DataFrame(response);
+
+        ByteBuf content = dataFrame.content();
+        byte[] written = new byte[content.readableBytes()];
+        content.getBytes(content.readerIndex(), written);
+        assertThat(java.util.Arrays.equals(written, data), is(true));
+        assertThat(content.nioBufferCount(), is(bytes.asByteBuffers().length));
+        assertThat(content.nioBufferCount(), greaterThan(1));
+        content.release();
+    }
+
+    @Test
     public void shouldReturnNullDataFrameForAnEmptySegmentedBody() {
         HttpResponse response = HttpResponse.response()
             .withBody(org.mockserver.model.StringBody.fromSegmentedBytes(new org.mockserver.model.SegmentedBytes(), org.mockserver.model.MediaType.JSON_UTF_8));

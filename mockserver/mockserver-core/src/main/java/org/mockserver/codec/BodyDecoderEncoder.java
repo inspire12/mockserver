@@ -81,12 +81,15 @@ public class BodyDecoderEncoder {
     }
 
     /**
-     * The segments a body built from segmented bytes holds. They are its bytes on the wire whatever the
-     * header says: they are encoded in the body's declared charset, which wins over the header's, as
-     * {@link #bodyToBytes} reuses a materialised body's bytes.
+     * The segments a body built from segmented bytes holds, or null for any other body. They are its bytes
+     * on the wire whatever the header says: a text body's are encoded in its declared charset, which wins
+     * over the header's, as {@link #bodyToBytes} reuses a materialised body's bytes.
      */
-    static SegmentedBytes wireSegments(Body body) {
-        return body instanceof StringBody ? ((StringBody) body).getSegmentedBytes() : null;
+    public static SegmentedBytes wireSegments(Body body) {
+        if (body instanceof StringBody) {
+            return ((StringBody) body).getSegmentedBytes();
+        }
+        return body instanceof BinaryBody ? ((BinaryBody) body).getSegmentedBytes() : null;
     }
 
     byte[] bodyToBytes(Body body, String contentTypeHeader) {

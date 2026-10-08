@@ -7,6 +7,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import org.junit.Test;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
+import org.mockserver.model.BinaryBody;
 import org.mockserver.model.MediaType;
 import org.mockserver.model.SegmentedBytes;
 import org.mockserver.model.StringBody;
@@ -78,6 +79,50 @@ public class SegmentedBodyWriteTest {
         } finally {
             wire[0].release();
         }
+    }
+
+    @Test
+    public void shouldWrapTheSegmentsOfABinaryBodyAsTheNettyBodyWithoutACopy() {
+        byte[] data = largeText().getBytes(StandardCharsets.US_ASCII);
+        BinaryBody body = binaryBody(data);
+        BodyDecoderEncoder encoder = new BodyDecoderEncoder();
+        encoder.bodyToByteBuf(body, null).release();
+
+        ByteBuf[] wire = new ByteBuf[1];
+        long allocated = allocatedBy(() -> wire[0] = encoder.bodyToByteBuf(body, "application/zip"));
+        try {
+            byte[] bytes = new byte[wire[0].readableBytes()];
+            wire[0].getBytes(wire[0].readerIndex(), bytes);
+            assertThat(Arrays.equals(bytes, data), is(true));
+            assertThat(wire[0].nioBufferCount(), is(body.getSegmentedBytes().asByteBuffers().length));
+            assertThat("allocated " + allocated, allocated, lessThan(LARGE / 20L));
+        } finally {
+            wire[0].release();
+        }
+    }
+
+    @Test
+    public void shouldWriteTheSegmentsOfABinaryBodyToTheServletResponseWithoutACopy() throws IOException {
+        byte[] data = largeText().getBytes(StandardCharsets.US_ASCII);
+        BinaryBody body = binaryBody(data);
+        BodyServletDecoderEncoder encoder = new BodyServletDecoderEncoder(new MockServerLogger());
+        encoder.bodyToServletResponse(servletResponse(new CountingOutputStream()), body, null);
+
+        CountingOutputStream out = new CountingOutputStream();
+        HttpServletResponse response = servletResponse(out);
+        long allocated = allocatedBy(() -> encoder.bodyToServletResponse(response, body, "application/zip"));
+
+        assertThat(out.count, is((long) data.length));
+        assertThat(out.writes, greaterThan(1));
+        assertThat(out.closed, is(true));
+        assertThat(out.hash, is(hash(data)));
+        assertThat("allocated " + allocated, allocated, lessThan(LARGE / 20L));
+    }
+
+    private static BinaryBody binaryBody(byte[] data) {
+        SegmentedBytes bytes = new SegmentedBytes();
+        bytes.write(data, 0, data.length);
+        return BinaryBody.fromSegmentedBytes(bytes, null);
     }
 
     @Test

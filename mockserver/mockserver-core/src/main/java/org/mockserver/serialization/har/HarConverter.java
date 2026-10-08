@@ -49,15 +49,49 @@ public class HarConverter {
                     .withName("MockServer")
                     .withVersion(Version.getVersion())
             )
-            .withEntries(
-                requestAndResponses.stream()
-                    .map(this::convertEntry)
-                    .collect(Collectors.toList())
-            );
+            .withEntries(new ConvertedEntries(requestAndResponses));
 
         Map<String, HarLog> wrapper = new LinkedHashMap<>();
         wrapper.put("log", harLog);
         return wrapper;
+    }
+
+    /**
+     * The entries of a HAR, each converted as it is read, so serialising them holds one converted entry
+     * (with its bodies as text) at a time rather than all of them.
+     */
+    private final class ConvertedEntries extends AbstractList<HarEntry> {
+        private final List<LogEventRequestAndResponse> requestAndResponses;
+
+        private ConvertedEntries(List<LogEventRequestAndResponse> requestAndResponses) {
+            this.requestAndResponses = requestAndResponses;
+        }
+
+        @Override
+        public HarEntry get(int index) {
+            return convertEntry(requestAndResponses.get(index));
+        }
+
+        @Override
+        public Iterator<HarEntry> iterator() {
+            Iterator<LogEventRequestAndResponse> source = requestAndResponses.iterator();
+            return new Iterator<HarEntry>() {
+                @Override
+                public boolean hasNext() {
+                    return source.hasNext();
+                }
+
+                @Override
+                public HarEntry next() {
+                    return convertEntry(source.next());
+                }
+            };
+        }
+
+        @Override
+        public int size() {
+            return requestAndResponses.size();
+        }
     }
 
     private HarEntry convertEntry(LogEventRequestAndResponse requestAndResponse) {

@@ -25,6 +25,8 @@ import org.springframework.mock.web.MockHttpServletResponse;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
@@ -59,7 +61,8 @@ import static org.mockserver.model.JsonBody.json;
  * frontends write them, to digests recorded from the implementation that built each response as one
  * String. The fixture mixes multi-byte, supplementary and unpaired surrogate characters with bodies
  * long enough to cross every internal buffer boundary. The fixed log timestamp, formatted in the
- * JVM's zone, and the MockServer version are replaced by placeholders before hashing.
+ * JVM's zone, and the MockServer version are replaced by placeholders before hashing, as are the
+ * random ids in OpenAPI documents and the time each Bruno zip entry was written.
  * <p>
  * To re-record (only when an output change is intended), run with
  * {@code -Dmockserver.recordRetrieveGolden=<path of retrieve-golden.txt in src/test/resources>}.
@@ -163,11 +166,7 @@ public class HttpStateRetrieveGoldenTest {
                 continue;
             }
             for (Format format : Format.values()) {
-                // a zip carries the time it was written, and OpenAPI the random ids of the expectations
-                // it derives, so neither can have a recorded digest
-                if (format != Format.BRUNO && format != Format.OPENAPI) {
-                    retrieves.add(new Object[]{type, format});
-                }
+                retrieves.add(new Object[]{type, format});
             }
         }
         return retrieves;
@@ -184,8 +183,8 @@ public class HttpStateRetrieveGoldenTest {
             RetrieveType type = (RetrieveType) retrieve[0];
             Format format = (Format) retrieve[1];
             HttpResponse response = httpState.retrieve(retrieveRequest(type, format));
-            Wire netty = nettyWire(response);
-            Wire servlet = servletWire(response);
+            Wire netty = nettyWire(response, format);
+            Wire servlet = servletWire(response, format);
             String key = type + " " + format;
             actual.put(key, response.getStatusCode() + " " + netty.describe());
             // the servlet frontend must write exactly what Netty writes
@@ -223,7 +222,7 @@ public class HttpStateRetrieveGoldenTest {
         return golden;
     }
 
-    private Wire nettyWire(HttpResponse response) {
+    private Wire nettyWire(HttpResponse response, Format format) {
         List<DefaultHttpObject> objects = new MockServerHttpResponseToFullHttpResponse(new MockServerLogger()).mapMockServerResponseToNettyResponse(response);
         try {
             assertThat(objects.size(), is(1));
@@ -231,29 +230,37 @@ public class HttpStateRetrieveGoldenTest {
             ByteBuf content = full.content();
             byte[] bytes = new byte[content.readableBytes()];
             content.getBytes(content.readerIndex(), bytes);
-            return new Wire(full.headers().get(CONTENT_TYPE), bytes);
+            return new Wire(full.headers().get(CONTENT_TYPE), bytes, format);
         } finally {
             objects.forEach(ReferenceCountUtil::release);
         }
     }
 
-    private Wire servletWire(HttpResponse response) {
+    private Wire servletWire(HttpResponse response, Format format) {
         MockHttpServletResponse servletResponse = new MockHttpServletResponse();
         new MockServerHttpResponseToHttpServletResponseEncoder(new MockServerLogger()).mapMockServerResponseToHttpServletResponse(response, servletResponse);
-        return new Wire(servletResponse.getHeader(CONTENT_TYPE.toString()), servletResponse.getContentAsByteArray());
+        return new Wire(servletResponse.getHeader(CONTENT_TYPE.toString()), servletResponse.getContentAsByteArray(), format);
     }
 
     static final class Wire {
         final String contentType;
         final byte[] bytes;
+        final Format format;
 
-        Wire(String contentType, byte[] bytes) {
+        Wire(String contentType, byte[] bytes, Format format) {
             this.contentType = contentType;
             this.bytes = bytes;
+            this.format = format;
         }
 
         String describe() {
-            byte[] normalised = normalise(bytes);
+            byte[] normalised = "application/zip".equals(contentType) ? zipWithoutTimes(bytes) : normalise(bytes);
+            if (format == Format.OPENAPI) {
+                // the operation ids of expectations derived from logged requests are random
+                normalised = new String(normalised, StandardCharsets.ISO_8859_1)
+                    .replaceAll("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", "<uuid>")
+                    .getBytes(StandardCharsets.ISO_8859_1);
+            }
             return String.valueOf(contentType).replace(' ', '_') + " " + normalised.length + " " + sha256(normalised);
         }
     }
@@ -267,6 +274,28 @@ public class HttpStateRetrieveGoldenTest {
             text = text.replace("\"" + version + "\"", "\"<version>\"");
         }
         return text.getBytes(StandardCharsets.ISO_8859_1);
+    }
+
+    /**
+     * A copy of a zip with the time and date of every entry, in its local and its central directory
+     * header, set to zero: a zip records when each entry was written.
+     */
+    static byte[] zipWithoutTimes(byte[] zip) {
+        byte[] copy = zip.clone();
+        ByteBuffer buffer = ByteBuffer.wrap(copy).order(ByteOrder.LITTLE_ENDIAN);
+        int endOfCentralDirectory = copy.length - 22;
+        assertThat("end of central directory signature", buffer.getInt(endOfCentralDirectory), is(0x06054b50));
+        int entries = buffer.getShort(endOfCentralDirectory + 10) & 0xffff;
+        int header = buffer.getInt(endOfCentralDirectory + 16);
+        for (int i = 0; i < entries; i++) {
+            assertThat("central directory header signature", buffer.getInt(header), is(0x02014b50));
+            buffer.putInt(header + 12, 0);
+            int local = buffer.getInt(header + 42);
+            assertThat("local file header signature", buffer.getInt(local), is(0x04034b50));
+            buffer.putInt(local + 10, 0);
+            header += 46 + (buffer.getShort(header + 28) & 0xffff) + (buffer.getShort(header + 30) & 0xffff) + (buffer.getShort(header + 32) & 0xffff);
+        }
+        return copy;
     }
 
     static String sha256(byte[] bytes) {

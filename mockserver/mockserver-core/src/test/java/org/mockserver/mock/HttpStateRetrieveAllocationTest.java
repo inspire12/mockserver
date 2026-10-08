@@ -70,6 +70,13 @@ public class HttpStateRetrieveAllocationTest {
             {RetrieveType.RECORDED_EXPECTATIONS, Format.JSON, ONCE},
             {RetrieveType.RECORDED_EXPECTATIONS, Format.HAR, ONCE},
             {RetrieveType.ACTIVE_EXPECTATIONS, Format.JSON, ONCE},
+            {RetrieveType.REQUESTS, Format.POSTMAN, ONCE},
+            {RetrieveType.REQUEST_RESPONSES, Format.OPENAPI, ONCE},
+            {RetrieveType.REQUEST_RESPONSES, Format.POSTMAN, ONCE},
+            {RetrieveType.RECORDED_EXPECTATIONS, Format.OPENAPI, ONCE},
+            {RetrieveType.RECORDED_EXPECTATIONS, Format.POSTMAN, ONCE},
+            {RetrieveType.ACTIVE_EXPECTATIONS, Format.OPENAPI, ONCE},
+            {RetrieveType.ACTIVE_EXPECTATIONS, Format.POSTMAN, ONCE},
             // these render each entry or expectation as text of its own first, which costs several
             // times its size; the bound is what that costs plus the response once
             {RetrieveType.LOGS, Format.JSON, 18.5},

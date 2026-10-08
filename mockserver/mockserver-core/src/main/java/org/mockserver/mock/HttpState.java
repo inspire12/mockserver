@@ -56,6 +56,7 @@ import org.mockserver.verify.VerificationSequence;
 import org.slf4j.event.Level;
 
 import java.io.IOException;
+import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.io.Writer;
 import java.util.ArrayList;
@@ -70,6 +71,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static io.netty.handler.codec.http.HttpHeaderNames.CONTENT_TYPE;
@@ -1463,10 +1465,8 @@ public class HttpState {
                             }
                             case OPENAPI: {
                                 List<RequestDefinition> requests = retrieveRequestsPossiblyFanIn(requestDefinition, logCorrelationId, request, applyFanIn);
-                                response.withBody(
-                                    getExpectationExportSerializer().serializeRequestsAsOpenApi(requests),
-                                    MediaType.JSON_UTF_8
-                                );
+                                ExpectationExportSerializer exporter = getExpectationExportSerializer();
+                                response.withBody(writtenBody(MediaType.JSON_UTF_8, writer -> exporter.writeOpenApi(exporter.expectationsFromRequests(requests), writer), exporter::openApiFailure));
                                 if (logEntry != null) {
                                     mockServerLogger.logEvent(logEntry);
                                 }
@@ -1475,10 +1475,8 @@ public class HttpState {
                             }
                             case POSTMAN: {
                                 List<RequestDefinition> requests = retrieveRequestsPossiblyFanIn(requestDefinition, logCorrelationId, request, applyFanIn);
-                                response.withBody(
-                                    getExpectationExportSerializer().serializeRequestsAsPostman(requests),
-                                    MediaType.JSON_UTF_8
-                                );
+                                ExpectationExportSerializer exporter = getExpectationExportSerializer();
+                                response.withBody(writtenBody(MediaType.JSON_UTF_8, writer -> exporter.writePostmanCollection(exporter.expectationsFromRequests(requests), writer), exporter::postmanFailure));
                                 if (logEntry != null) {
                                     mockServerLogger.logEvent(logEntry);
                                 }
@@ -1487,8 +1485,9 @@ public class HttpState {
                             }
                             case BRUNO: {
                                 List<RequestDefinition> requests = retrieveRequestsPossiblyFanIn(requestDefinition, logCorrelationId, request, applyFanIn);
+                                ExpectationExportSerializer exporter = getExpectationExportSerializer();
                                 response
-                                    .withBody(getExpectationExportSerializer().serializeRequestsAsBruno(requests))
+                                    .withBody(writtenBinaryBody(out -> exporter.writeBrunoCollection(exporter.expectationsFromRequests(requests), out), exporter::brunoFailure))
                                     .withHeader(io.netty.handler.codec.http.HttpHeaderNames.CONTENT_TYPE.toString(), "application/zip")
                                     .withHeader("content-disposition", "attachment; filename=\"mockserver-requests.bruno.zip\"");
                                 if (logEntry != null) {
@@ -1605,10 +1604,8 @@ public class HttpState {
                             }
                             case OPENAPI: {
                                 List<LogEventRequestAndResponse> pairs = retrieveRequestResponsesPossiblyFanIn(requestDefinition, logCorrelationId, request, applyFanIn);
-                                response.withBody(
-                                    getExpectationExportSerializer().serializeRequestResponsesAsOpenApi(pairs),
-                                    MediaType.JSON_UTF_8
-                                );
+                                ExpectationExportSerializer exporter = getExpectationExportSerializer();
+                                response.withBody(writtenBody(MediaType.JSON_UTF_8, writer -> exporter.writeOpenApi(exporter.expectationsFromPairs(pairs), writer), exporter::openApiFailure));
                                 if (logEntry != null) {
                                     mockServerLogger.logEvent(logEntry);
                                 }
@@ -1617,10 +1614,8 @@ public class HttpState {
                             }
                             case POSTMAN: {
                                 List<LogEventRequestAndResponse> pairs = retrieveRequestResponsesPossiblyFanIn(requestDefinition, logCorrelationId, request, applyFanIn);
-                                response.withBody(
-                                    getExpectationExportSerializer().serializeRequestResponsesAsPostman(pairs),
-                                    MediaType.JSON_UTF_8
-                                );
+                                ExpectationExportSerializer exporter = getExpectationExportSerializer();
+                                response.withBody(writtenBody(MediaType.JSON_UTF_8, writer -> exporter.writePostmanCollection(exporter.expectationsFromPairs(pairs), writer), exporter::postmanFailure));
                                 if (logEntry != null) {
                                     mockServerLogger.logEvent(logEntry);
                                 }
@@ -1629,8 +1624,9 @@ public class HttpState {
                             }
                             case BRUNO: {
                                 List<LogEventRequestAndResponse> pairs = retrieveRequestResponsesPossiblyFanIn(requestDefinition, logCorrelationId, request, applyFanIn);
+                                ExpectationExportSerializer exporter = getExpectationExportSerializer();
                                 response
-                                    .withBody(getExpectationExportSerializer().serializeRequestResponsesAsBruno(pairs))
+                                    .withBody(writtenBinaryBody(out -> exporter.writeBrunoCollection(exporter.expectationsFromPairs(pairs), out), exporter::brunoFailure))
                                     .withHeader(io.netty.handler.codec.http.HttpHeaderNames.CONTENT_TYPE.toString(), "application/zip")
                                     .withHeader("content-disposition", "attachment; filename=\"mockserver-traffic.bruno.zip\"");
                                 if (logEntry != null) {
@@ -1793,10 +1789,8 @@ public class HttpState {
                                     consumer -> mockServerLog.retrieveRecordedExpectations(requestDefinition, consumer),
                                     logCorrelationId, request
                                 ), request);
-                                response.withBody(
-                                    getExpectationExportSerializer().serializeAsOpenApi(expectations),
-                                    MediaType.JSON_UTF_8
-                                );
+                                ExpectationExportSerializer exporter = getExpectationExportSerializer();
+                                response.withBody(writtenBody(MediaType.JSON_UTF_8, writer -> exporter.writeOpenApi(expectations, writer), exporter::openApiFailure));
                                 if (logEntry != null) {
                                     mockServerLogger.logEvent(logEntry);
                                 }
@@ -1808,10 +1802,8 @@ public class HttpState {
                                     consumer -> mockServerLog.retrieveRecordedExpectations(requestDefinition, consumer),
                                     logCorrelationId, request
                                 ), request);
-                                response.withBody(
-                                    getExpectationExportSerializer().serializeAsPostmanCollection(expectations),
-                                    MediaType.JSON_UTF_8
-                                );
+                                ExpectationExportSerializer exporter = getExpectationExportSerializer();
+                                response.withBody(writtenBody(MediaType.JSON_UTF_8, writer -> exporter.writePostmanCollection(expectations, writer), exporter::postmanFailure));
                                 if (logEntry != null) {
                                     mockServerLogger.logEvent(logEntry);
                                 }
@@ -1823,8 +1815,9 @@ public class HttpState {
                                     consumer -> mockServerLog.retrieveRecordedExpectations(requestDefinition, consumer),
                                     logCorrelationId, request
                                 ), request);
+                                ExpectationExportSerializer exporter = getExpectationExportSerializer();
                                 response
-                                    .withBody(getExpectationExportSerializer().serializeAsBrunoCollection(expectations))
+                                    .withBody(writtenBinaryBody(out -> exporter.writeBrunoCollection(expectations, out), exporter::brunoFailure))
                                     .withHeader(io.netty.handler.codec.http.HttpHeaderNames.CONTENT_TYPE.toString(), "application/zip")
                                     .withHeader("content-disposition", "attachment; filename=\"mockserver-recorded.bruno.zip\"");
                                 if (logEntry != null) {
@@ -1911,20 +1904,14 @@ public class HttpState {
                                 response.withBody("LOG_ENTRIES not supported for ACTIVE_EXPECTATIONS", MediaType.create("text", "plain").withCharset(UTF_8));
                                 break;
                             case OPENAPI:
-                                response.withBody(
-                                    getExpectationExportSerializer().serializeAsOpenApi(expectations),
-                                    MediaType.JSON_UTF_8
-                                );
+                                response.withBody(writtenBody(MediaType.JSON_UTF_8, writer -> getExpectationExportSerializer().writeOpenApi(selected, writer), getExpectationExportSerializer()::openApiFailure));
                                 break;
                             case POSTMAN:
-                                response.withBody(
-                                    getExpectationExportSerializer().serializeAsPostmanCollection(expectations),
-                                    MediaType.JSON_UTF_8
-                                );
+                                response.withBody(writtenBody(MediaType.JSON_UTF_8, writer -> getExpectationExportSerializer().writePostmanCollection(selected, writer), getExpectationExportSerializer()::postmanFailure));
                                 break;
                             case BRUNO:
                                 response
-                                    .withBody(getExpectationExportSerializer().serializeAsBrunoCollection(expectations))
+                                    .withBody(writtenBinaryBody(out -> getExpectationExportSerializer().writeBrunoCollection(selected, out), getExpectationExportSerializer()::brunoFailure))
                                     .withHeader(io.netty.handler.codec.http.HttpHeaderNames.CONTENT_TYPE.toString(), "application/zip")
                                     .withHeader("content-disposition", "attachment; filename=\"mockserver-expectations.bruno.zip\"");
                                 break;
@@ -2051,18 +2038,47 @@ public class HttpState {
         void writeTo(Writer writer) throws IOException;
     }
 
+    @FunctionalInterface
+    private interface ResponseBytes {
+        void writeTo(OutputStream out) throws IOException;
+    }
+
     /**
      * Writes a retrieve response's text straight into the bytes the frontend writes, encoded in the
      * charset of {@code mediaType}: the response is never built as one String, nor copied as bytes.
      */
     private static StringBody writtenBody(MediaType mediaType, ResponseText text) {
+        return writtenBody(mediaType, text, ioe -> {
+            throw new UncheckedIOException(ioe);
+        });
+    }
+
+    /**
+     * As {@link #writtenBody(MediaType, ResponseText)}, answering {@code onFailure}'s text if writing
+     * fails: the response is built whole before it is written, so what was written is discarded.
+     */
+    private static StringBody writtenBody(MediaType mediaType, ResponseText text, Function<IOException, String> onFailure) {
         SegmentedBytes bytes = new SegmentedBytes();
         try (Writer writer = bytes.writer(mediaType.getCharset())) {
             text.writeTo(writer);
         } catch (IOException ioe) {
-            throw new UncheckedIOException(ioe);
+            return new StringBody(onFailure.apply(ioe), mediaType);
         }
         return StringBody.fromSegmentedBytes(bytes, mediaType);
+    }
+
+    /**
+     * Writes a binary retrieve response straight into the bytes the frontend writes, answering
+     * {@code onFailure}'s bytes if writing fails, discarding what was written.
+     */
+    private static BinaryBody writtenBinaryBody(ResponseBytes content, Function<IOException, byte[]> onFailure) {
+        SegmentedBytes bytes = new SegmentedBytes();
+        try {
+            content.writeTo(bytes);
+        } catch (IOException ioe) {
+            return new BinaryBody(onFailure.apply(ioe));
+        }
+        return BinaryBody.fromSegmentedBytes(bytes, null);
     }
 
     /**

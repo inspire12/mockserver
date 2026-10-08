@@ -15,6 +15,8 @@ import static org.apache.commons.lang3.StringUtils.isBlank;
 public class BinaryBody extends BodyWithContentType<byte[]> {
     private int hashCode;
     private final byte[] bytes;
+    // set instead of bytes for a body built from bytes held in segments, which are never joined to be written
+    private final SegmentedBytes segmentedBytes;
     private final Base64Converter base64Converter = new Base64Converter();
 
     public BinaryBody(byte[] bytes) {
@@ -24,6 +26,24 @@ public class BinaryBody extends BodyWithContentType<byte[]> {
     public BinaryBody(byte[] bytes, MediaType contentType) {
         super(Type.BINARY, contentType);
         this.bytes = bytes;
+        this.segmentedBytes = null;
+    }
+
+    private BinaryBody(SegmentedBytes segmentedBytes, MediaType contentType) {
+        super(Type.BINARY, contentType);
+        this.bytes = null;
+        this.segmentedBytes = segmentedBytes;
+    }
+
+    /**
+     * A body of the bytes held in the segments they were written to, so writing it needs no further
+     * copy. It equals the body built from the same bytes with {@link #BinaryBody(byte[], MediaType)}.
+     */
+    public static BinaryBody fromSegmentedBytes(SegmentedBytes segmentedBytes, MediaType contentType) {
+        if (segmentedBytes == null) {
+            throw new IllegalArgumentException("segmented bytes are required");
+        }
+        return new BinaryBody(segmentedBytes, contentType);
     }
 
     public static BinaryBody binary(byte[] body) {
@@ -34,13 +54,31 @@ public class BinaryBody extends BodyWithContentType<byte[]> {
         return new BinaryBody(body, contentType);
     }
 
+    /**
+     * For a body built {@link #fromSegmentedBytes from segmented bytes}, a copy of them in one array.
+     */
     public byte[] getValue() {
-        return bytes;
+        return canonicalBytes();
     }
 
+    /**
+     * For a body built {@link #fromSegmentedBytes from segmented bytes}, a copy of them in one array.
+     */
     @JsonIgnore
     public byte[] getRawBytes() {
-        return bytes;
+        return canonicalBytes();
+    }
+
+    private byte[] canonicalBytes() {
+        return segmentedBytes != null ? segmentedBytes.toByteArray() : bytes;
+    }
+
+    /**
+     * The bytes a body built {@link #fromSegmentedBytes from segmented bytes} holds, or null for any other body.
+     */
+    @JsonIgnore
+    public SegmentedBytes getSegmentedBytes() {
+        return segmentedBytes;
     }
 
     /**
@@ -58,7 +96,8 @@ public class BinaryBody extends BodyWithContentType<byte[]> {
 
     @Override
     public String toString() {
-        return bytes != null ? base64Converter.bytesToBase64String(bytes) : null;
+        byte[] value = canonicalBytes();
+        return value != null ? base64Converter.bytesToBase64String(value) : null;
     }
 
     @Override
@@ -76,7 +115,7 @@ public class BinaryBody extends BodyWithContentType<byte[]> {
             return false;
         }
         BinaryBody that = (BinaryBody) o;
-        return Arrays.equals(bytes, that.bytes) &&
+        return Arrays.equals(canonicalBytes(), that.canonicalBytes()) &&
             Objects.equals(base64Converter, that.base64Converter);
     }
 
@@ -84,7 +123,7 @@ public class BinaryBody extends BodyWithContentType<byte[]> {
     public int hashCode() {
         if (hashCode == 0) {
             int result = Objects.hash(super.hashCode(), base64Converter);
-            hashCode = 31 * result + Arrays.hashCode(bytes);
+            hashCode = 31 * result + Arrays.hashCode(canonicalBytes());
         }
         return hashCode;
     }

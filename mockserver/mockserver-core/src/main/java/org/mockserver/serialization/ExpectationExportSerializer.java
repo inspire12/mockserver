@@ -1,5 +1,6 @@
 package org.mockserver.serialization;
 
+import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -18,6 +19,9 @@ import org.mockserver.model.RequestDefinition;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
+import java.io.StringWriter;
+import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -82,32 +86,50 @@ public class ExpectationExportSerializer {
     // -----------------------------------------------------------------------
 
     public String serializeAsOpenApi(List<Expectation> expectations) {
+        StringWriter writer = new StringWriter();
         try {
-            ObjectNode root = objectMapper.createObjectNode();
-            root.put("openapi", OPENAPI_VERSION);
-            ObjectNode info = root.putObject("info");
-            info.put("title", COLLECTION_NAME);
-            info.put("version", "1.0.0");
-            info.put("description", COLLECTION_DESCRIPTION);
-
-            ObjectNode paths = root.putObject("paths");
-            // Defect 3: operationId must be unique across the whole document.
-            Set<String> emittedOperationIds = new HashSet<>();
-            for (Expectation expectation : expectations) {
-                addOpenApiOperation(paths, expectation, emittedOperationIds);
-            }
-            return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(root);
-        } catch (JsonProcessingException e) {
-            if (mockServerLogger.isEnabledForInstance(org.slf4j.event.Level.INFO)) {
-                mockServerLogger.logEvent(new org.mockserver.log.model.LogEntry()
-                    .setType(org.mockserver.log.model.LogEntry.LogMessageType.EXCEPTION)
-                    .setMessageFormat("exception while serialising expectations as OpenAPI: " + e.getMessage()));
-            }
-            // Return a minimal but schema-VALID OpenAPI document rather than "{}".
-            return "{\"openapi\":\"" + OPENAPI_VERSION + "\","
-                + "\"info\":{\"title\":\"" + COLLECTION_NAME + "\",\"version\":\"1.0\"},"
-                + "\"paths\":{}}";
+            writeOpenApi(expectations, writer);
+            return writer.toString();
+        } catch (IOException e) {
+            return openApiFailure(e);
         }
+    }
+
+    /**
+     * As {@link #serializeAsOpenApi}, writing the document to {@code writer} rather than building it as one
+     * String. Operations are merged by path and method, so the document is built whole before it is written.
+     * A failure part-way leaves what was written: discard it and answer {@link #openApiFailure} instead.
+     */
+    public void writeOpenApi(List<Expectation> expectations, Writer writer) throws IOException {
+        ObjectNode root = objectMapper.createObjectNode();
+        root.put("openapi", OPENAPI_VERSION);
+        ObjectNode info = root.putObject("info");
+        info.put("title", COLLECTION_NAME);
+        info.put("version", "1.0.0");
+        info.put("description", COLLECTION_DESCRIPTION);
+
+        ObjectNode paths = root.putObject("paths");
+        // Defect 3: operationId must be unique across the whole document.
+        Set<String> emittedOperationIds = new HashSet<>();
+        for (Expectation expectation : expectations) {
+            addOpenApiOperation(paths, expectation, emittedOperationIds);
+        }
+        objectMapper.writerWithDefaultPrettyPrinter().writeValue(writer, root);
+    }
+
+    /**
+     * Logs a failure to write an OpenAPI document and returns the document answered in its place.
+     */
+    public String openApiFailure(IOException e) {
+        if (mockServerLogger.isEnabledForInstance(org.slf4j.event.Level.INFO)) {
+            mockServerLogger.logEvent(new org.mockserver.log.model.LogEntry()
+                .setType(org.mockserver.log.model.LogEntry.LogMessageType.EXCEPTION)
+                .setMessageFormat("exception while serialising expectations as OpenAPI: " + e.getMessage()));
+        }
+        // Return a minimal but schema-VALID OpenAPI document rather than "{}".
+        return "{\"openapi\":\"" + OPENAPI_VERSION + "\","
+            + "\"info\":{\"title\":\"" + COLLECTION_NAME + "\",\"version\":\"1.0\"},"
+            + "\"paths\":{}}";
     }
 
     private void addOpenApiOperation(ObjectNode paths, Expectation expectation, Set<String> emittedOperationIds) {
@@ -408,34 +430,59 @@ public class ExpectationExportSerializer {
     // -----------------------------------------------------------------------
 
     public String serializeAsPostmanCollection(List<Expectation> expectations) {
+        StringWriter writer = new StringWriter();
         try {
-            ObjectNode root = objectMapper.createObjectNode();
-            ObjectNode info = root.putObject("info");
+            writePostmanCollection(expectations, writer);
+            return writer.toString();
+        } catch (IOException e) {
+            return postmanFailure(e);
+        }
+    }
+
+    /**
+     * As {@link #serializeAsPostmanCollection}, writing the collection to {@code writer} one item at a time
+     * rather than building it as one tree and one String. A failure part-way leaves what was written:
+     * discard it and answer {@link #postmanFailure} instead.
+     */
+    public void writePostmanCollection(List<Expectation> expectations, Writer writer) throws IOException {
+        try (JsonGenerator generator = objectMapper.writerWithDefaultPrettyPrinter().createGenerator(writer)) {
+            generator.writeStartObject();
+            ObjectNode info = objectMapper.createObjectNode();
             info.put("name", COLLECTION_NAME);
             info.put("description", COLLECTION_DESCRIPTION);
             info.put("schema", POSTMAN_SCHEMA);
+            generator.writeFieldName("info");
+            objectMapper.writeTree(generator, info);
 
-            ArrayNode items = root.putArray("item");
+            generator.writeArrayFieldStart("item");
             for (Expectation expectation : expectations) {
-                ObjectNode item = items.addObject();
+                ObjectNode item = objectMapper.createObjectNode();
                 addPostmanItem(item, expectation);
+                objectMapper.writeTree(generator, item);
             }
+            generator.writeEndArray();
 
             // Suggest a baseUrl variable so the collection isn't pinned to localhost.
-            ArrayNode variables = root.putArray("variable");
+            ArrayNode variables = objectMapper.createArrayNode();
             ObjectNode baseUrlVar = variables.addObject();
             baseUrlVar.put("key", "baseUrl");
             baseUrlVar.put("value", "http://localhost:1080");
-
-            return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(root);
-        } catch (JsonProcessingException e) {
-            if (mockServerLogger.isEnabledForInstance(org.slf4j.event.Level.INFO)) {
-                mockServerLogger.logEvent(new org.mockserver.log.model.LogEntry()
-                    .setType(org.mockserver.log.model.LogEntry.LogMessageType.EXCEPTION)
-                    .setMessageFormat("exception while serialising expectations as Postman: " + e.getMessage()));
-            }
-            return "{}";
+            generator.writeFieldName("variable");
+            objectMapper.writeTree(generator, variables);
+            generator.writeEndObject();
         }
+    }
+
+    /**
+     * Logs a failure to write a Postman collection and returns the document answered in its place.
+     */
+    public String postmanFailure(IOException e) {
+        if (mockServerLogger.isEnabledForInstance(org.slf4j.event.Level.INFO)) {
+            mockServerLogger.logEvent(new org.mockserver.log.model.LogEntry()
+                .setType(org.mockserver.log.model.LogEntry.LogMessageType.EXCEPTION)
+                .setMessageFormat("exception while serialising expectations as Postman: " + e.getMessage()));
+        }
+        return "{}";
     }
 
     private void addPostmanItem(ObjectNode item, Expectation expectation) {
@@ -525,9 +572,22 @@ public class ExpectationExportSerializer {
     // -----------------------------------------------------------------------
 
     public byte[] serializeAsBrunoCollection(List<Expectation> expectations) {
-        try (ByteArrayOutputStream baos = new ByteArrayOutputStream();
-             ZipOutputStream zip = new ZipOutputStream(baos)) {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try {
+            writeBrunoCollection(expectations, baos);
+            return baos.toByteArray();
+        } catch (IOException e) {
+            return brunoFailure(e);
+        }
+    }
 
+    /**
+     * As {@link #serializeAsBrunoCollection}, writing the zip to {@code out} rather than into an array of its
+     * own; {@code out} is closed. A failure part-way leaves what was written: discard it and answer
+     * {@link #brunoFailure} instead.
+     */
+    public void writeBrunoCollection(List<Expectation> expectations, OutputStream out) throws IOException {
+        try (ZipOutputStream zip = new ZipOutputStream(out)) {
             // Manifest
             writeZipEntry(zip, "bruno.json", brunoManifest());
             // Environment with baseUrl
@@ -542,15 +602,19 @@ public class ExpectationExportSerializer {
             }
 
             zip.finish();
-            return baos.toByteArray();
-        } catch (IOException e) {
-            if (mockServerLogger.isEnabledForInstance(org.slf4j.event.Level.INFO)) {
-                mockServerLogger.logEvent(new org.mockserver.log.model.LogEntry()
-                    .setType(org.mockserver.log.model.LogEntry.LogMessageType.EXCEPTION)
-                    .setMessageFormat("exception while serialising expectations as Bruno: " + e.getMessage()));
-            }
-            return new byte[0];
         }
+    }
+
+    /**
+     * Logs a failure to write a Bruno collection and returns the bytes answered in its place.
+     */
+    public byte[] brunoFailure(IOException e) {
+        if (mockServerLogger.isEnabledForInstance(org.slf4j.event.Level.INFO)) {
+            mockServerLogger.logEvent(new org.mockserver.log.model.LogEntry()
+                .setType(org.mockserver.log.model.LogEntry.LogMessageType.EXCEPTION)
+                .setMessageFormat("exception while serialising expectations as Bruno: " + e.getMessage()));
+        }
+        return new byte[0];
     }
 
     private String brunoManifest() {
@@ -707,30 +771,33 @@ public class ExpectationExportSerializer {
     // -----------------------------------------------------------------------
 
     public String serializeRequestResponsesAsOpenApi(List<LogEventRequestAndResponse> pairs) {
-        return serializeAsOpenApi(toExpectationsFromPairs(pairs));
+        return serializeAsOpenApi(expectationsFromPairs(pairs));
     }
 
     public String serializeRequestResponsesAsPostman(List<LogEventRequestAndResponse> pairs) {
-        return serializeAsPostmanCollection(toExpectationsFromPairs(pairs));
+        return serializeAsPostmanCollection(expectationsFromPairs(pairs));
     }
 
     public byte[] serializeRequestResponsesAsBruno(List<LogEventRequestAndResponse> pairs) {
-        return serializeAsBrunoCollection(toExpectationsFromPairs(pairs));
+        return serializeAsBrunoCollection(expectationsFromPairs(pairs));
     }
 
     public String serializeRequestsAsOpenApi(List<? extends RequestDefinition> requests) {
-        return serializeAsOpenApi(toExpectationsFromRequests(requests));
+        return serializeAsOpenApi(expectationsFromRequests(requests));
     }
 
     public String serializeRequestsAsPostman(List<? extends RequestDefinition> requests) {
-        return serializeAsPostmanCollection(toExpectationsFromRequests(requests));
+        return serializeAsPostmanCollection(expectationsFromRequests(requests));
     }
 
     public byte[] serializeRequestsAsBruno(List<? extends RequestDefinition> requests) {
-        return serializeAsBrunoCollection(toExpectationsFromRequests(requests));
+        return serializeAsBrunoCollection(expectationsFromRequests(requests));
     }
 
-    private List<Expectation> toExpectationsFromPairs(List<LogEventRequestAndResponse> pairs) {
+    /**
+     * Each captured pair with a request as an expectation that answers its response, as every format exports it.
+     */
+    public List<Expectation> expectationsFromPairs(List<LogEventRequestAndResponse> pairs) {
         List<Expectation> result = new ArrayList<>(pairs.size());
         for (LogEventRequestAndResponse pair : pairs) {
             HttpRequest request = pair.getHttpRequest();
@@ -746,7 +813,10 @@ public class ExpectationExportSerializer {
         return result;
     }
 
-    private List<Expectation> toExpectationsFromRequests(List<? extends RequestDefinition> requests) {
+    /**
+     * Each captured HTTP request as an expectation, as every format exports it.
+     */
+    public List<Expectation> expectationsFromRequests(List<? extends RequestDefinition> requests) {
         List<Expectation> result = new ArrayList<>(requests.size());
         for (RequestDefinition definition : requests) {
             if (definition instanceof HttpRequest) {

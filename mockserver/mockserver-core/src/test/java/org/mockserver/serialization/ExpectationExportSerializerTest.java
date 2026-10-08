@@ -381,4 +381,88 @@ public class ExpectationExportSerializerTest {
         String openApi = serializer.serializeAsOpenApi(Collections.singletonList(expectation));
         assertParsesCleanly(openApi);
     }
+
+    // -----------------------------------------------------------------------
+    // writing to a Writer
+    // -----------------------------------------------------------------------
+
+    private static String text(int characters) {
+        char[] text = new char[characters];
+        Arrays.fill(text, 'x');
+        return new String(text);
+    }
+
+    @Test
+    public void shouldWriteAPostmanCollectionOneItemAtATime() throws Exception {
+        // given
+        int items = 3;
+        int bodyCharacters = 20_000;
+        List<Expectation> expectations = new java.util.ArrayList<>();
+        for (int i = 0; i < items; i++) {
+            expectations.add(new Expectation(request("/item/" + i)).thenRespond(response(text(bodyCharacters))));
+        }
+        java.io.StringWriter writer = new java.io.StringWriter();
+        List<Integer> writtenWhenRead = new java.util.ArrayList<>();
+        List<Expectation> recording = new java.util.AbstractList<Expectation>() {
+            @Override
+            public Expectation get(int index) {
+                writtenWhenRead.add(writer.getBuffer().length());
+                return expectations.get(index);
+            }
+
+            @Override
+            public int size() {
+                return expectations.size();
+            }
+        };
+
+        // when
+        serializer.writePostmanCollection(recording, writer);
+
+        // then each item is written before the next is read (less what the generator may still buffer)
+        assertThat(writtenWhenRead.size(), is(items));
+        for (int i = 1; i < items; i++) {
+            assertThat("written when item " + i + " was read", writtenWhenRead.get(i), org.hamcrest.Matchers.greaterThan(i * bodyCharacters / 2));
+        }
+        assertThat(writer.toString(), is(serializer.serializeAsPostmanCollection(expectations)));
+        assertThat(parseJson(writer.toString()).get("item").size(), is(items));
+    }
+
+    @Test
+    public void shouldWriteTheSameOpenApiDocumentToAWriter() throws Exception {
+        List<Expectation> expectations = Arrays.asList(
+            new Expectation(request("/a").withMethod("GET")).withId("a").thenRespond(response("é😀")),
+            new Expectation(request("/a").withMethod("POST")).withId("b").thenRespond(response().withStatusCode(201))
+        );
+        java.io.StringWriter writer = new java.io.StringWriter();
+
+        serializer.writeOpenApi(expectations, writer);
+
+        assertThat(writer.toString(), is(serializer.serializeAsOpenApi(expectations)));
+        assertParsesCleanly(writer.toString());
+    }
+
+    @Test
+    public void shouldWriteTheSameBrunoEntriesToAStream() throws Exception {
+        List<Expectation> expectations = Arrays.asList(
+            new Expectation(request("/a").withMethod("GET")).thenRespond(response("é😀")),
+            new Expectation(request("/a").withMethod("GET")).thenRespond(response("second"))
+        );
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+
+        serializer.writeBrunoCollection(expectations, out);
+
+        assertThat(zipEntries(out.toByteArray()), is(zipEntries(serializer.serializeAsBrunoCollection(expectations))));
+        assertThat(zipEntries(out.toByteArray()).keySet(), is(new java.util.LinkedHashSet<>(Arrays.asList("bruno.json", "environments/local.bru", "get-a.bru", "get-a-2.bru"))));
+    }
+
+    private static java.util.Map<String, String> zipEntries(byte[] zip) throws java.io.IOException {
+        java.util.Map<String, String> entries = new java.util.LinkedHashMap<>();
+        try (java.util.zip.ZipInputStream in = new java.util.zip.ZipInputStream(new java.io.ByteArrayInputStream(zip))) {
+            for (java.util.zip.ZipEntry entry = in.getNextEntry(); entry != null; entry = in.getNextEntry()) {
+                entries.put(entry.getName(), new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8));
+            }
+        }
+        return entries;
+    }
 }

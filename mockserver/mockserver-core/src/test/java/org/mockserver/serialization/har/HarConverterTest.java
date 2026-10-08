@@ -608,4 +608,45 @@ public class HarConverterTest {
         assertThat(timings.get("connect").asLong(), is(-1L));
         assertThat(timings.get("ssl").asLong(), is(-1L));
     }
+
+    @Test
+    public void shouldConvertAndWriteOneEntryAtATime() throws Exception {
+        // given
+        int entries = 3;
+        int bodyCharacters = 20_000;
+        char[] body = new char[bodyCharacters];
+        Arrays.fill(body, 'x');
+        List<LogEventRequestAndResponse> pairs = new java.util.ArrayList<>();
+        for (int i = 0; i < entries; i++) {
+            pairs.add(new LogEventRequestAndResponse()
+                .withTimestamp("2026-01-15T10:30:00.000Z")
+                .withHttpRequest(request("/entry/" + i).withMethod("GET"))
+                .withHttpResponse(response().withStatusCode(200).withBody(new String(body))));
+        }
+        java.io.StringWriter writer = new java.io.StringWriter();
+        List<Integer> writtenWhenRead = new java.util.ArrayList<>();
+        List<LogEventRequestAndResponse> recording = new java.util.AbstractList<LogEventRequestAndResponse>() {
+            @Override
+            public LogEventRequestAndResponse get(int index) {
+                writtenWhenRead.add(writer.getBuffer().length());
+                return pairs.get(index);
+            }
+
+            @Override
+            public int size() {
+                return pairs.size();
+            }
+        };
+
+        // when
+        harConverter.serialize(recording, writer);
+
+        // then each entry is converted after the one before it was written (less what the generator may still buffer)
+        assertThat(writtenWhenRead.size(), is(entries));
+        for (int i = 1; i < entries; i++) {
+            assertThat("written when entry " + i + " was read", writtenWhenRead.get(i), greaterThan(i * bodyCharacters / 2));
+        }
+        assertThat(writer.toString(), is(harConverter.serialize(pairs)));
+        assertThat(objectMapper.readTree(writer.toString()).get("log").get("entries").size(), is(entries));
+    }
 }
