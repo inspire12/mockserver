@@ -624,7 +624,7 @@ This release delivers a sustained performance and memory programme alongside dat
   when the upstream closes its connection the client's connection is closed (after what the
   upstream sent is delivered), where before it stayed open and the next message opened a new
   upstream connection, and an upstream that closes without answering is no longer an error;
-  when the client closes, what it had sent is delivered before the upstream connection is closed;
+  when the client closes, what it had sent is delivered before the upstream connection is closed, and an upstream that has stopped reading has its connection closed 5 seconds after the client's;
   there is no time limit on the upstream answering: a client whose upstream never answers stays
   connected until one side closes, where before it was closed after `maxFutureTimeout` (TCP
   keep-alive, `forwardSocketKeepAlive`, still detects an upstream that has gone);

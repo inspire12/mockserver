@@ -10,6 +10,7 @@ import org.mockserver.log.model.LogEntry;
 import org.mockserver.model.BinaryMessage;
 import org.mockserver.model.BinaryProxyListener;
 import org.mockserver.socket.ChannelReadPause;
+import org.mockserver.socket.LingeringClose;
 import org.slf4j.event.Level;
 
 import java.net.ConnectException;
@@ -20,6 +21,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -216,6 +218,22 @@ public class BinaryRelayTest {
 
         assertThat(relay.receivedByUpstream(), is("not yet taken by the upstream"));
         assertThat(relay.upstream.isOpen(), is(false));
+    }
+
+    @Test
+    public void shouldCloseTheUpstreamAtTheLingerLimitWhenItNeverTakesWhatIsQueuedAfterTheClientCloses() {
+        EmbeddedChannel client = relay(true);
+        relay.upstreamFlushGate.blocked = true;
+        relay.clientSends("never taken by the upstream");
+
+        client.close();
+        relay.upstream.advanceTimeBy(LingeringClose.LINGER_MILLIS - 1, TimeUnit.MILLISECONDS);
+        relay.upstream.runScheduledPendingTasks();
+        assertThat("the upstream connection is kept for the linger limit", relay.upstream.isOpen(), is(true));
+        relay.upstream.advanceTimeBy(1, TimeUnit.MILLISECONDS);
+        relay.upstream.runScheduledPendingTasks();
+
+        assertThat("and closed then, though the flush never completed", relay.upstream.isOpen(), is(false));
     }
 
     @Test

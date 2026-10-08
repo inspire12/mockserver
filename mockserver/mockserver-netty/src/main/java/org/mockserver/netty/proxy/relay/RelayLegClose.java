@@ -31,12 +31,14 @@ final class RelayLegClose {
     /**
      * Ends the leg once its outbound buffer has been flushed (HTTP/2 DATA waiting for flow-control window is not in it
      * and fails, so a caller waits for such a write first). A socket's output is shut down and the socket closed when
-     * the other end closes, as it does on reading the end of the stream, or after {@link LingeringClose#LINGER_MILLIS}.
+     * the other end closes, as it does on reading the end of the stream, or {@link LingeringClose#LINGER_MILLIS} after
+     * this is called, flushed or not: an other end that has stopped reading never lets the flush complete.
      * Closed at once it would reset whatever the other end writes next, and MockServer's end of a loopback writes
      * while it reads (its HTTP/2 settings): a write that fails closes that end with what was flushed here unread.
      */
     static void afterFlush(Channel channel) {
         if (channel.isActive()) {
+            LingeringClose.closeSocketUnlessClosedWithinLinger(channel);
             channel.writeAndFlush(Unpooled.EMPTY_BUFFER).addListener(future -> endOutput(channel));
         } else {
             now(channel);
@@ -47,6 +49,7 @@ final class RelayLegClose {
      * As {@link #afterFlush}, once this write, the last the leg is given, has completed.
      */
     static void afterWritten(ChannelFuture lastWrite) {
+        LingeringClose.closeSocketUnlessClosedWithinLinger(lastWrite.channel());
         lastWrite.addListener(future -> endOutput(lastWrite.channel()));
     }
 
@@ -57,6 +60,5 @@ final class RelayLegClose {
         }
         // at the socket, as the close is: through the pipeline a TLS handler would first write its close_notify
         ReadAfterFailedWrite.endOutput((DuplexChannel) channel);
-        LingeringClose.closeSocketUnlessClosedWithinLinger(channel);
     }
 }

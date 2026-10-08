@@ -1617,8 +1617,8 @@ finished, so `RelayLegClose` closes the loopback's socket with `channel.unsafe()
 
 `RelayLegClose` has two forms. `now` closes the socket. `afterFlush`, used when the client has gone and a request
 may still be on its way to MockServer, flushes the outbound buffer, shuts down the socket's output (a FIN), and closes
-the socket when MockServer's side closes, which it does on reading the end of the stream, or after 5 s
-(`LingeringClose.LINGER_MILLIS`) if it does not. See [A request the client sent before it left](#a-request-the-client-sent-before-it-left).
+the socket when MockServer's side closes, which it does on reading the end of the stream, or 5 s
+(`LingeringClose.LINGER_MILLIS`) after `afterFlush` is called if it does not, flushed or not. See [A request the client sent before it left](#a-request-the-client-sent-before-it-left).
 
 | The relay ends because | Loopback leg | Client leg |
 |---|---|---|
@@ -2664,7 +2664,7 @@ sequenceDiagram
 | Memory for one connection | One gathered message (at most 256 KiB) from the client and one read from the upstream in flight, each channel's write buffer, and the messages of at most 64 listener calls plus one read. No message queue: `ForwardQueue` is not created |
 | During the upstream TLS handshake | One hold on the client from its first decrypted message until the handshake succeeds ([above](#the-in-band-tls-upgrade-of-the-upstream-connection)) |
 | Holds stay balanced | Each reason is one flag in the relay, given up when the reason ends, when either connection closes and when the connection is handed back to per-message forwarding, so `ChannelReadPause`'s count composes with other holders |
-| Client closes | Driven by the handler's `channelInactive`, not the close future, which completes before `PortUnificationHandler.decodeLast` and `BinaryMessageGatherer.channelInactive` hand over bytes they still hold. What is queued for the upstream is flushed, then `RelayLegClose.afterFlush`: end of output, and a wait of up to 5 seconds for the upstream to close. A client that closes before the connect completes still has its messages delivered |
+| Client closes | Driven by the handler's `channelInactive`, not the close future, which completes before `PortUnificationHandler.decodeLast` and `BinaryMessageGatherer.channelInactive` hand over bytes they still hold. What is queued for the upstream is flushed, then `RelayLegClose.afterFlush`: end of output, and the upstream's socket closed when the upstream closes or 5 seconds after the client's close, whichever comes first. The 5 seconds run from the close, not from the end of the flush: an upstream that has stopped reading never lets the flush complete, and would otherwise hold its connection, and what is queued for it, until `responseWriteStallTimeoutMillis` closed it, or for good while too little was queued to make the connection unwritable (no stall timer runs then). `BinaryRelayTest` and `BinaryRelayEndOfConnectionIntegrationTest` cover an upstream that never reads and one that reads slowly. A client that closes before the connect completes still has its messages delivered |
 | Upstream closes | `closeOnFlush` on the client: what the upstream sent is delivered first. Not an error, and no WARN |
 | Upstream fault | Both closed. An SSL or decoder fault: WARN with the cause. A reset by the upstream: WARN with its message (8.0.0 logged one too). Anything else: ERROR with the stack trace, as `connectionClosedException` classifies it (the scheme of `Http2ConnectionExceptionHandler`) |
 | Listener order | The relay and the per-message forwarder chain listener calls through one channel attribute (`BinaryRequestProxyingHandler.PREVIOUS_LISTENER_CALL`). A connection no longer changes mode part way through, so the two never share a connection |
