@@ -381,7 +381,11 @@ class PyBuilder {
   private binary(v: unknown, indent: number): string {
     this.use('BinaryResponse');
     const o = v as Json;
-    return renderCall('BinaryResponse', [['binary_data', pyStr(o['binaryData'])]], indent);
+    // No data is a valid binary response: the message has no reply.
+    const kw: Kw[] = typeof o['binaryData'] === 'string' && o['binaryData'] !== ''
+      ? [['binary_data', pyStr(o['binaryData'])]]
+      : [];
+    return renderCall('BinaryResponse', kw, indent);
   }
 
   private dnsResponse(v: unknown, indent: number): string {

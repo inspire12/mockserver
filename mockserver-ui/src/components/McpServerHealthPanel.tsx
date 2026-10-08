@@ -10,6 +10,7 @@ import TableBody from '@mui/material/TableBody';
 import TableRow from '@mui/material/TableRow';
 import TableCell from '@mui/material/TableCell';
 import { useDashboardStore } from '../store';
+import { useAutoLoadLlmRows } from '../hooks/useLoadFullRow';
 import {
   aggregateMcpServerHealth,
   MCP_SLOW_THRESHOLD_MS,
@@ -99,6 +100,7 @@ function HealthRow({ row }: { row: McpServerHealth }) {
 export default function McpServerHealthPanel() {
   const proxiedRequests = useDashboardStore((s) => s.proxiedRequests);
   const recordedRequests = useDashboardStore((s) => s.recordedRequests);
+  useAutoLoadLlmRows();
 
   const rows = useMemo(() => {
     const values = [...proxiedRequests, ...recordedRequests].map((item) => item.value);

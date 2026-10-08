@@ -2712,6 +2712,7 @@ function BinaryResponsePanel({
       </Typography>
       <TextField
         label="Binary data (base64)"
+        helperText="Leave empty to send no reply: MockServer writes nothing for the matched message and keeps the connection open."
         multiline
         minRows={4}
         maxRows={12}
@@ -5156,7 +5157,8 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
                   case 'websocket': return null;
                   case 'sse': return sseState.events.some((ev) => ev.data.trim().length > 0 || ev.event.trim().length > 0) ? null : 'Add at least one SSE event';
                   case 'binary_response':
-                    if (binaryResponseState.binaryData.trim().length === 0) return 'Enter base64 binary data';
+                    // No data is valid: the matched message gets no reply.
+                    if (binaryResponseState.binaryData.trim().length === 0) return null;
                     return isValidBase64(binaryResponseState.binaryData) ? null : 'Binary data is not valid base64';
                   case 'dns_response': {
                     // Surface invalid answer-records JSON instead of silently dropping it (the

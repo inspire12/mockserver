@@ -792,6 +792,9 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **The Python code the dashboard generates for a binary response with no data now works.** It was
+  `BinaryResponse(binary_data="undefined")`; it is now `BinaryResponse()`. The code generated for every language
+  builds a binary response without data.
 - **The Maven plugin's `run` goal now fails the build when MockServer does not start.** A port already in use, or a `dnsPort` or `http3Port` that cannot be opened, used to be logged as an error while the build carried on without a running MockServer; `run` now fails the build with the reason, as `start` already did. The `runForked` goal also fails the build when the forked JVM cannot be launched, exits before MockServer answers (the message gives its exit status), or does not answer within about 75 seconds (it is then stopped), instead of logging and carrying on.
 - **A binary expectation's response `delay` is applied.** It was accepted and stored but ignored, so the reply was written at once. MockServer now writes the reply that long after the message arrived, without holding a thread, and keeps replies on one connection in the order of the messages they answer: a later reply waits for an earlier delayed one, even if its own delay is shorter or it has none, and a message that matches no expectation is answered, and its connection closed, only after the delayed replies before it. Closing the connection cancels a reply still waiting.
 - **A request to a mocked path that fails inside the WAR deployments no longer gets control-plane treatment.** When `MockServerServlet` or `ProxyServlet` failed while handling a request outside `/mockserver` (including a request whose body could not be read), the answer always carried CORS headers and could echo the exception's message as a `400`. It is now a `500` with a generic message naming a correlation id, carrying CORS headers only when `enableCORSForAllResponses` is on, the same as the Netty server. Failures on control-plane paths are answered as before.
@@ -1255,7 +1258,8 @@ This release delivers a sustained performance and memory programme alongside dat
   nothing and keeps the connection open, so a message that a real server does not answer can be mocked.
   An empty `binaryData` is not serialised: the Java client sends such an expectation without it, and
   an expectation retrieved from MockServer never has it, even one created from JSON with
-  `"binaryData": ""`.
+  `"binaryData": ""`. The dashboard's Mocks composer now accepts a binary response with no data too, and
+  says next to the field that it means no reply.
 - **An HTTP request, or an HTTP/2 prior-knowledge connection, whose first bytes arrive a few at a time is now
   recognised.** A first read shorter than 5 bytes was taken for TLS whatever it contained, so a request
   that arrived one byte at a time was never answered, and an HTTP/2 connection preface split across reads

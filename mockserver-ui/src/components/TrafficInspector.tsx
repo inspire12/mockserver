@@ -77,7 +77,8 @@ import {
 import type { ScriptedTurn } from './ConversationView';
 import type { JsonListItem, TruncatedBody } from '../types';
 import TruncatedBodyNotice from './TruncatedBodyNotice';
-import { useLoadFullRow } from '../hooks/useLoadFullRow';
+import { useLoadFullRow, useAutoLoadLlmRows, notifyFullBodyLoadFailed, forEachLimited } from '../hooks/useLoadFullRow';
+import { hasTruncatedBodies } from '../lib/fullBody';
 import { isCapturableTraffic } from '../lib/expectationFromCapture';
 import type { CreateFromMenuAction } from './LogEntry';
 import { replayRequests } from '../lib/replay';
@@ -1677,13 +1678,6 @@ function tryParseJsonObject(text: string): Record<string, unknown> | null {
   }
 }
 
-function notifyFullBodyLoadFailed(e: unknown) {
-  useDashboardStore.getState().setNotification({
-    message: `Could not load the full body, so nothing was done: ${humanizeError(e).message}`,
-    severity: 'error',
-  });
-}
-
 /** Structured Request tab: method/path/query prominently, headers table, body. */
 function StructuredRequestPanel({ value, truncated, onLoadFull }: {
   value: Record<string, unknown>;
@@ -1875,20 +1869,35 @@ function DetailActions({ item, summary, canCapture, unmatched, onCaptureAsMock, 
   // verify / chaos) offered on log rows, seeded from the selected flow. Pass
   // the whole captured value so Create Mock reuses the generic extraction, and
   // method/host/path from the parsed summary. Only shown when a request exists.
+  const loadFullRow = useLoadFullRow();
   const launchpadActions = useMemo<CreateFromMenuAction[]>(
     () => buildLaunchpadActions(
       {
         itemValue: httpRequest ? item.value : undefined,
+        loadItemValue: hasTruncatedBodies(item) ? async () => (await loadFullRow(item)).value : undefined,
         method: summary.method ?? undefined,
         path: summary.path ?? undefined,
         host: summary.host ?? undefined,
       },
       setBreakpoint,
     ),
-    [httpRequest, item.value, summary.method, summary.path, summary.host, setBreakpoint],
+    [httpRequest, item, loadFullRow, summary.method, summary.path, summary.host, setBreakpoint],
   );
 
-  const loadFullRow = useLoadFullRow();
+  // Why Didn't This Match? and Generate Stub match the request, so they need its whole body.
+  const withFullRequest = useCallback((act: (request: Record<string, unknown>) => Promise<void>) => {
+    if (!httpRequest) return;
+    if (!hasTruncatedBodies(item)) {
+      void act(httpRequest);
+      return;
+    }
+    loadFullRow(item).then((full) => {
+      const request = full.value['httpRequest'];
+      return request && typeof request === 'object' && !Array.isArray(request)
+        ? act(request as Record<string, unknown>)
+        : undefined;
+    }, notifyFullBodyLoadFailed);
+  }, [httpRequest, item, loadFullRow]);
   const handleCopyCurl = useCallback(async () => {
     let fullItem: JsonListItem;
     try {
@@ -1915,7 +1924,7 @@ function DetailActions({ item, summary, canCapture, unmatched, onCaptureAsMock, 
           size="small"
           color="warning"
           startIcon={<HelpOutlinedIcon sx={{ fontSize: '0.875rem' }} />}
-          onClick={() => { void debugMismatch(httpRequest); }}
+          onClick={() => withFullRequest(debugMismatch)}
           sx={detailActionSx}
         >
           Why Didn't This Match?
@@ -1926,7 +1935,7 @@ function DetailActions({ item, summary, canCapture, unmatched, onCaptureAsMock, 
           size="small"
           color="info"
           startIcon={<AutoFixHighIcon sx={{ fontSize: '0.875rem' }} />}
-          onClick={() => { void generateStub(httpRequest); }}
+          onClick={() => withFullRequest(generateStub)}
           sx={detailActionSx}
         >
           Generate Stub
@@ -2207,6 +2216,7 @@ export default function TrafficInspector() {
   const setSelectedKey = useDashboardStore((s) => s.setSelectedTrafficKey);
   const connectionParams = useConnectionParams();
   const loadFullRow = useLoadFullRow();
+  useAutoLoadLlmRows();
   // A capture or repeat built from a shortened body would be wrong: open it only once the body is whole.
   const loadFullRowThen = useCallback(async (item: JsonListItem, open: () => void) => {
     try {
@@ -2258,7 +2268,6 @@ export default function TrafficInspector() {
   // DiffRequestsDialog (PUT /mockserver/diff). compareKeys holds the (max two) selected item keys.
   const [compareMode, setCompareMode] = useState(false);
   const [compareKeys, setCompareKeys] = useState<string[]>([]);
-  const [diffDialogOpen, setDiffDialogOpen] = useState(false);
 
   // Diff Pool (Proxyman-style): a persistent set of staged requests independent
   // of the current selection or the two-pick Compare mode. Held as lightweight
@@ -2387,6 +2396,25 @@ export default function TrafficInspector() {
     return { method: method || undefined, path: path || undefined };
   }, [trafficSearch]);
 
+  // Search reads only what is shown, so a body the server shortened is searched only in part until
+  // it is loaded. Loading every one automatically could hold hundreds of megabytes, so it is offered.
+  const shortenedRows = useMemo(() => allRequests.filter(hasTruncatedBodies), [allRequests]);
+  const [searchingFull, setSearchingFull] = useState(false);
+  const searchFullBodies = useCallback(async () => {
+    setSearchingFull(true);
+    try {
+      const failed = await forEachLimited(shortenedRows, 4, loadFullRow);
+      if (failed > 0) {
+        useDashboardStore.getState().setNotification({
+          message: `${failed} of ${shortenedRows.length} full bodies could not be loaded, so those requests are searched only in part`,
+          severity: 'warning',
+        });
+      }
+    } finally {
+      setSearchingFull(false);
+    }
+  }, [shortenedRows, loadFullRow]);
+
   // Filter by search
   const filteredLive = useMemo(
     () =>
@@ -2487,16 +2515,24 @@ export default function TrafficInspector() {
   // the diff payload.
   const selectedInDiffPool = selectedEntry ? diffPool.some((e) => e.key === selectedEntry.item.key) : false;
 
-  const handleAddSelectedToDiffPool = useCallback(() => {
+  // The pool keeps the whole request: by the time it is diffed the row may have left the server's log.
+  const handleAddSelectedToDiffPool = useCallback(async () => {
     if (!selectedEntry) return;
+    let full: JsonListItem;
+    try {
+      full = await loadFullRow(selectedEntry.item);
+    } catch (e) {
+      notifyFullBodyLoadFailed(e);
+      return;
+    }
     addToDiffPool({
       key: selectedEntry.item.key,
       method: selectedEntry.summary.method,
       path: selectedEntry.summary.path,
       status: selectedEntry.summary.statusCode,
-      value: selectedEntry.item.value,
+      value: full.value,
     });
-  }, [selectedEntry, addToDiffPool]);
+  }, [selectedEntry, addToDiffPool, loadFullRow]);
 
   // The two pooled entries picked in the popover, in pick order (first =
   // "expected", second = "actual"), and their diff payloads.
@@ -2521,14 +2557,20 @@ export default function TrafficInspector() {
     [compareKeys, allRequests],
   );
 
-  const compareJson = useMemo(() => {
-    return validCompareKeys.map((key) => {
-      const entry = allRequests.find((item) => item.key === key);
-      return entry ? requestJsonForDiff(entry.value) : '';
-    });
-  }, [validCompareKeys, allRequests]);
-
   const canDiff = validCompareKeys.length === 2;
+  const [compareDiffPair, setCompareDiffPair] = useState<[string, string] | null>(null);
+  const openCompareDiff = useCallback(async () => {
+    const picked = validCompareKeys.flatMap((key) => allRequests.filter((item) => item.key === key));
+    if (picked.length !== 2) return;
+    let full: JsonListItem[];
+    try {
+      full = await Promise.all(picked.map((item) => loadFullRow(item)));
+    } catch (e) {
+      notifyFullBodyLoadFailed(e);
+      return;
+    }
+    setCompareDiffPair([requestJsonForDiff(full[0]!.value), requestJsonForDiff(full[1]!.value)]);
+  }, [validCompareKeys, allRequests, loadFullRow]);
 
   // Selected keys whose request still exists (a WebSocket refresh can drop one),
   // resolved against the currently-filtered rows so "select all" and the count
@@ -2720,7 +2762,7 @@ export default function TrafficInspector() {
               size="small"
               variant="contained"
               disabled={!canDiff}
-              onClick={() => setDiffDialogOpen(true)}
+              onClick={() => { void openCompareDiff(); }}
               sx={{ height: 28, px: 1, fontSize: '0.7rem', textTransform: 'none', flexShrink: 0 }}
             >
               Diff ({validCompareKeys.length}/2)
@@ -2804,6 +2846,20 @@ export default function TrafficInspector() {
             </span>
           </Tooltip>
         </Box>
+        {trafficSearch && shortenedRows.length > 0 && (
+          <Alert
+            severity="info"
+            sx={{ mx: 1, my: 0.5, py: 0, fontSize: '0.75rem' }}
+            action={(
+              <Button size="small" color="inherit" disabled={searchingFull} onClick={() => { void searchFullBodies(); }}>
+                {searchingFull ? 'Loading…' : 'Search Full Bodies'}
+              </Button>
+            )}
+          >
+            {shortenedRows.length === 1 ? '1 request has' : `${shortenedRows.length} requests have`} a body
+            longer than shown; the search covers only the part shown.
+          </Alert>
+        )}
         {/* Only worth the vertical space once the traffic actually spans more
             than one upstream — see HostTree's docstring. */}
         {hosts.length > 1 && (
@@ -2994,14 +3050,14 @@ export default function TrafficInspector() {
 
       {/* Diff two picked requests, reusing the shared dialog + PUT /mockserver/diff endpoint.
           Mount only while open and key on the selection so the dialog seeds fresh inputs each time. */}
-      {diffDialogOpen && (
+      {compareDiffPair && (
         <DiffRequestsDialog
           key={compareKeys.join('|')}
           open
-          onClose={() => setDiffDialogOpen(false)}
+          onClose={() => setCompareDiffPair(null)}
           connectionParams={connectionParams}
-          initialExpected={compareJson[0] ?? ''}
-          initialActual={compareJson[1] ?? ''}
+          initialExpected={compareDiffPair[0]}
+          initialActual={compareDiffPair[1]}
         />
       )}
 

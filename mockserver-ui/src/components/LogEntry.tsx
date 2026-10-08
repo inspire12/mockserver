@@ -21,8 +21,9 @@ import BoltIcon from '@mui/icons-material/Bolt';
 import type { LogEntryValue, MessagePart, TruncatedBody } from '../types';
 import JsonViewer from './JsonViewer';
 import TruncatedBodyNotice from './TruncatedBodyNotice';
-import { useConnectionParams } from '../hooks/useConnectionParams';
+import { useConnectionParams, type ConnectionParams } from '../hooks/useConnectionParams';
 import { fetchFullMessage, isLoadable } from '../lib/fullBody';
+import { notifyFullBodyLoadFailed } from '../hooks/useLoadFullRow';
 import BecauseSection from './BecauseSection';
 import EventLogLossDetails from './EventLogLossDetails';
 import CopyButton from './CopyButton';
@@ -488,20 +489,46 @@ function isNotMatchedEntry(entry: LogEntryValue): boolean {
   return desc.includes('EXPECTATION_NOT_MATCHED');
 }
 
-function extractRequestFromEntry(entry: LogEntryValue): Record<string, unknown> | null {
+function requestPartOfEntry(entry: LogEntryValue): MessagePart | null {
   if (!entry.messageParts) return null;
   // The loss summary of an incomplete-log verification failure is an object
   // argument too, but it is not a request.
   const jsonParts = entry.messageParts.filter(
     (p) => p.json && p.argument && typeof p.value === 'object' && p.value !== null && !parseEventLogLoss(p.value),
   );
-  if (jsonParts.length >= 2) {
-    return jsonParts[1]!.value as Record<string, unknown>;
+  return jsonParts[jsonParts.length >= 2 ? 1 : 0] ?? null;
+}
+
+function extractRequestFromEntry(entry: LogEntryValue): Record<string, unknown> | null {
+  const part = requestPartOfEntry(entry);
+  return part ? (part.value as Record<string, unknown>) : null;
+}
+
+/**
+ * The row's request for an action that matches or copies it: whole, fetched when the server
+ * shortened its body. Throws when a shortened body cannot be loaded, so the action does nothing.
+ */
+async function loadRequestFromEntry(entry: LogEntryValue, params: ConnectionParams): Promise<Record<string, unknown> | null> {
+  const part = requestPartOfEntry(entry);
+  if (!part) return null;
+  const marker = part.truncatedBody;
+  if (!marker) return part.value as Record<string, unknown>;
+  if (!isLoadable(marker)) throw new Error('its body was shortened and cannot be loaded from this log entry');
+  return fetchFullMessage(params, marker);
+}
+
+function actOnFullRequest(
+  entry: LogEntryValue,
+  params: ConnectionParams,
+  act: ((request: Record<string, unknown>) => Promise<void>) | null,
+): void {
+  const part = requestPartOfEntry(entry);
+  if (!part || !act) return;
+  if (!part.truncatedBody) {
+    void act(part.value as Record<string, unknown>);
+    return;
   }
-  if (jsonParts.length === 1) {
-    return jsonParts[0]!.value as Record<string, unknown>;
-  }
-  return null;
+  loadRequestFromEntry(entry, params).then((request) => (request ? act(request) : undefined), notifyFullBodyLoadFailed);
 }
 
 /**
@@ -568,6 +595,8 @@ function extractGraphqlOperation(entry: LogEntryValue): GraphqlOperation | null 
 interface LaunchpadData {
   /** Captured value wrapping the request (`{ httpRequest, ... }`) for mock extraction. */
   itemValue: Record<string, unknown>;
+  /** Set when the request's body was shortened: loads the whole captured value for Create Mock. */
+  loadItemValue?: () => Promise<Record<string, unknown>>;
   method?: string;
   path?: string;
   host?: string;
@@ -603,10 +632,22 @@ function extractLaunchpadData(entry: LogEntryValue): LaunchpadData | null {
  * subscribe (keeps the memoized log row off the store's update path).
  */
 export function buildLaunchpadActions(
-  data: { itemValue?: Record<string, unknown>; method?: string; path?: string; host?: string },
+  data: {
+    itemValue?: Record<string, unknown>;
+    loadItemValue?: () => Promise<Record<string, unknown>>;
+    method?: string;
+    path?: string;
+    host?: string;
+  },
   setBreakpoint: SetBreakpointFn | null,
 ): CreateFromMenuAction[] {
-  const { itemValue, method, path, host } = data;
+  const { itemValue, loadItemValue, method, path, host } = data;
+  const createMock = (value: Record<string, unknown>) => {
+    const draft = extractGenericExpectationFromCapture(value);
+    useDashboardStore.getState().editExpectation(
+      expectationToJsonObject(draft) as Record<string, unknown>,
+    );
+  };
   return [
     {
       key: 'mock',
@@ -614,10 +655,11 @@ export function buildLaunchpadActions(
       icon: <AddCircleOutlineIcon fontSize="small" color="primary" />,
       onClick: itemValue
         ? () => {
-            const draft = extractGenericExpectationFromCapture(itemValue);
-            useDashboardStore.getState().editExpectation(
-              expectationToJsonObject(draft) as Record<string, unknown>,
-            );
+            if (!loadItemValue) {
+              createMock(itemValue);
+              return;
+            }
+            loadItemValue().then(createMock, notifyFullBodyLoadFailed);
           }
         : undefined,
       disabledTooltip: 'No request captured to build a mock from',
@@ -683,11 +725,18 @@ function LogEntry({ entry, indent = false, divider = false, collapsible = false,
   const showSetBreakpointButton = setBreakpoint !== null && breakpointPrefill !== null;
   // "Create From This…" launchpad — offered on any request-bearing row so one
   // captured flow can fan out into a mock, breakpoint, verification, or chaos.
+  const params = useConnectionParams();
   const launchpad = useMemo(() => extractLaunchpadData(entry), [entry]);
-  const launchpadActions = useMemo(
-    () => (launchpad ? buildLaunchpadActions(launchpad, setBreakpoint) : []),
-    [launchpad, setBreakpoint],
-  );
+  const launchpadActions = useMemo(() => {
+    if (!launchpad) return [];
+    const shortened = requestPartOfEntry(entry)?.truncatedBody !== undefined;
+    return buildLaunchpadActions(
+      shortened
+        ? { ...launchpad, loadItemValue: async () => ({ httpRequest: await loadRequestFromEntry(entry, params) }) }
+        : launchpad,
+      setBreakpoint,
+    );
+  }, [launchpad, entry, params, setBreakpoint]);
 
   return (
     <Box
@@ -749,10 +798,7 @@ function LogEntry({ entry, indent = false, divider = false, collapsible = false,
                   sx={{ p: 0, ml: 0.5, '& .MuiSvgIcon-root': { fontSize: '0.9rem' } }}
                   onClick={(e) => {
                     e.stopPropagation();
-                    const request = extractRequestFromEntry(entry);
-                    if (request && debugMismatch) {
-                      void debugMismatch(request);
-                    }
+                    actOnFullRequest(entry, params, debugMismatch);
                   }}
                 >
                   <HelpOutlinedIcon sx={{ color: 'warning.main' }} />
@@ -766,10 +812,7 @@ function LogEntry({ entry, indent = false, divider = false, collapsible = false,
                   sx={{ p: 0, ml: 0.5, '& .MuiSvgIcon-root': { fontSize: '0.9rem' } }}
                   onClick={(e) => {
                     e.stopPropagation();
-                    const request = extractRequestFromEntry(entry);
-                    if (request && generateStub) {
-                      void generateStub(request);
-                    }
+                    actOnFullRequest(entry, params, generateStub);
                   }}
                 >
                   <AutoFixHighIcon sx={{ color: 'info.main' }} />

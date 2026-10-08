@@ -15,6 +15,7 @@ import SearchIcon from '@mui/icons-material/Search';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import { useDashboardStore } from '../store';
+import { useAutoLoadLlmRows } from '../hooks/useLoadFullRow';
 import { groupBySession, parseIsolationSource, shortenScenarioName, type Session, type SessionRequest } from '../lib/sessionGrouping';
 import {
   getModelLabel,
@@ -497,6 +498,7 @@ export default function SessionInspector({ connectionParams }: SessionInspectorP
   const proxiedRequests = useDashboardStore((s) => s.proxiedRequests);
   const recordedRequests = useDashboardStore((s) => s.recordedRequests);
   const activeExpectations = useDashboardStore((s) => s.activeExpectations);
+  useAutoLoadLlmRows();
   const [search, setSearch] = useState('');
   const [tab, setTab] = useState(0);
 

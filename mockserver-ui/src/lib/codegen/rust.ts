@@ -934,7 +934,9 @@ function renderPrimaryAction(key: string, value: unknown, ctx: Ctx, indent: numb
     case 'httpWebSocketResponse':
       return inline(`.respond_web_socket(${webSocketExpr(obj, indent + 4)})`);
     case 'binaryResponse':
-      return inline(`.respond_binary(BinaryResponse::from_base64(${rustStr(String(obj['binaryData'] ?? ''))}))`);
+      return inline(typeof obj['binaryData'] === 'string' && obj['binaryData'] !== ''
+        ? `.respond_binary(BinaryResponse::from_base64(${rustStr(obj['binaryData'])}))`
+        : '.respond_binary(BinaryResponse::new())');
     case 'grpcStreamResponse':
       return inline(`.respond_grpc_stream(${grpcStreamExpr(obj, indent + 4)})`);
     case 'dnsResponse': {

@@ -21,6 +21,7 @@ import RefreshIcon from '@mui/icons-material/Refresh';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import DownloadIcon from '@mui/icons-material/Download';
 import { useDashboardStore } from '../store';
+import { useAutoLoadLlmRows } from '../hooks/useLoadFullRow';
 import { groupBySession } from '../lib/sessionGrouping';
 import {
   fetchOptimisationReport,
@@ -108,6 +109,7 @@ function useSessionOptions(): SessionOption[] {
   const proxiedRequests = useDashboardStore((s) => s.proxiedRequests);
   const recordedRequests = useDashboardStore((s) => s.recordedRequests);
   const activeExpectations = useDashboardStore((s) => s.activeExpectations);
+  useAutoLoadLlmRows();
 
   return useMemo(() => {
     const all = [...proxiedRequests, ...recordedRequests];
