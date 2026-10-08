@@ -82,6 +82,7 @@ public class PortUnificationHandlerDetectionTest {
     @AfterClass
     public static void stopServerState() {
         httpState.stop();
+        httpState = null;
     }
 
     private static byte[] ascii(String text) {

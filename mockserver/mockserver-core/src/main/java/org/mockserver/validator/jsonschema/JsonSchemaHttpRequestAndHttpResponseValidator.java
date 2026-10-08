@@ -33,12 +33,22 @@ public class JsonSchemaHttpRequestAndHttpResponseValidator extends JsonSchemaVal
         );
     }
 
-    private static JsonSchemaHttpRequestAndHttpResponseValidator jsonSchemaHttpRequestValidator;
+    private JsonSchemaHttpRequestAndHttpResponseValidator(MockServerLogger mockServerLogger, JsonSchemaHttpRequestAndHttpResponseValidator compiled) {
+        super(compiled, mockServerLogger);
+    }
 
+    private static volatile JsonSchemaHttpRequestAndHttpResponseValidator compiled;
+
+    /**
+     * A validator that logs to {@code mockServerLogger}. The schema is compiled once per JVM, by a validator that
+     * holds no server's logger, so a stopped server is not kept by it.
+     */
     public static JsonSchemaHttpRequestAndHttpResponseValidator jsonSchemaHttpRequestAndHttpResponseValidator(MockServerLogger mockServerLogger) {
-        if (jsonSchemaHttpRequestValidator == null) {
-            jsonSchemaHttpRequestValidator = new JsonSchemaHttpRequestAndHttpResponseValidator(mockServerLogger);
+        JsonSchemaHttpRequestAndHttpResponseValidator shared = compiled;
+        if (shared == null) {
+            shared = new JsonSchemaHttpRequestAndHttpResponseValidator(new MockServerLogger(JsonSchemaHttpRequestAndHttpResponseValidator.class));
+            compiled = shared;
         }
-        return jsonSchemaHttpRequestValidator;
+        return new JsonSchemaHttpRequestAndHttpResponseValidator(mockServerLogger, shared);
     }
 }

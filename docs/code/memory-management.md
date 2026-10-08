@@ -1011,6 +1011,20 @@ a clustered backend the three chaos registries and the cross-protocol bus also h
 which reaches the server through the invalidation listeners the server registered on it; each holds it in a
 `MostRecentRegistration` too, so `stop()` lets go of it and an older clustered server still running gets
 its own store back (`StoppedClusteredServerIsCollectedTest` in `mockserver-state-infinispan`).
+The JSON schema validators compile each schema once per JVM, with a logger of their own, and hand each
+caller a validator that logs to the caller's logger, so neither the first server's log nor the server is
+kept by them (`JsonSchemaValidatorLoggerTest`). The load-scenario orchestrator keeps its most recent run for
+status after it ends; when the server whose sender that run used stops, the run is let go
+(`LoadScenarioOrchestratorTest`). An `HttpState` given a new request sender unregisters the one it replaced,
+so after `stop()` the load-scenario and drift-alert senders cannot fall back to it, and once stopped it registers
+none, as when a connection's first request arrives during the stop (`HttpStateRequestSenderTest`).
+The tests' `EchoServer` upstream stops its own event log, and with it that log's thread, when it is stopped
+(`EchoServerStopTest`).
+
+In `mockserver-netty`'s unit-test fork, `ClearInlineMocksAfterEachTestClass` (a surefire listener set in
+that module's pom) clears Mockito's inline mocks after each test class: a handler mocked into a real
+pipeline records invocations whose arguments reach the mock itself, so Mockito would otherwise keep it, its
+channel and the stopped server behind it until the fork ends.
 
 **Clearing expectations does NOT clear the log.** `PUT /mockserver/clear?type=EXPECTATIONS` only clears stored expectations; the request/event log is independent and keeps its entries (bounded by `maxLogEntries` and `maxEventLogSizeInBytes`). To free the log, use `PUT /mockserver/clear?type=LOG` (or `?type=ALL`), or `PUT /mockserver/reset` (clears both). Long-running, high-throughput servers should either lower `maxLogEntries`, set a byte budget, or periodically clear the log.
 

@@ -131,8 +131,11 @@ public class LoadScenarioOrchestrator {
     private final Map<String, LoadScenarioStatus> terminalStatuses = new ConcurrentHashMap<>();
     /** Name of the most-recently-triggered run, backing the single-run convenience accessors. */
     private volatile String lastRunName;
-    /** Most recently started run, retained for test assertions on slot accounting after termination. */
-    private volatile RunningScenario lastRun;
+    /**
+     * Most recently started run, retained for test assertions on slot accounting after termination. Unset when the
+     * server whose sender the ended run used stops, so that server is not kept.
+     */
+    private final AtomicReference<RunningScenario> lastRun = new AtomicReference<>();
     /**
      * The single shared scheduled control tick that drives ALL active runs. Created lazily on the
      * first trigger and cancelled when the last run terminates so an idle orchestrator schedules no
@@ -175,10 +178,15 @@ public class LoadScenarioOrchestrator {
 
     /**
      * Forget {@code sender}, a stopping server's. If it is the one in use, the sender of the server still running
-     * that registered most recently is used instead; a sender in use that is not {@code sender} is kept.
+     * that registered most recently is used instead; a sender in use that is not {@code sender} is kept. The most
+     * recent run is no longer retained if it has ended and used {@code sender}.
      */
     public void unregisterSender(Function<HttpRequest, CompletableFuture<HttpResponse>> sender) {
         installedSender.unregister(sender);
+        RunningScenario run = lastRun.get();
+        if (run != null && run.sender == sender && runs.get(run.scenario.getName()) != run) {
+            lastRun.compareAndSet(run, null);
+        }
     }
 
     /** Install the configuration used for caps and template engines. Called by the runtime. */
@@ -234,7 +242,7 @@ public class LoadScenarioOrchestrator {
 
         long now = clock.getAsLong();
         RunningScenario running = new RunningScenario(scenario, effectiveSender, now);
-        lastRun = running;
+        lastRun.set(running);
         lastRunName = scenario.getName();
 
         // Register the run and clear the name's retained terminal status in one atomic step, so the
@@ -312,7 +320,7 @@ public class LoadScenarioOrchestrator {
         stopAll();
         terminalStatuses.clear();
         lastRunName = null;
-        lastRun = null;
+        lastRun.set(null);
     }
 
     /**
@@ -1198,7 +1206,7 @@ public class LoadScenarioOrchestrator {
      * stopped or completed. Returns {@code 0} when no scenario has ever run.
      */
     int lastRunActiveVuCount() {
-        RunningScenario run = lastRun;
+        RunningScenario run = lastRun.get();
         return run != null ? run.activeVUs.get() : 0;
     }
 
@@ -1208,7 +1216,7 @@ public class LoadScenarioOrchestrator {
      * iteration overran the cycle. Returns {@code 0} when no scenario has ever run.
      */
     long lastRunPacingDelayMillis() {
-        RunningScenario run = lastRun;
+        RunningScenario run = lastRun.get();
         return run != null ? run.lastPacingDelayMillis : 0;
     }
 

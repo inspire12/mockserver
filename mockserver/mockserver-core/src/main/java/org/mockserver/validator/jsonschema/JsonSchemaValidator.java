@@ -128,6 +128,18 @@ public class JsonSchemaValidator extends ObjectWithReflectiveEqualsHashCodeToStr
         this.validator = compiled.validator;
     }
 
+    /**
+     * A validator of {@code compiled}'s schema that logs to {@code mockServerLogger}, sharing {@code compiled}'s
+     * compilation.
+     */
+    protected JsonSchemaValidator(JsonSchemaValidator compiled, MockServerLogger mockServerLogger) {
+        this.mockServerLogger = mockServerLogger;
+        this.type = compiled.type;
+        this.schema = compiled.schema;
+        this.schemaJsonNode = compiled.schemaJsonNode;
+        this.validator = compiled.validator;
+    }
+
     public JsonSchemaValidator(MockServerLogger mockServerLogger, String schema) {
         this.mockServerLogger = mockServerLogger;
         this.type = null;

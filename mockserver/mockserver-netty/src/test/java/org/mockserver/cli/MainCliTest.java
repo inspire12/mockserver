@@ -544,6 +544,7 @@ public class MainCliTest {
             assertThat("response.getBodyAsString", httpResponse.getBodyAsString(), is("proxied_via_https_scheme"));
         } finally {
             stopQuietly(mockServerClient);
+            stopQuietly(echoServer);
         }
     }
 
@@ -567,6 +568,7 @@ public class MainCliTest {
             assertThat("response.getBodyAsString", httpResponse.getBodyAsString(), is("proxied_via_proxy_cmd"));
         } finally {
             stopQuietly(mockServerClient);
+            stopQuietly(echoServer);
         }
     }
 
@@ -839,6 +841,7 @@ public class MainCliTest {
             ConfigurationProperties.validateProxyOpenAPISpec(originalSpec != null ? originalSpec : "");
             ConfigurationProperties.validateProxyEnforce(originalEnforce);
             stopQuietly(mockServerClient);
+            stopQuietly(echoServer);
         }
     }
 

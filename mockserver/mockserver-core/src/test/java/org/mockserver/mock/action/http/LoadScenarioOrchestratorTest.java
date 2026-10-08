@@ -15,6 +15,7 @@ import org.mockserver.model.HttpResponse;
 import org.mockserver.model.HttpTemplate;
 import org.mockserver.slo.SloSampleStore;
 
+import java.lang.ref.WeakReference;
 import java.util.Collections;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -1459,6 +1460,72 @@ public class LoadScenarioOrchestratorTest {
         }
     }
 
+
+    @Test
+    public void unregisteringTheSenderOfAnEndedRunLetsThatSenderBeCollected() throws Exception {
+        // a real scheduler: a mock keeps the tasks it was handed, and through them the run and its sender
+        WeakReference<?> stoppedServers = startStopAndUnregister(orchestrator, "ended");
+
+        assertCollected(stoppedServers);
+        assertThat("the ended run's status is kept", orchestrator.statusFor("ended").state, is(org.mockserver.load.LoadScenarioState.STOPPED));
+    }
+
+    @Test
+    public void unregisteringAnotherServersSenderKeepsTheEndedRun() throws Exception {
+        LoadScenarioOrchestrator installed = orchestratorTickedOnlyByTheTest(clock::get);
+        try {
+            assertThat(installed.start(oneSecondScenario("ended"), NEVER_RESPONDS), is(nullValue()));
+            installed.stop("ended");
+            assertThat("the ended run's virtual user still waits for its response", installed.lastRunActiveVuCount(), is(1));
+
+            installed.unregisterSender(httpRequest -> new CompletableFuture<>());
+
+            assertThat(installed.lastRunActiveVuCount(), is(1));
+        } finally {
+            installed.reset();
+        }
+    }
+
+    @Test
+    public void unregisteringTheSenderOfARunStillActiveKeepsThatRun() throws Exception {
+        LoadScenarioOrchestrator installed = orchestratorTickedOnlyByTheTest(clock::get);
+        try {
+            installed.registerSender(NEVER_RESPONDS);
+            assertThat(installed.start(oneSecondScenario("active"), null), is(nullValue()));
+
+            installed.unregisterSender(NEVER_RESPONDS);
+
+            assertThat(installed.isActive("active"), is(true));
+            assertThat(installed.lastRunActiveVuCount(), is(1));
+        } finally {
+            installed.reset();
+        }
+    }
+
+    private static WeakReference<?> startStopAndUnregister(LoadScenarioOrchestrator installed, String name) {
+        Function<HttpRequest, CompletableFuture<HttpResponse>> stoppedServers = new NeverRespondingSender();
+        installed.registerSender(stoppedServers);
+        assertThat(installed.start(oneSecondScenario(name), null), is(nullValue()));
+        installed.stop(name);
+        installed.unregisterSender(stoppedServers);
+        return new WeakReference<>(stoppedServers);
+    }
+
+    private static final class NeverRespondingSender implements Function<HttpRequest, CompletableFuture<HttpResponse>> {
+        @Override
+        public CompletableFuture<HttpResponse> apply(HttpRequest httpRequest) {
+            return new CompletableFuture<>();
+        }
+    }
+
+    private static void assertCollected(WeakReference<?> reference) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        while (reference.get() != null && System.nanoTime() < deadline) {
+            System.gc();
+            Thread.sleep(100);
+        }
+        assertThat("the sender of a stopped server is still reachable after 30s of garbage collection", reference.get(), is(nullValue()));
+    }
 
     @Test
     public void aStopLandingWhileItsRunIsStillStartingKeepsTheStoppedStatus() throws Exception {

@@ -151,8 +151,8 @@ public class MainTest {
     public void shouldStartMockServerWithRemotePortAndHost() {
         // given
         MockServerClient mockServerClient = null;
+        EchoServer echoServer = new EchoServer(false);
         try {
-            EchoServer echoServer = new EchoServer(false);
             echoServer.withNextResponse(response("port_forwarded_response"));
 
             // when
@@ -175,6 +175,7 @@ public class MainTest {
             assertThat("response.getBodyAsString", response.getBodyAsString(), is("port_forwarded_response"));
         } finally {
             stopQuietly(mockServerClient);
+            stopQuietly(echoServer);
         }
     }
 
@@ -182,8 +183,8 @@ public class MainTest {
     public void shouldStartMockServerWithRemotePort() {
         // given
         MockServerClient mockServerClient = null;
+        EchoServer echoServer = new EchoServer(false);
         try {
-            EchoServer echoServer = new EchoServer(false);
             echoServer.withNextResponse(response("port_forwarded_response"));
 
             // when
@@ -205,6 +206,7 @@ public class MainTest {
             assertThat("response.getBodyAsString", response.getBodyAsString(), is("port_forwarded_response"));
         } finally {
             stopQuietly(mockServerClient);
+            stopQuietly(echoServer);
         }
     }
 

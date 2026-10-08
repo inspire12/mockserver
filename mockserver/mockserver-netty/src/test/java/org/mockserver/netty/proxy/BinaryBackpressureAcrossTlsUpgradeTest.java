@@ -83,6 +83,7 @@ public class BinaryBackpressureAcrossTlsUpgradeTest {
     @AfterClass
     public static void stopServerState() {
         httpState.stop();
+        httpState = null;
     }
 
     @Test

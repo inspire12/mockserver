@@ -82,6 +82,10 @@ public class McpToolsAllProvidersTest {
         if (httpState != null) {
             httpState.stop();
         }
+        mockServerClient = null;
+        mockServer = null;
+        httpState = null;
+        toolRegistry = null;
     }
 
     @Before

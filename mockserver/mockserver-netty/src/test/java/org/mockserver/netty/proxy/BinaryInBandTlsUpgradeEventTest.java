@@ -79,6 +79,7 @@ public class BinaryInBandTlsUpgradeEventTest {
     @AfterClass
     public static void stopServerState() {
         httpState.stop();
+        httpState = null;
     }
 
     @Test

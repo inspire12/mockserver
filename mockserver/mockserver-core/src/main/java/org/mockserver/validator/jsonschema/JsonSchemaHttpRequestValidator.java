@@ -24,12 +24,22 @@ public class JsonSchemaHttpRequestValidator extends JsonSchemaValidator {
         );
     }
 
-    private static JsonSchemaHttpRequestValidator jsonSchemaHttpRequestValidator;
+    private JsonSchemaHttpRequestValidator(MockServerLogger mockServerLogger, JsonSchemaHttpRequestValidator compiled) {
+        super(compiled, mockServerLogger);
+    }
 
+    private static volatile JsonSchemaHttpRequestValidator compiled;
+
+    /**
+     * A validator that logs to {@code mockServerLogger}. The schema is compiled once per JVM, by a validator that
+     * holds no server's logger, so a stopped server is not kept by it.
+     */
     public static JsonSchemaHttpRequestValidator jsonSchemaHttpRequestValidator(MockServerLogger mockServerLogger) {
-        if (jsonSchemaHttpRequestValidator == null) {
-            jsonSchemaHttpRequestValidator = new JsonSchemaHttpRequestValidator(mockServerLogger);
+        JsonSchemaHttpRequestValidator shared = compiled;
+        if (shared == null) {
+            shared = new JsonSchemaHttpRequestValidator(new MockServerLogger(JsonSchemaHttpRequestValidator.class));
+            compiled = shared;
         }
-        return jsonSchemaHttpRequestValidator;
+        return new JsonSchemaHttpRequestValidator(mockServerLogger, shared);
     }
 }

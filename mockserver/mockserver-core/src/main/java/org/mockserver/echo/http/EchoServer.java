@@ -117,6 +117,7 @@ public class EchoServer implements Stoppable {
         scheduler.shutdown();
         bossGroup.shutdownGracefully();
         workerGroup.shutdownGracefully();
+        mockServerEventLog.stop();
     }
 
     @Override

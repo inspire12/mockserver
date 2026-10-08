@@ -196,9 +196,16 @@ final class BinaryRelayHarness {
 
     void finish() {
         client.finishAndReleaseAll();
-        // one whose connect failed before registration has nothing to release, and cannot be closed again
-        if (upstream != null && upstream.isRegistered()) {
+        if (upstream == null) {
+            return;
+        }
+        if (upstream.isRegistered()) {
             upstream.finishAndReleaseAll();
+        } else {
+            // closed and deregistered already, by the relay or by a connect that failed, so it cannot be closed
+            // again; what it was given stays queued until released
+            upstream.releaseInbound();
+            upstream.releaseOutbound();
         }
     }
 

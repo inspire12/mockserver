@@ -329,6 +329,9 @@ public class HttpState {
     // what this server registered in process-wide places, removed on stop() wherever it is still registered
     private volatile Metrics.LiveStateReaders registeredLiveStateReaders;
     private volatile java.util.function.Function<HttpRequest, CompletableFuture<HttpResponse>> installedRequestSender;
+    private final Object requestSenderLock = new Object();
+    // guarded by requestSenderLock: set by stop(), after which no request sender is registered process-wide
+    private boolean requestSenderReleased;
     private volatile org.mockserver.state.KeyValueStore<com.fasterxml.jackson.databind.node.ObjectNode> serviceChaosStore;
     private volatile org.mockserver.state.KeyValueStore<com.fasterxml.jackson.databind.node.ObjectNode> tcpChaosStore;
     private volatile org.mockserver.state.KeyValueStore<com.fasterxml.jackson.databind.node.ObjectNode> grpcChaosStore;
@@ -642,14 +645,25 @@ public class HttpState {
 
     /**
      * Install {@code requestSender} as this server's replay handler and as the process-wide sender of load
-     * scenarios and drift alerts. {@link #stop()} removes it from those that still hold it, so pass the same
-     * instance on every call. Called by the runtime.
+     * scenarios and drift alerts. {@link #stop()} removes it from those that still hold it. A different instance
+     * replaces the one installed before, which is removed from them too. Once stopped, as when a connection's first
+     * request arrives while the server stops, it is installed only as the replay handler. Called by the runtime.
      */
     public void installRequestSender(java.util.function.Function<HttpRequest, CompletableFuture<HttpResponse>> requestSender) {
-        this.installedRequestSender = requestSender;
         setReplayHandler(requestSender);
-        org.mockserver.mock.action.http.LoadScenarioOrchestrator.getInstance().registerSender(requestSender);
-        org.mockserver.mock.drift.DriftAlertNotifier.getInstance().registerSender(requestSender);
+        synchronized (requestSenderLock) {
+            if (requestSenderReleased) {
+                return;
+            }
+            java.util.function.Function<HttpRequest, CompletableFuture<HttpResponse>> replaced = this.installedRequestSender;
+            this.installedRequestSender = requestSender;
+            org.mockserver.mock.action.http.LoadScenarioOrchestrator.getInstance().registerSender(requestSender);
+            org.mockserver.mock.drift.DriftAlertNotifier.getInstance().registerSender(requestSender);
+            if (replaced != null && replaced != requestSender) {
+                org.mockserver.mock.action.http.LoadScenarioOrchestrator.getInstance().unregisterSender(replaced);
+                org.mockserver.mock.drift.DriftAlertNotifier.getInstance().unregisterSender(replaced);
+            }
+        }
     }
 
     public Configuration getConfiguration() {
@@ -7014,8 +7028,11 @@ public class HttpState {
         if (requestMatchers != null) {
             CrossProtocolEventBus.getInstance().unregisterScenarioManager(requestMatchers.getScenarioManager());
         }
-        org.mockserver.mock.action.http.LoadScenarioOrchestrator.getInstance().unregisterSender(installedRequestSender);
-        org.mockserver.mock.drift.DriftAlertNotifier.getInstance().unregisterSender(installedRequestSender);
+        synchronized (requestSenderLock) {
+            requestSenderReleased = true;
+            org.mockserver.mock.action.http.LoadScenarioOrchestrator.getInstance().unregisterSender(installedRequestSender);
+            org.mockserver.mock.drift.DriftAlertNotifier.getInstance().unregisterSender(installedRequestSender);
+        }
         org.mockserver.mock.action.http.ServiceChaosRegistry.getInstance().unsetStateBackendStore(serviceChaosStore);
         org.mockserver.mock.action.http.TcpChaosRegistry.getInstance().unsetStateBackendStore(tcpChaosStore);
         org.mockserver.mock.action.http.GrpcChaosRegistry.getInstance().unsetStateBackendStore(grpcChaosStore);

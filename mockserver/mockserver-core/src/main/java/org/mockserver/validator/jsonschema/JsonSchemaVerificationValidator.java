@@ -34,13 +34,23 @@ public class JsonSchemaVerificationValidator extends JsonSchemaValidator {
         );
     }
 
-    private static JsonSchemaVerificationValidator jsonSchemaVerificationValidator;
+    private JsonSchemaVerificationValidator(MockServerLogger mockServerLogger, JsonSchemaVerificationValidator compiled) {
+        super(compiled, mockServerLogger);
+    }
 
+    private static volatile JsonSchemaVerificationValidator compiled;
+
+    /**
+     * A validator that logs to {@code mockServerLogger}. The schema is compiled once per JVM, by a validator that
+     * holds no server's logger, so a stopped server is not kept by it.
+     */
     public static JsonSchemaVerificationValidator jsonSchemaVerificationValidator(MockServerLogger mockServerLogger) {
-        if (jsonSchemaVerificationValidator == null) {
-            jsonSchemaVerificationValidator = new JsonSchemaVerificationValidator(mockServerLogger);
+        JsonSchemaVerificationValidator shared = compiled;
+        if (shared == null) {
+            shared = new JsonSchemaVerificationValidator(new MockServerLogger(JsonSchemaVerificationValidator.class));
+            compiled = shared;
         }
-        return jsonSchemaVerificationValidator;
+        return new JsonSchemaVerificationValidator(mockServerLogger, shared);
     }
 
 }

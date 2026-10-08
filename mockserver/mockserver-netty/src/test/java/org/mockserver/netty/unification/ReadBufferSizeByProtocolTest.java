@@ -91,6 +91,7 @@ public class ReadBufferSizeByProtocolTest {
     @AfterClass
     public static void stopServerState() {
         httpState.stop();
+        httpState = null;
     }
 
     @Before
