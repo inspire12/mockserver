@@ -32,4 +32,36 @@ final class GeneratedCode {
         generator.accept(writer);
         return writer.toString();
     }
+
+    /**
+     * A writer that takes what is written to it one character at a time, so a generator can escape or
+     * scan an expectation's JSON as it is written rather than once it is a String. Closing it does nothing.
+     */
+    abstract static class CharWriter extends Writer {
+
+        @Override
+        public abstract void write(int c) throws IOException;
+
+        @Override
+        public void write(char[] chars, int offset, int length) throws IOException {
+            for (int i = offset; i < offset + length; i++) {
+                write(chars[i]);
+            }
+        }
+
+        @Override
+        public void write(String text, int offset, int length) throws IOException {
+            for (int i = offset; i < offset + length; i++) {
+                write(text.charAt(i));
+            }
+        }
+
+        @Override
+        public void flush() {
+        }
+
+        @Override
+        public void close() {
+        }
+    }
 }

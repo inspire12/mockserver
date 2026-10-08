@@ -3,6 +3,7 @@ package org.mockserver.serialization.code;
 import org.mockserver.mock.Expectation;
 import org.mockserver.serialization.ExpectationSerializer;
 
+import java.io.IOException;
 import java.io.Writer;
 import java.util.List;
 
@@ -81,10 +82,11 @@ public class ExpectationToGoSerializer {
                 if (expectation == null) {
                     continue;
                 }
-                String json = expectationSerializer.serialize(expectation);
                 output.append(NEW_LINE);
                 output.append(TAB).append("var e mockserver.Expectation").append(NEW_LINE);
-                output.append(TAB).append("_ = json.Unmarshal([]byte(").append(goStringLiteral(json)).append("), &e)").append(NEW_LINE);
+                output.append(TAB).append("_ = json.Unmarshal([]byte(");
+                writeGoStringLiteral(expectation, output, writer);
+                output.append("), &e)").append(NEW_LINE);
                 output.append(TAB).append("client.Upsert(e)").append(NEW_LINE);
             }
         }
@@ -93,38 +95,51 @@ public class ExpectationToGoSerializer {
     }
 
     /**
-     * Emit {@code json} as a Go string literal. Prefer a raw string literal
+     * Emit the expectation's JSON as a Go string literal. Prefer a raw string literal
      * (backticks) which preserves the JSON verbatim with no escaping; fall back
      * to a double-quoted interpreted string (with Go escapes) only if the JSON
-     * contains a backtick, which cannot be represented inside a raw literal.
+     * contains a backtick, which cannot be represented inside a raw literal. The JSON
+     * is written once to look for a backtick and once to {@code writer}, never held whole.
      */
-    private static String goStringLiteral(String json) {
-        if (json.indexOf('`') < 0) {
-            return "`" + json + "`";
-        }
-        StringBuilder sb = new StringBuilder("\"");
-        for (int i = 0; i < json.length(); i++) {
-            char c = json.charAt(i);
-            switch (c) {
-                case '\\':
-                    sb.append("\\\\");
-                    break;
-                case '"':
-                    sb.append("\\\"");
-                    break;
-                case '\n':
-                    sb.append("\\n");
-                    break;
-                case '\r':
-                    sb.append("\\r");
-                    break;
-                case '\t':
-                    sb.append("\\t");
-                    break;
-                default:
-                    sb.append(c);
+    private void writeGoStringLiteral(Expectation expectation, StringBuilder output, Writer writer) {
+        boolean[] backtick = new boolean[1];
+        expectationSerializer.serialize(expectation, new GeneratedCode.CharWriter() {
+            @Override
+            public void write(int c) {
+                backtick[0] |= c == '`';
             }
-        }
-        return sb.append("\"").toString();
+        });
+        String quote = backtick[0] ? "\"" : "`";
+        output.append(quote);
+        GeneratedCode.flush(output, writer);
+        expectationSerializer.serialize(expectation, backtick[0] ? goEscaped(writer) : writer);
+        output.append(quote);
+    }
+
+    private static Writer goEscaped(Writer writer) {
+        return new GeneratedCode.CharWriter() {
+            @Override
+            public void write(int c) throws IOException {
+                switch (c) {
+                    case '\\':
+                        writer.write("\\\\");
+                        break;
+                    case '"':
+                        writer.write("\\\"");
+                        break;
+                    case '\n':
+                        writer.write("\\n");
+                        break;
+                    case '\r':
+                        writer.write("\\r");
+                        break;
+                    case '\t':
+                        writer.write("\\t");
+                        break;
+                    default:
+                        writer.write(c);
+                }
+            }
+        };
     }
 }

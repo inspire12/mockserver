@@ -57,7 +57,8 @@ public class ExpectationToJavaScriptSerializer {
                 }
                 output.append(NEW_LINE);
                 output.append("mockServerClient(\"localhost\", 1080).mockAnyResponse(");
-                output.append(expectationSerializer.serialize(expectation));
+                GeneratedCode.flush(output, writer);
+                expectationSerializer.serialize(expectation, writer);
                 output.append(");").append(NEW_LINE);
             }
         }

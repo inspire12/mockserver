@@ -3,6 +3,7 @@ package org.mockserver.serialization.code;
 import org.mockserver.mock.Expectation;
 import org.mockserver.serialization.ExpectationSerializer;
 
+import java.io.IOException;
 import java.io.Writer;
 import java.util.List;
 
@@ -87,21 +88,29 @@ public class ExpectationToCSharpSerializer {
                 if (expectation == null) {
                     continue;
                 }
-                String json = expectationSerializer.serialize(expectation);
                 output.append(NEW_LINE);
-                output.append("client.Upsert(JsonSerializer.Deserialize<Expectation>(@\"")
-                    .append(csharpVerbatim(json))
-                    .append("\", jsonOptions));").append(NEW_LINE);
+                output.append("client.Upsert(JsonSerializer.Deserialize<Expectation>(@\"");
+                GeneratedCode.flush(output, writer);
+                expectationSerializer.serialize(expectation, csharpVerbatim(writer));
+                output.append("\", jsonOptions));").append(NEW_LINE);
             }
         }
         GeneratedCode.flush(output, writer);
     }
 
     /**
-     * Escape {@code json} for embedding inside a C# verbatim string literal
+     * Escapes what is written for embedding inside a C# verbatim string literal
      * ({@code @"..."}): only the double-quote needs escaping, by doubling it.
      */
-    private static String csharpVerbatim(String json) {
-        return json.replace("\"", "\"\"");
+    private static Writer csharpVerbatim(Writer writer) {
+        return new GeneratedCode.CharWriter() {
+            @Override
+            public void write(int c) throws IOException {
+                if (c == '"') {
+                    writer.write('"');
+                }
+                writer.write(c);
+            }
+        };
     }
 }

@@ -57,6 +57,7 @@ import org.slf4j.event.Level;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.io.StringWriter;
 import java.io.UncheckedIOException;
 import java.io.Writer;
 import java.util.ArrayList;
@@ -1397,19 +1398,9 @@ public class HttpState {
                                 );
                             }
                         } else {
-                            response.withBody(writtenBody(MediaType.PLAIN_TEXT_UTF_8, writer -> {
-                                for (int i = 0; i < logEntries.size(); i++) {
-                                    LogEntry messageLogEntry = logEntries.get(i);
-                                    writer
-                                        .append(messageLogEntry.getTimestamp())
-                                        .append(" - ")
-                                        .append(messageLogEntry.getMessage(configuration));
-                                    if (i < logEntries.size() - 1) {
-                                        writer.append(LOG_SEPARATOR);
-                                    }
-                                }
-                                writer.append(NEW_LINE);
-                            }));
+                            // a message argument that cannot be written as JSON is shown by its fields, as the
+                            // rendered message shows it, so then the text is built again from the rendered messages
+                            response.withBody(writtenBody(MediaType.PLAIN_TEXT_UTF_8, writer -> writeLogs(logEntries, writer, false), ioe -> renderedLogs(logEntries)));
                             if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
                                 mockServerLogger.logEvent(
                                     new LogEntry()
@@ -2034,6 +2025,38 @@ public class HttpState {
         } else {
             return response().withStatusCode(200);
         }
+    }
+
+    /**
+     * Writes the plain-text LOGS retrieve: each entry's message is written as it is rendered or, with
+     * {@code rendered}, rendered to a String first.
+     */
+    private void writeLogs(List<LogEntry> logEntries, Writer writer, boolean rendered) throws IOException {
+        for (int i = 0; i < logEntries.size(); i++) {
+            LogEntry messageLogEntry = logEntries.get(i);
+            writer
+                .append(messageLogEntry.getTimestamp())
+                .append(" - ");
+            if (rendered) {
+                writer.append(messageLogEntry.getMessage(configuration));
+            } else {
+                messageLogEntry.writeMessage(configuration, writer);
+            }
+            if (i < logEntries.size() - 1) {
+                writer.append(LOG_SEPARATOR);
+            }
+        }
+        writer.append(NEW_LINE);
+    }
+
+    private String renderedLogs(List<LogEntry> logEntries) {
+        StringWriter writer = new StringWriter();
+        try {
+            writeLogs(logEntries, writer, true);
+        } catch (IOException ioe) {
+            throw new UncheckedIOException(ioe);
+        }
+        return writer.toString();
     }
 
     @FunctionalInterface

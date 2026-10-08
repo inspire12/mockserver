@@ -1,7 +1,5 @@
 package org.mockserver.serialization.java;
 
-import com.google.common.base.Strings;
-import org.apache.commons.text.StringEscapeUtils;
 import org.mockserver.mock.Expectation;
 import org.mockserver.model.Action;
 import org.mockserver.model.CaptureRule;
@@ -15,11 +13,11 @@ import org.mockserver.model.OpenAPIDefinition;
 import org.mockserver.model.RateLimit;
 import org.mockserver.model.RequestDefinition;
 
-import java.io.IOException;
-import java.io.UncheckedIOException;
+import java.io.StringWriter;
 import java.io.Writer;
 import java.util.Arrays;
 import java.util.List;
+import java.util.function.Consumer;
 
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
 import static org.mockserver.character.Character.NEW_LINE;
@@ -46,33 +44,30 @@ public class ExpectationToJavaSerializer implements ToJavaSerializer<Expectation
     }
 
     public String serialize(List<Expectation> expectations) {
-        StringBuilder output = new StringBuilder();
-        for (Expectation expectation : expectations) {
-            output.append(serialize(0, expectation));
-            output.append(NEW_LINE);
-            output.append(NEW_LINE);
-        }
-        return output.toString();
+        StringWriter writer = new StringWriter();
+        serialize(expectations, writer);
+        return writer.toString();
     }
 
     /**
-     * As {@link #serialize(List)}, writing the code for one expectation at a time to {@code writer}.
+     * As {@link #serialize(List)}, writing the code for one expectation at a time to {@code writer}, and
+     * each body as it is escaped.
      */
     public void serialize(List<Expectation> expectations, Writer writer) {
-        try {
-            for (Expectation expectation : expectations) {
-                writer.write(serialize(0, expectation));
-                writer.write(NEW_LINE);
-                writer.write(NEW_LINE);
-            }
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
+        JavaCode output = new JavaCode(writer);
+        for (Expectation expectation : expectations) {
+            write(0, expectation, output);
+            output.append(NEW_LINE);
+            output.append(NEW_LINE);
         }
     }
 
     @Override
     public String serialize(int numberOfSpacesToIndent, Expectation expectation) {
-        StringBuffer output = new StringBuffer();
+        return JavaCode.toString(output -> write(numberOfSpacesToIndent, expectation, output));
+    }
+
+    private void write(int numberOfSpacesToIndent, Expectation expectation, JavaCode output) {
         if (expectation != null) {
             // when(...) takes one terminal action, and has none for forward-validate, a rate limit or steps alone
             int actionCount = generatedActionCount(expectation);
@@ -94,7 +89,7 @@ public class ExpectationToJavaSerializer implements ToJavaSerializer<Expectation
             String respondWith = upsert ? ".thenRespondWith" : ".respondWith";
             RequestDefinition requestDefinition = expectation.getHttpRequest();
             if (requestDefinition instanceof HttpRequest) {
-                output.append(new HttpRequestToJavaSerializer().serialize(indent + 1, (HttpRequest) requestDefinition));
+                new HttpRequestToJavaSerializer().write(indent + 1, (HttpRequest) requestDefinition, output);
             } else if (requestDefinition instanceof OpenAPIDefinition) {
                 output.append(new OpenAPIMatcherToJavaSerializer().serialize(indent + 1, (OpenAPIDefinition) requestDefinition));
             }
@@ -120,16 +115,16 @@ public class ExpectationToJavaSerializer implements ToJavaSerializer<Expectation
                 appendNewLineAndIndent(indent * INDENT_SIZE, output).append(".withPercentage(").append(expectation.getPercentage()).append(")");
             }
             if (isNotBlank(expectation.getNamespace())) {
-                appendNewLineAndIndent(indent * INDENT_SIZE, output).append(".withNamespace(\"").append(StringEscapeUtils.escapeJava(expectation.getNamespace())).append("\")");
+                appendNewLineAndIndent(indent * INDENT_SIZE, output).append(".withNamespace(\"").appendEscaped(expectation.getNamespace()).append("\")");
             }
             if (isNotBlank(expectation.getScenarioName())) {
-                appendNewLineAndIndent(indent * INDENT_SIZE, output).append(".withScenarioName(\"").append(StringEscapeUtils.escapeJava(expectation.getScenarioName())).append("\")");
+                appendNewLineAndIndent(indent * INDENT_SIZE, output).append(".withScenarioName(\"").appendEscaped(expectation.getScenarioName()).append("\")");
             }
             if (isNotBlank(expectation.getScenarioState())) {
-                appendNewLineAndIndent(indent * INDENT_SIZE, output).append(".withScenarioState(\"").append(StringEscapeUtils.escapeJava(expectation.getScenarioState())).append("\")");
+                appendNewLineAndIndent(indent * INDENT_SIZE, output).append(".withScenarioState(\"").appendEscaped(expectation.getScenarioState()).append("\")");
             }
             if (isNotBlank(expectation.getNewScenarioState())) {
-                appendNewLineAndIndent(indent * INDENT_SIZE, output).append(".withNewScenarioState(\"").append(StringEscapeUtils.escapeJava(expectation.getNewScenarioState())).append("\")");
+                appendNewLineAndIndent(indent * INDENT_SIZE, output).append(".withNewScenarioState(\"").appendEscaped(expectation.getNewScenarioState()).append("\")");
             }
             if (expectation.getResponseMode() != null) {
                 appendNewLineAndIndent(indent * INDENT_SIZE, output).append(".withResponseMode(org.mockserver.mock.ResponseMode.").append(expectation.getResponseMode().name()).append(")");
@@ -165,14 +160,14 @@ public class ExpectationToJavaSerializer implements ToJavaSerializer<Expectation
                 List<HttpResponse> responses = expectation.getHttpResponses();
                 for (int i = 0; i < responses.size(); i++) {
                     appendNewLineAndIndent((indent + 1) * INDENT_SIZE, output);
-                    output.append(responseSerializer.serialize(indent + 2, responses.get(i)));
+                    responseSerializer.write(indent + 2, responses.get(i), output);
                     if (i < responses.size() - 1) {
                         output.append(",");
                     }
                 }
                 appendNewLineAndIndent(indent * INDENT_SIZE, output).append("))");
             } else if (expectation.getHttpResponse() != null) {
-                appendAction(indent, respond, new HttpResponseToJavaSerializer().serialize(indent + 1, expectation.getHttpResponse()), expectation.getHttpResponse(), output);
+                appendAction(indent, respond, code -> new HttpResponseToJavaSerializer().write(indent + 1, expectation.getHttpResponse(), code), expectation.getHttpResponse(), output);
             }
             if (expectation.getHttpResponseTemplate() != null) {
                 appendAction(indent, respond, new HttpTemplateToJavaSerializer().serialize(indent + 1, expectation.getHttpResponseTemplate()), expectation.getHttpResponseTemplate(), output);
@@ -233,7 +228,6 @@ public class ExpectationToJavaSerializer implements ToJavaSerializer<Expectation
             }
             output.append(";");
         }
-        return output.toString();
     }
 
     /**
@@ -342,7 +336,7 @@ public class ExpectationToJavaSerializer implements ToJavaSerializer<Expectation
             .build();
     }
 
-    private <T extends ObjectWithReflectiveEqualsHashCodeToString> void appendEach(int numberOfSpacesToIndent, String open, List<T> values, ToJavaSerializer<T> serializer, String close, StringBuffer output) {
+    private <T extends ObjectWithReflectiveEqualsHashCodeToString> void appendEach(int numberOfSpacesToIndent, String open, List<T> values, ToJavaSerializer<T> serializer, String close, JavaCode output) {
         if (values != null && !values.isEmpty()) {
             appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(open);
             for (int i = 0; i < values.size(); i++) {
@@ -352,21 +346,25 @@ public class ExpectationToJavaSerializer implements ToJavaSerializer<Expectation
         }
     }
 
-    private void appendCall(int numberOfSpacesToIndent, String method, String serializedArgument, StringBuffer output) {
+    private void appendCall(int numberOfSpacesToIndent, String method, String serializedArgument, JavaCode output) {
         appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(method).append(serializedArgument);
         appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(")");
     }
 
-    private void appendAction(int numberOfSpacesToIndent, String method, String serializedAction, Action<?> action, StringBuffer output) {
+    private void appendAction(int numberOfSpacesToIndent, String method, String serializedAction, Action<?> action, JavaCode output) {
+        appendAction(numberOfSpacesToIndent, method, code -> code.append(serializedAction), action, output);
+    }
+
+    private void appendAction(int numberOfSpacesToIndent, String method, Consumer<JavaCode> serializedAction, Action<?> action, JavaCode output) {
         appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(method);
-        output.append(serializedAction);
+        serializedAction.accept(output);
         if (action.isPrimary()) {
             appendNewLineAndIndent((numberOfSpacesToIndent + 2) * INDENT_SIZE, output).append(".withPrimary(true)");
         }
         appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(")");
     }
 
-    private StringBuffer appendNewLineAndIndent(int numberOfSpacesToIndent, StringBuffer output) {
-        return output.append(NEW_LINE).append(Strings.padStart("", numberOfSpacesToIndent, ' '));
+    private JavaCode appendNewLineAndIndent(int numberOfSpacesToIndent, JavaCode output) {
+        return output.newLineAndIndent(numberOfSpacesToIndent);
     }
 }

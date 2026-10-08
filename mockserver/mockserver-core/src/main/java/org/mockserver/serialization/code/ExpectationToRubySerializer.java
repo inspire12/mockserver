@@ -74,7 +74,9 @@ public class ExpectationToRubySerializer {
                 }
                 output.append(NEW_LINE);
                 output.append("client.upsert(MockServer::Expectation.from_hash(JSON.parse(<<").append(HEREDOC_DELIMITER).append(")))").append(NEW_LINE);
-                output.append(expectationSerializer.serialize(expectation)).append(NEW_LINE);
+                GeneratedCode.flush(output, writer);
+                expectationSerializer.serialize(expectation, writer);
+                output.append(NEW_LINE);
                 output.append(HEREDOC_DELIMITER).append(NEW_LINE);
             }
         }

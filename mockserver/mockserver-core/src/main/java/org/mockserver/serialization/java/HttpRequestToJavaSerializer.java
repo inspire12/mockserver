@@ -1,9 +1,6 @@
 package org.mockserver.serialization.java;
 
-import com.google.common.base.Strings;
-import org.apache.commons.text.StringEscapeUtils;
 import org.mockserver.model.*;
-import org.mockserver.serialization.Base64Converter;
 
 import java.util.List;
 
@@ -15,8 +12,6 @@ import static org.mockserver.serialization.java.ExpectationToJavaSerializer.INDE
  * @author jamesdbloom
  */
 public class HttpRequestToJavaSerializer implements ToJavaSerializer<HttpRequest> {
-
-    private final Base64Converter base64Converter = new Base64Converter();
 
     public String serialize(List<HttpRequest> httpRequests) {
         StringBuilder output = new StringBuilder();
@@ -30,17 +25,23 @@ public class HttpRequestToJavaSerializer implements ToJavaSerializer<HttpRequest
 
     @Override
     public String serialize(int numberOfSpacesToIndent, HttpRequest request) {
-        StringBuffer output = new StringBuffer();
+        return JavaCode.toString(output -> write(numberOfSpacesToIndent, request, output));
+    }
+
+    /**
+     * As {@link #serialize(int, HttpRequest)}, writing the code to {@code output}, the body as it is escaped.
+     */
+    void write(int numberOfSpacesToIndent, HttpRequest request, JavaCode output) {
         if (request != null) {
             appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output);
             output.append("request()");
             if (isNotBlank(request.getMethod().getValue())) {
                 appendNewLineAndIndent((numberOfSpacesToIndent + 1) * INDENT_SIZE, output);
-                output.append(".withMethod(\"").append(StringEscapeUtils.escapeJava(request.getMethod().getValue())).append("\")");
+                output.append(".withMethod(\"").appendEscaped(request.getMethod().getValue()).append("\")");
             }
             if (isNotBlank(request.getPath().getValue())) {
                 appendNewLineAndIndent((numberOfSpacesToIndent + 1) * INDENT_SIZE, output);
-                output.append(".withPath(\"").append(StringEscapeUtils.escapeJava(request.getPath().getValue())).append("\")");
+                output.append(".withPath(\"").appendEscaped(request.getPath().getValue()).append("\")");
             }
             outputHeaders(numberOfSpacesToIndent + 1, output, request.getHeaderList());
             outputCookies(numberOfSpacesToIndent + 1, output, request.getCookieList());
@@ -69,50 +70,50 @@ public class HttpRequestToJavaSerializer implements ToJavaSerializer<HttpRequest
                     appendNewLineAndIndent((numberOfSpacesToIndent + 1) * INDENT_SIZE, output);
                     output.append(".withBody(");
                     if (jsonBody.isMatchNumbersAsStrings()) {
-                        output.append("JsonBody.json(\"").append(StringEscapeUtils.escapeJava(jsonBody.getValue())).append("\", JsonBodyMatchType.").append(jsonBody.getMatchType()).append(", true)");
+                        output.append("JsonBody.json(\"").appendEscaped(jsonBody.getValue()).append("\", JsonBodyMatchType.").append(jsonBody.getMatchType()).append(", true)");
                     } else {
-                        output.append("new JsonBody(\"").append(StringEscapeUtils.escapeJava(jsonBody.getValue())).append("\", JsonBodyMatchType.").append(jsonBody.getMatchType()).append(")");
+                        output.append("new JsonBody(\"").appendEscaped(jsonBody.getValue()).append("\", JsonBodyMatchType.").append(jsonBody.getMatchType()).append(")");
                     }
                     output.append(")");
                 } else if (request.getBody() instanceof JsonPathBody jsonPathBody) {
                     appendNewLineAndIndent((numberOfSpacesToIndent + 1) * INDENT_SIZE, output);
                     output.append(".withBody(");
-                    output.append("new JsonPathBody(\"").append(StringEscapeUtils.escapeJava(jsonPathBody.getValue())).append("\")");
+                    output.append("new JsonPathBody(\"").appendEscaped(jsonPathBody.getValue()).append("\")");
                     output.append(")");
                 } else if (request.getBody() instanceof JsonSchemaBody jsonSchemaBody) {
                     appendNewLineAndIndent((numberOfSpacesToIndent + 1) * INDENT_SIZE, output);
                     output.append(".withBody(");
-                    output.append("new JsonSchemaBody(\"").append(StringEscapeUtils.escapeJava(jsonSchemaBody.getValue())).append("\")");
+                    output.append("new JsonSchemaBody(\"").appendEscaped(jsonSchemaBody.getValue()).append("\")");
                     output.append(")");
                 } else if (request.getBody() instanceof XmlBody xmlBody) {
                     appendNewLineAndIndent((numberOfSpacesToIndent + 1) * INDENT_SIZE, output);
                     output.append(".withBody(");
-                    output.append("new XmlBody(\"").append(StringEscapeUtils.escapeJava(xmlBody.getValue())).append("\")");
+                    output.append("new XmlBody(\"").appendEscaped(xmlBody.getValue()).append("\")");
                     output.append(")");
                 } else if (request.getBody() instanceof XPathBody xPathBody) {
                     appendNewLineAndIndent((numberOfSpacesToIndent + 1) * INDENT_SIZE, output);
                     output.append(".withBody(");
-                    output.append("new XPathBody(\"").append(StringEscapeUtils.escapeJava(xPathBody.getValue())).append("\")");
+                    output.append("new XPathBody(\"").appendEscaped(xPathBody.getValue()).append("\")");
                     output.append(")");
                 } else if (request.getBody() instanceof XmlSchemaBody xmlSchemaBody) {
                     appendNewLineAndIndent((numberOfSpacesToIndent + 1) * INDENT_SIZE, output);
                     output.append(".withBody(");
-                    output.append("new XmlSchemaBody(\"").append(StringEscapeUtils.escapeJava(xmlSchemaBody.getValue())).append("\")");
+                    output.append("new XmlSchemaBody(\"").appendEscaped(xmlSchemaBody.getValue()).append("\")");
                     output.append(")");
                 } else if (request.getBody() instanceof RegexBody regexBody) {
                     appendNewLineAndIndent((numberOfSpacesToIndent + 1) * INDENT_SIZE, output);
                     output.append(".withBody(");
-                    output.append("new RegexBody(\"").append(StringEscapeUtils.escapeJava(regexBody.getValue())).append("\")");
+                    output.append("new RegexBody(\"").appendEscaped(regexBody.getValue()).append("\")");
                     output.append(")");
                 } else if (request.getBody() instanceof FuzzyBody fuzzyBody) {
                     appendNewLineAndIndent((numberOfSpacesToIndent + 1) * INDENT_SIZE, output);
                     output.append(".withBody(");
-                    output.append("new FuzzyBody(\"").append(StringEscapeUtils.escapeJava(fuzzyBody.getValue())).append("\", ").append(fuzzyBody.getThreshold()).append("d, ").append(fuzzyBody.isIgnoreCase()).append(")");
+                    output.append("new FuzzyBody(\"").appendEscaped(fuzzyBody.getValue()).append("\", ").append(fuzzyBody.getThreshold()).append("d, ").append(fuzzyBody.isIgnoreCase()).append(")");
                     output.append(")");
                 } else if (request.getBody() instanceof StringBody stringBody) {
                     appendNewLineAndIndent((numberOfSpacesToIndent + 1) * INDENT_SIZE, output);
                     output.append(".withBody(");
-                    output.append("new StringBody(\"").append(StringEscapeUtils.escapeJava(stringBody.getValue())).append("\")");
+                    output.append("new StringBody(\"").appendEscaped(stringBody.getValue()).append("\")");
                     output.append(")");
                 } else if (request.getBody() instanceof ParameterBody parameterBody) {
                     appendNewLineAndIndent((numberOfSpacesToIndent + 1) * INDENT_SIZE, output);
@@ -146,7 +147,7 @@ public class HttpRequestToJavaSerializer implements ToJavaSerializer<HttpRequest
                             if (fi > 0) {
                                 output.append(", ");
                             }
-                            output.append("\"").append(StringEscapeUtils.escapeJava(graphQLBody.getFields().get(fi))).append("\"");
+                            output.append("\"").appendEscaped(graphQLBody.getFields().get(fi)).append("\"");
                         }
                         output.append(")");
                     }
@@ -157,15 +158,13 @@ public class HttpRequestToJavaSerializer implements ToJavaSerializer<HttpRequest
                     output.append(")");
                 } else if (request.getBody() instanceof BinaryBody binaryBody) {
                     appendNewLineAndIndent((numberOfSpacesToIndent + 1) * INDENT_SIZE, output);
-                    output.append(".withBody(new Base64Converter().base64StringToBytes(\"").append(base64Converter.bytesToBase64String(binaryBody.getRawBytes())).append("\"))");
+                    output.append(".withBody(new Base64Converter().base64StringToBytes(\"").appendBase64(binaryBody.getRawBytes()).append("\"))");
                 }
             }
         }
-
-        return output.toString();
     }
 
-    private void outputQueryStringParameter(int numberOfSpacesToIndent, StringBuffer output, List<Parameter> parameters) {
+    private void outputQueryStringParameter(int numberOfSpacesToIndent, JavaCode output, List<Parameter> parameters) {
         if (parameters.size() > 0) {
             appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(".withQueryStringParameters(");
             appendObject(numberOfSpacesToIndent, output, new ParameterToJavaSerializer(), parameters);
@@ -173,7 +172,7 @@ public class HttpRequestToJavaSerializer implements ToJavaSerializer<HttpRequest
         }
     }
 
-    private void outputCookies(int numberOfSpacesToIndent, StringBuffer output, List<Cookie> cookies) {
+    private void outputCookies(int numberOfSpacesToIndent, JavaCode output, List<Cookie> cookies) {
         if (cookies.size() > 0) {
             appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(".withCookies(");
             appendObject(numberOfSpacesToIndent, output, new CookieToJavaSerializer(), cookies);
@@ -181,7 +180,7 @@ public class HttpRequestToJavaSerializer implements ToJavaSerializer<HttpRequest
         }
     }
 
-    private void outputHeaders(int numberOfSpacesToIndent, StringBuffer output, List<Header> headers) {
+    private void outputHeaders(int numberOfSpacesToIndent, JavaCode output, List<Header> headers) {
         if (headers.size() > 0) {
             appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(".withHeaders(");
             appendObject(numberOfSpacesToIndent, output, new HeaderToJavaSerializer(), headers);
@@ -189,11 +188,11 @@ public class HttpRequestToJavaSerializer implements ToJavaSerializer<HttpRequest
         }
     }
 
-    private <T extends ObjectWithReflectiveEqualsHashCodeToString> void appendObject(int numberOfSpacesToIndent, StringBuffer output, MultiValueToJavaSerializer<T> toJavaSerializer, List<T> objects) {
+    private <T extends ObjectWithReflectiveEqualsHashCodeToString> void appendObject(int numberOfSpacesToIndent, JavaCode output, MultiValueToJavaSerializer<T> toJavaSerializer, List<T> objects) {
         output.append(toJavaSerializer.serializeAsJava(numberOfSpacesToIndent + 1, objects));
     }
 
-    private StringBuffer appendNewLineAndIndent(int numberOfSpacesToIndent, StringBuffer output) {
-        return output.append(NEW_LINE).append(Strings.padStart("", numberOfSpacesToIndent, ' '));
+    private JavaCode appendNewLineAndIndent(int numberOfSpacesToIndent, JavaCode output) {
+        return output.newLineAndIndent(numberOfSpacesToIndent);
     }
 }

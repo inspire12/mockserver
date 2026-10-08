@@ -1,5 +1,7 @@
 package org.mockserver.formatting;
 
+import com.fasterxml.jackson.core.JsonGenerator;
+import com.fasterxml.jackson.databind.ObjectWriter;
 import com.google.common.base.Joiner;
 import com.google.common.base.Splitter;
 import io.netty.buffer.ByteBuf;
@@ -8,7 +10,11 @@ import org.mockserver.mock.Expectation;
 import org.mockserver.model.Action;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
+import org.mockserver.model.ObjectWithJsonToString;
+import org.mockserver.serialization.ObjectMapperFactory;
 
+import java.io.IOException;
+import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
@@ -28,6 +34,16 @@ public class StringFormatter {
     // compiled once; String.replaceAll / String.split(String) would compile them on every call
     private static final Pattern START_OF_EACH_LINE = Pattern.compile("(?m)^");
     private static final Pattern ARGUMENT_PLACEHOLDER = Pattern.compile("\\{}");
+    private static final ClassValue<Boolean> TO_STRING_IS_JSON = new ClassValue<>() {
+        @Override
+        protected Boolean computeValue(Class<?> type) {
+            try {
+                return type.getMethod("toString").getDeclaringClass() == ObjectWithJsonToString.class;
+            } catch (NoSuchMethodException e) {
+                return false;
+            }
+        }
+    };
 
     static {
         INDENTS.put(0, "");
@@ -75,6 +91,44 @@ public class StringFormatter {
             }
         }
         return logMessage.toString();
+    }
+
+    /**
+     * Writes to {@code writer} the text {@link #formatLogMessage(String, Object...)} returns, writing an argument whose
+     * text is its JSON as it is serialised, so neither the message nor such an argument is held as a String. Where
+     * formatLogMessage would show an argument that cannot be serialised by its fields, this throws an IOException.
+     */
+    public static void writeLogMessage(final Writer writer, final String message, final Object... arguments) throws IOException {
+        final String[] messageParts = ARGUMENT_PLACEHOLDER.split(message);
+        for (int messagePartIndex = 0; messagePartIndex < messageParts.length; messagePartIndex++) {
+            writer.write(messageParts[messagePartIndex]);
+            if (arguments.length > messagePartIndex) {
+                writer.write(NEW_LINE);
+                writer.write(NEW_LINE);
+                writeArgument(new LineIndentingWriter(writer, INDENTS.get(1)), arguments[messagePartIndex]);
+                writer.write(NEW_LINE);
+            }
+            if (messagePartIndex < messageParts.length - 1) {
+                writer.write(NEW_LINE);
+                if (!messageParts[messagePartIndex + 1].startsWith(" ")) {
+                    writer.write(" ");
+                }
+            }
+        }
+    }
+
+    private static void writeArgument(Writer writer, Object argument) throws IOException {
+        if (argument != null && TO_STRING_IS_JSON.get(argument.getClass())) {
+            UnquotingWriter unquoted = new UnquotingWriter(writer);
+            try {
+                ArgumentWriter.INSTANCE.writeValue(unquoted, argument);
+            } catch (Exception e) {
+                throw new IOException("could not write log message argument as JSON", e);
+            }
+            unquoted.finish();
+        } else {
+            writer.write(String.valueOf(argument));
+        }
     }
 
     public static String formatLogMessage(final String[] messageParts, final Object... arguments) {
@@ -205,5 +259,124 @@ public class StringFormatter {
      */
     static String bytesLeftOut(int length, int shown) {
         return "...(" + length + " bytes, only the first " + shown + " logged, maxLoggedBodyBytes)";
+    }
+
+    // loaded on first use: ObjectMapperFactory's own initialisation may format a log message
+    private static final class ArgumentWriter {
+        // the writer ObjectWithJsonToString.toString uses, leaving the target open
+        private static final ObjectWriter INSTANCE = ObjectMapperFactory.createObjectMapper(true, false).without(JsonGenerator.Feature.AUTO_CLOSE_TARGET);
+    }
+
+    /**
+     * Writes each line it is given with {@code indent} before it, as a multiline {@code ^} replaced by the indent
+     * does: before the first character and after each line terminator (a {@code \r\n} pair counting as one), but
+     * not after a line terminator that ends the text.
+     */
+    private static final class LineIndentingWriter extends Writer {
+
+        private final Writer writer;
+        private final String indent;
+        private boolean lineStart = true;
+        private char previous;
+
+        private LineIndentingWriter(Writer writer, String indent) {
+            this.writer = writer;
+            this.indent = indent;
+        }
+
+        @Override
+        public void write(int c) throws IOException {
+            if (lineStart && !(previous == '\r' && c == '\n')) {
+                writer.write(indent);
+            }
+            writer.write(c);
+            previous = (char) c;
+            lineStart = c == '\n' || c == '\r' || c == '\u0085' || c == '\u2028' || c == '\u2029';
+        }
+
+        @Override
+        public void write(char[] chars, int offset, int length) throws IOException {
+            for (int i = offset; i < offset + length; i++) {
+                write(chars[i]);
+            }
+        }
+
+        @Override
+        public void write(String text, int offset, int length) throws IOException {
+            for (int i = offset; i < offset + length; i++) {
+                write(text.charAt(i));
+            }
+        }
+
+        @Override
+        public void flush() {
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    /**
+     * Writes JSON as {@link ObjectWithJsonToString#toString()} gives it: a JSON string without its quotes.
+     */
+    private static final class UnquotingWriter extends Writer {
+
+        private final Writer writer;
+        private boolean started;
+        private boolean quoted;
+        private int held = -1;
+
+        private UnquotingWriter(Writer writer) {
+            this.writer = writer;
+        }
+
+        @Override
+        public void write(int c) throws IOException {
+            if (!started) {
+                started = true;
+                quoted = c == '"';
+                if (quoted) {
+                    return;
+                }
+            }
+            if (quoted) {
+                // the last character is the closing quote, so each is written once the next arrives
+                if (held >= 0) {
+                    writer.write(held);
+                }
+                held = c;
+            } else {
+                writer.write(c);
+            }
+        }
+
+        @Override
+        public void write(char[] chars, int offset, int length) throws IOException {
+            for (int i = offset; i < offset + length; i++) {
+                write(chars[i]);
+            }
+        }
+
+        @Override
+        public void write(String text, int offset, int length) throws IOException {
+            for (int i = offset; i < offset + length; i++) {
+                write(text.charAt(i));
+            }
+        }
+
+        void finish() throws IOException {
+            if (quoted && held != '"') {
+                throw new IOException("log message argument's JSON string did not end with a quote");
+            }
+        }
+
+        @Override
+        public void flush() {
+        }
+
+        @Override
+        public void close() {
+        }
     }
 }

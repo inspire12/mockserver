@@ -1,5 +1,6 @@
 package org.mockserver.serialization;
 
+import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectWriter;
@@ -35,6 +36,7 @@ import static org.slf4j.event.Level.INFO;
 public class ExpectationSerializer implements Serializer<Expectation> {
     private final MockServerLogger mockServerLogger;
     private ObjectWriter objectWriter;
+    private ObjectWriter openTargetObjectWriter;
     private ObjectMapper objectMapper;
     private JsonArraySerializer jsonArraySerializer = new JsonArraySerializer();
     private JsonSchemaExpectationValidator expectationValidator;
@@ -61,6 +63,7 @@ public class ExpectationSerializer implements Serializer<Expectation> {
         this.mockServerLogger = mockServerLogger;
         this.openAPIExpectationSerializer = new OpenAPIExpectationSerializer(mockServerLogger, configuration);
         this.objectWriter = ObjectMapperFactory.createObjectMapper(true, serialiseDefaultValues);
+        this.openTargetObjectWriter = objectWriter.without(JsonGenerator.Feature.AUTO_CLOSE_TARGET);
         this.objectMapper = ObjectMapperFactory.createObjectMapper();
     }
 
@@ -85,18 +88,35 @@ public class ExpectationSerializer implements Serializer<Expectation> {
                 return objectWriter
                     .writeValueAsString(new ExpectationDTO(expectation));
             } catch (Exception e) {
-                mockServerLogger.logEvent(
-                    new LogEntry()
-                        .setLogLevel(Level.ERROR)
-                        .setMessageFormat("exception while serializing expectation to JSON with value:{}")
-                        .setArguments(expectation)
-                        .setThrowable(e)
-                );
-                throw new RuntimeException("Exception while serializing expectation to JSON with value " + expectation, e);
+                throw failure(expectation, e);
             }
         } else {
             return "";
         }
+    }
+
+    /**
+     * As {@link #serialize(Expectation)}, writing the same text to {@code writer}, which is left open.
+     */
+    public void serialize(Expectation expectation, Writer writer) {
+        if (expectation != null) {
+            try {
+                openTargetObjectWriter.writeValue(writer, new ExpectationDTO(expectation));
+            } catch (Exception e) {
+                throw failure(expectation, e);
+            }
+        }
+    }
+
+    private RuntimeException failure(Expectation expectation, Exception e) {
+        mockServerLogger.logEvent(
+            new LogEntry()
+                .setLogLevel(Level.ERROR)
+                .setMessageFormat("exception while serializing expectation to JSON with value:{}")
+                .setArguments(expectation)
+                .setThrowable(e)
+        );
+        return new RuntimeException("Exception while serializing expectation to JSON with value " + expectation, e);
     }
 
     public String serialize(List<Expectation> expectations) {

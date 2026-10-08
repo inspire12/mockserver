@@ -73,14 +73,14 @@ public class ExpectationToRustSerializer {
                 if (expectation == null) {
                     continue;
                 }
-                String json = expectationSerializer.serialize(expectation);
-                String hashes = rawStringHashes(json);
+                String hashes = rawStringHashes(expectation);
                 output.append(NEW_LINE);
                 output.append(INDENT)
                     .append("client.upsert(&[serde_json::from_str::<Expectation>(r")
-                    .append(hashes).append("\"")
-                    .append(json)
-                    .append("\"").append(hashes)
+                    .append(hashes).append("\"");
+                GeneratedCode.flush(output, writer);
+                expectationSerializer.serialize(expectation, writer);
+                output.append("\"").append(hashes)
                     .append(")?])?;").append(NEW_LINE);
             }
         }
@@ -93,36 +93,31 @@ public class ExpectationToRustSerializer {
     /**
      * Choose the smallest run of {@code #} hashes such that a raw string literal
      * {@code r<hashes>"..."<hashes>} cannot be terminated early by the JSON: the
-     * literal ends at a {@code "} followed by that many {@code #}. Start at one
-     * hash and increase until the JSON contains no {@code "} followed by that
-     * many consecutive {@code #} characters.
+     * literal ends at a {@code "} followed by that many {@code #}. That is one more
+     * than the longest run of {@code #} after a {@code "} in the JSON, which is
+     * written once to find it rather than held whole.
      */
-    private static String rawStringHashes(String json) {
-        int hashes = 1;
-        while (containsQuoteFollowedByHashes(json, hashes)) {
-            hashes++;
-        }
-        StringBuilder sb = new StringBuilder(hashes);
-        for (int i = 0; i < hashes; i++) {
+    private String rawStringHashes(Expectation expectation) {
+        int[] longestRun = new int[1];
+        expectationSerializer.serialize(expectation, new GeneratedCode.CharWriter() {
+            // -1 until a quote is seen, then the number of hashes after it
+            private int run = -1;
+
+            @Override
+            public void write(int c) {
+                if (c == '"') {
+                    run = 0;
+                } else if (c == '#' && run >= 0) {
+                    longestRun[0] = Math.max(longestRun[0], ++run);
+                } else {
+                    run = -1;
+                }
+            }
+        });
+        StringBuilder sb = new StringBuilder(longestRun[0] + 1);
+        for (int i = 0; i <= longestRun[0]; i++) {
             sb.append('#');
         }
         return sb.toString();
-    }
-
-    private static boolean containsQuoteFollowedByHashes(String json, int hashes) {
-        for (int i = 0; i < json.length(); i++) {
-            if (json.charAt(i) == '"') {
-                int h = 0;
-                int j = i + 1;
-                while (j < json.length() && json.charAt(j) == '#') {
-                    h++;
-                    j++;
-                }
-                if (h >= hashes) {
-                    return true;
-                }
-            }
-        }
-        return false;
     }
 }

@@ -80,7 +80,9 @@ public class ExpectationToPhpSerializer {
                 }
                 output.append(NEW_LINE);
                 output.append("$client->upsertExpectation(Expectation::fromArray(json_decode(<<<'").append(NOWDOC_DELIMITER).append("'").append(NEW_LINE);
-                output.append(expectationSerializer.serialize(expectation)).append(NEW_LINE);
+                GeneratedCode.flush(output, writer);
+                expectationSerializer.serialize(expectation, writer);
+                output.append(NEW_LINE);
                 output.append(NOWDOC_DELIMITER).append(", true)));").append(NEW_LINE);
             }
         }

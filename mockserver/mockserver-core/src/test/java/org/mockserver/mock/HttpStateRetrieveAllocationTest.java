@@ -77,13 +77,24 @@ public class HttpStateRetrieveAllocationTest {
             {RetrieveType.RECORDED_EXPECTATIONS, Format.POSTMAN, ONCE},
             {RetrieveType.ACTIVE_EXPECTATIONS, Format.OPENAPI, ONCE},
             {RetrieveType.ACTIVE_EXPECTATIONS, Format.POSTMAN, ONCE},
-            // these render each entry or expectation as text of its own first, which costs several
-            // times its size; the bound is what that costs plus the response once
-            {RetrieveType.LOGS, Format.JSON, 18.5},
-            {RetrieveType.RECORDED_EXPECTATIONS, Format.JAVA, 14.5},
-            {RetrieveType.ACTIVE_EXPECTATIONS, Format.JAVA, 14.5},
-            {RetrieveType.RECORDED_EXPECTATIONS, Format.PYTHON, 7.8},
-            {RetrieveType.ACTIVE_EXPECTATIONS, Format.GO, 8.9},
+            // plain text: each quoted request renders its body from the stored bytes once more, as above
+            {RetrieveType.LOGS, Format.JSON, ONCE + 1},
+            {RetrieveType.RECORDED_EXPECTATIONS, Format.JAVA, ONCE},
+            {RetrieveType.ACTIVE_EXPECTATIONS, Format.JAVA, ONCE},
+            {RetrieveType.RECORDED_EXPECTATIONS, Format.JAVASCRIPT, ONCE},
+            {RetrieveType.RECORDED_EXPECTATIONS, Format.PYTHON, ONCE},
+            {RetrieveType.RECORDED_EXPECTATIONS, Format.GO, ONCE},
+            {RetrieveType.RECORDED_EXPECTATIONS, Format.CSHARP, ONCE},
+            {RetrieveType.RECORDED_EXPECTATIONS, Format.RUBY, ONCE},
+            {RetrieveType.RECORDED_EXPECTATIONS, Format.RUST, ONCE},
+            {RetrieveType.RECORDED_EXPECTATIONS, Format.PHP, ONCE},
+            {RetrieveType.ACTIVE_EXPECTATIONS, Format.JAVASCRIPT, ONCE},
+            {RetrieveType.ACTIVE_EXPECTATIONS, Format.PYTHON, ONCE},
+            {RetrieveType.ACTIVE_EXPECTATIONS, Format.GO, ONCE},
+            {RetrieveType.ACTIVE_EXPECTATIONS, Format.CSHARP, ONCE},
+            {RetrieveType.ACTIVE_EXPECTATIONS, Format.RUBY, ONCE},
+            {RetrieveType.ACTIVE_EXPECTATIONS, Format.RUST, ONCE},
+            {RetrieveType.ACTIVE_EXPECTATIONS, Format.PHP, ONCE},
         });
     }
 

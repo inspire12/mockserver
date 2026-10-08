@@ -70,7 +70,8 @@ public class ExpectationToPythonSerializer {
                 // consecutive double-quotes (a structural colon, comma, brace or bracket always
                 // separates quotes), and the last character is always a closing brace or bracket, so
                 // the triple-quoted literal can never be terminated early by any expectation content.
-                output.append(expectationSerializer.serialize(expectation));
+                GeneratedCode.flush(output, writer);
+                expectationSerializer.serialize(expectation, writer);
                 output.append(TRIPLE_QUOTE).append(")))").append(NEW_LINE);
             }
         }

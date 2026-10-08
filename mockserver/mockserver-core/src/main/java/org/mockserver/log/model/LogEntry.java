@@ -15,6 +15,8 @@ import org.mockserver.time.EpochService;
 import org.mockserver.uuid.UUIDService;
 import org.slf4j.event.Level;
 
+import java.io.IOException;
+import java.io.Writer;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -920,10 +922,28 @@ public class LogEntry implements EventTranslator<LogEntry> {
         return messageFor(redaction(configuration));
     }
 
-    private String messageFor(Redaction redaction) {
-        if (arguments == null) {
-            return messageFormatFor(redaction);
+    /**
+     * Writes to {@code writer} what {@link #getMessage(org.mockserver.configuration.Configuration)} returns. A message
+     * that quotes a request, a response or anything else that may hold one is written as it is rendered, so neither
+     * it nor a quoted request is held as a String; any other is rendered, and memoised, as getMessage does. Where
+     * getMessage shows an argument that cannot be serialised as JSON by its fields, this throws an IOException.
+     *
+     * @param configuration the effective server configuration (may be {@code null})
+     */
+    public void writeMessage(org.mockserver.configuration.Configuration configuration, Writer writer) throws IOException {
+        Redaction redaction = redaction(configuration);
+        if (arguments == null || memoFor(redaction) != null || !quotesHttpMessage()) {
+            writer.append(messageFor(redaction));
+        } else {
+            org.mockserver.formatting.StringFormatter.writeLogMessage(
+                writer,
+                redaction == null ? messageFormat : redaction.scrub(messageFormat),
+                argumentsFor(redaction)
+            );
         }
+    }
+
+    private String memoFor(Redaction redaction) {
         Object memo = renderedMessage;
         if (redaction == null) {
             if (memo instanceof String) {
@@ -931,6 +951,17 @@ public class LogEntry implements EventTranslator<LogEntry> {
             }
         } else if (memo instanceof RedactedMessage && ((RedactedMessage) memo).redactionKey.equals(redaction.key)) {
             return ((RedactedMessage) memo).message;
+        }
+        return null;
+    }
+
+    private String messageFor(Redaction redaction) {
+        if (arguments == null) {
+            return messageFormatFor(redaction);
+        }
+        String memo = memoFor(redaction);
+        if (memo != null) {
+            return memo;
         }
         String message;
         if (redaction == null) {
