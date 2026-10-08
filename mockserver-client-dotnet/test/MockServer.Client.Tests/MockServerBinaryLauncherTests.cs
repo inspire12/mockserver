@@ -47,6 +47,59 @@ public class MockServerBinaryLauncherTests : IDisposable
     // Version validation (H1)
     // ---------------------------------------------------------------
 
+    [Fact]
+    public void WindowsCommandArguments_QuotesEachPartSoCmdMetacharactersStayLiteral()
+    {
+        var args = MockServerBinaryLauncher.WindowsCommandArguments(
+            @"C:\My Cache (x86)\9.0.0-SNAPSHOT\mockserver.bat", new[] { "-serverPort", "1080", "a&b|c<d>e^f!g" });
+
+        args.Should().Be(
+            @"/d /v:off /s /c """"C:\My Cache (x86)\9.0.0-SNAPSHOT\mockserver.bat"" ""-serverPort"" ""1080"" ""a&b|c<d>e^f!g""""");
+    }
+
+    [Fact]
+    public void WindowsCommandArguments_KeepsASinglePercentAndDoublesATrailingBackslashRun()
+    {
+        var args = MockServerBinaryLauncher.WindowsCommandArguments(
+            @"C:\c\mockserver.bat", new[] { "-Dx=100%", @"C:\dir\", @"a\b" });
+
+        args.Should().Be(@"/d /v:off /s /c """"C:\c\mockserver.bat"" ""-Dx=100%"" ""C:\dir\\"" ""a\b""""");
+    }
+
+    [Theory]
+    [InlineData("\"")]
+    [InlineData("\r")]
+    [InlineData("\n")]
+    [InlineData("\0")]
+    public void WindowsCommandArguments_RefusesAQuoteLineBreakOrNulWithoutEchoingIt(string bad)
+    {
+        var inArgument = () => MockServerBinaryLauncher.WindowsCommandArguments(@"C:\c\mockserver.bat", new[] { "ok", "secret" + bad });
+        var inLauncher = () => MockServerBinaryLauncher.WindowsCommandArguments(@"C:\secret" + bad + @"\mockserver.bat", new string[0]);
+
+        inArgument.Should().Throw<ArgumentException>()
+            .Which.Message.Should().StartWith("argument 1 cannot be passed through cmd.exe safely").And.NotContain("secret");
+        inLauncher.Should().Throw<ArgumentException>()
+            .Which.Message.Should().StartWith("the launcher path cannot be passed through cmd.exe safely").And.NotContain("secret");
+    }
+
+    [Fact]
+    public void WindowsCommandArguments_RefusesTwoPercentSignsWithoutEchoingTheLine()
+    {
+        var act = () => MockServerBinaryLauncher.WindowsCommandArguments(@"C:\c%\mockserver.bat", new[] { "-Dx=secret%PATH" });
+
+        act.Should().Throw<ArgumentException>()
+            .Which.Message.Should().Contain("more than one %").And.NotContain("secret");
+    }
+
+    [Fact]
+    public void WindowsComSpec_PrefersComSpecThenSystemRootThenFails()
+    {
+        MockServerBinaryLauncher.WindowsComSpec(@"D:\cmd.exe", @"C:\Windows").Should().Be(@"D:\cmd.exe");
+        MockServerBinaryLauncher.WindowsComSpec("", @"C:\Windows").Should().Be(@"C:\Windows\System32\cmd.exe");
+        var neither = () => MockServerBinaryLauncher.WindowsComSpec(null, null);
+        neither.Should().Throw<FileNotFoundException>().WithMessage("*cmd.exe not found*");
+    }
+
     [Theory]
     [InlineData("1.0.0")]
     [InlineData("7.0.1")]

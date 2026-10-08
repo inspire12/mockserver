@@ -6,6 +6,7 @@ namespace MockServer\Tests\Unit;
 
 use MockServer\BinaryLauncher;
 use MockServer\Exception\BinaryInstallException;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -819,6 +820,81 @@ class BinaryLauncherTest extends TestCase
             $this->assertStringEndsWith('mockserver', $path);
             $this->assertStringEndsNotWith('.bat', $path);
         }
+    }
+
+    public function testWindowsCommandLineQuotesEachPartSoCmdMetacharactersStayLiteral(): void
+    {
+        $line = BinaryLauncher::windowsCommandLine(
+            'C:\My Cache (x86)\9.0.0-SNAPSHOT\mockserver.bat',
+            ['-serverPort', '1080', 'a&b|c<d>e^f!g']
+        );
+
+        $this->assertSame(
+            'cmd.exe /d /v:off /s /c ""C:\My Cache (x86)\9.0.0-SNAPSHOT\mockserver.bat" "-serverPort" "1080" "a&b|c<d>e^f!g""',
+            $line
+        );
+    }
+
+    public function testWindowsCommandLineKeepsASinglePercentAndDoublesATrailingBackslashRun(): void
+    {
+        $line = BinaryLauncher::windowsCommandLine('C:\c\mockserver.bat', ['-Dx=100%', 'C:\dir\\', 'a\b']);
+
+        $this->assertSame('cmd.exe /d /v:off /s /c ""C:\c\mockserver.bat" "-Dx=100%" "C:\dir\\\\" "a\b""', $line);
+    }
+
+    /**
+     * @return array<string, array{string}>
+     */
+    public static function cmdUnsafeParts(): array
+    {
+        return ['quote' => ['"'], 'CR' => ["\r"], 'LF' => ["\n"], 'NUL' => ["\0"]];
+    }
+
+    #[DataProvider('cmdUnsafeParts')]
+    public function testWindowsCommandLineRefusesAnUnsafeArgumentWithoutEchoingIt(string $bad): void
+    {
+        try {
+            BinaryLauncher::windowsCommandLine('C:\c\mockserver.bat', ['ok', 'secret' . $bad]);
+            $this->fail('expected a refusal');
+        } catch (BinaryInstallException $e) {
+            $this->assertStringStartsWith('argument 1 cannot be passed through cmd.exe safely', $e->getMessage());
+            $this->assertStringNotContainsString('secret', $e->getMessage());
+        }
+    }
+
+    #[DataProvider('cmdUnsafeParts')]
+    public function testWindowsCommandLineRefusesAnUnsafeLauncherPathWithoutEchoingIt(string $bad): void
+    {
+        try {
+            BinaryLauncher::windowsCommandLine('C:\secret' . $bad . '\mockserver.bat', []);
+            $this->fail('expected a refusal');
+        } catch (BinaryInstallException $e) {
+            $this->assertStringStartsWith('the launcher path cannot be passed through cmd.exe safely', $e->getMessage());
+            $this->assertStringNotContainsString('secret', $e->getMessage());
+        }
+    }
+
+    public function testWindowsCommandLineRefusesTwoPercentSignsWithoutEchoingTheLine(): void
+    {
+        try {
+            BinaryLauncher::windowsCommandLine('C:\c%\mockserver.bat', ['-Dx=secret%PATH']);
+            $this->fail('expected a refusal');
+        } catch (BinaryInstallException $e) {
+            $this->assertStringContainsString('more than one %', $e->getMessage());
+            $this->assertStringNotContainsString('secret', $e->getMessage());
+        }
+    }
+
+    public function testLaunchCommandUsesTheCmdLineForABatOnWindowsAndAnArgumentArrayElsewhere(): void
+    {
+        $this->assertSame(
+            'cmd.exe /d /v:off /s /c ""C:\c\mockserver.bat" "-serverPort" "1080""',
+            BinaryLauncher::launchCommand('C:\c\mockserver.bat', ['-serverPort', '1080'], 'Windows')
+        );
+        $this->assertSame(
+            ['/c/a b;x/mockserver', '-serverPort', '1080', '$(id)'],
+            BinaryLauncher::launchCommand('/c/a b;x/mockserver', ['-serverPort', '1080', '$(id)'], 'Linux')
+        );
     }
 
     // -----------------------------------------------------------------

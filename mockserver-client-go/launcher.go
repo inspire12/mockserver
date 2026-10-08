@@ -642,9 +642,8 @@ func (h *ServerHandle) Wait() error {
 // StartServer downloads the MockServer binary (if needed) and starts it on the
 // given port. It returns a ServerHandle that can be used to stop the server.
 //
-// On Windows, the .bat launcher is invoked via "cmd /c" as required by the OS
-// (H4). The launcher path and arguments are passed as separate tokens to
-// exec.Command, avoiding unquoted shell expansion of untrusted values.
+// No shell is used: on Windows the .bat launcher runs through cmd.exe with a
+// command line built by windowsCommandLine, elsewhere it is executed directly.
 func StartServer(port int, version string, opts *EnsureOptions) (*ServerHandle, error) {
 	if version == "" {
 		version = Version
@@ -657,16 +656,9 @@ func StartServer(port int, version string, opts *EnsureOptions) (*ServerHandle, 
 
 	args := []string{"-serverPort", fmt.Sprintf("%d", port)}
 
-	// H4: On Windows, .bat files cannot be executed directly via CreateProcess;
-	// they must be invoked via cmd.exe. We pass the launcher path and all args
-	// as separate arguments to cmd /c, so each is individually quoted by Go's
-	// os/exec (safe against injection).
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmdArgs := append([]string{"/c", launcher}, args...)
-		cmd = exec.Command("cmd", cmdArgs...)
-	} else {
-		cmd = exec.Command(launcher, args...)
+	cmd, err := launchCommand(launcher, args)
+	if err != nil {
+		return nil, err
 	}
 
 	// H5: pipe stdout/stderr through the parent process to avoid pipe-buffer
@@ -684,6 +676,51 @@ func StartServer(port int, version string, opts *EnsureOptions) (*ServerHandle, 
 		Launcher: launcher,
 		cmd:      cmd,
 	}, nil
+}
+
+// cmdLineEnd matches a line break or NUL, which ends a cmd.exe command line
+// even inside double quotes.
+var cmdLineEnd = regexp.MustCompile("[\r\n\x00]")
+
+// windowsCommandLine builds the verbatim cmd.exe command line that runs the
+// .bat launcher. Each part is double-quoted so cmd.exe takes &, |, <, >, ^ and
+// parentheses literally; /d skips AutoRun and /v:off keeps ! literal. cmd.exe
+// expands %NAME% even inside quotes, so a line with two or more % is refused,
+// as is any double quote, line break or NUL.
+func windowsCommandLine(launcher string, args []string) (string, error) {
+	// Errors name the part, never its value, which may be a secret.
+	parts := append([]string{launcher}, args...)
+	quoted := make([]string, 0, len(parts))
+	for i, part := range parts {
+		if strings.Contains(part, `"`) || cmdLineEnd.MatchString(part) {
+			name := "the launcher path"
+			if i > 0 {
+				name = fmt.Sprintf("argument %d", i-1)
+			}
+			return "", fmt.Errorf("mockserver: %s cannot be passed through cmd.exe safely (contains a double quote, a line break or NUL)", name)
+		}
+		// Double a trailing run of backslashes so it cannot escape the closing
+		// quote when the launched program splits its command line.
+		trailing := len(part) - len(strings.TrimRight(part, `\`))
+		quoted = append(quoted, `"`+part+strings.Repeat(`\`, trailing)+`"`)
+	}
+	line := strings.Join(quoted, " ")
+	if strings.Count(line, "%") > 1 {
+		return "", errors.New("mockserver: the launcher path and arguments contain more than one %, which cmd.exe would expand as an environment variable reference (%NAME%); remove the % characters to run on Windows")
+	}
+	return `cmd.exe /d /v:off /s /c "` + line + `"`, nil
+}
+
+// windowsComSpec returns the absolute path of cmd.exe: %ComSpec%, else
+// %SystemRoot%\System32\cmd.exe, or an error if neither is set.
+func windowsComSpec(getenv func(string) string) (string, error) {
+	if comspec := getenv("ComSpec"); comspec != "" {
+		return comspec, nil
+	}
+	if root := getenv("SystemRoot"); root != "" {
+		return root + `\System32\cmd.exe`, nil
+	}
+	return "", errors.New("mockserver: cmd.exe not found: neither %ComSpec% nor %SystemRoot% is set")
 }
 
 // VerifySHA256 verifies that a file's SHA-256 matches the expected hex digest.

@@ -364,6 +364,8 @@ handle = MockServer::BinaryLauncher.start(port: 1080, version: '8.0.0')
 | `MockServer::BinaryLauncher.start(port:, version:, extra_args:, log:)` | Ensure the binary and start MockServer. Returns a `ServerHandle`. |
 | `MockServer::BinaryLauncher::ServerHandle` | Handle to the running process. Methods: `stop(timeout:)`, `running?`. Attributes: `pid`, `port`, `launcher`. |
 
+On Windows the launcher runs `mockserver.bat` through `cmd.exe` with every argument quoted, so characters such as `^`, `!` and parentheses reach MockServer unchanged. `start` raises `MockServer::Error` if the launcher path or an `extra_args` entry contains `"`, `<`, `>`, `|`, `&`, a line break or NUL, or if together they contain more than one `%` (which `cmd.exe` would expand as a `%NAME%` variable); it also needs a native Windows Ruby (mswin or mingw, such as RubyInstaller). No shell is used on Linux or macOS.
+
 ### Supported platforms
 
 | OS | Architecture |

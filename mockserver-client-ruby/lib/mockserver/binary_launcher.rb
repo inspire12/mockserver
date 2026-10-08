@@ -48,6 +48,9 @@ module MockServer
     # Strict pattern for version strings — blocks path separators and '..'.
     VERSION_PATTERN = /\A[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?\z/
 
+    # Characters refused in the launcher path and arguments on Windows (see +windows_command_line+).
+    WINDOWS_UNSAFE = /["<>|&\r\n\0]/
+
     class << self
       # Resolve the current platform to the bundle naming tokens.
       #
@@ -241,16 +244,51 @@ module MockServer
         launcher = ensure_launcher(version: version, log: log)
         args = ['-serverPort', port.to_s] + extra_args
 
-        # H4: On Windows, .bat files must be invoked via cmd.exe /c.
         # H5: Drain stdout/stderr via :out/:err redirection to avoid pipe-buffer deadlock.
+        # On Unix the [command, argv0] form never goes through a shell, even with no args.
         pid = if windows?
-                Process.spawn('cmd.exe', '/c', launcher, *args,
+                Process.spawn(windows_command_line(launcher, args),
                               out: File::NULL, err: File::NULL)
               else
-                Process.spawn(launcher, *args,
+                Process.spawn([launcher, launcher], *args,
                               out: File::NULL, err: File::NULL)
               end
         ServerHandle.new(pid: pid, port: port, launcher: launcher)
+      end
+
+      # Build the cmd.exe command line that runs the +.bat+ launcher on Windows.
+      #
+      # Native Windows Ruby passes a single command string to CreateProcess
+      # unchanged unless it sees a redirection (+<+, +>+, +|+, +&+, a line break
+      # or +%NAME%+), so those are refused, which keeps the line away from a
+      # second shell. Each part is double-quoted so cmd.exe takes +^+, +(+, +)+
+      # and +!+ literally (+/v:off+), and +/d+ skips AutoRun. cmd.exe expands
+      # +%NAME%+ even inside quotes, so a line with two or more +%+ is refused.
+      #
+      # @param launcher [String] path of the +.bat+ launcher
+      # @param args [Array<String>] arguments for the launcher
+      # @return [String]
+      # @raise [Error] if a part cannot be passed to cmd.exe safely, or Ruby is not a native Windows build
+      def windows_command_line(launcher, args)
+        unless RbConfig::CONFIG['host_os'] =~ /mswin|mingw/i
+          raise Error, 'starting the Windows launcher needs a native Windows Ruby (mswin or mingw, ' \
+                       "such as RubyInstaller); this Ruby is #{RbConfig::CONFIG['host_os']}"
+        end
+        # Messages name the part, never its value, which may be a secret.
+        parts = [launcher, *args].map(&:to_s)
+        parts.each_with_index do |part, i|
+          next unless part.match?(WINDOWS_UNSAFE)
+
+          name = i.zero? ? 'the launcher path' : "argument #{i - 1}"
+          raise Error, "#{name} cannot be passed through cmd.exe safely " \
+                       '(contains ", <, >, |, &, a line break or NUL)'
+        end
+        line = parts.map { |part| quote_cmd_arg(part) }.join(' ')
+        if line.count('%') > 1
+          raise Error, 'the launcher path and arguments contain more than one %, which cmd.exe would expand ' \
+                       'as an environment variable reference (%NAME%); remove the % characters to run on Windows'
+        end
+        %(cmd.exe /d /v:off /s /c "#{line}")
       end
 
       # Remove old version directories from the cache, keeping the current version
@@ -328,6 +366,13 @@ module MockServer
       end
 
       private
+
+      # Double-quote one cmd.exe argument, doubling a trailing run of backslashes
+      # so it cannot escape the closing quote when the program splits its command line.
+      def quote_cmd_arg(arg)
+        trailing = arg[/\\*\z/]
+        %("#{arg}#{trailing}")
+      end
 
       # Build a clear, actionable error message for a missing release bundle.
       #

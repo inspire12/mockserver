@@ -688,7 +688,7 @@ public sealed class MockServerBinaryLauncher : IDisposable
     /// <summary>
     /// Downloads the binary (if needed) and starts MockServer on the given port.
     /// Returns the launcher instance that can be used to stop the server.
-    /// H4: On Windows, spawns .bat via cmd.exe with proper quoting/escaping.
+    /// H4: On Windows, runs the .bat through cmd.exe with every argument quoted (see <see cref="WindowsCommandArguments"/>).
     /// H5: On non-Windows, drains stdout/stderr async to avoid pipe-buffer deadlock.
     /// </summary>
     public static async Task<MockServerBinaryLauncher> StartAsync(int port, string? version = null,
@@ -701,11 +701,11 @@ public sealed class MockServerBinaryLauncher : IDisposable
         ProcessStartInfo psi;
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
-            // H4: Spawn .bat safely via cmd.exe with proper quoting
             psi = new ProcessStartInfo
             {
-                FileName = "cmd.exe",
-                Arguments = $"/c \"\"{launcher}\" -serverPort {port}\"",
+                FileName = WindowsComSpec(
+                    Environment.GetEnvironmentVariable("ComSpec"), Environment.GetEnvironmentVariable("SystemRoot")),
+                Arguments = WindowsCommandArguments(launcher, new[] { "-serverPort", port.ToString(System.Globalization.CultureInfo.InvariantCulture) }),
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -732,6 +732,51 @@ public sealed class MockServerBinaryLauncher : IDisposable
         instance.DrainOutputStreams();
 
         return instance;
+    }
+
+    /// <summary>The absolute path of cmd.exe: %ComSpec%, else %SystemRoot%\System32\cmd.exe.</summary>
+    /// <exception cref="FileNotFoundException">Neither variable is set.</exception>
+    internal static string WindowsComSpec(string? comSpec, string? systemRoot)
+    {
+        if (!string.IsNullOrEmpty(comSpec)) return comSpec!;
+        if (!string.IsNullOrEmpty(systemRoot)) return systemRoot + @"\System32\cmd.exe";
+        throw new FileNotFoundException("cmd.exe not found: neither %ComSpec% nor %SystemRoot% is set");
+    }
+
+    /// <summary>
+    /// Builds the cmd.exe arguments that run the .bat launcher. Each part is double-quoted so
+    /// cmd.exe takes &amp;, |, &lt;, &gt;, ^ and parentheses literally; /d skips AutoRun and /v:off
+    /// keeps ! literal. cmd.exe expands %NAME% even inside quotes, so a line with two or more %
+    /// is refused, as is any double quote, line break or NUL.
+    /// </summary>
+    /// <exception cref="ArgumentException">A part cannot be passed to cmd.exe safely.</exception>
+    internal static string WindowsCommandArguments(string launcher, IEnumerable<string> args)
+    {
+        // Messages name the part, never its value, which may be a secret.
+        var quoted = new List<string>();
+        var i = -1;
+        foreach (var part in new[] { launcher }.Concat(args))
+        {
+            if (part.IndexOfAny(new[] { '"', '\r', '\n', '\0' }) >= 0)
+            {
+                var name = i < 0 ? "the launcher path" : "argument " + i;
+                throw new ArgumentException(
+                    name + " cannot be passed through cmd.exe safely (contains a double quote, a line break or NUL)");
+            }
+            i++;
+            // Double a trailing run of backslashes so it cannot escape the closing quote
+            // when the launched program splits its command line.
+            var trailing = part.Length - part.TrimEnd('\\').Length;
+            quoted.Add("\"" + part + new string('\\', trailing) + "\"");
+        }
+        var line = string.Join(" ", quoted);
+        if (line.IndexOf('%') != line.LastIndexOf('%'))
+        {
+            throw new ArgumentException(
+                "the launcher path and arguments contain more than one %, which cmd.exe would expand as an " +
+                "environment variable reference (%NAME%); remove the % characters to run on Windows");
+        }
+        return "/d /v:off /s /c \"" + line + "\"";
     }
 
     /// <summary>

@@ -25,6 +25,8 @@ from mockserver.launcher import (
     _prune_old_versions,
     _sha256,
     _validate_version,
+    _windows_command_line,
+    _windows_comspec,
     asset_url,
     bundle_base_name,
     cache_dir,
@@ -624,6 +626,89 @@ class TestStart:
                 assert proc.launcher.exists()
             finally:
                 proc.stop()
+
+    def test_start_on_unix_passes_an_argument_list_without_a_shell(self):
+        with mock.patch("mockserver.launcher.ensure_binary", return_value=Path("/c/a b/mockserver")), \
+                mock.patch("mockserver.launcher.sys") as ms, \
+                mock.patch("mockserver.launcher.subprocess.Popen") as popen:
+            ms.platform = "linux"
+            start(1080, extra_args=["-Dx=$(id)", "a;b"], log=False)
+        popen.assert_called_once()
+        assert popen.call_args.args[0] == ["/c/a b/mockserver", "-serverPort", "1080", "-Dx=$(id)", "a;b"]
+        assert popen.call_args.kwargs["shell"] is False
+
+    def test_start_on_windows_runs_cmd_without_a_shell_and_quotes_every_argument(self):
+        launcher = r"C:\Users\A B\AppData\Local\mockserver\binaries\9.9.9\bin\mockserver.bat"
+        with mock.patch("mockserver.launcher.ensure_binary", return_value=launcher), \
+                mock.patch("mockserver.launcher.sys") as ms, \
+                mock.patch.dict(os.environ, {"ComSpec": r"C:\Windows\System32\cmd.exe"}), \
+                mock.patch("mockserver.launcher.subprocess.Popen") as popen:
+            ms.platform = "win32"
+            start(1080, extra_args=["-Dmockserver.initializationJsonPath=C:\\x & y\\init.json"], log=False)
+        popen.assert_called_once()
+        assert popen.call_args.args[0] == (
+            'cmd.exe /d /v:off /s /c "'
+            f'"{launcher}" "-serverPort" "1080" '
+            '"-Dmockserver.initializationJsonPath=C:\\x & y\\init.json""'
+        )
+        assert popen.call_args.kwargs["executable"] == r"C:\Windows\System32\cmd.exe"
+        assert popen.call_args.kwargs["shell"] is False
+
+    def test_start_on_windows_refuses_an_unsafe_argument_before_spawning(self):
+        with mock.patch("mockserver.launcher.ensure_binary", return_value=r"C:\c\mockserver.bat"), \
+                mock.patch("mockserver.launcher.sys") as ms, \
+                mock.patch("mockserver.launcher.subprocess.Popen") as popen:
+            ms.platform = "win32"
+            with pytest.raises(ValueError, match="cmd.exe"):
+                start(1080, extra_args=['a" & calc & "'], log=False)
+        popen.assert_not_called()
+
+
+class TestWindowsCommandLine:
+    """The cmd.exe line that runs the .bat launcher on Windows."""
+
+    def test_quotes_each_part_so_cmd_metacharacters_stay_literal(self):
+        line = _windows_command_line(r"C:\My Cache (x86)\mockserver.bat", ["-serverPort", "1080", "a&b|c<d>e^f!g"])
+        assert line == (
+            'cmd.exe /d /v:off /s /c ""C:\\My Cache (x86)\\mockserver.bat" '
+            '"-serverPort" "1080" "a&b|c<d>e^f!g""'
+        )
+
+    def test_keeps_a_version_string_and_a_single_percent(self):
+        line = _windows_command_line(r"C:\c\9.0.0-SNAPSHOT\mockserver.bat", ["-Dx=100%"])
+        assert line == 'cmd.exe /d /v:off /s /c ""C:\\c\\9.0.0-SNAPSHOT\\mockserver.bat" "-Dx=100%""'
+
+    def test_doubles_a_trailing_backslash_run(self):
+        line = _windows_command_line(r"C:\c\mockserver.bat", ["C:\\dir\\", "a\\b"])
+        assert line.endswith('"C:\\dir\\\\" "a\\b""')
+
+    @pytest.mark.parametrize("bad", ['a"b', "a\rb", "a\nb", "a\0b"])
+    def test_refuses_a_quote_line_break_or_nul_in_an_argument_without_echoing_it(self, bad):
+        with pytest.raises(ValueError, match="^argument 1 cannot be passed through cmd.exe safely") as e:
+            _windows_command_line(r"C:\c\mockserver.bat", ["ok", "secret" + bad])
+        assert "secret" not in str(e.value)
+
+    @pytest.mark.parametrize("bad", ['"', "\n", "\0"])
+    def test_refuses_a_quote_line_break_or_nul_in_the_launcher_path_without_echoing_it(self, bad):
+        with pytest.raises(ValueError, match="^the launcher path cannot be passed through cmd.exe safely") as e:
+            _windows_command_line("C:\\secret" + bad + "\\mockserver.bat", ["-serverPort", "1080"])
+        assert "secret" not in str(e.value)
+
+    def test_refuses_two_percent_signs_across_the_whole_line_without_echoing_it(self):
+        with pytest.raises(ValueError, match="more than one %") as e:
+            _windows_command_line(r"C:\c%\mockserver.bat", ["-Dx=secret%PATH"])
+        assert "secret" not in str(e.value)
+
+
+class TestWindowsComspec:
+    def test_prefers_comspec(self):
+        with mock.patch.dict(os.environ, {"ComSpec": r"D:\cmd.exe", "SystemRoot": r"C:\Windows"}, clear=True):
+            assert _windows_comspec() == r"D:\cmd.exe"
+
+    def test_raises_when_neither_comspec_nor_systemroot_is_set(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with pytest.raises(FileNotFoundError, match="cmd.exe not found"):
+                _windows_comspec()
 
 
 # ---------------------------------------------------------------------------

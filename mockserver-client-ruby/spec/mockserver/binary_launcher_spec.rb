@@ -1173,22 +1173,73 @@ RSpec.describe MockServer::BinaryLauncher do
       FileUtils.rm_rf(tmpdir)
     end
 
-    it 'spawns via cmd.exe /c on Windows' do
-      launcher_path = File.join(tmpdir, 'mockserver.bat')
-      File.write(launcher_path, '@echo off')
-
-      # Stub ensure_launcher to return our fake bat file
+    it 'spawns cmd.exe with one verbatim command line that quotes every argument' do
+      launcher_path = 'C:\\Users\\A B (x)\\mockserver\\9.0.0-SNAPSHOT\\bin\\mockserver.bat'
       allow(described_class).to receive(:ensure_launcher).and_return(launcher_path)
 
-      # Intercept Process.spawn to verify it uses cmd.exe
       expect(Process).to receive(:spawn).with(
-        'cmd.exe', '/c', launcher_path,
-        '-serverPort', '1080',
+        %(cmd.exe /d /v:off /s /c ""#{launcher_path}" "-serverPort" "1080" "-Dx=a b^c!d(e)""),
         hash_including(:out, :err)
       ).and_return(12345)
 
-      handle = described_class.start(port: 1080, log: log)
+      handle = described_class.start(port: 1080, extra_args: ['-Dx=a b^c!d(e)'], log: log)
       expect(handle.pid).to eq(12345)
+    end
+
+    it 'refuses an unsafe argument before spawning' do
+      allow(described_class).to receive(:ensure_launcher).and_return('C:\\c\\mockserver.bat')
+      expect(Process).not_to receive(:spawn)
+
+      expect { described_class.start(port: 1080, extra_args: ['a & calc'], log: log) }
+        .to raise_error(MockServer::Error, /cmd\.exe/)
+    end
+  end
+
+  describe '.windows_command_line' do
+    let(:launcher) { 'C:\\c\\mockserver.bat' }
+
+    def line_for(*args, host_os: 'mingw-ucrt', launcher_path: launcher)
+      allow(RbConfig::CONFIG).to receive(:[]).and_call_original
+      allow(RbConfig::CONFIG).to receive(:[]).with('host_os').and_return(host_os)
+      described_class.windows_command_line(launcher_path, args)
+    end
+
+    it 'keeps a single percent sign' do
+      expect(line_for('-Dx=100%')).to eq(%(cmd.exe /d /v:off /s /c ""C:\\c\\mockserver.bat" "-Dx=100%""))
+    end
+
+    it 'doubles a trailing backslash run so it cannot escape the closing quote' do
+      expect(line_for('C:\\dir\\', 'a\\b')).to end_with(%("C:\\dir\\\\" "a\\b""))
+    end
+
+    ['"', '<', '>', '|', '&', "\r", "\n", "\0"].each do |bad|
+      it "refuses #{bad.inspect} in an argument without echoing the argument" do
+        expect { line_for('ok', "secret#{bad}") }.to raise_error(MockServer::Error) { |e|
+          expect(e.message).to start_with('argument 1 cannot be passed through cmd.exe safely')
+          expect(e.message).not_to include('secret')
+        }
+      end
+    end
+
+    it 'refuses an unsafe launcher path without echoing it' do
+      expect { line_for('-serverPort', launcher_path: 'C:\\secret&D\\mockserver.bat') }
+        .to raise_error(MockServer::Error) { |e|
+          expect(e.message).to start_with('the launcher path cannot be passed through cmd.exe safely')
+          expect(e.message).not_to include('secret')
+        }
+    end
+
+    it 'refuses two percent signs across the whole line without echoing it' do
+      expect { line_for('-Dx=secret%PATH', launcher_path: 'C:\\c%\\mockserver.bat') }
+        .to raise_error(MockServer::Error) { |e|
+          expect(e.message).to include('more than one %')
+          expect(e.message).not_to include('secret')
+        }
+    end
+
+    it 'refuses a Ruby that is not a native Windows build' do
+      expect { line_for('-serverPort', host_os: 'cygwin') }
+        .to raise_error(MockServer::Error, /native Windows Ruby/)
     end
   end
 
@@ -1217,13 +1268,28 @@ RSpec.describe MockServer::BinaryLauncher do
       allow(described_class).to receive(:ensure_launcher).and_return(launcher_path)
 
       expect(Process).to receive(:spawn).with(
-        launcher_path,
-        '-serverPort', '1080',
+        [launcher_path, launcher_path],
+        '-serverPort', '1080', '$(id);x',
         hash_including(:out, :err)
       ).and_return(12345)
 
-      handle = described_class.start(port: 1080, log: log)
+      handle = described_class.start(port: 1080, extra_args: ['$(id);x'], log: log)
       expect(handle.pid).to eq(12345)
+    end
+
+    it 'never hands the launcher path to a shell' do
+      dir = File.join(tmpdir, 'a b;touch pwned')
+      FileUtils.mkdir_p(dir)
+      launcher_path = File.join(dir, 'mockserver')
+      File.write(launcher_path, "#!/bin/sh\necho \"$@\" > \"$(dirname \"$0\")/ran\"\n")
+      File.chmod(0o755, launcher_path)
+      allow(described_class).to receive(:ensure_launcher).and_return(launcher_path)
+
+      handle = described_class.start(port: 1080, extra_args: ['a;b'], log: log)
+      Process.wait(handle.pid)
+
+      expect(File.read(File.join(dir, 'ran'))).to eq("-serverPort 1080 a;b\n")
+      expect(File.exist?(File.join(tmpdir, 'pwned'))).to be false
     end
   end
 

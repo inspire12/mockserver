@@ -355,12 +355,7 @@ class BinaryLauncher
 
         $this->log("Starting MockServer on port {$port}: {$launcher} " . implode(' ', $args));
 
-        // H4: On Windows, .bat files cannot be executed directly via CreateProcess
-        // (which proc_open uses with array form). They require cmd.exe to interpret them.
-        $command = [$launcher, ...$args];
-        if (PHP_OS_FAMILY === 'Windows' && str_ends_with($launcher, '.bat')) {
-            $command = ['cmd', '/c', $launcher, ...$args];
-        }
+        $command = self::launchCommand($launcher, $args, PHP_OS_FAMILY);
 
         // H5: By default, forward stdout/stderr to /dev/null (NUL on Windows) to prevent
         // pipe-buffer deadlock. The Java MockServer process can produce significant output
@@ -382,10 +377,15 @@ class BinaryLauncher
             ];
         }
 
+        // bypass_shell makes Windows pass a string command to CreateProcess unchanged;
+        // elsewhere the array form already runs without a shell.
         $process = proc_open(
             $command,
             $descriptorSpec,
             $pipes,
+            null,
+            null,
+            ['bypass_shell' => true],
         );
 
         if (!is_resource($process)) {
@@ -410,6 +410,61 @@ class BinaryLauncher
         }
 
         return new BinaryHandle($process, $stdout, $stderr, $port);
+    }
+
+    /**
+     * The command proc_open runs: an argument array (no shell), or on Windows,
+     * where a .bat file needs cmd.exe, the command line from windowsCommandLine().
+     *
+     * @internal
+     * @param array<string> $args
+     * @return string|array<string>
+     * @throws BinaryInstallException
+     */
+    public static function launchCommand(string $launcher, array $args, string $osFamily): string|array
+    {
+        if ($osFamily === 'Windows' && str_ends_with(strtolower($launcher), '.bat')) {
+            return self::windowsCommandLine($launcher, $args);
+        }
+        return [$launcher, ...$args];
+    }
+
+    /**
+     * Build the cmd.exe command line that runs the .bat launcher. Each part is
+     * double-quoted so cmd.exe takes &, |, <, >, ^ and parentheses literally;
+     * /d skips AutoRun and /v:off keeps ! literal. cmd.exe expands %NAME% even
+     * inside quotes, so a line with two or more % is refused, as is any double
+     * quote, line break or NUL.
+     *
+     * @internal
+     * @param array<string> $args
+     * @throws BinaryInstallException if a part cannot be passed to cmd.exe safely
+     */
+    public static function windowsCommandLine(string $launcher, array $args): string
+    {
+        // Messages name the part, never its value, which may be a secret.
+        $quoted = [];
+        foreach ([$launcher, ...array_values($args)] as $i => $part) {
+            $part = (string) $part;
+            if (strpbrk($part, "\"\r\n\0") !== false) {
+                $name = $i === 0 ? 'the launcher path' : 'argument ' . ($i - 1);
+                throw new BinaryInstallException(
+                    $name . ' cannot be passed through cmd.exe safely (contains a double quote, a line break or NUL)'
+                );
+            }
+            // Double a trailing run of backslashes so it cannot escape the closing
+            // quote when the launched program splits its command line.
+            $trailing = strlen($part) - strlen(rtrim($part, '\\'));
+            $quoted[] = '"' . $part . str_repeat('\\', $trailing) . '"';
+        }
+        $line = implode(' ', $quoted);
+        if (substr_count($line, '%') > 1) {
+            throw new BinaryInstallException(
+                'the launcher path and arguments contain more than one %, which cmd.exe would expand as an '
+                . 'environment variable reference (%NAME%); remove the % characters to run on Windows'
+            );
+        }
+        return 'cmd.exe /d /v:off /s /c "' . $line . '"';
     }
 
     /**

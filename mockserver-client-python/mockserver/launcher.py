@@ -583,16 +583,70 @@ def start(
     if log:
         logger.info("Starting MockServer on port %d: %s", port, " ".join(args))
 
-    # H4/H5: On Windows, .bat launchers need shell=True; we use a list form to
-    # let subprocess quote each arg safely.  On all platforms we inherit stdio
-    # (stdout=None, stderr=None) to match the Node reference (stdio:'inherit')
-    # and avoid pipe-buffer deadlock when MockServer produces output exceeding
-    # the OS pipe buffer (~64 KiB).
-    use_shell = sys.platform == "win32"
-    process = subprocess.Popen(
-        args,
-        stdout=None,
-        stderr=None,
-        shell=use_shell,
-    )
+    # No shell on any platform.  Stdio is inherited (as in the Node reference)
+    # so a chatty server cannot fill a pipe buffer and block.
+    if sys.platform == "win32":
+        process = subprocess.Popen(
+            _windows_command_line(args[0], args[1:]),
+            executable=_windows_comspec(),
+            stdout=None,
+            stderr=None,
+            shell=False,
+        )
+    else:
+        process = subprocess.Popen(args, stdout=None, stderr=None, shell=False)
     return MockServerProcess(process, port, launcher)
+
+
+# A line break or NUL ends a cmd.exe command line, even inside double quotes.
+_CMD_LINE_END = re.compile(r"[\r\n\0]")
+
+
+def _windows_comspec() -> str:
+    """Return the absolute path of cmd.exe, found as subprocess does for shell=True."""
+    comspec = os.environ.get("ComSpec")
+    if not comspec:
+        comspec = os.path.join(os.environ.get("SystemRoot", ""), "System32", "cmd.exe")
+        if not os.path.isabs(comspec):
+            raise FileNotFoundError("cmd.exe not found: neither %ComSpec% nor %SystemRoot% is set")
+    return comspec
+
+
+def _windows_command_line(launcher: str, args: list[str]) -> str:
+    """Build the verbatim cmd.exe command line that runs the ``.bat`` launcher.
+
+    Each argument is passed as a double-quoted literal, so cmd.exe treats
+    ``&``, ``|``, ``<``, ``>``, ``^`` and ``(``/``)`` as text.  ``/d`` skips
+    AutoRun and ``/v:off`` keeps ``!`` literal.  No quoting stops cmd.exe
+    expanding ``%NAME%``, so a line with two or more ``%`` is refused, as is
+    any ``"``, line break or NUL.
+
+    Raises
+    ------
+    ValueError
+        If the launcher path or an argument cannot be passed to cmd.exe safely.
+    """
+    # Messages name the part, never its value, which may be a secret.
+    parts = [launcher, *args]
+    for i, part in enumerate(parts):
+        if '"' in part or _CMD_LINE_END.search(part):
+            name = "the launcher path" if i == 0 else f"argument {i - 1}"
+            raise ValueError(
+                f"{name} cannot be passed through cmd.exe safely "
+                "(contains a double quote, a line break or NUL)"
+            )
+    line = " ".join(_quote_cmd_arg(part) for part in parts)
+    if line.count("%") > 1:
+        raise ValueError(
+            "the launcher path and arguments contain more than one %, which cmd.exe "
+            "would expand as an environment variable reference (%NAME%); remove the "
+            "% characters to run on Windows"
+        )
+    return f'cmd.exe /d /v:off /s /c "{line}"'
+
+
+def _quote_cmd_arg(arg: str) -> str:
+    # Double a trailing run of backslashes so it cannot escape the closing quote
+    # when the launched program splits its command line.
+    trailing = len(arg) - len(arg.rstrip("\\"))
+    return '"' + arg + "\\" * trailing + '"'

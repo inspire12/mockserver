@@ -820,14 +820,22 @@ pub fn start_with_version(
 ) -> LauncherResult<ServerHandle> {
     let launcher = ensure_binary(version, opts)?;
 
-    // On Windows, .bat files cannot be spawned directly by
-    // std::process::Command — they must be invoked via `cmd.exe /c`.
-    // On non-Windows, spawn the launcher directly.
+    // No shell on any platform. On Windows the .bat launcher runs through
+    // cmd.exe with a command line passed to CreateProcess unchanged (`raw_arg`),
+    // because the standard argument quoting is not the one cmd.exe follows.
     #[cfg(target_os = "windows")]
     let mut cmd = {
         use std::os::windows::process::CommandExt;
-        let mut c = Command::new("cmd");
-        c.args(["/c", &launcher.to_string_lossy(), "-serverPort", &port.to_string()]);
+        let launcher = launcher.to_str().ok_or_else(|| {
+            LauncherError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("launcher path is not valid Unicode: {}", launcher.display()),
+            ))
+        })?;
+        let port = port.to_string();
+        let comspec = windows_comspec(std::env::var_os("ComSpec"), std::env::var_os("SystemRoot"))?;
+        let mut c = Command::new(comspec);
+        c.raw_arg(windows_cmd_args(launcher, &["-serverPort", &port])?);
         // CREATE_NO_WINDOW suppresses the console window for background use.
         c.creation_flags(0x08000000);
         c
@@ -847,6 +855,69 @@ pub fn start_with_version(
     Ok(ServerHandle { child, port })
 }
 
+/// The absolute path of cmd.exe: `%ComSpec%`, else `%SystemRoot%\System32\cmd.exe`,
+/// or an error if neither is set.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_comspec(
+    comspec: Option<std::ffi::OsString>,
+    system_root: Option<std::ffi::OsString>,
+) -> LauncherResult<PathBuf> {
+    match (comspec, system_root) {
+        (Some(comspec), _) if !comspec.is_empty() => Ok(PathBuf::from(comspec)),
+        (_, Some(root)) if !root.is_empty() => {
+            let mut path = root;
+            path.push("\\System32\\cmd.exe");
+            Ok(PathBuf::from(path))
+        }
+        _ => Err(LauncherError::Io(io::Error::new(
+            io::ErrorKind::NotFound,
+            "cmd.exe not found: neither %ComSpec% nor %SystemRoot% is set",
+        ))),
+    }
+}
+
+/// Build the cmd.exe arguments (everything after the program name) that run
+/// the `.bat` launcher. Each part is double-quoted so cmd.exe takes `&`, `|`,
+/// `<`, `>`, `^` and parentheses literally; `/d` skips AutoRun and `/v:off`
+/// keeps `!` literal. cmd.exe expands `%NAME%` even inside quotes, so a line
+/// with two or more `%` is refused, as is any `"`, line break or NUL.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_cmd_args(launcher: &str, args: &[&str]) -> LauncherResult<String> {
+    // Errors name the part, never its value, which may be a secret.
+    let mut quoted = Vec::with_capacity(args.len() + 1);
+    for (i, part) in std::iter::once(launcher)
+        .chain(args.iter().copied())
+        .enumerate()
+    {
+        if part.contains(['"', '\r', '\n', '\0']) {
+            let name = if i == 0 {
+                "the launcher path".to_string()
+            } else {
+                format!("argument {}", i - 1)
+            };
+            return Err(LauncherError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{name} cannot be passed through cmd.exe safely (contains a double quote, a line break or NUL)"
+                ),
+            )));
+        }
+        // Double a trailing run of backslashes so it cannot escape the closing
+        // quote when the launched program splits its command line.
+        let trailing = part.len() - part.trim_end_matches('\\').len();
+        quoted.push(format!("\"{part}{}\"", "\\".repeat(trailing)));
+    }
+    let line = quoted.join(" ");
+    if line.matches('%').count() > 1 {
+        return Err(LauncherError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the launcher path and arguments contain more than one %, which cmd.exe would expand as an \
+             environment variable reference (%NAME%); remove the % characters to run on Windows",
+        )));
+    }
+    Ok(format!("/d /v:off /s /c \"{line}\""))
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -857,6 +928,77 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::sync::Mutex;
+
+    #[test]
+    fn windows_cmd_args_quote_each_part_so_cmd_metacharacters_stay_literal() {
+        let line = windows_cmd_args(
+            r"C:\My Cache (x86)\9.0.0-SNAPSHOT\mockserver.bat",
+            &["-serverPort", "1080", "a&b|c<d>e^f!g"],
+        )
+        .unwrap();
+        assert_eq!(
+            line,
+            r#"/d /v:off /s /c ""C:\My Cache (x86)\9.0.0-SNAPSHOT\mockserver.bat" "-serverPort" "1080" "a&b|c<d>e^f!g"""#
+        );
+    }
+
+    #[test]
+    fn windows_cmd_args_keep_a_single_percent_and_double_a_trailing_backslash_run() {
+        let line =
+            windows_cmd_args(r"C:\c\mockserver.bat", &["-Dx=100%", r"C:\dir\", r"a\b"]).unwrap();
+        assert_eq!(
+            line,
+            r#"/d /v:off /s /c ""C:\c\mockserver.bat" "-Dx=100%" "C:\dir\\" "a\b"""#
+        );
+    }
+
+    #[test]
+    fn windows_cmd_args_refuse_a_quote_line_break_or_nul_without_echoing_it() {
+        for bad in ["\"", "\r", "\n", "\0"] {
+            let arg = format!("secret{bad}");
+            let err = windows_cmd_args(r"C:\c\mockserver.bat", &["ok", &arg])
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("argument 1 cannot be passed through cmd.exe safely")
+                    && !err.contains("secret"),
+                "argument containing {bad:?}: {err}"
+            );
+            let launcher = format!(r"C:\secret{bad}\mockserver.bat");
+            let err = windows_cmd_args(&launcher, &[]).unwrap_err().to_string();
+            assert!(
+                err.contains("the launcher path cannot be passed through cmd.exe safely")
+                    && !err.contains("secret"),
+                "launcher containing {bad:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_cmd_args_refuse_two_percent_signs_without_echoing_the_line() {
+        let err = windows_cmd_args(r"C:\c%\mockserver.bat", &["-Dx=secret%PATH"])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("more than one %") && !err.contains("secret"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn windows_comspec_prefers_comspec_then_system_root_then_fails() {
+        let os = |s: &str| Some(std::ffi::OsString::from(s));
+        assert_eq!(
+            windows_comspec(os(r"D:\cmd.exe"), os(r"C:\Windows")).unwrap(),
+            PathBuf::from(r"D:\cmd.exe")
+        );
+        assert_eq!(
+            windows_comspec(os(""), os(r"C:\Windows")).unwrap(),
+            PathBuf::from(r"C:\Windows\System32\cmd.exe")
+        );
+        let err = windows_comspec(None, None).unwrap_err().to_string();
+        assert!(err.contains("cmd.exe not found"), "{err}");
+    }
 
     // Global mutex to serialize tests that mutate environment variables.
     // Rust's test harness runs tests in parallel within the same process,

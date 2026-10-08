@@ -965,3 +965,62 @@ func TestIntegration_EnsureBinary_RealDownload(t *testing.T) {
 	}
 	t.Logf("Downloaded launcher: %s (%d bytes)", launcher, info.Size())
 }
+
+// --- Windows cmd.exe command line ---
+
+func TestWindowsCommandLine_QuotesEachPartSoCmdMetacharactersStayLiteral(t *testing.T) {
+	line, err := windowsCommandLine(`C:\My Cache (x86)\9.0.0-SNAPSHOT\mockserver.bat`, []string{"-serverPort", "1080", "a&b|c<d>e^f!g"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `cmd.exe /d /v:off /s /c ""C:\My Cache (x86)\9.0.0-SNAPSHOT\mockserver.bat" "-serverPort" "1080" "a&b|c<d>e^f!g""`
+	if line != want {
+		t.Errorf("got  %s\nwant %s", line, want)
+	}
+}
+
+func TestWindowsCommandLine_KeepsASinglePercentAndDoublesATrailingBackslashRun(t *testing.T) {
+	line, err := windowsCommandLine(`C:\c\mockserver.bat`, []string{"-Dx=100%", `C:\dir\`, `a\b`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `cmd.exe /d /v:off /s /c ""C:\c\mockserver.bat" "-Dx=100%" "C:\dir\\" "a\b""`
+	if line != want {
+		t.Errorf("got  %s\nwant %s", line, want)
+	}
+}
+
+func TestWindowsCommandLine_RefusesAQuoteLineBreakOrNulWithoutEchoingIt(t *testing.T) {
+	for _, bad := range []string{`"`, "\r", "\n", "\x00"} {
+		_, err := windowsCommandLine(`C:\c\mockserver.bat`, []string{"ok", "secret" + bad})
+		if err == nil || !strings.HasPrefix(err.Error(), "mockserver: argument 1 cannot be passed through cmd.exe safely") || strings.Contains(err.Error(), "secret") {
+			t.Errorf("argument containing %q: got %v", bad, err)
+		}
+		_, err = windowsCommandLine(`C:\secret`+bad+`\mockserver.bat`, nil)
+		if err == nil || !strings.HasPrefix(err.Error(), "mockserver: the launcher path cannot be passed through cmd.exe safely") || strings.Contains(err.Error(), "secret") {
+			t.Errorf("launcher containing %q: got %v", bad, err)
+		}
+	}
+}
+
+func TestWindowsCommandLine_RefusesTwoPercentSignsWithoutEchoingTheLine(t *testing.T) {
+	_, err := windowsCommandLine(`C:\c%\mockserver.bat`, []string{"-Dx=secret%PATH"})
+	if err == nil || !strings.Contains(err.Error(), "more than one %") || strings.Contains(err.Error(), "secret") {
+		t.Errorf("got %v", err)
+	}
+}
+
+func TestWindowsComSpec(t *testing.T) {
+	env := func(vars map[string]string) func(string) string {
+		return func(k string) string { return vars[k] }
+	}
+	if got, err := windowsComSpec(env(map[string]string{"ComSpec": `D:\cmd.exe`, "SystemRoot": `C:\Windows`})); err != nil || got != `D:\cmd.exe` {
+		t.Errorf("ComSpec set: got %q, %v", got, err)
+	}
+	if got, err := windowsComSpec(env(map[string]string{"SystemRoot": `C:\Windows`})); err != nil || got != `C:\Windows\System32\cmd.exe` {
+		t.Errorf("SystemRoot only: got %q, %v", got, err)
+	}
+	if _, err := windowsComSpec(env(nil)); err == nil || !strings.Contains(err.Error(), "cmd.exe not found") {
+		t.Errorf("neither set: got %v", err)
+	}
+}

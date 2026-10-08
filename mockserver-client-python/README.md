@@ -469,6 +469,8 @@ server.stop()
 | `start(port, version=None, *, extra_args=None, log=True)` | Ensure the binary and start MockServer. Returns a `MockServerProcess`. |
 | `MockServerProcess` | Handle to the running process. Properties: `port`, `pid`, `launcher`, `returncode`. Methods: `stop(timeout=10.0)`. Supports `with` statement. |
 
+On Windows the launcher runs `mockserver.bat` through `cmd.exe` with every argument quoted, so characters such as `&`, `|` and `^` reach MockServer unchanged. `start()` raises `ValueError` if the launcher path or an `extra_args` entry contains a double quote, a line break or NUL, or if together they contain more than one `%` (which `cmd.exe` would expand as a `%NAME%` variable). No shell is used on Linux or macOS.
+
 ### Supported platforms
 
 | OS | Architecture |
