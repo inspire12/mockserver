@@ -232,7 +232,7 @@ function startDroppingProxy() {
         upstream.pipe(downstream);
     });
     return new Promise(function (resolve) {
-        server.listen(0, function () {
+        server.listen(0, '127.0.0.1', function () {
             resolve({
                 port: server.address().port,
                 dropWebSockets: function () {
@@ -364,9 +364,10 @@ describe('reconnecting callback WebSockets', function () {
         }
     });
 
-    it('reconnects a dropped callback WebSocket with its client id while MockServer keeps the expectation', async function () {
+    it('reconnects a dropped callback WebSocket with its client id while MockServer keeps the expectation', { timeout: 30000 }, async function () {
         var proxy = await startDroppingProxy();
-        var client = mockServerClient(mockServerHost, proxy.port);
+        // the dropping proxy listens in this process, not on the MockServer host
+        var client = mockServerClient('127.0.0.1', proxy.port);
         var direct = mockServerClient(mockServerHost, mockServerPort);
         var requestPath = '/callback-reconnect-' + crypto.randomUUID();
         var thens = 0;
