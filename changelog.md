@@ -786,6 +786,8 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **A request to a mocked path that fails inside the WAR deployments no longer gets control-plane treatment.** When `MockServerServlet` or `ProxyServlet` failed while handling a request outside `/mockserver` (including a request whose body could not be read), the answer always carried CORS headers and could echo the exception's message as a `400`. It is now a `500` with a generic message naming a correlation id, carrying CORS headers only when `enableCORSForAllResponses` is on, the same as the Netty server. Failures on control-plane paths are answered as before.
+- **Java code generated for an expectation with more than one action now recreates it.** Retrieving such an expectation with `format=JAVA` produced a chain of `.respond(...)`/`.forward(...)`/`.error(...)` calls that did not compile and did not mark the primary action. It is now generated as `upsert(new Expectation(...).thenRespond(...).thenForward(...))`, with `.withPrimary(true)` on the primary action. The other code formats embed the expectation's JSON, which already carries the primary flag.
 - **A fault inside MockServer is now answered `500` by the control-plane endpoints that handle their own errors too,
   not `400` with the fault's message.** This extends the BREAKING change that answers an unexpected control-plane
   failure `500` with `unexpected error processing request, see the MockServer log for correlation id: <id>`: it

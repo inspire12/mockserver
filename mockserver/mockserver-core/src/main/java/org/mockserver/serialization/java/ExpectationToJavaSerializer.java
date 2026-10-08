@@ -3,6 +3,7 @@ package org.mockserver.serialization.java;
 import com.google.common.base.Strings;
 import org.apache.commons.text.StringEscapeUtils;
 import org.mockserver.mock.Expectation;
+import org.mockserver.model.Action;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.model.OpenAPIDefinition;
@@ -11,6 +12,7 @@ import org.mockserver.model.RequestDefinition;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.io.Writer;
+import java.util.Arrays;
 import java.util.List;
 
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
@@ -52,46 +54,56 @@ public class ExpectationToJavaSerializer implements ToJavaSerializer<Expectation
     public String serialize(int numberOfSpacesToIndent, Expectation expectation) {
         StringBuffer output = new StringBuffer();
         if (expectation != null) {
+            boolean upsert = generatedActionCount(expectation) > 1;
+            int indent = upsert ? numberOfSpacesToIndent + 1 : numberOfSpacesToIndent;
             appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append("new MockServerClient(\"localhost\", 1080)");
-            appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(".when(");
+            if (upsert) {
+                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(".upsert(");
+                appendNewLineAndIndent(indent * INDENT_SIZE, output).append("new org.mockserver.mock.Expectation(");
+            } else {
+                appendNewLineAndIndent(indent * INDENT_SIZE, output).append(".when(");
+            }
+            String respond = upsert ? ".thenRespond(" : ".respond(";
+            String forward = upsert ? ".thenForward(" : ".forward(";
+            String error = upsert ? ".thenError(" : ".error(";
             RequestDefinition requestDefinition = expectation.getHttpRequest();
             if (requestDefinition instanceof HttpRequest) {
-                output.append(new HttpRequestToJavaSerializer().serialize(numberOfSpacesToIndent + 1, (HttpRequest) requestDefinition));
+                output.append(new HttpRequestToJavaSerializer().serialize(indent + 1, (HttpRequest) requestDefinition));
             } else if (requestDefinition instanceof OpenAPIDefinition) {
-                output.append(new OpenAPIMatcherToJavaSerializer().serialize(numberOfSpacesToIndent + 1, (OpenAPIDefinition) requestDefinition));
+                output.append(new OpenAPIMatcherToJavaSerializer().serialize(indent + 1, (OpenAPIDefinition) requestDefinition));
             }
             output.append(",");
             if (expectation.getTimes() != null) {
-                output.append(new TimesToJavaSerializer().serialize(numberOfSpacesToIndent + 1, expectation.getTimes()));
+                output.append(new TimesToJavaSerializer().serialize(indent + 1, expectation.getTimes()));
             } else {
-                appendNewLineAndIndent((numberOfSpacesToIndent + 1) * INDENT_SIZE, output).append("null");
+                appendNewLineAndIndent((indent + 1) * INDENT_SIZE, output).append("null");
             }
             output.append(",");
             if (expectation.getTimeToLive() != null) {
-                output.append(new TimeToLiveToJavaSerializer().serialize(numberOfSpacesToIndent + 1, expectation.getTimeToLive()));
+                output.append(new TimeToLiveToJavaSerializer().serialize(indent + 1, expectation.getTimeToLive()));
             } else {
-                appendNewLineAndIndent((numberOfSpacesToIndent + 1) * INDENT_SIZE, output).append("null");
+                appendNewLineAndIndent((indent + 1) * INDENT_SIZE, output).append("null");
             }
             output.append(",");
-            appendNewLineAndIndent((numberOfSpacesToIndent + 1) * INDENT_SIZE, output).append(expectation.getPriority());
-            appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(")");
+            appendNewLineAndIndent((indent + 1) * INDENT_SIZE, output).append(expectation.getPriority());
+            appendNewLineAndIndent(indent * INDENT_SIZE, output).append(")");
             if (expectation.getPercentage() != null) {
-                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(".withPercentage(").append(expectation.getPercentage()).append(")");
+                appendNewLineAndIndent(indent * INDENT_SIZE, output).append(".withPercentage(").append(expectation.getPercentage()).append(")");
             }
             if (isNotBlank(expectation.getNamespace())) {
-                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(".withNamespace(\"").append(StringEscapeUtils.escapeJava(expectation.getNamespace())).append("\")");
+                appendNewLineAndIndent(indent * INDENT_SIZE, output).append(".withNamespace(\"").append(StringEscapeUtils.escapeJava(expectation.getNamespace())).append("\")");
             }
             if (isNotBlank(expectation.getScenarioName())) {
-                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(".withScenarioName(\"").append(StringEscapeUtils.escapeJava(expectation.getScenarioName())).append("\")");
+                appendNewLineAndIndent(indent * INDENT_SIZE, output).append(".withScenarioName(\"").append(StringEscapeUtils.escapeJava(expectation.getScenarioName())).append("\")");
             }
             if (isNotBlank(expectation.getScenarioState())) {
-                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(".withScenarioState(\"").append(StringEscapeUtils.escapeJava(expectation.getScenarioState())).append("\")");
+                appendNewLineAndIndent(indent * INDENT_SIZE, output).append(".withScenarioState(\"").append(StringEscapeUtils.escapeJava(expectation.getScenarioState())).append("\")");
             }
             if (isNotBlank(expectation.getNewScenarioState())) {
-                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(".withNewScenarioState(\"").append(StringEscapeUtils.escapeJava(expectation.getNewScenarioState())).append("\")");
+                appendNewLineAndIndent(indent * INDENT_SIZE, output).append(".withNewScenarioState(\"").append(StringEscapeUtils.escapeJava(expectation.getNewScenarioState())).append("\")");
             }
             if (expectation.getResponseMode() != null) {
-                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(".withResponseMode(org.mockserver.mock.ResponseMode.").append(expectation.getResponseMode().name()).append(")");
+                appendNewLineAndIndent(indent * INDENT_SIZE, output).append(".withResponseMode(org.mockserver.mock.ResponseMode.").append(expectation.getResponseMode().name()).append(")");
             }
             if (expectation.getResponseWeights() != null && !expectation.getResponseWeights().isEmpty()) {
                 StringBuilder weights = new StringBuilder();
@@ -102,75 +114,93 @@ public class ExpectationToJavaSerializer implements ToJavaSerializer<Expectation
                     }
                     weights.append(responseWeights.get(i));
                 }
-                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(".withResponseWeights(java.util.Arrays.asList(").append(weights).append("))");
+                appendNewLineAndIndent(indent * INDENT_SIZE, output).append(".withResponseWeights(java.util.Arrays.asList(").append(weights).append("))");
             }
             if (expectation.getSwitchAfter() != null) {
-                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(".withSwitchAfter(").append(expectation.getSwitchAfter()).append(")");
+                appendNewLineAndIndent(indent * INDENT_SIZE, output).append(".withSwitchAfter(").append(expectation.getSwitchAfter()).append(")");
             }
             if (expectation.getHttpResponses() != null && !expectation.getHttpResponses().isEmpty()) {
                 HttpResponseToJavaSerializer responseSerializer = new HttpResponseToJavaSerializer();
-                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(".respond(java.util.Arrays.asList(");
+                appendNewLineAndIndent(indent * INDENT_SIZE, output).append(respond).append("java.util.Arrays.asList(");
                 List<HttpResponse> responses = expectation.getHttpResponses();
                 for (int i = 0; i < responses.size(); i++) {
-                    appendNewLineAndIndent((numberOfSpacesToIndent + 1) * INDENT_SIZE, output);
-                    output.append(responseSerializer.serialize(numberOfSpacesToIndent + 2, responses.get(i)));
+                    appendNewLineAndIndent((indent + 1) * INDENT_SIZE, output);
+                    output.append(responseSerializer.serialize(indent + 2, responses.get(i)));
                     if (i < responses.size() - 1) {
                         output.append(",");
                     }
                 }
-                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append("))");
+                appendNewLineAndIndent(indent * INDENT_SIZE, output).append("))");
             } else if (expectation.getHttpResponse() != null) {
-                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(".respond(");
-                output.append(new HttpResponseToJavaSerializer().serialize(numberOfSpacesToIndent + 1, expectation.getHttpResponse()));
-                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(")");
+                appendAction(indent, respond, new HttpResponseToJavaSerializer().serialize(indent + 1, expectation.getHttpResponse()), expectation.getHttpResponse(), output);
             }
             if (expectation.getHttpResponseTemplate() != null) {
-                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(".respond(");
-                output.append(new HttpTemplateToJavaSerializer().serialize(numberOfSpacesToIndent + 1, expectation.getHttpResponseTemplate()));
-                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(")");
+                appendAction(indent, respond, new HttpTemplateToJavaSerializer().serialize(indent + 1, expectation.getHttpResponseTemplate()), expectation.getHttpResponseTemplate(), output);
             }
             if (expectation.getHttpResponseClassCallback() != null) {
-                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(".respond(");
-                output.append(new HttpClassCallbackToJavaSerializer().serialize(numberOfSpacesToIndent + 1, expectation.getHttpResponseClassCallback()));
-                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(")");
+                appendAction(indent, respond, new HttpClassCallbackToJavaSerializer().serialize(indent + 1, expectation.getHttpResponseClassCallback()), expectation.getHttpResponseClassCallback(), output);
             }
             if (expectation.getHttpResponseObjectCallback() != null) {
-                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append("/*NOT POSSIBLE TO GENERATE CODE FOR OBJECT CALLBACK*/");
+                appendNewLineAndIndent(indent * INDENT_SIZE, output).append("/*NOT POSSIBLE TO GENERATE CODE FOR OBJECT CALLBACK*/");
             }
             if (expectation.getHttpForward() != null) {
-                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(".forward(");
-                output.append(new HttpForwardToJavaSerializer().serialize(numberOfSpacesToIndent + 1, expectation.getHttpForward()));
-                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(")");
+                appendAction(indent, forward, new HttpForwardToJavaSerializer().serialize(indent + 1, expectation.getHttpForward()), expectation.getHttpForward(), output);
             }
             if (expectation.getHttpOverrideForwardedRequest() != null) {
-                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(".forward(");
-                output.append(new HttpOverrideForwardedRequestToJavaSerializer().serialize(numberOfSpacesToIndent + 1, expectation.getHttpOverrideForwardedRequest()));
-                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(")");
+                appendAction(indent, forward, new HttpOverrideForwardedRequestToJavaSerializer().serialize(indent + 1, expectation.getHttpOverrideForwardedRequest()), expectation.getHttpOverrideForwardedRequest(), output);
             }
             if (expectation.getHttpForwardTemplate() != null) {
-                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(".forward(");
-                output.append(new HttpTemplateToJavaSerializer().serialize(numberOfSpacesToIndent + 1, expectation.getHttpForwardTemplate()));
-                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(")");
+                appendAction(indent, forward, new HttpTemplateToJavaSerializer().serialize(indent + 1, expectation.getHttpForwardTemplate()), expectation.getHttpForwardTemplate(), output);
             }
             if (expectation.getHttpForwardClassCallback() != null) {
-                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(".forward(");
-                output.append(new HttpClassCallbackToJavaSerializer().serialize(numberOfSpacesToIndent + 1, expectation.getHttpForwardClassCallback()));
-                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(")");
+                appendAction(indent, forward, new HttpClassCallbackToJavaSerializer().serialize(indent + 1, expectation.getHttpForwardClassCallback()), expectation.getHttpForwardClassCallback(), output);
             }
             if (expectation.getHttpForwardObjectCallback() != null) {
-                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append("/*NOT POSSIBLE TO GENERATE CODE FOR OBJECT CALLBACK*/");
+                appendNewLineAndIndent(indent * INDENT_SIZE, output).append("/*NOT POSSIBLE TO GENERATE CODE FOR OBJECT CALLBACK*/");
             }
             if (expectation.getHttpForwardWithFallback() != null) {
-                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append("/*NOT POSSIBLE TO GENERATE CODE FOR FORWARD WITH FALLBACK*/");
+                appendNewLineAndIndent(indent * INDENT_SIZE, output).append("/*NOT POSSIBLE TO GENERATE CODE FOR FORWARD WITH FALLBACK*/");
             }
             if (expectation.getHttpError() != null) {
-                appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(".error(");
-                output.append(new HttpErrorToJavaSerializer().serialize(numberOfSpacesToIndent + 1, expectation.getHttpError()));
+                appendAction(indent, error, new HttpErrorToJavaSerializer().serialize(indent + 1, expectation.getHttpError()), expectation.getHttpError(), output);
+            }
+            if (upsert) {
                 appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(")");
             }
             output.append(";");
         }
         return output.toString();
+    }
+
+    /**
+     * The number of action calls the generated code makes. With more than one, the code builds an {@link Expectation}
+     * and upserts it, since {@code when(...)} takes a single terminal action.
+     */
+    private static int generatedActionCount(Expectation expectation) {
+        int count = expectation.getHttpResponses() != null && !expectation.getHttpResponses().isEmpty() || expectation.getHttpResponse() != null ? 1 : 0;
+        for (Action<?> action : Arrays.asList(
+            expectation.getHttpResponseTemplate(),
+            expectation.getHttpResponseClassCallback(),
+            expectation.getHttpForward(),
+            expectation.getHttpOverrideForwardedRequest(),
+            expectation.getHttpForwardTemplate(),
+            expectation.getHttpForwardClassCallback(),
+            expectation.getHttpError()
+        )) {
+            if (action != null) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private void appendAction(int numberOfSpacesToIndent, String method, String serializedAction, Action<?> action, StringBuffer output) {
+        appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(method);
+        output.append(serializedAction);
+        if (action.isPrimary()) {
+            appendNewLineAndIndent((numberOfSpacesToIndent + 2) * INDENT_SIZE, output).append(".withPrimary(true)");
+        }
+        appendNewLineAndIndent(numberOfSpacesToIndent * INDENT_SIZE, output).append(")");
     }
 
     private StringBuffer appendNewLineAndIndent(int numberOfSpacesToIndent, StringBuffer output) {

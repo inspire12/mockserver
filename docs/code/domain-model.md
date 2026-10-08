@@ -862,7 +862,7 @@ Central registry configuring Jackson `ObjectMapper` with all custom serializers,
 
 ### Java Code Serializers
 
-`serialization/java/` package generates Java client API code from domain objects (e.g., `ExpectationToJavaSerializer` produces Java code that recreates an expectation programmatically).
+`serialization/java/` package generates Java client API code from domain objects (e.g., `ExpectationToJavaSerializer` produces Java code that recreates an expectation programmatically: `client.when(...).respond(...)` for one action, or `client.upsert(new Expectation(...).thenRespond(...).thenForward(...))` with `.withPrimary(true)` on the primary action when there is more than one).
 
 ## OpenAPI
 

@@ -1222,4 +1222,97 @@ public class ExpectationToJavaSerializerTest {
                 "                        .withReasonPhrase(\"randomPhrase\")" + NEW_LINE +
                 "        );"));
     }
+
+    @Test
+    public void shouldSerializeExpectationWithMoreThanOneActionAsAnUpsertMarkingThePrimaryAction() {
+        assertThat(
+            new ExpectationToJavaSerializer().serialize(1,
+                new Expectation(
+                    request()
+                        .withPath("somePath"),
+                    once(),
+                    unlimited(),
+                    0)
+                    .withNamespace("some_namespace")
+                    .thenRespond(
+                        response()
+                            .withStatusCode(202)
+                            .withPrimary(true)
+                    )
+                    .thenForward(
+                        forward()
+                            .withHost("some_host")
+                            .withPort(9090)
+                            .withScheme(HttpForward.Scheme.HTTPS)
+                    )
+                    .thenError(
+                        error()
+                            .withDropConnection(true)
+                    )
+            )
+        , is(NEW_LINE +
+                "        new MockServerClient(\"localhost\", 1080)" + NEW_LINE +
+                "        .upsert(" + NEW_LINE +
+                "                new org.mockserver.mock.Expectation(" + NEW_LINE +
+                "                        request()" + NEW_LINE +
+                "                                .withPath(\"somePath\")," + NEW_LINE +
+                "                        Times.once()," + NEW_LINE +
+                "                        TimeToLive.unlimited()," + NEW_LINE +
+                "                        0" + NEW_LINE +
+                "                )" + NEW_LINE +
+                "                .withNamespace(\"some_namespace\")" + NEW_LINE +
+                "                .thenRespond(" + NEW_LINE +
+                "                        response()" + NEW_LINE +
+                "                                .withStatusCode(202)" + NEW_LINE +
+                "                                .withPrimary(true)" + NEW_LINE +
+                "                )" + NEW_LINE +
+                "                .thenForward(" + NEW_LINE +
+                "                        forward()" + NEW_LINE +
+                "                                .withHost(\"some_host\")" + NEW_LINE +
+                "                                .withPort(9090)" + NEW_LINE +
+                "                                .withScheme(HttpForward.Scheme.HTTPS)" + NEW_LINE +
+                "                )" + NEW_LINE +
+                "                .thenError(" + NEW_LINE +
+                "                        error()" + NEW_LINE +
+                "                                .withDropConnection(true)" + NEW_LINE +
+                "                )" + NEW_LINE +
+                "        );"));
+    }
+
+    @Test
+    public void shouldMarkThePrimaryActionWhenItIsNotTheFirstAction() {
+        assertThat(
+            new ExpectationToJavaSerializer().serialize(0,
+                new Expectation(request().withPath("somePath"), null, null, 0)
+                    .thenRespond(
+                        template(HttpTemplate.TemplateType.VELOCITY)
+                            .withTemplate("some_template")
+                    )
+                    .thenForward(
+                        callback()
+                            .withCallbackClass("some_class")
+                            .withPrimary(true)
+                    )
+            )
+        , is(NEW_LINE +
+                "new MockServerClient(\"localhost\", 1080)" + NEW_LINE +
+                ".upsert(" + NEW_LINE +
+                "        new org.mockserver.mock.Expectation(" + NEW_LINE +
+                "                request()" + NEW_LINE +
+                "                        .withPath(\"somePath\")," + NEW_LINE +
+                "                null," + NEW_LINE +
+                "                null," + NEW_LINE +
+                "                0" + NEW_LINE +
+                "        )" + NEW_LINE +
+                "        .thenRespond(" + NEW_LINE +
+                "                template(HttpTemplate.TemplateType.VELOCITY)" + NEW_LINE +
+                "                        .withTemplate(\"some_template\")" + NEW_LINE +
+                "        )" + NEW_LINE +
+                "        .thenForward(" + NEW_LINE +
+                "                callback()" + NEW_LINE +
+                "                        .withCallbackClass(\"some_class\")" + NEW_LINE +
+                "                        .withPrimary(true)" + NEW_LINE +
+                "        )" + NEW_LINE +
+                ");"));
+    }
 }

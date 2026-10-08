@@ -94,6 +94,7 @@ public class MockServerServlet extends HttpServlet implements ServletContextList
 
         ResponseWriter responseWriter = new ServletResponseWriter(configuration, new MockServerLogger(), httpServletResponse);
         HttpRequest request = null;
+        boolean dataPlane = false;
         try {
 
             request = httpServletRequestToMockServerRequestDecoder.mapHttpServletRequestToMockServerRequest(httpServletRequest);
@@ -123,6 +124,7 @@ public class MockServerServlet extends HttpServlet implements ServletContextList
 
                 } else {
 
+                    dataPlane = true;
                     String portExtension = "";
                     if (!(httpServletRequest.getLocalPort() == 443 && httpServletRequest.isSecure() || httpServletRequest.getLocalPort() == 80)) {
                         portExtension = ":" + httpServletRequest.getLocalPort();
@@ -138,8 +140,15 @@ public class MockServerServlet extends HttpServlet implements ServletContextList
         } catch (Throwable throwable) {
             if (request == null) {
                 request = httpServletRequestToMockServerRequestDecoder.mapUndecodableServletRequest(httpServletRequest);
+                dataPlane = !HttpState.isControlPlanePathCandidate(request.getPath().getValue());
             }
-            ControlPlaneFailureResponse.write(mockServerLogger, responseWriter, request, throwable);
+            if (dataPlane) {
+                // answered as a mock response, as HttpRequestHandler answers a data-plane failure
+                String message = ControlPlaneFailureResponse.logUnexpectedFailure(mockServerLogger, request, throwable);
+                responseWriter.writeResponse(request, ControlPlaneFailureResponse.dataPlaneFailureResponse(message), false);
+            } else {
+                ControlPlaneFailureResponse.write(mockServerLogger, responseWriter, request, throwable);
+            }
         }
     }
 

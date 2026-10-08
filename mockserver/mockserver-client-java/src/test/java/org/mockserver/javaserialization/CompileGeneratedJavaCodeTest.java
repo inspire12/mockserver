@@ -259,6 +259,50 @@ public class CompileGeneratedJavaCodeTest {
             "}"), is(true));
     }
 
+    @Test
+    public void shouldCompileExpectationWithMoreThanOneAction() throws URISyntaxException {
+
+        String expectationAsJavaCode = new ExpectationToJavaSerializer().serialize(1,
+            new Expectation(
+                request()
+                    .withMethod("GET")
+                    .withPath("somePath"),
+                Times.once(),
+                TimeToLive.unlimited(),
+                0)
+                .withNamespace("some_namespace")
+                .thenRespond(
+                    response()
+                        .withStatusCode(202)
+                        .withPrimary(true)
+                )
+                .thenForward(
+                    forward()
+                        .withHost("localhost")
+                        .withPort(1090)
+                )
+                .thenRespond(
+                    template(HttpTemplate.TemplateType.VELOCITY)
+                        .withTemplate("some_template")
+                )
+        );
+
+        assertThat(compileJavaCode("" +
+            "import org.mockserver.client.MockServerClient;" + NEW_LINE +
+            "import org.mockserver.matchers.Times;" + NEW_LINE +
+            "import org.mockserver.matchers.TimeToLive;" + NEW_LINE +
+            "import org.mockserver.model.*;" + NEW_LINE +
+            "import static org.mockserver.model.HttpRequest.request;" + NEW_LINE +
+            "import static org.mockserver.model.HttpResponse.response;" + NEW_LINE +
+            "import static org.mockserver.model.HttpForward.forward;" + NEW_LINE +
+            "import static org.mockserver.model.HttpTemplate.template;" + NEW_LINE + NEW_LINE +
+            "class TestClass {" + NEW_LINE +
+            "   static {" +
+            "      " + expectationAsJavaCode + NEW_LINE +
+            "   }" + NEW_LINE +
+            "}"), is(true));
+    }
+
     private boolean compileJavaCode(final String javaCode) throws URISyntaxException {
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
 

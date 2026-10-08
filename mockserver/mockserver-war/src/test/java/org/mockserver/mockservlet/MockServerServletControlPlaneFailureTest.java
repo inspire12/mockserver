@@ -12,6 +12,7 @@ import org.mockserver.logging.MockServerLogger;
 import org.mockserver.mappers.HttpServletRequestToMockServerHttpRequestDecoder;
 import org.mockserver.mock.Expectation;
 import org.mockserver.mock.HttpState;
+import org.mockserver.mock.action.http.HttpActionHandler;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.scheduler.Scheduler;
 import org.slf4j.event.Level;
@@ -27,6 +28,7 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -38,7 +40,9 @@ import static org.mockserver.responsewriter.ControlPlaneFailureResponse.UNEXPECT
 
 /**
  * How the MockServerServlet answers a control-plane request whose handling throws: a client error is a {@code 400}
- * carrying its message, anything else a {@code 500} with a generic message and one {@code ERROR} log entry.
+ * carrying its message, anything else a {@code 500} with a generic message and one {@code ERROR} log entry. A
+ * data-plane request whose handling throws is answered {@code 500} with the generic message as a mock response, so
+ * without CORS headers unless {@code enableCORSForAllResponses} is on.
  */
 public class MockServerServletControlPlaneFailureTest {
 
@@ -49,6 +53,7 @@ public class MockServerServletControlPlaneFailureTest {
     private HttpState realHttpState;
     private MockServerLogger mockServerLogger;
     private HttpServletRequestToMockServerHttpRequestDecoder httpServletRequestToMockServerRequestDecoder;
+    private HttpActionHandler actionHandler;
 
     @InjectMocks
     private MockServerServlet servlet;
@@ -66,6 +71,7 @@ public class MockServerServletControlPlaneFailureTest {
         };
         httpStateHandler = spy(realHttpState);
         mockServerLogger = mock(MockServerLogger.class);
+        actionHandler = mock(HttpActionHandler.class);
         httpServletRequestToMockServerRequestDecoder = spy(new HttpServletRequestToMockServerHttpRequestDecoder(configuration(), new MockServerLogger()));
         servlet = new MockServerServlet();
         openMocks(this);
@@ -169,6 +175,77 @@ public class MockServerServletControlPlaneFailureTest {
         // then
         assertThat(response.getStatus(), is(400));
         assertThat(new String(response.getContentAsByteArray(), UTF_8), is("request line not understood"));
+    }
+
+    @Test
+    public void shouldAnswerADataPlaneFailureWithAServerErrorAndAGenericMessageWithoutCorsHeaders() {
+        // given
+        RuntimeException dataPlaneFault = new IllegalArgumentException("internal detail of the data plane fault");
+        doThrow(dataPlaneFault).when(actionHandler).processAction(any(), any(), any(), any(), anyBoolean(), anyBoolean());
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/some_mocked_path");
+        request.addHeader("Origin", "https://app.example.com");
+
+        // when
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        servlet.service(request, response);
+
+        // then
+        String body = new String(response.getContentAsByteArray(), UTF_8);
+        assertThat(response.getStatus(), is(500));
+        assertThat(body, startsWith(UNEXPECTED_FAILURE_MESSAGE));
+        assertThat(body, not(containsString("internal detail of the data plane fault")));
+        assertThat(response.getHeader("Access-Control-Allow-Origin"), nullValue());
+        assertThat(response.getHeaderNames(), not(hasItem(startsWith("Access-Control-"))));
+
+        // and - logged once at ERROR, with the stack trace, under the correlation id the caller was given
+        ArgumentCaptor<LogEntry> logged = ArgumentCaptor.forClass(LogEntry.class);
+        verify(mockServerLogger, atLeastOnce()).logEvent(logged.capture());
+        List<LogEntry> errors = logged.getAllValues().stream()
+            .filter(entry -> entry.getLogLevel() == Level.ERROR && entry.getThrowable() == dataPlaneFault)
+            .collect(Collectors.toList());
+        assertThat(errors, hasSize(1));
+        assertThat(body, is(UNEXPECTED_FAILURE_MESSAGE + errors.get(0).getCorrelationId()));
+    }
+
+    @Test
+    public void shouldAnswerADataPlaneRequestWhoseBodyCannotBeReadWithAServerErrorWithoutCorsHeaders() {
+        // given
+        MockHttpServletRequest request = new MockHttpServletRequest("PUT", "/some_mocked_path") {
+            @Override
+            public ServletInputStream getInputStream() {
+                return new FailingServletInputStream();
+            }
+        };
+        request.addHeader("Origin", "https://app.example.com");
+
+        // when
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        servlet.service(request, response);
+
+        // then
+        String body = new String(response.getContentAsByteArray(), UTF_8);
+        assertThat(response.getStatus(), is(500));
+        assertThat(body, startsWith(UNEXPECTED_FAILURE_MESSAGE));
+        assertThat(response.getHeader("Access-Control-Allow-Origin"), nullValue());
+        assertThat(response.getHeaderNames(), not(hasItem(startsWith("Access-Control-"))));
+    }
+
+    @Test
+    public void shouldAnswerADataPlaneRequestTheDecoderRejectsWithAServerErrorAndAGenericMessage() {
+        // given
+        doThrow(new IllegalArgumentException("request line not understood"))
+            .when(httpServletRequestToMockServerRequestDecoder).mapHttpServletRequestToMockServerRequest(any());
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/some_mocked_path");
+        request.addHeader("Origin", "https://app.example.com");
+
+        // when
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        servlet.service(request, response);
+
+        // then
+        assertThat(response.getStatus(), is(500));
+        assertThat(new String(response.getContentAsByteArray(), UTF_8), startsWith(UNEXPECTED_FAILURE_MESSAGE));
+        assertThat(response.getHeader("Access-Control-Allow-Origin"), nullValue());
     }
 
     private static class FailingServletInputStream extends ServletInputStream {

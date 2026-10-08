@@ -237,7 +237,9 @@ scheduler-run `/llm/optimisationReport` and `/llm/diffRuns` answer through `Cont
 
 The same catch-all in `HttpRequestHandler` also answers a fault on the data-plane path outside `processAction`'s own
 `catch` (`CONNECT` set-up, the data-plane authentication gate, the TLS-required check), so those are a `500` too.
-`processAction`'s own `catch` (`HttpRequestHandler` for HTTP/1.1 and HTTP/2, both `Http3MockServerHandler` paths) answers
+`processAction`'s own `catch` (`HttpRequestHandler` for HTTP/1.1 and HTTP/2, both `Http3MockServerHandler` paths) and
+the servlets' `catch` for a data-plane request (one that reached `processAction`, or whose decoding failed on a path
+that is not a control-plane path, `HttpState.isControlPlanePathCandidate`) answer
 every exception as the `500` row does, whatever its class, with the same body and log entry, but written as a mock
 response (`ControlPlaneFailureResponse.dataPlaneFailureResponse`), so it carries CORS headers only when
 `enableCORSForAllResponses` is on and no `version` header; on the gRPC-over-HTTP/3 path
