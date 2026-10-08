@@ -1027,7 +1027,7 @@ This release delivers a sustained performance and memory programme alongside dat
   30 seconds with the server still holding its port, and AsyncAPI load, status and verify requests waited too. The
   line is gone, and brokers are now closed after the reset lets go of the AsyncAPI mock. A server at the default log
   level with no AsyncAPI brokers loaded now stops within a few seconds while stdout is blocked. With brokers loaded,
-  stopping can still wait while their connections log as they close.
+  stopping waits for their connections to close for at most 5 seconds.
 - **A forwarded or proxied HTTP/1.1 response MockServer cannot read is now answered `502` naming why, instead of
   being passed on in part.** When an upstream's response had a header that is not valid HTTP, a status line that is
   not HTTP or is longer than 4 KB, or a chunk size that is not a number, MockServer passed on what it had read so
