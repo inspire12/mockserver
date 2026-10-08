@@ -170,7 +170,6 @@ public class MockServerClientIntegrationTest {
                 .withPath("/mockserver/expectation")
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
                 )
@@ -254,7 +253,6 @@ public class MockServerClientIntegrationTest {
                 .withPath("/mockserver/expectation")
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
                 )
@@ -335,7 +333,6 @@ public class MockServerClientIntegrationTest {
                 .withPath("/mockserver/expectation")
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
                 )
@@ -387,7 +384,6 @@ public class MockServerClientIntegrationTest {
                 .withPath("/mockserver/expectation")
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
                 )
@@ -564,7 +560,6 @@ public class MockServerClientIntegrationTest {
                 .withPath("/mockserver/expectation")
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
                 )
@@ -647,7 +642,6 @@ public class MockServerClientIntegrationTest {
                 .withPath("/mockserver/expectation")
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
                 )
@@ -728,7 +722,6 @@ public class MockServerClientIntegrationTest {
                 .withPath("/mockserver/expectation")
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
                 )
@@ -778,7 +771,6 @@ public class MockServerClientIntegrationTest {
                 .withPath("/mockserver/expectation")
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
                 )
@@ -857,7 +849,6 @@ public class MockServerClientIntegrationTest {
                 .withPath("/mockserver/expectation")
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
                 )
@@ -945,7 +936,6 @@ public class MockServerClientIntegrationTest {
                 .withPath("/mockserver/expectation")
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
                 )
@@ -1001,7 +991,6 @@ public class MockServerClientIntegrationTest {
                 .withPath("/mockserver/expectation")
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
                 )
@@ -1047,7 +1036,6 @@ public class MockServerClientIntegrationTest {
                 .withPath("/mockserver/stop")
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("content-length", "0"),
                     new Header("connection", "keep-alive")
                 )
@@ -1058,7 +1046,6 @@ public class MockServerClientIntegrationTest {
                 .withPath("/mockserver/status")
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("content-length", "0"),
                     new Header("connection", "keep-alive")
                 )
@@ -1088,7 +1075,6 @@ public class MockServerClientIntegrationTest {
                 .withPath("/mockserver/status")
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("content-length", "0"),
                     new Header("connection", "keep-alive")
                 )
@@ -1122,7 +1108,6 @@ public class MockServerClientIntegrationTest {
                     .withPath("/mockserver/status")
                     .withHeaders(
                         new Header("host", "localhost:" + echoServerOne.getPort()),
-                        new Header("accept-encoding", "gzip,deflate"),
                         new Header("content-length", "0"),
                         new Header("connection", "keep-alive")
                     )
@@ -1153,7 +1138,6 @@ public class MockServerClientIntegrationTest {
                 .withPath("/mockserver/reset")
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("content-length", "0"),
                     new Header("connection", "keep-alive")
                 )
@@ -1186,7 +1170,6 @@ public class MockServerClientIntegrationTest {
                 .withPath("/mockserver/clear")
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
                 )
@@ -1225,7 +1208,6 @@ public class MockServerClientIntegrationTest {
                 .withPath("/mockserver/clear")
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
                 )
@@ -1258,7 +1240,6 @@ public class MockServerClientIntegrationTest {
                 .withPath("/mockserver/clear")
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("content-length", "0"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
@@ -1305,7 +1286,6 @@ public class MockServerClientIntegrationTest {
                 .withQueryStringParameter("format", Format.JSON.name())
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
                 )
@@ -1351,7 +1331,6 @@ public class MockServerClientIntegrationTest {
                 .withQueryStringParameter("format", Format.JSON.name())
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("content-length", "0"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
@@ -1397,7 +1376,6 @@ public class MockServerClientIntegrationTest {
                 .withQueryStringParameter("format", Format.JSON.name())
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
                 )
@@ -1446,7 +1424,6 @@ public class MockServerClientIntegrationTest {
                 .withQueryStringParameter("format", Format.JAVA.name())
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
                 )
@@ -1504,7 +1481,6 @@ public class MockServerClientIntegrationTest {
                 .withQueryStringParameter("format", Format.JSON.name())
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
                 )
@@ -1558,7 +1534,6 @@ public class MockServerClientIntegrationTest {
                 .withQueryStringParameter("format", Format.JSON.name())
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("content-length", "0"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
@@ -1608,7 +1583,6 @@ public class MockServerClientIntegrationTest {
                 .withQueryStringParameter("format", Format.JSON.name())
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
                 )
@@ -1658,7 +1632,6 @@ public class MockServerClientIntegrationTest {
                 .withQueryStringParameter("format", Format.JSON.name())
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
                 )
@@ -1704,7 +1677,6 @@ public class MockServerClientIntegrationTest {
                 .withQueryStringParameter("format", Format.JSON.name())
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("content-length", "0"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
@@ -1750,7 +1722,6 @@ public class MockServerClientIntegrationTest {
                 .withQueryStringParameter("format", Format.JSON.name())
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
                 )
@@ -1799,7 +1770,6 @@ public class MockServerClientIntegrationTest {
                 .withQueryStringParameter("format", Format.JAVA.name())
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
                 )
@@ -1849,7 +1819,6 @@ public class MockServerClientIntegrationTest {
                 .withQueryStringParameter("format", Format.JSON.name())
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
                 )
@@ -1895,7 +1864,6 @@ public class MockServerClientIntegrationTest {
                 .withQueryStringParameter("format", Format.JSON.name())
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("content-length", "0"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
@@ -1941,7 +1909,6 @@ public class MockServerClientIntegrationTest {
                 .withQueryStringParameter("format", Format.JSON.name())
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
                 )
@@ -1990,7 +1957,6 @@ public class MockServerClientIntegrationTest {
                 .withQueryStringParameter("format", Format.JAVA.name())
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
                 )
@@ -2026,7 +1992,6 @@ public class MockServerClientIntegrationTest {
                 .withPath("/mockserver/verifySequence")
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
                 )
@@ -2068,7 +2033,6 @@ public class MockServerClientIntegrationTest {
                 .withPath("/mockserver/verifySequence")
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
                 )
@@ -2111,7 +2075,6 @@ public class MockServerClientIntegrationTest {
                 .withPath("/mockserver/verify")
                 .withHeaders(
                     new Header("host", "localhost:" + echoServerOne.getPort()),
-                    new Header("accept-encoding", "gzip,deflate"),
                     new Header("connection", "keep-alive"),
                     new Header("content-type", "application/json; charset=utf-8")
                 )

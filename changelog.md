@@ -318,6 +318,7 @@ This release delivers a sustained performance and memory programme alongside dat
   retained entry holds about what the budget counts. Log output is unchanged.
 ### Changed
 
+- **A forwarded or proxied request now carries the client's own `Accept-Encoding` to the upstream, instead of always `gzip,deflate`.** Upstream servers may therefore now see the codings your client asked for, in its order and with its `q` values, less any MockServer cannot decompress (it keeps `gzip`, `deflate` and `zstd`, and `br` when the Brotli4j library is on the classpath), so recorded and matched responses still decompress. A client that sends no `Accept-Encoding` now has none sent on its behalf, and one whose choices MockServer cannot decompress has `identity` sent instead. This applies to forward actions and overrides, the HTTP proxy, CONNECT and SOCKS tunnels, HTTP/2 and HTTP/3 clients, HTTP/2 upstreams and streamed responses; a compressed response still reaches the client decompressed, without `Content-Encoding` and with the upstream's `Vary`. The Java client no longer adds `Accept-Encoding: gzip,deflate` to the requests it sends either.
 - **BREAKING: the Node client and launcher now have an `exports` map, so an ES module can import
   a deep path without its extension, and a path the map does not name can no longer be loaded.**
   Before: from an ES module `import { llmMock } from 'mockserver-client/llm'` failed with

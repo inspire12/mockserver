@@ -5,6 +5,7 @@ import io.netty.buffer.Unpooled;
 import io.netty.handler.codec.http.*;
 import org.mockserver.codec.BodyContentEncodingEncoder;
 import org.mockserver.codec.BodyDecoderEncoder;
+import org.mockserver.codec.ForwardedAcceptEncoding;
 import org.mockserver.codec.SnappyBlockOrFrameDecoder;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
@@ -121,8 +122,17 @@ public class MockServerHttpRequestToFullHttpRequest {
     }
 
     private void setHeader(HttpRequest httpRequest, FullHttpRequest request) {
+        List<String> acceptEncoding = new ArrayList<>();
         for (Header header : httpRequest.getHeaderList()) {
             String headerName = header.getName().getValue();
+            if (headerName.equalsIgnoreCase(ACCEPT_ENCODING.toString())) {
+                if (header.getValues().isEmpty()) {
+                    acceptEncoding.add("");
+                }
+                for (NottableString headerValue : header.getValues()) {
+                    acceptEncoding.add(headerValue.getValue());
+                }
+            }
             // do not set hop-by-hop headers, and never leak the x-mockserver-response-index control header
             // (force-response-variant) upstream — it is consumed at action-resolution time and is meaningful
             // only to MockServer. Filtering it out of the outbound request here (rather than mutating the
@@ -145,7 +155,11 @@ public class MockServerHttpRequestToFullHttpRequest {
         if (isNotBlank(httpRequest.getFirstHeader(HOST.toString()))) {
             request.headers().add(HOST, httpRequest.getFirstHeader(HOST.toString()));
         }
-        request.headers().set(ACCEPT_ENCODING, GZIP + "," + DEFLATE);
+        // the client's codings, less any the forward client could not decode on the way back
+        String forwardedAcceptEncoding = ForwardedAcceptEncoding.forwarded(acceptEncoding);
+        if (forwardedAcceptEncoding != null) {
+            request.headers().set(ACCEPT_ENCODING, forwardedAcceptEncoding);
+        }
         // no x-http2-scheme or x-http2-stream-id: the HTTP/2 forward's stream codec sets the scheme and stream itself,
         // and when ALPN settles on HTTP/1.1 they would reach the upstream as headers
         request.headers().set(CONTENT_LENGTH, request.content().readableBytes());

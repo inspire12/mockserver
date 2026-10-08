@@ -147,7 +147,6 @@ public class NettyHttpProxySOCKS4IntegrationTest {
             inputStream.read(echoServerResponse);
             assertThat(new String(echoServerResponse, StandardCharsets.UTF_8), startsWith("" +
                 "HTTP/1.1 200 OK\r\n" +
-                "accept-encoding: gzip,deflate\r\n" +
                 "connection: keep-alive\r\n" +
                 "content-length: 0\r\n" +
                 "\r\n"
@@ -229,7 +228,6 @@ public class NettyHttpProxySOCKS4IntegrationTest {
             inputStream.read(echoServerResponse);
             assertThat(new String(echoServerResponse, StandardCharsets.UTF_8), startsWith("" +
                 "HTTP/1.1 200 OK\r\n" +
-                "accept-encoding: gzip,deflate\r\n" +
                 "connection: keep-alive\r\n" +
                 "content-length: 0\r\n" +
                 "\r\n"

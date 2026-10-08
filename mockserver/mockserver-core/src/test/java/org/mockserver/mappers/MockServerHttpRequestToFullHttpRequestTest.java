@@ -185,7 +185,7 @@ public class MockServerHttpRequestToFullHttpRequestTest {
     }
 
     @Test
-    public void shouldSetAcceptEncodingHeader() {
+    public void shouldSetNoAcceptEncodingHeaderWhenTheRequestHasNone() {
         // given
         HttpRequest httpRequest = request().withPath("/path");
 
@@ -194,9 +194,23 @@ public class MockServerHttpRequestToFullHttpRequestTest {
 
         try {
             // then
-            String acceptEncoding = result.headers().get(HttpHeaderNames.ACCEPT_ENCODING);
-            assertThat(acceptEncoding, containsString("gzip"));
-            assertThat(acceptEncoding, containsString("deflate"));
+            assertThat(result.headers().contains(HttpHeaderNames.ACCEPT_ENCODING), is(false));
+        } finally {
+            result.release();
+        }
+    }
+
+    @Test
+    public void shouldSetTheRequestsAcceptEncodingLimitedToDecodedCodings() {
+        // given
+        HttpRequest httpRequest = request().withPath("/path").withHeader("Accept-Encoding", "compress, gzip;q=0.8, deflate");
+
+        // when
+        FullHttpRequest result = mapper.mapMockServerRequestToNettyRequest(httpRequest);
+
+        try {
+            // then
+            assertThat(result.headers().getAll(HttpHeaderNames.ACCEPT_ENCODING), is(java.util.Collections.singletonList("gzip;q=0.8, deflate")));
         } finally {
             result.release();
         }

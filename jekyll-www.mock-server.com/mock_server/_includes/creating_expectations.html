@@ -461,6 +461,8 @@ $client-&gt;when(
 
 <p>When a compressed request is forwarded or proxied unchanged, the upstream receives exactly the bytes the client sent. If an override, template or callback changes the body, MockServer compresses the new body with the same <span class="inline_code">Content-Encoding</span> (with more than one <span class="inline_code">Content-Encoding</span> header, the first one is used, both to decompress and to compress). A body sent with a list of codings (for example <span class="inline_code">gzip, br</span>) or with a coding MockServer does not decompress is matched, recorded and forwarded exactly as it was sent. <a href="/mock_server/configuration_properties.html#button_configuration_max_request_body_size">maxRequestBodySize</a> limits the decompressed size: a larger body is answered with <span class="inline_code">413</span>, except a <span class="inline_code">snappy</span> remote-write body that declares a larger size, whose connection (or HTTP/2 or HTTP/3 stream) is closed without a response.</p>
 
+<p>A forwarded request also carries the client's own <span class="inline_code">Accept-Encoding</span>, less any compression MockServer cannot decompress, so the response can always be decompressed for matching and recording; see <a href="/proxy/getting_started.html#compressed_responses">compressed responses</a>.</p>
+
 <a id="graphql_body_matching" class="anchor" href="#graphql_body_matching">&nbsp;</a>
 
 <h4>GraphQL Body Matching</h4>

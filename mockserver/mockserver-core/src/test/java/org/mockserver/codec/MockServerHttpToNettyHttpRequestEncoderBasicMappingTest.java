@@ -215,13 +215,37 @@ public class MockServerHttpToNettyHttpRequestEncoderBasicMappingTest {
         // then
         HttpHeaders headers = ((FullHttpRequest) output.get(0)).headers();
         assertThat(headers.names(), containsInAnyOrder(
-            "accept-encoding",
             "content-length",
             "connection"
         ));
-        assertThat(headers.getAll("Accept-Encoding"), containsInAnyOrder("gzip,deflate"));
         assertThat(headers.getAll("Content-Length"), containsInAnyOrder("0"));
         assertThat(headers.getAll("Connection"), containsInAnyOrder("keep-alive"));
+    }
+
+    @Test
+    public void shouldForwardTheClientsAcceptEncodingLimitedToDecodedCodings() {
+        // given
+        httpRequest.withHeader("Accept-Encoding", "compress, deflate;q=0.5", "gzip;q=0.9");
+
+        // when
+        new MockServerHttpToNettyHttpRequestEncoder(mockServerLogger, null).encode(null, httpRequest, output);
+
+        // then
+        HttpHeaders headers = ((FullHttpRequest) output.get(0)).headers();
+        assertThat(headers.getAll("Accept-Encoding"), is(Collections.singletonList("deflate;q=0.5, gzip;q=0.9")));
+    }
+
+    @Test
+    public void shouldForwardIdentityWhenNoneOfTheClientsCodingsIsDecoded() {
+        // given
+        httpRequest.withHeader("accept-encoding", "compress");
+
+        // when
+        new MockServerHttpToNettyHttpRequestEncoder(mockServerLogger, null).encode(null, httpRequest, output);
+
+        // then
+        HttpHeaders headers = ((FullHttpRequest) output.get(0)).headers();
+        assertThat(headers.getAll("Accept-Encoding"), is(Collections.singletonList("identity")));
     }
 
     @Test
@@ -235,7 +259,6 @@ public class MockServerHttpToNettyHttpRequestEncoderBasicMappingTest {
         // then
         HttpHeaders headers = ((FullHttpRequest) output.get(0)).headers();
         assertThat(headers.names(), containsInAnyOrder(
-            "accept-encoding",
             "content-length",
             "connection"
         ));
@@ -254,7 +277,6 @@ public class MockServerHttpToNettyHttpRequestEncoderBasicMappingTest {
         // then
         HttpHeaders headers = ((FullHttpRequest) output.get(0)).headers();
         assertThat(headers.names(), containsInAnyOrder(
-            "accept-encoding",
             "content-length",
             "connection"
         ));

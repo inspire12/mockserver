@@ -1335,6 +1335,49 @@ limited by `maxRequestBodySize`, but an oversized block is refused like a corrup
 answered 413. A body re-encoded as `snappy` uses the raw block format (`SnappyBlock`, the same
 snappy-java call MockServer's own remote-write exporter makes) unless the original body was framed.
 
+### Accept-Encoding on a forwarded request
+
+A forwarded or proxied request carries the client's own `Accept-Encoding` upstream, less the codings
+MockServer cannot decode, so whatever coding the upstream picks is one the forward client decodes
+before the response is recorded, matched and relayed. Until 9.0.0 every outbound request said
+`Accept-Encoding: gzip,deflate`, whatever the client sent.
+
+| Client sent | Upstream receives |
+|---|---|
+| no `Accept-Encoding` | none |
+| `compress, zstd;q=0.9, gzip;q=0.5` | `zstd;q=0.9, gzip;q=0.5` (`zstd` only when zstd-jni loads) |
+| `gzip;q=1.0, *;q=0.1` | `gzip;q=1.0, deflate;q=0.1, zstd;q=0.1, identity;q=0.1` (`br`, `zstd` only when their library loads) |
+| `compress`, `gzip;q=0`, an empty value | `identity` |
+
+`ForwardedAcceptEncoding.forwarded` builds the value, and `MockServerHttpRequestToFullHttpRequest`
+sets it, so it applies wherever a request leaves through `NettyHttpClient`: the forward and
+override actions, callbacks, proxying (HTTP proxy, CONNECT and SOCKS tunnels through the loopback, and
+an HTTP/2 upstream, whose stream codec turns the same request into frames), streamed responses, and
+MockServer's own outbound calls (the Java client, LLM completions), which send whatever their request
+model holds, so a request with no `Accept-Encoding` no longer gains one. It keeps the elements
+in order with their parameters, joins several fields into one, keeps `identity` and every coding
+`BoundedZstdHttpContentDecompressor.decodes` accepts (so `x-gzip`, `x-deflate` and `snappy` too), and
+replaces `*` with the registered codings it covers (`gzip`, `deflate`, `br`, `zstd`, `identity`) that
+are decoded and not named elsewhere (`x-gzip` and `x-deflate` count as naming `gzip` and `deflate`). When no
+element left has a q-value above zero it sends `identity`, so `compress, *;q=0` still gets `identity`. An
+`Accept-Encoding` set by a forward override (`forwardOverriddenRequest`) is filtered the same way, since the
+overridden request goes through the same mapper.
+
+**No `Accept-Encoding`, none sent.** RFC 9110 section 12.5.3 reads a missing field as "no preference",
+while `identity` alone says only an unencoded response is acceptable; sending nothing keeps the client's
+request as it was. An upstream may then use any coding: one MockServer decodes is decoded as usual, and
+one it does not is relayed still encoded with its `Content-Encoding` and recorded encoded, which the
+client, having stated no preference, accepts.
+
+**What the client gets back.** Unchanged: a body in a coding MockServer decodes reaches the client and
+the recording decoded, without `Content-Encoding` and with its length adjusted, and the upstream's
+`Vary` is relayed as is. Identity is acceptable to every client that did not send `identity;q=0`, so
+the response is not encoded again for the client.
+
+**WebSocket upgrades** are relayed by `WebSocketProxyRelayHandler`, which already sends the client's
+handshake headers as they came (`Accept-Encoding` included) and never relays or records the body of a
+refused handshake, so it is unchanged.
+
 ### ProxyPass (Reverse Proxy)
 
 The `proxyPass` configuration property allows MockServer to act as a reverse proxy, mapping incoming path prefixes to upstream servers with automatic path rewriting. This is evaluated in `HttpActionHandler.handleProxyPass()` after expectation matching and CORS, but before the speculative proxy attempt.

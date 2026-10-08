@@ -91,7 +91,8 @@ import static org.mockserver.stop.Stop.stopQuietly;
  * A request body sent with a {@code Content-Encoding}, over HTTP/1.1, HTTP/2 and HTTP/3, is forwarded upstream as the
  * exact bytes the client sent, whatever the coding (an upstream socket compares the bytes); a body changed by an
  * override is encoded in its coding again; and a Prometheus remote-write request (raw-block Snappy) is matched on its
- * decoded protobuf and answered. The HTTP/3 tests are QUIC-gated like the other HTTP/3 integration tests.
+ * decoded protobuf and answered; and the upstream is sent the client's own {@code Accept-Encoding}, limited to the
+ * codings MockServer decodes. The HTTP/3 tests are QUIC-gated like the other HTTP/3 integration tests.
  */
 @SuppressWarnings("deprecation") // NioEventLoopGroup deprecation in Netty 4.2
 public class ForwardContentEncodingIntegrationTest {
@@ -103,8 +104,10 @@ public class ForwardContentEncodingIntegrationTest {
     private static MockServerClient mockServerClient;
     private static CapturingUpstream upstream;
     private static int http3Port;
+    private ClientResponse lastResponse;
 
-    private enum Transport { HTTP_1_1, HTTP_2, HTTP_3, CONNECT_HTTP_1_1, CONNECT_HTTP_2, SOCKS5_HTTP_1_1 }
+    // HTTP_PROXY_1_1: MockServer as a plain HTTP proxy with no expectation, so the request passes through to its host
+    private enum Transport { HTTP_1_1, HTTP_2, HTTP_3, CONNECT_HTTP_1_1, CONNECT_HTTP_2, SOCKS5_HTTP_1_1, HTTP_PROXY_1_1 }
 
     @BeforeClass
     public static void startServer() throws IOException {
@@ -213,6 +216,107 @@ public class ForwardContentEncodingIntegrationTest {
         assertRemoteWriteMocked(Transport.CONNECT_HTTP_2);
     }
 
+    @Test
+    public void shouldForwardTheClientsAcceptEncodingOverHttp1() throws Exception {
+        assertClientsAcceptEncodingForwarded(Transport.HTTP_1_1);
+    }
+
+    @Test
+    public void shouldForwardTheClientsAcceptEncodingOverHttp2() throws Exception {
+        assertClientsAcceptEncodingForwarded(Transport.HTTP_2);
+    }
+
+    @Test
+    public void shouldForwardTheClientsAcceptEncodingOverHttp3() throws Exception {
+        assumeHttp3();
+        assertClientsAcceptEncodingForwarded(Transport.HTTP_3);
+    }
+
+    @Test
+    public void shouldForwardTheClientsAcceptEncodingThroughAConnectTunnelOverHttp1() throws Exception {
+        assertClientsAcceptEncodingForwarded(Transport.CONNECT_HTTP_1_1);
+    }
+
+    @Test
+    public void shouldForwardTheClientsAcceptEncodingThroughAConnectTunnelOverHttp2() throws Exception {
+        assertClientsAcceptEncodingForwarded(Transport.CONNECT_HTTP_2);
+    }
+
+    @Test
+    public void shouldForwardTheClientsAcceptEncodingThroughASocks5Tunnel() throws Exception {
+        assertClientsAcceptEncodingForwarded(Transport.SOCKS5_HTTP_1_1);
+    }
+
+    @Test
+    public void shouldForwardAnOverridesOwnAcceptEncodingFiltered() throws Exception {
+        mockServerClient
+            .when(request().withPath("/forward_accept_encoding/override"))
+            .forward(forwardOverriddenRequest(
+                request()
+                    .withHeader("Host", "127.0.0.1:" + upstream.port())
+                    .withHeader("Accept-Encoding", "compress, deflate;q=0.4")
+                    .withSecure(false)
+            ));
+
+        send(Transport.HTTP_1_1, "/forward_accept_encoding/override", plainHeaders("gzip", null), PLAIN);
+        CapturedRequest overridden = upstream.captured.poll(TIMEOUT.getSeconds(), TimeUnit.SECONDS);
+
+        assertThat(overridden, notNullValue());
+        assertThat(overridden.headers.get("accept-encoding"), is("deflate;q=0.4"));
+        assertThat(lastResponse.status, is(200));
+    }
+
+    @Test
+    public void shouldPassTheClientsAcceptEncodingThroughAnHttpProxy() throws Exception {
+        assertClientsAcceptEncodingForwarded(Transport.HTTP_PROXY_1_1);
+    }
+
+    /**
+     * The upstream sees the client's Accept-Encoding less the codings MockServer does not decode, none when the client
+     * sent none, and identity when nothing is left; a gzip response it then sends, aggregated or streamed, reaches the
+     * client and the recording decoded, with no Content-Encoding and with its Vary.
+     */
+    private void assertClientsAcceptEncodingForwarded(Transport transport) throws Exception {
+        if (transport != Transport.HTTP_PROXY_1_1) {
+            mockServerClient
+                .when(request().withPath("/forward_accept_encoding.*"))
+                .forward(forward().withHost("127.0.0.1").withPort(upstream.port()));
+        }
+        assertThat("zstd-jni reaches this module's classpath, as it does the shaded jar", Zstd.isAvailable(), is(true));
+
+        send(transport, "/forward_accept_encoding/none", plainHeaders(null, null), PLAIN);
+        CapturedRequest none = upstream.captured.poll(TIMEOUT.getSeconds(), TimeUnit.SECONDS);
+        assertThat(transport + " no Accept-Encoding reached the upstream", none, notNullValue());
+        assertThat(transport + " no Accept-Encoding", none.headers.containsKey("accept-encoding"), is(false));
+        assertThat(transport + " identity answer", new String(lastResponse.body, StandardCharsets.UTF_8), is("captured"));
+
+        send(transport, "/forward_accept_encoding/filtered", plainHeaders("compress, zstd;q=0.9, x-unknown, gzip;q=0.5", null), PLAIN);
+        CapturedRequest filtered = upstream.captured.poll(TIMEOUT.getSeconds(), TimeUnit.SECONDS);
+        assertThat(transport + " filtered reached the upstream", filtered, notNullValue());
+        assertThat(transport + " filtered", filtered.headers.get("accept-encoding"), is("zstd;q=0.9, gzip;q=0.5"));
+        assertThat(transport + " status", lastResponse.status, is(200));
+        assertThat(transport + " decoded for the client", new String(lastResponse.body, StandardCharsets.UTF_8), is("captured"));
+        assertThat(transport + " no Content-Encoding for the client", lastResponse.headers.containsKey("content-encoding"), is(false));
+        assertThat(transport + " Vary for the client", lastResponse.headers.get("vary"), is("accept-encoding"));
+        org.mockserver.model.HttpResponse recorded = mockServerClient.retrieveRecordedRequestsAndResponses(request().withPath("/forward_accept_encoding/filtered"))[0].getHttpResponse();
+        assertThat(transport + " recorded decoded", recorded.getBodyAsString(), is("captured"));
+        assertThat(transport + " recorded without Content-Encoding", recorded.containsHeader("content-encoding"), is(false));
+
+        send(transport, "/forward_accept_encoding/nothing_decoded", plainHeaders("compress", null), PLAIN);
+        CapturedRequest nothingDecoded = upstream.captured.poll(TIMEOUT.getSeconds(), TimeUnit.SECONDS);
+        assertThat(transport + " nothing decoded reached the upstream", nothingDecoded, notNullValue());
+        assertThat(transport + " nothing decoded", nothingDecoded.headers.get("accept-encoding"), is("identity"));
+
+        send(transport, "/forward_accept_encoding/stream", plainHeaders("gzip", "text/event-stream"), PLAIN);
+        CapturedRequest streamed = upstream.captured.poll(TIMEOUT.getSeconds(), TimeUnit.SECONDS);
+        assertThat(transport + " streamed reached the upstream", streamed, notNullValue());
+        assertThat(transport + " streamed", streamed.headers.get("accept-encoding"), is("gzip"));
+        assertThat(transport + " streamed status", lastResponse.status, is(200));
+        assertThat(transport + " streamed decoded for the client", new String(lastResponse.body, StandardCharsets.UTF_8), is("data: captured\n\n"));
+        assertThat(transport + " streamed without Content-Encoding", lastResponse.headers.containsKey("content-encoding"), is(false));
+        assertThat(transport + " streamed Vary", lastResponse.headers.get("vary"), is("accept-encoding"));
+    }
+
     private void assertEveryCodingForwardedByteIdentical(Transport transport) throws Exception {
         mockServerClient
             .when(request().withPath("/forward_coding"))
@@ -305,6 +409,18 @@ public class ForwardContentEncodingIntegrationTest {
         assertThat(new String(recorded.getBodyAsRawBytes(), StandardCharsets.ISO_8859_1), containsString("remote_write_test_total"));
     }
 
+    private static Map<String, String> plainHeaders(String acceptEncoding, String accept) {
+        Map<String, String> headers = new LinkedHashMap<>();
+        headers.put("content-type", "application/json");
+        if (acceptEncoding != null) {
+            headers.put("accept-encoding", acceptEncoding);
+        }
+        if (accept != null) {
+            headers.put("accept", accept);
+        }
+        return headers;
+    }
+
     private static Map<String, String> headers(String contentType, String contentEncoding) {
         Map<String, String> headers = new LinkedHashMap<>();
         headers.put("content-type", contentType);
@@ -331,6 +447,13 @@ public class ForwardContentEncodingIntegrationTest {
                 return sendWithJdkClient(tunnelled, URI.create("https://127.0.0.1:" + upstream.port() + path), headers, body, version);
             case SOCKS5_HTTP_1_1:
                 return sendThroughSocks5(path, headers, body);
+            case HTTP_PROXY_1_1:
+                HttpClient proxied = HttpClient.newBuilder()
+                    .version(HttpClient.Version.HTTP_1_1)
+                    .proxy(ProxySelector.of(new InetSocketAddress("127.0.0.1", mockServer.getLocalPort())))
+                    .connectTimeout(TIMEOUT)
+                    .build();
+                return sendWithJdkClient(proxied, URI.create("http://127.0.0.1:" + upstream.port() + path), headers, body, HttpClient.Version.HTTP_1_1);
             default:
                 return sendHttp3(path, headers, body);
         }
@@ -347,6 +470,9 @@ public class ForwardContentEncodingIntegrationTest {
         headers.forEach(builder::header);
         HttpResponse<byte[]> response = client.send(builder.build(), HttpResponse.BodyHandlers.ofByteArray());
         assertThat(response.version(), is(expected));
+        Map<String, String> responseHeaders = new HashMap<>();
+        response.headers().map().forEach((name, values) -> responseHeaders.put(name.toLowerCase(Locale.ROOT), String.join(", ", values)));
+        lastResponse = new ClientResponse(response.statusCode(), responseHeaders, response.body());
         return response.statusCode();
     }
 
@@ -363,9 +489,16 @@ public class ForwardContentEncodingIntegrationTest {
                 out.write(head.toString().getBytes(StandardCharsets.US_ASCII));
                 out.write(body);
                 out.flush();
-                String statusLine = CapturingUpstream.readLine(new BufferedInputStream(tls.getInputStream()));
+                InputStream in = new BufferedInputStream(tls.getInputStream());
+                String statusLine = CapturingUpstream.readLine(in);
                 assertThat(statusLine, notNullValue());
-                return Integer.parseInt(statusLine.split(" ")[1]);
+                int status = Integer.parseInt(statusLine.split(" ")[1]);
+                Map<String, String> responseHeaders = CapturingUpstream.readHeaders(in);
+                byte[] responseBody = "chunked".equalsIgnoreCase(responseHeaders.get("transfer-encoding"))
+                    ? readChunked(in)
+                    : in.readNBytes(Integer.parseInt(responseHeaders.getOrDefault("content-length", "0")));
+                lastResponse = new ClientResponse(status, responseHeaders, responseBody);
+                return status;
             }
         }
     }
@@ -396,17 +529,23 @@ public class ForwardContentEncodingIntegrationTest {
                 .connect()
                 .get(15, TimeUnit.SECONDS);
             int[] status = {-1};
+            Map<String, String> responseHeaders = new HashMap<>();
+            ByteArrayOutputStream responseBody = new ByteArrayOutputStream();
             CountDownLatch done = new CountDownLatch(1);
             QuicStreamChannel stream = Http3.newRequestStream(quicChannel, new Http3RequestStreamInboundHandler() {
                 @Override
                 protected void channelRead(ChannelHandlerContext ctx, Http3HeadersFrame frame) {
                     if (frame.headers().status() != null) {
                         status[0] = Integer.parseInt(frame.headers().status().toString());
+                        frame.headers().forEach(header -> responseHeaders.put(header.getKey().toString().toLowerCase(Locale.ROOT), header.getValue().toString()));
                     }
                 }
 
                 @Override
                 protected void channelRead(ChannelHandlerContext ctx, Http3DataFrame frame) {
+                    byte[] bytes = new byte[frame.content().readableBytes()];
+                    frame.content().readBytes(bytes);
+                    responseBody.writeBytes(bytes);
                     frame.release();
                 }
 
@@ -432,12 +571,25 @@ public class ForwardContentEncodingIntegrationTest {
             requestHeaders.headers().addInt("content-length", body.length);
             stream.writeAndFlush(requestHeaders).sync();
             stream.writeAndFlush(new DefaultHttp3DataFrame(Unpooled.wrappedBuffer(body))).addListener(QuicStreamChannel.SHUTDOWN_OUTPUT).sync();
-            done.await(TIMEOUT.getSeconds(), TimeUnit.SECONDS);
+            assertThat("HTTP/3 response complete", done.await(TIMEOUT.getSeconds(), TimeUnit.SECONDS), is(true));
             quicChannel.close().sync();
             datagramChannel.close().sync();
+            lastResponse = new ClientResponse(status[0], responseHeaders, responseBody.toByteArray());
             return status[0];
         } finally {
             group.shutdownGracefully();
+        }
+    }
+
+    private static final class ClientResponse {
+        final int status;
+        final Map<String, String> headers;
+        final byte[] body;
+
+        ClientResponse(int status, Map<String, String> headers, byte[] body) {
+            this.status = status;
+            this.headers = headers;
+            this.body = body;
         }
     }
 
@@ -485,20 +637,43 @@ public class ForwardContentEncodingIntegrationTest {
                     if (requestLine == null || requestLine.isEmpty()) {
                         return;
                     }
-                    Map<String, String> headers = new HashMap<>();
-                    String line;
-                    while ((line = readLine(in)) != null && !line.isEmpty()) {
-                        int colon = line.indexOf(':');
-                        headers.put(line.substring(0, colon).trim().toLowerCase(Locale.ROOT), line.substring(colon + 1).trim());
-                    }
+                    Map<String, String> headers = readHeaders(in);
                     byte[] body = in.readNBytes(Integer.parseInt(headers.getOrDefault("content-length", "0")));
                     captured.add(new CapturedRequest(headers, body));
-                    out.write("HTTP/1.1 200 OK\r\ncontent-length: 8\r\n\r\ncaptured".getBytes(StandardCharsets.US_ASCII));
+                    if (requestLine.contains(" /forward_accept_encoding")) {
+                        answerInAnAcceptedCoding(out, requestLine.contains("/stream "), headers.get("accept-encoding"));
+                    } else {
+                        out.write("HTTP/1.1 200 OK\r\ncontent-length: 8\r\n\r\ncaptured".getBytes(StandardCharsets.US_ASCII));
+                    }
                     out.flush();
                 }
             } catch (IOException | RuntimeException ignored) {
                 // the test fails on the missing capture
             }
+        }
+
+        // gzip when the request accepts it, as an upstream that honours Accept-Encoding does
+        private static void answerInAnAcceptedCoding(OutputStream out, boolean stream, String acceptEncoding) throws IOException {
+            boolean gzip = acceptEncoding != null && acceptEncoding.contains("gzip");
+            byte[] plain = (stream ? "data: captured\n\n" : "captured").getBytes(StandardCharsets.US_ASCII);
+            byte[] body = gzip ? gzipBestCompression(plain) : plain;
+            String head = "HTTP/1.1 200 OK\r\n"
+                + "content-type: " + (stream ? "text/event-stream" : "text/plain") + "\r\n"
+                + "vary: accept-encoding\r\n"
+                + (gzip ? "content-encoding: gzip\r\n" : "")
+                + "content-length: " + body.length + "\r\n\r\n";
+            out.write(head.getBytes(StandardCharsets.US_ASCII));
+            out.write(body);
+        }
+
+        static Map<String, String> readHeaders(InputStream in) throws IOException {
+            Map<String, String> headers = new HashMap<>();
+            String line;
+            while ((line = readLine(in)) != null && !line.isEmpty()) {
+                int colon = line.indexOf(':');
+                headers.put(line.substring(0, colon).trim().toLowerCase(Locale.ROOT), line.substring(colon + 1).trim());
+            }
+            return headers;
         }
 
         private static String readLine(InputStream in) throws IOException {
@@ -521,6 +696,21 @@ public class ForwardContentEncodingIntegrationTest {
                 // closing
             }
         }
+    }
+
+    private static byte[] readChunked(InputStream in) throws IOException {
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        String sizeLine;
+        while ((sizeLine = CapturingUpstream.readLine(in)) != null) {
+            int size = Integer.parseInt(sizeLine.split(";")[0].trim(), 16);
+            if (size == 0) {
+                CapturingUpstream.readHeaders(in);
+                break;
+            }
+            body.writeBytes(in.readNBytes(size));
+            CapturingUpstream.readLine(in);
+        }
+        return body.toByteArray();
     }
 
     private static byte[] plain() {

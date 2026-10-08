@@ -15,11 +15,16 @@ import org.mockserver.model.Protocol;
 import org.mockserver.netty.MockServer;
 import org.mockserver.scheduler.Scheduler;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.util.zip.GZIPOutputStream;
+
 import static io.netty.handler.codec.http.HttpHeaderNames.HOST;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.core.Is.is;
+import static org.mockserver.model.BinaryBody.binary;
 import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.model.HttpForward.forward;
 import static org.mockserver.model.HttpRequest.request;
@@ -124,6 +129,57 @@ public class ForwardHttp2UpstreamIntegrationTest {
         } finally {
             stopQuietly(forwardServer);
         }
+    }
+
+    @Test(timeout = 30000)
+    public void shouldForwardTheClientsAcceptEncodingOverHttp2AndRecordTheResponseDecoded() throws Exception {
+        // given - an upstream that answers in gzip only when asked for it
+        upstreamClient
+            .when(request().withPath("/forwarded_coding").withProtocol(Protocol.HTTP_2).withHeader("accept-encoding", "gzip;q=0.5"))
+            .respond(response()
+                .withStatusCode(200)
+                .withHeader("content-encoding", "gzip")
+                .withHeader("vary", "accept-encoding")
+                .withBody(binary(gzip("upstream_saw_http2_gzip"))));
+        MockServer forwardServer = new MockServer(configuration().forwardProxyHttp2Enabled(true));
+        MockServerClient forwardClient = new MockServerClient("localhost", forwardServer.getLocalPort());
+        try {
+            forwardClient
+                .when(request().withPath("/forwarded_coding"))
+                .forward(forward().withHost("127.0.0.1").withPort(upstreamServer.getLocalPort()).withScheme(HttpForward.Scheme.HTTPS));
+
+            // when - the client accepts a coding MockServer does not decode, and gzip
+            HttpResponse response = new NettyHttpClient(configuration(), new MockServerLogger(), clientEventLoopGroup, null, false)
+                .sendRequest(
+                    request()
+                        .withMethod("GET")
+                        .withPath("/forwarded_coding")
+                        .withSecure(true)
+                        .withProtocol(Protocol.HTTP_2)
+                        .withHeader(HOST.toString(), "127.0.0.1:" + forwardServer.getLocalPort())
+                        .withHeader("accept-encoding", "compress, gzip;q=0.5")
+                ).get(15, SECONDS);
+
+            // then - the upstream saw gzip alone over HTTP/2, and the forward recorded the response decoded
+            assertThat(response.getStatusCode(), is(200));
+            assertThat(response.getBodyAsString(), is("upstream_saw_http2_gzip"));
+            upstreamClient.verify(request().withPath("/forwarded_coding").withProtocol(Protocol.HTTP_2).withHeader("accept-encoding", "gzip;q=0.5"), exactly(1));
+            HttpResponse recorded = forwardClient.retrieveRecordedRequestsAndResponses(request().withPath("/forwarded_coding"))[0].getHttpResponse();
+            assertThat(recorded.getBodyAsString(), is("upstream_saw_http2_gzip"));
+            assertThat(recorded.containsHeader("content-encoding"), is(false));
+            assertThat(recorded.getFirstHeader("vary"), is("accept-encoding"));
+        } finally {
+            stopQuietly(forwardClient);
+            stopQuietly(forwardServer);
+        }
+    }
+
+    private static byte[] gzip(String text) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try (GZIPOutputStream gzip = new GZIPOutputStream(out)) {
+            gzip.write(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+        return out.toByteArray();
     }
 
     @Test(timeout = 30000)

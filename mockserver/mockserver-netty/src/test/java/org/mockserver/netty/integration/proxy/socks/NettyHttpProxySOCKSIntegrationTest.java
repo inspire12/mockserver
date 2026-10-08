@@ -509,16 +509,18 @@ public class NettyHttpProxySOCKSIntegrationTest {
 
         outputStream.write(("" +
             "GET /some_path HTTP/1.1\r\n" +
+            "Accept-Encoding: compress, gzip\r\n" +
             "Content-Length: 0\r\n" +
             "\r\n"
         ).getBytes(StandardCharsets.UTF_8));
         outputStream.flush();
 
+        // the client's Accept-Encoding less the coding MockServer does not decode
         byte[] echoServerResponse = new byte[125];
         inputStream.read(echoServerResponse);
         assertThat(new String(echoServerResponse, StandardCharsets.UTF_8), startsWith("" +
             "HTTP/1.1 200 OK\r\n" +
-            "accept-encoding: gzip,deflate\r\n" +
+            "accept-encoding: gzip\r\n" +
             "connection: keep-alive\r\n" +
             "content-length: 0\r\n" +
             "\r\n"

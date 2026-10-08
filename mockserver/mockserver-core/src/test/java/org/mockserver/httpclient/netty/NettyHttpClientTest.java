@@ -77,10 +77,24 @@ public class NettyHttpClientTest {
                 .withStatusCode(200)
                 .withReasonPhrase("OK")
                 .withHeader(header(HOST.toString(), "0.0.0.0:" + echoServer.getPort()))
-                .withHeader(header(ACCEPT_ENCODING.toString(), GZIP.toString() + "," + DEFLATE.toString()))
                 .withHeader(header(CONNECTION.toString(), KEEP_ALIVE.toString()))
                 .withHeader(header(CONTENT_LENGTH.toString(), 0))
         ));
+    }
+
+    @Test
+    public void shouldSendTheRequestsAcceptEncodingLimitedToCodingsItDecodes() throws Exception {
+        // given
+        NettyHttpClient nettyHttpClient = new NettyHttpClient(configuration(), mockServerLogger, clientEventLoopGroup, null, false);
+
+        // when
+        HttpResponse httpResponse = nettyHttpClient.sendRequest(request()
+                .withHeader("Host", "0.0.0.0:" + echoServer.getPort())
+                .withHeader(ACCEPT_ENCODING.toString(), "compress, deflate;q=0.5, gzip;q=0.8"))
+            .get(10, TimeUnit.SECONDS);
+
+        // then
+        assertThat(httpResponse.getHeader(ACCEPT_ENCODING.toString()), is(java.util.Collections.singletonList("deflate;q=0.5, gzip;q=0.8")));
     }
 
     @Test
@@ -98,7 +112,6 @@ public class NettyHttpClientTest {
                 .withStatusCode(200)
                 .withReasonPhrase("OK")
                 .withHeader(header(HOST.toString(), "www.google.com"))
-                .withHeader(header(ACCEPT_ENCODING.toString(), GZIP.toString() + "," + DEFLATE.toString()))
                 .withHeader(header(CONNECTION.toString(), KEEP_ALIVE.toString()))
                 .withHeader(header(CONTENT_LENGTH.toString(), 0))
         ));
@@ -118,7 +131,6 @@ public class NettyHttpClientTest {
             response()
                 .withStatusCode(200)
                 .withReasonPhrase("OK")
-                .withHeader(header(ACCEPT_ENCODING.toString(), GZIP.toString() + "," + DEFLATE.toString()))
                 .withHeader(header(CONNECTION.toString(), KEEP_ALIVE.toString()))
                 .withHeader(header(CONTENT_LENGTH.toString(), 0))
         ));
@@ -149,7 +161,6 @@ public class NettyHttpClientTest {
                 .withContentType(MediaType.PLAIN_TEXT_UTF_8)
                 .withHeader(header(HOST.toString(), "0.0.0.0:" + echoServer.getPort()))
                 .withHeader(header(CONTENT_LENGTH.toString(), "this is an example body".length()))
-                .withHeader(header(ACCEPT_ENCODING.toString(), GZIP.toString() + "," + DEFLATE.toString()))
                 .withHeader(header(CONNECTION.toString(), KEEP_ALIVE.toString()))
                 .withHeader(header(COOKIE.toString(), "some_cookie_name=some_cookie_value; another_cookie_name=another_cookie_value"))
                 .withHeader(header("some_header_name", "some_header_value"))
@@ -183,7 +194,6 @@ public class NettyHttpClientTest {
                 .withReasonPhrase("OK")
                 .withHeader(header(HOST.toString(), "0.0.0.0:" + echoServer.getPort()))
                 .withHeader(header(CONTENT_LENGTH.toString(), "this is an example body".length()))
-                .withHeader(header(ACCEPT_ENCODING.toString(), GZIP.toString() + "," + DEFLATE.toString()))
                 .withHeader(header(CONNECTION.toString(), KEEP_ALIVE.toString()))
                 .withHeader(header(COOKIE.toString(), "some_cookie_name=some_cookie_value; another_cookie_name=another_cookie_value"))
                 .withHeader(header("some_header_name", "some_header_value"))
@@ -219,7 +229,6 @@ public class NettyHttpClientTest {
                 .withContentType(MediaType.ANY_VIDEO_TYPE)
                 .withHeader(header(HOST.toString(), "0.0.0.0:" + echoServer.getPort()))
                 .withHeader(header(CONTENT_LENGTH.toString(), "this is an example body".length()))
-                .withHeader(header(ACCEPT_ENCODING.toString(), GZIP.toString() + "," + DEFLATE.toString()))
                 .withHeader(header(CONNECTION.toString(), KEEP_ALIVE.toString()))
                 .withHeader(header(COOKIE.toString(), "some_cookie_name=some_cookie_value; another_cookie_name=another_cookie_value"))
                 .withHeader(header("some_header_name", "some_header_value"))
