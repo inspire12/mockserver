@@ -287,6 +287,10 @@ export interface StandardBinaryResponseState {
   binaryData: string; // base64-encoded
   /** Absent means the server default, ANSWER_ONLY. */
   upstream?: BinaryUpstreamName;
+  /** Carried verbatim from a loaded expectation (the form does not edit it). */
+  delay?: Record<string, unknown>;
+  /** Carried verbatim from a loaded expectation (the form does not edit it). */
+  primary?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -567,6 +571,14 @@ export interface StandardActionPayload {
    */
   editActionModeled?: boolean;
   /**
+   * The action-family JSON the form produced for {@link editOriginal} right after
+   * loading it. An action field whose form output still equals this baseline was
+   * not touched, so the original's value (or absence) is kept: unedited fields the
+   * form loads lossily or not at all (delay, primary, extra message fields, …)
+   * survive a save. Only meaningful alongside {@link editOriginal}.
+   */
+  editActionBaseline?: Record<string, unknown>;
+  /**
    * Scenario state-machine bindings, as entered in the Advanced form's optional
    * Scenario section. Blank fields are omitted from the payload.
    */
@@ -834,6 +846,15 @@ interface WhenArgs {
 const JAVA_TIME_UNITS: ReadonlySet<string> = new Set([
   'NANOSECONDS', 'MICROSECONDS', 'MILLISECONDS', 'SECONDS', 'MINUTES', 'HOURS', 'DAYS',
 ]);
+
+/** `withDelay(TimeUnit, long)` arguments for a carried binaryResponse delay, or undefined when it has no numeric value. */
+function javaBinaryDelay(bin: StandardBinaryResponseState): { unit: string; value: number } | undefined {
+  const value = bin.delay?.['value'];
+  if (typeof value !== 'number' || !isFinite(value)) return undefined;
+  const rawUnit = bin.delay?.['timeUnit'];
+  const unit = typeof rawUnit === 'string' && JAVA_TIME_UNITS.has(rawUnit) ? rawUnit : 'MILLISECONDS';
+  return { unit, value };
+}
 
 /**
  * Derive the arguments for the 4-arg `when(request, Times, TimeToLive, priority)`
@@ -1332,6 +1353,8 @@ export function buildExpectationJson(
           binPayload['binaryData'] = action.binaryResponse.binaryData.trim();
         }
         if (action.binaryResponse.upstream) binPayload['upstream'] = action.binaryResponse.upstream;
+        if (action.binaryResponse.delay) binPayload['delay'] = action.binaryResponse.delay;
+        if (action.binaryResponse.primary !== undefined) binPayload['primary'] = action.binaryResponse.primary;
         out['binaryResponse'] = binPayload;
       }
       break;
@@ -1482,6 +1505,7 @@ export function buildExpectationJson(
       actionModeled: action.editActionModeled,
       scenarioModeled: action.scenarioModeled,
       jwtModeled: action.jwtModeled,
+      actionBaseline: action.editActionBaseline,
     });
   }
 
@@ -1576,6 +1600,8 @@ export interface MergeUnmodeledOptions {
    * faithfully represent.
    */
   jwtModeled?: boolean;
+  /** See {@link StandardActionPayload.editActionBaseline}. */
+  actionBaseline?: Record<string, unknown>;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -1627,6 +1653,34 @@ const DEFAULT_PRESERVING_KEYS: readonly DefaultPreservingKey[] = [
 const DEFAULT_PRESERVING_KEY_SET: ReadonlySet<string> = new Set(
   DEFAULT_PRESERVING_KEYS.map((d) => d.key),
 );
+
+/** A duration (`{timeUnit, value}`-shaped: delay, timeout, timeToLive, …) is one value, never merged per field. */
+function isDuration(v: unknown): boolean {
+  return isPlainObject(v) && 'timeUnit' in v;
+}
+
+/**
+ * Keeps `original` except where the form changed a field: a field whose `form`
+ * value differs from the `baseline` (what the form produced on load) takes the
+ * form's value, or is removed when the form dropped it. Nested objects merge the
+ * same way; arrays, scalars and durations are replaced whole when changed.
+ */
+function mergeUntouched(
+  original: Record<string, unknown>,
+  form: Record<string, unknown>,
+  baseline: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = structuredClone(original);
+  for (const k of new Set([...Object.keys(form), ...Object.keys(baseline)])) {
+    if (deepEqualCanonical(form[k], baseline[k])) continue;
+    if (!(k in form)) delete out[k];
+    else if (isPlainObject(out[k]) && isPlainObject(form[k]) && isPlainObject(baseline[k])
+      && !isDuration(out[k]) && !isDuration(form[k]) && !isDuration(baseline[k])) {
+      out[k] = mergeUntouched(out[k] as Record<string, unknown>, form[k] as Record<string, unknown>, baseline[k] as Record<string, unknown>);
+    } else out[k] = form[k];
+  }
+  return out;
+}
 
 /**
  * Deep-merge the form-generated expectation JSON (`formJson`) onto the retained
@@ -1718,7 +1772,15 @@ export function mergeUnmodeledFields(
     ACTION_FAMILY_KEYS.some((k) => k in formJson) || 'steps' in formJson;
   if (actionModeled && formProvidesAction) {
     for (const k of ACTION_FAMILY_KEYS) delete result[k];
-    for (const k of ACTION_FAMILY_KEYS) if (k in formJson) result[k] = formJson[k];
+    for (const k of ACTION_FAMILY_KEYS) {
+      if (!(k in formJson)) continue;
+      const orig = original[k];
+      const base = opts.actionBaseline?.[k];
+      const form = formJson[k];
+      result[k] = isPlainObject(orig) && isPlainObject(base) && isPlainObject(form)
+        ? mergeUntouched(orig, form, base)
+        : form;
+    }
   }
   // else: leave the original action family untouched (preserve unmodeled action).
 
@@ -2398,6 +2460,9 @@ function actionToJava(action: StandardActionPayload): string {
         lines.push(`        .withBinaryData(Base64.getDecoder().decode("${escapeJava(bin.binaryData.trim())}"))`);
       }
       if (bin.upstream) lines.push(`        .withUpstream(Upstream.${bin.upstream})`);
+      const binDelay = javaBinaryDelay(bin);
+      if (binDelay) lines.push(`        .withDelay(TimeUnit.${binDelay.unit}, ${binDelay.value})`);
+      if (bin.primary !== undefined) lines.push(`        .withPrimary(${bin.primary})`);
       lines.push(')');
       return lines.join('\n');
     }
@@ -2987,6 +3052,7 @@ function collectJavaImports(
       imp.add('import static org.mockserver.model.BinaryResponse.binaryResponse;');
       imp.add('import java.util.Base64;');
       if (action.binaryResponse?.upstream) imp.add('import org.mockserver.model.BinaryResponse.Upstream;');
+      if (action.binaryResponse && javaBinaryDelay(action.binaryResponse)) imp.add('import java.util.concurrent.TimeUnit;');
       break;
     case 'dns_response':
       imp.add('import static org.mockserver.model.DnsResponse.dnsResponse;');

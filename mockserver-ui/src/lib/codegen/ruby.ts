@@ -386,6 +386,8 @@ function binaryResponse(w: Obj, indent: number): string {
   const args: Arg[] = [];
   if ('binaryData' in w) args.push({ name: 'binary_data', value: rb(String(w['binaryData'])) });
   if (typeof w['upstream'] === 'string') args.push({ name: 'upstream', value: rb(w['upstream']) });
+  if ('delay' in w) args.push({ name: 'delay', value: delay(w['delay'] as Obj, indent + 2) });
+  if ('primary' in w) args.push({ name: 'primary', value: scalar(w['primary']) });
   return ctor('BinaryResponse', args, indent);
 }
 

@@ -386,6 +386,8 @@ class PyBuilder {
       ? [['binary_data', pyStr(o['binaryData'])]]
       : [];
     if (typeof o['upstream'] === 'string') kw.push(['upstream', pyStr(o['upstream'])]);
+    if (o['delay'] != null) kw.push(['delay', this.delay(o['delay'])]);
+    if (typeof o['primary'] === 'boolean') kw.push(['primary', pyBool(o['primary'])]);
     return renderCall('BinaryResponse', kw, indent);
   }
 

@@ -934,11 +934,14 @@ function renderPrimaryAction(key: string, value: unknown, ctx: Ctx, indent: numb
     case 'httpWebSocketResponse':
       return inline(`.respond_web_socket(${webSocketExpr(obj, indent + 4)})`);
     case 'binaryResponse': {
+      const calls: string[] = [];
+      if (isObjR(obj['delay'])) calls.push(`.delay(${delayExpr(obj['delay'])})`);
+      if (typeof obj['primary'] === 'boolean') calls.push(`.primary(${obj['primary']})`);
       const base = typeof obj['binaryData'] === 'string' && obj['binaryData'] !== ''
         ? `BinaryResponse::from_base64(${rustStr(obj['binaryData'])})`
         : 'BinaryResponse::new()';
       const upstream = typeof obj['upstream'] === 'string' ? `.upstream(BinaryUpstream::${pascalEnum(obj['upstream'])})` : '';
-      return inline(`.respond_binary(${base}${upstream})`);
+      return inline(`.respond_binary(${chain(base + upstream, calls, indent + 4)})`);
     }
     case 'grpcStreamResponse':
       return inline(`.respond_grpc_stream(${grpcStreamExpr(obj, indent + 4)})`);

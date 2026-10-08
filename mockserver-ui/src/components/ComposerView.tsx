@@ -1366,6 +1366,39 @@ function paramsToText(params: unknown): string {
   return lines.join('\n');
 }
 
+/** The payload the form builds from per-action states; shared by the live draft and the edit baseline. */
+function actionPayloadFromStates(p: ActionPrefill): StandardActionPayload {
+  const a: StandardActionPayload = { type: p.type };
+  if (p.type === 'static') a.static = p.staticState;
+  if (p.type === 'forward') a.forward = p.forwardState;
+  if (p.type === 'forward_override') a.forwardOverride = p.forwardOverrideState;
+  if (p.type === 'forward_fallback') a.forwardFallback = p.forwardFallbackState;
+  if (p.type === 'callback') a.callback = p.callbackState;
+  if (p.type === 'template') a.template = p.templateState;
+  if (p.type === 'error') a.error = p.errorState;
+  if (p.type === 'websocket' && p.websocketState) a.websocket = {
+    subprotocol: p.websocketState.subprotocol,
+    messages: p.websocketState.messages,
+    closeConnection: p.websocketState.closeConnection,
+    matchers: p.websocketState.matchers,
+  };
+  if (p.type === 'sse') a.sse = p.sseState;
+  if (p.type === 'binary_response') a.binaryResponse = p.binaryResponseState;
+  if (p.type === 'dns_response') a.dnsResponse = p.dnsResponseState;
+  if (p.type === 'forward_template') a.forwardTemplate = p.forwardTemplateState;
+  if (p.type === 'forward_class_callback') a.forwardClassCallback = p.forwardClassCallbackState;
+  if (p.type === 'grpc_stream') a.grpcStream = p.grpcStreamState;
+  return a;
+}
+
+/** The action-family JSON the form emits for a freshly loaded action (see editActionBaseline). */
+function actionBaselineFor(prefill: ActionPrefill): Record<string, unknown> {
+  const json = buildExpectationJson(emptyMatcher(), actionPayloadFromStates(prefill));
+  const baseline: Record<string, unknown> = {};
+  for (const k of ACTION_FAMILY_KEYS) if (k in json) baseline[k] = json[k];
+  return baseline;
+}
+
 function actionFromExpectation(item: JsonListItem): ActionPrefill | null {
   const v = item.value;
 
@@ -1595,10 +1628,17 @@ function actionFromExpectation(item: JsonListItem): ActionPrefill | null {
     const bin = v['binaryResponse'] as Record<string, unknown>;
     // binaryData is a byte[] serialised as base64 by Jackson
     const data = typeof bin['binaryData'] === 'string' ? (bin['binaryData'] as string) : '';
+    const binaryResponseState: StandardBinaryResponseState = { binaryData: data };
     const upstream = BINARY_UPSTREAM_NAMES.find((u) => u === bin['upstream']);
+    if (upstream) binaryResponseState.upstream = upstream;
+    const delay = bin['delay'];
+    if (delay && typeof delay === 'object' && !Array.isArray(delay)) {
+      binaryResponseState.delay = delay as Record<string, unknown>;
+    }
+    if (typeof bin['primary'] === 'boolean') binaryResponseState.primary = bin['primary'];
     return {
       type: 'binary_response',
-      binaryResponseState: upstream ? { binaryData: data, upstream } : { binaryData: data },
+      binaryResponseState,
     };
   }
 
@@ -2706,6 +2746,14 @@ function SsePanel({
 // Binary response panel
 // ---------------------------------------------------------------------------
 
+/** Drops the fields carried from a loaded expectation, so they cannot leak into a different one. */
+function withoutCarriedBinaryFields(s: StandardBinaryResponseState): StandardBinaryResponseState {
+  const rest = { ...s };
+  delete rest.delay;
+  delete rest.primary;
+  return rest;
+}
+
 function BinaryResponsePanel({
   state,
   setState,
@@ -2713,6 +2761,9 @@ function BinaryResponsePanel({
   state: StandardBinaryResponseState;
   setState: (s: StandardBinaryResponseState) => void;
 }) {
+  const kept: string[] = [];
+  if (state.delay) kept.push(`delay ${String(state.delay['value'] ?? '')} ${String(state.delay['timeUnit'] ?? '')}`.trim());
+  if (state.primary !== undefined) kept.push(`primary ${state.primary}`);
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
       <Typography variant="body2" color="text.secondary">
@@ -2736,7 +2787,9 @@ function BinaryResponsePanel({
         value={state.upstream ?? 'ANSWER_ONLY'}
         onChange={(e) => {
           const upstream = e.target.value as BinaryUpstreamName;
-          setState(upstream === 'ANSWER_ONLY' ? { binaryData: state.binaryData } : { ...state, upstream });
+          const next: StandardBinaryResponseState = { ...state, upstream };
+          if (upstream === 'ANSWER_ONLY') delete next.upstream;
+          setState(next);
         }}
         helperText="Only on a binary connection MockServer relays to an upstream (forwardBinaryRequestsMatchExpectations). Forwarding needs binaryMessageFraming POSTGRESQL; without it the match answers only."
         sx={{ width: { xs: '100%', sm: 360 } }}
@@ -2745,6 +2798,11 @@ function BinaryResponsePanel({
         <MenuItem value="ANSWER_AND_FORWARD">Answer and forward (drop the upstream reply)</MenuItem>
         <MenuItem value="FORWARD_AND_REPLACE">Forward and replace the upstream reply</MenuItem>
       </TextField>
+      {kept.length > 0 && (
+        <Typography variant="caption" color="text.secondary" data-testid="binary-response-kept-fields">
+          Kept unchanged from the loaded expectation: {kept.join(', ')}
+        </Typography>
+      )}
     </Box>
   );
 }
@@ -4023,6 +4081,8 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
   // (so the original action is preserved).
   const [editOriginal, setEditOriginal] = useState<Record<string, unknown> | null>(null);
   const [editActionModeled, setEditActionModeled] = useState(true);
+  // What the form emitted for the loaded action, so a save keeps the fields left untouched.
+  const [editActionBaseline, setEditActionBaseline] = useState<Record<string, unknown> | undefined>(undefined);
   // Whether the Advanced JWT form faithfully owns the original's httpRequest.jwt
   // on edit. False when the original carries a jwt the form cannot round-trip
   // losslessly (e.g. object-form NottableString claims): the jwt is then
@@ -4134,6 +4194,7 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
       // Detect the action shape and prefill the matching panel + switch the radio.
       const prefill = actionFromExpectation(item);
       setEditActionModeled(!!prefill || !!existingStepsForFlag);
+      setEditActionBaseline(prefill ? actionBaselineFor(prefill) : undefined);
       if (prefill) {
         // Infer the correct kind from the action type and switch to it. MCP is a
         // view over standard HTTP response expectations, so loading one from the
@@ -4150,7 +4211,7 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
         if (prefill.errorState) setErrorState(prefill.errorState);
         if (prefill.websocketState) setWebsocketState(prefill.websocketState);
         if (prefill.sseState) setSseState(prefill.sseState);
-        if (prefill.binaryResponseState) setBinaryResponseState(prefill.binaryResponseState);
+        setBinaryResponseState((s) => prefill.binaryResponseState ?? withoutCarriedBinaryFields(s));
         if (prefill.dnsResponseState) setDnsResponseState(prefill.dnsResponseState);
         if (prefill.forwardTemplateState) setForwardTemplateState(prefill.forwardTemplateState);
         if (prefill.forwardClassCallbackState) setForwardClassCallbackState(prefill.forwardClassCallbackState);
@@ -4263,6 +4324,7 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
     setStepsState([]);
     setCaptureEnabled(false);
     setCaptureRules([]);
+    setBinaryResponseState(withoutCarriedBinaryFields);
     // Drop the edit overlay so a fresh compose does not merge onto a stale
     // original (and cannot resurrect an old expectation's unmodeled fields).
     setEditOriginal(null);
@@ -4323,6 +4385,7 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
       setEditJwtModeled(jwtFaithfullyModeled(value['httpRequest']));
       const prefill = actionFromExpectation(item);
       setEditActionModeled(!!prefill || !!existingStepsForFlag);
+      setEditActionBaseline(prefill ? actionBaselineFor(prefill) : undefined);
       if (prefill) {
         const inferredKind = kindForActionType(prefill.type);
         setKind(inferredKind);
@@ -4336,7 +4399,7 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
         if (prefill.errorState) setErrorState(prefill.errorState);
         if (prefill.websocketState) setWebsocketState(prefill.websocketState);
         if (prefill.sseState) setSseState(prefill.sseState);
-        if (prefill.binaryResponseState) setBinaryResponseState(prefill.binaryResponseState);
+        setBinaryResponseState((s) => prefill.binaryResponseState ?? withoutCarriedBinaryFields(s));
         if (prefill.dnsResponseState) setDnsResponseState(prefill.dnsResponseState);
         if (prefill.forwardTemplateState) setForwardTemplateState(prefill.forwardTemplateState);
         if (prefill.forwardClassCallbackState) setForwardClassCallbackState(prefill.forwardClassCallbackState);
@@ -4383,26 +4446,11 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
   // Matcher" playground and the Review preview share ONE buildExpectationJson
   // call — the matcher you test is byte-for-byte the one that would register.
   const draftAction = useMemo<StandardActionPayload>(() => {
-    const a: StandardActionPayload = { type: actionType };
-    if (actionType === 'static') a.static = staticState;
-    if (actionType === 'forward') a.forward = forwardState;
-    if (actionType === 'forward_override') a.forwardOverride = forwardOverrideState;
-    if (actionType === 'forward_fallback') a.forwardFallback = forwardFallbackState;
-    if (actionType === 'callback') a.callback = callbackState;
-    if (actionType === 'template') a.template = templateState;
-    if (actionType === 'error') a.error = errorState;
-    if (actionType === 'websocket') a.websocket = {
-      subprotocol: websocketState.subprotocol,
-      messages: websocketState.messages,
-      closeConnection: websocketState.closeConnection,
-      matchers: websocketState.matchers,
-    };
-    if (actionType === 'sse') a.sse = sseState;
-    if (actionType === 'binary_response') a.binaryResponse = binaryResponseState;
-    if (actionType === 'dns_response') a.dnsResponse = dnsResponseState;
-    if (actionType === 'forward_template') a.forwardTemplate = forwardTemplateState;
-    if (actionType === 'forward_class_callback') a.forwardClassCallback = forwardClassCallbackState;
-    if (actionType === 'grpc_stream') a.grpcStream = grpcStreamState;
+    const a = actionPayloadFromStates({
+      type: actionType, staticState, forwardState, forwardOverrideState, forwardFallbackState,
+      callbackState, templateState, errorState, websocketState, sseState, binaryResponseState,
+      dnsResponseState, forwardTemplateState, forwardClassCallbackState, grpcStreamState,
+    });
     if (chaosEnabled && actionType !== 'error') a.chaos = chaosState;
     // Steps override top-level side-effects
     if (stepsEnabled && stepsState.length > 0) {
@@ -4435,6 +4483,7 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
     if (editOriginal) {
       a.editOriginal = editOriginal;
       a.editActionModeled = editActionModeled;
+      a.editActionBaseline = editActionBaseline;
       // The Advanced form always renders + prefills the JWT section, so it owns
       // jwt on edit — but only when it can faithfully round-trip the original
       // (editJwtModeled); otherwise the original jwt is preserved as passthrough.
@@ -4446,7 +4495,7 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
     callbackState, templateState, errorState, websocketState, sseState, binaryResponseState,
     dnsResponseState, forwardTemplateState, forwardClassCallbackState, grpcStreamState,
     chaosEnabled, chaosState, stepsEnabled, stepsState, sideEffectsEnabled, sideEffects,
-    captureEnabled, captureRules, editOriginal, editActionModeled, editJwtModeled,
+    captureEnabled, captureRules, editOriginal, editActionModeled, editActionBaseline, editJwtModeled,
     scenarioBindingName, scenarioBindingState, scenarioBindingNext,
   ]);
 
@@ -4575,7 +4624,7 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
               // is set only when editing/duplicating; new-compose stays unaffected.
               onRegister={() => void handleRegister(
                 editOriginal
-                  ? { type: 'static', static: staticState, editOriginal, editActionModeled: quickActionModeled }
+                  ? { type: 'static', static: staticState, editOriginal, editActionModeled: quickActionModeled, editActionBaseline }
                   : { type: 'static', static: staticState },
                 matcher,
               )}
