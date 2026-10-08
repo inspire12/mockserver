@@ -14,8 +14,8 @@ flowchart TB
     subgraph "AWS eu-west-2"
         subgraph "VPC (auto-created)"
             subgraph "AutoScaling Group"
-                EC2_1[EC2 c5.2xlarge<br/>Buildkite Agent<br/>20% on-demand / 80% spot]
-                EC2_2[EC2 c5.xlarge<br/>Buildkite Agent<br/>20% on-demand / 80% spot]
+                EC2_1[EC2 m7i.2xlarge<br/>Buildkite Agent<br/>20% on-demand / 80% spot]
+                EC2_2[EC2 m6a.2xlarge<br/>Buildkite Agent<br/>20% on-demand / 80% spot]
             end
         end
         SCALER[Lambda Autoscaler<br/>Runs every minute]
@@ -162,7 +162,7 @@ flowchart LR
 |----------|------|---------|-------------|
 | `buildkite_agent_token` | `string` | *(required)* | Buildkite agent registration token |
 | `region` | `string` | `eu-west-2` | AWS region |
-| `instance_types` | `string` | `c5.2xlarge,c5.xlarge,...` | EC2 instance types (diversified for reliability) |
+| `instance_types` | `string` | `m7i.2xlarge` | EC2 instance types, all 8 vCPU / 32 GiB; the first is used for on-demand, Spot picks from all (tfvars: `m7i.2xlarge,m6a.2xlarge,m6i.2xlarge,m7a.2xlarge`) |
 | `min_size` | `number` | `0` | Minimum instances (0 = scale to zero) |
 | `max_size` | `number` | `10` | Maximum instances |
 | `on_demand_percentage` | `number` | `20` | % on-demand vs spot (20 = 20% on-demand fallback) |
@@ -208,7 +208,7 @@ Five agent queues separate workloads by resource needs:
 
 | Queue | Instance | Capacity mix | Max | Agents/instance | Purpose |
 |-------|----------|-------------|-----|-----------------|---------|
-| `default` | c5.2xlarge / c5a.2xlarge / m5.2xlarge | 20% on-demand / 80% Spot | 10 | 1 | Build and test (Maven, Docker, k3d) |
+| `default` | m7i.2xlarge / m6a.2xlarge / m6i.2xlarge / m7a.2xlarge | 20% on-demand / 80% Spot | 10 | 1 | Build and test (Maven, Docker, k3d) |
 | `trigger` | t3.small / t3a.small / t3.micro | 100% Spot | 4 | 4 | Trigger polling jobs (`sleep` + `curl` loops) |
 | `release` | Same as `default` | 100% on-demand | 2 | 1 | Release pipeline steps with release secrets |
 | `perf` | c5.12xlarge | 100% on-demand | 3 | 1 | Daily performance-regression benchmarks (k6 + JMH); up to three perf jobs at once, each with a whole machine to itself. 24 physical cores, so the server, upstream and k6 cpusets land on genuinely disjoint cores |

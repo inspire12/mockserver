@@ -35,9 +35,14 @@ variable "instance_types" {
   # container needs a >=32 GiB host to leave the daemon/agent/OS room, so every
   # type here is a same-vCPU 32 GiB variant (keeps the 8-vCPU assumption the perf
   # gates rely on). Keep them ALL 8 vCPU / 32 GiB when editing for Spot diversity.
-  description = "EC2 instance types (comma-separated), all 8 vCPU / 32 GiB. First type preferred for on-demand."
+  #
+  # Order matters only for on-demand: the ASG launches on-demand (and the whole
+  # release queue) on the FIRST type, and the stack picks the AMI architecture
+  # from it, so it must stay x86_64. Spot is capacity-optimized and ignores the
+  # order, so a type slow enough to be unwanted must be removed, not demoted.
+  description = "EC2 instance types (comma-separated), all 8 vCPU / 32 GiB, x86_64. First type preferred for on-demand; Spot picks from all of them."
   type        = string
-  default     = "m5.2xlarge"
+  default     = "m7i.2xlarge"
 }
 
 variable "min_size" {

@@ -87,7 +87,7 @@
 #   uses (java-build.sh, java-deploy-snapshot.sh, maven-plugin-build.sh,
 #   ui-java-codegen-compile.sh, helm-integration-test.sh). It clears the declared
 #   6g Xmx plus metaspace/code-cache/native overhead, and the default-queue
-#   agents are c5.2xlarge (16 GiB), so it still leaves ample headroom for the
+#   agents have 32 GiB (m7i.2xlarge class), so it still leaves ample headroom for the
 #   sibling Testcontainers containers — those run on the HOST daemon through the
 #   mounted socket, outside this container's cgroup.
 #

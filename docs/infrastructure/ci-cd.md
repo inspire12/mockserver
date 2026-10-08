@@ -51,7 +51,7 @@ The monorepo uses a path-based pipeline orchestrator that dynamically triggers s
 
 | Queue | Instance Types | Purpose |
 |-------|---------------|---------|
-| `default` | `c5.2xlarge`, `c5a.2xlarge`, `m5.2xlarge` | Build and test workloads (Maven, Docker, k3d) |
+| `default` | `m7i.2xlarge` (on-demand), plus `m6a.2xlarge`, `m6i.2xlarge`, `m7a.2xlarge` for Spot | Build and test workloads (Maven, Docker, k3d) |
 | `trigger` | `t3.small`, `t3a.small`, `t3.micro` | Trigger polling jobs (`sleep` + `curl` loops) |
 | `release` | Same as `default` | Release pipeline steps that access release secrets |
 | `perf` | `c5.12xlarge` | Daily performance-regression benchmarks (k6 + JMH); scale-to-zero, max 3 with one agent per instance, 100% on-demand |
