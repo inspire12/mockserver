@@ -296,8 +296,8 @@ public class AsyncApiMockOrchestrator {
     /**
      * Stop periodic publishing, waiting for an in-flight publish to finish.
      * <p>
-     * Callers close the publishers immediately after this returns (see
-     * {@code resetInternal()}), so returning while a scheduled {@code publishAll} is still running
+     * Callers close the publishers immediately after this returns (the control
+     * plane's teardown does), so returning while a scheduled {@code publishAll} is still running
      * would let that thread publish against a channel being closed underneath it. Shutting down
      * gracefully and then awaiting termination closes that window: {@code shutdown()} cancels the
      * periodic schedule (a {@code ScheduledThreadPoolExecutor} drops periodic tasks on shutdown by

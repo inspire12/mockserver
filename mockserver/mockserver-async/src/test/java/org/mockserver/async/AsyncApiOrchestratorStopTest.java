@@ -21,8 +21,8 @@ import static org.hamcrest.Matchers.is;
 /**
  * {@code stop()} must not return while a publish cycle is still in flight.
  *
- * <p>Callers close the publishers immediately after {@code stop()} returns — {@code resetInternal()}
- * does exactly that — so a scheduler thread still inside {@code publishAll} would be publishing
+ * <p>Callers close the publishers immediately after {@code stop()} returns — the control plane's
+ * teardown does exactly that — so a scheduler thread still inside {@code publishAll} would be publishing
  * against a channel being closed underneath it. {@code shutdownNow()} alone does not prevent this:
  * it interrupts the worker and returns straight away, without waiting for it to unwind.
  *

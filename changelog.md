@@ -792,6 +792,16 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **Stopping MockServer no longer waits for AsyncAPI broker connections that are slow to close.** Stopping the
+  server, or `PUT /mockserver/reset`, closes the Kafka, AMQP and MQTT connections of a loaded AsyncAPI mock, and
+  it used to wait for every one to finish: a broker that was slow to answer a disconnect, or a slowly drained
+  stdout while those connections logged as they closed, could hold `stop()` until it gave up after 30 seconds
+  with the server still holding its port. It now waits up to 5 seconds, logs one warning if connections are
+  still closing, and returns; they finish closing in the background. Loading a new AsyncAPI spec, including on
+  a restarted server or over a spec that is still loaded, first waits up to 30 seconds for the old connections
+  to close, so a new MQTT client does not take over a client id an old connection still holds, then logs a
+  warning and connects anyway. Stopping or resetting MockServer while such a load waits no longer waits for it,
+  and cancels it.
 - **A forwarded stream in a compression MockServer does not decode now keeps its `Content-Encoding`.** When an upstream answered a streamed response (for example Server-Sent Events) in a coding MockServer does not decompress, such as `br` without the Brotli4j library, an unknown coding or a list of codings, MockServer passed the body on still encoded but removed its `Content-Encoding` header, so the client was given bytes it could not read and nothing saying they were encoded. The header is now kept, over HTTP/1.1 and HTTP/2, directly and through a `CONNECT` or SOCKS tunnel, and through a tunnel such a stream is now passed on as it arrives. A stream in a coding MockServer decodes (`gzip`, `deflate`, `snappy`, and `zstd` or `br` when their libraries are present) is still passed on decoded, without the header.
 - **A mocked `1xx` response over HTTP/3 now resets its stream instead of ending it, and no longer closes the whole connection when the expectation has a body or trailers.** An expectation whose response has a `1xx` status (such as `102` or `103`) has nothing more to send. Over HTTP/3 MockServer sent the `1xx` and then ended the stream normally, which HTTP/3 does not allow after an interim response, and if the expectation also had a body or trailers the HTTP/3 connection was closed with an error, failing every other request on it. MockServer now sends the `1xx` header section alone and resets the request's stream with `H3_NO_ERROR`, as it resets an HTTP/2 stream with `NO_ERROR`, so the client's request fails at once and the connection carries on; the client may not receive the `1xx` before the reset. `101` is treated the same way, as HTTP/3 has no upgrade. The first time each such expectation answers an HTTP/3 request, MockServer logs one warning saying what happened and how to answer HTTP/3 clients.
 - **The Python code the dashboard generates for a binary response with no data now works.** It was

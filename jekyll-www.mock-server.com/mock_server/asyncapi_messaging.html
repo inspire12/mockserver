@@ -918,7 +918,9 @@ curl_close($ch);</code></pre>
 
 <h3>Reset</h3>
 
-<p>All async mocking state (publishers, subscribers, and recorded messages) is cleared when you call <span class="inline_code">PUT /mockserver/reset</span>.</p>
+<p>All async mocking state (publishers, subscribers, and recorded messages) is cleared when you call <span class="inline_code">PUT /mockserver/reset</span>, and when MockServer stops.</p>
+
+<p>Resetting or stopping closes the broker connections but waits for them for at most 5 seconds, so a broker that is slow to answer a disconnect cannot hold up your tests' teardown; any connection still closing then logs one warning and finishes closing in the background. The next spec you load, even on a restarted MockServer in the same JVM, waits up to 30 seconds for those connections to close before connecting again, so a new MQTT client never collides with an old one using the same client id. The same applies when a new spec replaces one that is loaded: its old connections are closed first. If they still have not closed by then, MockServer logs a warning and connects the new spec anyway. Resetting or stopping MockServer while a load is waiting cancels that load.</p>
 
 <a id="asyncapi_supported_specs" class="anchor" href="#asyncapi_supported_specs">&nbsp;</a>
 

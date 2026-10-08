@@ -291,7 +291,7 @@ public class AsyncApiControlPlaneImplTest {
             assertThat(e.getMessage(), containsString("Failed to load AsyncAPI spec"));
         }
 
-        // After failure, status should show nothing loaded (resetInternal was called)
+        // After failure, status should show nothing loaded (the failed load took everything out)
         JsonNode status = controlPlane.status();
         assertThat(status.get("loaded").asBoolean(), is(false));
         assertThat(status.get("publishers").asInt(), is(0));

@@ -35,8 +35,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Implementation of {@link AsyncApiControlPlane} that lives in the mockserver-async
@@ -64,6 +68,24 @@ public class AsyncApiControlPlaneImpl implements AsyncApiControlPlane {
      */
     static final int MAX_VALIDATION_ISSUES = 1000;
 
+    /**
+     * How long {@link #reset()}, and so server {@code stop()}, waits for the brokers it closes. The same
+     * budget the orchestrator and the Kafka subscribers give their own shutdown, and well inside the 30 s
+     * after which {@code stop()} gives up.
+     */
+    static final Duration CLOSE_WAIT = Duration.ofSeconds(5);
+
+    /**
+     * How long {@link #load(String)} waits for brokers still closing before it connects anyway; matches the 30 s
+     * {@code stop()} allows a whole server. A close still running after that is stuck, not slow.
+     */
+    static final Duration EARLIER_CLOSE_WAIT = Duration.ofSeconds(30);
+
+    static final String CLOSER_THREAD_NAME = "MockServer-AsyncAPI-broker-close";
+
+    // across every control plane in the JVM: a restarted server registers a new one
+    private static final Set<Teardown> CLOSING = ConcurrentHashMap.newKeySet();
+
     private final AsyncApiParser parser = new AsyncApiParser();
     private final MessageExampleGenerator generator = new MessageExampleGenerator();
     private final AsyncApiSchemaValidator schemaValidator = new AsyncApiSchemaValidator();
@@ -76,6 +98,8 @@ public class AsyncApiControlPlaneImpl implements AsyncApiControlPlane {
      * falls back to {@link ConfigurationProperties} when its own field is unset.
      */
     private final Configuration configuration;
+    private final Duration closeWait;
+    private final Duration earlierCloseWait;
 
     // Active state
     private volatile AsyncApiSpec loadedSpec;
@@ -84,6 +108,8 @@ public class AsyncApiControlPlaneImpl implements AsyncApiControlPlane {
     private final List<MessagePublisher> activePublishers = new CopyOnWriteArrayList<>();
     private final List<MessageSubscriber> activeSubscribers = new CopyOnWriteArrayList<>();
     private final List<SchemaValidationRecord> validationIssues = new CopyOnWriteArrayList<>();
+    // guarded by this; lets a load that waited for earlier closes see that a reset or stop happened meanwhile
+    private long resets;
 
     /**
      * Create a control-plane with no {@link Configuration} instance, falling back entirely
@@ -100,7 +126,13 @@ public class AsyncApiControlPlaneImpl implements AsyncApiControlPlane {
      * @param configuration the server configuration, or {@code null} to use only the static store
      */
     public AsyncApiControlPlaneImpl(Configuration configuration) {
+        this(configuration, CLOSE_WAIT, EARLIER_CLOSE_WAIT);
+    }
+
+    AsyncApiControlPlaneImpl(Configuration configuration, Duration closeWait, Duration earlierCloseWait) {
         this.configuration = configuration;
+        this.closeWait = closeWait;
+        this.earlierCloseWait = earlierCloseWait;
     }
 
     /**
@@ -128,11 +160,50 @@ public class AsyncApiControlPlaneImpl implements AsyncApiControlPlane {
         }
     }
 
+    /**
+     * Replaces whatever is loaded. The brokers it replaces, and any an earlier reset or a stopped server left closing,
+     * close on daemon threads, and the load waits for them without holding the monitor, so a reset, stop, status or
+     * verify meanwhile is not held up: a broker still closing can share the new brokers' client ids (MQTT disconnects
+     * the older session of a client id). After {@link #EARLIER_CLOSE_WAIT} it logs a warning and connects anyway.
+     * A reset or stop while it waits cancels it.
+     */
     @Override
-    public synchronized JsonNode load(String requestBody) {
-        // Reset any previous state
-        resetInternal();
+    public JsonNode load(String requestBody) {
+        long deadline = System.nanoTime() + earlierCloseWait.toNanos();
+        Long resetsAtStart = null;
+        boolean gaveUp = false;
+        try {
+            while (true) {
+                Teardown replaced;
+                synchronized (this) {
+                    if (resetsAtStart == null) {
+                        resetsAtStart = resets;
+                    } else if (resets != resetsAtStart) {
+                        throw new IllegalStateException("a reset or stop happened while this load waited for earlier broker connections to close");
+                    }
+                    replaced = detach().registerClosing();
+                    if (gaveUp || (replaced.isEmpty() && CLOSING.isEmpty())) {
+                        replaced.startClosing();
+                        return loadHoldingMonitor(requestBody);
+                    }
+                }
+                replaced.startClosing();
+                if (!awaitEarlierCloses(deadline)) {
+                    // broker clients bind nothing an old one still holds, so a stuck close must not block every later load
+                    gaveUp = true;
+                    LOG.warn("AsyncAPI broker connections from an earlier reset, stop or load still closing after {}s;"
+                        + " connecting the new ones anyway", earlierCloseWait.getSeconds());
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Failed to load AsyncAPI spec: " + e.getMessage(), e);
+        } catch (IllegalStateException e) {
+            throw new RuntimeException("Failed to load AsyncAPI spec: " + e.getMessage(), e);
+        }
+    }
 
+    private JsonNode loadHoldingMonitor(String requestBody) {
         try {
             // Parse the request body: either a plain spec or a wrapper
             String specContent;
@@ -180,11 +251,11 @@ public class AsyncApiControlPlaneImpl implements AsyncApiControlPlane {
 
         } catch (IllegalArgumentException | com.fasterxml.jackson.core.JsonProcessingException e) {
             // a spec or broker configuration the caller can correct
-            resetInternal();
+            detach().registerClosing().startClosing();
             throw new IllegalArgumentException("Failed to load AsyncAPI spec: " + e.getMessage(), e);
         } catch (Exception e) {
-            // Clean up any partially-created brokers on failure
-            resetInternal();
+            // Clean up any partially-created brokers on failure; a later load waits for them to close
+            detach().registerClosing().startClosing();
             throw new RuntimeException("Failed to load AsyncAPI spec: " + e.getMessage(), e);
         }
     }
@@ -202,7 +273,7 @@ public class AsyncApiControlPlaneImpl implements AsyncApiControlPlane {
 
     /**
      * Create publisher/subscriber connections. Extracted so partial-failure cleanup
-     * is handled by the caller's catch block calling {@link #resetInternal()}.
+     * is handled by the caller's catch block, which takes them out and closes them.
      */
     private void createBrokerConnections(AsyncApiSpec spec, BrokerConfig brokerConfig) {
         int maxRecordedMessages = recordedMessageMaxEntries();
@@ -526,21 +597,44 @@ public class AsyncApiControlPlaneImpl implements AsyncApiControlPlane {
         return new AsyncApiHttpExpectationGenerator().generateSerialized(requestBody);
     }
 
+    /**
+     * Takes the brokers out of the control plane and closes them on a daemon thread, waiting up to
+     * {@link #CLOSE_WAIT} for that before returning; closes still running then finish in the background.
+     * Server {@code stop()} runs this: closing can log (the orchestrator and the broker clients do), console
+     * logging is synchronous, and a broker can be slow to close, so neither a blocked console nor a slow
+     * broker may hold {@code stop()}, or {@code load}/{@code status}/{@code verify} behind the monitor.
+     */
     @Override
     public void reset() {
-        // Server stop() runs this. Closing brokers can write to the console (the orchestrator and the
-        // broker clients log), and console logging is synchronous, so the closing happens after the
-        // monitor is released: a console that drains slowly must not hold load/status/verify behind it.
-        // No log line of its own, as that would make stop() itself wait for the console.
         Teardown teardown;
         synchronized (this) {
-            teardown = detach();
+            resets++;
+            // registered under the monitor, so a load that takes it next waits for these closes
+            teardown = detach().registerClosing();
         }
-        teardown.close();
+        teardown.closeInBackground(closeWait);
     }
 
-    private void resetInternal() {
-        detach().close();
+    /**
+     * Must be called without holding this control plane's monitor: waits for the closes registered so far, on every
+     * control plane in the JVM (a restarted server registers a new one), until the deadline.
+     *
+     * @return false if a close was still running at the deadline
+     */
+    private boolean awaitEarlierCloses(long deadline) throws InterruptedException {
+        for (Teardown closing : CLOSING) {
+            if (!closing.closed.await(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Package-private: the number of broker closes still running, across every control plane in this JVM.
+     */
+    static int closesInProgress() {
+        return CLOSING.size();
     }
 
     /**
@@ -564,14 +658,76 @@ public class AsyncApiControlPlaneImpl implements AsyncApiControlPlane {
         private final List<MessagePublisher> publishers;
         private final List<MessageSubscriber> subscribers;
 
+        private final CountDownLatch closed = new CountDownLatch(1);
+
         private Teardown(List<AsyncApiMockOrchestrator> orchestrators, List<MessagePublisher> publishers, List<MessageSubscriber> subscribers) {
             this.orchestrators = orchestrators;
             this.publishers = publishers;
             this.subscribers = subscribers;
         }
 
-        // orchestrators first: they publish through the publishers closed after them
+        private boolean isEmpty() {
+            return orchestrators.isEmpty() && publishers.isEmpty() && subscribers.isEmpty();
+        }
+
+        private Teardown registerClosing() {
+            if (!isEmpty()) {
+                CLOSING.add(this);
+            }
+            return this;
+        }
+
+        private void closeInBackground(Duration wait) {
+            if (!startClosing()) {
+                return;
+            }
+            try {
+                if (!closed.await(wait.toMillis(), TimeUnit.MILLISECONDS)) {
+                    // from a thread of its own: with stdout blocked, logging here would hold stop() after all
+                    Thread notice = new Thread(() -> LOG.warn("AsyncAPI broker connections still closing after {}s;"
+                        + " the reset or stop goes ahead and they finish closing in the background", wait.getSeconds()), CLOSER_THREAD_NAME + " notice");
+                    notice.setDaemon(true);
+                    notice.start();
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+
+        /**
+         * Closes on a daemon thread, or on the caller's if one cannot be started.
+         *
+         * @return false when there was nothing to close
+         */
+        private boolean startClosing() {
+            if (isEmpty()) {
+                return false;
+            }
+            boolean started = false;
+            try {
+                Thread closer = new Thread(this::close, CLOSER_THREAD_NAME);
+                closer.setDaemon(true);
+                closer.start();
+                started = true;
+            } finally {
+                if (!started) {
+                    close();
+                }
+            }
+            return true;
+        }
+
         private void close() {
+            try {
+                closeAll();
+            } finally {
+                CLOSING.remove(this);
+                closed.countDown();
+            }
+        }
+
+        // orchestrators first: they publish through the publishers closed after them
+        private void closeAll() {
             for (AsyncApiMockOrchestrator orchestrator : orchestrators) {
                 try {
                     orchestrator.stop();
@@ -650,7 +806,7 @@ public class AsyncApiControlPlaneImpl implements AsyncApiControlPlane {
      * Run the load-time one-shot publish, recording any failure as a validation issue instead of
      * letting it fail the spec load.
      * <p>
-     * This call sits inside the {@code try} whose {@code catch} calls {@link #resetInternal()}, so
+     * This call sits inside the {@code try} whose {@code catch} takes out and closes every broker, so
      * an escaping exception would tear down every publisher, subscriber and orchestrator across
      * <em>all</em> brokers and fail {@code PUT /mockserver/asyncapi} outright. Since
      * {@code publishOnLoad} defaults to true, that would make the default path for an
