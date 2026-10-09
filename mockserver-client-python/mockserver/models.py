@@ -300,12 +300,18 @@ class Delay:
     time_unit: str = "MILLISECONDS"
     value: int = 0
     distribution: DelayDistribution | None = None
+    # Rendered against the request and read as milliseconds; falls back to time_unit/value.
+    template: str | None = None
+    # VELOCITY or MUSTACHE.
+    template_type: str | None = None
 
     def to_dict(self) -> dict:
         return _strip_none({
             "timeUnit": self.time_unit,
             "value": self.value,
             "distribution": self.distribution.to_dict() if self.distribution else None,
+            "template": self.template,
+            "templateType": self.template_type,
         })
 
     @classmethod
@@ -317,6 +323,8 @@ class Delay:
             time_unit=data.get("timeUnit", "MILLISECONDS"),
             value=data.get("value", 0),
             distribution=DelayDistribution.from_dict(dist_data) if dist_data else None,
+            template=data.get("template"),
+            template_type=data.get("templateType"),
         )
 
 
@@ -1362,6 +1370,35 @@ class ConnectionOptions:
 
 
 @dataclass
+class RecoverAfter:
+    """Serve ``fail_response`` for the first ``fail_times`` matches, then the real response.
+
+    ``idempotency_header`` keys an independent failure window per value of that request header.
+    """
+
+    fail_times: int | None = None
+    fail_response: HttpResponse | None = None
+    idempotency_header: str | None = None
+
+    def to_dict(self) -> dict:
+        return _strip_none({
+            "failTimes": self.fail_times,
+            "failResponse": self.fail_response.to_dict() if self.fail_response else None,
+            "idempotencyHeader": self.idempotency_header,
+        })
+
+    @classmethod
+    def from_dict(cls, data: dict) -> RecoverAfter:
+        if data is None:
+            return None
+        return cls(
+            fail_times=data.get("failTimes"),
+            fail_response=HttpResponse.from_dict(data.get("failResponse")),
+            idempotency_header=data.get("idempotencyHeader"),
+        )
+
+
+@dataclass
 class HttpResponse:
     status_code: int | None = None
     reason_phrase: str | None = None
@@ -1373,6 +1410,11 @@ class HttpResponse:
     primary: bool | None = None
     # HTTP trailing headers (sent after the body); same keyToMultiValue shape as headers.
     trailers: list[KeyToMultiValue] | None = None
+    # A status drawn from a range, e.g. "2xx" or "200-299".
+    status_code_range: str | None = None
+    # A JSON schema the body is generated from.
+    generate_from_schema: str | None = None
+    recover_after: RecoverAfter | None = None
 
     def to_dict(self) -> dict:
         return _strip_none({
@@ -1385,6 +1427,9 @@ class HttpResponse:
             "connectionOptions": self.connection_options.to_dict() if self.connection_options else None,
             "primary": self.primary,
             "trailers": _serialize_key_multi_values(self.trailers),
+            "statusCodeRange": self.status_code_range,
+            "generateFromSchema": self.generate_from_schema,
+            "recoverAfter": self.recover_after.to_dict() if self.recover_after else None,
         })
 
     @classmethod
@@ -1401,6 +1446,9 @@ class HttpResponse:
             connection_options=ConnectionOptions.from_dict(data.get("connectionOptions")),
             primary=data.get("primary"),
             trailers=_deserialize_key_multi_values(data.get("trailers")),
+            status_code_range=data.get("statusCodeRange"),
+            generate_from_schema=data.get("generateFromSchema"),
+            recover_after=RecoverAfter.from_dict(data.get("recoverAfter")),
         )
 
     @staticmethod
@@ -1455,6 +1503,18 @@ class HttpResponse:
         self.trailers.append(KeyToMultiValue(name=name, values=list(values)))
         return self
 
+    def with_status_code_range(self, status_code_range: str) -> HttpResponse:
+        self.status_code_range = status_code_range
+        return self
+
+    def with_generate_from_schema(self, schema: str) -> HttpResponse:
+        self.generate_from_schema = schema
+        return self
+
+    def with_recover_after(self, recover_after: RecoverAfter) -> HttpResponse:
+        self.recover_after = recover_after
+        return self
+
 
 @dataclass
 class HttpForward:
@@ -1497,6 +1557,10 @@ class HttpTemplate:
     template_file: str | None = None
     delay: Delay | None = None
     primary: bool | None = None
+    # Response fields applied over the rendered template's output.
+    response_override: HttpResponse | None = None
+    # The server's responseModifier object (headers / cookies add, replace, remove; condition; patches).
+    response_modifier: dict | None = None
 
     def to_dict(self) -> dict:
         return _strip_none({
@@ -1505,6 +1569,8 @@ class HttpTemplate:
             "templateFile": self.template_file,
             "delay": self.delay.to_dict() if self.delay else None,
             "primary": self.primary,
+            "responseOverride": self.response_override.to_dict() if self.response_override else None,
+            "responseModifier": self.response_modifier,
         })
 
     @classmethod
@@ -1517,6 +1583,8 @@ class HttpTemplate:
             template_file=data.get("templateFile"),
             delay=Delay.from_dict(data.get("delay")),
             primary=data.get("primary"),
+            response_override=HttpResponse.from_dict(data.get("responseOverride")),
+            response_modifier=data.get("responseModifier"),
         )
 
 
@@ -1662,6 +1730,8 @@ class HttpSseResponse:
     close_connection: bool | None = None
     delay: Delay | None = None
     primary: bool | None = None
+    # Renders each event's fields with this engine (VELOCITY / JAVASCRIPT / MUSTACHE).
+    template_type: str | None = None
 
     def to_dict(self) -> dict:
         result: dict = {}
@@ -1673,6 +1743,8 @@ class HttpSseResponse:
             result["events"] = [e.to_dict() if hasattr(e, 'to_dict') else e for e in self.events]
         if self.close_connection is not None:
             result["closeConnection"] = self.close_connection
+        if self.template_type is not None:
+            result["templateType"] = self.template_type
         if self.delay is not None:
             result["delay"] = self.delay.to_dict()
         if self.primary is not None:
@@ -1694,6 +1766,7 @@ class HttpSseResponse:
             close_connection=data.get("closeConnection"),
             delay=Delay.from_dict(data.get("delay")),
             primary=data.get("primary"),
+            template_type=data.get("templateType"),
         )
 
 
@@ -1764,6 +1837,43 @@ class WebSocketFrameMatcher:
 
 
 @dataclass
+class GraphQLSubscriptionFilter:
+    """Matches a ``graphql-transport-ws`` subscribe message against this GraphQL query."""
+
+    query: str | None = None
+    operation_name: str | None = None
+    variables_schema: str | None = None
+    # NORMALISED_STRING, AST_EXACT or AST_SUBSET.
+    selection_set_match_type: str | None = None
+    fields: list[str] | None = None
+    # Optional body-type discriminator; only "GRAPHQL" is meaningful.
+    type: str | None = None
+
+    def to_dict(self) -> dict:
+        return _strip_none({
+            "type": self.type,
+            "query": self.query,
+            "operationName": self.operation_name,
+            "variablesSchema": self.variables_schema,
+            "selectionSetMatchType": self.selection_set_match_type,
+            "fields": list(self.fields) if self.fields is not None else None,
+        })
+
+    @classmethod
+    def from_dict(cls, data: dict) -> GraphQLSubscriptionFilter:
+        if data is None:
+            return None
+        return cls(
+            query=data.get("query"),
+            operation_name=data.get("operationName"),
+            variables_schema=data.get("variablesSchema"),
+            selection_set_match_type=data.get("selectionSetMatchType"),
+            fields=data.get("fields"),
+            type=data.get("type"),
+        )
+
+
+@dataclass
 class HttpWebSocketResponse:
     subprotocol: str | None = None
     messages: list[WebSocketMessage] | None = None
@@ -1771,6 +1881,9 @@ class HttpWebSocketResponse:
     close_connection: bool | None = None
     delay: Delay | None = None
     primary: bool | None = None
+    # Renders each message with this engine (VELOCITY / JAVASCRIPT / MUSTACHE).
+    template_type: str | None = None
+    graphql_subscription_filter: GraphQLSubscriptionFilter | None = None
 
     def to_dict(self) -> dict:
         result: dict = {}
@@ -1786,6 +1899,10 @@ class HttpWebSocketResponse:
             result["delay"] = self.delay.to_dict()
         if self.primary is not None:
             result["primary"] = self.primary
+        if self.template_type is not None:
+            result["templateType"] = self.template_type
+        if self.graphql_subscription_filter is not None:
+            result["graphqlSubscriptionFilter"] = self.graphql_subscription_filter.to_dict()
         return result
 
     @classmethod
@@ -1807,6 +1924,8 @@ class HttpWebSocketResponse:
             close_connection=data.get("closeConnection"),
             delay=Delay.from_dict(data.get("delay")),
             primary=data.get("primary"),
+            template_type=data.get("templateType"),
+            graphql_subscription_filter=GraphQLSubscriptionFilter.from_dict(data.get("graphqlSubscriptionFilter")),
         )
 
 

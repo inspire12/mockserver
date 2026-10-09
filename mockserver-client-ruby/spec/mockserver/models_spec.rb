@@ -3228,4 +3228,107 @@ RSpec.describe 'MockServer models' do
       expect(exp.to_h['timestamp']).to eq('2026-07-03T12:00:00.000Z')
     end
   end
+
+  # -------------------------------------------------------------------
+  # Action fields the server accepts: each round-trips under its wire
+  # name and is left out when unset.
+  # -------------------------------------------------------------------
+  describe 'action fields the server accepts' do
+    it 'Delay round-trips template and templateType' do
+      data = { 'timeUnit' => 'SECONDS', 'value' => 2, 'template' => '$!request.path.length()', 'templateType' => 'VELOCITY' }
+      delay = MockServer::Delay.from_hash(data)
+      expect(delay.template).to eq('$!request.path.length()')
+      expect(delay.template_type).to eq('VELOCITY')
+      expect(delay.to_h).to eq(data)
+      expect(MockServer::Delay.new(time_unit: 'SECONDS', value: 2).to_h).to eq({ 'timeUnit' => 'SECONDS', 'value' => 2 })
+    end
+
+    it 'HttpResponse round-trips statusCodeRange, generateFromSchema and recoverAfter' do
+      data = {
+        'statusCode' => 200,
+        'statusCodeRange' => '2xx',
+        'generateFromSchema' => '{"type":"string"}',
+        'recoverAfter' => {
+          'failTimes' => 2,
+          'failResponse' => { 'statusCode' => 503, 'body' => 'busy' },
+          'idempotencyHeader' => 'X-Idempotency'
+        }
+      }
+      resp = MockServer::HttpResponse.from_hash(data)
+      expect(resp.recover_after).to be_a(MockServer::RecoverAfter)
+      expect(resp.recover_after.fail_response).to be_a(MockServer::HttpResponse)
+      expect(resp.to_h).to eq(data)
+      built = MockServer::HttpResponse.response(status_code: 200)
+                                      .with_status_code_range('2xx')
+                                      .with_generate_from_schema('{"type":"string"}')
+                                      .with_recover_after(MockServer::RecoverAfter.new(
+                                        fail_times: 2,
+                                        fail_response: MockServer::HttpResponse.new(status_code: 503, body: 'busy'),
+                                        idempotency_header: 'X-Idempotency'
+                                      ))
+      expect(built.to_h).to eq(data)
+      unset = MockServer::HttpResponse.new(status_code: 200).to_h
+      expect(unset.keys & %w[statusCodeRange generateFromSchema recoverAfter]).to be_empty
+      expect(MockServer::RecoverAfter.new.to_h).to eq({})
+    end
+
+    it 'HttpTemplate round-trips responseOverride and responseModifier' do
+      data = {
+        'templateType' => 'VELOCITY',
+        'template' => '$!request.path',
+        'responseOverride' => { 'statusCode' => 297, 'headers' => [{ 'name' => 'x-a', 'values' => ['b'] }] },
+        'responseModifier' => { 'headers' => { 'remove' => ['x-gone'] }, 'cookies' => { 'add' => { 'c' => 'v' } } }
+      }
+      tmpl = MockServer::HttpTemplate.from_hash(data)
+      expect(tmpl.response_override).to be_a(MockServer::HttpResponse)
+      expect(tmpl.to_h).to eq(data)
+      built = MockServer::HttpTemplate.template('VELOCITY', '$!request.path')
+                                      .with_response_override(MockServer::HttpResponse.new(status_code: 297).with_header('x-a', 'b'))
+                                      .with_response_modifier(data['responseModifier'])
+      expect(built.to_h).to eq(data)
+      unset = MockServer::HttpTemplate.template('VELOCITY', 'x').to_h
+      expect(unset.keys & %w[responseOverride responseModifier]).to be_empty
+    end
+
+    it 'HttpWebSocketResponse round-trips templateType and graphqlSubscriptionFilter' do
+      data = {
+        'messages' => [{ 'text' => 'hi' }],
+        'templateType' => 'MUSTACHE',
+        'graphqlSubscriptionFilter' => {
+          'type' => 'GRAPHQL',
+          'query' => 'subscription { ticks }',
+          'operationName' => 'Ticks',
+          'variablesSchema' => '{"type":"object"}',
+          'selectionSetMatchType' => 'AST_SUBSET',
+          'fields' => ['ticks']
+        }
+      }
+      resp = MockServer::HttpWebSocketResponse.from_hash(data)
+      expect(resp.graphql_subscription_filter).to be_a(MockServer::GraphQLSubscriptionFilter)
+      expect(resp.to_h).to eq(data)
+      unset = MockServer::HttpWebSocketResponse.new(messages: [MockServer::WebSocketMessage.new(text: 'hi')]).to_h
+      expect(unset.keys & %w[templateType graphqlSubscriptionFilter]).to be_empty
+      expect(MockServer::GraphQLSubscriptionFilter.new(query: 'subscription { a }').to_h).to eq({ 'query' => 'subscription { a }' })
+    end
+
+    it 'HttpSseResponse round-trips templateType' do
+      data = { 'statusCode' => 200, 'events' => [{ 'data' => 'd' }], 'templateType' => 'MUSTACHE' }
+      expect(MockServer::HttpSseResponse.from_hash(data).to_h).to eq(data)
+      expect(MockServer::HttpSseResponse.new(status_code: 200).to_h).not_to have_key('templateType')
+    end
+
+    it 'Expectation carries the fields through' do
+      data = {
+        'httpRequest' => { 'path' => '/x' },
+        'httpResponseTemplate' => {
+          'templateType' => 'MUSTACHE',
+          'template' => '{}',
+          'delay' => { 'timeUnit' => 'MILLISECONDS', 'value' => 1, 'template' => '{{ request.path.length }}', 'templateType' => 'MUSTACHE' },
+          'responseOverride' => { 'statusCode' => 201 },
+          'responseModifier' => { 'headers' => { 'remove' => ['x'] } }
+        }
+      }
+      expect(MockServer::Expectation.from_hash(data).to_h).to include(data)
+    end
+  end
 end

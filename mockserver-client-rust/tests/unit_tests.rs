@@ -702,6 +702,47 @@ fn test_delay_seconds() {
     assert_eq!(json["value"], 5);
 }
 
+#[test]
+fn test_delay_new_takes_any_time_unit() {
+    let json = serde_json::to_value(Delay::new("DAYS", 1)).unwrap();
+    assert_eq!(json, serde_json::json!({"timeUnit": "DAYS", "value": 1}));
+}
+
+#[test]
+fn test_delay_distribution_roundtrip() {
+    for (distribution, wire) in [
+        (DelayDistribution::uniform(10, 20), serde_json::json!({"type": "UNIFORM", "min": 10, "max": 20})),
+        (DelayDistribution::log_normal(30, 90), serde_json::json!({"type": "LOG_NORMAL", "median": 30, "p99": 90})),
+        (DelayDistribution::gaussian(50, 5), serde_json::json!({"type": "GAUSSIAN", "mean": 50, "stdDev": 5})),
+    ] {
+        let delay = Delay::milliseconds(1).distribution(distribution);
+        let json = serde_json::to_value(&delay).unwrap();
+        assert_eq!(json, serde_json::json!({"timeUnit": "MILLISECONDS", "value": 1, "distribution": wire}));
+        let back: Delay = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(back, delay);
+        assert_eq!(serde_json::to_value(&back).unwrap(), json);
+    }
+}
+
+#[test]
+fn test_delay_template_roundtrip() {
+    let delay = Delay::seconds(2).template("$!request.path.length()").template_type("VELOCITY");
+    let json = serde_json::to_value(&delay).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "timeUnit": "SECONDS",
+            "value": 2,
+            "template": "$!request.path.length()",
+            "templateType": "VELOCITY"
+        })
+    );
+    let back: Delay = serde_json::from_value(json.clone()).unwrap();
+    assert_eq!(back, delay);
+    let unset = serde_json::to_value(Delay::seconds(2)).unwrap();
+    assert_eq!(unset, serde_json::json!({"timeUnit": "SECONDS", "value": 2}));
+}
+
 // ---------------------------------------------------------------------------
 // Expectation array serialization (upsert payload)
 // ---------------------------------------------------------------------------
@@ -789,6 +830,30 @@ fn test_http_template_delay_and_primary_roundtrip() {
     let unset = serde_json::to_value(HttpTemplate::new("MUSTACHE", "{}")).unwrap();
     assert!(unset.get("delay").is_none());
     assert!(unset.get("primary").is_none());
+}
+
+#[test]
+fn test_http_template_response_override_and_modifier_roundtrip() {
+    let modifier = serde_json::json!({"headers": {"remove": ["x-gone"]}, "cookies": {"add": {"c": "v"}}});
+    let tmpl = HttpTemplate::new("VELOCITY", "$!request.path")
+        .response_override(HttpResponse::new().status_code(297))
+        .response_modifier(modifier.clone());
+    let json = serde_json::to_value(&tmpl).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "templateType": "VELOCITY",
+            "template": "$!request.path",
+            "responseOverride": {"statusCode": 297},
+            "responseModifier": modifier
+        })
+    );
+    let back: HttpTemplate = serde_json::from_value(json.clone()).unwrap();
+    assert_eq!(back, tmpl);
+    assert_eq!(serde_json::to_value(&back).unwrap(), json);
+    let unset = serde_json::to_value(HttpTemplate::from_file("MUSTACHE", "t.mustache")).unwrap();
+    assert!(unset.get("responseOverride").is_none());
+    assert!(unset.get("responseModifier").is_none());
 }
 
 #[test]

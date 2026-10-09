@@ -41,25 +41,12 @@ function rustNotes(code: string): string[] {
   return Array.from(code.matchAll(/\/\* NOTE: the Rust (\w+) model has no (.*?); omitted \*\//g), (m) => `${m[1]}: ${m[2]}`);
 }
 
-/** What the Python and Ruby models cannot hold (identical for both clients). */
-const MODEL_GAPS: Record<string, string[]> = {
-  httpResponse: ['httpResponse.statusCodeRange', 'httpResponse.generateFromSchema', 'httpResponse.recoverAfter'],
-  httpForward: ['httpForward.delay.template', 'httpForward.delay.templateType'],
-  httpResponseTemplate: ['httpResponseTemplate.responseOverride', 'httpResponseTemplate.responseModifier'],
-  httpWebSocketResponse: ['httpWebSocketResponse.templateType', 'httpWebSocketResponse.graphqlSubscriptionFilter'],
-  httpSseResponse: ['httpSseResponse.templateType'],
-  httpForwardTemplate: ['httpForwardTemplate.delay.template', 'httpForwardTemplate.delay.templateType'],
-  httpForwardClassCallback: ['httpForwardClassCallback.delay.template', 'httpForwardClassCallback.delay.templateType'],
-};
+/** What the Python and Ruby models cannot hold (identical for both clients); empty while every schema field has one. */
+const MODEL_GAPS: Record<string, string[]> = {};
 
 /** What the Rust models cannot hold; every other field is typed or carried in an `extra` map. */
-const RUST_GAPS: Record<string, string[]> = {
-  httpForward: ['Delay: template, templateType'],
-  httpResponseTemplate: ['HttpTemplate: responseOverride, responseModifier', 'Delay: distribution'],
-  httpForwardTemplate: ['Delay: template, templateType'],
-  httpForwardClassCallback: ['Delay: template, templateType'],
-};
-const rustGaps = (key: string): string[] => RUST_GAPS[key] ?? ['Delay: distribution'];
+const RUST_GAPS: Record<string, string[]> = {};
+const rustGaps = (key: string): string[] => RUST_GAPS[key] ?? [];
 
 describe('all-fields action edits', () => {
   it.each(actionFieldCombos.map((c) => [c.name, c] as const))('%s: the saved expectation carries every field', (_name, c) => {

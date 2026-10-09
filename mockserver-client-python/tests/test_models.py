@@ -16,8 +16,10 @@ from mockserver.models import (
     DnsRecordType,
     DnsRequestDefinition,
     GraphQLBody,
+    GraphQLSubscriptionFilter,
     HttpForwardValidateAction,
     HttpForwardWithFallback,
+    HttpSseResponse,
     HttpWebSocketResponse,
     JsonSchemaBody,
     MultipartBody,
@@ -25,6 +27,7 @@ from mockserver.models import (
     Protocol,
     RateLimit,
     RateLimitAlgorithm,
+    RecoverAfter,
     ValidationMode,
     WasmBody,
     XPathBody,
@@ -4323,5 +4326,98 @@ class TestExpectationTimestamp:
             "httpRequest": {"path": "/x"},
             "httpResponse": {"body": "ok"},
             "timestamp": "2026-07-03T12:00:00.000Z",
+        }
+        assert Expectation.from_dict(data).to_dict() == data
+
+
+class TestActionFieldsTheServerAccepts:
+    """Each field round-trips under the server's wire name and is left out when unset."""
+
+    def test_delay_template_round_trip(self):
+        data = {"timeUnit": "SECONDS", "value": 2, "template": "$!request.path.length()", "templateType": "VELOCITY"}
+        delay = Delay.from_dict(data)
+        assert delay.template == "$!request.path.length()"
+        assert delay.template_type == "VELOCITY"
+        assert delay.to_dict() == data
+        assert Delay(time_unit="SECONDS", value=2).to_dict() == {"timeUnit": "SECONDS", "value": 2}
+
+    def test_response_status_code_range_schema_and_recover_after_round_trip(self):
+        data = {
+            "statusCode": 200,
+            "statusCodeRange": "2xx",
+            "generateFromSchema": '{"type":"string"}',
+            "recoverAfter": {
+                "failTimes": 2,
+                "failResponse": {"statusCode": 503, "body": "busy"},
+                "idempotencyHeader": "X-Idempotency",
+            },
+        }
+        resp = HttpResponse.from_dict(data)
+        assert isinstance(resp.recover_after, RecoverAfter)
+        assert isinstance(resp.recover_after.fail_response, HttpResponse)
+        assert resp.to_dict() == data
+        built = (
+            HttpResponse.response(status_code=200)
+            .with_status_code_range("2xx")
+            .with_generate_from_schema('{"type":"string"}')
+            .with_recover_after(RecoverAfter(
+                fail_times=2,
+                fail_response=HttpResponse(status_code=503, body="busy"),
+                idempotency_header="X-Idempotency",
+            ))
+        )
+        assert built.to_dict() == data
+        unset = HttpResponse(status_code=200).to_dict()
+        assert not {"statusCodeRange", "generateFromSchema", "recoverAfter"} & unset.keys()
+        assert RecoverAfter().to_dict() == {}
+
+    def test_template_response_override_and_modifier_round_trip(self):
+        data = {
+            "templateType": "VELOCITY",
+            "template": "$!request.path",
+            "responseOverride": {"statusCode": 297, "headers": [{"name": "x-a", "values": ["b"]}]},
+            "responseModifier": {"headers": {"remove": ["x-gone"]}, "cookies": {"add": {"c": "v"}}},
+        }
+        tmpl = HttpTemplate.from_dict(data)
+        assert isinstance(tmpl.response_override, HttpResponse)
+        assert tmpl.to_dict() == data
+        unset = HttpTemplate(template_type="VELOCITY", template="x").to_dict()
+        assert not {"responseOverride", "responseModifier"} & unset.keys()
+
+    def test_websocket_template_type_and_graphql_filter_round_trip(self):
+        data = {
+            "messages": [{"text": "hi"}],
+            "templateType": "MUSTACHE",
+            "graphqlSubscriptionFilter": {
+                "type": "GRAPHQL",
+                "query": "subscription { ticks }",
+                "operationName": "Ticks",
+                "variablesSchema": '{"type":"object"}',
+                "selectionSetMatchType": "AST_SUBSET",
+                "fields": ["ticks"],
+            },
+        }
+        resp = HttpWebSocketResponse.from_dict(data)
+        assert isinstance(resp.graphql_subscription_filter, GraphQLSubscriptionFilter)
+        assert resp.to_dict() == data
+        unset = HttpWebSocketResponse(messages=[WebSocketMessage(text="hi")]).to_dict()
+        assert not {"templateType", "graphqlSubscriptionFilter"} & unset.keys()
+        assert GraphQLSubscriptionFilter(query="subscription { a }").to_dict() == {"query": "subscription { a }"}
+
+    def test_sse_template_type_round_trip(self):
+        data = {"statusCode": 200, "events": [{"data": "d"}], "templateType": "MUSTACHE"}
+        assert HttpSseResponse.from_dict(data).to_dict() == data
+        assert "templateType" not in HttpSseResponse(status_code=200).to_dict()
+
+    def test_expectation_carries_the_fields_through(self):
+        data = {
+            "httpRequest": {"path": "/x"},
+            "httpResponseTemplate": {
+                "templateType": "MUSTACHE",
+                "template": "{}",
+                "delay": {"timeUnit": "MILLISECONDS", "value": 1, "template": "{{ request.path.length }}", "templateType": "MUSTACHE"},
+                "responseOverride": {"statusCode": 201},
+                "responseModifier": {"headers": {"remove": ["x"]}},
+            },
         }
         assert Expectation.from_dict(data).to_dict() == data

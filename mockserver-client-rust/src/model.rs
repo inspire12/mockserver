@@ -1617,6 +1617,15 @@ pub struct HttpTemplate {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary: Option<bool>,
+
+    /// Response fields applied over the rendered template's output.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_override: Option<HttpResponse>,
+
+    /// The server's `responseModifier` object (headers / cookies add, replace
+    /// and remove, a condition, JSON patches), kept as free-form JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_modifier: Option<serde_json::Value>,
 }
 
 impl HttpTemplate {
@@ -1625,9 +1634,7 @@ impl HttpTemplate {
         Self {
             template_type: Some(template_type.into()),
             template: Some(template.into()),
-            template_file: None,
-            delay: None,
-            primary: None,
+            ..Default::default()
         }
     }
 
@@ -1635,10 +1642,8 @@ impl HttpTemplate {
     pub fn from_file(template_type: impl Into<String>, file_path: impl Into<String>) -> Self {
         Self {
             template_type: Some(template_type.into()),
-            template: None,
             template_file: Some(file_path.into()),
-            delay: None,
-            primary: None,
+            ..Default::default()
         }
     }
 
@@ -1669,6 +1674,18 @@ impl HttpTemplate {
     /// Mark this action as the primary action of the expectation.
     pub fn primary(mut self, primary: bool) -> Self {
         self.primary = Some(primary);
+        self
+    }
+
+    /// Apply these response fields over the rendered template's output.
+    pub fn response_override(mut self, response: HttpResponse) -> Self {
+        self.response_override = Some(response);
+        self
+    }
+
+    /// Rewrite the rendered response with a `responseModifier` object.
+    pub fn response_modifier(mut self, modifier: serde_json::Value) -> Self {
+        self.response_modifier = Some(modifier);
         self
     }
 }
@@ -2910,23 +2927,104 @@ impl OpenApiExpectation {
 pub struct Delay {
     pub time_unit: String,
     pub value: u64,
+
+    /// A variable delay drawn from this distribution instead of `value`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub distribution: Option<DelayDistribution>,
+
+    /// Rendered against the request and read as milliseconds; a non-numeric or
+    /// blank result falls back to `time_unit` / `value`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+
+    /// Engine for `template`: `VELOCITY` or `MUSTACHE`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template_type: Option<String>,
 }
 
 impl Delay {
+    /// Create a delay of `value` in the given time unit (e.g. `"MINUTES"`).
+    pub fn new(time_unit: impl Into<String>, value: u64) -> Self {
+        Self {
+            time_unit: time_unit.into(),
+            value,
+            distribution: None,
+            template: None,
+            template_type: None,
+        }
+    }
+
     /// Create a delay in milliseconds.
     pub fn milliseconds(value: u64) -> Self {
-        Self {
-            time_unit: "MILLISECONDS".to_string(),
-            value,
-        }
+        Self::new("MILLISECONDS", value)
     }
 
     /// Create a delay in seconds.
     pub fn seconds(value: u64) -> Self {
-        Self {
-            time_unit: "SECONDS".to_string(),
-            value,
-        }
+        Self::new("SECONDS", value)
+    }
+
+    /// Draw the delay from a distribution instead of using `value`.
+    pub fn distribution(mut self, distribution: DelayDistribution) -> Self {
+        self.distribution = Some(distribution);
+        self
+    }
+
+    /// Compute the delay in milliseconds from a template rendered against the request.
+    pub fn template(mut self, template: impl Into<String>) -> Self {
+        self.template = Some(template.into());
+        self
+    }
+
+    /// Set the engine for the delay template (`VELOCITY` or `MUSTACHE`).
+    pub fn template_type(mut self, template_type: impl Into<String>) -> Self {
+        self.template_type = Some(template_type.into());
+        self
+    }
+}
+
+/// The distribution of a variable [`Delay`], in milliseconds: `UNIFORM` uses
+/// `min` and `max`, `LOG_NORMAL` uses `median` and `p99`, `GAUSSIAN` uses
+/// `mean` and `std_dev`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DelayDistribution {
+    #[serde(rename = "type")]
+    pub distribution_type: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub median: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p99: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mean: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub std_dev: Option<u64>,
+}
+
+impl DelayDistribution {
+    /// A delay drawn uniformly between `min` and `max` milliseconds.
+    pub fn uniform(min: u64, max: u64) -> Self {
+        Self { distribution_type: "UNIFORM".to_string(), min: Some(min), max: Some(max), ..Default::default() }
+    }
+
+    /// A log-normal delay with the given median and 99th percentile in milliseconds.
+    pub fn log_normal(median: u64, p99: u64) -> Self {
+        Self { distribution_type: "LOG_NORMAL".to_string(), median: Some(median), p99: Some(p99), ..Default::default() }
+    }
+
+    /// A Gaussian delay with the given mean and standard deviation in milliseconds.
+    pub fn gaussian(mean: u64, std_dev: u64) -> Self {
+        Self { distribution_type: "GAUSSIAN".to_string(), mean: Some(mean), std_dev: Some(std_dev), ..Default::default() }
     }
 }
 

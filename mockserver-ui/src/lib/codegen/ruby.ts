@@ -141,11 +141,13 @@ function cookies(map: Obj, indent: number): string {
 // ---------------------------------------------------------------------------
 
 function delay(w: Obj, indent: number, at: string): string {
-  known(at, w, ['timeUnit', 'value', 'distribution']);
+  known(at, w, ['timeUnit', 'value', 'distribution', 'template', 'templateType']);
   const args: Arg[] = [];
   if ('timeUnit' in w) args.push({ name: 'time_unit', value: rb(String(w['timeUnit'])) });
   if ('value' in w) args.push({ name: 'value', value: scalar(w['value']) });
   if ('distribution' in w) args.push({ name: 'distribution', value: delayDistribution(w['distribution'] as Obj, indent + 2, `${at}.distribution`) });
+  if ('template' in w) args.push({ name: 'template', value: rb(String(w['template'])) });
+  if ('templateType' in w) args.push({ name: 'template_type', value: rb(String(w['templateType'])) });
   return ctor('Delay', args, indent);
 }
 
@@ -323,8 +325,20 @@ function httpResponse(className: 'HttpResponse', w: Obj, indent: number, at: str
   push('trailers', 'trailers', (v) => kmv(v as Obj, indent + 2));
   push('delay', 'delay', (v) => delay(v as Obj, indent + 2, `${at}.delay`));
   push('primary', 'primary', (v) => scalar(v));
+  push('statusCodeRange', 'status_code_range', (v) => rb(String(v)));
+  push('generateFromSchema', 'generate_from_schema', (v) => rb(String(v)));
+  push('recoverAfter', 'recover_after', (v) => recoverAfter(v as Obj, indent + 2, `${at}.recoverAfter`));
   known(at, w, keys);
   return ctor(className, args, indent);
+}
+
+function recoverAfter(w: Obj, indent: number, at: string): string {
+  known(at, w, ['failTimes', 'failResponse', 'idempotencyHeader']);
+  const args: Arg[] = [];
+  if ('failTimes' in w) args.push({ name: 'fail_times', value: scalar(w['failTimes']) });
+  if ('failResponse' in w) args.push({ name: 'fail_response', value: httpResponse('HttpResponse', w['failResponse'] as Obj, indent + 2, `${at}.failResponse`) });
+  if ('idempotencyHeader' in w) args.push({ name: 'idempotency_header', value: rb(String(w['idempotencyHeader'])) });
+  return ctor('RecoverAfter', args, indent);
 }
 
 // ---------------------------------------------------------------------------
@@ -348,11 +362,15 @@ function httpForward(w: Obj, indent: number, at: string): string {
 }
 
 function httpTemplate(w: Obj, indent: number, at: string): string {
-  known(at, w, ['templateType', 'template', 'templateFile', 'delay', 'primary']);
+  known(at, w, ['templateType', 'template', 'templateFile', 'delay', 'primary', 'responseOverride', 'responseModifier']);
   const args: Arg[] = [];
   if ('templateType' in w) args.push({ name: 'template_type', value: rb(String(w['templateType'])) });
   if ('template' in w) args.push({ name: 'template', value: rb(String(w['template'])) });
   if ('templateFile' in w) args.push({ name: 'template_file', value: rb(String(w['templateFile'])) });
+  if ('responseOverride' in w) {
+    args.push({ name: 'response_override', value: httpResponse('HttpResponse', w['responseOverride'] as Obj, indent + 2, `${at}.responseOverride`) });
+  }
+  if ('responseModifier' in w) args.push({ name: 'response_modifier', value: rbValue(w['responseModifier'], indent + 2) });
   return ctor('HttpTemplate', inherited(w, args, indent, at), indent);
 }
 
@@ -393,7 +411,7 @@ function webSocketMessage(w: Obj, indent: number, at: string): string {
 }
 
 function httpWebSocketResponse(w: Obj, indent: number, at: string): string {
-  known(at, w, ['subprotocol', 'messages', 'matchers', 'closeConnection', 'delay', 'primary']);
+  known(at, w, ['subprotocol', 'messages', 'matchers', 'closeConnection', 'templateType', 'graphqlSubscriptionFilter', 'delay', 'primary']);
   const args: Arg[] = [];
   if ('subprotocol' in w) args.push({ name: 'subprotocol', value: rb(String(w['subprotocol'])) });
   if ('messages' in w) {
@@ -417,11 +435,29 @@ function httpWebSocketResponse(w: Obj, indent: number, at: string): string {
     args.push({ name: 'matchers', value: arrayOf(matchers, indent + 2) });
   }
   if ('closeConnection' in w) args.push({ name: 'close_connection', value: scalar(w['closeConnection']) });
+  if ('templateType' in w) args.push({ name: 'template_type', value: rb(String(w['templateType'])) });
+  if ('graphqlSubscriptionFilter' in w) {
+    args.push({
+      name: 'graphql_subscription_filter',
+      value: graphqlSubscriptionFilter(w['graphqlSubscriptionFilter'] as Obj, indent + 2, `${at}.graphqlSubscriptionFilter`),
+    });
+  }
   return ctor('HttpWebSocketResponse', inherited(w, args, indent, at), indent);
 }
 
+function graphqlSubscriptionFilter(w: Obj, indent: number, at: string): string {
+  const spec: [string, string][] = [
+    ['type', 'type'], ['query', 'query'], ['operationName', 'operation_name'],
+    ['variablesSchema', 'variables_schema'], ['selectionSetMatchType', 'selection_set_match_type'], ['fields', 'fields'],
+  ];
+  known(at, w, spec.map(([wk]) => wk));
+  const args: Arg[] = [];
+  for (const [wk, arg] of spec) if (wk in w) args.push({ name: arg, value: rbValue(w[wk], indent + 2) });
+  return ctor('GraphQLSubscriptionFilter', args, indent);
+}
+
 function httpSseResponse(w: Obj, indent: number, at: string): string {
-  known(at, w, ['statusCode', 'headers', 'events', 'closeConnection', 'delay', 'primary']);
+  known(at, w, ['statusCode', 'headers', 'events', 'closeConnection', 'templateType', 'delay', 'primary']);
   const args: Arg[] = [];
   if ('statusCode' in w) args.push({ name: 'status_code', value: scalar(w['statusCode']) });
   if ('headers' in w) args.push({ name: 'headers', value: kmv(w['headers'] as Obj, indent + 2) });
@@ -440,6 +476,7 @@ function httpSseResponse(w: Obj, indent: number, at: string): string {
     args.push({ name: 'events', value: arrayOf(events, indent + 2) });
   }
   if ('closeConnection' in w) args.push({ name: 'close_connection', value: scalar(w['closeConnection']) });
+  if ('templateType' in w) args.push({ name: 'template_type', value: rb(String(w['templateType'])) });
   return ctor('HttpSseResponse', inherited(w, args, indent, at), indent);
 }
 

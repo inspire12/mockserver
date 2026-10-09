@@ -91,7 +91,7 @@ keywords: OpenAPI, Swagger, OpenAPI v3, WSDL, SOAP, generate mock expectations, 
 
 <p>This is only used when the response has no explicit <span class="inline_code">body</span> — an explicit body always takes precedence — and a schema that cannot be parsed simply leaves the body unset (and is logged) rather than failing the request.</p>
 
-<p>The <span class="inline_code">generateFromSchema</span> field takes the JSON Schema as a string. The Java, .NET and Rust clients expose a typed setter (<span class="inline_code">withGenerateFromSchema</span> / the <span class="inline_code">GenerateFromSchema</span> property / <span class="inline_code">generate_from_schema</span>); JavaScript submits the raw expectation JSON directly; the remaining clients (Python, Ruby, Go, PHP) have no typed setter, so they submit the same expectation as raw JSON via the <span class="inline_code">PUT /mockserver/expectation</span> REST endpoint.</p>
+<p>The <span class="inline_code">generateFromSchema</span> field takes the JSON Schema as a string. The Java, .NET, Python, Ruby and Rust clients expose a typed setter (<span class="inline_code">withGenerateFromSchema</span> / the <span class="inline_code">GenerateFromSchema</span> property / <span class="inline_code">with_generate_from_schema</span> in Python and Ruby / <span class="inline_code">generate_from_schema</span> in Rust); JavaScript submits the raw expectation JSON directly; the remaining clients (Go, PHP) have no typed setter, so they submit the same expectation as raw JSON via the <span class="inline_code">PUT /mockserver/expectation</span> REST endpoint.</p>
 
 <button id="button_generate_response_from_json_schema" class="accordion">generate a response body from an inline json schema</button>
 <div class="panel">
@@ -139,10 +139,9 @@ mockServerClient("localhost", 1080).mockAnyResponse({
     <button class="accordion inner">Python</button>
     <div class="panel">
         <pre class="prettyprint lang-python code"><code class="code">import json
-import requests
 
-# The Python client's HttpResponse has no typed generateFromSchema setter,
-# so submit the same expectation as raw JSON via the REST API.
+from mockserver import HttpRequest, HttpResponse, MockServerClient
+
 schema = json.dumps({
     "type": "object",
     "required": ["id", "status"],
@@ -153,21 +152,16 @@ schema = json.dumps({
     },
 })
 
-requests.put(
-    "http://localhost:1080/mockserver/expectation",
-    json={
-        "httpRequest": {"path": "/users/1"},
-        "httpResponse": {"statusCode": 200, "generateFromSchema": schema},
-    },
+client = MockServerClient("localhost", 1080)
+client.when(HttpRequest(path="/users/1")).respond(
+    HttpResponse(status_code=200).with_generate_from_schema(schema)
 )</code></pre>
     </div>
     <button class="accordion inner">Ruby</button>
     <div class="panel">
         <pre class="prettyprint lang-ruby code"><code class="code">require 'json'
-require 'net/http'
+require 'mockserver-client'
 
-# The Ruby client's HttpResponse has no typed generateFromSchema setter,
-# so submit the same expectation as raw JSON via the REST API.
 schema = JSON.generate({
   'type' =&gt; 'object',
   'required' =&gt; %w[id status],
@@ -178,15 +172,10 @@ schema = JSON.generate({
   }
 })
 
-uri = URI('http://localhost:1080/mockserver/expectation')
-Net::HTTP.start(uri.host, uri.port) do |http|
-  request = Net::HTTP::Put.new(uri, 'Content-Type' =&gt; 'application/json')
-  request.body = JSON.generate(
-    'httpRequest' =&gt; { 'path' =&gt; '/users/1' },
-    'httpResponse' =&gt; { 'statusCode' =&gt; 200, 'generateFromSchema' =&gt; schema }
-  )
-  http.request(request)
-end</code></pre>
+client = MockServer::Client.new('localhost', 1080)
+client.when(MockServer::HttpRequest.new(path: '/users/1')).respond(
+  MockServer::HttpResponse.new(status_code: 200).with_generate_from_schema(schema)
+)</code></pre>
     </div>
     <button class="accordion inner">Go</button>
     <div class="panel">

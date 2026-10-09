@@ -304,19 +304,25 @@ module MockServer
   end
 
   class Delay
-    attr_accessor :time_unit, :value, :distribution
+    # template is rendered against the request and read as milliseconds (falling
+    # back to time_unit/value); template_type is VELOCITY or MUSTACHE.
+    attr_accessor :time_unit, :value, :distribution, :template, :template_type
 
-    def initialize(time_unit: 'MILLISECONDS', value: 0, distribution: nil)
+    def initialize(time_unit: 'MILLISECONDS', value: 0, distribution: nil, template: nil, template_type: nil)
       @time_unit = time_unit
       @value = value
       @distribution = distribution
+      @template = template
+      @template_type = template_type
     end
 
     def to_h
       MockServer.strip_none({
         'timeUnit'     => @time_unit,
         'value'        => @value,
-        'distribution' => @distribution&.to_h
+        'distribution' => @distribution&.to_h,
+        'template'     => @template,
+        'templateType' => @template_type
       })
     end
 
@@ -325,9 +331,11 @@ module MockServer
 
       dist_data = data['distribution']
       new(
-        time_unit:    data.fetch('timeUnit', 'MILLISECONDS'),
-        value:        data.fetch('value', 0),
-        distribution: dist_data ? DelayDistribution.from_hash(dist_data) : nil
+        time_unit:     data.fetch('timeUnit', 'MILLISECONDS'),
+        value:         data.fetch('value', 0),
+        distribution:  dist_data ? DelayDistribution.from_hash(dist_data) : nil,
+        template:      data['template'],
+        template_type: data['templateType']
       )
     end
   end
@@ -968,14 +976,48 @@ module MockServer
     end
   end
 
+  # Serves +fail_response+ for the first +fail_times+ matches, then the real
+  # response; +idempotency_header+ keys an independent window per header value.
+  class RecoverAfter
+    attr_accessor :fail_times, :fail_response, :idempotency_header
+
+    def initialize(fail_times: nil, fail_response: nil, idempotency_header: nil)
+      @fail_times = fail_times
+      @fail_response = fail_response
+      @idempotency_header = idempotency_header
+    end
+
+    def to_h
+      MockServer.strip_none({
+        'failTimes'         => @fail_times,
+        'failResponse'      => @fail_response&.to_h,
+        'idempotencyHeader' => @idempotency_header
+      })
+    end
+
+    def self.from_hash(data)
+      return nil if data.nil?
+
+      new(
+        fail_times:         data['failTimes'],
+        fail_response:      HttpResponse.from_hash(data['failResponse']),
+        idempotency_header: data['idempotencyHeader']
+      )
+    end
+  end
+
   class HttpResponse
     # trailers carries HTTP trailing headers (org.mockserver.model.Headers on the
     # response's +trailers+ slot), a keyToMultiValue collection like +headers+.
+    # status_code_range serves a status from a range such as "2xx";
+    # generate_from_schema is a JSON schema the body is generated from.
     attr_accessor :status_code, :reason_phrase, :headers, :cookies,
-                  :body, :delay, :connection_options, :trailers, :primary
+                  :body, :delay, :connection_options, :trailers, :primary,
+                  :status_code_range, :generate_from_schema, :recover_after
 
     def initialize(status_code: nil, reason_phrase: nil, headers: nil, cookies: nil,
-                   body: nil, delay: nil, connection_options: nil, trailers: nil, primary: nil)
+                   body: nil, delay: nil, connection_options: nil, trailers: nil, primary: nil,
+                   status_code_range: nil, generate_from_schema: nil, recover_after: nil)
       @status_code = status_code
       @reason_phrase = reason_phrase
       @headers = headers
@@ -985,6 +1027,9 @@ module MockServer
       @connection_options = connection_options
       @trailers = trailers
       @primary = primary
+      @status_code_range = status_code_range
+      @generate_from_schema = generate_from_schema
+      @recover_after = recover_after
     end
 
     def to_h
@@ -997,7 +1042,10 @@ module MockServer
         'delay'            => @delay&.to_h,
         'connectionOptions' => @connection_options&.to_h,
         'trailers'         => MockServer.serialize_key_multi_values(@trailers),
-        'primary'          => @primary
+        'primary'          => @primary,
+        'statusCodeRange'  => @status_code_range,
+        'generateFromSchema' => @generate_from_schema,
+        'recoverAfter'     => @recover_after&.to_h
       })
     end
 
@@ -1013,7 +1061,10 @@ module MockServer
         delay:             Delay.from_hash(data['delay']),
         connection_options: ConnectionOptions.from_hash(data['connectionOptions']),
         trailers:          MockServer.deserialize_key_multi_values(data['trailers']),
-        primary:           data['primary']
+        primary:           data['primary'],
+        status_code_range: data['statusCodeRange'],
+        generate_from_schema: data['generateFromSchema'],
+        recover_after:     RecoverAfter.from_hash(data['recoverAfter'])
       )
     end
 
@@ -1068,6 +1119,21 @@ module MockServer
       @reason_phrase = reason_phrase
       self
     end
+
+    def with_status_code_range(status_code_range)
+      @status_code_range = status_code_range
+      self
+    end
+
+    def with_generate_from_schema(schema)
+      @generate_from_schema = schema
+      self
+    end
+
+    def with_recover_after(recover_after)
+      @recover_after = recover_after
+      self
+    end
   end
 
   class HttpForward
@@ -1109,23 +1175,31 @@ module MockServer
   end
 
   class HttpTemplate
-    attr_accessor :template_type, :template, :template_file, :delay, :primary
+    # response_override (an {HttpResponse}) is applied over the rendered output;
+    # response_modifier is the server's responseModifier object, as a Hash.
+    attr_accessor :template_type, :template, :template_file, :delay, :primary,
+                  :response_override, :response_modifier
 
-    def initialize(template_type: 'JAVASCRIPT', template: nil, template_file: nil, delay: nil, primary: nil)
+    def initialize(template_type: 'JAVASCRIPT', template: nil, template_file: nil, delay: nil, primary: nil,
+                   response_override: nil, response_modifier: nil)
       @template_type = template_type
       @template = template
       @template_file = template_file
       @delay = delay
       @primary = primary
+      @response_override = response_override
+      @response_modifier = response_modifier
     end
 
     def to_h
       MockServer.strip_none({
-        'templateType' => @template_type,
-        'template'     => @template,
-        'templateFile' => @template_file,
-        'delay'        => @delay&.to_h,
-        'primary'      => @primary
+        'templateType'     => @template_type,
+        'template'         => @template,
+        'templateFile'     => @template_file,
+        'delay'            => @delay&.to_h,
+        'primary'          => @primary,
+        'responseOverride' => @response_override&.to_h,
+        'responseModifier' => @response_modifier
       })
     end
 
@@ -1137,7 +1211,9 @@ module MockServer
         template:      data['template'],
         template_file: data['templateFile'],
         delay:         Delay.from_hash(data['delay']),
-        primary:       data['primary']
+        primary:       data['primary'],
+        response_override: HttpResponse.from_hash(data['responseOverride']),
+        response_modifier: data['responseModifier']
       )
     end
 
@@ -1147,6 +1223,16 @@ module MockServer
 
     def with_template_file(template_file)
       @template_file = template_file
+      self
+    end
+
+    def with_response_override(response_override)
+      @response_override = response_override
+      self
+    end
+
+    def with_response_modifier(response_modifier)
+      @response_modifier = response_modifier
       self
     end
   end
@@ -1376,15 +1462,18 @@ module MockServer
   end
 
   class HttpSseResponse
-    attr_accessor :status_code, :headers, :events, :close_connection, :delay, :primary
+    # template_type renders each event with that engine (VELOCITY / JAVASCRIPT / MUSTACHE).
+    attr_accessor :status_code, :headers, :events, :close_connection, :delay, :primary, :template_type
 
-    def initialize(status_code: nil, headers: nil, events: nil, close_connection: nil, delay: nil, primary: nil)
+    def initialize(status_code: nil, headers: nil, events: nil, close_connection: nil, delay: nil, primary: nil,
+                   template_type: nil)
       @status_code = status_code
       @headers = headers
       @events = events
       @close_connection = close_connection
       @delay = delay
       @primary = primary
+      @template_type = template_type
     end
 
     def to_h
@@ -1395,6 +1484,7 @@ module MockServer
       result['closeConnection'] = @close_connection unless @close_connection.nil?
       result['delay'] = @delay.to_h if @delay
       result['primary'] = @primary unless @primary.nil?
+      result['templateType'] = @template_type unless @template_type.nil?
       result
     end
 
@@ -1409,7 +1499,8 @@ module MockServer
         events:           events,
         close_connection: data['closeConnection'],
         delay:            Delay.from_hash(data['delay']),
-        primary:          data['primary']
+        primary:          data['primary'],
+        template_type:    data['templateType']
       )
     end
   end
@@ -1478,18 +1569,63 @@ module MockServer
     end
   end
 
+  # Matches a graphql-transport-ws subscribe message against this GraphQL query.
+  # +type+ is an optional body-type discriminator; only "GRAPHQL" is meaningful.
+  class GraphQLSubscriptionFilter
+    attr_accessor :query, :operation_name, :variables_schema, :selection_set_match_type, :fields, :type
+
+    def initialize(query: nil, operation_name: nil, variables_schema: nil, selection_set_match_type: nil,
+                   fields: nil, type: nil)
+      @query = query
+      @operation_name = operation_name
+      @variables_schema = variables_schema
+      @selection_set_match_type = selection_set_match_type
+      @fields = fields
+      @type = type
+    end
+
+    def to_h
+      MockServer.strip_none({
+        'type'                  => @type,
+        'query'                 => @query,
+        'operationName'         => @operation_name,
+        'variablesSchema'       => @variables_schema,
+        'selectionSetMatchType' => @selection_set_match_type,
+        'fields'                => @fields
+      })
+    end
+
+    def self.from_hash(data)
+      return nil if data.nil?
+
+      new(
+        query:                    data['query'],
+        operation_name:           data['operationName'],
+        variables_schema:         data['variablesSchema'],
+        selection_set_match_type: data['selectionSetMatchType'],
+        fields:                   data['fields'],
+        type:                     data['type']
+      )
+    end
+  end
+
   class HttpWebSocketResponse
     # matchers carries per-incoming-frame response rules (server
     # HttpWebSocketResponseDTO.matchers); each is a {WebSocketFrameMatcher}.
-    attr_accessor :subprotocol, :messages, :matchers, :close_connection, :delay, :primary
+    # template_type renders each message with that engine.
+    attr_accessor :subprotocol, :messages, :matchers, :close_connection, :delay, :primary,
+                  :template_type, :graphql_subscription_filter
 
-    def initialize(subprotocol: nil, messages: nil, matchers: nil, close_connection: nil, delay: nil, primary: nil)
+    def initialize(subprotocol: nil, messages: nil, matchers: nil, close_connection: nil, delay: nil, primary: nil,
+                   template_type: nil, graphql_subscription_filter: nil)
       @subprotocol = subprotocol
       @messages = messages
       @matchers = matchers
       @close_connection = close_connection
       @delay = delay
       @primary = primary
+      @template_type = template_type
+      @graphql_subscription_filter = graphql_subscription_filter
     end
 
     def to_h
@@ -1500,6 +1636,8 @@ module MockServer
       result['closeConnection'] = @close_connection unless @close_connection.nil?
       result['delay'] = @delay.to_h if @delay
       result['primary'] = @primary unless @primary.nil?
+      result['templateType'] = @template_type unless @template_type.nil?
+      result['graphqlSubscriptionFilter'] = @graphql_subscription_filter.to_h if @graphql_subscription_filter
       result
     end
 
@@ -1516,7 +1654,9 @@ module MockServer
         matchers:         matchers,
         close_connection: data['closeConnection'],
         delay:            Delay.from_hash(data['delay']),
-        primary:          data['primary']
+        primary:          data['primary'],
+        template_type:    data['templateType'],
+        graphql_subscription_filter: GraphQLSubscriptionFilter.from_hash(data['graphqlSubscriptionFilter'])
       )
     end
   end

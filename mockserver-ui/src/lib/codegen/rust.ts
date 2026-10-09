@@ -133,13 +133,34 @@ function gapNote(model: string, o: Record<string, unknown>, known: readonly stri
 }
 
 function delayExpr(d: Record<string, unknown>): string {
-  const note = gapNote('Delay', d, ['timeUnit', 'value']);
+  const note = gapNote('Delay', d, ['timeUnit', 'value', 'distribution', 'template', 'templateType']);
   const unit = String(d['timeUnit'] ?? 'MILLISECONDS');
   const value = Number(d['value'] ?? 0);
-  if (unit === 'MILLISECONDS') return `${note}Delay::milliseconds(${numLit(value)})`;
-  if (unit === 'SECONDS') return `${note}Delay::seconds(${numLit(value)})`;
-  // MINUTES (and any other unit) has no constructor — use a typed struct literal.
-  return `${note}Delay { time_unit: ${rustStr(unit)}.to_string(), value: ${numLit(value)} }`;
+  let expr = unit === 'MILLISECONDS' ? `Delay::milliseconds(${numLit(value)})`
+    : unit === 'SECONDS' ? `Delay::seconds(${numLit(value)})`
+    : `Delay::new(${rustStr(unit)}, ${numLit(value)})`;
+  if (isObjR(d['distribution'])) expr += `.distribution(${delayDistributionExpr(d['distribution'])})`;
+  if (typeof d['template'] === 'string') expr += `.template(${rustStr(d['template'])})`;
+  if (typeof d['templateType'] === 'string') expr += `.template_type(${rustStr(d['templateType'])})`;
+  return note + expr;
+}
+
+const DISTRIBUTION_BOUNDS = ['min', 'max', 'median', 'p99', 'mean', 'stdDev'] as const;
+
+/** A named constructor when the distribution has exactly its type's two bounds, else a struct literal. */
+function delayDistributionExpr(d: Record<string, unknown>): string {
+  const note = gapNote('DelayDistribution', d, ['type', ...DISTRIBUTION_BOUNDS]);
+  const ctors: Record<string, [string, string, string]> = {
+    UNIFORM: ['uniform', 'min', 'max'], LOG_NORMAL: ['log_normal', 'median', 'p99'], GAUSSIAN: ['gaussian', 'mean', 'stdDev'],
+  };
+  const ctor = ctors[String(d['type'])];
+  const bounds = DISTRIBUTION_BOUNDS.filter((k) => typeof d[k] === 'number');
+  if (ctor && bounds.length === 2 && bounds.includes(ctor[1] as never) && bounds.includes(ctor[2] as never)) {
+    return `${note}DelayDistribution::${ctor[0]}(${numLit(d[ctor[1]] as number)}, ${numLit(d[ctor[2]] as number)})`;
+  }
+  const fields = [`distribution_type: ${rustStr(String(d['type'] ?? ''))}.to_string()`];
+  for (const k of bounds) fields.push(`${k === 'stdDev' ? 'std_dev' : k}: Some(${numLit(d[k] as number)})`);
+  return `${note}DelayDistribution { ${fields.join(', ')}, ..Default::default() }`;
 }
 
 function timesExpr(t: Record<string, unknown>): string {
@@ -474,7 +495,7 @@ function inheritedFields(o: Record<string, unknown>): string[] {
   return fields;
 }
 
-const TEMPLATE_FIELDS = ['templateType', 'template', 'templateFile', 'delay', 'primary'];
+const TEMPLATE_FIELDS = ['templateType', 'template', 'templateFile', 'delay', 'primary', 'responseOverride', 'responseModifier'];
 
 function forwardExpr(f: Record<string, unknown>, indent: number): string {
   const host = rustStr(String(f['host'] ?? ''));
@@ -486,17 +507,28 @@ function forwardExpr(f: Record<string, unknown>, indent: number): string {
   return withExtra('HttpForward', base, f, ['host', 'port', 'scheme', 'delay', 'primary'], indent);
 }
 
-/** The HttpTemplate model has no `extra` map, so callers name what it lacks with {@link gapNote}. */
-function templateExpr(t: Record<string, unknown>, indent: number): string {
+/** The HttpTemplate model has no `extra` map, so this names what it lacks with {@link gapNote}. */
+function templateExpr(t: Record<string, unknown>, ctx: Ctx, indent: number): Rendered {
+  const note = gapNote('HttpTemplate', t, TEMPLATE_FIELDS);
   const type = rustStr(String(t['templateType'] ?? ''));
   const file = t['templateFile'];
+  const calls: string[] = [];
+  const setup: string[] = [];
+  let head: string;
   if (typeof file === 'string') {
-    const calls: string[] = [];
     if (typeof t['template'] === 'string') calls.push(`.template(${rustStr(t['template'])})`);
-    calls.push(...inheritedCalls(t));
-    return chain(`HttpTemplate::from_file(${type}, ${rustStr(file)})`, calls, indent);
+    head = `HttpTemplate::from_file(${type}, ${rustStr(file)})`;
+  } else {
+    head = `HttpTemplate::new(${type}, ${rustStr(String(t['template'] ?? ''))})`;
   }
-  return chain(`HttpTemplate::new(${type}, ${rustStr(String(t['template'] ?? ''))})`, inheritedCalls(t), indent);
+  calls.push(...inheritedCalls(t));
+  if (isObjR(t['responseOverride'])) {
+    const r = renderHttpResponse(t['responseOverride'], ctx, indent + 4, 'template_response_override');
+    setup.push(...r.setup);
+    calls.push(`.response_override(${r.expr})`);
+  }
+  if (t['responseModifier'] != null) calls.push(`.response_modifier(${jsonMacro(t['responseModifier'], indent + 4)})`);
+  return { setup, expr: note + chain(head, calls, indent) };
 }
 
 function errorExpr(e: Record<string, unknown>, indent: number): string {
@@ -1020,9 +1052,10 @@ function renderPrimaryAction(key: string, value: unknown, ctx: Ctx, indent: numb
     case 'httpForward':
       return inline(`.forward(${forwardExpr(obj, indent + 4)})`);
     case 'httpResponseTemplate':
-      return inline(`.respond_template(${gapNote('HttpTemplate', obj, TEMPLATE_FIELDS)}${templateExpr(obj, indent + 4)})`);
-    case 'httpForwardTemplate':
-      return inline(`.forward_template(${gapNote('HttpTemplate', obj, TEMPLATE_FIELDS)}${templateExpr(obj, indent + 4)})`);
+    case 'httpForwardTemplate': {
+      const r = templateExpr(obj, ctx, indent + 4);
+      return { setup: r.setup, expr: `.${key === 'httpResponseTemplate' ? 'respond_template' : 'forward_template'}(${r.expr})` };
+    }
     case 'httpError':
       return inline(`.error(${errorExpr(obj, indent + 4)})`);
     case 'httpResponseClassCallback':
@@ -1075,7 +1108,11 @@ function renderPrimaryAction(key: string, value: unknown, ctx: Ctx, indent: numb
         if (obj[wireKey] != null) fields.push(`${field}: Some(${jsonMacro(obj[wireKey], indent + 8)}),`);
       }
       const rt = obj['responseTemplate'];
-      if (isObjR(rt)) fields.push(`response_template: Some(${gapNote('HttpTemplate', rt, TEMPLATE_FIELDS)}${templateExpr(rt, indent + 8)}),`);
+      if (isObjR(rt)) {
+        const r = templateExpr(rt, ctx, indent + 8);
+        setup.push(...r.setup);
+        fields.push(`response_template: Some(${r.expr}),`);
+      }
       if (isObjR(obj['httpRequest'])) {
         const r = renderHttpRequest(obj['httpRequest'], ctx, indent, 'override_http_request');
         setup.push(...r.setup);

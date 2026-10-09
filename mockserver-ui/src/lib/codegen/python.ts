@@ -141,11 +141,13 @@ class PyBuilder {
   private delay(v: unknown, at: string): string {
     this.use('Delay');
     const o = v as Json;
-    this.known(at, o, ['timeUnit', 'value', 'distribution']);
+    this.known(at, o, ['timeUnit', 'value', 'distribution', 'template', 'templateType']);
     const kw: Kw[] = [];
     if (o['timeUnit'] != null) kw.push(['time_unit', pyStr(o['timeUnit'])]);
     if (o['value'] != null) kw.push(['value', pyNum(o['value'])]);
     if (o['distribution'] != null) kw.push(['distribution', this.delayDistribution(o['distribution'], `${at}.distribution`)]);
+    if (o['template'] != null) kw.push(['template', pyStr(o['template'])]);
+    if (o['templateType'] != null) kw.push(['template_type', pyStr(o['templateType'])]);
     return renderInline('Delay', kw);
   }
 
@@ -357,7 +359,10 @@ class PyBuilder {
   private response(v: unknown, indent: number, at: string): string {
     this.use('HttpResponse');
     const o = v as Json;
-    this.known(at, o, ['statusCode', 'reasonPhrase', 'body', 'headers', 'cookies', 'delay', 'connectionOptions', 'primary', 'trailers']);
+    this.known(at, o, [
+      'statusCode', 'reasonPhrase', 'body', 'headers', 'cookies', 'delay', 'connectionOptions', 'primary', 'trailers',
+      'statusCodeRange', 'generateFromSchema', 'recoverAfter',
+    ]);
     const kw: Kw[] = [];
     if (o['statusCode'] != null) kw.push(['status_code', pyNum(o['statusCode'])]);
     if (o['reasonPhrase'] != null) kw.push(['reason_phrase', pyStr(o['reasonPhrase'])]);
@@ -368,7 +373,21 @@ class PyBuilder {
     if (o['connectionOptions'] != null) kw.push(['connection_options', this.connectionOptions(o['connectionOptions'], indent + 4, `${at}.connectionOptions`)]);
     if (typeof o['primary'] === 'boolean') kw.push(['primary', pyBool(o['primary'])]);
     if (o['trailers'] != null) kw.push(['trailers', this.keyMultiList(o['trailers'], indent + 4)]);
+    if (o['statusCodeRange'] != null) kw.push(['status_code_range', pyStr(o['statusCodeRange'])]);
+    if (o['generateFromSchema'] != null) kw.push(['generate_from_schema', pyStr(o['generateFromSchema'])]);
+    if (o['recoverAfter'] != null) kw.push(['recover_after', this.recoverAfter(o['recoverAfter'], indent + 4, `${at}.recoverAfter`)]);
     return renderCall('HttpResponse', kw, indent);
+  }
+
+  private recoverAfter(v: unknown, indent: number, at: string): string {
+    this.use('RecoverAfter');
+    const o = v as Json;
+    this.known(at, o, ['failTimes', 'failResponse', 'idempotencyHeader']);
+    const kw: Kw[] = [];
+    if (o['failTimes'] != null) kw.push(['fail_times', pyNum(o['failTimes'])]);
+    if (o['failResponse'] != null) kw.push(['fail_response', this.response(o['failResponse'], indent + 4, `${at}.failResponse`)]);
+    if (o['idempotencyHeader'] != null) kw.push(['idempotency_header', pyStr(o['idempotencyHeader'])]);
+    return renderCall('RecoverAfter', kw, indent);
   }
 
   private forward(v: unknown, indent: number, at: string): string {
@@ -411,10 +430,12 @@ class PyBuilder {
   private template(v: unknown, indent: number, at: string): string {
     this.use('HttpTemplate');
     const o = v as Json;
-    this.known(at, o, ['templateType', 'template', 'templateFile', 'delay', 'primary']);
+    this.known(at, o, ['templateType', 'template', 'templateFile', 'delay', 'primary', 'responseOverride', 'responseModifier']);
     const kw: Kw[] = [['template_type', pyStr(o['templateType'])]];
     if (o['template'] != null) kw.push(['template', pyStr(o['template'])]);
     if (o['templateFile'] != null) kw.push(['template_file', pyStr(o['templateFile'])]);
+    if (o['responseOverride'] != null) kw.push(['response_override', this.response(o['responseOverride'], indent + 4, `${at}.responseOverride`)]);
+    if (o['responseModifier'] != null) kw.push(['response_modifier', toPythonLiteral(o['responseModifier'], indent + 4)]);
     return renderCall('HttpTemplate', this.inherited(o, kw, at), indent);
   }
 
@@ -444,7 +465,7 @@ class PyBuilder {
   private webSocket(v: unknown, indent: number, at: string): string {
     this.use('HttpWebSocketResponse');
     const o = v as Json;
-    this.known(at, o, ['subprotocol', 'messages', 'closeConnection', 'matchers', 'delay', 'primary']);
+    this.known(at, o, ['subprotocol', 'messages', 'closeConnection', 'matchers', 'templateType', 'graphqlSubscriptionFilter', 'delay', 'primary']);
     const kw: Kw[] = [];
     if (o['subprotocol'] != null) kw.push(['subprotocol', pyStr(o['subprotocol'])]);
     if (o['messages'] != null) kw.push(['messages', this.wsMessages(o['messages'], indent + 4, `${at}.messages`)]);
@@ -461,7 +482,24 @@ class PyBuilder {
       });
       kw.push(['matchers', renderList(matchers, indent + 4)]);
     }
+    if (o['templateType'] != null) kw.push(['template_type', pyStr(o['templateType'])]);
+    if (o['graphqlSubscriptionFilter'] != null) {
+      kw.push(['graphql_subscription_filter', this.graphqlFilter(o['graphqlSubscriptionFilter'] as Json, indent + 4, `${at}.graphqlSubscriptionFilter`)]);
+    }
     return renderCall('HttpWebSocketResponse', this.inherited(o, kw, at), indent);
+  }
+
+  private graphqlFilter(o: Json, indent: number, at: string): string {
+    this.use('GraphQLSubscriptionFilter');
+    const fields: [string, string][] = [
+      ['type', 'type'], ['query', 'query'], ['operationName', 'operation_name'],
+      ['variablesSchema', 'variables_schema'], ['selectionSetMatchType', 'selection_set_match_type'],
+    ];
+    this.known(at, o, [...fields.map(([wire]) => wire), 'fields']);
+    const kw: Kw[] = [];
+    for (const [wire, py] of fields) if (o[wire] != null) kw.push([py, pyStr(o[wire])]);
+    if (o['fields'] != null) kw.push(['fields', strArray(o['fields'])]);
+    return renderCall('GraphQLSubscriptionFilter', kw, indent);
   }
 
   /** The model holds a binary message as bytes, which it base64-encodes back onto the wire. */
@@ -484,7 +522,7 @@ class PyBuilder {
   private sse(v: unknown, indent: number, at: string): string {
     this.use('HttpSseResponse');
     const o = v as Json;
-    this.known(at, o, ['statusCode', 'headers', 'events', 'closeConnection', 'delay', 'primary']);
+    this.known(at, o, ['statusCode', 'headers', 'events', 'closeConnection', 'templateType', 'delay', 'primary']);
     const kw: Kw[] = [];
     if (o['statusCode'] != null) kw.push(['status_code', pyNum(o['statusCode'])]);
     if (o['headers'] != null) kw.push(['headers', this.keyMultiList(o['headers'], indent + 4)]);
@@ -503,6 +541,7 @@ class PyBuilder {
       kw.push(['events', renderList(events, indent + 4)]);
     }
     if (o['closeConnection'] != null) kw.push(['close_connection', pyBool(o['closeConnection'])]);
+    if (o['templateType'] != null) kw.push(['template_type', pyStr(o['templateType'])]);
     return renderCall('HttpSseResponse', this.inherited(o, kw, at), indent);
   }
 
