@@ -14,6 +14,7 @@ require 'digest'
 require 'json'
 require 'yaml'
 require 'shellwords'
+require 'tmpdir'
 require 'uri'
 
 module WebsiteExamples
@@ -405,10 +406,17 @@ module WebsiteExamples
       WebMock.disable! unless loaded
     end
 
+    # The child runs in a temporary directory, so a file an example writes
+    # (load_injection.html writes load-report.xml) is removed afterwards.
     def run(code)
+      Dir.mktmpdir('website-example') { |dir| run_in(dir, code) }
+    end
+
+    def run_in(dir, code)
       reader, writer = IO.pipe
       pid = fork do
         reader.close
+        Dir.chdir(dir)
         result = child(code)
         writer.write(JSON.generate(result))
         writer.close

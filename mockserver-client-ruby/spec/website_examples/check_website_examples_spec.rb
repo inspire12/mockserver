@@ -288,6 +288,19 @@ RSpec.describe 'website example check' do
                                                                  'httpResponse' => { 'body' => 'b' } }])
     end
 
+    it 'runs an example in a temporary directory it removes, so no file the example writes is left' do
+      name = 'website-example-leftover.txt'
+      result = described_class.run(<<~RUBY)
+        File.write('#{name}', 'x')
+        Net::HTTP.get(URI("http://example.com/?" + URI.encode_www_form(dir: Dir.pwd)))
+      RUBY
+      dir = URI.decode_www_form(result['calls'].last['query']).to_h['dir']
+      expect(result['error']).to be_nil
+      expect(File.exist?(File.join(WebsiteExamples::CLIENT_ROOT, name))).to be(false)
+      expect(File.exist?(name)).to be(false)
+      expect(File.exist?(dir)).to be(false)
+    end
+
     it 'reports an exception the example raises' do
       expect(described_class.run("raise ArgumentError, 'boom'")['error']).to eq('ArgumentError: boom')
     end
