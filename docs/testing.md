@@ -598,6 +598,7 @@ The `scripts/buildkite_quick_build.sh` script runs the full build inside a `mock
 
 ```bash
 ./mvnw -T 1C clean install -Djava.security.egd=file:/dev/./urandom \
+  -P "$PROFILES" -Dmockserver.shadeSourcesJar=false \
   -Dmockserver.testOutput=quiet -DdisableXmlReport=false \
   -DredirectTestOutputToFile=true -Dmockserver.testLogLevel=INFO \
   "-Dmockserver.testArgLine=-Dmockserver.maxLogEntries=10000 -Dmockserver.maxExpectations=5000"
@@ -607,12 +608,14 @@ The `scripts/buildkite_quick_build.sh` script runs the full build inside a `mock
 |----------|-------|
 | JVM heap | `-Xms2048m -Xmx6144m` |
 | Maven parallelism | `-T 1C` (1 thread per CPU core) |
+| Profiles (`$PROFILES`) | `clustered-libs`, plus `netty-it-skip` when `MOCKSERVER_NETTY_ITS_IN_SHARDS=true` (CI), whose netty integration tests run in the shard steps |
 | Test output | `quiet` (dots + failure details) |
 | XML reports | Enabled (`-DdisableXmlReport=false`) |
 | Test output redirection | Enabled (`-DredirectTestOutputToFile=true`) |
 | Test log level | `INFO` (`-Dmockserver.testLogLevel=INFO`) |
 | Event log and expectation caps | 10,000 log entries and 5,000 expectations per test server, through `-Dmockserver.testArgLine`, which overrides the poms' `-Dmockserver.maxLogEntries=1000` |
-| Netty leak gate | On: the forks of `mockserver-core` and `mockserver-netty` run the leak detector at `paranoid` and `check-netty-leaks` fails the build on a leaked buffer, or when tests ran but no fork installed the detector. `-Dmockserver.testArgLine` does not remove it (see [ByteBuf Leak Detection in Tests](code/netty-pipeline.md#bytebuf-leak-detection-in-tests)) |
+| Netty leak gate | On: the forks of `mockserver-core` and `mockserver-netty` run the leak detector at `paranoid` (allocation sites only, `targetRecords=0`) and `check-netty-leaks` fails the build on a leaked buffer, or when tests ran but no fork installed the detector. `-Dmockserver.testArgLine` does not remove it (see [ByteBuf Leak Detection in Tests](code/netty-pipeline.md#bytebuf-leak-detection-in-tests)) |
+| `-no-dependencies` source jars | Not built (`-Dmockserver.shadeSourcesJar=false`); the snapshot deploy and the release build them |
 | Timeout | 90 minutes |
 | Build artefacts | `**/*.log` files collected |
 

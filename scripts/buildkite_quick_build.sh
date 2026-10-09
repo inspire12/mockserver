@@ -54,7 +54,10 @@ set +e
 # artifact (pipeline-java.yml) and consumed by java-docker-push-snapshot.sh to build
 # the `mockserver-snapshot-clustered` image from the SAME commit as the other snapshot
 # images — which is what lets the perf harness's item-13 clustered A/B run at all.
-./mvnw -B --no-transfer-progress -T 1C clean install ${1:-} -P "$PROFILES" -Dmockserver.testOutput=quiet -DredirectTestOutputToFile=true -Dmockserver.testLogLevel=INFO "-Dmockserver.testArgLine=-Dmockserver.maxLogEntries=10000 -Dmockserver.maxExpectations=5000"
+# -Dmockserver.shadeSourcesJar=false: nothing downstream of this step reads the
+# shaded *-no-dependencies -sources.jar files, which are slow to build; the snapshot
+# deploy and the release build their own and keep the pom default (true).
+./mvnw -B --no-transfer-progress -T 1C clean install ${1:-} -P "$PROFILES" -Dmockserver.shadeSourcesJar=false -Dmockserver.testOutput=quiet -DredirectTestOutputToFile=true -Dmockserver.testLogLevel=INFO "-Dmockserver.testArgLine=-Dmockserver.maxLogEntries=10000 -Dmockserver.maxExpectations=5000"
 MVN_EXIT=$?
 log_debug "Maven exited with code=$MVN_EXIT"
 

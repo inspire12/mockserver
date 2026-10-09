@@ -13,6 +13,7 @@ import io.netty.buffer.UnpooledHeapByteBuf;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.*;
 import io.netty.util.ReferenceCountUtil;
+import io.netty.util.ResourceLeakDetector;
 import org.junit.Test;
 
 import java.util.ArrayList;
@@ -38,6 +39,12 @@ public class CoalescingHttpObjectAggregatorTest {
     private static final int CORPUS_MAX = 300_000;
     private static final int SMALL_LIMIT = 128;
     private static final int SMALL_LIMIT_MAX = 100_000;
+    // the paranoid leak detector records a stack trace per buffer, which makes the cases of hundreds of thousands
+    // of pieces run for many minutes; they still run without it, and the gate still covers the others
+    private static final int MAX_PIECES_UNDER_PARANOID_LEAK_DETECTION = 4_096;
+    private static final int PARANOID_CORPUS_CASES = 1_197;
+    private static final int PARANOID_SMALL_LIMIT_CORPUS_CASES = 1_206;
+    private static final int PARANOID_SMALL_LIMIT_CONSOLIDATED = 134;
     private static final int[][] CORPUS_PATTERNS = {
         {1}, {2}, {7}, {100}, {SMALL - 1}, {SMALL}, {1156}, {4096}, {8192},
         {BLOCK - 1}, {BLOCK}, {BLOCK + 1}, {65_536},
@@ -51,7 +58,7 @@ public class CoalescingHttpObjectAggregatorTest {
     @Test
     public void shouldAggregateTheSameAsAPlainAggregatorAcrossTheCorpus() {
         int cases = runCorpus(CORPUS_MAX, 0, 100_000, new int[]{63, 64, 65, 66, 130}, new int[1]);
-        assertThat(cases, is(CORPUS_PATTERNS.length * 14 * Ending.values().length));
+        assertThat(cases, is(paranoidLeakDetection() ? PARANOID_CORPUS_CASES : CORPUS_PATTERNS.length * 14 * Ending.values().length));
     }
 
     @Test
@@ -60,9 +67,10 @@ public class CoalescingHttpObjectAggregatorTest {
         // merges are compared with Netty's consolidation, including the trailers and a 413 after a merge
         int[] consolidated = new int[1];
         int cases = runCorpus(SMALL_LIMIT_MAX, SMALL_LIMIT, 50_000, new int[]{127, 128, 129, 130, 400}, consolidated);
-        assertThat(cases, is(CORPUS_PATTERNS.length * 14 * Ending.values().length));
-        // the corpus is deterministic: 188 cases pass the limit (the rest are too short or in pieces too large)
-        assertThat("cases where the plain aggregator consolidated", consolidated[0], is(188));
+        assertThat(cases, is(paranoidLeakDetection() ? PARANOID_SMALL_LIMIT_CORPUS_CASES : CORPUS_PATTERNS.length * 14 * Ending.values().length));
+        // the corpus is deterministic: 188 cases pass the limit, 134 of them under paranoid leak detection (the rest
+        // are too short or in pieces too large)
+        assertThat("cases where the plain aggregator consolidated", consolidated[0], is(paranoidLeakDetection() ? PARANOID_SMALL_LIMIT_CONSOLIDATED : 188));
     }
 
     private static int runCorpus(int maxContentLength, int componentLimit, int middleLength, int[] pieceCounts, int[] consolidated) {
@@ -77,6 +85,9 @@ public class CoalescingHttpObjectAggregatorTest {
                 lengths.add((int) Math.min(bytes, maxContentLength + 1));
             }
             for (int length : lengths) {
+                if (paranoidLeakDetection() && pieces(pattern, length) > MAX_PIECES_UNDER_PARANOID_LEAK_DETECTION) {
+                    continue;
+                }
                 for (Ending ending : Ending.values()) {
                     if (assertSameAsPlainAggregator(pattern, maxContentLength, componentLimit, length, ending)) {
                         consolidated[0]++;
@@ -86,6 +97,18 @@ public class CoalescingHttpObjectAggregatorTest {
             }
         }
         return cases;
+    }
+
+    private static boolean paranoidLeakDetection() {
+        return ResourceLeakDetector.getLevel() == ResourceLeakDetector.Level.PARANOID;
+    }
+
+    private static int pieces(int[] pattern, int length) {
+        int pieces = 0;
+        for (int sent = 0; sent < length; pieces++) {
+            sent += pattern[pieces % pattern.length];
+        }
+        return pieces;
     }
 
     @Test

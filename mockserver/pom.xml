@@ -71,6 +71,9 @@
         <skipTests>false</skipTests>
         <skipAssembly>false</skipAssembly>
         <skipShade>false</skipShade>
+        <!-- the *-no-dependencies modules' -sources.jar, which Maven Central requires on release; the CI
+             build step passes false because nothing in it reads them -->
+        <mockserver.shadeSourcesJar>true</mockserver.shadeSourcesJar>
         <mockserver.testOutput>verbose</mockserver.testOutput>
         <mockserver.testLogLevel>ERROR</mockserver.testLogLevel>
         <!-- Appended to every surefire/failsafe fork. Reserved for the command line (CI's ring-buffer
@@ -84,7 +87,11 @@
              -Dmockserver.leakArgLine= on the command line turns the detector and the gate off. -->
         <mockserver.leakArgLine/>
         <mockserver.leakReportDir>${project.build.directory}/netty-leaks</mockserver.leakReportDir>
-        <mockserver.nettyLeakDetectorArgLine>-Dio.netty.leakDetection.level=paranoid -Dio.netty.customResourceLeakDetector=org.mockserver.test.FailOnLeakResourceLeakDetector -Dmockserver.leakReportDir=${mockserver.leakReportDir}</mockserver.nettyLeakDetectorArgLine>
+        <!-- paranoid still tracks every buffer; targetRecords=0 drops only the per-access stack traces
+             ("Recent access records"), which cost most of the detector's time. A leak report keeps the
+             allocation site. For access records, re-run a module with -Dio.netty.leakDetection.targetRecords=4
+             in -Dmockserver.testArgLine (it comes after this line, so it wins). -->
+        <mockserver.nettyLeakDetectorArgLine>-Dio.netty.leakDetection.level=paranoid -Dio.netty.leakDetection.targetRecords=0 -Dio.netty.customResourceLeakDetector=org.mockserver.test.FailOnLeakResourceLeakDetector -Dmockserver.leakReportDir=${mockserver.leakReportDir}</mockserver.nettyLeakDetectorArgLine>
         <!-- false downgrades a recorded leak to a warning while it is triaged; detection and
              recording stay on, and a gate whose detector never ran still fails. -->
         <mockserver.failOnNettyLeak>true</mockserver.failOnNettyLeak>
@@ -1246,7 +1253,7 @@
                                         </manifestEntries>
                                     </transformer>
                                 </transformers>
-                                <createSourcesJar>true</createSourcesJar>
+                                <createSourcesJar>${mockserver.shadeSourcesJar}</createSourcesJar>
                                 <shadeSourcesContent>true</shadeSourcesContent>
                                 <shadedArtifactAttached>false</shadedArtifactAttached>
                                 <createDependencyReducedPom>false</createDependencyReducedPom>

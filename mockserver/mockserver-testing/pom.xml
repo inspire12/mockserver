@@ -45,4 +45,20 @@
         </dependency>
     </dependencies>
 
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <!-- FailOnLeakResourceLeakDetectorTest starts a child JVM with the leak detector
+                         settings every gated module's forks get, to prove they still record a leak -->
+                    <systemPropertyVariables>
+                        <mockserver.nettyLeakDetectorArgLine>${mockserver.nettyLeakDetectorArgLine}</mockserver.nettyLeakDetectorArgLine>
+                    </systemPropertyVariables>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
 </project>
