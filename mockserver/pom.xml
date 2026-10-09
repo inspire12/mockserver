@@ -688,7 +688,7 @@
             <dependency>
                 <groupId>net.javacrumbs.json-unit</groupId>
                 <artifactId>json-unit-core</artifactId>
-                <version>6.2.0</version>
+                <version>6.3.0</version>
             </dependency>
 
             <!-- json validation -->
@@ -885,7 +885,7 @@
             <dependency>
                 <groupId>org.xerial.snappy</groupId>
                 <artifactId>snappy-java</artifactId>
-                <version>1.1.10.10</version>
+                <version>1.1.10.11</version>
             </dependency>
 
             <!-- dnsjava (test scope only) — independent DNS wire parser used to verify that the
