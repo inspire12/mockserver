@@ -19,6 +19,11 @@
              parent pom's file-based gate (check-netty-leaks), which fails the build on a leak. -->
         <mockserver.leakArgLine>${mockserver.nettyLeakDetectorArgLine}</mockserver.leakArgLine>
         <mockserver.failIfNoIntegrationTests>true</mockserver.failIfNoIntegrationTests>
+        <!-- Packages of the named CI integration-test shards (see the netty-it-shard-* profiles).
+             Not subpackages: a /**/ include matches nothing in the JUnit Platform fork, which
+             re-applies the pattern, so a subpackage's tests run in netty-it-shard-rest. -->
+        <mockserver.nettyItShard.proxyHttp>org/mockserver/netty/integration/proxy/http</mockserver.nettyItShard.proxyHttp>
+        <mockserver.nettyItShard.mock>org/mockserver/netty/integration/mock</mockserver.nettyItShard.mock>
     </properties>
 
     <dependencies>
@@ -784,6 +789,79 @@
                                 </configuration>
                             </execution>
                         </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <!-- CI integration-test shards. The reactor build skips this module's integration tests
+             (netty-it-skip) and parallel Buildkite steps run them, one step per netty-it-shard-*
+             profile (.buildkite/scripts/steps/java-netty-it-shard.sh). netty-it-shard-rest
+             excludes exactly the packages the named shards include, so every integration test
+             runs in one shard. To rebalance, change the mockserver.nettyItShard.* patterns. -->
+        <profile>
+            <id>netty-it-skip</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <configuration>
+                            <skipITs>true</skipITs>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
+            <id>netty-it-shard-proxy-http</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <configuration>
+                            <includes combine.self="override">
+                                <include>${mockserver.nettyItShard.proxyHttp}/*IntegrationTest.java</include>
+                            </includes>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
+            <id>netty-it-shard-mock</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <configuration>
+                            <includes combine.self="override">
+                                <include>${mockserver.nettyItShard.mock}/*IntegrationTest.java</include>
+                            </includes>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
+            <id>netty-it-shard-rest</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <configuration>
+                            <includes combine.self="override">
+                                <include>**/*IntegrationTest.java</include>
+                            </includes>
+                            <!-- **/*$* restates failsafe's default exclude, which an explicit list replaces -->
+                            <excludes combine.self="override">
+                                <exclude>${mockserver.nettyItShard.proxyHttp}/*IntegrationTest.java</exclude>
+                                <exclude>${mockserver.nettyItShard.mock}/*IntegrationTest.java</exclude>
+                                <exclude>**/*$*</exclude>
+                            </excludes>
+                        </configuration>
                     </plugin>
                 </plugins>
             </build>

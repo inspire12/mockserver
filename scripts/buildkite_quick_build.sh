@@ -26,6 +26,14 @@ else
     echo "BRANCH: ${CURRENT_BRANCH:-}"
 fi
 
+# In CI, mockserver-netty's integration tests run in the parallel ":maven: netty IT" shard
+# steps (pipeline-java.yml sets this), so the reactor build skips just those.
+PROFILES="clustered-libs"
+if [ "${MOCKSERVER_NETTY_ITS_IN_SHARDS:-false}" = "true" ]; then
+    PROFILES="${PROFILES},netty-it-skip"
+    echo "mockserver-netty integration tests: run by the netty IT shard steps, skipped here"
+fi
+
 log_debug "Starting Maven build (foreground)..."
 set +e
 # -Djava.security.egd is supplied via .mvn/maven.config (file:/dev/./urandom)
@@ -46,7 +54,7 @@ set +e
 # artifact (pipeline-java.yml) and consumed by java-docker-push-snapshot.sh to build
 # the `mockserver-snapshot-clustered` image from the SAME commit as the other snapshot
 # images — which is what lets the perf harness's item-13 clustered A/B run at all.
-./mvnw -B --no-transfer-progress -T 1C clean install ${1:-} -P clustered-libs -Dmockserver.testOutput=quiet -DredirectTestOutputToFile=true -Dmockserver.testLogLevel=INFO "-Dmockserver.testArgLine=-Dmockserver.maxLogEntries=10000 -Dmockserver.maxExpectations=5000"
+./mvnw -B --no-transfer-progress -T 1C clean install ${1:-} -P "$PROFILES" -Dmockserver.testOutput=quiet -DredirectTestOutputToFile=true -Dmockserver.testLogLevel=INFO "-Dmockserver.testArgLine=-Dmockserver.maxLogEntries=10000 -Dmockserver.maxExpectations=5000"
 MVN_EXIT=$?
 log_debug "Maven exited with code=$MVN_EXIT"
 

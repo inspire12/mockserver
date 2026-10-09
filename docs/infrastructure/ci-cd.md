@@ -357,8 +357,13 @@ flowchart TD
     PULL --> BUILD["3. Maven build
     java-build.sh (in Docker)
     ./mvnw clean install"]
+    PULL --> PRE["3b. netty IT prebuild
+    install -DskipTests"]
+    PRE --> SHARDS["netty IT shards x3
+    failsafe + leak gate"]
     BUILD --> SUMMARY["4. Coverage summary
     jacoco coverage annotation"]
+    SHARDS --> SUMMARY
     SUMMARY --> DEPLOY["5. Deploy snapshot to Sonatype
     master only"]
     DEPLOY --> CTESTS["6. Container integration tests
@@ -387,10 +392,45 @@ Runs `.buildkite/scripts/steps/java-build.sh`, which executes the full Maven bui
 - Volume-mounts the repository into the container
 - Passes the `BUILDKITE_BRANCH` environment variable
 - Executes `scripts/buildkite_quick_build.sh` which runs `./mvnw clean install`
-- That build runs the unit and integration tests of `mockserver-core` and `mockserver-netty` under Netty's leak detector at `paranoid` and fails at each module's `check-netty-leaks` step if a buffer was leaked, or if tests ran and no fork installed the detector. The script's `-Dmockserver.testArgLine=...` does not remove the detector, whose flags are in `mockserver.leakArgLine`; while both shared one property, CI ran without it. See [ByteBuf Leak Detection in Tests](../code/netty-pipeline.md#bytebuf-leak-detection-in-tests)
+- That build runs the unit and integration tests of `mockserver-core` and the unit tests of `mockserver-netty` (whose integration tests run in the [shard steps](#step-3b-netty-integration-test-shards)) under Netty's leak detector at `paranoid` and fails at each module's `check-netty-leaks` step if a buffer was leaked, or if tests ran and no fork installed the detector. The script's `-Dmockserver.testArgLine=...` does not remove the detector, whose flags are in `mockserver.leakArgLine`; while both shared one property, CI ran without it. See [ByteBuf Leak Detection in Tests](../code/netty-pipeline.md#bytebuf-leak-detection-in-tests)
 - After that reactor `install` succeeds, the same script runs the whole-reactor **configuration-reachability guard** over the now fully-built tree: `./mvnw -pl mockserver-netty surefire:test@configuration-callsite-guard`. `ConfigurationCallSiteGuardTest` scans every module's compiled `target/classes` (except the on-demand `mockserver-benchmark`, which is outside the reactor and every release path, so a locally built benchmark cannot change the verdict) to prove no enforcement site reads a configuration value only from the static `ConfigurationProperties` store (unreachable from `PUT /mockserver/configuration`), and that control-plane authentication and server TLS values are read through their snapshots rather than field by field (see [tls-and-security.md](../code/tls-and-security.md)). It is **excluded from netty's own test phase** and run here instead, because under `-T 1C` every module downstream of `mockserver-netty` in the reactor (junit-rule, junit-jupiter, spring, async, blob-\*, state-infinispan, testcontainers, k8s-webhook) is uncompiled at netty's test time — so running it there silently scanned only a subset. Both scanning tests assert every module they should cover was actually scanned (deriving the expected set from the reactor `<modules>` list), so an incomplete tree fails loudly; its exit is folded into the build's exit so a violation reddens the build. `mockserver-maven-plugin` is outside the reactor, so this run does not scan it; the `mockserver-maven-plugin` pipeline runs the guard over it (see [Gates That Must Fail Closed](#gates-that-must-fail-closed)).
 - Memory limit: 7 GB
 - Collects build artifacts: `.log` files, the **failing** tests' reports plus their console output (`mockserver/target/failed-tests/**`, curated by `java-collect-failures.sh`), the jacoco coverage XML and HTML tarball, and the shaded JAR. Per-class `TEST-*.xml` for passing classes are **not** uploaded — only failing-test artefacts appear in the build's artefact list, keeping it small (one `TEST-*.xml` per class otherwise produced ~650 artefacts that cluttered the list). A pass/fail summary is still printed at the end of the build log.
+
+#### Step 3b: Netty Integration-Test Shards
+
+**Outcome.** `mockserver-netty`'s integration tests (about 28 minutes in one serial Failsafe fork on an m5.2xlarge) no longer run inside `:maven: build`. Three parallel steps run them, each on its own agent, so they leave the build's critical path. Every integration test still runs exactly once, under the same leak gate and CI arguments.
+
+```mermaid
+flowchart LR
+    PRE["netty IT prebuild
+install -pl mockserver-netty -am
+-DskipTests -DskipITs"] -->|"m2.tar.gz
+netty-target.tar"| A["shard proxy-http"]
+    PRE --> B["shard mock"]
+    PRE --> C["shard rest"]
+    BUILD[":maven: build
+-P netty-it-skip"]
+```
+
+| Step | What it runs |
+|---|---|
+| `:maven: netty IT prebuild` (`java-netty-it-prebuild.sh`) | `scripts/buildkite_netty_it.sh prebuild`: builds `mockserver-netty` and its upstream modules once without tests, then uploads two archives: the SNAPSHOT artifacts that run installed (minus `mockserver-netty` itself) and netty's `target/classes`, `target/test-classes` and assembled fat jars (some integration tests boot them) |
+| `:maven: netty IT {{matrix}}`, one job per `proxy-http`, `mock`, `rest` (`java-netty-it-shard.sh`) | Downloads the archives (`--step netty-it-prebuild`) and runs `scripts/buildkite_netty_it.sh shard <name>`: only the integration-test bindings, invoked directly so nothing recompiles (`delete-stale-failsafe-summary`, `jacoco:prepare-agent-integration`, `clean-netty-leaks`, `failsafe:integration-test`, `print-netty-leaks`, `failsafe:verify`, `check-netty-leaks`) under profile `netty-it-shard-<name>`. Then it collects failing-test artefacts. The `rest` shard also makes the HTTP/3 `assert-suite-ran.sh` check that `java-build-and-collect.sh` made before |
+
+**How the partition is defined.** In `mockserver-netty/pom.xml`. The properties `mockserver.nettyItShard.proxyHttp` (`org/mockserver/netty/integration/proxy/http`) and `mockserver.nettyItShard.mock` (`org/mockserver/netty/integration/mock`) are the named shards' packages, without their subpackages: an include with `/**/` in the middle passes Maven's scan but matches nothing in the JUnit Platform fork, which applies the pattern again, so a future subpackage's tests run in `rest`. Profiles `netty-it-shard-proxy-http` and `netty-it-shard-mock` include one each; `netty-it-shard-rest` includes every `*IntegrationTest` and excludes both, so the three are disjoint and their union is the full set by construction. No class list is kept anywhere. Each shard keeps the module's `failIfNoTests=true`, so a pattern that stops matching anything fails its shard rather than passing empty. The reactor build skips the module's integration tests with profile `netty-it-skip`, which `scripts/buildkite_quick_build.sh` adds only when `MOCKSERVER_NETTY_ITS_IN_SHARDS=true`, set on the `:maven: build` step in `pipeline-java.yml`. A local `./mvnw verify` activates none of these profiles and still runs every integration test in one fork.
+
+**Why profiles by package, not a hash of class names.** A package pattern is readable in the pom, needs no script to compute or check, and the remainder-by-exclusion makes a missing or duplicated test impossible without a cross-shard union check. The split at build 2981 (m5.2xlarge, class times): `integration.proxy.http` 650 s (39 classes), `integration.mock` 538 s (106 classes), everything else 524 s (`http3` 151 s of it). That is about 9 to 11 minutes of tests per shard, plus about 2 to 3 minutes per shard to start the container, download the archives and resolve dependencies.
+
+**Leak gate.** Each shard runs `clean-netty-leaks` before its fork and `check-netty-leaks` after it, so each shard fails on its own leaks and on a fork that did not install the detector, exactly as the module did in one fork.
+
+**Failure.** A failing shard fails its job, and so the build, like any other step in this group; the `wait` before the deploy block keeps a red shard from publishing. A failed prebuild fails the build and the shards do not start. A failing shard's failure artefacts are under `mockserver/target/failed-tests/` on that shard's job.
+
+**Coverage.** The coverage summary and the diff-coverage gate read only the unit-test `target/site/jacoco/jacoco.xml` files, so they are unchanged. Netty's integration-test coverage, previously `mockserver-netty/target/site/jacoco-it/jacoco.xml` (and its HTML in `jacoco-html-reports.tar.gz`) from `:maven: build`, is now one `mockserver/mockserver-netty/target/jacoco-it-<shard>.exec` artefact per shard. To see it, download the three files and merge them with the JaCoCo CLI (`org.jacoco:org.jacoco.cli:<version>:jar:nodeps`): `java -jar jacococli.jar merge jacoco-it-*.exec --destfile jacoco-it.exec`, then `java -jar jacococli.jar report jacoco-it.exec --classfiles mockserver/mockserver-netty/target/classes --sourcefiles mockserver/mockserver-netty/src/main/java --html jacoco-it-html` in a tree built from the same commit.
+
+**Rebalancing.** Move a package between shards by changing the two `mockserver.nettyItShard.*` properties; the `rest` exclusion follows automatically. To add a shard, add a property, a profile that includes it, an `<exclude>` of it in `netty-it-shard-rest`, a matrix value in `pipeline-java.yml`, and the name to the `case` in `buildkite_netty_it.sh`. If the `http3` package moves out of `rest`, move the HTTP/3 check in `java-netty-it-shard.sh` with it, or the `rest` shard fails on missing reports. Use the per-class `Time elapsed` lines of a recent `:maven: build` log (or the shards' logs) to choose.
+
+**Rollback.** Delete the `env: MOCKSERVER_NETTY_ITS_IN_SHARDS` block on `:maven: build` and the two netty IT steps in `pipeline-java.yml`. The reactor build then runs all of the module's integration tests in one fork again and `java-build-and-collect.sh` makes the HTTP/3 check again; the profiles and scripts are inert. Remove the env and the steps together: the env without the steps would skip the tests entirely.
 
 #### Step 4: Coverage Summary
 
@@ -489,12 +529,13 @@ Steps run in parallel unless a `- wait` or `depends_on` orders them, so a step b
 
 - **Artifact-only Maven runs pass `-DskipITs` as well as `-DskipTests`.** In this repo `-DskipTests` silences surefire only; failsafe still runs every `*IntegrationTest`. A step that runs Maven only to assemble artifacts for a later step — the Sonatype snapshot deploy, the UI e2e and codegen jar builds, the maven-plugin build — must pass both, or it silently re-runs the full integration suite the build already ran. The snapshot deploy did this for 23 minutes a build, of which the upload was the last few seconds.
 - **Container integration tests run alongside `:maven: build`, not after it.** They consume only the netty fat jar and the WAR, which `:maven: container-test jars` builds test-free. They sit before the post-build `wait` and are ordered by `depends_on: container-test-jars`; `container-tests-run.sh` downloads with `--step container-test-jars`, so it cannot pick up the same-named copies `:maven: build` also uploads. Master-only, as before.
+- **`mockserver-netty`'s integration tests run alongside `:maven: build`**, in three shards fed by one test-free prebuild (see [Step 3b](#step-3b-netty-integration-test-shards)). The prebuild and the slowest shard together take far less than the rest of `:maven: build`.
 - **The allocation gate runs alongside `:maven: build`.** `perf-alloc-gate.sh` builds its own reactor from the restored cache and uses nothing the build produces. It still runs on PRs and master, and the plain `wait` before the deploy block still stops a red gate from publishing.
 - **UI build and Playwright e2e run alongside lint and unit tests** in `pipeline-ui.yml`. Neither consumes their output. The trade-off, accepted deliberately: e2e now runs even when the unit tests are red, instead of being skipped.
 
 ### Spot Resilience (agent-lost auto-retry)
 
-The `default` agent queue is a mix of on-demand and Spot instances (see [aws-infrastructure.md](aws-infrastructure.md#scaling-behaviour)). When AWS reclaims a Spot instance mid-build, the Buildkite agent is lost and the running job ends with **exit status `-1`** (or `255`) — an infrastructure kill, not a test failure. The Maven build runs 15–25 minutes, so a reclaim part-way through used to fail the whole build and require a manual re-run (~2 Spot evictions/day were observed).
+The `default` agent queue is a mix of on-demand and Spot instances (see [aws-infrastructure.md](aws-infrastructure.md#scaling-behaviour)). When AWS reclaims a Spot instance mid-build, the Buildkite agent is lost and the running job ends with **exit status `-1`** (or `255`) — an infrastructure kill, not a test failure. The Maven build is the pipeline's longest step, so a reclaim part-way through used to fail the whole build and require a manual re-run (~2 Spot evictions/day were observed).
 
 Two complementary mitigations:
 

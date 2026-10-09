@@ -42,8 +42,9 @@ rc=$?
 # into a loud failure (it also fails if the reports are absent, i.e. the suite did
 # not run at all). Only checked on a green build (rc==0): a failed build is
 # already red, and piling a report-absence error on top would only obscure the
-# real cause.
-if [ "$rc" -eq 0 ]; then
+# real cause. When the netty integration tests run in the shard steps instead
+# (MOCKSERVER_NETTY_ITS_IN_SHARDS), the rest shard makes this check.
+if [ "$rc" -eq 0 ] && [ "${MOCKSERVER_NETTY_ITS_IN_SHARDS:-false}" != "true" ]; then
   "$SCRIPT_DIR/assert-suite-ran.sh" \
     'mockserver/mockserver-netty/target/failsafe-reports/TEST-*Http3*IntegrationTest.xml' \
     || rc=$?

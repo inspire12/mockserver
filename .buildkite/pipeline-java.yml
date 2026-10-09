@@ -49,6 +49,10 @@ steps:
     # never fails the build. Kept in a script (not inline YAML) so the shell -
     # not Buildkite's pipeline-upload interpolation - owns the `$?`/`$rc`.
     command: ".buildkite/scripts/steps/java-build-and-collect.sh"
+    # mockserver-netty's integration tests run in the ":maven: netty IT" steps below, not
+    # here. Remove this together with those steps to run them here again.
+    env:
+      MOCKSERVER_NETTY_ITS_IN_SHARDS: "true"
     artifact_paths:
       - "**/*.log"
       # ONLY failing tests are uploaded as JUnit XML - the artefact tab stays a
@@ -111,6 +115,45 @@ steps:
     # (flaky) test failure. This reactor build instead relies on the in-Maven
     # retry (.mvn/maven.config) and the warm maven cache (restored above); see
     # docs/infrastructure/ci-cd.md -> Transient Maven Central Resilience.
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  # mockserver-netty's integration tests, split into parallel shards so they leave the
+  # ":maven: build" critical path. The prebuild compiles netty and its upstream modules
+  # once (no tests) and uploads them; each shard downloads them and runs only failsafe for
+  # its profile in mockserver-netty/pom.xml, with the netty leak gate. netty-it-shard-rest
+  # excludes the named shards' packages, so every test runs exactly once. A failing shard
+  # fails the build like any other step. See docs/infrastructure/ci-cd.md.
+  - label: ":maven: netty IT prebuild"
+    key: "netty-it-prebuild"
+    command: ".buildkite/scripts/steps/java-netty-it-prebuild.sh"
+    artifact_paths:
+      - "mockserver/target/netty-it/*.tar*"
+    timeout_in_minutes: 30
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  - label: ":maven: netty IT {{matrix}}"
+    depends_on: "netty-it-prebuild"
+    command: ".buildkite/scripts/steps/java-netty-it-shard.sh {{matrix}}"
+    matrix:
+      - "proxy-http"
+      - "mock"
+      - "rest"
+    artifact_paths:
+      - "**/*.log"
+      - "mockserver/target/failed-tests/**/*"
+      - "mockserver/mockserver-netty/target/jacoco-it-*.exec"
+    # headroom over the slowest shard on the slowest agent type; the fork stops at 2400 s
+    timeout_in_minutes: 45
     retry:
       automatic:
         - exit_status: -1   # agent lost (e.g. Spot reclamation)

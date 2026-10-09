@@ -35,4 +35,5 @@ exec "$SCRIPT_DIR/../run-in-docker.sh" \
   --cache maven \
   --cache gradle \
   -e "BUILDKITE_BRANCH=${BUILDKITE_BRANCH:-}" \
+  -e "MOCKSERVER_NETTY_ITS_IN_SHARDS=${MOCKSERVER_NETTY_ITS_IN_SHARDS:-false}" \
   -- /build/scripts/buildkite_quick_build.sh
