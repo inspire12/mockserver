@@ -5,6 +5,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Errors returned by the MockServer client.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// The server returned a verification failure (HTTP 406).
     VerificationFailure(String),

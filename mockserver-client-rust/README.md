@@ -339,6 +339,19 @@ client.close_breakpoint_websocket();
 
 **Stream frame decisions:** `StreamFrameDecision::continue_frame`, `::modify`, `::drop_frame`, `::inject`, `::close`.
 
+### Enums and newer MockServer versions
+
+Every public enum is `#[non_exhaustive]`, so a `match` on one needs a `_ =>` arm. New
+values can then be added in a minor release without breaking your code.
+
+Enums that travel over the wire (for example `ResponseMode`, `BinaryUpstream`,
+`CrossProtocolTrigger` and the `Load*` enums) also have an `Unknown` variant. A value
+this client version does not recognise, sent by a newer MockServer, reads as `Unknown`
+instead of failing the whole response. The original value is not kept, so `Unknown`
+cannot be sent back: serialising it, or sending an expectation or load scenario that
+holds it, returns an error and nothing reaches the server. To re-submit server JSON
+unchanged, use `upsert_raw`.
+
 ## Start / Launch MockServer
 
 The Rust client can download and launch a local MockServer instance directly -- no Java installation and no Docker required. The launcher downloads a self-contained platform bundle (`mockserver-<version>-<os>-<arch>`) from the GitHub Release, verifies its SHA-256, caches it per-user, and starts it.

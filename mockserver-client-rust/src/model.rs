@@ -57,6 +57,7 @@ where
 /// even a bare string) falls through to [`Matcher`](Self::Matcher).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
+#[non_exhaustive]
 pub enum ParameterValues {
     /// Plain multi-value form: a list of exact-or-regex string values.
     Values(Vec<String>),
@@ -1099,6 +1100,7 @@ impl HttpRequest {
 
 /// Request/response body — either a plain string, a typed object, or a file reference.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Body {
     /// A plain string body.
     Plain(String),
@@ -2784,6 +2786,7 @@ pub struct BinaryResponse {
 /// the server answers as `AnswerOnly`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[non_exhaustive]
 pub enum BinaryUpstream {
     /// Write the binary data; do not forward the message (the default).
     AnswerOnly,
@@ -2791,6 +2794,11 @@ pub enum BinaryUpstream {
     AnswerAndForward,
     /// Forward the message and write the binary data in place of the upstream's reply.
     ForwardAndReplace,
+    /// A value from a newer MockServer that this client version does not
+    /// recognise, so reading it does not fail the whole response. It cannot be
+    /// sent: serialising it returns an error.
+    #[serde(other, skip_serializing)]
+    Unknown,
 }
 
 impl BinaryResponse {
@@ -3331,6 +3339,7 @@ impl VerificationTimes {
 ///   matches before advancing to the next.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[non_exhaustive]
 pub enum ResponseMode {
     /// Cycle through the responses in order (default).
     Sequential,
@@ -3340,12 +3349,18 @@ pub enum ResponseMode {
     Weighted,
     /// Return each response for [`Expectation::switch_after`] matches before advancing.
     Switch,
+    /// A value from a newer MockServer that this client version does not
+    /// recognise, so reading it does not fail the whole response. It cannot be
+    /// sent: serialising it returns an error.
+    #[serde(other, skip_serializing)]
+    Unknown,
 }
 
 /// The protocol event that triggers a [`CrossProtocolScenario`] state
 /// transition. Maps to the `trigger` field.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[non_exhaustive]
 pub enum CrossProtocolTrigger {
     /// A DNS query is observed.
     DnsQuery,
@@ -3355,6 +3370,11 @@ pub enum CrossProtocolTrigger {
     GrpcRequest,
     /// An HTTP request is observed.
     HttpRequest,
+    /// A value from a newer MockServer that this client version does not
+    /// recognise, so reading it does not fail the whole response. It cannot be
+    /// sent: serialising it returns an error.
+    #[serde(other, skip_serializing)]
+    Unknown,
 }
 
 /// A cross-protocol scenario correlation: when a protocol event matching
@@ -4723,6 +4743,7 @@ pub(crate) struct ScenarioList {
 
 /// The type of data to retrieve from MockServer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RetrieveType {
     /// Recorded inbound requests.
     Requests,
@@ -4755,6 +4776,7 @@ impl RetrieveType {
 /// retrieved expectations as SDK setup code (the builder code that recreates
 /// the expectations) in a range of languages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RetrieveFormat {
     Json,
     LogEntries,
@@ -4788,6 +4810,7 @@ impl RetrieveFormat {
 
 /// The type of data to clear from MockServer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ClearType {
     All,
     Log,
@@ -4840,6 +4863,7 @@ pub struct PactVerification {
 /// * [`MockMode::Capture`] — forward and record; with no expectations defined this
 ///   captures all traffic. Backed by the same proxy flag as [`MockMode::Spy`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MockMode {
     /// Match expectations; unmatched requests get a `404` (default).
     Simulate,
@@ -4991,6 +5015,7 @@ impl SocketAddress {
 /// holds and pauses.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[non_exhaustive]
 pub enum RampCurve {
     /// Constant slope.
     Linear,
@@ -4998,6 +5023,11 @@ pub enum RampCurve {
     Quadratic,
     /// A steeper ease-in.
     Exponential,
+    /// A value from a newer MockServer that this client version does not
+    /// recognise, so reading it does not fail the whole response. It cannot be
+    /// sent: serialising it returns an error.
+    #[serde(other, skip_serializing)]
+    Unknown,
 }
 
 /// The kind of a [`LoadStage`].
@@ -5007,6 +5037,7 @@ pub enum RampCurve {
 /// - `Pause` — drive no load for the duration.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[non_exhaustive]
 pub enum LoadStageType {
     /// Closed model — hold or ramp concurrent virtual users.
     Vu,
@@ -5014,6 +5045,11 @@ pub enum LoadStageType {
     Rate,
     /// Drive no load for the duration.
     Pause,
+    /// A value from a newer MockServer that this client version does not
+    /// recognise, so reading it does not fail the whole response. It cannot be
+    /// sent: serialising it returns an error.
+    #[serde(other, skip_serializing)]
+    Unknown,
 }
 
 /// One stage of a [`LoadProfile`]: a contiguous slice of the run holding or
@@ -5138,6 +5174,7 @@ impl LoadStage {
 /// Maps to the `LoadShapeType` schema.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[non_exhaustive]
 pub enum LoadShapeType {
     /// Ramp up, hold the peak, ramp back down, with an optional recovery hold.
     Spike,
@@ -5145,6 +5182,11 @@ pub enum LoadShapeType {
     Stairs,
     /// Ramp 0 to target then hold.
     RampHold,
+    /// A value from a newer MockServer that this client version does not
+    /// recognise, so reading it does not fail the whole response. It cannot be
+    /// sent: serialising it returns an error.
+    #[serde(other, skip_serializing)]
+    Unknown,
 }
 
 /// What a [`LoadShape`] drives. Maps to the `LoadShapeMetric` schema.
@@ -5153,11 +5195,17 @@ pub enum LoadShapeType {
 /// - `Rate` — arrival rate in iterations/second (open model).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[non_exhaustive]
 pub enum LoadShapeMetric {
     /// Concurrent virtual users (closed model).
     Vu,
     /// Arrival rate in iterations/second (open model).
     Rate,
+    /// A value from a newer MockServer that this client version does not
+    /// recognise, so reading it does not fail the whole response. It cannot be
+    /// sent: serialising it returns an error.
+    #[serde(other, skip_serializing)]
+    Unknown,
 }
 
 /// A declarative named load shape that expands into ordinary [`LoadStage`]s.
@@ -5334,12 +5382,18 @@ pub enum LoadThresholdMetric {
     /// Failed per-step [`LoadCheck`]s / evaluated checks, as a 0.0-1.0
     /// fraction (0 when no checks ran).
     CheckFailureRate,
+    /// A value from a newer MockServer that this client version does not
+    /// recognise, so reading it does not fail the whole response. It cannot be
+    /// sent: serialising it returns an error.
+    #[serde(other, skip_serializing)]
+    Unknown,
 }
 
 /// How a [`LoadThreshold`]'s observed value is compared to its threshold. Maps
 /// to the threshold `comparator` enum.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[non_exhaustive]
 pub enum LoadComparator {
     /// observed < threshold.
     LessThan,
@@ -5349,6 +5403,11 @@ pub enum LoadComparator {
     GreaterThan,
     /// observed >= threshold.
     GreaterThanOrEqual,
+    /// A value from a newer MockServer that this client version does not
+    /// recognise, so reading it does not fail the whole response. It cannot be
+    /// sent: serialising it returns an error.
+    #[serde(other, skip_serializing)]
+    Unknown,
 }
 
 /// An in-run pass/fail threshold for a load scenario: a per-run metric compared
@@ -5384,6 +5443,7 @@ impl LoadThreshold {
 /// to the pacing `mode` enum.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[non_exhaustive]
 pub enum LoadPacingMode {
     /// No pacing (immediate reschedule).
     None,
@@ -5391,6 +5451,11 @@ pub enum LoadPacingMode {
     ConstantPacing,
     /// `value` is the target iterations/second per VU (cycle = 1000 / value ms).
     ConstantThroughput,
+    /// A value from a newer MockServer that this client version does not
+    /// recognise, so reading it does not fail the whole response. It cannot be
+    /// sent: serialising it returns an error.
+    #[serde(other, skip_serializing)]
+    Unknown,
 }
 
 /// Adaptive iteration pacing (think-time) for a load scenario: a target
@@ -5429,17 +5494,24 @@ impl LoadPacing {
 /// enum.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[non_exhaustive]
 pub enum LoadFeederFormat {
     /// CSV: first line is the header row.
     Csv,
     /// JSON: an array of flat objects.
     Json,
+    /// A value from a newer MockServer that this client version does not
+    /// recognise, so reading it does not fail the whole response. It cannot be
+    /// sent: serialising it returns an error.
+    #[serde(other, skip_serializing)]
+    Unknown,
 }
 
 /// How a [`LoadFeeder`] selects a row each iteration. Maps to the feeder
 /// `strategy` enum.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[non_exhaustive]
 pub enum LoadFeederStrategy {
     /// Cycle rows and never exhaust (default).
     Circular,
@@ -5447,6 +5519,11 @@ pub enum LoadFeederStrategy {
     Random,
     /// Use each row once in order; COMPLETES the run when exhausted.
     Sequential,
+    /// A value from a newer MockServer that this client version does not
+    /// recognise, so reading it does not fail the whole response. It cannot be
+    /// sent: serialising it returns an error.
+    #[serde(other, skip_serializing)]
+    Unknown,
 }
 
 /// Parameterized test data (a data feeder) for a load scenario: an inline
@@ -5502,6 +5579,7 @@ impl LoadFeeder {
 /// `source` enum.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[non_exhaustive]
 pub enum LoadCaptureSource {
     /// A JSONPath over the response body.
     BodyJsonpath,
@@ -5509,6 +5587,11 @@ pub enum LoadCaptureSource {
     Header,
     /// A regex over the response body string (capture group 1).
     BodyRegex,
+    /// A value from a newer MockServer that this client version does not
+    /// recognise, so reading it does not fail the whole response. It cannot be
+    /// sent: serialising it returns an error.
+    #[serde(other, skip_serializing)]
+    Unknown,
 }
 
 /// A declarative cross-step capture / correlation rule: extracts a value from a
@@ -5559,6 +5642,7 @@ impl LoadCapture {
 /// `source` enum.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[non_exhaustive]
 pub enum LoadCheckSource {
     /// The response status code.
     Status,
@@ -5566,6 +5650,11 @@ pub enum LoadCheckSource {
     Header,
     /// A JSONPath over the response body (`json_path`).
     BodyJsonpath,
+    /// A value from a newer MockServer that this client version does not
+    /// recognise, so reading it does not fail the whole response. It cannot be
+    /// sent: serialising it returns an error.
+    #[serde(other, skip_serializing)]
+    Unknown,
 }
 
 /// How a [`LoadCheck`] compares the observed value with its expected value.
@@ -5574,6 +5663,7 @@ pub enum LoadCheckSource {
 /// both sides as numbers and fail the check when either is not a number.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[non_exhaustive]
 pub enum LoadCheckComparator {
     Equals,
     NotEquals,
@@ -5583,6 +5673,11 @@ pub enum LoadCheckComparator {
     Lt,
     Gte,
     Lte,
+    /// A value from a newer MockServer that this client version does not
+    /// recognise, so reading it does not fail the whole response. It cannot be
+    /// sent: serialising it returns an error.
+    #[serde(other, skip_serializing)]
+    Unknown,
 }
 
 /// A per-step response assertion for a load scenario: reads a value from the
@@ -5674,11 +5769,17 @@ impl LoadCheck {
 /// the `stepSelection` enum.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[non_exhaustive]
 pub enum LoadStepSelection {
     /// Run ALL steps in declared order (a multi-step user journey).
     Sequential,
     /// Run exactly ONE step per iteration chosen at random by weight.
     Weighted,
+    /// A value from a newer MockServer that this client version does not
+    /// recognise, so reading it does not fail the whole response. It cannot be
+    /// sent: serialising it returns an error.
+    #[serde(other, skip_serializing)]
+    Unknown,
 }
 
 /// The load profile of a load scenario: EITHER an ordered list of [`LoadStage`]s

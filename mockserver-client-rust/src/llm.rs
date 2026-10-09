@@ -457,6 +457,7 @@ pub fn embedding() -> EmbeddingResponse {
 /// Either a [`Completion`] or an [`EmbeddingResponse`], accepted by
 /// `responding_with` builder methods.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum LlmResponseBody {
     Completion(Completion),
     Embedding(EmbeddingResponse),

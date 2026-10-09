@@ -42,6 +42,7 @@ const HTTP_TIMEOUT_SECS: u64 = 600;
 
 /// Errors specific to the binary launcher.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum LauncherError {
     /// The current OS or architecture is not supported.
     UnsupportedPlatform(String),

@@ -1325,10 +1325,11 @@ impl MockServerClient {
     /// the server — so this does not surface [`Error::FeatureDisabled`]. Returns
     /// the raw JSON the server echoes (`{"name":..,"state":"LOADED"}`).
     pub fn load_scenario(&self, scenario: &LoadScenario) -> Result<Value> {
+        let body = serde_json::to_value(scenario)?;
         let resp = self
             .http
             .put(self.url("/mockserver/loadScenario"))
-            .json(scenario)
+            .json(&body)
             .send()?;
         self.load_scenario_json(resp)
     }
@@ -1469,10 +1470,11 @@ impl MockServerClient {
         &self,
         body: &T,
     ) -> Result<Value> {
+        let body = serde_json::to_value(body)?;
         let resp = self
             .http
             .put(self.url("/mockserver/loadScenario/generateFromOpenAPI"))
-            .json(body)
+            .json(&body)
             .send()?;
         self.load_scenario_json(resp)
     }
@@ -1489,10 +1491,11 @@ impl MockServerClient {
         &self,
         body: &T,
     ) -> Result<Value> {
+        let body = serde_json::to_value(body)?;
         let resp = self
             .http
             .put(self.url("/mockserver/loadScenario/generateFromRecording"))
-            .json(body)
+            .json(&body)
             .send()?;
         self.load_scenario_json(resp)
     }
