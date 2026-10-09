@@ -68,7 +68,10 @@ client.when(
 
 client = MockServer::Client.new('localhost', 1080)
 client.when(
-    MockServer::HttpRequest.new(path: '/some/path')
+    MockServer::HttpRequest.new(path: '/some/path'),
+    times: MockServer::Times.exactly(1),
+    time_to_live: MockServer::TimeToLive.exactly(60, 'SECONDS'),
+    priority: 10
 ).respond(
     MockServer::HttpResponse.new(body: 'some_response_body')
 )</code></pre>
@@ -207,7 +210,10 @@ client.when(
 
 client = MockServer::Client.new('localhost', 1080)
 client.when(
-    MockServer::HttpRequest.new
+    MockServer::HttpRequest.new,
+    times: MockServer::Times.exactly(1),
+    time_to_live: MockServer::TimeToLive.exactly(60, 'SECONDS'),
+    priority: -10
 ).respond(
     MockServer::HttpResponse.new(body: 'some_default_response_body')
 )</code></pre>
@@ -628,7 +634,8 @@ client.when(
 
 client = MockServer::Client.new('localhost', 1080)
 client.when(
-    MockServer::HttpRequest.new(path: '/some/path')
+    MockServer::HttpRequest.new(path: '/some/path'),
+    times: MockServer::Times.exactly(2)
 ).respond(
     MockServer::HttpResponse.new(body: 'some_response_body')
 )</code></pre>
@@ -764,7 +771,9 @@ client.when(
 
 client = MockServer::Client.new('localhost', 1080)
 client.when(
-    MockServer::HttpRequest.new(path: '/some/path')
+    MockServer::HttpRequest.new(path: '/some/path'),
+    times: MockServer::Times.exactly(1),
+    time_to_live: MockServer::TimeToLive.exactly(60, 'SECONDS')
 ).respond(
     MockServer::HttpResponse.new(body: 'some_response_body')
 )</code></pre>
@@ -2246,6 +2255,7 @@ client.when(
 client = MockServer::Client.new('localhost', 1080)
 client.when(
     MockServer::HttpRequest.new(path: '/some/path')
+        .with_query_param('[A-z]{0,10}', '055CA455-1DF7-45BB-8535-4F83E7266092')
 ).respond(
     MockServer::HttpResponse.new(body: 'some_response_body')
 )</code></pre>
@@ -2375,6 +2385,7 @@ client.when(
 client = MockServer::Client.new('localhost', 1080)
 client.when(
     MockServer::HttpRequest.new(path: '/some/path')
+        .with_query_param('cartId', '[A-Z0-9\\-]+')
 ).respond(
     MockServer::HttpResponse.new(body: 'some_response_body')
 )</code></pre>
@@ -3615,6 +3626,8 @@ client.when(
 client = MockServer::Client.new('localhost', 1080)
 client.when(
     MockServer::HttpRequest.new(path: '/some/path', method: 'GET')
+        .with_header('Accept', 'application/json')
+        .with_header('Accept-Encoding', 'gzip, deflate, br')
 ).respond(
     MockServer::HttpResponse.new(body: 'some_response_body')
 )</code></pre>
@@ -3747,8 +3760,10 @@ client.when(
         <pre class="prettyprint lang-ruby code"><code class="code">require 'mockserver-client'
 
 client = MockServer::Client.new('localhost', 1080)
+# matches requests that have any header starting with the name Accept
 client.when(
     MockServer::HttpRequest.new(path: '/some/path')
+        .with_header('Accept.*', '')
 ).respond(
     MockServer::HttpResponse.new(body: 'some_response_body')
 )</code></pre>
@@ -3878,8 +3893,10 @@ client.when(
         <pre class="prettyprint lang-ruby code"><code class="code">require 'mockserver-client'
 
 client = MockServer::Client.new('localhost', 1080)
+# matches requests that have a header with a name starting with Accept and a value containing gzip
 client.when(
     MockServer::HttpRequest.new(path: '/some/path')
+        .with_header('Accept.*', '.*gzip.*')
 ).respond(
     MockServer::HttpResponse.new(body: 'some_response_body')
 )</code></pre>
@@ -4647,6 +4664,9 @@ client.when(
 client = MockServer::Client.new('localhost', 1080)
 client.when(
     MockServer::HttpRequest.new(path: '/some/path')
+        .with_header('headerOne|headerTwo', '.*')
+        .with_header('?headerOne', 'headerOneValue')
+        .with_header('?headerTwo', 'headerTwoValue')
 ).respond(
     MockServer::HttpResponse.new(body: 'some_response_body')
 )</code></pre>
@@ -4785,7 +4805,9 @@ client.when(
 
 client = MockServer::Client.new('localhost', 1080)
 client.when(
-    MockServer::HttpRequest.new(path: '/some/path')
+    MockServer::HttpRequest.new(path: '/some/path', headers_key_match_style: 'MATCHING_KEY')
+        .with_header('multiValuedHeader', 'value.*')
+        .with_header('headerTwo', 'headerTwoValue')
 ).respond(
     MockServer::HttpResponse.new(body: 'some_response_body')
 )</code></pre>
@@ -4928,6 +4950,8 @@ client.when(
 client = MockServer::Client.new('localhost', 1080)
 client.when(
     MockServer::HttpRequest.new(path: '/view/cart', method: 'GET')
+        .with_query_param('cartId', '055CA455-1DF7-45BB-8535-4F83E7266092')
+        .with_cookie('session', '4930456C-C718-476F-971F-CB8E047AB349')
 ).respond(
     MockServer::HttpResponse.new(body: 'some_response_body')
 )</code></pre>
@@ -5082,6 +5106,8 @@ client.when(
 client = MockServer::Client.new('localhost', 1080)
 client.when(
     MockServer::HttpRequest.new(path: '/view/cart', method: 'GET')
+        .with_query_param('cartId', { 'schema' =&gt; { 'type' =&gt; 'string', 'format' =&gt; 'uuid' } })
+        .with_cookie('session', { 'schema' =&gt; { 'type' =&gt; 'string', 'format' =&gt; 'uuid' } })
 ).respond(
     MockServer::HttpResponse.new(body: 'some_response_body')
 )</code></pre>

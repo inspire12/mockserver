@@ -22,6 +22,16 @@ steps:
         - exit_status: 255  # agent forced shutdown
           limit: 2
 
+  - label: ":ruby: Ruby website examples match the REST API tab"
+    command: ".buildkite/scripts/steps/ruby-website-examples.sh"
+    timeout_in_minutes: 10
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
   - wait: ~
     continue_on_failure: true
 

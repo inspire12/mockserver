@@ -1,0 +1,274 @@
+# Website accordions whose Ruby tab is allowed to differ from the REST API tab.
+# Key: page path#accordion button id (or its title when it has no id).
+# status: the finding this entry accepts (not_compared, differs, sent_nothing,
+# raised, rest_unparseable, rest_quoting, rest_invalid_json). digest: what the
+# block sends (or, for not_compared, its code), as the check prints it; a
+# block that starts sending something else fails until it is reviewed again.
+# Any other finding fails the check, and so does an entry that no longer
+# matches its finding.
+
+# --- The Ruby tab follows the other language tabs; the REST API tab is the odd one out ---
+mock_server/_includes/verification_summary.html#button_verify_req_at_least_twice:
+  status: differs
+  digest: 5f1acebb588d
+  reason: The REST API tab verifies path /simple; every language tab verifies /some/path.
+mock_server/_includes/verification_summary.html#button_verify_req_at_most_twice:
+  status: differs
+  digest: bbdec658e9d1
+  reason: The REST API tab verifies path /simple; every language tab verifies /some/path.
+mock_server/_includes/verification_summary.html#button_verify_req_exactly_twice:
+  status: differs
+  digest: f9a5f31e9aca
+  reason: The REST API tab verifies path /simple; every language tab verifies /some/path.
+mock_server/_includes/verification_summary.html#button_verify_req_never_received:
+  status: differs
+  digest: d48755e86f2a
+  reason: The REST API tab verifies path /simple; every language tab verifies /some/path.
+mock_server/mockserver_clients.html#button_client_verify_reqs:
+  status: differs
+  digest: 5f1acebb588d
+  reason: The REST API tab verifies /simple exactly twice; the language tabs verify /some/path at least twice.
+mock_server/_includes/retrieve_code_example.html#button_retrieve_recorded_expectations_as_json:
+  status: differs
+  digest: 6a89737cb53e
+  reason: The REST API tab leaves out the POST method that the Java tab (and Ruby) retrieve by.
+mock_server/_includes/retrieve_code_example.html#button_retrieve_recorded_reqs_as_json:
+  status: differs
+  digest: 993f00176b98
+  reason: The REST API tab leaves out the POST method that the Java tab (and Ruby) retrieve by.
+mock_server/_includes/request_matcher_code_examples.html#button_match_request_by_cookies_value_json_schema:
+  status: differs
+  digest: 1e9bb28efdbb
+  reason: The REST API tab matches literal values; the example (and the Java and JavaScript tabs) matches JSON schemas.
+mock_server/_includes/stateful_scenarios.html#sequential_cycling_mdash_one_expectation_cycles_200_503_200_then_wraps_back:
+  status: differs
+  digest: 8e37c6a1af0d
+  reason: The REST API tab leaves out the GET method and responseMode SEQUENTIAL that the Java tab (and Ruby) set.
+mock_server/_includes/stateful_scenarios.html#switch_after_n_calls_mdash_succeed_for_the_first_n_requests_then_permanently_fail:
+  status: differs
+  digest: d9e327e5e6b9
+  reason: The REST API tab leaves out the GET method that the Java tab (and Ruby) match on.
+mock_server/_includes/stateful_scenarios.html#weighted_responses_mdash_simulate_an_80_success_20_failure_split:
+  status: differs
+  digest: 52ef24ef9917
+  reason: The REST API tab leaves out the GET method that the Java tab (and Ruby) match on.
+mock_server/_includes/stateful_scenarios.html#cross_protocol_trigger_mdash_a_request_to_events_unlocks_get_api_conn_status_by_advancing_a_shared_scenario:
+  status: differs
+  digest: e0cf48418cde
+  reason: The REST API tab uses different response bodies; Ruby sends the bodies the Java tab sends.
+mock_server/contract_testing.html#button_pact_full_workflow:
+  status: differs
+  digest: 25b90068cd46
+  reason: The REST API tab adds an expectation id and a JSON-object body and reads the contract from a file; Ruby follows the Java tab and passes the exported contract on.
+mock_server/_includes/response_action_code_examples.html#button_file_store_api:
+  status: differs
+  digest: bd32613062bd
+  reason: The REST API tab sends the raw file with ?name=, which the server rejects; /mockserver/files/store needs the name and content JSON the Ruby client sends.
+mock_server/mockserver_clients.html#button_client_bind_to_additional_free_port:
+  status: differs
+  digest: d77fcbed4b64
+  reason: The REST API tab binds two free ports (and its URL is missing a closing quote); the Ruby tab binds one.
+
+# --- The REST API tab cannot be sent as written (REST-tab defects) ---
+mock_server/_includes/forward_action_code_examples.html#button_javascript_templated_forward:
+  status: rest_invalid_json
+  digest: d6f76ea78b70
+  reason: The REST API tab builds the template with Java-style "..." + "..." concatenation, which is not JSON.
+mock_server/_includes/forward_action_code_examples.html#button_javascript_templated_forward_strip_path_prefix:
+  status: rest_invalid_json
+  digest: feea6a8f62c3
+  reason: The REST API tab builds the template with Java-style "..." + "..." concatenation, which is not JSON.
+mock_server/_includes/forward_action_code_examples.html#button_javascript_templated_forward_with_delay:
+  status: rest_invalid_json
+  digest: d6f76ea78b70
+  reason: The REST API tab builds the template with Java-style "..." + "..." concatenation, which is not JSON.
+mock_server/_includes/forward_action_code_examples.html#button_javascript_velocity_templated_forward:
+  status: rest_invalid_json
+  digest: 0f0fded20e69
+  reason: The REST API tab builds the template with Java-style "..." + "..." concatenation, which is not JSON.
+mock_server/_includes/forward_action_code_examples.html#button_response_template_forward:
+  status: rest_quoting
+  digest: 30da9120313e
+  reason: The REST API tab's single-quoted -d body holds single quotes, which the shell strips; Ruby sends the body as written.
+mock_server/_includes/forward_action_code_examples.html#button_response_override_template_forward:
+  status: rest_quoting
+  digest: 1a8cd2d41f9c
+  reason: The REST API tab's single-quoted -d body holds single quotes, which the shell strips; Ruby sends the body as written.
+mock_server/_includes/response_action_code_examples.html#button_response_literal_status_code_and_reason_phrase:
+  status: rest_quoting
+  digest: 08dab86c2aca
+  reason: The REST API tab's single-quoted -d body holds the apostrophe in "I'm a teapot", which ends the shell string; Ruby sends the body as written.
+mock_server/_includes/stateful_scenarios.html#three_step_order_flow_mdash_capture_the_order_id_in_step_1_then_return_it_in_the_response_body_of_step_3:
+  status: rest_quoting
+  digest: 4fadaf356c39
+  reason: The REST API tab's single-quoted -d body holds single quotes, which the shell strips; Ruby sends the body as written.
+mock_server/response_templates.html#button_mustache_basic_template:
+  status: rest_quoting
+  digest: 94877ebbe0e7
+  reason: The REST API tab's single-quoted -d body holds single quotes, which the shell strips; Ruby sends the body as written.
+mock_server/response_templates.html#button_velocity_basic_template:
+  status: rest_quoting
+  digest: 1df1b6d7c206
+  reason: The REST API tab's single-quoted -d body holds single quotes, which the shell strips; Ruby sends the body as written.
+mock_server/response_templates.html#button_javascript_basic_template:
+  status: rest_quoting
+  digest: 84627998fc8a
+  reason: The REST API tab's single-quoted -d body holds single quotes, which the shell strips; Ruby sends the body as written.
+
+# --- Intentional: the Ruby tab shows the same feature another way ---
+mock_server/CORS_support.html#button_enabled_permissive_cors_for_all_response:
+  status: sent_nothing
+  digest: bb5bb1b3a774
+  reason: Ruby starts a server with the CORS properties (BinaryLauncher); the REST API tab sets them on a running server.
+mock_server/CORS_support.html#button_enabled_permissive_cors_for_control_plane_api:
+  status: sent_nothing
+  digest: bb5bb1b3a774
+  reason: Ruby starts a server with the CORS properties (BinaryLauncher); the REST API tab sets them on a running server.
+mock_server/_includes/openapi_request_matcher_code_examples.html#button_match_by_inline_openapi_yaml:
+  status: differs
+  digest: c89630a0c0ed
+  reason: Ruby reads the YAML spec from a file; the REST API tab inlines it (and adds an expectation id).
+mock_server/using_openapi.html#button_open_api_inline_json_specification:
+  status: differs
+  digest: 5f9dc2b1e137
+  reason: Ruby reads the spec from a file; the REST API tab splices it in with a shell backtick command.
+mock_server/using_openapi.html#button_wsdl_inline:
+  status: differs
+  digest: b996b93a35f3
+  reason: The REST API tab abbreviates the WSDL document with "..."; Ruby sends it in full.
+mock_server/_includes/response_action_code_examples.html#button_response_literal_binary_PNG_body:
+  status: differs
+  digest: ebe8aebb5438
+  reason: Ruby reads test.png and base64-encodes it, as the Java tab does; the REST API tab inlines the base64.
+mock_server/_includes/grpc_mocking.html#button_grpc_record_replay:
+  status: differs
+  digest: d7e5cdb560d3
+  reason: Ruby replays the expectations it retrieved; the REST API tab saves them to a file and uploads that file.
+mock_server/running_tests_in_parallel.html#button_parallel_tests_unique_session_id:
+  status: differs
+  digest: 13fb3a6bee39
+  reason: Ruby generates a fresh session id with SecureRandom.uuid; the REST API tab shows a fixed one.
+mock_server/mock_openid_connect_provider.html#button_create_oidc_provider:
+  status: differs
+  digest: dfc428e02bb8
+  reason: The REST API tab shows a defaults call and then a configured call; Ruby shows the configured one.
+mock_server/interactive_breakpoints.html#button_breakpoint_client_api:
+  status: differs
+  digest: ba70b3e3ce2d
+  reason: Ruby registers each phase combination with its own WebSocket client id and lists matchers with GET; the REST API tab shows one placeholder registration and lists with PUT (the server accepts both).
+mock_server/_includes/stateful_scenarios.html#timed_auto_transition_mdash_model_a_deployment_that_automatically_completes_after_1_second:
+  status: differs
+  digest: c6af8e0937a4
+  reason: Ruby, like the Java tab, shows only the scenario call; the REST API tab also registers the expectations it relies on.
+mock_server/_includes/stateful_scenarios.html#external_trigger_mdash_flip_a_dependency_from_healthy_to_down_on_demand_from_your_test_harness:
+  status: differs
+  digest: 9e853dd5de24
+  reason: Ruby, like the Java tab, shows only the trigger call; the REST API tab also registers the expectations it relies on.
+mock_server/_includes/load_scenario_code_examples.html#button_load_lifecycle:
+  status: differs
+  digest: 689ac66525f2
+  reason: Ruby also clears the scenario registry at the end; the REST API tab stops at stop.
+mock_server/_includes/load_scenario_code_examples.html#button_load_vu_ramp:
+  status: differs
+  digest: b33ab6b3a72d
+  reason: Ruby also stops the scenario after starting it; the REST API tab registers and starts it.
+mock_server/_includes/load_scenario_code_examples.html#button_load_rate_soak:
+  status: differs
+  digest: 9fcdb205653b
+  reason: Ruby also stops the scenario after starting it; the REST API tab registers and starts it.
+mock_server/load_injection.html#button_load_step_checks:
+  status: differs
+  digest: a0aff751aaa3
+  reason: Ruby also stops the scenario after starting it; the REST API tab registers and starts it.
+mock_server/load_injection.html#in_run_thresholds_fail_the_run_on_a_latency_or_error_budget_breach:
+  status: differs
+  digest: d93c74cf5315
+  reason: Ruby reads the status once; the REST API tab polls it in a shell loop.
+
+# --- Not compared: no REST API tab, no call to /mockserver/ in it, or no accordion ---
+mock_server/_includes/ai_protocol_mocking.html#button_mcp_tools:
+  status: not_compared
+  digest: 20a12422ed8c
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_mcp_resources:
+  status: not_compared
+  digest: 004fd87e44ea
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_mcp_prompts:
+  status: not_compared
+  digest: 95ba1f677979
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_mcp_full:
+  status: not_compared
+  digest: 6a11878a0c0d
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_a2a_basic:
+  status: not_compared
+  digest: 4488c3f3ced9
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_a2a_handlers:
+  status: not_compared
+  digest: 36ded7d9ffa5
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_a2a_streaming:
+  status: not_compared
+  digest: 95185d21ce85
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_a2a_push:
+  status: not_compared
+  digest: 486cfa91fc62
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_a2a_workflow:
+  status: not_compared
+  digest: ee4433732512
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/creating_expectations.html#tabs-1:
+  status: not_compared
+  digest: 54bb14784603
+  reason: These language tabs have no REST API tab to compare with.
+mock_server/client_compatibility.html#loose-74196ab55da3:
+  status: not_compared
+  digest: 74196ab55da3
+  reason: An RSpec spec_helper line outside any accordion; it sends nothing itself.
+mock_server/client_compatibility.html#loose-a5d2d12642e9:
+  status: not_compared
+  digest: a5d2d12642e9
+  reason: An RSpec example outside any accordion that needs the spec helper and a PaymentService class.
+mock_server/drift_detection.html#tabs-1:
+  status: not_compared
+  digest: 674ba75730e9
+  reason: These language tabs have no REST API tab to compare with.
+mock_server/drift_detection.html#tabs-2:
+  status: not_compared
+  digest: afed87db6878
+  reason: These language tabs have no REST API tab to compare with.
+mock_server/mock_openid_connect_provider.html#button_device_flow:
+  status: not_compared
+  digest: cc6fc9da40bf
+  reason: The REST API tab calls the mocked OIDC endpoints, not /mockserver/.
+mock_server/mock_openid_connect_provider.html#button_introspect_token:
+  status: not_compared
+  digest: 1f688cabe1bf
+  reason: The REST API tab calls the mocked OIDC endpoints, not /mockserver/.
+mock_server/mockserver_clients.html#loose-03f6e7c0efcf:
+  status: not_compared
+  digest: 03f6e7c0efcf
+  reason: A block-form client example outside any accordion, with no REST API tab beside it.
+mock_server/mockserver_clients.html#loose-b3b4f2461a6a:
+  status: not_compared
+  digest: b3b4f2461a6a
+  reason: A block-form client example outside any accordion, with no REST API tab beside it.
+mock_server/mockserver_testcontainers.html#loose-726d4a0657ee:
+  status: not_compared
+  digest: 726d4a0657ee
+  reason: A Gemfile line, not code that sends anything.
+mock_server/mockserver_testcontainers.html#loose-0d91d2bd3be9:
+  status: not_compared
+  digest: 0d91d2bd3be9
+  reason: Starts a Testcontainers container (the testcontainers-mockserver gem), outside any accordion.
+
+# --- Added with the alternate REST API tab titles ---
+mock_server/_includes/openapi_request_matcher_code_examples.html#button_match_by_inline_openapi_json:
+  status: rest_invalid_json
+  digest: 3fda2f398375
+  reason: One REST API tab splices the spec in with a shell backtick cat, which is not JSON as written; Ruby reads the spec from a file.

@@ -1526,7 +1526,10 @@ all_scenarios = client.scenarios()</code></pre>
 
     <button class="accordion inner">Ruby</button>
     <div class="panel">
-        <pre class="prettyprint lang-ruby code"><code class="code"># Get state:
+        <pre class="prettyprint lang-ruby code"><code class="code"># List all:
+all = client.scenarios
+
+# Get state:
 state = client.scenario('DeployFlow').state
 
 # Set state immediately:
@@ -1536,10 +1539,7 @@ client.scenario('DeployFlow').set('Deploying')
 client.scenario('DeployFlow').set('Deploying', transition_after_ms: 5000, next_state: 'Deployed')
 
 # Jump immediately:
-client.scenario('DeployFlow').trigger('Failed')
-
-# List all:
-all = client.scenarios</code></pre>
+client.scenario('DeployFlow').trigger('Failed')</code></pre>
     </div>
 
     <button class="accordion inner">Go</button>

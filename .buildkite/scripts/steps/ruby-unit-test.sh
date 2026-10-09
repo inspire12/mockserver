@@ -7,4 +7,5 @@ exec "$SCRIPT_DIR/../run-in-docker.sh" \
   -i ruby:3.3 \
   -w /build/mockserver-client-ruby \
   --cache bundler \
-  -- bash -c "bundle install && bundle exec rspec --tag '~integration' --format progress --format RspecJunitFormatter --out test-reports/unit.xml"
+  -- bash -c "bundle install && bundle exec rspec --tag '~integration' --format progress --format RspecJunitFormatter --out test-reports/unit.xml \
+    && bundle exec ruby spec/website_examples/check_website_examples.rb"

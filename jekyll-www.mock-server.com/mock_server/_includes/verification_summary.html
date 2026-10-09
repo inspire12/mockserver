@@ -1157,7 +1157,7 @@ client.verify(
 client = MockServer::Client.new('localhost', 1080)
 client.verify(
     MockServer::HttpRequest.new(path: '/some/path'),
-    MockServer::HttpResponse.new(status_code: 200, body: '{"status": "ok"}'),
+    response: MockServer::HttpResponse.new(status_code: 200, body: '{"status": "ok"}'),
     times: MockServer::VerificationTimes.at_least(1)
 )</code></pre>
     </div>
@@ -1280,9 +1280,9 @@ client.verify(
 
 client = MockServer::Client.new('localhost', 1080)
 client.verify(
-    MockServer::HttpResponse.new(
+    response: MockServer::HttpResponse.new(
         status_code: 200,
-        headers: { 'Content-Type' => 'application/json' }
+        headers: { 'Content-Type' =&gt; 'application/json' }
     ),
     times: MockServer::VerificationTimes.at_least(1)
 )</code></pre>
@@ -2163,10 +2163,8 @@ client.verify_sequence(
 
 client = MockServer::Client.new('localhost', 1080)
 client.verify_sequence(
-    requests: [
-        MockServer::HttpRequest.new(path: '/api/login'),
-        MockServer::HttpRequest.new(path: '/api/data'),
-    ],
+    MockServer::HttpRequest.new(path: '/api/login'),
+    MockServer::HttpRequest.new(path: '/api/data'),
     responses: [
         MockServer::HttpResponse.new(status_code: 200),
         MockServer::HttpResponse.new(status_code: 200, body: '{"result": "success"}'),

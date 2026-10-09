@@ -237,10 +237,58 @@ module MockServer
   end
 
   # @api private
-  def self.serialize_key_multi_values(items)
+  # With a key_match_style (MATCHING_KEY or SUB_SET) the collection is written in
+  # the object form, the only form that carries keyMatchStyle.
+  def self.serialize_key_multi_values(items, key_match_style = nil)
+    if key_match_style
+      map = { 'keyMatchStyle' => key_match_style }
+      (items || []).each { |item| (map[item.name] ||= []).concat(Array(item.values)) }
+      return map
+    end
     return nil if items.nil?
 
     items.map(&:to_h)
+  end
+
+  # @api private
+  # An httpRequest naming an OpenAPI spec (specUrlOrPayload) is an OpenAPI
+  # matcher; anything else is an HTTP (or DNS) request matcher.
+  def self.deserialize_request_definition(data)
+    return OpenAPIDefinition.from_hash(data) if data.is_a?(Hash) && data.key?('specUrlOrPayload')
+
+    HttpRequest.from_hash(data)
+  end
+
+  # @api private
+  def self.key_match_style(data)
+    data['keyMatchStyle'] || data[:keyMatchStyle] if data.is_a?(Hash)
+  end
+
+  # @api private
+  # Accept a keyToMultiValue collection as the server's JSON does, so headers,
+  # query parameters and trailers can be given as { name => values }, as
+  # [{ name:, values: }] or as KeyToMultiValue objects.
+  def self.coerce_key_multi_values(value)
+    return value if value.nil?
+    return deserialize_key_multi_values(stringify_keys(value)) if value.is_a?(Hash)
+    raise TypeError, "Expected a Hash or an Array of KeyToMultiValue, got #{value.class.name}" unless value.is_a?(Array)
+
+    value.map { |item| item.is_a?(Hash) ? KeyToMultiValue.from_hash(stringify_keys(item)) : item }
+  end
+
+  # @api private
+  # Cookies as { name => value }, [{ name:, value: }] or KeyToMultiValue objects.
+  def self.coerce_cookies(value)
+    return value if value.nil?
+    return deserialize_cookies(stringify_keys(value)) if value.is_a?(Hash)
+    raise TypeError, "Expected a Hash or an Array of KeyToMultiValue, got #{value.class.name}" unless value.is_a?(Array)
+
+    value.map do |item|
+      next item unless item.is_a?(Hash)
+
+      item = stringify_keys(item)
+      KeyToMultiValue.new(name: item.fetch('name', ''), values: item.key?('value') ? [item['value']] : item.fetch('values', []))
+    end
   end
 
   # @api private
@@ -260,7 +308,8 @@ module MockServer
     return nil if data.nil?
 
     if data.is_a?(Hash)
-      return data.map { |k, v| KeyToMultiValue.new(name: k, values: v.is_a?(Array) ? v : [v]) }
+      return data.reject { |k, _v| k == 'keyMatchStyle' }
+                 .map { |k, v| KeyToMultiValue.new(name: k, values: v.is_a?(Array) ? v : [v]) }
     end
 
     data.map do |item|
@@ -832,46 +881,85 @@ module MockServer
     # protocol pins the transport the matcher requires
     # (org.mockserver.model.Protocol: HTTP_1_1 / HTTP_2 / HTTP_3 / SOCKS / ...),
     # round-tripping the httpRequest +protocol+ wire key.
-    attr_accessor :method, :path, :query_string_parameters, :headers,
-                  :cookies, :body, :secure, :protocol, :keep_alive, :respond_before_body,
-                  :path_parameters, :socket_address, :jwt,
-                  :dns_name, :dns_type, :dns_class
+    # headers, query_string_parameters, path_parameters and cookies also accept a
+    # Hash ({ name => values }) or an Array of Hashes, as in the server's JSON.
+    # *_key_match_style is SUB_SET (the server's default: one value of a key
+    # must match) or MATCHING_KEY (every value must); a Hash with a
+    # 'keyMatchStyle' key sets it too.
+    attr_accessor :method, :path, :body, :secure, :protocol, :keep_alive, :respond_before_body,
+                  :socket_address, :jwt, :dns_name, :dns_type, :dns_class,
+                  :headers_key_match_style, :query_string_parameters_key_match_style,
+                  :path_parameters_key_match_style
+    attr_reader :query_string_parameters, :headers, :cookies, :path_parameters
 
     def initialize(method: nil, path: nil, query_string_parameters: nil, headers: nil,
                    cookies: nil, body: nil, secure: nil, protocol: nil, keep_alive: nil,
                    respond_before_body: nil, path_parameters: nil, socket_address: nil,
-                   jwt: nil, dns_name: nil, dns_type: nil, dns_class: nil)
+                   jwt: nil, dns_name: nil, dns_type: nil, dns_class: nil,
+                   headers_key_match_style: nil, query_string_parameters_key_match_style: nil,
+                   path_parameters_key_match_style: nil)
       @method = method
       @path = path
-      @query_string_parameters = query_string_parameters
-      @headers = headers
-      @cookies = cookies
+      self.query_string_parameters = query_string_parameters
+      self.headers = headers
+      self.cookies = cookies
       @body = body
       @secure = secure
       @protocol = protocol
       @keep_alive = keep_alive
       @respond_before_body = respond_before_body
-      @path_parameters = path_parameters
+      self.path_parameters = path_parameters
       @socket_address = socket_address
       @jwt = jwt
       @dns_name = dns_name
       @dns_type = dns_type
       @dns_class = dns_class
+      @headers_key_match_style = headers_key_match_style if headers_key_match_style
+      @query_string_parameters_key_match_style = query_string_parameters_key_match_style if query_string_parameters_key_match_style
+      @path_parameters_key_match_style = path_parameters_key_match_style if path_parameters_key_match_style
+    end
+
+    def headers=(value)
+      style = MockServer.key_match_style(value)
+      @headers_key_match_style = style if style
+      @headers = MockServer.coerce_key_multi_values(value)
+    end
+
+    def query_string_parameters=(value)
+      style = MockServer.key_match_style(value)
+      @query_string_parameters_key_match_style = style if style
+      @query_string_parameters = MockServer.coerce_key_multi_values(value)
+    end
+
+    def path_parameters=(value)
+      style = MockServer.key_match_style(value)
+      @path_parameters_key_match_style = style if style
+      @path_parameters = MockServer.coerce_key_multi_values(value)
+    end
+
+    def cookies=(value)
+      @cookies = MockServer.coerce_cookies(value)
     end
 
     def to_h
+      path_parameters = if @path_parameters_key_match_style
+                          MockServer.serialize_key_multi_values(@path_parameters, @path_parameters_key_match_style)
+                        else
+                          MockServer.serialize_key_multi_values_object(@path_parameters)
+                        end
       MockServer.strip_none({
         'method'                => @method,
         'path'                  => @path,
-        'queryStringParameters' => MockServer.serialize_key_multi_values(@query_string_parameters),
-        'headers'               => MockServer.serialize_key_multi_values(@headers),
+        'queryStringParameters' => MockServer.serialize_key_multi_values(@query_string_parameters,
+                                                                         @query_string_parameters_key_match_style),
+        'headers'               => MockServer.serialize_key_multi_values(@headers, @headers_key_match_style),
         'cookies'               => MockServer.serialize_cookies(@cookies),
         'body'                  => MockServer.serialize_body(@body),
         'secure'                => @secure,
         'protocol'              => @protocol,
         'keepAlive'             => @keep_alive,
         'respondBeforeBody'     => @respond_before_body,
-        'pathParameters'        => MockServer.serialize_key_multi_values_object(@path_parameters),
+        'pathParameters'        => path_parameters,
         'socketAddress'         => @socket_address&.to_h,
         'jwt'                   => @jwt&.to_h,
         'dnsName'               => @dns_name,
@@ -899,7 +987,10 @@ module MockServer
         jwt:                     Jwt.from_hash(data['jwt']),
         dns_name:                data['dnsName'],
         dns_type:                data['dnsType'],
-        dns_class:               data['dnsClass']
+        dns_class:               data['dnsClass'],
+        headers_key_match_style: MockServer.key_match_style(data['headers']),
+        query_string_parameters_key_match_style: MockServer.key_match_style(data['queryStringParameters']),
+        path_parameters_key_match_style: MockServer.key_match_style(data['pathParameters'])
       )
     end
 
@@ -1049,25 +1140,39 @@ module MockServer
     # response's +trailers+ slot), a keyToMultiValue collection like +headers+.
     # status_code_range serves a status from a range such as "2xx";
     # generate_from_schema is a JSON schema the body is generated from.
-    attr_accessor :status_code, :reason_phrase, :headers, :cookies,
-                  :body, :delay, :connection_options, :trailers, :primary,
+    # headers, trailers and cookies also accept a Hash or an Array of Hashes,
+    # as in the server's JSON (see HttpRequest).
+    attr_accessor :status_code, :reason_phrase, :body, :delay, :connection_options, :primary,
                   :status_code_range, :generate_from_schema, :recover_after
+    attr_reader :headers, :cookies, :trailers
 
     def initialize(status_code: nil, reason_phrase: nil, headers: nil, cookies: nil,
                    body: nil, delay: nil, connection_options: nil, trailers: nil, primary: nil,
                    status_code_range: nil, generate_from_schema: nil, recover_after: nil)
       @status_code = status_code
       @reason_phrase = reason_phrase
-      @headers = headers
-      @cookies = cookies
+      self.headers = headers
+      self.cookies = cookies
       @body = body
       @delay = delay
       @connection_options = connection_options
-      @trailers = trailers
+      self.trailers = trailers
       @primary = primary
       @status_code_range = status_code_range
       @generate_from_schema = generate_from_schema
       @recover_after = recover_after
+    end
+
+    def headers=(value)
+      @headers = MockServer.coerce_key_multi_values(value)
+    end
+
+    def trailers=(value)
+      @trailers = MockServer.coerce_key_multi_values(value)
+    end
+
+    def cookies=(value)
+      @cookies = MockServer.coerce_cookies(value)
     end
 
     def to_h
@@ -1380,16 +1485,27 @@ module MockServer
   end
 
   class HttpOverrideForwardedRequest
+    # request_override (an {HttpRequest}) is merged over the forwarded request and
+    # response_override (an {HttpResponse}) over the response; response_template
+    # (an {HttpTemplate}) renders the response from the request and the forwarded
+    # response. http_request / http_response are the older names of the overrides;
+    # the server accepts either set, not both.
     attr_accessor :http_request, :http_response, :delay,
-                  :request_modifier, :response_modifier, :primary
+                  :request_override, :request_modifier,
+                  :response_override, :response_modifier, :response_template, :primary
 
     def initialize(http_request: nil, http_response: nil, delay: nil,
-                   request_modifier: nil, response_modifier: nil, primary: nil)
+                   request_override: nil, request_modifier: nil,
+                   response_override: nil, response_modifier: nil, response_template: nil,
+                   primary: nil)
       @http_request = http_request
       @http_response = http_response
       @delay = delay
+      @request_override = request_override
       @request_modifier = request_modifier
+      @response_override = response_override
       @response_modifier = response_modifier
+      @response_template = response_template
       @primary = primary
     end
 
@@ -1398,8 +1514,11 @@ module MockServer
         'httpRequest'      => @http_request&.to_h,
         'httpResponse'     => @http_response&.to_h,
         'delay'            => @delay&.to_h,
+        'requestOverride'  => @request_override&.to_h,
         'requestModifier'  => @request_modifier,
+        'responseOverride' => @response_override&.to_h,
         'responseModifier' => @response_modifier,
+        'responseTemplate' => @response_template&.to_h,
         'primary'          => @primary
       })
     end
@@ -1411,14 +1530,32 @@ module MockServer
         http_request:      HttpRequest.from_hash(data['httpRequest']),
         http_response:     HttpResponse.from_hash(data['httpResponse']),
         delay:             Delay.from_hash(data['delay']),
+        request_override:  HttpRequest.from_hash(data['requestOverride']),
         request_modifier:  data['requestModifier'],
+        response_override: HttpResponse.from_hash(data['responseOverride']),
         response_modifier: data['responseModifier'],
+        response_template: HttpTemplate.from_hash(data['responseTemplate']),
         primary:           data['primary']
       )
     end
 
     def self.forward_overridden_request(request: nil)
       new(http_request: request)
+    end
+
+    def with_request_override(request_override)
+      @request_override = request_override
+      self
+    end
+
+    def with_response_override(response_override)
+      @response_override = response_override
+      self
+    end
+
+    def with_response_template(response_template)
+      @response_template = response_template
+      self
     end
   end
 
@@ -2731,7 +2868,7 @@ module MockServer
         id:                              data['id'],
         priority:                        data['priority'],
         percentage:                      data['percentage'],
-        http_request:                    HttpRequest.from_hash(data['httpRequest']),
+        http_request:                    MockServer.deserialize_request_definition(data['httpRequest']),
         http_response:                   HttpResponse.from_hash(data['httpResponse']),
         http_response_template:          HttpTemplate.from_hash(data['httpResponseTemplate']),
         http_response_class_callback:    HttpClassCallback.from_hash(data['httpResponseClassCallback']),
@@ -2773,18 +2910,25 @@ module MockServer
     end
   end
 
+  # An OpenAPI request matcher: as an expectation's or verification's
+  # httpRequest it matches the requests an OpenAPI operation accepts.
   class OpenAPIDefinition
-    attr_accessor :spec_url_or_payload, :operation_id
+    # not_operation inverts the match (the server's +not+ field).
+    attr_accessor :spec_url_or_payload, :operation_id, :context_path_prefix, :not_operation
 
-    def initialize(spec_url_or_payload: nil, operation_id: nil)
+    def initialize(spec_url_or_payload: nil, operation_id: nil, context_path_prefix: nil, not_operation: nil)
       @spec_url_or_payload = spec_url_or_payload
       @operation_id = operation_id
+      @context_path_prefix = context_path_prefix
+      @not_operation = not_operation
     end
 
     def to_h
       MockServer.strip_none({
-        'specUrlOrPayload' => @spec_url_or_payload,
-        'operationId'      => @operation_id
+        'not'               => @not_operation,
+        'specUrlOrPayload'  => @spec_url_or_payload,
+        'operationId'       => @operation_id,
+        'contextPathPrefix' => @context_path_prefix
       })
     end
 
@@ -2793,7 +2937,9 @@ module MockServer
 
       new(
         spec_url_or_payload: data['specUrlOrPayload'],
-        operation_id:        data['operationId']
+        operation_id:        data['operationId'],
+        context_path_prefix: data['contextPathPrefix'],
+        not_operation:       data['not']
       )
     end
   end
@@ -2895,7 +3041,7 @@ module MockServer
       return nil if data.nil?
 
       new(
-        http_request:    HttpRequest.from_hash(data['httpRequest']),
+        http_request:    MockServer.deserialize_request_definition(data['httpRequest']),
         http_response:   HttpResponse.from_hash(data['httpResponse']),
         expectation_id:  ExpectationId.from_hash(data['expectationId']),
         times:           VerificationTimes.from_hash(data['times']),
@@ -2928,7 +3074,7 @@ module MockServer
       http_responses_data = data['httpResponses']
       expectation_ids_data = data['expectationIds']
       new(
-        http_requests:   http_requests_data&.map { |r| HttpRequest.from_hash(r) },
+        http_requests:   http_requests_data&.map { |r| MockServer.deserialize_request_definition(r) },
         http_responses:  http_responses_data&.map { |r| HttpResponse.from_hash(r) },
         expectation_ids: expectation_ids_data&.map { |e| ExpectationId.from_hash(e) }
       )

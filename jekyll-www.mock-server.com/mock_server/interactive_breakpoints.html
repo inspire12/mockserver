@@ -545,33 +545,33 @@ client.clear_breakpoint_matchers()
     </div>
     <button class="accordion inner">Ruby</button>
     <div class="panel">
-        <pre class="prettyprint lang-ruby code"><code class="code">require 'mockserver'
+        <pre class="prettyprint lang-ruby code"><code class="code">require 'mockserver-client'
 
 client = MockServer::Client.new('localhost', 1080)
 
 # REQUEST phase only
 bp_id = client.add_request_breakpoint(
   MockServer::HttpRequest.new(path: '/api/.*'),
-  ->(request) { request }  # continue unchanged; return HttpResponse to abort
+  -&gt;(request) { request }  # continue unchanged; return HttpResponse to abort
 )
 
 # REQUEST + RESPONSE
 bp_id2 = client.add_request_and_response_breakpoint(
   MockServer::HttpRequest.new(path: '/api/.*'),
-  ->(request) { request },
-  ->(request, response) { response }
+  -&gt;(request) { request },
+  -&gt;(request, response) { response }
 )
 
 # Streaming phases
 bp_id3 = client.add_breakpoint(
   MockServer::HttpRequest.new(path: '/stream/.*'),
   %w[RESPONSE_STREAM],
-  stream_frame_handler: ->(frame) { { 'action' => 'CONTINUE' } }
+  stream_frame_handler: -&gt;(frame) { { 'action' =&gt; 'CONTINUE' } }
   # Other actions: MODIFY (with body), DROP, INJECT (with body), CLOSE
 )
 
 # Manage matchers
-matchers = client.list_breakpoint_matchers   # {"matchers" => [...]}
+matchers = client.list_breakpoint_matchers   # {"matchers" =&gt; [...]}
 client.remove_breakpoint_matcher(bp_id)
 client.clear_breakpoint_matchers</code></pre>
     </div>

@@ -114,6 +114,26 @@ client.upsert(MockServer::Expectation.from_hash({
 Symbol keys need a client released after 8.0.0; 8.0.0 and earlier read only
 string keys and build an empty expectation from a symbol-keyed hash.
 
+Headers, query parameters, path parameters, trailers and cookies can be given
+in the same shapes the JSON uses. A key match style sets whether at least one
+value of each listed key must match (`SUB_SET`, the default) or every value of
+it (`MATCHING_KEY`):
+
+```ruby
+MockServer::HttpRequest.new(
+  path: '/view/cart',
+  headers: { 'Accept' => ['application/json'] },
+  headers_key_match_style: 'MATCHING_KEY',
+  query_string_parameters: [{ name: 'cartId', values: ['055CA455'] }],
+  cookies: { 'session' => '4930456C' }
+)
+```
+
+An `httpRequest` holding `specUrlOrPayload` is read as an `OpenAPIDefinition`
+matcher, and `HttpOverrideForwardedRequest` carries `request_override`,
+`response_override` and `response_template`. These need a client released
+after 8.0.0.
+
 ## JWT and combined body matchers
 
 Match a request by the claims in its JWT (carried by default in the

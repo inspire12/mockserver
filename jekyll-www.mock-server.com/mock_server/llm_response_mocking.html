@@ -179,16 +179,32 @@ require 'json'
 # OpenAI — POST /v1/chat/completions
 uri = URI('http://localhost:1080/mockserver/expectation')
 http = Net::HTTP.new(uri.host, uri.port)
-req = Net::HTTP::Put.new(uri.path, 'Content-Type' => 'application/json')
+req = Net::HTTP::Put.new(uri.path, 'Content-Type' =&gt; 'application/json')
 req.body = JSON.generate({
-  'httpRequest' => { 'method' => 'POST', 'path' => '/v1/chat/completions' },
-  'httpLlmResponse' => {
-    'provider' => 'OPENAI',
-    'model' => 'gpt-4o',
-    'completion' => {
-      'text' => 'MockServer is an open-source HTTP mock server.',
-      'stopReason' => 'stop',
-      'usage' => { 'inputTokens' => 12, 'outputTokens' => 8 }
+  'httpRequest' =&gt; { 'method' =&gt; 'POST', 'path' =&gt; '/v1/chat/completions' },
+  'httpLlmResponse' =&gt; {
+    'provider' =&gt; 'OPENAI',
+    'model' =&gt; 'gpt-4o',
+    'completion' =&gt; {
+      'text' =&gt; 'MockServer is an open-source HTTP mock server.',
+      'stopReason' =&gt; 'stop',
+      'usage' =&gt; { 'inputTokens' =&gt; 12, 'outputTokens' =&gt; 8 }
+    }
+  }
+})
+http.request(req)
+
+# Anthropic — POST /v1/messages
+req = Net::HTTP::Put.new(uri.path, 'Content-Type' =&gt; 'application/json')
+req.body = JSON.generate({
+  'httpRequest' =&gt; { 'method' =&gt; 'POST', 'path' =&gt; '/v1/messages' },
+  'httpLlmResponse' =&gt; {
+    'provider' =&gt; 'ANTHROPIC',
+    'model' =&gt; 'claude-sonnet-4-20250514',
+    'completion' =&gt; {
+      'text' =&gt; 'MockServer is an open-source HTTP mock server.',
+      'stopReason' =&gt; 'end_turn',
+      'usage' =&gt; { 'inputTokens' =&gt; 12, 'outputTokens' =&gt; 8 }
     }
   }
 })

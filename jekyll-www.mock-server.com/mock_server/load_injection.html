@@ -279,8 +279,8 @@ scenario = LoadScenario.new(
 
 client.load_scenario(scenario)               # 1. register (does NOT start it yet)
 client.start_load_scenarios('checkout-load') # 2. start (requires loadGenerationEnabled=true)
-client.load_scenarios                        # 3. list all registered scenarios
-client.get_load_scenario('checkout-load')    # live status
+client.get_load_scenario('checkout-load')    # 3. poll one scenario's live status
+client.load_scenarios                        #    or list all registered scenarios
 client.stop_load_scenarios('checkout-load')  # 4. stop (nil stops ALL running scenarios)
 client.close</code></pre>
     </div>
@@ -2141,7 +2141,7 @@ client.load_scenario(scenario)   # register (does NOT start it yet)</code></pre>
     LoadStep.new(name: 'login',
                  request: HttpRequest.new(method: 'POST', path: '/auth/login',
                                           headers: { 'Host' =&gt; ['api.svc:8080'], 'Content-Type' =&gt; ['application/json'] },
-                                          body: '{"username":"user{% raw %}{{iteration.vuId}}{% endraw %}","password":"secret"}',
+                                          body: { 'username' =&gt; 'user{% raw %}{{iteration.vuId}}{% endraw %}', 'password' =&gt; 'secret' },
                                           socket_address: SocketAddress.new(host: 'api.svc', port: 8080, scheme: 'HTTP')),
                  captures: [LoadCapture.new(name: 'token', source: 'BODY_JSONPATH', expression: '$.accessToken')]),
     LoadStep.new(name: 'fetch-account',

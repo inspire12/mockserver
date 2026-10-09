@@ -1464,25 +1464,24 @@ client.upsert(Expectation.from_dict({
     </div>
     <button class="accordion inner">Ruby</button>
     <div class="panel">
-        <pre class="prettyprint lang-ruby code"><code class="code">require 'mockserver-client'
+        <pre class="prettyprint lang-ruby code"><code class="code">require 'base64'
+require 'mockserver-client'
+include MockServer
 
-client = MockServer::Client.new('localhost', 1080)
-client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest" =&gt; {
-        "path" =&gt; "/ws/rest/user/[0-9]+/icon/[0-9]+\\.png"
-    },
-    "httpResponse" =&gt; {
-        "statusCode" =&gt; 200,
-        "headers" =&gt; {
-            "content-type" =&gt; ["image/png"],
-            "content-disposition" =&gt; ["form-data; name=\"test.png\"; filename=\"test.png\""]
+png_bytes = File.binread('test.png')
+client = Client.new('localhost', 1080)
+client.when(
+    HttpRequest.new(path: '/ws/rest/user/[0-9]+/icon/[0-9]+\\.png')
+).respond(
+    HttpResponse.new(
+        status_code: 200,
+        headers: {
+            'content-type' =&gt; ['image/png'],
+            'content-disposition' =&gt; ['form-data; name="test.png"; filename="test.png"']
         },
-        "body" =&gt; {
-            "type" =&gt; "BINARY",
-            "base64Bytes" =&gt; "iVBORw0KGgoAAAANSUhEUgAAAqwAAAAp..."
-        }
-    }
-}))</code></pre>
+        body: Body.new(type: 'BINARY', base64_bytes: Base64.strict_encode64(png_bytes))
+    )
+)</code></pre>
     </div>
     <button class="accordion inner">Go</button>
     <div class="panel">
@@ -1914,24 +1913,27 @@ client.upsert(Expectation.from_dict({
     <button class="accordion inner">Ruby</button>
     <div class="panel">
         <pre class="prettyprint lang-ruby code"><code class="code">require 'mockserver-client'
+include MockServer
 
-client = MockServer::Client.new('localhost', 1080)
-client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest" =&gt; {
-        "path" =&gt; "/some/path"
-    },
-    "httpResponse" =&gt; {
-        "body" =&gt; "some_response_body",
-        "delay" =&gt; {
-            "timeUnit" =&gt; "MILLISECONDS",
-            "distribution" =&gt; {
-                "type" =&gt; "UNIFORM",
-                "min" =&gt; 100,
-                "max" =&gt; 500
-            }
-        }
-    }
-}))</code></pre>
+client = Client.new('localhost', 1080)
+
+# uniform random delay between 100ms and 500ms
+client.when(HttpRequest.new(path: '/some/path')).respond(
+    HttpResponse.new(body: 'some_response_body',
+                     delay: Delay.new(distribution: DelayDistribution.new(type: 'UNIFORM', min: 100, max: 500)))
+)
+
+# log-normal delay (realistic latency distribution) with median 200ms and p99 of 800ms
+client.when(HttpRequest.new(path: '/some/path')).respond(
+    HttpResponse.new(body: 'some_response_body',
+                     delay: Delay.new(distribution: DelayDistribution.new(type: 'LOG_NORMAL', median: 200, p99: 800)))
+)
+
+# gaussian delay with mean 200ms and standard deviation of 50ms
+client.when(HttpRequest.new(path: '/some/path')).respond(
+    HttpResponse.new(body: 'some_response_body',
+                     delay: Delay.new(distribution: DelayDistribution.new(type: 'GAUSSIAN', mean: 200, std_dev: 50)))
+)</code></pre>
     </div>
     <button class="accordion inner">Go</button>
     <div class="panel">
