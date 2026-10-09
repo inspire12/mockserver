@@ -45,9 +45,9 @@ diff (i.e. the model was fixed) — forcing the stale entry to be removed.
 
 - Body matchers: STRING(+subString), JSON(+matchType STRICT), JSON_SCHEMA, JSON_PATH, XML, XML_SCHEMA, XPATH,
   REGEX(+not/optional), PARAMETERS, BINARY, GRAPHQL, WASM, ALL_OF; plus JWT request matcher and pathParameters.
-- Actions: static response (delay+connectionOptions+cookies+trailers+reasonPhrase), forward, override, forward
-  with fallback, forward validate, forward template, forward class/object callback, response template
-  (JS/MUSTACHE), response class/object callback, error, websocket, sse, binary (+upstream), dns, grpc stream, grpc bidi, llm
+- Actions: static response (delay+connectionOptions+cookies+trailers+reasonPhrase), forward, override (+primary),
+  forward with fallback, forward validate, forward template (+delay+primary), forward class/object callback,
+  response template (JS; MUSTACHE+delay+primary), response class/object callback, error, websocket, sse, binary (+upstream), dns, grpc stream, grpc bidi, llm
   (completion+conversationPredicates+normalization+streamingPhysics; embedding+rerank+moderation+contentFilter+chaos).
 - Response sequences: httpResponses with responseMode SEQUENTIAL / WEIGHTED(+responseWeights) / SWITCH(+switchAfter) / RANDOM.
 - Top-level: chaos, rateLimit, percentage, beforeActions, afterActions, capture, namespace, steps, scenario

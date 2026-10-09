@@ -38,6 +38,53 @@ func TestHttpTemplate_MarshalJSON(t *testing.T) {
 	if _, exists := m["delay"]; exists {
 		t.Error("delay should be omitted when nil")
 	}
+	if _, exists := m["primary"]; exists {
+		t.Error("primary should be omitted when nil")
+	}
+}
+
+func TestHttpTemplate_DelayAndPrimary_RoundTrip(t *testing.T) {
+	for _, primary := range []bool{true, false} {
+		tmpl := ResponseTemplate("MUSTACHE").
+			Template("{\"a\":1}").
+			WithDelay("SECONDS", 2).
+			Primary(primary).
+			Build()
+
+		data, err := json.Marshal(tmpl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal(data, &m); err != nil {
+			t.Fatal(err)
+		}
+		if m["primary"] != primary {
+			t.Errorf("expected primary %v on the wire, got %v (%s)", primary, m["primary"], data)
+		}
+		delay, ok := m["delay"].(map[string]interface{})
+		if !ok || delay["timeUnit"] != "SECONDS" || delay["value"] != float64(2) {
+			t.Errorf("unexpected delay on the wire: %s", data)
+		}
+
+		var back HttpTemplate
+		if err := json.Unmarshal(data, &back); err != nil {
+			t.Fatal(err)
+		}
+		if back.Primary == nil || *back.Primary != primary {
+			t.Errorf("expected primary %v after round trip, got %v", primary, back.Primary)
+		}
+		if back.Delay == nil || back.Delay.TimeUnit != "SECONDS" || back.Delay.Value != 2 {
+			t.Errorf("unexpected delay after round trip: %+v", back.Delay)
+		}
+		again, err := json.Marshal(back)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(again) != string(data) {
+			t.Errorf("round trip changed the JSON: %s != %s", again, data)
+		}
+	}
 }
 
 func TestHttpTemplate_WithTemplateFile_MarshalJSON(t *testing.T) {

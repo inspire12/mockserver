@@ -165,6 +165,7 @@ const STRUCTS: Record<string, FieldSpec[]> = {
     ['template', 'Template', 'string'],
     ['templateFile', 'TemplateFile', 'string'],
     ['delay', 'Delay', 'struct:Delay'],
+    ['primary', 'Primary', 'boolPtr'],
     ['responseOverride', 'ResponseOverride', 'struct:HttpResponse'],
     ['responseModifier', 'ResponseModifier', 'struct:ResponseModifier'],
   ],

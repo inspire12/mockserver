@@ -242,6 +242,38 @@ public class ExpectationCompletenessTests
     }
 
     [Fact]
+    public void OverrideForwardedRequest_WithPrimary_RoundTrips()
+    {
+        var json = "{\"httpRequest\":{\"path\":\"/other\"},\"httpResponse\":{\"body\":\"overridden\"}," +
+                   "\"delay\":{\"timeUnit\":\"SECONDS\",\"value\":2},\"primary\":true}";
+        AssertRoundTrips<HttpOverrideForwardedRequest>(json);
+
+        JsonSerializer.Deserialize<HttpOverrideForwardedRequest>(json, JsonOptions)!.Primary.Should().BeTrue();
+        JsonSerializer.Serialize(new HttpOverrideForwardedRequest(), JsonOptions).Should().Be("{}");
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void HttpTemplate_WithDelayAndPrimary_RoundTrips(bool primary)
+    {
+        var json = "{\"templateType\":\"MUSTACHE\",\"template\":\"{}\"," +
+                   "\"delay\":{\"timeUnit\":\"SECONDS\",\"value\":2},\"primary\":" + (primary ? "true" : "false") + "}";
+        AssertRoundTrips<HttpTemplate>(json);
+
+        var built = HttpTemplate.OfType(TemplateType.MUSTACHE)
+            .WithTemplate("{}")
+            .WithDelay(TimeUnit.SECONDS, 2)
+            .WithPrimary(primary)
+            .Build();
+        JsonNode.DeepEquals(JsonNode.Parse(JsonSerializer.Serialize(built, JsonOptions)), JsonNode.Parse(json))
+            .Should().BeTrue("the builder sets the same wire fields");
+
+        var unset = JsonSerializer.Serialize(HttpTemplate.OfType(TemplateType.MUSTACHE).WithTemplate("{}").Build(), JsonOptions);
+        unset.Should().NotContain("delay").And.NotContain("primary");
+    }
+
+    [Fact]
     public void Request_DnsFields_RoundTrip()
     {
         var json = "{\"dnsName\":\"example.com\",\"dnsType\":\"A\",\"dnsClass\":\"IN\"}";

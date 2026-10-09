@@ -434,12 +434,6 @@ function withInheritedFields(
   return `${typeName} {\n${fields.map((f) => inner + f).join('\n')}\n${inner}..${base(indent + 4)}\n${pad(indent)}}`;
 }
 
-/** The Rust HttpTemplate model has no delay or primary: name what the snippet leaves out. */
-function templateGapNote(t: Record<string, unknown>): string {
-  const missing = ['delay', 'primary'].filter((k) => k in t);
-  return missing.length > 0 ? `/* NOTE: the Rust HttpTemplate model has no ${missing.join(', ')}; omitted */ ` : '';
-}
-
 function forwardExpr(f: Record<string, unknown>, indent: number): string {
   const host = rustStr(String(f['host'] ?? ''));
   const port = typeof f['port'] === 'number' ? numLit(f['port']) : '0';
@@ -455,9 +449,10 @@ function templateExpr(t: Record<string, unknown>, indent: number): string {
   if (typeof file === 'string') {
     const calls: string[] = [];
     if (typeof t['template'] === 'string') calls.push(`.template(${rustStr(t['template'])})`);
+    calls.push(...inheritedCalls(t));
     return chain(`HttpTemplate::from_file(${type}, ${rustStr(file)})`, calls, indent);
   }
-  return `HttpTemplate::new(${type}, ${rustStr(String(t['template'] ?? ''))})`;
+  return chain(`HttpTemplate::new(${type}, ${rustStr(String(t['template'] ?? ''))})`, inheritedCalls(t), indent);
 }
 
 function errorExpr(e: Record<string, unknown>, indent: number): string {
@@ -956,9 +951,9 @@ function renderPrimaryAction(key: string, value: unknown, ctx: Ctx, indent: numb
     case 'httpForward':
       return inline(`.forward(${forwardExpr(obj, indent + 4)})`);
     case 'httpResponseTemplate':
-      return inline(`.respond_template(${templateGapNote(obj)}${templateExpr(obj, indent + 4)})`);
+      return inline(`.respond_template(${templateExpr(obj, indent + 4)})`);
     case 'httpForwardTemplate':
-      return inline(`.forward_template(${templateGapNote(obj)}${templateExpr(obj, indent + 4)})`);
+      return inline(`.forward_template(${templateExpr(obj, indent + 4)})`);
     case 'httpError':
       return inline(`.error(${errorExpr(obj, indent + 4)})`);
     case 'httpResponseClassCallback':

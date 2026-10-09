@@ -4,6 +4,11 @@
   },
   "httpResponseTemplate": {
     "templateType": "MUSTACHE",
-    "template": "{\"statusCode\": 200, \"body\": \"{{request.path}}\"}"
+    "template": "{\"statusCode\": 200, \"body\": \"{{request.path}}\"}",
+    "delay": {
+      "timeUnit": "SECONDS",
+      "value": 1
+    },
+    "primary": false
   }
 }

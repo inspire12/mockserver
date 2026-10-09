@@ -6,6 +6,8 @@ type HttpTemplate struct {
 	Template     string `json:"template,omitempty"`
 	TemplateFile string `json:"templateFile,omitempty"`
 	Delay        *Delay `json:"delay,omitempty"`
+	// Primary marks this as the primary action when multiple are present.
+	Primary *bool `json:"primary,omitempty"`
 	// ResponseOverride is merged into the template's rendered response.
 	ResponseOverride *HttpResponse `json:"responseOverride,omitempty"`
 	// ResponseModifier rewrites headers/cookies of the rendered response.
@@ -44,6 +46,12 @@ func (b *TemplateBuilder) TemplateFile(filePath string) *TemplateBuilder {
 // WithDelay sets the template action delay.
 func (b *TemplateBuilder) WithDelay(timeUnit string, value int) *TemplateBuilder {
 	b.template.Delay = &Delay{TimeUnit: timeUnit, Value: value}
+	return b
+}
+
+// Primary marks this template as the primary action when multiple are present.
+func (b *TemplateBuilder) Primary(primary bool) *TemplateBuilder {
+	b.template.Primary = &primary
 	return b
 }
 

@@ -422,7 +422,7 @@ export const combos: Combo[] = [
   // -------------------------------------------------------------------------
   // Edits whose original action carries fields the form does not show (delay,
   // primary, per-message delays). The saved JSON keeps them, so every emitter
-  // must render them (or name what its client model cannot hold).
+  // must render them.
   // -------------------------------------------------------------------------
   keptFieldsEdit('kept-static', { type: 'static', static: { statusCode: 200, body: 'ok', contentType: '', bodyFromFile: false, filePath: '', fileTemplateType: '' } }, 'httpResponse',
     (w) => ({ ...w, delay: { timeUnit: 'HOURS', value: 1 }, primary: true })),

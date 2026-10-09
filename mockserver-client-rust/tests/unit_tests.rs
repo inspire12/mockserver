@@ -767,6 +767,31 @@ fn test_http_template_roundtrip() {
 }
 
 #[test]
+fn test_http_template_delay_and_primary_roundtrip() {
+    for primary in [true, false] {
+        let tmpl = HttpTemplate::new("MUSTACHE", "{}")
+            .delay(Delay::seconds(2))
+            .primary(primary);
+        let json = serde_json::to_value(&tmpl).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "templateType": "MUSTACHE",
+                "template": "{}",
+                "delay": {"timeUnit": "SECONDS", "value": 2},
+                "primary": primary
+            })
+        );
+        let back: HttpTemplate = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(back, tmpl);
+        assert_eq!(serde_json::to_value(&back).unwrap(), json);
+    }
+    let unset = serde_json::to_value(HttpTemplate::new("MUSTACHE", "{}")).unwrap();
+    assert!(unset.get("delay").is_none());
+    assert!(unset.get("primary").is_none());
+}
+
+#[test]
 fn test_http_template_deserialization_without_template_file() {
     let json_str = r#"{"templateType":"MUSTACHE","template":"{{name}}"}"#;
     let tmpl: HttpTemplate = serde_json::from_str(json_str).unwrap();

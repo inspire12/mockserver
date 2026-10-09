@@ -68,28 +68,15 @@ function editWithKeptFields(key: string, form: StandardActionPayload, itemLists:
   };
 }
 
-/**
- * Per language: how primary appears, and for actions whose client model cannot hold
- * delay or primary, the notice that names what the snippet leaves out.
- */
-const EMITTERS: [string, (a: StandardActionPayload) => string, RegExp, Record<string, RegExp>][] = [
-  ['Java', (a) => standardToJava(matcher, a), /withPrimary\(true\)/, {}],
-  ['Node', (a) => standardToNode(matcher, a, URL), /"primary": true/, {}],
-  ['Python', (a) => standardToPython(matcher, a, URL), /primary=True/, {}],
-  ['Go', (a) => standardToGo(matcher, a, URL), /Primary: /, {
-    httpResponseTemplate: /\/\/ NOTE: wire key "primary" has no typed Go field/,
-    httpForwardTemplate: /\/\/ NOTE: wire key "primary" has no typed Go field/,
-  }],
-  ['C#', (a) => standardToCsharp(matcher, a, URL), /Primary = true|""primary"":true/, {
-    httpResponseTemplate: /NOTE: the \.NET HttpTemplate model has no delay, primary; omitted/,
-    httpForwardTemplate: /NOTE: the \.NET HttpTemplate model has no delay, primary; omitted/,
-    httpOverrideForwardedRequest: /NOTE: the \.NET HttpOverrideForwardedRequest model has no primary; omitted/,
-  }],
-  ['Ruby', (a) => standardToRuby(matcher, a, URL), /primary: true|"primary" => true/, {}],
-  ['Rust', (a) => standardToRust(matcher, a, URL), /\.primary\(true\)|primary: Some\(true\)|extra\.insert\("primary"/, {
-    httpResponseTemplate: /NOTE: the Rust HttpTemplate model has no delay, primary; omitted/,
-    httpForwardTemplate: /NOTE: the Rust HttpTemplate model has no delay, primary; omitted/,
-  }],
+/** Per language: how primary appears. */
+const EMITTERS: [string, (a: StandardActionPayload) => string, RegExp][] = [
+  ['Java', (a) => standardToJava(matcher, a), /withPrimary\(true\)/],
+  ['Node', (a) => standardToNode(matcher, a, URL), /"primary": true/],
+  ['Python', (a) => standardToPython(matcher, a, URL), /primary=True/],
+  ['Go', (a) => standardToGo(matcher, a, URL), /Primary: /],
+  ['C#', (a) => standardToCsharp(matcher, a, URL), /Primary = true|WithPrimary\(true\)|""primary"":true/],
+  ['Ruby', (a) => standardToRuby(matcher, a, URL), /primary: true|"primary" => true/],
+  ['Rust', (a) => standardToRust(matcher, a, URL), /\.primary\(true\)|primary: Some\(true\)|extra\.insert\("primary"/],
 ];
 
 describe('fields kept through an edit', () => {
@@ -100,16 +87,12 @@ describe('fields kept through an edit', () => {
     expect(kept).toEqual(expect.arrayContaining(['delay', 'primary']));
   });
 
-  for (const [language, emit, primary, gaps] of EMITTERS) {
+  for (const [language, emit, primary] of EMITTERS) {
     it.each(FORMS)(`${language}: %s shows the kept delay, primary and per-message delays`, (key, form, itemLists) => {
       const code = emit(editWithKeptFields(key, form, itemLists));
-      const gap = gaps[key];
-      if (gap) {
-        expect(code).toMatch(gap);
-      } else {
-        expect(code).toContain('4321');
-        expect(code).toMatch(primary);
-      }
+      expect(code).toContain('4321');
+      expect(code).toMatch(primary);
+      expect(code).not.toMatch(/NOTE: .*(has no|no typed Go field)/);
       const itemDelays = (code.match(/8765/g) ?? []).length;
       expect(itemDelays).toBe(itemLists.length);
       expect(code).not.toContain('NOTE: the Java preview omits');

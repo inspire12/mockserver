@@ -22,6 +22,7 @@
     "delay": {
       "timeUnit": "MILLISECONDS",
       "value": 5
-    }
+    },
+    "primary": true
   }
 }

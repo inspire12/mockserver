@@ -1610,6 +1610,13 @@ pub struct HttpTemplate {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub template_file: Option<String>,
+
+    /// Delay applied before the templated action runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delay: Option<Delay>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary: Option<bool>,
 }
 
 impl HttpTemplate {
@@ -1619,6 +1626,8 @@ impl HttpTemplate {
             template_type: Some(template_type.into()),
             template: Some(template.into()),
             template_file: None,
+            delay: None,
+            primary: None,
         }
     }
 
@@ -1628,6 +1637,8 @@ impl HttpTemplate {
             template_type: Some(template_type.into()),
             template: None,
             template_file: Some(file_path.into()),
+            delay: None,
+            primary: None,
         }
     }
 
@@ -1646,6 +1657,18 @@ impl HttpTemplate {
     /// Set the template file path (alternative to inline template).
     pub fn template_file(mut self, file_path: impl Into<String>) -> Self {
         self.template_file = Some(file_path.into());
+        self
+    }
+
+    /// Set a delay applied before the templated action runs.
+    pub fn delay(mut self, delay: Delay) -> Self {
+        self.delay = Some(delay);
+        self
+    }
+
+    /// Mark this action as the primary action of the expectation.
+    pub fn primary(mut self, primary: bool) -> Self {
+        self.primary = Some(primary);
         self
     }
 }

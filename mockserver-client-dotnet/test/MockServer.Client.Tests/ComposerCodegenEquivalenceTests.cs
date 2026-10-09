@@ -667,6 +667,46 @@ public class ComposerCodegenEquivalenceTests
         },
         @"{""httpRequest"":{""path"":""/api"",""method"":""GET""},""httpOverrideForwardedRequest"":{""requestOverride"":{""method"":""PATCH"",""secure"":true,""path"":""/v2/api"",""headers"":{""X-Fwd"":[""yes""],""Host"":[""rewrite.example.com""]},""queryStringParameters"":{""debug"":[""1""]},""body"":""{\""patched\"":true}""}}}");
 
+    // ---- Edits keeping the delay and primary the form does not show ----
+
+    [Fact]
+    public void Strict_kept_template() => AssertStrict(
+        new Expectation
+        {
+            HttpRequest = new HttpRequest
+            {
+                Method = "GET",
+                Path = "/kept",
+            },
+            HttpResponseTemplate = HttpTemplate.OfType(TemplateType.MUSTACHE)
+                .WithTemplate("{\"a\":1}")
+                .WithDelay(TimeUnit.SECONDS, 2)
+                .WithPrimary(true)
+                .Build(),
+        },
+        @"{""httpRequest"":{""method"":""GET"",""path"":""/kept""},""httpResponseTemplate"":{""templateType"":""MUSTACHE"",""template"":""{\""a\"":1}"",""delay"":{""timeUnit"":""SECONDS"",""value"":2},""primary"":true}}");
+
+    [Fact]
+    public void Divergence_kept_forward_override() => AssertEquivalentUnderKnownDivergences(
+        new Expectation
+        {
+            HttpRequest = new HttpRequest
+            {
+                Method = "GET",
+                Path = "/kept",
+            },
+            HttpOverrideForwardedRequest = new HttpOverrideForwardedRequest
+            {
+                HttpRequest = new HttpRequest
+                {
+                    Path = "/v2",
+                },
+                Delay = new Delay { TimeUnit = TimeUnit.SECONDS, Value = 2 },
+                Primary = true,
+            },
+        },
+        @"{""httpRequest"":{""method"":""GET"",""path"":""/kept""},""httpOverrideForwardedRequest"":{""requestOverride"":{""path"":""/v2""},""delay"":{""timeUnit"":""SECONDS"",""value"":2},""primary"":true}}");
+
     // ---- Edit-preserved actions/siblings the standard composer form cannot model ----
     // These arrive via an edit overlay (editActionModeled === false / sibling
     // passthrough) and MUST be emitted as TYPED object initializers — previously the

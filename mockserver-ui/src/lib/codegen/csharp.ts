@@ -245,18 +245,10 @@ function renderAllOfSub(sub: unknown): string | null {
   }
 }
 
-/** Action fields the .NET client models do not declare, so deserializing drops them. */
-const DOTNET_MODEL_GAPS: Record<string, readonly string[]> = {
-  HttpTemplate: ['delay', 'primary'],
-  HttpOverrideForwardedRequest: ['primary'],
-};
-
 /** Deserialize a fragment into a typed model (fidelity fallback for shapes not modelled inline). */
 function rawTyped(type: string, value: unknown, ctx: Ctx): string {
   ctx.usings.add('System.Text.Json');
-  const dropped = isObject(value) ? (DOTNET_MODEL_GAPS[type] ?? []).filter((k) => k in value) : [];
-  const note = dropped.length > 0 ? `/* NOTE: the .NET ${type} model has no ${dropped.join(', ')}; omitted */ ` : '';
-  return `${note}JsonSerializer.Deserialize<${type}>(${csVerbatim(stableJson(value))})`;
+  return `JsonSerializer.Deserialize<${type}>(${csVerbatim(stableJson(value))})`;
 }
 
 // ---------------------------------------------------------------------------
@@ -384,13 +376,15 @@ function renderError(err: Record<string, unknown>, indent: number, ctx: Ctx): st
 }
 
 function renderTemplate(tpl: Record<string, unknown>, indent: number, ctx: Ctx): string {
-  const known = new Set(['templateType', 'template', 'templateFile']);
+  const known = new Set(['templateType', 'template', 'templateFile', 'delay', 'primary']);
   if (Object.keys(tpl).some((k) => !known.has(k)) || typeof tpl['templateType'] !== 'string') {
     return rawTyped('HttpTemplate', tpl, ctx);
   }
   const calls: string[] = [];
   if (typeof tpl['template'] === 'string') calls.push(`.WithTemplate(${csStr(tpl['template'] as string)})`);
   if (typeof tpl['templateFile'] === 'string') calls.push(`.WithTemplateFile(${csStr(tpl['templateFile'] as string)})`);
+  if (isObject(tpl['delay'])) calls.push(delayCall(tpl['delay'] as Record<string, unknown>));
+  if (typeof tpl['primary'] === 'boolean') calls.push(`.WithPrimary(${tpl['primary']})`);
   calls.push('.Build()');
   return csFluent(`HttpTemplate.OfType(TemplateType.${tpl['templateType']})`, calls, indent);
 }
@@ -407,7 +401,7 @@ function renderClassCallback(cb: Record<string, unknown>, indent: number, ctx: C
 function renderOverrideForwarded(ovr: Record<string, unknown>, indent: number, ctx: Ctx): string {
   // buildExpectationJson wraps the override under `requestOverride`; the .NET model
   // exposes it as `HttpRequest` (server @JsonAlias). Same meaning, different key.
-  const known = new Set(['requestOverride', 'httpRequest', 'httpResponse', 'responseTemplate', 'delay']);
+  const known = new Set(['requestOverride', 'httpRequest', 'httpResponse', 'responseTemplate', 'delay', 'primary']);
   if (Object.keys(ovr).some((k) => !known.has(k))) return rawTyped('HttpOverrideForwardedRequest', ovr, ctx);
   const props: string[] = [];
   const reqOverride = ovr['requestOverride'] ?? ovr['httpRequest'];
@@ -415,6 +409,7 @@ function renderOverrideForwarded(ovr: Record<string, unknown>, indent: number, c
   if (isObject(ovr['httpResponse'])) props.push(`HttpResponse = ${renderResponse(ovr['httpResponse'] as Record<string, unknown>, indent + 4, ctx)}`);
   if (isObject(ovr['responseTemplate'])) props.push(`ResponseTemplate = ${renderTemplate(ovr['responseTemplate'] as Record<string, unknown>, indent + 4, ctx)}`);
   if (isObject(ovr['delay'])) props.push(`Delay = ${renderDelay(ovr['delay'] as Record<string, unknown>)}`);
+  if (typeof ovr['primary'] === 'boolean') props.push(`Primary = ${ovr['primary']}`);
   return csObjectInit('HttpOverrideForwardedRequest', props, indent);
 }
 

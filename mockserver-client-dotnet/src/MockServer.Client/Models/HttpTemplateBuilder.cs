@@ -31,6 +31,19 @@ public sealed class HttpTemplateBuilder
         return this;
     }
 
+    public HttpTemplateBuilder WithDelay(TimeUnit timeUnit, long value)
+    {
+        _template.Delay = new Delay { TimeUnit = timeUnit, Value = value };
+        return this;
+    }
+
+    /// <summary>Marks this as the primary action when the expectation configures more than one.</summary>
+    public HttpTemplateBuilder WithPrimary(bool primary = true)
+    {
+        _template.Primary = primary;
+        return this;
+    }
+
     public HttpTemplate Build() => _template;
 
     /// <summary>
