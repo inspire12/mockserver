@@ -225,6 +225,8 @@ public class BinaryRelayTest {
         EmbeddedChannel client = relay(true);
         relay.upstreamFlushGate.blocked = true;
         relay.clientSends("never taken by the upstream");
+        // only advanceTimeBy moves the clock, so the limit cannot pass in real time between the steps
+        relay.upstream.freezeTime();
 
         client.close();
         relay.upstream.advanceTimeBy(LingeringClose.LINGER_MILLIS - 1, TimeUnit.MILLISECONDS);

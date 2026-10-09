@@ -27,6 +27,7 @@ import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.netty.unification.PortUnificationHandler;
 import org.mockserver.socket.ChannelReadPause;
+import org.mockserver.socket.LingeringClose;
 import org.mockserver.socket.tls.KeyStoreFactory;
 import org.mockserver.socket.tls.SniHandler;
 import org.slf4j.event.Level;
@@ -500,6 +501,29 @@ public class BinaryRelayTlsUpgradeTest {
         assertThat("after what the client sent, the TLS session is ended with a close_notify", closeEventsAtUpstream, contains(SslCloseCompletionEvent.SUCCESS));
         assertThat(relay.upstream.isOpen(), is(false));
         assertThat(relay.logged(Level.WARN), is(empty()));
+    }
+
+    @Test
+    public void shouldCloseTheUpstreamAtTheLingerLimitWhenItsCloseNotifyIsNeverTaken() {
+        EmbeddedChannel client = clientStartedWithTls(true);
+        relay.clientSends("startup");
+        exchangeWithUpstream();
+        // nearest the socket, so that it holds back the close_notify as well
+        BinaryRelayHarness.FlushGate socketTakesNothing = new BinaryRelayHarness.FlushGate();
+        socketTakesNothing.blocked = true;
+        relay.upstream.pipeline().addFirst(socketTakesNothing);
+        // only advanceTimeBy moves the clock, so the limit cannot pass in real time between the steps
+        relay.upstream.freezeTime();
+
+        client.close();
+        relay.upstream.runPendingTasks();
+        relay.upstream.advanceTimeBy(LingeringClose.LINGER_MILLIS - 1, TimeUnit.MILLISECONDS);
+        relay.upstream.runScheduledPendingTasks();
+        assertThat("the upstream connection is kept for the linger limit", relay.upstream.isOpen(), is(true));
+        relay.upstream.advanceTimeBy(1, TimeUnit.MILLISECONDS);
+        relay.upstream.runScheduledPendingTasks();
+
+        assertThat("and closed then, though the close_notify was never flushed", relay.upstream.isOpen(), is(false));
     }
 
     @Test
