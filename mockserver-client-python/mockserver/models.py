@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Union
 
 
 _FIELD_MAP = {
@@ -204,10 +204,61 @@ def _deserialize_body(data: Any) -> Body | JsonRpcBody | str | dict | None:
     return data
 
 
-def _serialize_key_multi_values(items: list[KeyToMultiValue] | None) -> list[dict] | None:
+def _serialize_key_multi_values(
+    items: list[KeyToMultiValue] | None, key_match_style: str | None = None, field_name: str = ""
+) -> list[dict] | dict | None:
+    # keyMatchStyle can only be carried by the {name: [values]} object form.
+    if key_match_style is not None:
+        result: dict = {"keyMatchStyle": key_match_style}
+        for item in items or []:
+            if not isinstance(item.name, str):
+                raise ValueError(
+                    f"{field_name} with keyMatchStyle needs plain string names, got {item.name!r}"
+                )
+            result.setdefault(item.name, []).extend(item.values)
+        return result
     if items is None:
         return None
     return [item.to_dict() for item in items]
+
+
+def _key_match_style(value: Any) -> str | None:
+    return value.get("keyMatchStyle") if isinstance(value, dict) else None
+
+
+def _coerce_key_multi_values(value: Any) -> list[KeyToMultiValue] | None:
+    # Accept the forms the server's JSON accepts: {name: [values]} or
+    # {name: value}, a list of {"name": .., "values": [..]} dicts, or a list
+    # of KeyToMultiValue.
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return _deserialize_key_multi_values(value)
+    if not isinstance(value, (list, tuple)):
+        raise TypeError(f"expected a dict or a list of KeyToMultiValue, got {type(value).__name__}")
+    if isinstance(value, list) and not any(isinstance(item, dict) for item in value):
+        return value
+    return [KeyToMultiValue.from_dict(item) if isinstance(item, dict) else item for item in value]
+
+
+def _coerce_cookies(value: Any) -> list[KeyToMultiValue] | None:
+    # Cookies as {name: value}, a list of {"name": .., "value": ..} dicts, or
+    # a list of KeyToMultiValue.
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return _deserialize_cookies(value)
+    if not isinstance(value, (list, tuple)):
+        raise TypeError(f"expected a dict or a list of KeyToMultiValue, got {type(value).__name__}")
+    if isinstance(value, list) and not any(isinstance(item, dict) for item in value):
+        return value
+    result = []
+    for item in value:
+        if isinstance(item, dict):
+            values = [item["value"]] if "value" in item else item.get("values", [])
+            item = KeyToMultiValue(name=item.get("name", ""), values=values)
+        result.append(item)
+    return result
 
 
 def _serialize_key_multi_values_map(items: list[KeyToMultiValue] | None) -> dict | None:
@@ -227,6 +278,7 @@ def _deserialize_key_multi_values(data: list | dict | None) -> list[KeyToMultiVa
         return [
             KeyToMultiValue(name=k, values=v if isinstance(v, list) else [v])
             for k, v in data.items()
+            if k != "keyMatchStyle"
         ]
     result = []
     for item in data:
@@ -507,6 +559,13 @@ class KeyToMultiValue:
             name=data.get("name", ""),
             values=data.get("values", []),
         )
+
+
+# What HttpRequest and HttpResponse accept for a keyToMultiValue collection
+# ({name: [values]}, {name: value}, a list of dicts or of KeyToMultiValue) and
+# for cookies ({name: value}, a list of dicts or of KeyToMultiValue).
+KeyToMultiValuesInput = Union[list[KeyToMultiValue], list[dict[str, Any]], dict[str, Any]]
+CookiesInput = Union[list[KeyToMultiValue], list[dict[str, Any]], dict[str, Any]]
 
 
 @dataclass
@@ -1117,14 +1176,14 @@ class Jwt:
 class HttpRequest:
     method: str | None = None
     path: str | None = None
-    query_string_parameters: list[KeyToMultiValue] | None = None
-    headers: list[KeyToMultiValue] | None = None
-    cookies: list[KeyToMultiValue] | None = None
+    query_string_parameters: KeyToMultiValuesInput | None = None
+    headers: KeyToMultiValuesInput | None = None
+    cookies: CookiesInput | None = None
     body: Body | str | dict | None = None
     secure: bool | None = None
     keep_alive: bool | None = None
     respond_before_body: bool | None = None
-    path_parameters: list[KeyToMultiValue] | None = None
+    path_parameters: KeyToMultiValuesInput | None = None
     socket_address: SocketAddress | None = None
     jwt: Jwt | None = None
     # Negates the whole request matcher (wire key "not"). When true a request matches
@@ -1132,15 +1191,52 @@ class HttpRequest:
     not_request: bool | None = None
     # Protocol matcher: HTTP_1_1 / HTTP_2 / HTTP_3 (see the ``Protocol`` constants).
     protocol: str | None = None
+    # SUB_SET (the server's default: one value of a key must match) or
+    # MATCHING_KEY (every value must). A dict given for the collection with a
+    # "keyMatchStyle" key sets it too.
+    headers_key_match_style: str | None = None
+    query_string_parameters_key_match_style: str | None = None
+    path_parameters_key_match_style: str | None = None
+
+    # headers, query_string_parameters, path_parameters and cookies also accept
+    # a dict ({name: [values]} or {name: value}; cookies {name: value}) or a
+    # list of dicts, as the server's JSON does.
+    def __post_init__(self) -> None:
+        self._normalise()
+
+    def _normalise(self) -> None:
+        if self.headers_key_match_style is None:
+            self.headers_key_match_style = _key_match_style(self.headers)
+        if self.query_string_parameters_key_match_style is None:
+            self.query_string_parameters_key_match_style = _key_match_style(self.query_string_parameters)
+        if self.path_parameters_key_match_style is None:
+            self.path_parameters_key_match_style = _key_match_style(self.path_parameters)
+        self.headers = _coerce_key_multi_values(self.headers)
+        self.query_string_parameters = _coerce_key_multi_values(self.query_string_parameters)
+        self.path_parameters = _coerce_key_multi_values(self.path_parameters)
+        self.cookies = _coerce_cookies(self.cookies)
 
     def to_dict(self) -> dict:
+        self._normalise()
+        if self.path_parameters_key_match_style is not None:
+            path_parameters = _serialize_key_multi_values(
+                _coerce_key_multi_values(self.path_parameters), self.path_parameters_key_match_style, "path_parameters"
+            )
+        else:
+            path_parameters = _serialize_key_multi_values_map(_coerce_key_multi_values(self.path_parameters))
         return _strip_none({
             "not": self.not_request,
             "method": self.method,
             "path": self.path,
-            "queryStringParameters": _serialize_key_multi_values(self.query_string_parameters),
-            "headers": _serialize_key_multi_values(self.headers),
-            "cookies": _serialize_cookies(self.cookies),
+            "queryStringParameters": _serialize_key_multi_values(
+                _coerce_key_multi_values(self.query_string_parameters),
+                self.query_string_parameters_key_match_style,
+                "query_string_parameters",
+            ),
+            "headers": _serialize_key_multi_values(
+                _coerce_key_multi_values(self.headers), self.headers_key_match_style, "headers"
+            ),
+            "cookies": _serialize_cookies(_coerce_cookies(self.cookies)),
             "body": _serialize_body(self.body),
             "secure": self.secure,
             "keepAlive": self.keep_alive,
@@ -1150,7 +1246,7 @@ class HttpRequest:
             # this map is NOT dual-encoding-normalised on comparison, and the values may
             # be schema matchers ({"schema": {..}}) rather than plain strings, so we must
             # preserve the object-map shape verbatim for a faithful round-trip.
-            "pathParameters": _serialize_key_multi_values_map(self.path_parameters),
+            "pathParameters": path_parameters,
             "socketAddress": self.socket_address.to_dict() if self.socket_address else None,
             "jwt": self.jwt.to_dict() if self.jwt else None,
             "protocol": self.protocol,
@@ -1175,6 +1271,9 @@ class HttpRequest:
             jwt=Jwt.from_dict(data.get("jwt")),
             not_request=data.get("not"),
             protocol=data.get("protocol"),
+            headers_key_match_style=_key_match_style(data.get("headers")),
+            query_string_parameters_key_match_style=_key_match_style(data.get("queryStringParameters")),
+            path_parameters_key_match_style=_key_match_style(data.get("pathParameters")),
         )
 
     @staticmethod
@@ -1190,21 +1289,30 @@ class HttpRequest:
         return self
 
     def with_header(self, name: str, *values: str) -> HttpRequest:
-        if self.headers is None:
-            self.headers = []
-        self.headers.append(KeyToMultiValue(name=name, values=list(values)))
+        self._normalise()
+        items = _coerce_key_multi_values(self.headers)
+        if items is None:
+            items = []
+        items.append(KeyToMultiValue(name=name, values=list(values)))
+        self.headers = items
         return self
 
     def with_query_param(self, name: str, *values: str) -> HttpRequest:
-        if self.query_string_parameters is None:
-            self.query_string_parameters = []
-        self.query_string_parameters.append(KeyToMultiValue(name=name, values=list(values)))
+        self._normalise()
+        items = _coerce_key_multi_values(self.query_string_parameters)
+        if items is None:
+            items = []
+        items.append(KeyToMultiValue(name=name, values=list(values)))
+        self.query_string_parameters = items
         return self
 
     def with_cookie(self, name: str, value: str) -> HttpRequest:
-        if self.cookies is None:
-            self.cookies = []
-        self.cookies.append(KeyToMultiValue(name=name, values=[value]))
+        self._normalise()
+        items = _coerce_cookies(self.cookies)
+        if items is None:
+            items = []
+        items.append(KeyToMultiValue(name=name, values=[value]))
+        self.cookies = items
         return self
 
     def with_body(self, body: Body | str | dict) -> HttpRequest:
@@ -1469,31 +1577,42 @@ class RecoverAfter:
 class HttpResponse:
     status_code: int | None = None
     reason_phrase: str | None = None
-    headers: list[KeyToMultiValue] | None = None
-    cookies: list[KeyToMultiValue] | None = None
+    headers: KeyToMultiValuesInput | None = None
+    cookies: CookiesInput | None = None
     body: Body | str | dict | None = None
     delay: Delay | None = None
     connection_options: ConnectionOptions | None = None
     primary: bool | None = None
     # HTTP trailing headers (sent after the body); same keyToMultiValue shape as headers.
-    trailers: list[KeyToMultiValue] | None = None
+    trailers: KeyToMultiValuesInput | None = None
     # A status drawn from a range, e.g. "2xx" or "200-299".
     status_code_range: str | None = None
     # A JSON schema the body is generated from.
     generate_from_schema: str | None = None
     recover_after: RecoverAfter | None = None
 
+    # headers, trailers and cookies also accept a dict or a list of dicts, as
+    # the server's JSON does (see HttpRequest).
+    def __post_init__(self) -> None:
+        self._normalise()
+
+    def _normalise(self) -> None:
+        self.headers = _coerce_key_multi_values(self.headers)
+        self.trailers = _coerce_key_multi_values(self.trailers)
+        self.cookies = _coerce_cookies(self.cookies)
+
     def to_dict(self) -> dict:
+        self._normalise()
         return _strip_none({
             "statusCode": self.status_code,
             "reasonPhrase": self.reason_phrase,
-            "headers": _serialize_key_multi_values(self.headers),
-            "cookies": _serialize_cookies(self.cookies),
+            "headers": _serialize_key_multi_values(_coerce_key_multi_values(self.headers)),
+            "cookies": _serialize_cookies(_coerce_cookies(self.cookies)),
             "body": _serialize_body(self.body),
             "delay": self.delay.to_dict() if self.delay else None,
             "connectionOptions": self.connection_options.to_dict() if self.connection_options else None,
             "primary": self.primary,
-            "trailers": _serialize_key_multi_values(self.trailers),
+            "trailers": _serialize_key_multi_values(_coerce_key_multi_values(self.trailers)),
             "statusCodeRange": self.status_code_range,
             "generateFromSchema": self.generate_from_schema,
             "recoverAfter": self.recover_after.to_dict() if self.recover_after else None,
@@ -1541,15 +1660,19 @@ class HttpResponse:
         return self
 
     def with_header(self, name: str, *values: str) -> HttpResponse:
-        if self.headers is None:
-            self.headers = []
-        self.headers.append(KeyToMultiValue(name=name, values=list(values)))
+        items = _coerce_key_multi_values(self.headers)
+        if items is None:
+            items = []
+        items.append(KeyToMultiValue(name=name, values=list(values)))
+        self.headers = items
         return self
 
     def with_cookie(self, name: str, value: str) -> HttpResponse:
-        if self.cookies is None:
-            self.cookies = []
-        self.cookies.append(KeyToMultiValue(name=name, values=[value]))
+        items = _coerce_cookies(self.cookies)
+        if items is None:
+            items = []
+        items.append(KeyToMultiValue(name=name, values=[value]))
+        self.cookies = items
         return self
 
     def with_body(self, body: Body | str | dict) -> HttpResponse:
@@ -1565,9 +1688,11 @@ class HttpResponse:
         return self
 
     def with_trailer(self, name: str, *values: str) -> HttpResponse:
-        if self.trailers is None:
-            self.trailers = []
-        self.trailers.append(KeyToMultiValue(name=name, values=list(values)))
+        items = _coerce_key_multi_values(self.trailers)
+        if items is None:
+            items = []
+        items.append(KeyToMultiValue(name=name, values=list(values)))
+        self.trailers = items
         return self
 
     def with_status_code_range(self, status_code_range: str) -> HttpResponse:

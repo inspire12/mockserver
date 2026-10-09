@@ -162,6 +162,31 @@ client.verify_zero_interactions()
 
 ## Request Matching
 
+### Headers, query parameters and cookies
+
+Pass headers, query and path parameters, trailers and cookies as a dict, as in
+MockServer's JSON, or as a list of `KeyToMultiValue`. A `"keyMatchStyle"` key
+(`SUB_SET`, the default, or `MATCHING_KEY`) sets how the values of a key are
+matched.
+
+```python
+from mockserver import HttpRequest, HttpResponse
+
+client.when(
+    HttpRequest(
+        path="/search",
+        headers={"Accept": "application/json"},        # one value
+        query_string_parameters={"tag": ["a", "b"]},   # several values
+        cookies={"session": "abc"},
+    )
+).respond(
+    HttpResponse(status_code=302, headers={"Location": ["https://example.com"]})
+)
+
+# every value the request has for X-Tag must match, not just one
+HttpRequest(headers={"keyMatchStyle": "MATCHING_KEY", "X-Tag": ["a", "b"]})
+```
+
 ### JWT matcher
 
 Match requests by the claims (and metadata) of a JWT carried in a header. Each

@@ -1270,8 +1270,8 @@ from mockserver.models import HttpResponse, VerificationTimes
 
 client = MockServerClient("localhost", 1080)
 client.verify(
-    HttpResponse(status_code=200, headers={"Content-Type": "application/json"}),
-    VerificationTimes.at_least(1)
+    response=HttpResponse(status_code=200, headers={"Content-Type": "application/json"}),
+    times=VerificationTimes.at_least(1)
 )</code></pre>
     </div>
     <button class="accordion inner">Ruby</button>
