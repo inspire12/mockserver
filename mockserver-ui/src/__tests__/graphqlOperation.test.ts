@@ -211,7 +211,94 @@ describe('parseGraphqlBody — bounded, graceful degradation', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Shortened bodies — the dashboard receives at most 64 KiB of a body, as a
+// plain string cut mid-JSON, so the text no longer parses as JSON
+// ---------------------------------------------------------------------------
+
+/** What the dashboard receives for a body longer than its 64 KiB cap. */
+function shortened(text: string): string {
+  return text.slice(0, 64 * 1024);
+}
+
+describe('parseGraphqlBody — shortened JSON bodies', () => {
+  const plainJson = shortened(JSON.stringify({ data: 'x'.repeat(70_000) }));
+  const jsonHeaders = [{ name: 'content-type', values: ['application/json'] }];
+
+  it('does not read a shortened plain JSON body as an anonymous GraphQL query', () => {
+    expect(() => JSON.parse(plainJson)).toThrow();
+    expect(graphqlOperationOfRequest(captured(plainJson, jsonHeaders).httpRequest)).toBeNull();
+    expect(graphqlOperationOfRequest(captured(plainJson).httpRequest)).toBeNull();
+    expect(parseGraphqlBody({ type: 'STRING', string: plainJson })).toBeNull();
+  });
+
+  it('does not read a malformed JSON body as GraphQL', () => {
+    for (const body of ['{"id": 1, "name": "x",}', "{'id': 1}", '{"id": 1']) {
+      expect(parseGraphqlBody(body), body).toBeNull();
+      expect(graphqlOperationOfRequest(captured(body).httpRequest), body).toBeNull();
+    }
+  });
+
+  it('does not read a shortened LLM chat request as GraphQL', () => {
+    const chat = shortened(JSON.stringify({
+      model: 'gpt-4o',
+      messages: [{ role: 'user', content: 'H'.repeat(4_300_000) + ' END-HUGE' }],
+    }));
+    const request = { method: 'POST', path: '/llm/v1/chat/completions', headers: jsonHeaders, body: chat };
+    expect(graphqlOperationOfRequest(request)).toBeNull();
+    expect(parseGraphqlBody(chat)).toBeNull();
+  });
+
+  it('does not invent an anonymous query for a shortened GraphQL payload', () => {
+    const payload = shortened(JSON.stringify({
+      query: 'query GetUser { user { id } }',
+      variables: { blob: 'x'.repeat(70_000) },
+    }));
+    expect(graphqlOperationOfRequest(captured(payload, jsonHeaders).httpRequest)).toBeNull();
+    expect(parseGraphqlBody(payload)).toBeNull();
+  });
+
+  it('still detects the same GraphQL payload when it arrives whole', () => {
+    const payload = JSON.stringify({ query: 'query GetUser { user { id } }', variables: { blob: 'x'.repeat(1000) } });
+    expect(graphqlOperationOfRequest(captured(payload, jsonHeaders).httpRequest))
+      .toEqual({ operationName: 'GetUser', operationType: 'query' });
+  });
+
+  it('reads a raw document only when it is not declared as JSON', () => {
+    const document = '{ user { id } }';
+    expect(graphqlOperationOfRequest(captured(document, jsonHeaders).httpRequest)).toBeNull();
+    expect(graphqlOperationOfRequest(
+      captured(document, [{ name: 'Content-Type', values: ['application/graphql; charset=utf-8'] }]).httpRequest,
+    )).toEqual({ operationName: null, operationType: 'query' });
+    expect(graphqlOperationOfRequest(captured(document).httpRequest))
+      .toEqual({ operationName: null, operationType: 'query' });
+  });
+});
+
+describe('parseGraphqlBody — persisted queries', () => {
+  const persistedQuery = { version: 1, sha256Hash: 'ecf4edb46db40b5132295c0291d62fb65d6759a9eedfa4d5d612dd5ec54a6b38' };
+
+  it('detects an automatic persisted query registration, which carries the document', () => {
+    expect(parseGraphqlBody(jsonBody({
+      query: 'query GetUser { user { id } }',
+      operationName: 'GetUser',
+      extensions: { persistedQuery },
+    }))).toEqual({ operationName: 'GetUser', operationType: 'query' });
+  });
+
+  it('does not badge a hash-only persisted query, which carries no document to read', () => {
+    expect(parseGraphqlBody(jsonBody({ operationName: 'GetUser', extensions: { persistedQuery } }))).toBeNull();
+  });
+});
+
 describe('looksLikeGraphqlDocument', () => {
+  it('rejects text that opens like a JSON object, whole or cut short', () => {
+    expect(looksLikeGraphqlDocument('{"data":"xxxx')).toBe(false);
+    expect(looksLikeGraphqlDocument('{ \n "query": "query GetUser { user { id')).toBe(false);
+    expect(looksLikeGraphqlDocument('{ ...UserFields } fragment UserFields on User { id }')).toBe(true);
+    expect(looksLikeGraphqlDocument('# lead\n{ # inner\n user { id } }')).toBe(true);
+  });
+
   it('accepts documents and rejects look-alikes', () => {
     expect(looksLikeGraphqlDocument('query GetUser { user { id } }')).toBe(true);
     expect(looksLikeGraphqlDocument('{ user { id } }')).toBe(true);

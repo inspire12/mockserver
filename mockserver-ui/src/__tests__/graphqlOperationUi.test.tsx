@@ -86,6 +86,28 @@ describe('TrafficInspector — GraphQL operation badge', () => {
     expect(screen.getByText('api.example.com/graphql')).toBeInTheDocument();
   });
 
+  it('shows no badge for a plain JSON body the dashboard received shortened', () => {
+    seed([{
+      key: 'big',
+      value: {
+        httpRequest: {
+          method: 'POST',
+          path: '/big',
+          headers: [
+            { name: 'host', values: ['api.example.com'] },
+            { name: 'content-type', values: ['application/json'] },
+          ],
+          body: JSON.stringify({ data: 'x'.repeat(70_000) }).slice(0, 64 * 1024),
+        },
+        httpResponse: { statusCode: 404 },
+      },
+    }]);
+    renderTrafficInspector();
+
+    expect(screen.getByText('api.example.com/big')).toBeInTheDocument();
+    expect(screen.queryByText(/^GQL /)).not.toBeInTheDocument();
+  });
+
   it('renders the row normally when the body is binary/compressed', () => {
     seed([{
       key: 'b1',
@@ -181,6 +203,31 @@ describe('LogEntry — GraphQL operation badge', () => {
     );
 
     expect(screen.getByText('received request')).toBeInTheDocument();
+    expect(screen.queryByText(/^GQL /)).not.toBeInTheDocument();
+  });
+
+  it('shows no badge on a log row whose JSON request body was shortened', () => {
+    render(
+      <LogEntry
+        collapsible
+        entry={{
+          description: 'request didn\'t match expectation',
+          messageParts: [{
+            key: 'msg_0',
+            value: {
+              method: 'POST',
+              path: '/big',
+              headers: { 'content-type': ['application/json'] },
+              body: JSON.stringify({ data: 'x'.repeat(70_000) }).slice(0, 64 * 1024),
+            },
+            json: true,
+            argument: true,
+          }],
+        }}
+      />,
+    );
+
+    expect(screen.getByText('request didn\'t match expectation')).toBeInTheDocument();
     expect(screen.queryByText(/^GQL /)).not.toBeInTheDocument();
   });
 

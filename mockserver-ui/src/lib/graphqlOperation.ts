@@ -21,14 +21,17 @@
  *    `image/png`, …) is rejected outright.
  * 2. **Body shape**: the body decodes either to a JSON object with a **string**
  *    `query` member (the GraphQL-over-HTTP POST payload
- *    `{ query, operationName, variables }`), or — when it is not JSON at all —
- *    to raw text (the `application/graphql` document form). An object-valued
- *    `query` (Elasticsearch, Mongo-style query DSLs) is not GraphQL.
+ *    `{ query, operationName, variables }`), or — when it is not JSON at all and
+ *    its `Content-Type` is absent or mentions `graphql` — to raw text (the
+ *    `application/graphql` document form). An object-valued `query`
+ *    (Elasticsearch, Mongo-style query DSLs) is not GraphQL, and a body declared
+ *    as JSON that does not parse (the dashboard holds only a 64 KiB prefix of a
+ *    longer body) is not read as a document.
  * 3. **Parseable document**: that candidate text must look like a GraphQL
  *    executable document — see {@link looksLikeGraphqlDocument}. `"SELECT * FROM
  *    users"`, `"widgets"` and `"{}"` all fail; crucially so does anything that
- *    parses as JSON, which is what stops a nested JSON string in a `query` field
- *    being read as a GraphQL shorthand selection set.
+ *    opens like a JSON object (`{` then a `"` key), whole or cut short, which is
+ *    what stops JSON text being read as a GraphQL shorthand selection set.
  * 4. **An operation definition** must actually be found by the top-level scanner.
  *
  * ## Degradation and bounds
@@ -93,15 +96,6 @@ function tryParseJson(text: string): unknown {
     return JSON.parse(text);
   } catch {
     return undefined;
-  }
-}
-
-function parsesAsJson(text: string): boolean {
-  try {
-    JSON.parse(text);
-    return true;
-  } catch {
-    return false;
   }
 }
 
@@ -180,9 +174,9 @@ function decodeBody(body: unknown): { payload: Record<string, unknown> | undefin
 // Document recognition + scanning
 // ---------------------------------------------------------------------------
 
-/** Index of the first character that is not whitespace, a comma, or a comment. */
-function firstSignificantIndex(doc: string): number {
-  let i = 0;
+/** Index of the first character at or after `from` that is not whitespace, a comma, or a comment. */
+function firstSignificantIndex(doc: string, from = 0): number {
+  let i = from;
   const n = doc.length;
   while (i < n) {
     const c = doc[i]!;
@@ -203,6 +197,9 @@ function firstSignificantIndex(doc: string): number {
 
 const DEFINITION_KEYWORD = /^(query|mutation|subscription|fragment)\b/;
 
+/** What a selection set's first selection can start with: a field name or a `...` spread. */
+const SELECTION_START = /^[_A-Za-z.]$/;
+
 /**
  * True when `doc` plausibly is a GraphQL executable document. This is the guard
  * that keeps ordinary JSON with a `query` key from being read as GraphQL:
@@ -211,8 +208,9 @@ const DEFINITION_KEYWORD = /^(query|mutation|subscription|fragment)\b/;
  *   shorthand form) — which rejects `SELECT * FROM users`, `widgets`, `*`;
  * - it must contain a selection set with at least one field name — which rejects
  *   `query`, `{}` and `{   }`;
- * - it must NOT itself parse as JSON — which rejects `{"filter":"x"}`, the one
- *   realistic string that would otherwise pass as a shorthand selection set.
+ * - a shorthand selection set must open with a field name or a `...` spread —
+ *   which rejects `{"filter":"x"}` and any prefix of a JSON object, the
+ *   realistic texts that would otherwise pass as a shorthand selection set.
  */
 export function looksLikeGraphqlDocument(doc: string): boolean {
   if (doc.length === 0 || doc.length > MAX_BODY_CHARS) return false;
@@ -224,7 +222,7 @@ export function looksLikeGraphqlDocument(doc: string): boolean {
   const brace = doc.indexOf('{', start);
   if (brace < 0) return false;
   if (!/[_A-Za-z]/.test(doc.slice(brace + 1, brace + 1 + SELECTION_PROBE_CHARS))) return false;
-  if (shorthand && parsesAsJson(doc)) return false;
+  if (shorthand && !SELECTION_START.test(doc.charAt(firstSignificantIndex(doc, brace + 1)))) return false;
   return true;
 }
 
@@ -348,6 +346,10 @@ function pickOperation(ops: GraphqlOperation[], declaredName: string | undefined
  * object. Never throws.
  */
 export function parseGraphqlBody(body: unknown): GraphqlOperation | null {
+  return parseBody(body, true);
+}
+
+function parseBody(body: unknown, allowDocument: boolean): GraphqlOperation | null {
   const { payload, text } = decodeBody(body);
 
   // GraphQL-over-HTTP POST payload: `{ query, operationName?, variables? }`.
@@ -364,7 +366,7 @@ export function parseGraphqlBody(body: unknown): GraphqlOperation | null {
 
   // `application/graphql`: the body IS the document. Only reachable when the
   // text did not parse as JSON, so a JSON body can never take this branch.
-  if (text !== undefined && looksLikeGraphqlDocument(text)) {
+  if (allowDocument && text !== undefined && looksLikeGraphqlDocument(text)) {
     return pickOperation(findOperations(text), undefined);
   }
 
@@ -384,8 +386,11 @@ function contentTypeAllows(contentType: string | undefined): boolean {
 export function graphqlOperationOfRequest(request: unknown): GraphqlOperation | null {
   const req = asObject(request);
   if (!req) return null;
-  if (!contentTypeAllows(headerValue(req['headers'], 'content-type'))) return null;
-  return parseGraphqlBody(req['body']);
+  const contentType = headerValue(req['headers'], 'content-type');
+  if (!contentTypeAllows(contentType)) return null;
+  // Raw-document bodies are `application/graphql`; text declared as JSON that
+  // does not parse is malformed or cut short, never a document.
+  return parseBody(req['body'], contentType === undefined || /graphql/i.test(contentType));
 }
 
 /**
