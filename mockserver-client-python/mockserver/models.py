@@ -2443,6 +2443,15 @@ class DnsResponse:
 
 @dataclass
 class HttpOverrideForwardedRequest:
+    """Forward the matched request after overriding or modifying it.
+
+    ``request_override`` is merged over the forwarded request and
+    ``response_override`` over the response; ``response_template`` renders the
+    response instead. ``http_request`` and ``http_response`` are deprecated
+    aliases of the two overrides, kept for existing code: set one name of each
+    pair, not both.
+    """
+
     http_request: HttpRequest | None = None
     http_response: HttpResponse | None = None
     response_template: HttpTemplate | None = None
@@ -2450,15 +2459,31 @@ class HttpOverrideForwardedRequest:
     request_modifier: dict | None = None
     response_modifier: dict | None = None
     primary: bool | None = None
+    request_override: HttpRequest | None = None
+    response_override: HttpResponse | None = None
 
     def to_dict(self) -> dict:
+        if self.http_request is not None and self.request_override is not None:
+            raise ValueError("set request_override or its deprecated alias http_request, not both")
+        if self.http_response is not None and self.response_override is not None:
+            raise ValueError("set response_override or its deprecated alias http_response, not both")
+        request = self.request_override if self.request_override is not None else self.http_request
+        response = self.response_override if self.response_override is not None else self.http_response
+        # The server accepts httpRequest / httpResponse only alongside delay and primary.
+        alias_form = (
+            self.request_override is None and self.response_override is None
+            and self.request_modifier is None and self.response_modifier is None
+            and self.response_template is None
+        )
+        request_key = "httpRequest" if alias_form else "requestOverride"
+        response_key = "httpResponse" if alias_form else "responseOverride"
         return _strip_none({
-            "httpRequest": self.http_request.to_dict() if self.http_request else None,
-            "httpResponse": self.http_response.to_dict() if self.http_response else None,
+            request_key: request.to_dict() if request else None,
+            "requestModifier": self.request_modifier,
+            response_key: response.to_dict() if response else None,
+            "responseModifier": self.response_modifier,
             "responseTemplate": self.response_template.to_dict() if self.response_template else None,
             "delay": self.delay.to_dict() if self.delay else None,
-            "requestModifier": self.request_modifier,
-            "responseModifier": self.response_modifier,
             "primary": self.primary,
         })
 
@@ -2474,6 +2499,8 @@ class HttpOverrideForwardedRequest:
             request_modifier=data.get("requestModifier"),
             response_modifier=data.get("responseModifier"),
             primary=data.get("primary"),
+            request_override=HttpRequest.from_dict(data.get("requestOverride")),
+            response_override=HttpResponse.from_dict(data.get("responseOverride")),
         )
 
     @staticmethod

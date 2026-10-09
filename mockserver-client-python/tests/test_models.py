@@ -1403,10 +1403,11 @@ class TestHttpOverrideForwardedRequest:
             delay=Delay(time_unit="MILLISECONDS", value=100),
             request_modifier={"path": {"regex": "/old/(.*)", "substitution": "/new/$1"}},
         )
+        # Next to a modifier the aliases are written, and so read back, as the overrides.
         restored = HttpOverrideForwardedRequest.from_dict(original.to_dict())
-        assert restored.http_request.method == "POST"
-        assert restored.http_request.path == "/api"
-        assert restored.http_response.status_code == 202
+        assert restored.request_override.method == "POST"
+        assert restored.request_override.path == "/api"
+        assert restored.response_override.status_code == 202
         assert restored.delay.value == 100
         assert restored.request_modifier["path"]["regex"] == "/old/(.*)"
 

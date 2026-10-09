@@ -132,6 +132,27 @@ client.mock_with_forward_callback(
 )
 ```
 
+## Forward with Overrides
+
+Forward the matched request with fields replaced (`request_override`), modified
+(`request_modifier`), or with its response overridden (`response_override`,
+`response_modifier`, `response_template`), without a callback:
+
+```python
+from mockserver import HttpOverrideForwardedRequest, HttpRequest, HttpResponse
+
+client.when(HttpRequest.request("/some/path")).forward(
+    HttpOverrideForwardedRequest(
+        request_override=HttpRequest(path="/other/path", headers={"Host": ["target.host.com"]}),
+        response_override=HttpResponse(headers={"X-Proxied": ["true"]}),
+        response_modifier={"headers": {"remove": ["Server"]}},
+    )
+)
+```
+
+`http_request` and `http_response` are deprecated aliases of `request_override`
+and `response_override`, kept for existing code; set one name of each pair, not both.
+
 ## Verification
 
 ```python

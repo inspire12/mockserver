@@ -303,7 +303,7 @@ def test_push_notifications_advertised_and_config_and_delivery_generated():
         if method == "tasks/send" and "httpOverrideForwardedRequest" in e:
             has_forward_delivery = True
             override = e["httpOverrideForwardedRequest"]
-            webhook = override["httpRequest"]
+            webhook = override["requestOverride"]
             assert webhook["method"] == "POST"
             assert webhook["path"] == "/callback"
             assert webhook["socketAddress"]["host"] == "localhost"
@@ -326,7 +326,7 @@ def test_literal_webhook_push_body_not_velocity_escaped():
     webhook = None
     for e in expectations:
         if "httpOverrideForwardedRequest" in e:
-            webhook = e["httpOverrideForwardedRequest"]["httpRequest"]
+            webhook = e["httpOverrideForwardedRequest"]["requestOverride"]
     assert webhook is not None
     push_body = webhook["body"]
     if isinstance(push_body, dict):
@@ -341,7 +341,7 @@ def test_https_webhook_default_port_and_scheme():
     webhook = None
     for e in expectations:
         if "httpOverrideForwardedRequest" in e:
-            webhook = e["httpOverrideForwardedRequest"]["httpRequest"]
+            webhook = e["httpOverrideForwardedRequest"]["requestOverride"]
     assert webhook is not None
     assert webhook["socketAddress"]["host"] == "example.com"
     assert webhook["socketAddress"]["port"] == 443

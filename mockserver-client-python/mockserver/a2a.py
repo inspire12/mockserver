@@ -428,7 +428,7 @@ class A2aMockBuilder:
         return Expectation(
             http_request=self._json_rpc_request("tasks/send"),
             http_override_forwarded_request=HttpOverrideForwardedRequest(
-                http_request=webhook_request,
+                request_override=webhook_request,
                 response_template=client_response_template,
             ),
         )
