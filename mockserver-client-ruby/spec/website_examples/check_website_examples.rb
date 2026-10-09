@@ -66,7 +66,9 @@ module WebsiteExamples
           next unless attrs =~ /class="accordion([^"]*)"/
 
           classes = Regexp.last_match(1)
-          title = CGI.unescapeHTML(m[2].gsub(/<[^>]+>/, '')).strip
+          title = m[2].dup
+          title = title.gsub(/<[^>]*>/, '') while title.match?(/<[^>]*>/)
+          title = CGI.unescapeHTML(title).delete('<>').strip
           pending = { kind: classes.include?('inner') ? :inner : :group, title: title,
                       id: attrs[/id="([^"]+)"/, 1], line: line }
         elsif m[0].start_with?('<pre')
