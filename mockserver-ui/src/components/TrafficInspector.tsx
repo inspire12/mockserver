@@ -749,7 +749,10 @@ function TrafficRowImpl({
         borderBottom: 1,
         borderColor: 'divider',
         minHeight: 36,
-        flexWrap: 'wrap',
+        // One line per row: the path truncates (its tooltip has the whole of it)
+        // and the chips keep their place instead of wrapping under the time.
+        flexWrap: 'nowrap',
+        overflow: 'hidden',
       }}
     >
       {compareMode && (
@@ -789,7 +792,7 @@ function TrafficRowImpl({
         size="small"
         color={kindColor(summary.parsed)}
         variant="outlined"
-        sx={{ height: 18, fontSize: '0.6rem', '& .MuiChip-label': { px: 0.5 } }}
+        sx={{ height: 18, fontSize: '0.6rem', flexShrink: 0, '& .MuiChip-label': { px: 0.5 } }}
       />
       <Typography
         variant="caption"
@@ -806,10 +809,11 @@ function TrafficRowImpl({
         <Typography
           variant="caption"
           noWrap
+          data-testid="traffic-row-path"
           sx={{
             fontFamily: monospaceFontFamily,
-            flex: 1,
-            minWidth: 80,
+            flex: '1 1 0',
+            minWidth: 40,
             overflow: 'hidden',
             textOverflow: 'ellipsis',
           }}
@@ -823,7 +827,7 @@ function TrafficRowImpl({
           label={summary.statusCode}
           size="small"
           color={statusColor(summary.statusCode)}
-          sx={{ height: 18, fontSize: '0.6rem', '& .MuiChip-label': { px: 0.5 } }}
+          sx={{ height: 18, fontSize: '0.6rem', flexShrink: 0, '& .MuiChip-label': { px: 0.5 } }}
         />
       )}
       {model && (
@@ -831,11 +835,13 @@ function TrafficRowImpl({
           label={model}
           size="small"
           variant="outlined"
-          sx={{ height: 18, fontSize: '0.6rem', '& .MuiChip-label': { px: 0.5 } }}
+          title={model}
+          sx={{ height: 18, fontSize: '0.6rem', minWidth: 0, '& .MuiChip-label': { px: 0.5 } }}
         />
       )}
       {tokens && (
-        <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.6rem', flexShrink: 0 }}>
+        // Least important on a narrow row, so it gives up its space first.
+        <Typography variant="caption" color="text.secondary" noWrap sx={{ fontSize: '0.6rem', flexShrink: 1000, minWidth: 0 }}>
           {tokens}
         </Typography>
       )}
@@ -845,7 +851,7 @@ function TrafficRowImpl({
           size="small"
           variant="outlined"
           color="info"
-          sx={{ height: 18, fontSize: '0.6rem', '& .MuiChip-label': { px: 0.5 } }}
+          sx={{ height: 18, fontSize: '0.6rem', flexShrink: 0, '& .MuiChip-label': { px: 0.5 } }}
         />
       )}
     </Box>
@@ -2672,8 +2678,12 @@ export default function TrafficInspector() {
               ? 0
               : undefined,
           minWidth: stacked ? 0 : 300,
+          // Explicit because 'clip', unlike 'hidden', keeps the content-sized minimum.
+          minHeight: 0,
           height: stacked && selectedEntry && !compareMode && !selectMode ? '45%' : undefined,
-          overflow: 'hidden',
+          // 'clip', not 'hidden': a hidden box can still be scrolled, so focusing a
+          // control past its edge (a popover's anchor) shifted every row sideways.
+          overflow: 'clip',
           // Disable the width transition while actively dragging so the pane
           // tracks the pointer 1:1.
           transition:
@@ -2681,10 +2691,15 @@ export default function TrafficInspector() {
         }}
       >
         <Box
+          data-testid="traffic-toolbar"
           sx={{
             display: 'flex',
             alignItems: 'center',
-            gap: 1,
+            // Wraps onto a second line when the detail pane narrows the list, so
+            // every control stays visible and reachable.
+            flexWrap: 'wrap',
+            columnGap: 1,
+            rowGap: 0.5,
             px: 1,
             py: 0.25,
             borderBottom: 1,

@@ -382,15 +382,18 @@ function TruncatedJsonArgument({ part, marker }: { part: MessagePart; marker: Tr
   const [full, setFull] = useState<Record<string, unknown> | null>(null);
   return (
     <>
+      {/* A block of its own above the argument, not inside the inline JSON box,
+          so the surrounding message text reads as one sentence. */}
+      {!full && (
+        <TruncatedBodyNotice
+          marker={marker}
+          onLoad={!isLoadable(marker) ? undefined : async () => {
+            setFull(await fetchFullMessage(params, marker));
+          }}
+          sx={{ width: 'fit-content', maxWidth: '100%' }}
+        />
+      )}
       <Box sx={{ display: 'inline-block', pl: 0.5, verticalAlign: 'top' }}>
-        {!full && (
-          <TruncatedBodyNotice
-            marker={marker}
-            onLoad={!isLoadable(marker) ? undefined : async () => {
-              setFull(await fetchFullMessage(params, marker));
-            }}
-          />
-        )}
         <JsonViewer
           data={full ?? (part.value as Record<string, unknown>)}
           collapsed={0}
