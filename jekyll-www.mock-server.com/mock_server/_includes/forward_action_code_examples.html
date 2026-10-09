@@ -316,14 +316,14 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "path": "/some/path"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/some/path"
     },
-    "httpOverrideForwardedRequest": {
-        "httpRequest": {
-            "path": "/some/other/path",
-            "headers": {
-                "Host": ["target.host.com"]
+    "httpOverrideForwardedRequest" =&gt; {
+        "httpRequest" =&gt; {
+            "path" =&gt; "/some/other/path",
+            "headers" =&gt; {
+                "Host" =&gt; ["target.host.com"]
             }
         }
     }
@@ -529,18 +529,18 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "path": "/some/path"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/some/path"
     },
-    "httpOverrideForwardedRequest": {
-        "httpRequest": {
-            "path": "/some/other/path",
-            "headers": {
-                "Host": ["target.host.com"]
+    "httpOverrideForwardedRequest" =&gt; {
+        "httpRequest" =&gt; {
+            "path" =&gt; "/some/other/path",
+            "headers" =&gt; {
+                "Host" =&gt; ["target.host.com"]
             }
         },
-        "httpResponse": {
-            "body": "some_overridden_body"
+        "httpResponse" =&gt; {
+            "body" =&gt; "some_overridden_body"
         }
     }
 }))</code></pre>
@@ -953,84 +953,84 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "path": "/some/path"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/some/path"
     },
-    "httpOverrideForwardedRequest": {
-        "requestOverride": {
-            "headers": {
-                "Host": [
+    "httpOverrideForwardedRequest" =&gt; {
+        "requestOverride" =&gt; {
+            "headers" =&gt; {
+                "Host" =&gt; [
                     "target.host.com"
                 ]
             },
-            "body": "some_overridden_body"
+            "body" =&gt; "some_overridden_body"
         },
-        "requestModifier": {
-            "cookies": {
-                "add": {
-                    "cookieToAddOne": "addedValue",
-                    "cookieToAddTwo": "addedValue"
+        "requestModifier" =&gt; {
+            "cookies" =&gt; {
+                "add" =&gt; {
+                    "cookieToAddOne" =&gt; "addedValue",
+                    "cookieToAddTwo" =&gt; "addedValue"
                 },
-                "remove": [
+                "remove" =&gt; [
                     "overrideCookieToRemove",
                     "requestCookieToRemove"
                 ],
-                "replace": {
-                    "overrideCookieToReplace": "replacedValue",
-                    "requestCookieToReplace": "replacedValue",
-                    "extraCookieToReplace": "shouldBeIgnore"
+                "replace" =&gt; {
+                    "overrideCookieToReplace" =&gt; "replacedValue",
+                    "requestCookieToReplace" =&gt; "replacedValue",
+                    "extraCookieToReplace" =&gt; "shouldBeIgnore"
                 }
             },
-            "headers": {
-                "add": {
-                    "headerToAddTwo": [
+            "headers" =&gt; {
+                "add" =&gt; {
+                    "headerToAddTwo" =&gt; [
                         "addedValue"
                     ],
-                    "headerToAddOne": [
+                    "headerToAddOne" =&gt; [
                         "addedValue"
                     ]
                 },
-                "remove": [
+                "remove" =&gt; [
                     "overrideHeaderToRemove",
                     "requestHeaderToRemove"
                 ],
-                "replace": {
-                    "requestHeaderToReplace": [
+                "replace" =&gt; {
+                    "requestHeaderToReplace" =&gt; [
                         "replacedValue"
                     ],
-                    "overrideHeaderToReplace": [
+                    "overrideHeaderToReplace" =&gt; [
                         "replacedValue"
                     ],
-                    "extraHeaderToReplace": [
+                    "extraHeaderToReplace" =&gt; [
                         "shouldBeIgnore"
                     ]
                 }
             },
-            "path": {
-                "regex": "^/(.+)/(.+)$",
-                "substitution": "/prefix/$1/infix/$2/postfix"
+            "path" =&gt; {
+                "regex" =&gt; "^/(.+)/(.+)$",
+                "substitution" =&gt; "/prefix/$1/infix/$2/postfix"
             },
-            "queryStringParameters": {
-                "add": {
-                    "parameterToAddTwo": [
+            "queryStringParameters" =&gt; {
+                "add" =&gt; {
+                    "parameterToAddTwo" =&gt; [
                         "addedValue"
                     ],
-                    "parameterToAddOne": [
+                    "parameterToAddOne" =&gt; [
                         "addedValue"
                     ]
                 },
-                "remove": [
+                "remove" =&gt; [
                     "overrideParameterToRemove",
                     "requestParameterToRemove"
                 ],
-                "replace": {
-                    "requestParameterToReplace": [
+                "replace" =&gt; {
+                    "requestParameterToReplace" =&gt; [
                         "replacedValue"
                     ],
-                    "overrideParameterToReplace": [
+                    "overrideParameterToReplace" =&gt; [
                         "replacedValue"
                     ],
-                    "extraParameterToReplace": [
+                    "extraParameterToReplace" =&gt; [
                         "shouldBeIgnore"
                     ]
                 }
@@ -1890,36 +1890,6 @@ client.upsert(Expectation.from_dict({
                     "overrideCookieToRemove",
                     "requestCookieToRemove"
                 ],
-                "replace": {))</code></pre>
-    </div>
-    <button class="accordion inner">Ruby</button>
-    <div class="panel">
-        <pre class="prettyprint lang-ruby code"><code class="code">require 'mockserver-client'
-
-client = MockServer::Client.new('localhost', 1080)
-client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "path": "/some/path"
-    },
-    "httpOverrideForwardedRequest": {
-        "requestOverride": {
-            "headers": {
-                "Host": [
-                    "target.host.com"
-                ]
-            },
-            "body": "some_overridden_body"
-        },
-        "requestModifier": {
-            "cookies": {
-                "add": {
-                    "cookieToAddOne": "addedValue",
-                    "cookieToAddTwo": "addedValue"
-                },
-                "remove": [
-                    "overrideCookieToRemove",
-                    "requestCookieToRemove"
-                ],
                 "replace": {
                     "overrideCookieToReplace": "replacedValue",
                     "requestCookieToReplace": "replacedValue",
@@ -1950,51 +1920,147 @@ client.upsert(MockServer::Expectation.from_hash({
                         "shouldBeIgnore"
                     ]
                 }
+            }
+        }
+    }
+}))</code></pre>
+    </div>
+    <button class="accordion inner">Ruby</button>
+    <div class="panel">
+        <pre class="prettyprint lang-ruby code"><code class="code">require 'mockserver-client'
+
+client = MockServer::Client.new('localhost', 1080)
+client.upsert(MockServer::Expectation.from_hash({
+    "httpRequest" =&gt; {
+        "path" =&gt; "/some/path"
+    },
+    "httpOverrideForwardedRequest" =&gt; {
+        "requestOverride" =&gt; {
+            "headers" =&gt; {
+                "Host" =&gt; [
+                    "target.host.com"
+                ]
             },
-            "path": {
-                "regex": "^/(.+)/(.+)$",
-                "substitution": "/prefix/$1/infix/$2/postfix"
+            "body" =&gt; "some_overridden_body"
+        },
+        "requestModifier" =&gt; {
+            "cookies" =&gt; {
+                "add" =&gt; {
+                    "cookieToAddOne" =&gt; "addedValue",
+                    "cookieToAddTwo" =&gt; "addedValue"
+                },
+                "remove" =&gt; [
+                    "overrideCookieToRemove",
+                    "requestCookieToRemove"
+                ],
+                "replace" =&gt; {
+                    "overrideCookieToReplace" =&gt; "replacedValue",
+                    "requestCookieToReplace" =&gt; "replacedValue",
+                    "extraCookieToReplace" =&gt; "shouldBeIgnore"
+                }
             },
-            "queryStringParameters": {
-                "add": {
-                    "parameterToAddTwo": [
+            "headers" =&gt; {
+                "add" =&gt; {
+                    "headerToAddTwo" =&gt; [
                         "addedValue"
                     ],
-                    "parameterToAddOne": [
+                    "headerToAddOne" =&gt; [
                         "addedValue"
                     ]
                 },
-                "remove": [
+                "remove" =&gt; [
+                    "overrideHeaderToRemove",
+                    "requestHeaderToRemove"
+                ],
+                "replace" =&gt; {
+                    "requestHeaderToReplace" =&gt; [
+                        "replacedValue"
+                    ],
+                    "overrideHeaderToReplace" =&gt; [
+                        "replacedValue"
+                    ],
+                    "extraHeaderToReplace" =&gt; [
+                        "shouldBeIgnore"
+                    ]
+                }
+            },
+            "path" =&gt; {
+                "regex" =&gt; "^/(.+)/(.+)$",
+                "substitution" =&gt; "/prefix/$1/infix/$2/postfix"
+            },
+            "queryStringParameters" =&gt; {
+                "add" =&gt; {
+                    "parameterToAddTwo" =&gt; [
+                        "addedValue"
+                    ],
+                    "parameterToAddOne" =&gt; [
+                        "addedValue"
+                    ]
+                },
+                "remove" =&gt; [
                     "overrideParameterToRemove",
                     "requestParameterToRemove"
                 ],
-                "replace": {
-                    "requestParameterToReplace": [
+                "replace" =&gt; {
+                    "requestParameterToReplace" =&gt; [
                         "replacedValue"
                     ],
-                    "overrideParameterToReplace": [
+                    "overrideParameterToReplace" =&gt; [
                         "replacedValue"
                     ],
-                    "extraParameterToReplace": [
+                    "extraParameterToReplace" =&gt; [
                         "shouldBeIgnore"
                     ]
                 }
             }
         },
-        "responseOverride": {
-            "body": "some_overridden_body"
+        "responseOverride" =&gt; {
+            "body" =&gt; "some_overridden_body"
         },
-        "responseModifier": {
-            "cookies": {
-                "add": {
-                    "cookieToAddOne": "addedValue",
-                    "cookieToAddTwo": "addedValue"
+        "responseModifier" =&gt; {
+            "cookies" =&gt; {
+                "add" =&gt; {
+                    "cookieToAddOne" =&gt; "addedValue",
+                    "cookieToAddTwo" =&gt; "addedValue"
                 },
-                "remove": [
+                "remove" =&gt; [
                     "overrideCookieToRemove",
                     "requestCookieToRemove"
                 ],
-                "replace": {))</code></pre>
+                "replace" =&gt; {
+                    "overrideCookieToReplace" =&gt; "replacedValue",
+                    "requestCookieToReplace" =&gt; "replacedValue",
+                    "extraCookieToReplace" =&gt; "shouldBeIgnore"
+                }
+            },
+            "headers" =&gt; {
+                "add" =&gt; {
+                    "headerToAddTwo" =&gt; [
+                        "addedValue"
+                    ],
+                    "headerToAddOne" =&gt; [
+                        "addedValue"
+                    ]
+                },
+                "remove" =&gt; [
+                    "overrideHeaderToRemove",
+                    "requestHeaderToRemove"
+                ],
+                "replace" =&gt; {
+                    "requestHeaderToReplace" =&gt; [
+                        "replacedValue"
+                    ],
+                    "overrideHeaderToReplace" =&gt; [
+                        "replacedValue"
+                    ],
+                    "extraHeaderToReplace" =&gt; [
+                        "shouldBeIgnore"
+                    ]
+                }
+            }
+        }
+    }
+}))</code></pre>
     </div>
     <button class="accordion inner">Go</button>
     <div class="panel">
@@ -2690,19 +2756,19 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "path": "/some/path"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/some/path"
     },
-    "httpOverrideForwardedRequest": {
-        "httpRequest": {
-            "path": "/some/other/path",
-            "headers": {
-                "Host": ["any.host.com"]
+    "httpOverrideForwardedRequest" =&gt; {
+        "httpRequest" =&gt; {
+            "path" =&gt; "/some/other/path",
+            "headers" =&gt; {
+                "Host" =&gt; ["any.host.com"]
             },
-            "socketAddress": {
-                "host": "target.host.com",
-                "port": 1234,
-                "scheme": "HTTPS"
+            "socketAddress" =&gt; {
+                "host" =&gt; "target.host.com",
+                "port" =&gt; 1234,
+                "scheme" =&gt; "HTTPS"
             }
         }
     }
@@ -2935,20 +3001,20 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "path": "/some/path"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/some/path"
     },
-    "httpOverrideForwardedRequest": {
-        "httpRequest": {
-            "path": "/some/other/path",
-            "body": "some_overridden_body",
-            "headers": {
-                "Host": ["target.host.com"]
+    "httpOverrideForwardedRequest" =&gt; {
+        "httpRequest" =&gt; {
+            "path" =&gt; "/some/other/path",
+            "body" =&gt; "some_overridden_body",
+            "headers" =&gt; {
+                "Host" =&gt; ["target.host.com"]
             }
         },
-        "delay": {
-            "timeUnit": "SECONDS",
-            "value": 10
+        "delay" =&gt; {
+            "timeUnit" =&gt; "SECONDS",
+            "value" =&gt; 10
         }
     }
 }))</code></pre>
@@ -3189,23 +3255,23 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "path": "/some/path"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/some/path"
     },
-    "httpOverrideForwardedRequest": {
-        "httpRequest": {
-            "path": "/some/other/path",
-            "body": "some_overridden_body",
-            "headers": {
-                "Host": ["target.host.com"]
+    "httpOverrideForwardedRequest" =&gt; {
+        "httpRequest" =&gt; {
+            "path" =&gt; "/some/other/path",
+            "body" =&gt; "some_overridden_body",
+            "headers" =&gt; {
+                "Host" =&gt; ["target.host.com"]
             }
         },
-        "delay": {
-            "timeUnit": "MILLISECONDS",
-            "distribution": {
-                "type": "LOG_NORMAL",
-                "median": 200,
-                "p99": 800
+        "delay" =&gt; {
+            "timeUnit" =&gt; "MILLISECONDS",
+            "distribution" =&gt; {
+                "type" =&gt; "LOG_NORMAL",
+                "median" =&gt; 200,
+                "p99" =&gt; 800
             }
         }
     }
@@ -3470,11 +3536,11 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "path": "/some/path"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/some/path"
     },
-    "httpForwardTemplate": {
-        "template": "return {\n" +
+    "httpForwardTemplate" =&gt; {
+        "template" =&gt; "return {\n" +
         "    'path' : \"/somePath\",\n" +
         "    'queryStringParameters' : {\n" +
         "        'userId' : request.queryStringParameters && request.queryStringParameters['userId']\n" +
@@ -3484,7 +3550,7 @@ client.upsert(MockServer::Expectation.from_hash({
         "    },\n" +
         "    'body': JSON.stringify({'name': 'value'})\n" +
         "};",
-        "templateType": "JAVASCRIPT"
+        "templateType" =&gt; "JAVASCRIPT"
     }
 }))</code></pre>
     </div>
@@ -3713,17 +3779,17 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "path": "/somePrefix*"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/somePrefix*"
     },
-    "httpForwardTemplate": {
-        "template": "return {\n" +
+    "httpForwardTemplate" =&gt; {
+        "template" =&gt; "return {\n" +
         "    'path' : request.path.substring(request.path.indexOf('/somePrefix')+'/somePrefix'.length,request.path.length),\n" +
         "    'headers' : {\n" +
         "        'Host' : [ \"localhost:1081\" ]\n" +
         "    }\n" +
         "};",
-        "templateType": "JAVASCRIPT"
+        "templateType" =&gt; "JAVASCRIPT"
     }
 }))</code></pre>
     </div>
@@ -3953,11 +4019,11 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "path": "/some/path"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/some/path"
     },
-    "httpForwardTemplate": {
-        "template": "return {\n" +
+    "httpForwardTemplate" =&gt; {
+        "template" =&gt; "return {\n" +
         "    'path' : \"/somePath\",\n" +
         "    'cookies' : {\n" +
         "        'SessionId' : request.cookies && request.cookies['SessionId']\n" +
@@ -3969,8 +4035,8 @@ client.upsert(MockServer::Expectation.from_hash({
         "    'secure' : true,\n" +
         "    'body' : \"some_body\"\n" +
         "};",
-        "templateType": "JAVASCRIPT",
-        "delay": {"timeUnit": "SECONDS", "value": 20}
+        "templateType" =&gt; "JAVASCRIPT",
+        "delay" =&gt; {"timeUnit" =&gt; "SECONDS", "value" =&gt; 20}
     }
 }))</code></pre>
     </div>
@@ -4237,11 +4303,11 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "path": "/some/path"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/some/path"
     },
-    "httpForwardTemplate": {
-        "template": "{\n" +
+    "httpForwardTemplate" =&gt; {
+        "template" =&gt; "{\n" +
         "    'path' : \"/somePath\",\n" +
         "    'queryStringParameters' : {\n" +
         "        'userId' : [ \"$!request.queryStringParameters['userId'][0]\" ]\n" +
@@ -4254,7 +4320,7 @@ client.upsert(MockServer::Expectation.from_hash({
         "    },\n" +
         "    'body': \"{'name': 'value'}\"\n" +
         "}",
-        "templateType": "VELOCITY"
+        "templateType" =&gt; "VELOCITY"
     }
 }))</code></pre>
     </div>
@@ -4503,18 +4569,18 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "path": "/some/path"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/some/path"
     },
-    "httpOverrideForwardedRequest": {
-        "requestOverride": {
-            "headers": {
-                "Host": ["target.host.com"]
+    "httpOverrideForwardedRequest" =&gt; {
+        "requestOverride" =&gt; {
+            "headers" =&gt; {
+                "Host" =&gt; ["target.host.com"]
             }
         },
-        "responseTemplate": {
-            "templateType": "JAVASCRIPT",
-            "template": "return { 'statusCode': response.statusCode, 'headers': response.headers, 'body': JSON.stringify({ 'originalBody': response.body, 'requestPath': request.path }) };"
+        "responseTemplate" =&gt; {
+            "templateType" =&gt; "JAVASCRIPT",
+            "template" =&gt; "return { 'statusCode': response.statusCode, 'headers': response.headers, 'body': JSON.stringify({ 'originalBody': response.body, 'requestPath': request.path }) };"
         }
     }
 }))</code></pre>
@@ -4732,15 +4798,15 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "path": "/some/path"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/some/path"
     },
-    "httpForwardTemplate": {
-        "templateType": "JAVASCRIPT",
-        "template": "return { 'path': '/target' + request.path, 'headers': { 'Host': ['target.host.com'] } };",
-        "responseOverride": {
-            "headers": {
-                "x-proxy": ["mockserver"]
+    "httpForwardTemplate" =&gt; {
+        "templateType" =&gt; "JAVASCRIPT",
+        "template" =&gt; "return { 'path': '/target' + request.path, 'headers': { 'Host': ['target.host.com'] } };",
+        "responseOverride" =&gt; {
+            "headers" =&gt; {
+                "x-proxy" =&gt; ["mockserver"]
             }
         }
     }
@@ -4951,11 +5017,11 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest" : {
-        "path" : "/some.*"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/some.*"
     },
-    "httpForwardClassCallback" : {
-        "callbackClass" : "org.mockserver.examples.mockserver.CallbackActionExamples$TestExpectationForwardCallback"
+    "httpForwardClassCallback" =&gt; {
+        "callbackClass" =&gt; "org.mockserver.examples.mockserver.CallbackActionExamples$TestExpectationForwardCallback"
     }
 }))</code></pre>
     </div>

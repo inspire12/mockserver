@@ -100,6 +100,20 @@ All 26 domain model classes are available under the `MockServer` module:
 - `RequestDefinition` (alias for `HttpRequest`)
 - `Jwt` (JWT / bearer-token request matcher)
 
+Every model can also be built from the expectation JSON with `from_hash`. Keys
+may be strings (`'httpRequest' => {...}`, as `JSON.parse` returns them) or
+symbols (`"httpRequest": {...}` or `httpRequest: {...}`):
+
+```ruby
+client.upsert(MockServer::Expectation.from_hash({
+  "httpRequest": { "path": '/some/path' },
+  "httpResponse": { "statusCode": 200, "body": 'some_response_body' }
+}))
+```
+
+Symbol keys need a client released after 8.0.0; 8.0.0 and earlier read only
+string keys and build an empty expectation from a symbol-keyed hash.
+
 ## JWT and combined body matchers
 
 Match a request by the claims in its JWT (carried by default in the

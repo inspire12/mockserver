@@ -59,11 +59,11 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "specUrlOrPayload": "https://raw.githubusercontent.com/mock-server/mockserver-monorepo/master/mockserver/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json"
+    "httpRequest" =&gt; {
+        "specUrlOrPayload" =&gt; "https://raw.githubusercontent.com/mock-server/mockserver-monorepo/master/mockserver/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json"
     },
-    "httpResponse": {
-        "body": "some_response_body"
+    "httpResponse" =&gt; {
+        "body" =&gt; "some_response_body"
     }
 }))</code></pre>
     </div>
@@ -221,12 +221,12 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "specUrlOrPayload": "https://raw.githubusercontent.com/mock-server/mockserver-monorepo/master/mockserver/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json",
-        "operationId": "showPetById"
+    "httpRequest" =&gt; {
+        "specUrlOrPayload" =&gt; "https://raw.githubusercontent.com/mock-server/mockserver-monorepo/master/mockserver/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json",
+        "operationId" =&gt; "showPetById"
     },
-    "httpResponse": {
-        "body": "some_response_body"
+    "httpResponse" =&gt; {
+        "body" =&gt; "some_response_body"
     }
 }))</code></pre>
     </div>
@@ -386,11 +386,11 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "specUrlOrPayload": "file:/path/to/openapi_petstore_example.json"
+    "httpRequest" =&gt; {
+        "specUrlOrPayload" =&gt; "file:/path/to/openapi_petstore_example.json"
     },
-    "httpResponse": {
-        "body": "some_response_body"
+    "httpResponse" =&gt; {
+        "body" =&gt; "some_response_body"
     }
 }))</code></pre>
     </div>
@@ -545,11 +545,11 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "specUrlOrPayload": "org/mockserver/openapi/openapi_petstore_example.json"
+    "httpRequest" =&gt; {
+        "specUrlOrPayload" =&gt; "org/mockserver/openapi/openapi_petstore_example.json"
     },
-    "httpResponse": {
-        "body": "some_response_body"
+    "httpResponse" =&gt; {
+        "body" =&gt; "some_response_body"
     }
 }))</code></pre>
     </div>
@@ -718,12 +718,12 @@ require 'json'
 client = MockServer::Client.new('localhost', 1080)
 spec = JSON.parse(File.read('/path/to/openapi_petstore_example.json'))
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "specUrlOrPayload": spec,
-        "operationId": "showPetById"
+    "httpRequest" =&gt; {
+        "specUrlOrPayload" =&gt; spec,
+        "operationId" =&gt; "showPetById"
     },
-    "httpResponse": {
-        "body": "some_response_body"
+    "httpResponse" =&gt; {
+        "body" =&gt; "some_response_body"
     }
 }))</code></pre>
     </div>
@@ -1543,12 +1543,12 @@ client.upsert(Expectation.from_dict({
 client = MockServer::Client.new('localhost', 1080)
 yaml_spec = File.read('/path/to/openapi_petstore_example.yaml')
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "specUrlOrPayload": yaml_spec,
-        "operationId": "listPets"
+    "httpRequest" =&gt; {
+        "specUrlOrPayload" =&gt; yaml_spec,
+        "operationId" =&gt; "listPets"
     },
-    "httpResponse": {
-        "body": "some_response_body"
+    "httpResponse" =&gt; {
+        "body" =&gt; "some_response_body"
     }
 }))</code></pre>
     </div>
@@ -1735,16 +1735,16 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "specUrlOrPayload": "https://raw.githubusercontent.com/mock-server/mockserver-monorepo/master/mockserver/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json",
-        "operationId": "showPetById"
+    "httpRequest" =&gt; {
+        "specUrlOrPayload" =&gt; "https://raw.githubusercontent.com/mock-server/mockserver-monorepo/master/mockserver/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json",
+        "operationId" =&gt; "showPetById"
     },
-    "httpResponse": {
-        "statusCode": 200,
-        "body": "some_body"
+    "httpResponse" =&gt; {
+        "statusCode" =&gt; 200,
+        "body" =&gt; "some_body"
     },
-    "times": {
-        "remainingTimes": 2
+    "times" =&gt; {
+        "remainingTimes" =&gt; 2
     }
 }))</code></pre>
     </div>
@@ -1945,21 +1945,21 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "id": "630a6e5b-9d61-4668-a18f-a0d3df558583",
-    "priority": 0,
-    "httpRequest": {
-        "specUrlOrPayload": "https://raw.githubusercontent.com/mock-server/mockserver-monorepo/master/mockserver/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json",
-        "operationId": "showPetById"
+    "id" =&gt; "630a6e5b-9d61-4668-a18f-a0d3df558583",
+    "priority" =&gt; 0,
+    "httpRequest" =&gt; {
+        "specUrlOrPayload" =&gt; "https://raw.githubusercontent.com/mock-server/mockserver-monorepo/master/mockserver/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json",
+        "operationId" =&gt; "showPetById"
     },
-    "httpResponse": {
-        "statusCode": 200,
-        "body": "some_response_body"
+    "httpResponse" =&gt; {
+        "statusCode" =&gt; 200,
+        "body" =&gt; "some_response_body"
     },
-    "times": {
-        "unlimited": true
+    "times" =&gt; {
+        "unlimited" =&gt; true
     },
-    "timeToLive": {
-        "unlimited": true
+    "timeToLive" =&gt; {
+        "unlimited" =&gt; true
     }
 }))</code></pre>
     </div>

@@ -132,6 +132,44 @@ module MockServer
   end
 
   # @api private
+  def self.symbol_keys?(value)
+    case value
+    when Hash then value.any? { |k, v| k.is_a?(Symbol) || symbol_keys?(v) }
+    when Array then value.any? { |v| symbol_keys?(v) }
+    else false
+    end
+  end
+
+  # @api private
+  # Returns a copy of +value+ with every Symbol hash key, at any depth, turned
+  # into a String; values and other keys are unchanged.
+  def self.stringify_keys(value)
+    case value
+    when Hash then value.each_with_object({}) { |(k, v), h| h[k.is_a?(Symbol) ? k.to_s : k] = stringify_keys(v) }
+    when Array then value.map { |v| stringify_keys(v) }
+    else value
+    end
+  end
+
+  # @api private
+  # Prepended to every model's from_hash. A hash literal written with JSON-style
+  # keys ({ "httpRequest": {...} }) has Symbol keys in Ruby, while the models read
+  # the String keys JSON.parse produces, so normalise before reading. Only the
+  # outermost call scans: nested calls receive parts of the normalised hash.
+  module SymbolKeyTolerantFromHash
+    def from_hash(data)
+      return super if Thread.current[:mockserver_from_hash_normalised]
+
+      Thread.current[:mockserver_from_hash_normalised] = true
+      begin
+        super(MockServer.symbol_keys?(data) ? MockServer.stringify_keys(data) : data)
+      ensure
+        Thread.current[:mockserver_from_hash_normalised] = false
+      end
+    end
+  end
+
+  # @api private
   # Coerce a class-callback value into an {HttpClassCallback}. Accepts:
   #   * +nil+              -> +nil+
   #   * a +String+         -> +HttpClassCallback.new(callback_class: <string>)+
@@ -3384,4 +3422,8 @@ module MockServer
 
   # Alias matching the Python client
   RequestDefinition = HttpRequest
+
+  constants.map { |name| const_get(name) }.each do |model|
+    model.singleton_class.prepend(SymbolKeyTolerantFromHash) if model.is_a?(Class) && model.respond_to?(:from_hash)
+  end
 end

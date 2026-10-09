@@ -493,16 +493,16 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "method": "POST",
-        "path": "/upload",
-        "respondBeforeBody": true
+    "httpRequest" =&gt; {
+        "method" =&gt; "POST",
+        "path" =&gt; "/upload",
+        "respondBeforeBody" =&gt; true
     },
-    "httpResponse": {
-        "statusCode": 403,
-        "body": "forbidden",
-        "connectionOptions": {
-            "keepAliveOverride": false
+    "httpResponse" =&gt; {
+        "statusCode" =&gt; 403,
+        "body" =&gt; "forbidden",
+        "connectionOptions" =&gt; {
+            "keepAliveOverride" =&gt; false
         }
     }
 }))</code></pre>

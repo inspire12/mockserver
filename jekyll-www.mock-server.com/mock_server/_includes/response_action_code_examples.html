@@ -192,14 +192,14 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "path": "/api/data"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/api/data"
     },
-    "httpResponse": {
-        "body": {
-            "type": "FILE",
-            "filePath": "/path/to/response.json",
-            "contentType": "application/json"
+    "httpResponse" =&gt; {
+        "body" =&gt; {
+            "type" =&gt; "FILE",
+            "filePath" =&gt; "/path/to/response.json",
+            "contentType" =&gt; "application/json"
         }
     }
 }))</code></pre>
@@ -389,13 +389,13 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpResponse": {
-        "headers": {
-            "content-type": ["text/plain; charset=utf-16"]
+    "httpResponse" =&gt; {
+        "headers" =&gt; {
+            "content-type" =&gt; ["text/plain; charset=utf-16"]
         },
-        "body": {
-            "type": "BINARY",
-            "base64Bytes": "/v9iEYv0Ti1W/Yvd"
+        "body" =&gt; {
+            "type" =&gt; "BINARY",
+            "base64Bytes" =&gt; "/v9iEYv0Ti1W/Yvd"
         }
     }
 }))</code></pre>
@@ -587,19 +587,19 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "method": "GET",
-        "path": "/simple"
+    "httpRequest" =&gt; {
+        "method" =&gt; "GET",
+        "path" =&gt; "/simple"
     },
-    "httpResponse": {
-        "body": {
-            "type": "STRING",
-            "string": "\u0633\u0644\u0627\u0645",
-            "contentType": "text/plain; charset=utf-8"
+    "httpResponse" =&gt; {
+        "body" =&gt; {
+            "type" =&gt; "STRING",
+            "string" =&gt; "\u0633\u0644\u0627\u0645",
+            "contentType" =&gt; "text/plain; charset=utf-8"
          }
     },
-    "times": {
-        "unlimited": true
+    "times" =&gt; {
+        "unlimited" =&gt; true
     }
 }))</code></pre>
     </div>
@@ -955,14 +955,14 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "path": "/some/path"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/some/path"
     },
-    "httpResponse": {
-        "body": "some_response_body",
-        "trailers": {
-            "X-Checksum": ["abc123"],
-            "X-Signature": ["deadbeef"]
+    "httpResponse" =&gt; {
+        "body" =&gt; "some_response_body",
+        "trailers" =&gt; {
+            "X-Checksum" =&gt; ["abc123"],
+            "X-Signature" =&gt; ["deadbeef"]
         }
     }
 }))</code></pre>
@@ -1468,18 +1468,18 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "path": "/ws/rest/user/[0-9]+/icon/[0-9]+\\.png"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/ws/rest/user/[0-9]+/icon/[0-9]+\\.png"
     },
-    "httpResponse": {
-        "statusCode": 200,
-        "headers": {
-            "content-type": ["image/png"],
-            "content-disposition": ["form-data; name=\"test.png\"; filename=\"test.png\""]
+    "httpResponse" =&gt; {
+        "statusCode" =&gt; 200,
+        "headers" =&gt; {
+            "content-type" =&gt; ["image/png"],
+            "content-disposition" =&gt; ["form-data; name=\"test.png\"; filename=\"test.png\""]
         },
-        "body": {
-            "type": "BINARY",
-            "base64Bytes": "iVBORw0KGgoAAAANSUhEUgAAAqwAAAAp..."
+        "body" =&gt; {
+            "type" =&gt; "BINARY",
+            "base64Bytes" =&gt; "iVBORw0KGgoAAAANSUhEUgAAAqwAAAAp..."
         }
     }
 }))</code></pre>
@@ -1917,17 +1917,17 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "path": "/some/path"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/some/path"
     },
-    "httpResponse": {
-        "body": "some_response_body",
-        "delay": {
-            "timeUnit": "MILLISECONDS",
-            "distribution": {
-                "type": "UNIFORM",
-                "min": 100,
-                "max": 500
+    "httpResponse" =&gt; {
+        "body" =&gt; "some_response_body",
+        "delay" =&gt; {
+            "timeUnit" =&gt; "MILLISECONDS",
+            "distribution" =&gt; {
+                "type" =&gt; "UNIFORM",
+                "min" =&gt; 100,
+                "max" =&gt; 500
             }
         }
     }
@@ -2237,14 +2237,14 @@ client.upsert(Expectation.from_dict({
 # delay 10ms per character of the request body
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "path": "/some/path"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/some/path"
     },
-    "httpResponse": {
-        "body": "some_response_body",
-        "delay": {
-            "templateType": "VELOCITY",
-            "template": "#set($d = $request.body.length() * 10)$d"
+    "httpResponse" =&gt; {
+        "body" =&gt; "some_response_body",
+        "delay" =&gt; {
+            "templateType" =&gt; "VELOCITY",
+            "template" =&gt; "#set($d = $request.body.length() * 10)$d"
         }
     }
 }))</code></pre>
@@ -2686,14 +2686,14 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest" : {
-        "path" : "/some/path"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/some/path"
     },
-    "httpResponse" : {
-        "body" : "some_response_body",
-        "connectionOptions" : {
-            "suppressContentLengthHeader" : true,
-            "suppressConnectionHeader" : true
+    "httpResponse" =&gt; {
+        "body" =&gt; "some_response_body",
+        "connectionOptions" =&gt; {
+            "suppressContentLengthHeader" =&gt; true,
+            "suppressConnectionHeader" =&gt; true
         }
     }
 }))</code></pre>
@@ -2885,14 +2885,14 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest" : {
-        "path" : "/some/path"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/some/path"
     },
-    "httpResponse" : {
-        "body" : "some_response_body",
-        "connectionOptions" : {
-            "contentLengthHeaderOverride" : 10,
-            "keepAliveOverride" : false
+    "httpResponse" =&gt; {
+        "body" =&gt; "some_response_body",
+        "connectionOptions" =&gt; {
+            "contentLengthHeaderOverride" =&gt; 10,
+            "keepAliveOverride" =&gt; false
         }
     }
 }))</code></pre>
@@ -3081,13 +3081,13 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest" : {
-        "path" : "/some/path"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/some/path"
     },
-    "httpResponse" : {
-        "body" : "some_response_body",
-        "connectionOptions" : {
-            "closeSocket" : true
+    "httpResponse" =&gt; {
+        "body" =&gt; "some_response_body",
+        "connectionOptions" =&gt; {
+            "closeSocket" =&gt; true
         }
     }
 }))</code></pre>
@@ -3280,16 +3280,16 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest" : {
-        "path" : "/some/path"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/some/path"
     },
-    "httpResponse" : {
-        "body" : "some_response_body",
-        "connectionOptions" : {
-            "closeSocket" : true,
-            "closeSocketDelay" : {
-                "timeUnit" : "MILLISECONDS",
-                "value" : 500
+    "httpResponse" =&gt; {
+        "body" =&gt; "some_response_body",
+        "connectionOptions" =&gt; {
+            "closeSocket" =&gt; true,
+            "closeSocketDelay" =&gt; {
+                "timeUnit" =&gt; "MILLISECONDS",
+                "value" =&gt; 500
             }
         }
     }
@@ -3503,16 +3503,16 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest" : {
-        "path" : "/some/path"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/some/path"
     },
-    "httpResponse" : {
-        "body" : "some_long_response_body_delivered_in_chunks",
-        "connectionOptions" : {
-            "chunkSize" : 10,
-            "chunkDelay" : {
-                "timeUnit" : "MILLISECONDS",
-                "value" : 500
+    "httpResponse" =&gt; {
+        "body" =&gt; "some_long_response_body_delivered_in_chunks",
+        "connectionOptions" =&gt; {
+            "chunkSize" =&gt; 10,
+            "chunkDelay" =&gt; {
+                "timeUnit" =&gt; "MILLISECONDS",
+                "value" =&gt; 500
             }
         }
     }
@@ -3728,12 +3728,12 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "path": "/some/path"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/some/path"
     },
-    "httpResponseTemplate": {
-        "template": "return { statusCode: 200, cookies: { session: request.headers[\"Session-Id\"] &amp;&amp; request.headers[\"Session-Id\"][0] }, headers: { Date: [ Date() ] }, body: JSON.stringify({method: request.method, path: request.path, body: request.body}) };",
-        "templateType": "JAVASCRIPT"
+    "httpResponseTemplate" =&gt; {
+        "template" =&gt; "return { statusCode: 200, cookies: { session: request.headers[\"Session-Id\"] &amp;&amp; request.headers[\"Session-Id\"][0] }, headers: { Date: [ Date() ] }, body: JSON.stringify({method: request.method, path: request.path, body: request.body}) };",
+        "templateType" =&gt; "JAVASCRIPT"
     }
 }))</code></pre>
     </div>
@@ -3901,12 +3901,12 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "path": "/some/path"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/some/path"
     },
-    "httpResponseTemplate": {
-        "template": "return { statusCode: 200, headers: { Date: [ Date() ] }, body: JSON.stringify({is_active: JSON.parse(request.bodyAsString).is_active, id: \"1234\", name: \"taras\"}) };",
-        "templateType": "JAVASCRIPT"
+    "httpResponseTemplate" =&gt; {
+        "template" =&gt; "return { statusCode: 200, headers: { Date: [ Date() ] }, body: JSON.stringify({is_active: JSON.parse(request.bodyAsString).is_active, id: \"1234\", name: \"taras\"}) };",
+        "templateType" =&gt; "JAVASCRIPT"
     }
 }))</code></pre>
     </div>
@@ -4083,11 +4083,11 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {"path": "/some/path"},
-    "httpResponseTemplate": {
-        "template": "if (request.method === \"POST\" &amp;&amp; request.path === \"/some/path\") { return { statusCode: 200, body: JSON.stringify({name: \"value\"}) }; } else { return { statusCode: 406, body: request.body }; }",
-        "templateType": "JAVASCRIPT",
-        "delay": {"timeUnit": "MINUTES", "value": 2}
+    "httpRequest" =&gt; {"path" =&gt; "/some/path"},
+    "httpResponseTemplate" =&gt; {
+        "template" =&gt; "if (request.method === \"POST\" &amp;&amp; request.path === \"/some/path\") { return { statusCode: 200, body: JSON.stringify({name: \"value\"}) }; } else { return { statusCode: 406, body: request.body }; }",
+        "templateType" =&gt; "JAVASCRIPT",
+        "delay" =&gt; {"timeUnit" =&gt; "MINUTES", "value" =&gt; 2}
     }
 }))</code></pre>
     </div>
@@ -4262,12 +4262,12 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "path": "/some/path"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/some/path"
     },
-    "httpResponseTemplate": {
-        "template": "{ \"statusCode\": 200, \"cookies\": { \"session\": \"$!request.headers[\"Session-Id\"][0]\" }, \"headers\": { \"Client-User-Agent\": [ \"$!request.headers[\"User-Agent\"][0]\" ] }, \"body\": \"$!request.body\" }",
-        "templateType": "VELOCITY"
+    "httpResponseTemplate" =&gt; {
+        "template" =&gt; "{ \"statusCode\": 200, \"cookies\": { \"session\": \"$!request.headers[\"Session-Id\"][0]\" }, \"headers\": { \"Client-User-Agent\": [ \"$!request.headers[\"User-Agent\"][0]\" ] }, \"body\": \"$!request.body\" }",
+        "templateType" =&gt; "VELOCITY"
     }
 }))</code></pre>
     </div>
@@ -4454,11 +4454,11 @@ client.upsert(Expectation.from_dict({
 
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest" : {
-        "path" : "/some.*"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/some.*"
     },
-    "httpResponseClassCallback" : {
-        "callbackClass" : "org.mockserver.examples.mockserver.CallbackActionExamples$TestExpectationResponseCallback"
+    "httpResponseClassCallback" =&gt; {
+        "callbackClass" =&gt; "org.mockserver.examples.mockserver.CallbackActionExamples$TestExpectationResponseCallback"
     }
 }))</code></pre>
     </div>
@@ -5067,14 +5067,14 @@ client.upsert(Expectation.from_dict({
 # fail the first 3 matches with the default 503, then return the 200 response
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "path": "/some/path"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/some/path"
     },
-    "httpResponse": {
-        "statusCode": 200,
-        "body": "ok",
-        "recoverAfter": {
-            "failTimes": 3
+    "httpResponse" =&gt; {
+        "statusCode" =&gt; 200,
+        "body" =&gt; "ok",
+        "recoverAfter" =&gt; {
+            "failTimes" =&gt; 3
         }
     }
 }))</code></pre>
@@ -5291,21 +5291,21 @@ client.upsert(Expectation.from_dict({
 # fail the first 3 attempts per Idempotency-Key value with a custom 503 (incl. Retry-After), then succeed
 client = MockServer::Client.new('localhost', 1080)
 client.upsert(MockServer::Expectation.from_hash({
-    "httpRequest": {
-        "path": "/some/path"
+    "httpRequest" =&gt; {
+        "path" =&gt; "/some/path"
     },
-    "httpResponse": {
-        "statusCode": 200,
-        "body": "ok",
-        "recoverAfter": {
-            "failTimes": 3,
-            "failResponse": {
-                "statusCode": 503,
-                "headers": {
-                    "Retry-After": [ "1" ]
+    "httpResponse" =&gt; {
+        "statusCode" =&gt; 200,
+        "body" =&gt; "ok",
+        "recoverAfter" =&gt; {
+            "failTimes" =&gt; 3,
+            "failResponse" =&gt; {
+                "statusCode" =&gt; 503,
+                "headers" =&gt; {
+                    "Retry-After" =&gt; [ "1" ]
                 }
             },
-            "idempotencyHeader": "Idempotency-Key"
+            "idempotencyHeader" =&gt; "Idempotency-Key"
         }
     }
 }))</code></pre>
