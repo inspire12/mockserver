@@ -51,7 +51,11 @@ active = client.retrieve_active_expectations()</code></pre></div>
 client = MockServer::Client.new('localhost', 1080)
 active = client.retrieve_active_expectations</code></pre></div>
     <button class="accordion inner">Go</button>
-    <div class="panel"><pre class="prettyprint lang-go code"><code class="code">import mockserver "github.com/mock-server/mockserver-monorepo/mockserver-client-go/v7"
+    <div class="panel"><pre class="prettyprint lang-go code"><code class="code">import (
+    "log"
+
+    mockserver "github.com/mock-server/mockserver-monorepo/mockserver-client-go/v7"
+)
 
 client := mockserver.New("localhost", 1080)
 active, err := client.RetrieveActiveExpectations(nil)
@@ -108,7 +112,11 @@ requests = client.retrieve_recorded_requests()</code></pre></div>
 client = MockServer::Client.new('localhost', 1080)
 requests = client.retrieve_recorded_requests</code></pre></div>
     <button class="accordion inner">Go</button>
-    <div class="panel"><pre class="prettyprint lang-go code"><code class="code">import mockserver "github.com/mock-server/mockserver-monorepo/mockserver-client-go/v7"
+    <div class="panel"><pre class="prettyprint lang-go code"><code class="code">import (
+    "log"
+
+    mockserver "github.com/mock-server/mockserver-monorepo/mockserver-client-go/v7"
+)
 
 client := mockserver.New("localhost", 1080)
 requests, err := client.RetrieveRecordedRequests(nil)
@@ -362,6 +370,7 @@ response = Net::HTTP.start(uri.host, uri.port) { |http| http.request(req) }
 puts response.body</code></pre></div>
     <button class="accordion inner">Go</button>
     <div class="panel"><pre class="prettyprint lang-go code"><code class="code">import (
+    "log"
     "net/http"
     "strings"
 )
@@ -715,7 +724,10 @@ uri = URI('http://localhost:1080/mockserver/retrieve?type=LOGS&amp;correlationId
 response = Net::HTTP.start(uri.host, uri.port) { |http| http.request(Net::HTTP::Put.new(uri)) }
 puts response.body</code></pre></div>
     <button class="accordion inner">Go</button>
-    <div class="panel"><pre class="prettyprint lang-go code"><code class="code">import "net/http"
+    <div class="panel"><pre class="prettyprint lang-go code"><code class="code">import (
+    "log"
+    "net/http"
+)
 
 // no typed correlationId filter - call the REST endpoint
 url := "http://localhost:1080/mockserver/retrieve?type=LOGS&amp;correlationId=abc-123-def-456"
@@ -819,6 +831,7 @@ end</code></pre></div>
     <button class="accordion inner">Go</button>
     <div class="panel"><pre class="prettyprint lang-go code"><code class="code">import (
     "encoding/json"
+    "fmt"
     "net/http"
 )
 

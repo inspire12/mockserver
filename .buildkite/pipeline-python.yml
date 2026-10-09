@@ -42,6 +42,16 @@ steps:
         - exit_status: 255  # agent forced shutdown
           limit: 2
 
+  - label: ":python: Python website examples match the REST API tab"
+    command: ".buildkite/scripts/steps/website-examples.sh python"
+    timeout_in_minutes: 15
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
   - label: ":python: Python client integration tests"
     command: ".buildkite/scripts/steps/python-integration-test.sh"
     artifact_paths:

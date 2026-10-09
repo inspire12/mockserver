@@ -539,7 +539,7 @@ mockServerClient("localhost", 1080).mockAnyResponse({
 requests.put(
     "http://localhost:1080/mockserver/expectation",
     headers={"Content-Type": "application/json"},
-    data='''{
+    data=r'''{
     "httpRequest": {
         "method": "POST",
         "path": "/graphql",
@@ -778,7 +778,7 @@ mockServerClient("localhost", 1080).mockAnyResponse({
 requests.put(
     "http://localhost:1080/mockserver/expectation",
     headers={"Content-Type": "application/json"},
-    data='''{
+    data=r'''{
     "httpRequest": {
         "method": "POST",
         "path": "/graphql",
@@ -1029,7 +1029,7 @@ mockServerClient("localhost", 1080).mockAnyResponse({
 requests.put(
     "http://localhost:1080/mockserver/expectation",
     headers={"Content-Type": "application/json"},
-    data='''{
+    data=r'''{
     "httpRequest": {
         "method": "POST",
         "path": "/graphql",
@@ -1274,7 +1274,7 @@ mockServerClient("localhost", 1080).mockAnyResponse({
 requests.put(
     "http://localhost:1080/mockserver/expectation",
     headers={"Content-Type": "application/json"},
-    data='''{
+    data=r'''{
     "httpRequest": {
         "method": "POST",
         "path": "/graphql",
@@ -1524,7 +1524,7 @@ mockServerClient("localhost", 1080).mockAnyResponse({
 requests.put(
     "http://localhost:1080/mockserver/expectation",
     headers={"Content-Type": "application/json"},
-    data='''{
+    data=r'''{
     "httpRequest": {
         "method": "POST",
         "path": "/graphql",
@@ -2023,7 +2023,7 @@ mockServerClient("localhost", 1080).mockAnyResponse({
 requests.put(
     "http://localhost:1080/mockserver/expectation",
     headers={"Content-Type": "application/json"},
-    data='''{
+    data=r'''{
     "httpRequest": {
         "method": "GET",
         "path": "/graphql"
@@ -2300,7 +2300,7 @@ mockServerClient("localhost", 1080).mockAnyResponse({
 requests.put(
     "http://localhost:1080/mockserver/expectation",
     headers={"Content-Type": "application/json"},
-    data='''{
+    data=r'''{
     "httpRequest": {
         "method": "POST",
         "path": "/api/search",
@@ -2745,7 +2745,7 @@ mockServerClient("localhost", 1080).mockAnyResponse({
 requests.put(
     "http://localhost:1080/mockserver/expectation",
     headers={"Content-Type": "application/json"},
-    data='''{
+    data=r'''{
     "httpRequest": {
         "method": "GET",
         "path": "/api/resource",
@@ -3166,7 +3166,7 @@ mockServerClient("localhost", 1080).mockAnyResponse({
 requests.put(
     "http://localhost:1080/mockserver/expectation",
     headers={"Content-Type": "application/json"},
-    data='''{
+    data=r'''{
     "httpRequest": {
         "path": "/api/downstream"
     },
@@ -4201,7 +4201,7 @@ mockServerClient("localhost", 1080).mockAnyResponse({
 requests.put(
     "http://localhost:1080/mockserver/expectation",
     headers={"Content-Type": "application/json"},
-    data='''{
+    data=r'''{
     "httpRequest": {
         "method": "POST",
         "path": "/v1/messages"
@@ -4766,7 +4766,7 @@ mockServerClient("localhost", 1080).mockAnyResponse({
 requests.put(
     "http://localhost:1080/mockserver/expectation",
     headers={"Content-Type": "application/json"},
-    data='''{
+    data=r'''{
     "httpRequest": {
         "method": "GET",
         "path": "/ws/chat"

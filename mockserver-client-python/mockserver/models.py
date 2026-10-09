@@ -1493,7 +1493,8 @@ def _deserialize_conditional_branch(data: Any) -> Any | None:
 def _deserialize_request_definition(data: Any) -> Any | None:
     """Deserialize an expectation ``httpRequest`` into the correct request-matcher
     type. A dict carrying ``dnsName`` is a :class:`DnsRequestDefinition`, one
-    carrying ``if`` a :class:`ConditionalRequestDefinition`; anything else is an
+    carrying ``if`` a :class:`ConditionalRequestDefinition`, one carrying
+    ``specUrlOrPayload`` an :class:`OpenAPIDefinition`; anything else is an
     :class:`HttpRequest`.
     """
     if data is None:
@@ -1502,6 +1503,8 @@ def _deserialize_request_definition(data: Any) -> Any | None:
         return DnsRequestDefinition.from_dict(data)
     if isinstance(data, dict) and "if" in data:
         return ConditionalRequestDefinition.from_dict(data)
+    if isinstance(data, dict) and "specUrlOrPayload" in data:
+        return OpenAPIDefinition.from_dict(data)
     return HttpRequest.from_dict(data)
 
 
@@ -3190,7 +3193,7 @@ class Verification:
         if data is None:
             return None
         return cls(
-            http_request=HttpRequest.from_dict(data.get("httpRequest")),
+            http_request=_deserialize_conditional_branch(data.get("httpRequest")),
             http_response=HttpResponse.from_dict(data.get("httpResponse")),
             expectation_id=ExpectationId.from_dict(data.get("expectationId")),
             times=VerificationTimes.from_dict(data.get("times")),

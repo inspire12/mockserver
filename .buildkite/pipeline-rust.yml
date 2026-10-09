@@ -9,6 +9,16 @@ steps:
         - exit_status: 255  # agent forced shutdown
           limit: 2
 
+  - label: ":rust: Rust website examples match the REST API tab"
+    command: ".buildkite/scripts/steps/website-examples.sh rust"
+    timeout_in_minutes: 25
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
   # tests/integration_test.rs is entirely #[ignore]d; without `-- --ignored`
   # cargo test reported success having run none of it.
   - label: ":rust: :docker: Rust client integration tests"

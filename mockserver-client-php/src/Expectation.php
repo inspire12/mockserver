@@ -400,7 +400,8 @@ class Expectation implements \JsonSerializable
             $data['priority'] = $this->priority;
         }
         if ($this->httpRequest !== null) {
-            $data['httpRequest'] = $this->httpRequest->toArray();
+            // An empty matcher must encode as {} (it matches every request), not [].
+            $data['httpRequest'] = $this->httpRequest->toArray() ?: new \stdClass();
         }
         if ($this->httpResponse !== null) {
             $data['httpResponse'] = $this->httpResponse->toArray();

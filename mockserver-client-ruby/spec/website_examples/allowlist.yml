@@ -10,7 +10,7 @@
 # --- The Ruby tab follows the other language tabs; the REST API tab is the odd one out ---
 mock_server/contract_testing.html#button_pact_full_workflow:
   status: differs
-  digest: 25b90068cd46
+  digest: 4b393f1e911b
   reason: The REST API tab adds an expectation id and a JSON-object body and reads the contract from a file; Ruby follows the Java tab and passes the exported contract on.
 
 # --- Intentional: the Ruby tab shows the same feature another way ---
@@ -36,7 +36,7 @@ mock_server/using_openapi.html#button_wsdl_inline:
   reason: The REST API tab abbreviates the WSDL document with "..."; Ruby sends it in full.
 mock_server/_includes/response_action_code_examples.html#button_response_literal_binary_PNG_body:
   status: differs
-  digest: ebe8aebb5438
+  digest: 775947fc6153
   reason: Ruby reads test.png and base64-encodes it, as the Java tab does; the REST API tab inlines the base64.
 mock_server/_includes/grpc_mocking.html#button_grpc_record_replay:
   status: differs
@@ -44,7 +44,7 @@ mock_server/_includes/grpc_mocking.html#button_grpc_record_replay:
   reason: Ruby replays the expectations it retrieved; the REST API tab saves them to a file and uploads that file.
 mock_server/running_tests_in_parallel.html#button_parallel_tests_unique_session_id:
   status: differs
-  digest: 13fb3a6bee39
+  digest: 8b3dfb9610e1
   reason: Ruby generates a fresh session id with SecureRandom.uuid; the REST API tab shows a fixed one.
 mock_server/mock_openid_connect_provider.html#button_create_oidc_provider:
   status: differs
@@ -80,7 +80,7 @@ mock_server/load_injection.html#button_load_step_checks:
   reason: Ruby also stops the scenario after starting it; the REST API tab registers and starts it.
 mock_server/load_injection.html#in_run_thresholds_fail_the_run_on_a_latency_or_error_budget_breach:
   status: differs
-  digest: d93c74cf5315
+  digest: d2411b5fc4a2
   reason: Ruby reads the status once; the REST API tab polls it in a shell loop.
 
 # --- Not compared: no REST API tab, no call to /mockserver/ in it, or no accordion ---

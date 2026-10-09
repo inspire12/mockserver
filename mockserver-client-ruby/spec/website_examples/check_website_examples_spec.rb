@@ -153,6 +153,37 @@ RSpec.describe 'website example check' do
       expect(normalised('/mockserver/expectation', spaced)).to eq(normalised('/mockserver/expectation', compact))
     end
 
+    it 'reads a verification bound of -1, or an atLeast of 0, as no bound' do
+      explicit = { 'httpRequest' => { 'path' => '/a' }, 'times' => { 'atLeast' => 0, 'atMost' => -1 } }
+      expect(normalised('/mockserver/verify', explicit)).to eq(normalised('/mockserver/verify', explicit.merge('times' => {})))
+      bounded = explicit.merge('times' => { 'atLeast' => 2, 'atMost' => 0 })
+      expect(normalised('/mockserver/verify', bounded)).not_to eq(normalised('/mockserver/verify', explicit))
+    end
+
+    it 'reads a response without a status code as 200 OK' do
+      explicit = { 'httpResponse' => { 'statusCode' => 200, 'reasonPhrase' => 'OK', 'body' => 'b' } }
+      expect(normalised('/mockserver/expectation', explicit))
+        .to eq(normalised('/mockserver/expectation', { 'httpResponse' => { 'body' => 'b' } }))
+      teapot = { 'httpResponse' => { 'statusCode' => 418, 'reasonPhrase' => 'OK' } }
+      expect(normalised('/mockserver/expectation', teapot).first['body']['httpResponse']).to eq(teapot['httpResponse'])
+    end
+
+    it 'reads the default HTTP scheme, a clear of type ALL and an empty retrieve body as left out' do
+      address = ->(a) { { 'httpForward' => { 'socketAddress' => a } } }
+      expect(normalised('/mockserver/expectation', address.call('host' => 'h', 'scheme' => 'HTTP')))
+        .to eq(normalised('/mockserver/expectation', address.call('host' => 'h')))
+      expect(described_class.call('method' => 'PUT', 'path' => '/mockserver/clear', 'query' => 'type=ALL', 'body' => nil))
+        .to eq(described_class.call('method' => 'PUT', 'path' => '/mockserver/clear', 'query' => nil, 'body' => nil))
+      expect(normalised('/mockserver/retrieve', {}))
+        .to eq(described_class.call('method' => 'PUT', 'path' => '/mockserver/retrieve', 'query' => nil, 'body' => nil))
+    end
+
+    it 'reads an override\'s httpRequest and httpResponse as its requestOverride and responseOverride' do
+      old = { 'httpOverrideForwardedRequest' => { 'httpRequest' => { 'path' => '/b' }, 'httpResponse' => { 'body' => 'c' } } }
+      new = { 'httpOverrideForwardedRequest' => { 'requestOverride' => { 'path' => '/b' }, 'responseOverride' => { 'body' => 'c' } } }
+      expect(normalised('/mockserver/expectation', old)).to eq(normalised('/mockserver/expectation', new))
+    end
+
     it 'reads {"name": x} and {"names": [x]} as the same load scenario' do
       expect(normalised('/mockserver/loadScenario/start', { 'name' => 'a' }))
         .to eq(normalised('/mockserver/loadScenario/start', { 'names' => ['a'] }))

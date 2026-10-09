@@ -90,7 +90,7 @@ session_id = str(uuid.uuid4())
 
 client = MockServerClient("localhost", 1080)
 client.when(
-    HttpRequest.request(
+    HttpRequest(
         method="GET",
         path="/somePath"
     ).with_cookie("sessionId", session_id)

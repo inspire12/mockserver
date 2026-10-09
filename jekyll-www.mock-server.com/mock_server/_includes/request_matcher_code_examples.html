@@ -2442,7 +2442,7 @@ client.when(
 
 client := mockserver.New("localhost", 1080)
 client.When(
-    mockserver.Request().Path("/some/path").QueryStringParameter("cartId", "[A-Z0-9\-]+"),
+    mockserver.Request().Path("/some/path").QueryStringParameter("cartId", "[A-Z0-9\\-]+"),
 ).Respond(
     mockserver.Response().Body("some_response_body"),
 )</code></pre>
@@ -2454,7 +2454,7 @@ using MockServer.Client.Models;
 
 using var client = new MockServerClient("localhost", 1080);
 client.When(
-    HttpRequest.Request().WithPath("/some/path").WithQueryStringParameter("cartId", "[A-Z0-9\-]+")
+    HttpRequest.Request().WithPath("/some/path").WithQueryStringParameter("cartId", "[A-Z0-9\\-]+")
 ).Respond(
     HttpResponse.Response().WithBody("some_response_body")
 );</code></pre>
@@ -2464,7 +2464,7 @@ client.When(
         <pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::{ClientBuilder, HttpRequest, HttpResponse};
 
 let client = ClientBuilder::new("localhost", 1080).build().unwrap();
-client.when(HttpRequest::new().path("/some/path").query_param("cartId", "[A-Z0-9\-]+"))
+client.when(HttpRequest::new().path("/some/path").query_param("cartId", "[A-Z0-9\\-]+"))
     .respond(HttpResponse::new().body("some_response_body"))
     .unwrap();</code></pre>
     </div>
@@ -7403,14 +7403,14 @@ using System.Text;
 
 using var httpClient = new HttpClient();
 var json = @"{
-  &quot;httpRequest&quot; : {
-    &quot;body&quot; : {
-      &quot;type&quot; : &quot;XML&quot;,
-      &quot;xml&quot; : &quot;&lt;bookstore&gt; &lt;book nationality=\&quot;ITALIAN\&quot; category=\&quot;COOKING\&quot;&gt;&lt;title lang=\&quot;en\&quot;&gt;Everyday Italian&lt;/title&gt;&lt;author&gt;Giada De Laurentiis&lt;/author&gt;&lt;year&gt;2005&lt;/year&gt;&lt;price&gt;30.00&lt;/price&gt;&lt;/book&gt; &lt;/bookstore&gt;&quot;
+  &quot;&quot;httpRequest&quot;&quot; : {
+    &quot;&quot;body&quot;&quot; : {
+      &quot;&quot;type&quot;&quot; : &quot;&quot;XML&quot;&quot;,
+      &quot;&quot;xml&quot;&quot; : &quot;&quot;&lt;bookstore&gt; &lt;book nationality=\&quot;&quot;ITALIAN\&quot;&quot; category=\&quot;&quot;COOKING\&quot;&quot;&gt;&lt;title lang=\&quot;&quot;en\&quot;&quot;&gt;Everyday Italian&lt;/title&gt;&lt;author&gt;Giada De Laurentiis&lt;/author&gt;&lt;year&gt;2005&lt;/year&gt;&lt;price&gt;30.00&lt;/price&gt;&lt;/book&gt; &lt;/bookstore&gt;&quot;&quot;
     }
   },
-  &quot;httpResponse&quot; : {
-    &quot;body&quot; : &quot;some_response_body&quot;
+  &quot;&quot;httpResponse&quot;&quot; : {
+    &quot;&quot;body&quot;&quot; : &quot;&quot;some_response_body&quot;&quot;
   }
 }";
 await httpClient.PutAsync(
@@ -7832,14 +7832,14 @@ using System.Text;
 
 using var httpClient = new HttpClient();
 var json = @"{
-  &quot;httpRequest&quot; : {
-    &quot;body&quot; : {
-      &quot;type&quot; : &quot;XML_SCHEMA&quot;,
-      &quot;xmlSchema&quot; : &quot;&lt;?xml version=\&quot;1.0\&quot; encoding=\&quot;UTF-8\&quot;?&gt; &lt;xs:schema xmlns:xs=\&quot;http://www.w3.org/2001/XMLSchema\&quot; elementFormDefault=\&quot;qualified\&quot; attributeFormDefault=\&quot;unqualified\&quot;&gt; &lt;xs:element name=\&quot;notes\&quot;&gt; &lt;xs:complexType&gt; &lt;xs:sequence&gt; &lt;xs:element name=\&quot;note\&quot; maxOccurs=\&quot;unbounded\&quot;&gt; &lt;xs:complexType&gt; &lt;xs:sequence&gt; &lt;xs:element name=\&quot;to\&quot; minOccurs=\&quot;1\&quot; maxOccurs=\&quot;1\&quot; type=\&quot;xs:string\&quot;&gt;&lt;/xs:element&gt; &lt;xs:element name=\&quot;from\&quot; minOccurs=\&quot;1\&quot; maxOccurs=\&quot;1\&quot; type=\&quot;xs:string\&quot;&gt;&lt;/xs:element&gt; &lt;xs:element name=\&quot;heading\&quot; minOccurs=\&quot;1\&quot; maxOccurs=\&quot;1\&quot; type=\&quot;xs:string\&quot;&gt;&lt;/xs:element&gt; &lt;xs:element name=\&quot;body\&quot; minOccurs=\&quot;1\&quot; maxOccurs=\&quot;1\&quot; type=\&quot;xs:string\&quot;&gt;&lt;/xs:element&gt; &lt;/xs:sequence&gt; &lt;/xs:complexType&gt; &lt;/xs:element&gt; &lt;/xs:sequence&gt; &lt;/xs:complexType&gt; &lt;/xs:element&gt; &lt;/xs:schema&gt;&quot;
+  &quot;&quot;httpRequest&quot;&quot; : {
+    &quot;&quot;body&quot;&quot; : {
+      &quot;&quot;type&quot;&quot; : &quot;&quot;XML_SCHEMA&quot;&quot;,
+      &quot;&quot;xmlSchema&quot;&quot; : &quot;&quot;&lt;?xml version=\&quot;&quot;1.0\&quot;&quot; encoding=\&quot;&quot;UTF-8\&quot;&quot;?&gt; &lt;xs:schema xmlns:xs=\&quot;&quot;http://www.w3.org/2001/XMLSchema\&quot;&quot; elementFormDefault=\&quot;&quot;qualified\&quot;&quot; attributeFormDefault=\&quot;&quot;unqualified\&quot;&quot;&gt; &lt;xs:element name=\&quot;&quot;notes\&quot;&quot;&gt; &lt;xs:complexType&gt; &lt;xs:sequence&gt; &lt;xs:element name=\&quot;&quot;note\&quot;&quot; maxOccurs=\&quot;&quot;unbounded\&quot;&quot;&gt; &lt;xs:complexType&gt; &lt;xs:sequence&gt; &lt;xs:element name=\&quot;&quot;to\&quot;&quot; minOccurs=\&quot;&quot;1\&quot;&quot; maxOccurs=\&quot;&quot;1\&quot;&quot; type=\&quot;&quot;xs:string\&quot;&quot;&gt;&lt;/xs:element&gt; &lt;xs:element name=\&quot;&quot;from\&quot;&quot; minOccurs=\&quot;&quot;1\&quot;&quot; maxOccurs=\&quot;&quot;1\&quot;&quot; type=\&quot;&quot;xs:string\&quot;&quot;&gt;&lt;/xs:element&gt; &lt;xs:element name=\&quot;&quot;heading\&quot;&quot; minOccurs=\&quot;&quot;1\&quot;&quot; maxOccurs=\&quot;&quot;1\&quot;&quot; type=\&quot;&quot;xs:string\&quot;&quot;&gt;&lt;/xs:element&gt; &lt;xs:element name=\&quot;&quot;body\&quot;&quot; minOccurs=\&quot;&quot;1\&quot;&quot; maxOccurs=\&quot;&quot;1\&quot;&quot; type=\&quot;&quot;xs:string\&quot;&quot;&gt;&lt;/xs:element&gt; &lt;/xs:sequence&gt; &lt;/xs:complexType&gt; &lt;/xs:element&gt; &lt;/xs:sequence&gt; &lt;/xs:complexType&gt; &lt;/xs:element&gt; &lt;/xs:schema&gt;&quot;&quot;
     }
   },
-  &quot;httpResponse&quot; : {
-    &quot;body&quot; : &quot;some_response_body&quot;
+  &quot;&quot;httpResponse&quot;&quot; : {
+    &quot;&quot;body&quot;&quot; : &quot;&quot;some_response_body&quot;&quot;
   }
 }";
 await httpClient.PutAsync(
@@ -8021,14 +8021,14 @@ using System.Text;
 
 using var httpClient = new HttpClient();
 var json = @"{
-  &quot;httpRequest&quot; : {
-    &quot;body&quot; : {
-      &quot;type&quot; : &quot;XML_SCHEMA&quot;,
-      &quot;xmlSchema&quot; : &quot;&lt;?xml version=\&quot;1.0\&quot; encoding=\&quot;UTF-8\&quot;?&gt; &lt;xs:schema xmlns:xs=\&quot;http://www.w3.org/2001/XMLSchema\&quot; elementFormDefault=\&quot;qualified\&quot; attributeFormDefault=\&quot;unqualified\&quot;&gt; &lt;xs:element name=\&quot;notes\&quot;&gt; &lt;xs:complexType&gt; &lt;xs:sequence&gt; &lt;xs:element name=\&quot;note\&quot; maxOccurs=\&quot;unbounded\&quot;&gt; &lt;xs:complexType&gt; &lt;xs:sequence&gt; &lt;xs:element name=\&quot;to\&quot; minOccurs=\&quot;1\&quot; maxOccurs=\&quot;1\&quot; type=\&quot;xs:string\&quot;&gt;&lt;/xs:element&gt; &lt;xs:element name=\&quot;from\&quot; minOccurs=\&quot;1\&quot; maxOccurs=\&quot;1\&quot; type=\&quot;xs:string\&quot;&gt;&lt;/xs:element&gt; &lt;xs:element name=\&quot;heading\&quot; minOccurs=\&quot;1\&quot; maxOccurs=\&quot;1\&quot; type=\&quot;xs:string\&quot;&gt;&lt;/xs:element&gt; &lt;xs:element name=\&quot;body\&quot; minOccurs=\&quot;1\&quot; maxOccurs=\&quot;1\&quot; type=\&quot;xs:string\&quot;&gt;&lt;/xs:element&gt; &lt;/xs:sequence&gt; &lt;/xs:complexType&gt; &lt;/xs:element&gt; &lt;/xs:sequence&gt; &lt;/xs:complexType&gt; &lt;/xs:element&gt; &lt;/xs:schema&gt;&quot;
+  &quot;&quot;httpRequest&quot;&quot; : {
+    &quot;&quot;body&quot;&quot; : {
+      &quot;&quot;type&quot;&quot; : &quot;&quot;XML_SCHEMA&quot;&quot;,
+      &quot;&quot;xmlSchema&quot;&quot; : &quot;&quot;&lt;?xml version=\&quot;&quot;1.0\&quot;&quot; encoding=\&quot;&quot;UTF-8\&quot;&quot;?&gt; &lt;xs:schema xmlns:xs=\&quot;&quot;http://www.w3.org/2001/XMLSchema\&quot;&quot; elementFormDefault=\&quot;&quot;qualified\&quot;&quot; attributeFormDefault=\&quot;&quot;unqualified\&quot;&quot;&gt; &lt;xs:element name=\&quot;&quot;notes\&quot;&quot;&gt; &lt;xs:complexType&gt; &lt;xs:sequence&gt; &lt;xs:element name=\&quot;&quot;note\&quot;&quot; maxOccurs=\&quot;&quot;unbounded\&quot;&quot;&gt; &lt;xs:complexType&gt; &lt;xs:sequence&gt; &lt;xs:element name=\&quot;&quot;to\&quot;&quot; minOccurs=\&quot;&quot;1\&quot;&quot; maxOccurs=\&quot;&quot;1\&quot;&quot; type=\&quot;&quot;xs:string\&quot;&quot;&gt;&lt;/xs:element&gt; &lt;xs:element name=\&quot;&quot;from\&quot;&quot; minOccurs=\&quot;&quot;1\&quot;&quot; maxOccurs=\&quot;&quot;1\&quot;&quot; type=\&quot;&quot;xs:string\&quot;&quot;&gt;&lt;/xs:element&gt; &lt;xs:element name=\&quot;&quot;heading\&quot;&quot; minOccurs=\&quot;&quot;1\&quot;&quot; maxOccurs=\&quot;&quot;1\&quot;&quot; type=\&quot;&quot;xs:string\&quot;&quot;&gt;&lt;/xs:element&gt; &lt;xs:element name=\&quot;&quot;body\&quot;&quot; minOccurs=\&quot;&quot;1\&quot;&quot; maxOccurs=\&quot;&quot;1\&quot;&quot; type=\&quot;&quot;xs:string\&quot;&quot;&gt;&lt;/xs:element&gt; &lt;/xs:sequence&gt; &lt;/xs:complexType&gt; &lt;/xs:element&gt; &lt;/xs:sequence&gt; &lt;/xs:complexType&gt; &lt;/xs:element&gt; &lt;/xs:schema&gt;&quot;&quot;
     }
   },
-  &quot;httpResponse&quot; : {
-    &quot;body&quot; : &quot;some_response_body&quot;
+  &quot;&quot;httpResponse&quot;&quot; : {
+    &quot;&quot;body&quot;&quot; : &quot;&quot;some_response_body&quot;&quot;
   }
 }";
 await httpClient.PutAsync(
@@ -10404,7 +10404,7 @@ using System.Text;
 using var httpClient = new HttpClient();
 var json = @"{
     ""httpRequest"": {
-        ""method"": ""POST""
+        ""method"": ""POST"",
         ""headers"": {
             ""content-type"": [""image/png""],
             ""content-disposition"": [""form-data; name=\""test.png\""; filename=\""test.png\""""]

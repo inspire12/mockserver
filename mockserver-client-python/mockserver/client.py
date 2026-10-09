@@ -38,6 +38,13 @@ class SyncForwardChainExpectation:
         self._async_chain.with_priority(priority)
         return self
 
+    def with_chaos(self, chaos) -> SyncForwardChainExpectation:
+        self._async_chain.with_chaos(chaos)
+        return self
+
+    def with_steps(self, steps) -> list[Expectation]:
+        return self._run(self._async_chain.with_steps(steps))
+
     def respond(self, response_or_callback) -> list[Expectation]:
         return self._run(self._async_chain.respond(response_or_callback))
 
@@ -66,6 +73,9 @@ class SyncForwardChainExpectation:
 
     def respond_with_grpc_stream(self, grpc_stream_response) -> list[Expectation]:
         return self._run(self._async_chain.respond_with_grpc_stream(grpc_stream_response))
+
+    def respond_with_grpc_bidi(self, grpc_bidi_response) -> list[Expectation]:
+        return self._run(self._async_chain.respond_with_grpc_bidi(grpc_bidi_response))
 
     def respond_with_binary(self, binary_response) -> list[Expectation]:
         return self._run(self._async_chain.respond_with_binary(binary_response))

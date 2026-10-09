@@ -577,7 +577,7 @@ client.upsert(Expectation.from_dict({
          }
     },
     "times": {
-        "unlimited": true
+        "unlimited": True
     }
 }))</code></pre>
     </div>
@@ -2311,7 +2311,7 @@ await httpClient.PutAsync(
 
 // delay 10ms per character of the request body
 let client = Client::new();
-let body = r#"{
+let body = r##"{
     "httpRequest": {
         "path": "/some/path"
     },
@@ -2322,7 +2322,7 @@ let body = r#"{
             "template": "#set($d = $request.body.length() * 10)$d"
         }
     }
-}"#;
+}"##;
 client.put("http://localhost:1080/mockserver/expectation")
     .header("Content-Type", "application/json")
     .body(body.to_string())
@@ -2676,8 +2676,8 @@ client.upsert(Expectation.from_dict({
     "httpResponse" : {
         "body" : "some_response_body",
         "connectionOptions" : {
-            "suppressContentLengthHeader" : true,
-            "suppressConnectionHeader" : true
+            "suppressContentLengthHeader" : True,
+            "suppressConnectionHeader" : True
         }
     }
 }))</code></pre>
@@ -2876,7 +2876,7 @@ client.upsert(Expectation.from_dict({
         "body" : "some_response_body",
         "connectionOptions" : {
             "contentLengthHeaderOverride" : 10,
-            "keepAliveOverride" : false
+            "keepAliveOverride" : False
         }
     }
 }))</code></pre>
@@ -3072,7 +3072,7 @@ client.upsert(Expectation.from_dict({
     "httpResponse" : {
         "body" : "some_response_body",
         "connectionOptions" : {
-            "closeSocket" : true
+            "closeSocket" : True
         }
     }
 }))</code></pre>
@@ -3267,7 +3267,7 @@ client.upsert(Expectation.from_dict({
     "httpResponse" : {
         "body" : "some_response_body",
         "connectionOptions" : {
-            "closeSocket" : true,
+            "closeSocket" : True,
             "closeSocketDelay" : {
                 "timeUnit" : "MILLISECONDS",
                 "value" : 500

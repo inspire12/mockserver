@@ -447,9 +447,8 @@ client.open_api_expectation(OpenAPIExpectation.new(
 body := []byte(`{
     "specUrlOrPayload": "https://raw.githubusercontent.com/mock-server/mockserver-monorepo/master/mockserver/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json"
 }`)
-resp, err := http.DefaultClient.Do(
-    must(http.NewRequest("PUT", "http://localhost:1080/mockserver/openapi", bytes.NewReader(body))),
-)</code></pre>
+req, _ := http.NewRequest("PUT", "http://localhost:1080/mockserver/openapi", bytes.NewReader(body))
+resp, err := http.DefaultClient.Do(req)</code></pre>
     </div>
     <button class="accordion inner">.NET</button>
     <div class="panel">
@@ -577,9 +576,8 @@ body := []byte(`{
         "createPets": "500"
     }
 }`)
-resp, err := http.DefaultClient.Do(
-    must(http.NewRequest("PUT", "http://localhost:1080/mockserver/openapi", bytes.NewReader(body))),
-)</code></pre>
+req, _ := http.NewRequest("PUT", "http://localhost:1080/mockserver/openapi", bytes.NewReader(body))
+resp, err := http.DefaultClient.Do(req)</code></pre>
     </div>
     <button class="accordion inner">.NET</button>
     <div class="panel">
@@ -702,9 +700,8 @@ client.open_api_expectation(OpenAPIExpectation.new(
 body := []byte(`{
     "specUrlOrPayload": "file:/path/to/openapi_petstore_example.json"
 }`)
-resp, err := http.DefaultClient.Do(
-    must(http.NewRequest("PUT", "http://localhost:1080/mockserver/openapi", bytes.NewReader(body))),
-)</code></pre>
+req, _ := http.NewRequest("PUT", "http://localhost:1080/mockserver/openapi", bytes.NewReader(body))
+resp, err := http.DefaultClient.Do(req)</code></pre>
     </div>
     <button class="accordion inner">.NET</button>
     <div class="panel">
@@ -809,9 +806,8 @@ client.open_api_expectation(OpenAPIExpectation.new(
 body := []byte(`{
     "specUrlOrPayload": "org/mockserver/openapi/openapi_petstore_example.json"
 }`)
-resp, err := http.DefaultClient.Do(
-    must(http.NewRequest("PUT", "http://localhost:1080/mockserver/openapi", bytes.NewReader(body))),
-)</code></pre>
+req, _ := http.NewRequest("PUT", "http://localhost:1080/mockserver/openapi", bytes.NewReader(body))
+resp, err := http.DefaultClient.Do(req)</code></pre>
     </div>
     <button class="accordion inner">.NET</button>
     <div class="panel">
@@ -923,6 +919,7 @@ client.open_api_expectation(OpenAPIExpectation.new(
         <pre class="prettyprint lang-go code"><code class="code">import (
     "bytes"
     "encoding/json"
+    "log"
     "net/http"
     "os"
 )
@@ -935,9 +932,8 @@ if err != nil {
 payload, _ := json.Marshal(map[string]string{
     "specUrlOrPayload": string(specContent),
 })
-resp, err := http.DefaultClient.Do(
-    must(http.NewRequest("PUT", "http://localhost:1080/mockserver/openapi", bytes.NewReader(payload))),
-)</code></pre>
+req, _ := http.NewRequest("PUT", "http://localhost:1080/mockserver/openapi", bytes.NewReader(payload))
+resp, err := http.DefaultClient.Do(req)</code></pre>
     </div>
     <button class="accordion inner">.NET</button>
     <div class="panel">
@@ -1234,9 +1230,8 @@ components:
 payload, _ := json.Marshal(map[string]string{
     "specUrlOrPayload": spec,
 })
-resp, err := http.DefaultClient.Do(
-    must(http.NewRequest("PUT", "http://localhost:1080/mockserver/openapi", bytes.NewReader(payload))),
-)</code></pre>
+req, _ := http.NewRequest("PUT", "http://localhost:1080/mockserver/openapi", bytes.NewReader(payload))
+resp, err := http.DefaultClient.Do(req)</code></pre>
     </div>
     <button class="accordion inner">.NET</button>
     <div class="panel">
@@ -1670,6 +1665,7 @@ response = http.request(request)
     <div class="panel">
         <pre class="prettyprint lang-go code"><code class="code">import (
     "bytes"
+    "log"
     "net/http"
     "os"
 )

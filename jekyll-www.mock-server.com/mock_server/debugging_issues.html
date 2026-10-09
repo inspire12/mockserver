@@ -223,7 +223,7 @@ from mockserver.models import HttpRequest
 
 client = MockServerClient("localhost", 1080)
 active_expectations = client.retrieve_active_expectations(
-    HttpRequest.request(path="/some/path", method="POST")
+    HttpRequest(path="/some/path", method="POST")
 )</code></pre>
         </div>
         <button class="accordion inner">Ruby</button>
@@ -505,7 +505,7 @@ from mockserver.models import HttpRequest
 client = MockServerClient("localhost", 1080)
 # Python client always returns JSON-deserialized objects
 active_expectations = client.retrieve_active_expectations(
-    HttpRequest.request(path="/some/path", method="POST")
+    HttpRequest(path="/some/path", method="POST")
 )</code></pre>
         </div>
         <button class="accordion inner">Ruby</button>
@@ -747,7 +747,7 @@ from mockserver.models import HttpRequest
 
 client = MockServerClient("localhost", 1080)
 log_messages = client.retrieve_log_messages(
-    HttpRequest.request(path="/some/path", method="POST")
+    HttpRequest(path="/some/path", method="POST")
 )</code></pre>
         </div>
         <button class="accordion inner">Ruby</button>

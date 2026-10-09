@@ -336,7 +336,7 @@ class MockServerClient
         ?VerificationTimes $times = null,
         ?HttpResponse $httpResponse = null,
     ): void {
-        $payload = ['httpRequest' => $request->toArray()];
+        $payload = ['httpRequest' => $request->toArray() ?: new \stdClass()];
         if ($httpResponse !== null) {
             $payload['httpResponse'] = $httpResponse->toArray();
         }
@@ -437,7 +437,7 @@ class MockServerClient
     public function verifySequence(HttpRequest ...$requests): void
     {
         $payload = [
-            'httpRequests' => array_map(fn(HttpRequest $r) => $r->toArray(), $requests),
+            'httpRequests' => array_map(fn(HttpRequest $r) => $r->toArray() ?: new \stdClass(), $requests),
         ];
 
         $body = json_encode($payload, JSON_THROW_ON_ERROR);
@@ -489,7 +489,7 @@ class MockServerClient
         foreach ($requests as $request) {
             if ($request !== null) {
                 $hasRequests = true;
-                $httpRequests[] = $request->toArray();
+                $httpRequests[] = $request->toArray() ?: new \stdClass();
             } else {
                 // Placeholder to maintain index alignment; server expects
                 // httpRequests and httpResponses to be index-aligned
@@ -532,7 +532,7 @@ class MockServerClient
             $path .= '?type=' . urlencode($type);
         }
 
-        $body = $request !== null ? json_encode($request->toArray(), JSON_THROW_ON_ERROR) : '';
+        $body = $request !== null ? json_encode($request->toArray() ?: new \stdClass(), JSON_THROW_ON_ERROR) : '';
         $response = $this->put($path, $body);
 
         $status = $response->getStatusCode();
@@ -2364,7 +2364,7 @@ class MockServerClient
     private function retrieve(?HttpRequest $request, string $type, string $format): array
     {
         $path = '/mockserver/retrieve?type=' . urlencode($type) . '&format=' . urlencode($format);
-        $body = $request !== null ? json_encode($request->toArray(), JSON_THROW_ON_ERROR) : '';
+        $body = $request !== null ? json_encode($request->toArray() ?: new \stdClass(), JSON_THROW_ON_ERROR) : '';
 
         $response = $this->put($path, $body);
 
@@ -2432,7 +2432,7 @@ class MockServerClient
     private function retrieveRaw(?HttpRequest $request, string $type, string $format): string
     {
         $path = '/mockserver/retrieve?type=' . urlencode($type) . '&format=' . urlencode($format);
-        $body = $request !== null ? json_encode($request->toArray(), JSON_THROW_ON_ERROR) : '';
+        $body = $request !== null ? json_encode($request->toArray() ?: new \stdClass(), JSON_THROW_ON_ERROR) : '';
 
         $response = $this->put($path, $body);
 

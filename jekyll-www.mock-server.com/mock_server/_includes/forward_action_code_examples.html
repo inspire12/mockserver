@@ -2169,7 +2169,40 @@ func main() {
                     "overrideCookieToRemove",
                     "requestCookieToRemove"
                 ],
-                "replace": {`)
+                "replace": {
+                    "overrideCookieToReplace": "replacedValue",
+                    "requestCookieToReplace": "replacedValue",
+                    "extraCookieToReplace": "shouldBeIgnore"
+                }
+            },
+            "headers": {
+                "add": {
+                    "headerToAddTwo": [
+                        "addedValue"
+                    ],
+                    "headerToAddOne": [
+                        "addedValue"
+                    ]
+                },
+                "remove": [
+                    "overrideHeaderToRemove",
+                    "requestHeaderToRemove"
+                ],
+                "replace": {
+                    "requestHeaderToReplace": [
+                        "replacedValue"
+                    ],
+                    "overrideHeaderToReplace": [
+                        "replacedValue"
+                    ],
+                    "extraHeaderToReplace": [
+                        "shouldBeIgnore"
+                    ]
+                }
+            }
+        }
+    }
+}`)
     req, _ := http.NewRequest("PUT",
         "http://localhost:1080/mockserver/expectation",
         bytes.NewReader(body))
@@ -2280,7 +2313,40 @@ var json = @"{
                     ""overrideCookieToRemove"",
                     ""requestCookieToRemove""
                 ],
-                ""replace"": {";
+                ""replace"": {
+                    ""overrideCookieToReplace"": ""replacedValue"",
+                    ""requestCookieToReplace"": ""replacedValue"",
+                    ""extraCookieToReplace"": ""shouldBeIgnore""
+                }
+            },
+            ""headers"": {
+                ""add"": {
+                    ""headerToAddTwo"": [
+                        ""addedValue""
+                    ],
+                    ""headerToAddOne"": [
+                        ""addedValue""
+                    ]
+                },
+                ""remove"": [
+                    ""overrideHeaderToRemove"",
+                    ""requestHeaderToRemove""
+                ],
+                ""replace"": {
+                    ""requestHeaderToReplace"": [
+                        ""replacedValue""
+                    ],
+                    ""overrideHeaderToReplace"": [
+                        ""replacedValue""
+                    ],
+                    ""extraHeaderToReplace"": [
+                        ""shouldBeIgnore""
+                    ]
+                }
+            }
+        }
+    }
+}";
 await httpClient.PutAsync(
     "http://localhost:1080/mockserver/expectation",
     new StringContent(json, Encoding.UTF8, "application/json")
@@ -2388,7 +2454,40 @@ let body = r#"{
                     "overrideCookieToRemove",
                     "requestCookieToRemove"
                 ],
-                "replace": {"#;
+                "replace": {
+                    "overrideCookieToReplace": "replacedValue",
+                    "requestCookieToReplace": "replacedValue",
+                    "extraCookieToReplace": "shouldBeIgnore"
+                }
+            },
+            "headers": {
+                "add": {
+                    "headerToAddTwo": [
+                        "addedValue"
+                    ],
+                    "headerToAddOne": [
+                        "addedValue"
+                    ]
+                },
+                "remove": [
+                    "overrideHeaderToRemove",
+                    "requestHeaderToRemove"
+                ],
+                "replace": {
+                    "requestHeaderToReplace": [
+                        "replacedValue"
+                    ],
+                    "overrideHeaderToReplace": [
+                        "replacedValue"
+                    ],
+                    "extraHeaderToReplace": [
+                        "shouldBeIgnore"
+                    ]
+                }
+            }
+        }
+    }
+}"#;
 client.put("http://localhost:1080/mockserver/expectation")
     .header("Content-Type", "application/json")
     .body(body.to_string())
@@ -3569,16 +3668,7 @@ func main() {
         "path": "/some/path"
     },
     "httpForwardTemplate": {
-        "template": "return {\n" +
-        "    'path' : \"/somePath\",\n" +
-        "    'queryStringParameters' : {\n" +
-        "        'userId' : request.queryStringParameters && request.queryStringParameters['userId']\n" +
-        "    },\n" +
-        "    'headers' : {\n" +
-        "        'Host' : [ \"localhost:1081\" ]\n" +
-        "    },\n" +
-        "    'body': JSON.stringify({'name': 'value'})\n" +
-        "};",
+        "template": "return {\n    'path' : \"/somePath\",\n    'queryStringParameters' : {\n        'userId' : request.queryStringParameters && request.queryStringParameters['userId']\n    },\n    'headers' : {\n        'Host' : [ \"localhost:1081\" ]\n    },\n    'body': JSON.stringify({'name': 'value'})\n};",
         "templateType": "JAVASCRIPT"
     }
 }`)
@@ -3600,16 +3690,7 @@ var json = @"{
         ""path"": ""/some/path""
     },
     ""httpForwardTemplate"": {
-        ""template"": ""return {\n"" +
-        ""    'path' : \""/somePath\"",\n"" +
-        ""    'queryStringParameters' : {\n"" +
-        ""        'userId' : request.queryStringParameters && request.queryStringParameters['userId']\n"" +
-        ""    },\n"" +
-        ""    'headers' : {\n"" +
-        ""        'Host' : [ \""localhost:1081\"" ]\n"" +
-        ""    },\n"" +
-        ""    'body': JSON.stringify({'name': 'value'})\n"" +
-        ""};"",
+        ""template"": ""return {\n    'path' : \""/somePath\"",\n    'queryStringParameters' : {\n        'userId' : request.queryStringParameters && request.queryStringParameters['userId']\n    },\n    'headers' : {\n        'Host' : [ \""localhost:1081\"" ]\n    },\n    'body': JSON.stringify({'name': 'value'})\n};"",
         ""templateType"": ""JAVASCRIPT""
     }
 }";
@@ -3628,16 +3709,7 @@ let body = r#"{
         "path": "/some/path"
     },
     "httpForwardTemplate": {
-        "template": "return {\n" +
-        "    'path' : \"/somePath\",\n" +
-        "    'queryStringParameters' : {\n" +
-        "        'userId' : request.queryStringParameters && request.queryStringParameters['userId']\n" +
-        "    },\n" +
-        "    'headers' : {\n" +
-        "        'Host' : [ \"localhost:1081\" ]\n" +
-        "    },\n" +
-        "    'body': JSON.stringify({'name': 'value'})\n" +
-        "};",
+        "template": "return {\n    'path' : \"/somePath\",\n    'queryStringParameters' : {\n        'userId' : request.queryStringParameters && request.queryStringParameters['userId']\n    },\n    'headers' : {\n        'Host' : [ \"localhost:1081\" ]\n    },\n    'body': JSON.stringify({'name': 'value'})\n};",
         "templateType": "JAVASCRIPT"
     }
 }"#;
@@ -3655,16 +3727,7 @@ client.put("http://localhost:1080/mockserver/expectation")
         "path": "/some/path"
     },
     "httpForwardTemplate": {
-        "template": "return {\n" +
-        "    'path' : \"/somePath\",\n" +
-        "    'queryStringParameters' : {\n" +
-        "        'userId' : request.queryStringParameters &amp;&amp; request.queryStringParameters['userId']\n" +
-        "    },\n" +
-        "    'headers' : {\n" +
-        "        'Host' : [ \"localhost:1081\" ]\n" +
-        "    },\n" +
-        "    'body': JSON.stringify({'name': 'value'})\n" +
-        "};",
+        "template": "return {\n    'path' : \"/somePath\",\n    'queryStringParameters' : {\n        'userId' : request.queryStringParameters &amp;&amp; request.queryStringParameters['userId']\n    },\n    'headers' : {\n        'Host' : [ \"localhost:1081\" ]\n    },\n    'body': JSON.stringify({'name': 'value'})\n};",
         "templateType": "JAVASCRIPT"
     }
 }
@@ -3799,12 +3862,7 @@ func main() {
         "path": "/somePrefix*"
     },
     "httpForwardTemplate": {
-        "template": "return {\n" +
-        "    'path' : request.path.substring(request.path.indexOf('/somePrefix')+'/somePrefix'.length,request.path.length),\n" +
-        "    'headers' : {\n" +
-        "        'Host' : [ \"localhost:1081\" ]\n" +
-        "    }\n" +
-        "};",
+        "template": "return {\n    'path' : request.path.substring(request.path.indexOf('/somePrefix')+'/somePrefix'.length,request.path.length),\n    'headers' : {\n        'Host' : [ \"localhost:1081\" ]\n    }\n};",
         "templateType": "JAVASCRIPT"
     }
 }`)
@@ -3826,12 +3884,7 @@ var json = @"{
         ""path"": ""/somePrefix*""
     },
     ""httpForwardTemplate"": {
-        ""template"": ""return {\n"" +
-        ""    'path' : request.path.substring(request.path.indexOf('/somePrefix')+'/somePrefix'.length,request.path.length),\n"" +
-        ""    'headers' : {\n"" +
-        ""        'Host' : [ \""localhost:1081\"" ]\n"" +
-        ""    }\n"" +
-        ""};"",
+        ""template"": ""return {\n    'path' : request.path.substring(request.path.indexOf('/somePrefix')+'/somePrefix'.length,request.path.length),\n    'headers' : {\n        'Host' : [ \""localhost:1081\"" ]\n    }\n};"",
         ""templateType"": ""JAVASCRIPT""
     }
 }";
@@ -3850,12 +3903,7 @@ let body = r#"{
         "path": "/somePrefix*"
     },
     "httpForwardTemplate": {
-        "template": "return {\n" +
-        "    'path' : request.path.substring(request.path.indexOf('/somePrefix')+'/somePrefix'.length,request.path.length),\n" +
-        "    'headers' : {\n" +
-        "        'Host' : [ \"localhost:1081\" ]\n" +
-        "    }\n" +
-        "};",
+        "template": "return {\n    'path' : request.path.substring(request.path.indexOf('/somePrefix')+'/somePrefix'.length,request.path.length),\n    'headers' : {\n        'Host' : [ \"localhost:1081\" ]\n    }\n};",
         "templateType": "JAVASCRIPT"
     }
 }"#;
@@ -3873,12 +3921,7 @@ client.put("http://localhost:1080/mockserver/expectation")
         "path": "/somePrefix*"
     },
     "httpForwardTemplate": {
-        "template": "return {\n" +
-        "    'path' : request.path.substring(request.path.indexOf('/somePrefix')+'/somePrefix'.length,request.path.length),\n" +
-        "    'headers' : {\n" +
-        "        'Host' : [ \"localhost:1081\" ]\n" +
-        "    }\n" +
-        "};",
+        "template": "return {\n    'path' : request.path.substring(request.path.indexOf('/somePrefix')+'/somePrefix'.length,request.path.length),\n    'headers' : {\n        'Host' : [ \"localhost:1081\" ]\n    }\n};",
         "templateType": "JAVASCRIPT"
     }
 }
@@ -3990,8 +4033,8 @@ client.upsert(Expectation.from_dict({
         "    'headers' : {\n" +
         "        'Host' : [ \"localhost:1081\" ]\n" +
         "    },\n" +
-        "    'keepAlive' : True,\n" +
-        "    'secure' : True,\n" +
+        "    'keepAlive' : true,\n" +
+        "    'secure' : true,\n" +
         "    'body' : \"some_body\"\n" +
         "};",
         "templateType": "JAVASCRIPT",
@@ -4041,18 +4084,7 @@ func main() {
         "path": "/some/path"
     },
     "httpForwardTemplate": {
-        "template": "return {\n" +
-        "    'path' : \"/somePath\",\n" +
-        "    'cookies' : {\n" +
-        "        'SessionId' : request.cookies && request.cookies['SessionId']\n" +
-        "    },\n" +
-        "    'headers' : {\n" +
-        "        'Host' : [ \"localhost:1081\" ]\n" +
-        "    },\n" +
-        "    'keepAlive' : true,\n" +
-        "    'secure' : true,\n" +
-        "    'body' : \"some_body\"\n" +
-        "};",
+        "template": "return {\n    'path' : \"/somePath\",\n    'cookies' : {\n        'SessionId' : request.cookies && request.cookies['SessionId']\n    },\n    'headers' : {\n        'Host' : [ \"localhost:1081\" ]\n    },\n    'keepAlive' : true,\n    'secure' : true,\n    'body' : \"some_body\"\n};",
         "templateType": "JAVASCRIPT",
         "delay": {"timeUnit": "SECONDS", "value": 20}
     }
@@ -4075,18 +4107,7 @@ var json = @"{
         ""path"": ""/some/path""
     },
     ""httpForwardTemplate"": {
-        ""template"": ""return {\n"" +
-        ""    'path' : \""/somePath\"",\n"" +
-        ""    'cookies' : {\n"" +
-        ""        'SessionId' : request.cookies && request.cookies['SessionId']\n"" +
-        ""    },\n"" +
-        ""    'headers' : {\n"" +
-        ""        'Host' : [ \""localhost:1081\"" ]\n"" +
-        ""    },\n"" +
-        ""    'keepAlive' : true,\n"" +
-        ""    'secure' : true,\n"" +
-        ""    'body' : \""some_body\""\n"" +
-        ""};"",
+        ""template"": ""return {\n    'path' : \""/somePath\"",\n    'cookies' : {\n        'SessionId' : request.cookies && request.cookies['SessionId']\n    },\n    'headers' : {\n        'Host' : [ \""localhost:1081\"" ]\n    },\n    'keepAlive' : true,\n    'secure' : true,\n    'body' : \""some_body\""\n};"",
         ""templateType"": ""JAVASCRIPT"",
         ""delay"": {""timeUnit"": ""SECONDS"", ""value"": 20}
     }
@@ -4106,18 +4127,7 @@ let body = r#"{
         "path": "/some/path"
     },
     "httpForwardTemplate": {
-        "template": "return {\n" +
-        "    'path' : \"/somePath\",\n" +
-        "    'cookies' : {\n" +
-        "        'SessionId' : request.cookies && request.cookies['SessionId']\n" +
-        "    },\n" +
-        "    'headers' : {\n" +
-        "        'Host' : [ \"localhost:1081\" ]\n" +
-        "    },\n" +
-        "    'keepAlive' : true,\n" +
-        "    'secure' : true,\n" +
-        "    'body' : \"some_body\"\n" +
-        "};",
+        "template": "return {\n    'path' : \"/somePath\",\n    'cookies' : {\n        'SessionId' : request.cookies && request.cookies['SessionId']\n    },\n    'headers' : {\n        'Host' : [ \"localhost:1081\" ]\n    },\n    'keepAlive' : true,\n    'secure' : true,\n    'body' : \"some_body\"\n};",
         "templateType": "JAVASCRIPT",
         "delay": {"timeUnit": "SECONDS", "value": 20}
     }
@@ -4136,18 +4146,7 @@ client.put("http://localhost:1080/mockserver/expectation")
         "path": "/some/path"
     },
     "httpForwardTemplate": {
-        "template": "return {\n" +
-        "    'path' : \"/somePath\",\n" +
-        "    'cookies' : {\n" +
-        "        'SessionId' : request.cookies &amp;&amp; request.cookies['SessionId']\n" +
-        "    },\n" +
-        "    'headers' : {\n" +
-        "        'Host' : [ \"localhost:1081\" ]\n" +
-        "    },\n" +
-        "    'keepAlive' : true,\n" +
-        "    'secure' : true,\n" +
-        "    'body' : \"some_body\"\n" +
-        "};",
+        "template": "return {\n    'path' : \"/somePath\",\n    'cookies' : {\n        'SessionId' : request.cookies &amp;&amp; request.cookies['SessionId']\n    },\n    'headers' : {\n        'Host' : [ \"localhost:1081\" ]\n    },\n    'keepAlive' : true,\n    'secure' : true,\n    'body' : \"some_body\"\n};",
         "templateType": "JAVASCRIPT",
         "delay": {"timeUnit": "SECONDS", "value": 20}
     }
@@ -4314,19 +4313,7 @@ func main() {
         "path": "/some/path"
     },
     "httpForwardTemplate": {
-        "template": "{\n" +
-        "    'path' : \"/somePath\",\n" +
-        "    'queryStringParameters' : {\n" +
-        "        'userId' : [ \"$!request.queryStringParameters['userId'][0]\" ]\n" +
-        "    },\n" +
-        "    'cookies' : {\n" +
-        "        'SessionId' : \"$!request.cookies['SessionId']\"\n" +
-        "    },\n" +
-        "    'headers' : {\n" +
-        "        'Host' : [ \"localhost:1081\" ]\n" +
-        "    },\n" +
-        "    'body': \"{'name': 'value'}\"\n" +
-        "}",
+        "template": "{\n    'path' : \"/somePath\",\n    'queryStringParameters' : {\n        'userId' : [ \"$!request.queryStringParameters['userId'][0]\" ]\n    },\n    'cookies' : {\n        'SessionId' : \"$!request.cookies['SessionId']\"\n    },\n    'headers' : {\n        'Host' : [ \"localhost:1081\" ]\n    },\n    'body': \"{'name': 'value'}\"\n}",
         "templateType": "VELOCITY"
     }
 }`)
@@ -4348,19 +4335,7 @@ var json = @"{
         ""path"": ""/some/path""
     },
     ""httpForwardTemplate"": {
-        ""template"": ""{\n"" +
-        ""    'path' : \""/somePath\"",\n"" +
-        ""    'queryStringParameters' : {\n"" +
-        ""        'userId' : [ \""$!request.queryStringParameters['userId'][0]\"" ]\n"" +
-        ""    },\n"" +
-        ""    'cookies' : {\n"" +
-        ""        'SessionId' : \""$!request.cookies['SessionId']\""\n"" +
-        ""    },\n"" +
-        ""    'headers' : {\n"" +
-        ""        'Host' : [ \""localhost:1081\"" ]\n"" +
-        ""    },\n"" +
-        ""    'body': \""{'name': 'value'}\""\n"" +
-        ""}"",
+        ""template"": ""{\n    'path' : \""/somePath\"",\n    'queryStringParameters' : {\n        'userId' : [ \""$!request.queryStringParameters['userId'][0]\"" ]\n    },\n    'cookies' : {\n        'SessionId' : \""$!request.cookies['SessionId']\""\n    },\n    'headers' : {\n        'Host' : [ \""localhost:1081\"" ]\n    },\n    'body': \""{'name': 'value'}\""\n}"",
         ""templateType"": ""VELOCITY""
     }
 }";
@@ -4379,19 +4354,7 @@ let body = r#"{
         "path": "/some/path"
     },
     "httpForwardTemplate": {
-        "template": "{\n" +
-        "    'path' : \"/somePath\",\n" +
-        "    'queryStringParameters' : {\n" +
-        "        'userId' : [ \"$!request.queryStringParameters['userId'][0]\" ]\n" +
-        "    },\n" +
-        "    'cookies' : {\n" +
-        "        'SessionId' : \"$!request.cookies['SessionId']\"\n" +
-        "    },\n" +
-        "    'headers' : {\n" +
-        "        'Host' : [ \"localhost:1081\" ]\n" +
-        "    },\n" +
-        "    'body': \"{'name': 'value'}\"\n" +
-        "}",
+        "template": "{\n    'path' : \"/somePath\",\n    'queryStringParameters' : {\n        'userId' : [ \"$!request.queryStringParameters['userId'][0]\" ]\n    },\n    'cookies' : {\n        'SessionId' : \"$!request.cookies['SessionId']\"\n    },\n    'headers' : {\n        'Host' : [ \"localhost:1081\" ]\n    },\n    'body': \"{'name': 'value'}\"\n}",
         "templateType": "VELOCITY"
     }
 }"#;
@@ -4409,19 +4372,7 @@ client.put("http://localhost:1080/mockserver/expectation")
         "path": "/some/path"
     },
     "httpForwardTemplate": {
-        "template": "{\n" +
-        "    'path' : \"/somePath\",\n" +
-        "    'queryStringParameters' : {\n" +
-        "        'userId' : [ \"$!request.queryStringParameters['userId'][0]\" ]\n" +
-        "    },\n" +
-        "    'cookies' : {\n" +
-        "        'SessionId' : \"$!request.cookies['SessionId']\"\n" +
-        "    },\n" +
-        "    'headers' : {\n" +
-        "        'Host' : [ \"localhost:1081\" ]\n" +
-        "    },\n" +
-        "    'body': \"{'name': 'value'}\"\n" +
-        "}",
+        "template": "{\n    'path' : \"/somePath\",\n    'queryStringParameters' : {\n        'userId' : [ \"$!request.queryStringParameters['userId'][0]\" ]\n    },\n    'cookies' : {\n        'SessionId' : \"$!request.cookies['SessionId']\"\n    },\n    'headers' : {\n        'Host' : [ \"localhost:1081\" ]\n    },\n    'body': \"{'name': 'value'}\"\n}",
         "templateType": "VELOCITY"
     }
 }

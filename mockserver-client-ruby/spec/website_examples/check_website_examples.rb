@@ -5,9 +5,11 @@
 # forked child with all HTTP intercepted (WebMock, no network); the JSON the
 # client sends to /mockserver/* is compared, normalised, with the curl bodies of
 # the REST API tab. Differences not listed in allowlist.yml fail the check, and
-# so does an allowlist entry that now matches.
+# so does an allowlist entry that now matches. With --lang, the Python, Go,
+# .NET, Rust or PHP blocks run instead (see languages.rb), each against
+# allowlist-<lang>.yml.
 #
-#   ruby spec/website_examples/check_website_examples.rb [--verbose] [--only KEY]
+#   ruby spec/website_examples/check_website_examples.rb [--lang L] [--verbose] [--only KEY]
 
 require 'cgi'
 require 'digest'
@@ -42,7 +44,7 @@ module WebsiteExamples
     end
 
     def extract(path)
-      html = File.read(path)
+      html = File.read(path, encoding: 'UTF-8')
       rel = path.sub("#{SITE_ROOT}/", '')
       groups = []
       loose = []
@@ -252,6 +254,8 @@ module WebsiteExamples
         item = expectation(item) if call['path'] == '/mockserver/expectation' && item.is_a?(Hash)
         item = load_names(item) if call['path'] =~ %r{/mockserver/loadScenario/(start|stop)\z}
         item = item.reject { |k, v| k == 'startDelayMillis' && v == 0 } if call['path'] == '/mockserver/loadScenario' && item.is_a?(Hash)
+        item = verification(item) if call['path'] == '/mockserver/verify' && item.is_a?(Hash)
+        item = nil if item == {} && call['path'] =~ %r{/mockserver/(retrieve|clear)\z} # matches every request either way
         { 'method' => call['method'], 'path' => call['path'], 'query' => query(call['path'], call['query']),
           'body' => item }
       end
@@ -264,6 +268,7 @@ module WebsiteExamples
 
       params = URI.decode_www_form(q).map { |k, v| [k, %w[type format].include?(k) ? v.upcase : v] }.sort.to_h
       params.delete('format') if path == '/mockserver/retrieve' && params['format'] == 'JSON'
+      params.delete('type') if path == '/mockserver/clear' && params['type'] == 'ALL'
       params.empty? ? nil : params
     end
 
@@ -279,6 +284,15 @@ module WebsiteExamples
       e
     end
 
+    # A missing atLeast or atMost is read as -1 (no bound), and no count is
+    # below 0, so atLeast 0 bounds nothing either.
+    def verification(v)
+      return v unless v['times'].is_a?(Hash)
+
+      times = v['times'].reject { |k, n| (k == 'atLeast' && [0, -1].include?(n)) || (k == 'atMost' && n == -1) }
+      v.merge('times' => times)
+    end
+
     # {"name": x} and {"names": [x]} start or stop the same scenario; a load
     # scenario's startDelayMillis defaults to 0.
     def load_names(b)
@@ -286,8 +300,12 @@ module WebsiteExamples
     end
 
     # A response body string holding JSON is compared as JSON, so whitespace
-    # differences in a hand-written literal do not count.
+    # differences in a hand-written literal do not count. A response without
+    # a status code is sent as 200 OK.
     def response(r)
+      if r['statusCode'].nil? || r['statusCode'] == 200
+        r = r.reject { |k, v| (k == 'statusCode' && v == 200) || (k == 'reasonPhrase' && v == 'OK') }
+      end
       return r unless r['body'].is_a?(String)
 
       parsed = begin
@@ -316,8 +334,18 @@ module WebsiteExamples
                  end
       end
       out.delete('unlimited') if out['unlimited'] == false && (out.key?('remainingTimes') || out.key?('timeToLive'))
+      out.delete('scheme') if key == 'socketAddress' && out['scheme'] == 'HTTP' # the default scheme
+      override_names(out) if key == 'httpOverrideForwardedRequest'
       delay(out) if key == 'delay' || key == 'thinkTime'
       out
+    end
+
+    # httpRequest and httpResponse are the older names the server still reads
+    # for an override's requestOverride and responseOverride.
+    def override_names(o)
+      { 'httpRequest' => 'requestOverride', 'httpResponse' => 'responseOverride' }.each do |old, new|
+        o[new] = o.delete(old) if o.key?(old) && !o.key?(new)
+      end
     end
 
     # A delay's value defaults to 0, and its time unit only scales value and
@@ -507,11 +535,25 @@ module WebsiteExamples
     end
   end
 
+  # The Ruby blocks run in this process's forked children (Runner above).
+  module RubyRunner
+    module_function
+
+    def prepare(_units)
+      Runner.preload
+    end
+
+    def run(unit)
+      Runner.run(unit[:blocks].map(&:code).join("\n"))
+    end
+  end
+
   # ---------------------------------------------------------------------
   # Check
   # ---------------------------------------------------------------------
   module Check
-    STATUSES = %i[not_compared differs sent_nothing raised rest_unparseable rest_quoting rest_invalid_json].freeze
+    STATUSES = %i[not_compared differs sent_nothing raised does_not_compile rest_unparseable rest_quoting
+                  rest_invalid_json].freeze
     FAILURES = STATUSES + %i[digest_changed stale_allowlist unknown_key block_count]
 
     module_function
@@ -529,7 +571,7 @@ module WebsiteExamples
     end
 
     def load_allowlist(path = ALLOWLIST)
-      allow = File.exist?(path) ? (YAML.safe_load(File.read(path)) || {}) : {}
+      allow = File.exist?(path) ? (YAML.safe_load(File.read(path, encoding: 'UTF-8')) || {}) : {}
       bad = allow.reject do |_k, v|
         v.is_a?(Hash) && STATUSES.include?(v['status'].to_s.to_sym) && !v['reason'].to_s.strip.empty? &&
           v['digest'].to_s =~ /\A\h{12}\z/
@@ -539,50 +581,64 @@ module WebsiteExamples
       allow
     end
 
-    # Every Ruby block on the site is one unit: an accordion's Ruby tab, or a
-    # block outside any accordion (keyed by its code's digest). Each unit is
-    # compared with its REST API tab or must be allowlisted.
-    def units(files)
+    # Every block of the language on the site is one unit: an accordion's tab
+    # in that language, or a block outside any accordion (keyed by its code's
+    # digest). Each unit is compared with its REST API tab or must be allowlisted.
+    def units(files, lang = 'ruby')
       files.flat_map do |path|
         groups, loose = Extractor.extract(path)
         rel = path.sub("#{SITE_ROOT}/", '')
         seen = Hash.new(0)
         grouped = groups.filter_map do |group|
-          ruby = group.tabs.values.flatten.select { |b| b.lang == 'ruby' }
-          { key: group.key, group: group, ruby: ruby } unless ruby.empty?
+          blocks = group.tabs.values.flatten.select { |b| b.lang == lang }
+          { key: group.key, group: group, blocks: blocks } unless blocks.empty?
         end
-        grouped + loose.select { |b| b.lang == 'ruby' }.map do |block|
+        grouped + loose.select { |b| b.lang == lang }.map do |block|
           base = "#{rel}#loose-#{digest(block.code)}"
           seen[base] += 1
-          { key: seen[base] > 1 ? "#{base}-#{seen[base]}" : base, ruby: [block] }
+          { key: seen[base] > 1 ? "#{base}-#{seen[base]}" : base, blocks: [block] }
         end
       end
     end
 
-    def raw_block_count(files)
-      files.sum { |path| File.read(path).scan('lang-ruby').length }
+    def raw_block_count(files, lang = 'ruby')
+      files.sum { |path| File.read(path, encoding: 'UTF-8').scan(/lang-#{lang}\b/).length }
     end
 
-    def run(argv, files: Extractor.site_files, allow: load_allowlist)
+    def allowlist_path(lang)
+      lang == 'ruby' ? ALLOWLIST : File.join(__dir__, "allowlist-#{lang}.yml")
+    end
+
+    def runner_for(lang)
+      return RubyRunner if lang == 'ruby'
+
+      require_relative 'languages'
+      Languages.runner(lang)
+    end
+
+    def run(argv, files: Extractor.site_files, allow: nil, lang: nil, runner: nil)
       verbose = argv.include?('--verbose')
       only = argv[argv.index('--only') + 1] if argv.include?('--only')
-      Runner.preload
+      lang ||= argv.include?('--lang') ? argv[argv.index('--lang') + 1] : 'ruby'
+      allow ||= load_allowlist(allowlist_path(lang))
+      runner ||= runner_for(lang)
       counts = Hash.new(0)
       findings = []
-      all = units(files)
-      counts[:ruby_blocks] = all.sum { |u| u[:ruby].length }
-      if counts[:ruby_blocks] != raw_block_count(files)
+      all = units(files, lang)
+      counts[:blocks] = all.sum { |u| u[:blocks].length }
+      if counts[:blocks] != raw_block_count(files, lang)
         findings << { key: 'site', status: :block_count,
-                      error: "extracted #{counts[:ruby_blocks]} Ruby blocks, the pages hold #{raw_block_count(files)}" }
+                      error: "extracted #{counts[:blocks]} #{lang} blocks, the pages hold #{raw_block_count(files, lang)}" }
       end
       selected = only ? all.select { |u| u[:key] == only } : all
       findings << { key: only, status: :unknown_key } if only && selected.empty?
+      runner.prepare(selected)
       selected.each do |unit|
-        finding = check_unit(unit)
+        finding = check_unit(unit, runner)
         entry = allow[unit[:key]]
         if finding.nil?
           counts[:ok] += 1
-          findings << { key: unit[:key], status: :stale_allowlist, line: unit[:ruby].first.line } if entry
+          findings << { key: unit[:key], status: :stale_allowlist, line: unit[:blocks].first.line } if entry
         elsif entry && entry['status'] == finding[:status].to_s && entry['digest'] == finding[:digest]
           counts[:allowlisted] += 1
           report_finding(finding.merge(status: "allowed #{finding[:status]}"), true) if verbose
@@ -599,14 +655,16 @@ module WebsiteExamples
         (allow.keys - all.map { |u| u[:key] }).each { |key| findings << { key: key, status: :stale_allowlist } }
       end
       counts[:stale_allowlist] = findings.count { |f| f[:status] == :stale_allowlist }
-      report(counts, findings, verbose)
+      report(counts, findings, verbose, lang)
       findings.empty? ? 0 : 1
+    ensure
+      runner&.finish if runner.respond_to?(:finish)
     end
 
-    def check_unit(unit)
-      ruby = unit[:ruby]
-      base = { key: unit[:key], line: ruby.first.line }
-      code = ruby.map(&:code).join("\n")
+    def check_unit(unit, runner = RubyRunner)
+      blocks = unit[:blocks]
+      base = { key: unit[:key], line: blocks.first.line }
+      code = blocks.map(&:code).join("\n")
       calls = unit[:group] ? Rest.blocks(unit[:group].tabs).flat_map { |b| Rest.calls(b.code) } : []
       if calls.empty?
         return base.merge(status: :not_compared, digest: digest(code),
@@ -621,17 +679,18 @@ module WebsiteExamples
         return base.merge(status: :rest_invalid_json, digest: digest(calls), error: 'a REST API tab body is not valid JSON')
       end
 
-      result = Runner.run(code)
+      result = runner.run(unit)
       sent = normalised(control_plane(result['calls']))
       wants = ([alternatives.flatten] + alternatives).uniq.map { |a| normalised(a) }
       matched = wants.include?(sent)
       unless matched && result['error'].nil?
-        status = if result['error'] then :raised
+        status = if result['compile_error'] then :does_not_compile
+                 elsif result['error'] then :raised
                  elsif sent.empty? then :sent_nothing
                  else :differs
                  end
         return base.merge(status: status, error: result['error'], sent: sent, want: wants.first,
-                          digest: digest([sent, result['error']]))
+                          digest: digest([sent, result['digest_error'] || result['error']]))
       end
       return nil unless calls.any? { |c| c['quoting'] }
 
@@ -650,14 +709,15 @@ module WebsiteExamples
       puts "#{finding[:status].to_s.upcase.ljust(16)} #{finding[:key]}#{line}#{digest}#{error}"
       return unless verbose && finding[:sent]
 
-      puts "  ruby: #{JSON.generate(finding[:sent])}"
+      puts "  sent: #{JSON.generate(finding[:sent])}"
       puts "  rest: #{JSON.generate(finding[:want])}"
     end
 
-    def report(counts, findings, verbose)
+    def report(counts, findings, verbose, lang = 'ruby')
       findings.each { |f| report_finding(f, verbose) }
       puts
-      puts "Ruby blocks on the site:      #{counts[:ruby_blocks]}"
+      name = { 'csharp' => '.NET', 'php' => 'PHP' }.fetch(lang, lang.capitalize)
+      puts "#{"#{name} blocks on the site:".ljust(29)} #{counts[:blocks]}"
       puts "Units matching REST API tab:  #{counts[:ok]}"
       puts "Allowlisted with a reason:    #{counts[:allowlisted]}"
       FAILURES.each { |f| puts "#{f.to_s.tr('_', ' ').capitalize.ljust(29)} #{counts[f]}" }
