@@ -217,6 +217,27 @@ HttpRequest.request("/api/orders").with_body(
 )
 ```
 
+### Conditional (if/then/else) matcher
+
+Pass a `ConditionalRequestDefinition` where a request matcher goes: when
+`if_request` matches, `then_request` must match too; otherwise `else_request`
+must (with no `else_request` it matches whenever `if_request` does not). Each
+branch is an `HttpRequest`, an `OpenAPIDefinition` or another
+`ConditionalRequestDefinition`. Retrieved expectations whose `httpRequest` holds
+`if` read back as this type.
+
+```python
+from mockserver import Body, ConditionalRequestDefinition, HttpRequest, HttpResponse
+
+client.when(
+    ConditionalRequestDefinition(
+        if_request=HttpRequest(method="POST").with_header("content-type", "application/json"),
+        then_request=HttpRequest(body=Body.json_schema('{"type": "object", "required": ["orderId"]}')),
+        else_request=HttpRequest(method="GET"),
+    )
+).respond(HttpResponse(status_code=200))
+```
+
 ## Retrieval
 
 ```python

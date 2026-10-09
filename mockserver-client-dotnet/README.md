@@ -126,6 +126,28 @@ client.When(
 );
 ```
 
+### Conditional (if/then/else) and OpenAPI Request Matchers
+
+`HttpRequest.RequestIf(if, then, else)` builds a conditional matcher: when `if` matches, `then`
+must match too, otherwise `else` must (with no `else`, it matches whenever `if` does not). It is
+sent as an `httpRequest` holding `if`/`then`/`else` (the `If`, `Then` and `Else` properties, or
+`WithIf`/`WithThen`/`WithElse` on the builder). A branch may be an HTTP matcher, another
+conditional, or an OpenAPI matcher from `HttpRequest.OpenApi(specUrlOrPayload, operationId)`
+(`SpecUrlOrPayload`, `OperationId`, `ContextPathPrefix`). A load scenario `LoadStep` likewise takes
+`Checks`, a list of `LoadCheck` assertions on each step's response. These need a client released
+after 8.0.0.
+
+```csharp
+client.When(
+    HttpRequest.RequestIf(
+        HttpRequest.Request().WithMethod("POST").WithHeader("content-type", "application/json"),
+        HttpRequest.Request().WithJsonSchemaBody("{\"type\": \"object\", \"required\": [\"orderId\"]}"),
+        HttpRequest.Request().WithMethod("GET"))
+).Respond(
+    HttpResponse.Response().WithStatusCode(200)
+);
+```
+
 ### Async API
 
 All operations have async variants:

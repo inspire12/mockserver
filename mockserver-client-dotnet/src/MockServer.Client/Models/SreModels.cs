@@ -140,7 +140,10 @@ public enum LoadThresholdMetric
     ERROR_RATE,
 
     /// <summary>Requests per second over the run's elapsed time.</summary>
-    THROUGHPUT_RPS
+    THROUGHPUT_RPS,
+
+    /// <summary>Failed per-step <see cref="LoadCheck"/>s as a 0.0-1.0 fraction of all evaluated checks (0 when none ran).</summary>
+    CHECK_FAILURE_RATE
 }
 
 /// <summary>How an observed per-run value is compared to a <see cref="LoadThreshold.Threshold"/>.</summary>
@@ -201,6 +204,38 @@ public enum LoadCaptureSource
 
     /// <summary>A regex over the response body string (capture group 1).</summary>
     BODY_REGEX
+}
+
+/// <summary>Where a <see cref="LoadCheck"/> reads the observed value from a step's response.</summary>
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum LoadCheckSource
+{
+    /// <summary>The response status code.</summary>
+    STATUS,
+
+    /// <summary>A response header (<see cref="LoadCheck.HeaderName"/>).</summary>
+    HEADER,
+
+    /// <summary>A JSONPath over the response body (<see cref="LoadCheck.JsonPath"/>).</summary>
+    BODY_JSONPATH
+}
+
+/// <summary>
+/// How a <see cref="LoadCheck"/> compares the observed value with <see cref="LoadCheck.Value"/>. The string
+/// comparators work on the raw text (MATCHES is a full-match regex); GT/LT/GTE/LTE parse both sides as
+/// numbers and fail the check when either is not a number.
+/// </summary>
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum LoadCheckComparator
+{
+    EQUALS,
+    NOT_EQUALS,
+    CONTAINS,
+    MATCHES,
+    GT,
+    LT,
+    GTE,
+    LTE
 }
 
 /// <summary>The in-run threshold verdict of a load scenario run.</summary>
@@ -446,6 +481,14 @@ public sealed class LoadStep
     public List<LoadCapture>? Captures { get; set; }
 
     /// <summary>
+    /// Optional per-step response assertions. A failing check never fails the request; outcomes feed the
+    /// <c>mock_server_load_checks</c> metric, the run report and the CHECK_FAILURE_RATE threshold.
+    /// </summary>
+    [JsonPropertyName("checks")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<LoadCheck>? Checks { get; set; }
+
+    /// <summary>
     /// Relative selection weight, used only when the scenario's <see cref="LoadScenario.StepSelection"/>
     /// is WEIGHTED (must be &gt; 0 then; omitted means 1.0). Ignored under SEQUENTIAL.
     /// </summary>
@@ -481,6 +524,38 @@ public sealed class LoadCapture
     [JsonPropertyName("defaultValue")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? DefaultValue { get; set; }
+}
+
+/// <summary>
+/// A per-step response assertion (the load equivalent of a k6 check): reads a value from the step's
+/// response (<see cref="Source"/>) and compares it with <see cref="Value"/> using <see cref="Comparator"/>.
+/// </summary>
+public sealed class LoadCheck
+{
+    /// <summary>Where to read the observed value (required): STATUS, HEADER or BODY_JSONPATH.</summary>
+    [JsonPropertyName("source")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public LoadCheckSource? Source { get; set; }
+
+    /// <summary>The response header to read (required when <see cref="Source"/> is HEADER).</summary>
+    [JsonPropertyName("headerName")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? HeaderName { get; set; }
+
+    /// <summary>The JSONPath over the response body (required when <see cref="Source"/> is BODY_JSONPATH).</summary>
+    [JsonPropertyName("jsonPath")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? JsonPath { get; set; }
+
+    /// <summary>How the observed value is compared with <see cref="Value"/> (required).</summary>
+    [JsonPropertyName("comparator")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public LoadCheckComparator? Comparator { get; set; }
+
+    /// <summary>The expected value the observed value is compared against.</summary>
+    [JsonPropertyName("value")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Value { get; set; }
 }
 
 /// <summary>

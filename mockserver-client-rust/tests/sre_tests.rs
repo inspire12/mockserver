@@ -879,3 +879,117 @@ fn test_slo_verdict_deserializes_full_wire_shape() {
     assert_eq!(r.observed_value, Some(310.5));
     assert_eq!(r.result.as_deref(), Some("FAIL"));
 }
+
+// ---------------------------------------------------------------------------
+// LoadCheck (per-step response assertions)
+// ---------------------------------------------------------------------------
+
+/// Builds exactly the objects the website's Rust tab of
+/// `button_load_step_checks` (load_injection.html) builds and asserts the wire
+/// JSON equals that example's REST API tab.
+#[test]
+fn test_load_step_checks_website_example_matches_rest_tab() {
+    let profile = LoadProfile::of(vec![LoadStage::vu_hold(5, 60_000)]);
+    let steps = vec![LoadStep::new(
+        HttpRequest::new()
+            .method("GET")
+            .path("/api/orders/123")
+            .socket_address(SocketAddress::new("target", 8080)),
+    )
+    .check(LoadCheck::status(LoadCheckComparator::Equals, "200"))
+    .check(LoadCheck::header(
+        "Content-Type",
+        LoadCheckComparator::Contains,
+        "application/json",
+    ))
+    .check(LoadCheck::body_json_path(
+        "$.status",
+        LoadCheckComparator::Equals,
+        "CONFIRMED",
+    ))];
+    let scenario = LoadScenario::new("checked-scenario", profile, steps).threshold(
+        LoadThreshold::new(
+            LoadThresholdMetric::CheckFailureRate,
+            LoadComparator::LessThan,
+            0.01,
+        ),
+    );
+
+    let rest_tab = serde_json::json!({
+        "name": "checked-scenario",
+        "profile": { "stages": [ { "type": "VU", "vus": 5, "durationMillis": 60000 } ] },
+        "thresholds": [
+            { "metric": "CHECK_FAILURE_RATE", "comparator": "LESS_THAN", "threshold": 0.01 }
+        ],
+        "steps": [
+            {
+                "request": { "method": "GET", "path": "/api/orders/123",
+                             "socketAddress": { "host": "target", "port": 8080 } },
+                "checks": [
+                    { "source": "STATUS", "comparator": "EQUALS", "value": "200" },
+                    { "source": "HEADER", "headerName": "Content-Type", "comparator": "CONTAINS", "value": "application/json" },
+                    { "source": "BODY_JSONPATH", "jsonPath": "$.status", "comparator": "EQUALS", "value": "CONFIRMED" }
+                ]
+            }
+        ]
+    });
+    assert_eq!(serde_json::to_value(&scenario).unwrap(), rest_tab);
+    let back: LoadScenario = serde_json::from_value(rest_tab).unwrap();
+    assert_eq!(back, scenario);
+}
+
+#[test]
+fn test_load_step_omits_checks_when_unset() {
+    let step = LoadStep::new(HttpRequest::new().method("GET").path("/x"));
+    let json = serde_json::to_value(&step).unwrap();
+    assert!(json.get("checks").is_none());
+    assert!(json.get("captures").is_none());
+}
+
+#[test]
+fn test_load_check_every_comparator_serializes() {
+    let pairs = [
+        (LoadCheckComparator::Equals, "EQUALS"),
+        (LoadCheckComparator::NotEquals, "NOT_EQUALS"),
+        (LoadCheckComparator::Contains, "CONTAINS"),
+        (LoadCheckComparator::Matches, "MATCHES"),
+        (LoadCheckComparator::Gt, "GT"),
+        (LoadCheckComparator::Lt, "LT"),
+        (LoadCheckComparator::Gte, "GTE"),
+        (LoadCheckComparator::Lte, "LTE"),
+    ];
+    for (comparator, wire) in pairs {
+        assert_eq!(serde_json::to_value(comparator).unwrap(), wire);
+    }
+    let check = LoadCheck::new(LoadCheckSource::Status, LoadCheckComparator::Gte);
+    assert_eq!(
+        serde_json::to_value(&check).unwrap(),
+        serde_json::json!({ "source": "STATUS", "comparator": "GTE" })
+    );
+}
+
+#[test]
+fn test_load_step_reads_checks_from_server_echo_with_unknown_key() {
+    // The server echoes steps with extra keys (e.g. "valid") and without
+    // "captures"; reading must not fail and must keep the checks.
+    let step: LoadStep = serde_json::from_value(serde_json::json!({
+        "request": { "method": "GET", "path": "/x" },
+        "checks": [
+            { "source": "HEADER", "headerName": "X-Id", "comparator": "MATCHES", "value": "[0-9]+" }
+        ],
+        "valid": true
+    }))
+    .unwrap();
+    assert!(step.captures.is_empty());
+    assert_eq!(
+        step.checks,
+        vec![
+            LoadCheck::new(LoadCheckSource::Header, LoadCheckComparator::Matches)
+                .header_name("X-Id")
+                .value("[0-9]+")
+        ]
+    );
+    let json = serde_json::to_value(&step).unwrap();
+    assert!(json.get("valid").is_none());
+    assert_eq!(json["checks"][0]["headerName"], "X-Id");
+}

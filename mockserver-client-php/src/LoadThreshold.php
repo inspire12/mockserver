@@ -34,11 +34,11 @@ class LoadThreshold implements \JsonSerializable
      * Build a threshold from a per-run metric, a comparator and a value.
      *
      * @param string $metric One of LATENCY_P50, LATENCY_P95, LATENCY_P99,
-     *        LATENCY_P999, ERROR_RATE, THROUGHPUT_RPS.
+     *        LATENCY_P999, ERROR_RATE, THROUGHPUT_RPS, CHECK_FAILURE_RATE.
      * @param string $comparator One of LESS_THAN, LESS_THAN_OR_EQUAL,
      *        GREATER_THAN, GREATER_THAN_OR_EQUAL.
      * @param float $threshold The threshold value (milliseconds for latency
-     *        metrics, a 0.0-1.0 fraction for ERROR_RATE, requests/second for
+     *        metrics, a 0.0-1.0 fraction for ERROR_RATE and CHECK_FAILURE_RATE, requests/second for
      *        THROUGHPUT_RPS).
      */
     public static function of(string $metric, string $comparator, float $threshold): self

@@ -745,3 +745,143 @@ fn websocket_matcher_builder_round_trips() {
     let back: HttpWebSocketResponse = serde_json::from_value(out).unwrap();
     assert_eq!(back, ws);
 }
+
+// ---------------------------------------------------------------------------
+// Conditional (if/then/else) request matcher
+// ---------------------------------------------------------------------------
+
+/// Builds exactly the objects the website's Rust tab of
+/// `button_conditional_request_definition` (creating_expectations.html) builds
+/// and asserts the wire JSON equals that example's REST API tab.
+#[test]
+fn conditional_matcher_website_example_matches_rest_tab() {
+    let exp = Expectation::new(HttpRequest::conditional(
+        HttpRequest::new()
+            .method("POST")
+            .header("content-type", "application/json"),
+        HttpRequest::new()
+            .body_value(Body::json_schema(r#"{"type": "object", "required": ["orderId"]}"#)),
+        HttpRequest::new().method("GET"),
+    ))
+    .respond(HttpResponse::new().status_code(200));
+
+    let rest_tab = json!({
+        "httpRequest": {
+            "if": {
+                "method": "POST",
+                "headers": { "content-type": ["application/json"] }
+            },
+            "then": {
+                "body": {
+                    "type": "JSON_SCHEMA",
+                    "jsonSchema": "{\"type\": \"object\", \"required\": [\"orderId\"]}"
+                }
+            },
+            "else": {
+                "method": "GET"
+            }
+        },
+        "httpResponse": {
+            "statusCode": 200
+        }
+    });
+    assert_eq!(serde_json::to_value(&exp).unwrap(), rest_tab);
+    round_trip_expectation(&rest_tab.to_string());
+}
+
+#[test]
+fn conditional_matcher_without_else_omits_else() {
+    let request = HttpRequest::new()
+        .if_request(HttpRequest::new().method("POST"))
+        .then_request(HttpRequest::new().path("/orders"));
+    assert_eq!(
+        serde_json::to_value(&request).unwrap(),
+        json!({ "if": { "method": "POST" }, "then": { "path": "/orders" } })
+    );
+}
+
+#[test]
+fn conditional_matcher_nested_open_api_and_not_round_trip() {
+    let exp = round_trip_expectation(
+        r#"{
+            "httpRequest": {
+                "not": true,
+                "if": {
+                    "if": { "method": "POST" },
+                    "then": { "path": "/orders" }
+                },
+                "then": {
+                    "specUrlOrPayload": "https://example.com/petstore.yaml",
+                    "operationId": "createOrder",
+                    "contextPathPrefix": "/v1",
+                    "not": false
+                },
+                "else": {
+                    "specUrlOrPayload": { "openapi": "3.0.0", "paths": {} }
+                }
+            },
+            "httpResponse": { "statusCode": 200 }
+        }"#,
+    );
+    let request = exp.http_request.unwrap();
+    assert_eq!(request.not, Some(true));
+    assert!(
+        request.extra.is_empty(),
+        "if/then/else must be typed, not extra"
+    );
+
+    let guard = request.if_request.unwrap();
+    assert_eq!(guard.if_request.unwrap().method.as_deref(), Some("POST"));
+    assert_eq!(guard.then_request.unwrap().path.as_deref(), Some("/orders"));
+
+    let then = request.then_request.unwrap();
+    assert_eq!(
+        then.spec_url_or_payload,
+        Some(json!("https://example.com/petstore.yaml"))
+    );
+    assert_eq!(then.operation_id.as_deref(), Some("createOrder"));
+    assert_eq!(then.context_path_prefix.as_deref(), Some("/v1"));
+    assert_eq!(then.not, Some(false));
+
+    let otherwise = request.else_request.unwrap();
+    assert_eq!(
+        otherwise.spec_url_or_payload,
+        Some(json!({ "openapi": "3.0.0", "paths": {} }))
+    );
+}
+
+#[test]
+fn conditional_matcher_builders_match_wire_form() {
+    let request = HttpRequest::conditional(
+        HttpRequest::conditional(
+            HttpRequest::new().method("POST"),
+            HttpRequest::new().path("/a"),
+            HttpRequest::new().path("/b"),
+        ),
+        HttpRequest::open_api("https://example.com/spec.json")
+            .operation_id("listPets")
+            .context_path_prefix("/api"),
+        HttpRequest::open_api(json!({ "openapi": "3.0.0" })),
+    )
+    .not(true);
+    let out = serde_json::to_value(&request).unwrap();
+    assert_eq!(
+        out,
+        json!({
+            "not": true,
+            "if": {
+                "if": { "method": "POST" },
+                "then": { "path": "/a" },
+                "else": { "path": "/b" }
+            },
+            "then": {
+                "specUrlOrPayload": "https://example.com/spec.json",
+                "operationId": "listPets",
+                "contextPathPrefix": "/api"
+            },
+            "else": { "specUrlOrPayload": { "openapi": "3.0.0" } }
+        })
+    );
+    let back: HttpRequest = serde_json::from_value(out).unwrap();
+    assert_eq!(back, request);
+}

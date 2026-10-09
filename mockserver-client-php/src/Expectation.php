@@ -504,12 +504,20 @@ class Expectation implements \JsonSerializable
      * the typed builder — round-trips faithfully without lossy field-by-field
      * reconstruction.
      *
+     * The {@code httpRequest} is also read into a typed {@see HttpRequest}
+     * (see {@see HttpRequest::fromArray()}), returned by
+     * {@see getHttpRequest()}; a conditional matcher keeps its if/then/else
+     * branches.
+     *
      * @param array<string, mixed> $data
      */
     public static function fromArray(array $data): self
     {
         $expectation = new self();
         $expectation->rawData = $data;
+        if (isset($data['httpRequest']) && is_array($data['httpRequest'])) {
+            $expectation->httpRequest = HttpRequest::fromArray($data['httpRequest']);
+        }
         return $expectation;
     }
 }

@@ -269,6 +269,36 @@ client.when(
 The JWT matcher serialises under the request's `"jwt"` key, and the composite
 body serialises to `{"type":"ALL_OF","bodyAllOf":[ ... ]}`.
 
+### Conditional (if/then/else) request matchers and load-step checks
+
+`HttpRequest::conditional(if, then, else)` builds an `httpRequest` holding
+`if`, `then` and `else`: when the `if` request matches, `then` must match too,
+otherwise `else` must (leave out `else` with `.if_request(..).then_request(..)`,
+and the matcher matches whenever `if` does not). A branch can be any
+`HttpRequest`, an OpenAPI matcher (`HttpRequest::open_api(spec).operation_id(..)`)
+or another conditional; expectations read back from the server keep them.
+
+A load-scenario `LoadStep` takes per-step response assertions with
+`.check(LoadCheck::status(..))`, `LoadCheck::header(..)` or
+`LoadCheck::body_json_path(..)`; failing checks feed the
+`LoadThresholdMetric::CheckFailureRate` threshold. These need a client released
+after 8.0.0.
+
+```rust
+use mockserver_client::*;
+
+client.when(HttpRequest::conditional(
+    HttpRequest::new().method("POST"),
+    HttpRequest::new().path("/orders"),
+    HttpRequest::new().method("GET"),
+))
+.respond(HttpResponse::new().status_code(200))?;
+
+let step = LoadStep::new(HttpRequest::new().method("GET").path("/api/orders/123"))
+    .check(LoadCheck::status(LoadCheckComparator::Equals, "200"))
+    .check(LoadCheck::body_json_path("$.status", LoadCheckComparator::Equals, "CONFIRMED"));
+```
+
 ### Interactive Breakpoints
 
 Register breakpoint matchers to pause forwarded/proxied traffic at REQUEST, RESPONSE, RESPONSE_STREAM, or INBOUND_STREAM phases. A callback WebSocket connection is opened automatically.

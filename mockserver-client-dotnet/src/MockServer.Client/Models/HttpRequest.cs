@@ -172,9 +172,79 @@ public sealed class HttpRequest
     public List<ClientCertificateInfo>? ClientCertificateChain { get; set; }
 
     /// <summary>
+    /// OpenAPI matcher: the spec as a URL, a file/classpath reference or an inline JSON/YAML string,
+    /// or an inline spec object. Setting it makes this an OpenAPI matcher (the server's
+    /// <c>openAPIDefinition</c>); use it with <see cref="OperationId"/>, <see cref="ContextPathPrefix"/>
+    /// and <see cref="Not"/> only. Read back as a <c>string</c> or, for an object, a <see cref="JsonElement"/>.
+    /// </summary>
+    [JsonPropertyName("specUrlOrPayload")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    [JsonConverter(typeof(StringOrJsonElementConverter))]
+    public object? SpecUrlOrPayload { get; set; }
+
+    /// <summary>OpenAPI matcher: the operation the request must match (all operations when unset).</summary>
+    [JsonPropertyName("operationId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? OperationId { get; set; }
+
+    /// <summary>OpenAPI matcher: a path prefix prepended to the spec's paths.</summary>
+    [JsonPropertyName("contextPathPrefix")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ContextPathPrefix { get; set; }
+
+    /// <summary>
+    /// Conditional matcher condition. Setting it makes this a conditional (if/then/else) matcher (the
+    /// server's <c>conditionalRequestDefinition</c>): when <see cref="If"/> matches, <see cref="Then"/>
+    /// must match too, otherwise <see cref="Else"/> must (with no else, it matches whenever if does
+    /// not). Use it with <see cref="Then"/>, <see cref="Else"/> and <see cref="Not"/> only. Each branch
+    /// is an HTTP, OpenAPI or conditional matcher. See <see cref="RequestIf"/>.
+    /// </summary>
+    [JsonPropertyName("if")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public HttpRequest? If { get; set; }
+
+    /// <summary>Conditional matcher: what must also match when <see cref="If"/> matches.</summary>
+    [JsonPropertyName("then")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public HttpRequest? Then { get; set; }
+
+    /// <summary>Conditional matcher: what must match when <see cref="If"/> does not.</summary>
+    [JsonPropertyName("else")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public HttpRequest? Else { get; set; }
+
+    /// <summary>
     /// Creates a new HttpRequest builder.
     /// </summary>
     public static HttpRequestBuilder Request() => new();
+
+    /// <summary>
+    /// Creates a conditional (if/then/else) request matcher: when <paramref name="ifRequest"/> matches,
+    /// <paramref name="thenRequest"/> must match too, otherwise <paramref name="elseRequest"/> must.
+    /// Branches may themselves be OpenAPI (<see cref="OpenApi"/>) or conditional matchers.
+    /// </summary>
+    public static HttpRequest RequestIf(HttpRequest ifRequest, HttpRequest? thenRequest = null, HttpRequest? elseRequest = null)
+        => new() { If = ifRequest ?? throw new ArgumentNullException(nameof(ifRequest)), Then = thenRequest, Else = elseRequest };
+
+    /// <summary>
+    /// Creates an OpenAPI request matcher for <paramref name="specUrlOrPayload"/> (a URL, file/classpath
+    /// reference or inline JSON/YAML spec), optionally limited to one <paramref name="operationId"/>.
+    /// </summary>
+    public static HttpRequest OpenApi(string specUrlOrPayload, string? operationId = null)
+        => new() { SpecUrlOrPayload = specUrlOrPayload ?? throw new ArgumentNullException(nameof(specUrlOrPayload)), OperationId = operationId };
+}
+
+/// <summary>
+/// Reads a string-or-object value as a <c>string</c> or a <see cref="JsonElement"/>; writes whatever
+/// was assigned (a string, a <see cref="JsonElement"/>, a dictionary, ...) by its runtime type.
+/// </summary>
+internal sealed class StringOrJsonElementConverter : JsonConverter<object>
+{
+    public override object? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        => reader.TokenType == JsonTokenType.String ? reader.GetString() : JsonElement.ParseValue(ref reader);
+
+    public override void Write(Utf8JsonWriter writer, object value, JsonSerializerOptions options)
+        => JsonSerializer.Serialize(writer, value, value.GetType(), options);
 }
 
 /// <summary>Transport protocol a request matcher constrains to.</summary>

@@ -643,3 +643,135 @@ func TestChaosGraphqlAndTimestampRoundTrip(t *testing.T) {
       "timestamp": "2026-07-03T12:00:00.000Z"
     }`)
 }
+
+// TestConditionalRequestRoundTrip covers a conditional (if/then/else) matcher
+// whose branches are an HTTP matcher, a nested conditional with an OpenAPI
+// branch, and an OpenAPI matcher, with `not` at two levels.
+func TestConditionalRequestRoundTrip(t *testing.T) {
+	fixture := `{
+      "httpRequest": {
+        "not": true,
+        "if": {"method": "POST", "headers": {"content-type": ["application/json"]}},
+        "then": {
+          "if": {"path": "/orders"},
+          "then": {"specUrlOrPayload": "file:///specs/orders.yaml", "operationId": "createOrder", "not": false},
+          "else": {"body": {"type": "JSON_SCHEMA", "jsonSchema": "{\"type\": \"object\"}"}}
+        },
+        "else": {"specUrlOrPayload": {"openapi": "3.0.0"}, "operationId": "listOrders", "contextPathPrefix": "/v1"}
+      },
+      "httpResponse": {"statusCode": 200}
+    }`
+	assertRoundTrip(t, fixture)
+
+	var exp Expectation
+	if err := json.Unmarshal([]byte(fixture), &exp); err != nil {
+		t.Fatal(err)
+	}
+	req := exp.HttpRequest
+	if req.Not == nil || !*req.Not || req.If == nil || req.If.Method != "POST" {
+		t.Fatalf("conditional guard not read: %+v", req)
+	}
+	if req.Then == nil || req.Then.If == nil || req.Then.If.Path != "/orders" {
+		t.Fatalf("nested conditional then-branch not read: %+v", req.Then)
+	}
+	if req.Then.Then == nil || req.Then.Then.OperationId != "createOrder" || req.Then.Then.Not == nil || *req.Then.Then.Not {
+		t.Errorf("nested OpenAPI branch not read: %+v", req.Then.Then)
+	}
+	if req.Else == nil || req.Else.OperationId != "listOrders" || req.Else.ContextPathPrefix != "/v1" {
+		t.Errorf("OpenAPI else-branch not read: %+v", req.Else)
+	}
+}
+
+// TestConditionalRequestAbsentElseOmitted proves an unset branch is left off
+// the wire, and that a plain request matcher gains no if/then/else keys.
+func TestConditionalRequestAbsentElseOmitted(t *testing.T) {
+	out, err := json.Marshal(ConditionalRequest(
+		&HttpRequest{Method: "POST"},
+		&HttpRequest{Path: "/orders"},
+		nil,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := decodeJSON(t, []byte(`{"if": {"method": "POST"}, "then": {"path": "/orders"}}`))
+	if got := decodeJSON(t, out); !reflect.DeepEqual(want, got) {
+		t.Errorf("unexpected conditional JSON: %s", out)
+	}
+
+	out, err = json.Marshal(Request().Method("GET").Path("/x").Build())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeJSON(t, out); !reflect.DeepEqual(decodeJSON(t, []byte(`{"method": "GET", "path": "/x"}`)), got) {
+		t.Errorf("plain request changed on the wire: %s", out)
+	}
+}
+
+// TestConditionalRequestBuilderMatchesConstructor proves the fluent
+// If/Then/Else builder writes the same JSON as ConditionalRequest.
+func TestConditionalRequestBuilderMatchesConstructor(t *testing.T) {
+	built, err := json.Marshal(Request().
+		If(Request().Method("POST")).
+		Then(Request().Path("/orders")).
+		Else(Request().Method("GET")).
+		Build())
+	if err != nil {
+		t.Fatal(err)
+	}
+	constructed, err := json.Marshal(ConditionalRequest(
+		&HttpRequest{Method: "POST"},
+		&HttpRequest{Path: "/orders"},
+		&HttpRequest{Method: "GET"},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decodeJSON(t, built), decodeJSON(t, constructed)) {
+		t.Errorf("builder %s != constructor %s", built, constructed)
+	}
+}
+
+// TestConditionalRequestWebsiteExample builds exactly what the Go tab of
+// creating_expectations.html (button_conditional_request_definition) builds and
+// asserts the PUT body equals that example's REST API JSON.
+func TestConditionalRequestWebsiteExample(t *testing.T) {
+	var body []byte
+	ts := stubServer(t, 201, "", nil, nil, &body)
+	defer ts.Close()
+
+	client := NewFromURL(ts.URL)
+	if _, err := client.Upsert(Expectation{
+		HttpRequest: ConditionalRequest(
+			&HttpRequest{Method: "POST", Headers: map[string][]string{"content-type": {"application/json"}}},
+			&HttpRequest{Body: JSONSchemaBody(`{"type": "object", "required": ["orderId"]}`)},
+			&HttpRequest{Method: "GET"},
+		),
+		HttpResponse: &HttpResponse{StatusCode: 200},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	want := decodeJSON(t, []byte(`[{
+    "httpRequest": {
+        "if": {
+            "method": "POST",
+            "headers": { "content-type": ["application/json"] }
+        },
+        "then": {
+            "body": {
+                "type": "JSON_SCHEMA",
+                "jsonSchema": "{\"type\": \"object\", \"required\": [\"orderId\"]}"
+            }
+        },
+        "else": {
+            "method": "GET"
+        }
+    },
+    "httpResponse": {
+        "statusCode": 200
+    }
+}]`))
+	if got := decodeJSON(t, body); !reflect.DeepEqual(want, got) {
+		t.Errorf("website example JSON mismatch\ngot: %s", body)
+	}
+}

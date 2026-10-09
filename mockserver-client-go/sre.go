@@ -232,6 +232,9 @@ type LoadStep struct {
 	// response, binding extracted values visible to SUBSEQUENT steps in the same
 	// iteration. Meaningful only under SEQUENTIAL step selection.
 	Captures []LoadCapture `json:"captures,omitempty"`
+	// Checks are optional assertions on this step's response. A failing check
+	// never fails the request; failures feed the CHECK_FAILURE_RATE threshold.
+	Checks []LoadCheck `json:"checks,omitempty"`
 	// Weight is the relative selection weight, used only when the scenario's
 	// StepSelection is WEIGHTED (probability proportional to weight). Omitted
 	// means 1.0 in WEIGHTED mode; must be > 0 when WEIGHTED. A pointer so a
@@ -271,6 +274,60 @@ type LoadCapture struct {
 	DefaultValue string `json:"defaultValue,omitempty"`
 }
 
+// LoadCheckSource is where a LoadCheck reads its observed value from. Wire
+// values match the LoadCheck.source enum (OpenAPI).
+type LoadCheckSource = string
+
+const (
+	// LoadCheckStatus reads the response status code.
+	LoadCheckStatus LoadCheckSource = "STATUS"
+	// LoadCheckHeader reads the first value of the response header HeaderName.
+	LoadCheckHeader LoadCheckSource = "HEADER"
+	// LoadCheckBodyJSONPath evaluates JSONPath over the response body.
+	LoadCheckBodyJSONPath LoadCheckSource = "BODY_JSONPATH"
+)
+
+// LoadCheckComparator is how a LoadCheck compares the observed value with
+// Value. Wire values match the LoadCheck.comparator enum (OpenAPI).
+type LoadCheckComparator = string
+
+const (
+	// LoadCheckEquals passes when the observed value equals Value.
+	LoadCheckEquals LoadCheckComparator = "EQUALS"
+	// LoadCheckNotEquals passes when the observed value differs from Value.
+	LoadCheckNotEquals LoadCheckComparator = "NOT_EQUALS"
+	// LoadCheckContains passes when the observed value contains Value.
+	LoadCheckContains LoadCheckComparator = "CONTAINS"
+	// LoadCheckMatches passes when Value, a regex, matches the whole observed value.
+	LoadCheckMatches LoadCheckComparator = "MATCHES"
+	// LoadCheckGT passes when the observed number is greater than Value.
+	LoadCheckGT LoadCheckComparator = "GT"
+	// LoadCheckLT passes when the observed number is less than Value.
+	LoadCheckLT LoadCheckComparator = "LT"
+	// LoadCheckGTE passes when the observed number is at least Value.
+	LoadCheckGTE LoadCheckComparator = "GTE"
+	// LoadCheckLTE passes when the observed number is at most Value.
+	LoadCheckLTE LoadCheckComparator = "LTE"
+)
+
+// LoadCheck is a per-step response assertion for a load scenario: it reads a
+// value from the step's response and compares it with Value. A failing check
+// is counted (metric, report, CHECK_FAILURE_RATE threshold) but never fails the
+// request. Wire keys match schema LoadCheck (OpenAPI).
+type LoadCheck struct {
+	// Source is where to read the observed value from (required).
+	Source LoadCheckSource `json:"source,omitempty"`
+	// HeaderName is the response header to read (required when Source is HEADER).
+	HeaderName string `json:"headerName,omitempty"`
+	// JSONPath is evaluated over the response body (required when Source is
+	// BODY_JSONPATH).
+	JSONPath string `json:"jsonPath,omitempty"`
+	// Comparator is how the observed value is compared with Value (required).
+	Comparator LoadCheckComparator `json:"comparator,omitempty"`
+	// Value is the expected value. An empty Value is omitted from the wire.
+	Value string `json:"value,omitempty"`
+}
+
 // LoadThresholdMetric is the per-run metric a LoadThreshold evaluates. Wire
 // values match the LoadThreshold.metric enum (OpenAPI).
 type LoadThresholdMetric = string
@@ -288,6 +345,9 @@ const (
 	LoadThresholdErrorRate LoadThresholdMetric = "ERROR_RATE"
 	// LoadThresholdThroughputRPS is the per-run throughput (requests/second).
 	LoadThresholdThroughputRPS LoadThresholdMetric = "THROUGHPUT_RPS"
+	// LoadThresholdCheckFailureRate is the fraction (0.0-1.0) of evaluated
+	// per-step LoadChecks that failed (0 when no checks ran).
+	LoadThresholdCheckFailureRate LoadThresholdMetric = "CHECK_FAILURE_RATE"
 )
 
 // LoadThreshold is an in-run pass/fail threshold for a load scenario: a per-run

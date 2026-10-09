@@ -145,6 +145,35 @@ client.When(
 )
 ```
 
+#### Conditional (if/then/else) matcher
+
+When the `If` request matches, the `Then` request must match too; otherwise
+`Else` must (with no `Else`, the matcher matches whenever `If` does not). Each
+branch can be a request matcher, an OpenAPI matcher (`SpecUrlOrPayload`) or
+another conditional. An `httpRequest` holding `if` read back from the server
+fills `If`, `Then` and `Else`.
+
+```go
+client.When(
+    mockserver.Request().
+        If(mockserver.Request().Method("POST")).
+        Then(mockserver.Request().Path("/orders")).
+        Else(mockserver.Request().Method("GET")),
+).Respond(
+    mockserver.Response().StatusCode(200),
+)
+
+// or, for branches the builder cannot express (e.g. a JSON schema body):
+client.Upsert(mockserver.Expectation{
+    HttpRequest: mockserver.ConditionalRequest(
+        &mockserver.HttpRequest{Method: "POST"},
+        &mockserver.HttpRequest{Body: mockserver.JSONSchemaBody(`{"type": "object", "required": ["orderId"]}`)},
+        nil,
+    ),
+    HttpResponse: &mockserver.HttpResponse{StatusCode: 200},
+})
+```
+
 ### Verification
 
 ```go

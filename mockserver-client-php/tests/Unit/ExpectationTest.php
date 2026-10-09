@@ -14,6 +14,7 @@ use MockServer\HttpResponse;
 use MockServer\ResponseMode;
 use MockServer\TimeToLive;
 use MockServer\Times;
+use MockServer\Tests\Support\JsonCanon;
 use PHPUnit\Framework\TestCase;
 
 class ExpectationTest extends TestCase
@@ -381,5 +382,65 @@ class ExpectationTest extends TestCase
         $this->assertNull($expectation->getHttpError());
         $this->assertNull($expectation->getTimes());
         $this->assertNull($expectation->getTimeToLive());
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private static function conditionalExpectationWire(): array
+    {
+        return [
+            'httpRequest' => [
+                'if' => ['method' => 'POST', 'headers' => ['content-type' => ['application/json']]],
+                'then' => ['body' => [
+                    'type' => 'JSON_SCHEMA',
+                    'jsonSchema' => '{"type": "object", "required": ["orderId"]}',
+                ]],
+                'else' => ['method' => 'GET'],
+            ],
+            'httpResponse' => ['statusCode' => 200],
+        ];
+    }
+
+    public function testConditionalRequestWritesIfThenElseInsideHttpRequest(): void
+    {
+        $expectation = (new Expectation())
+            ->httpRequest(HttpRequest::conditional(
+                HttpRequest::request()->method('POST')->header('content-type', 'application/json'),
+                HttpRequest::request()->jsonSchemaBody('{"type": "object", "required": ["orderId"]}'),
+                HttpRequest::request()->method('GET'),
+            ))
+            ->httpResponse(HttpResponse::response()->statusCode(200));
+
+        $this->assertSame(
+            JsonCanon::canon(self::conditionalExpectationWire()),
+            JsonCanon::decode(json_encode($expectation, JSON_THROW_ON_ERROR)),
+        );
+    }
+
+    public function testFromArrayReadsConditionalHttpRequestWithItsBranches(): void
+    {
+        $wire = self::conditionalExpectationWire();
+        $expectation = Expectation::fromArray($wire);
+
+        $request = $expectation->getHttpRequest();
+        $this->assertNotNull($request);
+        $this->assertTrue($request->isConditional());
+        $this->assertSame('POST', $request->getIfRequest()?->getMethod());
+        $this->assertNotNull($request->getThenRequest());
+        $this->assertSame('GET', $request->getElseRequest()?->getMethod());
+        $this->assertSame(JsonCanon::canon($wire['httpRequest']), JsonCanon::canon($request->toArray()));
+
+        // JSON -> typed -> JSON is identical, both replayed and rebuilt from the typed request.
+        $this->assertSame($wire, $expectation->toArray());
+        $rebuilt = (new Expectation())
+            ->httpRequest($request)
+            ->httpResponse(HttpResponse::response()->statusCode(200));
+        $this->assertSame(JsonCanon::canon($wire), JsonCanon::canon($rebuilt->toArray()));
+    }
+
+    public function testFromArrayWithoutHttpRequestLeavesItNull(): void
+    {
+        $this->assertNull(Expectation::fromArray(['httpResponse' => ['statusCode' => 200]])->getHttpRequest());
     }
 }

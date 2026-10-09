@@ -25,6 +25,8 @@ class TestPublicExports:
             "ExpectationId",
             "OpenAPIDefinition",
             "OpenAPIExpectation",
+            "ConditionalRequestDefinition",
+            "LoadCheck",
             "Times",
             "TimeToLive",
             "Delay",

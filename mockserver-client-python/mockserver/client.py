@@ -6,6 +6,7 @@ from typing import Callable
 
 from mockserver.async_client import AsyncMockServerClient
 from mockserver.models import (
+    ConditionalRequestDefinition,
     Delay,
     Expectation,
     HttpChaosProfile,
@@ -521,7 +522,7 @@ class MockServerClient:
 
     def verify(
         self,
-        request: HttpRequest | None = None,
+        request: HttpRequest | ConditionalRequestDefinition | None = None,
         times: VerificationTimes | None = None,
         *,
         response: HttpResponse | None = None,
@@ -530,7 +531,7 @@ class MockServerClient:
 
     def verify_sequence(
         self,
-        *requests: HttpRequest,
+        *requests: HttpRequest | ConditionalRequestDefinition,
         responses: list[HttpResponse] | None = None,
     ) -> None:
         return self._run(self._async_client.verify_sequence(*requests, responses=responses))
@@ -633,7 +634,7 @@ class MockServerClient:
 
     def when(
         self,
-        request: HttpRequest,
+        request: HttpRequest | ConditionalRequestDefinition,
         times: Times | None = None,
         time_to_live: TimeToLive | None = None,
         priority: int | None = None,

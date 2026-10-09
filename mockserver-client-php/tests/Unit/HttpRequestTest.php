@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace MockServer\Tests\Unit;
 
 use MockServer\HttpRequest;
+use MockServer\Tests\Support\JsonCanon;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 class HttpRequestTest extends TestCase
@@ -321,5 +323,172 @@ class HttpRequestTest extends TestCase
         $this->assertSame([], $request->getQueryStringParameters());
         $this->assertSame([], $request->getCookies());
         $this->assertNull($request->getBody());
+    }
+
+    // -----------------------------------------------------------------
+    // Conditional (if/then/else) and OpenAPI matchers
+    // -----------------------------------------------------------------
+
+    /**
+     * @return array<string, mixed>
+     */
+    private static function conditionalWire(): array
+    {
+        return [
+            'if' => ['method' => 'POST', 'headers' => ['content-type' => ['application/json']]],
+            'then' => ['body' => [
+                'type' => 'JSON_SCHEMA',
+                'jsonSchema' => '{"type": "object", "required": ["orderId"]}',
+            ]],
+            'else' => ['method' => 'GET'],
+        ];
+    }
+
+    public function testConditionalSerialisesOnlyIfThenElse(): void
+    {
+        $request = HttpRequest::conditional(
+            HttpRequest::request()->method('POST')->header('content-type', 'application/json'),
+            HttpRequest::request()->jsonSchemaBody('{"type": "object", "required": ["orderId"]}'),
+            HttpRequest::request()->method('GET'),
+        );
+
+        $this->assertSame(
+            JsonCanon::canon(self::conditionalWire()),
+            JsonCanon::decode(json_encode($request, JSON_THROW_ON_ERROR)),
+        );
+        $this->assertTrue($request->isConditional());
+        $this->assertFalse($request->isOpenAPI());
+    }
+
+    public function testConditionalBuilderMethodsMatchFactory(): void
+    {
+        $built = HttpRequest::request()
+            ->ifRequest(HttpRequest::request()->method('POST'))
+            ->thenRequest(HttpRequest::request()->path('/orders'))
+            ->elseRequest(HttpRequest::request()->method('GET'))
+            ->not();
+
+        $this->assertSame([
+            'not' => true,
+            'if' => ['method' => 'POST'],
+            'then' => ['path' => '/orders'],
+            'else' => ['method' => 'GET'],
+        ], $built->toArray());
+    }
+
+    public function testConditionalOmitsAbsentBranches(): void
+    {
+        $array = HttpRequest::conditional(HttpRequest::request()->method('POST'))->toArray();
+
+        $this->assertSame(['if' => ['method' => 'POST']], $array);
+        $this->assertArrayNotHasKey('then', $array);
+        $this->assertArrayNotHasKey('else', $array);
+        $this->assertArrayNotHasKey('not', $array);
+    }
+
+    public function testOpenAPIMatcherFields(): void
+    {
+        $this->assertSame(
+            ['specUrlOrPayload' => 'https://example.com/petstore.json', 'operationId' => 'listPets'],
+            HttpRequest::openAPI('https://example.com/petstore.json', 'listPets')->toArray(),
+        );
+
+        $inline = HttpRequest::openAPI(['openapi' => '3.0.0', 'paths' => ['/pets' => ['get' => []]]])
+            ->contextPathPrefix('/api')
+            ->not(false);
+        $this->assertSame([
+            'not' => false,
+            'specUrlOrPayload' => ['openapi' => '3.0.0', 'paths' => ['/pets' => ['get' => []]]],
+            'contextPathPrefix' => '/api',
+        ], $inline->toArray());
+        $this->assertTrue($inline->isOpenAPI());
+        $this->assertSame('/api', $inline->getContextPathPrefix());
+    }
+
+    public function testFromArrayReadsConditionalBranchesAsTypedRequests(): void
+    {
+        $wire = self::conditionalWire();
+        $request = HttpRequest::fromArray($wire);
+
+        $this->assertTrue($request->isConditional());
+        $this->assertSame('POST', $request->getIfRequest()?->getMethod());
+        $this->assertSame(['content-type' => ['application/json']], $request->getIfRequest()?->getHeaders());
+        $this->assertSame('JSON_SCHEMA', $request->getThenRequest()?->getBody()['type'] ?? null);
+        $this->assertSame('GET', $request->getElseRequest()?->getMethod());
+        $this->assertSame(JsonCanon::canon($wire), JsonCanon::canon($request->toArray()));
+    }
+
+    public function testFromArrayReadsNestedConditionalOpenAPIBranchAndNot(): void
+    {
+        $wire = [
+            'not' => true,
+            'if' => ['path' => '/a'],
+            'then' => [
+                'if' => ['method' => 'POST'],
+                'then' => ['specUrlOrPayload' => 'https://example.com/o.json', 'operationId' => 'create'],
+            ],
+        ];
+        $request = HttpRequest::fromArray($wire);
+
+        $this->assertTrue($request->getNot());
+        $nested = $request->getThenRequest();
+        $this->assertNotNull($nested);
+        $this->assertTrue($nested->isConditional());
+        $openApi = $nested->getThenRequest();
+        $this->assertNotNull($openApi);
+        $this->assertTrue($openApi->isOpenAPI());
+        $this->assertSame('https://example.com/o.json', $openApi->getSpecUrlOrPayload());
+        $this->assertSame('create', $openApi->getOperationId());
+        $this->assertNull($request->getElseRequest());
+        $this->assertSame(
+            JsonCanon::canon($wire),
+            JsonCanon::decode(json_encode(HttpRequest::fromArray($wire), JSON_THROW_ON_ERROR)),
+        );
+    }
+
+    public function testFromArrayKeepsFieldsItDoesNotModel(): void
+    {
+        $wire = [
+            'method' => ['not' => true, 'value' => 'GET'],
+            'path' => '/pets/{id}',
+            'pathParameters' => ['id' => ['[0-9]+']],
+            'protocol' => 'HTTP_2',
+            'if' => ['dnsName' => 'example.com', 'dnsType' => 'A'],
+        ];
+        $request = HttpRequest::fromArray($wire);
+
+        $this->assertNull($request->getMethod());
+        $this->assertSame('/pets/{id}', $request->getPath());
+        $this->assertSame(JsonCanon::canon($wire), JsonCanon::canon($request->toArray()));
+
+        // A typed setter wins over the kept raw value of the same field.
+        $this->assertSame('PUT', $request->method('PUT')->toArray()['method']);
+    }
+
+    /**
+     * @return iterable<string, array{array<string, mixed>}>
+     */
+    public static function fixtureHttpRequestProvider(): iterable
+    {
+        $files = glob(__DIR__ . '/../../../test-fixtures/expectations/*.json') ?: [];
+        sort($files);
+        foreach ($files as $file) {
+            $decoded = json_decode((string) file_get_contents($file), true);
+            if (is_array($decoded) && isset($decoded['httpRequest']) && is_array($decoded['httpRequest'])) {
+                yield basename($file) => [$decoded['httpRequest']];
+            }
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $httpRequest
+     */
+    #[DataProvider('fixtureHttpRequestProvider')]
+    public function testFromArrayIsLosslessForEveryFixtureHttpRequest(array $httpRequest): void
+    {
+        $this->assertSame(
+            JsonCanon::canon($httpRequest),
+            JsonCanon::canon(HttpRequest::fromArray($httpRequest)->toArray()),
+        );
     }
 }

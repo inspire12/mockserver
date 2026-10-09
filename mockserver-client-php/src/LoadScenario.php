@@ -130,6 +130,8 @@ class LoadScenario implements \JsonSerializable
      *        same iteration).
      * @param float|null $weight Relative selection weight, used only when the
      *        scenario's stepSelection is WEIGHTED.
+     * @param array<int, LoadCheck> $checks Optional assertions on this step's
+     *        response; failures feed the CHECK_FAILURE_RATE threshold.
      */
     public function addStep(
         HttpRequest $request,
@@ -138,6 +140,7 @@ class LoadScenario implements \JsonSerializable
         array $labels = [],
         array $captures = [],
         ?float $weight = null,
+        array $checks = [],
     ): self {
         $step = ['request' => $request->toArray()];
         if ($thinkTime !== null) {
@@ -153,6 +156,12 @@ class LoadScenario implements \JsonSerializable
             $step['captures'] = array_map(
                 static fn (LoadCapture $capture): array => $capture->toArray(),
                 array_values($captures),
+            );
+        }
+        if ($checks !== []) {
+            $step['checks'] = array_map(
+                static fn (LoadCheck $check): array => $check->toArray(),
+                array_values($checks),
             );
         }
         if ($weight !== null) {

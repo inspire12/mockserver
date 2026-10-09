@@ -153,6 +153,15 @@ public sealed class HttpRequestBuilder
     }
 
     /// <summary>
+    /// Sets a <c>JSON_SCHEMA</c> body matcher from a schema string.
+    /// </summary>
+    public HttpRequestBuilder WithJsonSchemaBody(string jsonSchema)
+    {
+        _request.Body = Models.Body.OfJsonSchema(jsonSchema);
+        return this;
+    }
+
+    /// <summary>
     /// Sets a FILE body matcher with an optional template type.
     /// </summary>
     public HttpRequestBuilder WithFileBody(string filePath, string? contentType = null, FileTemplateType? templateType = null)
@@ -189,6 +198,37 @@ public sealed class HttpRequestBuilder
     public HttpRequestBuilder WithKeepAlive(bool keepAlive)
     {
         _request.KeepAlive = keepAlive;
+        return this;
+    }
+
+    /// <summary>Negates the whole matcher (the request, OpenAPI or conditional matcher) when true.</summary>
+    public HttpRequestBuilder WithNot(bool not)
+    {
+        _request.Not = not;
+        return this;
+    }
+
+    /// <summary>
+    /// Makes this a conditional matcher with <paramref name="ifRequest"/> as its condition. See
+    /// <see cref="HttpRequest.RequestIf"/>.
+    /// </summary>
+    public HttpRequestBuilder WithIf(HttpRequest ifRequest)
+    {
+        _request.If = ifRequest;
+        return this;
+    }
+
+    /// <summary>Conditional matcher: what must also match when the condition matches.</summary>
+    public HttpRequestBuilder WithThen(HttpRequest thenRequest)
+    {
+        _request.Then = thenRequest;
+        return this;
+    }
+
+    /// <summary>Conditional matcher: what must match when the condition does not.</summary>
+    public HttpRequestBuilder WithElse(HttpRequest elseRequest)
+    {
+        _request.Else = elseRequest;
         return this;
     }
 

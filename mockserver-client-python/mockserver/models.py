@@ -1318,15 +1318,82 @@ class DnsRequestDefinition:
         return DnsRequestDefinition(dns_name=dns_name, dns_type=dns_type, dns_class=dns_class)
 
 
+@dataclass
+class ConditionalRequestDefinition:
+    """A conditional (if/then/else) request matcher — an alternative to
+    :class:`HttpRequest` as the ``http_request`` of an expectation.
+
+    When ``if_request`` matches, ``then_request`` must match too; otherwise
+    ``else_request`` must (with no ``else_request`` the matcher matches whenever
+    ``if_request`` does not). Each branch is an :class:`HttpRequest`, an
+    :class:`OpenAPIDefinition` or another ``ConditionalRequestDefinition``.
+    ``not_condition`` inverts the whole match.
+
+    Serialises to ``{"if": .., "then": .., "else": .., "not": ..}``; MockServer
+    recognises a conditional matcher by the presence of ``if``.
+    """
+
+    if_request: HttpRequest | OpenAPIDefinition | ConditionalRequestDefinition | None = None
+    then_request: HttpRequest | OpenAPIDefinition | ConditionalRequestDefinition | None = None
+    else_request: HttpRequest | OpenAPIDefinition | ConditionalRequestDefinition | None = None
+    not_condition: bool | None = None
+
+    def to_dict(self) -> dict:
+        return _strip_none({
+            "not": self.not_condition,
+            "if": self.if_request.to_dict() if self.if_request is not None else None,
+            "then": self.then_request.to_dict() if self.then_request is not None else None,
+            "else": self.else_request.to_dict() if self.else_request is not None else None,
+        })
+
+    @classmethod
+    def from_dict(cls, data: dict) -> ConditionalRequestDefinition:
+        if data is None:
+            return None
+        return cls(
+            if_request=_deserialize_conditional_branch(data.get("if")),
+            then_request=_deserialize_conditional_branch(data.get("then")),
+            else_request=_deserialize_conditional_branch(data.get("else")),
+            not_condition=data.get("not"),
+        )
+
+    @staticmethod
+    def request_if(
+        if_request: HttpRequest | OpenAPIDefinition | ConditionalRequestDefinition,
+        then_request: HttpRequest | OpenAPIDefinition | ConditionalRequestDefinition | None = None,
+        else_request: HttpRequest | OpenAPIDefinition | ConditionalRequestDefinition | None = None,
+    ) -> ConditionalRequestDefinition:
+        return ConditionalRequestDefinition(
+            if_request=if_request, then_request=then_request, else_request=else_request
+        )
+
+
+def _deserialize_conditional_branch(data: Any) -> Any | None:
+    """Deserialize one branch of a :class:`ConditionalRequestDefinition`: a dict
+    carrying ``if`` is a nested conditional, one carrying ``specUrlOrPayload`` an
+    :class:`OpenAPIDefinition`, anything else an :class:`HttpRequest`.
+    """
+    if data is None:
+        return None
+    if isinstance(data, dict) and "if" in data:
+        return ConditionalRequestDefinition.from_dict(data)
+    if isinstance(data, dict) and "specUrlOrPayload" in data:
+        return OpenAPIDefinition.from_dict(data)
+    return HttpRequest.from_dict(data)
+
+
 def _deserialize_request_definition(data: Any) -> Any | None:
     """Deserialize an expectation ``httpRequest`` into the correct request-matcher
-    type. A dict carrying ``dnsName`` is a :class:`DnsRequestDefinition`; anything
-    else is an :class:`HttpRequest`.
+    type. A dict carrying ``dnsName`` is a :class:`DnsRequestDefinition`, one
+    carrying ``if`` a :class:`ConditionalRequestDefinition`; anything else is an
+    :class:`HttpRequest`.
     """
     if data is None:
         return None
     if isinstance(data, dict) and "dnsName" in data:
         return DnsRequestDefinition.from_dict(data)
+    if isinstance(data, dict) and "if" in data:
+        return ConditionalRequestDefinition.from_dict(data)
     return HttpRequest.from_dict(data)
 
 
@@ -2710,7 +2777,7 @@ class Expectation:
     id: str | None = None
     priority: int | None = None
     percentage: int | None = None
-    http_request: HttpRequest | DnsRequestDefinition | None = None
+    http_request: HttpRequest | DnsRequestDefinition | ConditionalRequestDefinition | None = None
     http_response: HttpResponse | None = None
     http_response_template: HttpTemplate | None = None
     http_response_class_callback: HttpClassCallback | None = None
@@ -2856,11 +2923,16 @@ class Expectation:
 class OpenAPIDefinition:
     spec_url_or_payload: str | None = None
     operation_id: str | None = None
+    context_path_prefix: str | None = None
+    # Negates the matcher (wire key "not"), as HttpRequest.not_request does.
+    not_request: bool | None = None
 
     def to_dict(self) -> dict:
         return _strip_none({
+            "not": self.not_request,
             "specUrlOrPayload": self.spec_url_or_payload,
             "operationId": self.operation_id,
+            "contextPathPrefix": self.context_path_prefix,
         })
 
     @classmethod
@@ -2870,6 +2942,8 @@ class OpenAPIDefinition:
         return cls(
             spec_url_or_payload=data.get("specUrlOrPayload"),
             operation_id=data.get("operationId"),
+            context_path_prefix=data.get("contextPathPrefix"),
+            not_request=data.get("not"),
         )
 
 
@@ -3294,6 +3368,46 @@ class LoadCapture:
 
 
 @dataclass
+class LoadCheck:
+    """A per-step response assertion for a :class:`LoadStep`.
+
+    Reads a value from the step's response — ``source`` ``STATUS``, ``HEADER``
+    (with ``header_name``) or ``BODY_JSONPATH`` (with ``json_path``) — and
+    compares it with ``value`` using ``comparator`` (``EQUALS``, ``NOT_EQUALS``,
+    ``CONTAINS``, ``MATCHES``, ``GT``, ``LT``, ``GTE`` or ``LTE``). A failing
+    check never fails the request; failures feed the ``CHECK_FAILURE_RATE``
+    threshold.
+    """
+
+    source: str = "STATUS"
+    comparator: str = "EQUALS"
+    value: str | None = None
+    header_name: str | None = None
+    json_path: str | None = None
+
+    def to_dict(self) -> dict:
+        return _strip_none({
+            "source": self.source,
+            "headerName": self.header_name,
+            "jsonPath": self.json_path,
+            "comparator": self.comparator,
+            "value": self.value,
+        })
+
+    @classmethod
+    def from_dict(cls, data: dict) -> LoadCheck:
+        if data is None:
+            return None
+        return cls(
+            source=data.get("source", "STATUS"),
+            comparator=data.get("comparator", "EQUALS"),
+            value=data.get("value"),
+            header_name=data.get("headerName"),
+            json_path=data.get("jsonPath"),
+        )
+
+
+@dataclass
 class LoadStep:
     """A single request issued on each iteration of a :class:`LoadScenario`.
 
@@ -3302,7 +3416,8 @@ class LoadStep:
     template placeholders are rendered per iteration. ``captures`` bind values
     from this step's response for later steps in the same iteration (see
     :class:`LoadCapture`). ``weight`` is the relative selection weight used only
-    when the scenario's ``step_selection`` is ``WEIGHTED``.
+    when the scenario's ``step_selection`` is ``WEIGHTED``. ``checks`` assert on
+    this step's response (see :class:`LoadCheck`).
     """
 
     request: HttpRequest | None = None
@@ -3311,6 +3426,7 @@ class LoadStep:
     labels: dict | None = None
     captures: list[LoadCapture] | None = None
     weight: float | None = None
+    checks: list[LoadCheck] | None = None
 
     def to_dict(self) -> dict:
         return _strip_none({
@@ -3319,6 +3435,7 @@ class LoadStep:
             "name": self.name,
             "labels": self.labels,
             "captures": [c.to_dict() for c in self.captures] if self.captures else None,
+            "checks": [c.to_dict() for c in self.checks] if self.checks else None,
             "weight": self.weight,
         })
 
@@ -3327,6 +3444,7 @@ class LoadStep:
         if data is None:
             return None
         captures = data.get("captures")
+        checks = data.get("checks")
         return cls(
             request=HttpRequest.from_dict(data.get("request")),
             think_time=Delay.from_dict(data.get("thinkTime")),
@@ -3334,6 +3452,7 @@ class LoadStep:
             labels=data.get("labels"),
             captures=[LoadCapture.from_dict(c) for c in captures] if captures is not None else None,
             weight=data.get("weight"),
+            checks=[LoadCheck.from_dict(c) for c in checks] if checks is not None else None,
         )
 
 

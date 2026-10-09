@@ -2551,32 +2551,18 @@ mockServerClient("localhost", 1080).mockAnyResponse({
     </div>
     <button class="accordion inner">Python</button>
     <div class="panel">
-        <pre class="prettyprint lang-python code"><code class="code">import requests
+        <pre class="prettyprint lang-python code"><code class="code">from mockserver import MockServerClient, Body, ConditionalRequestDefinition, HttpRequest, HttpResponse, KeyToMultiValue
 
-# no typed setter — submit the raw expectation JSON over HTTP
-requests.put(
-    "http://localhost:1080/mockserver/expectation",
-    headers={"Content-Type": "application/json"},
-    data='''{
-    "httpRequest": {
-        "if": {
-            "method": "POST",
-            "headers": { "content-type": ["application/json"] }
-        },
-        "then": {
-            "body": {
-                "type": "JSON_SCHEMA",
-                "jsonSchema": "{\"type\": \"object\", \"required\": [\"orderId\"]}"
-            }
-        },
-        "else": {
-            "method": "GET"
-        }
-    },
-    "httpResponse": {
-        "statusCode": 200
-    }
-}'''
+client = MockServerClient("localhost", 1080)
+client.when(
+    ConditionalRequestDefinition(
+        if_request=HttpRequest(method="POST",
+                               headers=[KeyToMultiValue(name="content-type", values=["application/json"])]),
+        then_request=HttpRequest(body=Body.json_schema('{"type": "object", "required": ["orderId"]}')),
+        else_request=HttpRequest(method="GET"),
+    )
+).respond(
+    HttpResponse(status_code=200)
 )</code></pre>
     </div>
     <button class="accordion inner">Ruby</button>
@@ -2601,138 +2587,76 @@ client.close</code></pre>
         <pre class="prettyprint lang-go code"><code class="code">package main
 
 import (
-    "bytes"
-    "net/http"
+    mockserver "github.com/mock-server/mockserver-monorepo/mockserver-client-go/v7"
 )
 
 func main() {
-    // no typed setter — submit the raw expectation JSON over HTTP
-    body := []byte(`{
-    "httpRequest": {
-        "if": {
-            "method": "POST",
-            "headers": { "content-type": ["application/json"] }
-        },
-        "then": {
-            "body": {
-                "type": "JSON_SCHEMA",
-                "jsonSchema": "{\"type\": \"object\", \"required\": [\"orderId\"]}"
-            }
-        },
-        "else": {
-            "method": "GET"
-        }
-    },
-    "httpResponse": {
-        "statusCode": 200
-    }
-}`)
-    req, _ := http.NewRequest("PUT",
-        "http://localhost:1080/mockserver/expectation",
-        bytes.NewReader(body))
-    req.Header.Set("Content-Type", "application/json")
-    http.DefaultClient.Do(req)
+    client := mockserver.New("localhost", 1080)
+    client.Upsert(mockserver.Expectation{
+        HttpRequest: mockserver.ConditionalRequest(
+            &amp;mockserver.HttpRequest{Method: "POST", Headers: map[string][]string{"content-type": {"application/json"}}},
+            &amp;mockserver.HttpRequest{Body: mockserver.JSONSchemaBody(`{"type": "object", "required": ["orderId"]}`)},
+            &amp;mockserver.HttpRequest{Method: "GET"},
+        ),
+        HttpResponse: &amp;mockserver.HttpResponse{StatusCode: 200},
+    })
 }</code></pre>
     </div>
     <button class="accordion inner">.NET</button>
     <div class="panel">
-        <pre class="prettyprint lang-csharp code"><code class="code">using System.Net.Http;
-using System.Text;
+        <pre class="prettyprint lang-csharp code"><code class="code">using MockServer.Client;
+using MockServer.Client.Models;
 
-using var httpClient = new HttpClient();
-// no typed setter — submit the raw expectation JSON over HTTP
-var json = @"{
-    ""httpRequest"": {
-        ""if"": {
-            ""method"": ""POST"",
-            ""headers"": { ""content-type"": [""application/json""] }
-        },
-        ""then"": {
-            ""body"": {
-                ""type"": ""JSON_SCHEMA"",
-                ""jsonSchema"": ""{\""type\"": \""object\"", \""required\"": [\""orderId\""]}""
-            }
-        },
-        ""else"": {
-            ""method"": ""GET""
-        }
-    },
-    ""httpResponse"": {
-        ""statusCode"": 200
-    }
-}";
-await httpClient.PutAsync(
-    "http://localhost:1080/mockserver/expectation",
-    new StringContent(json, Encoding.UTF8, "application/json")
+using var client = new MockServerClient("localhost", 1080);
+client.When(
+    HttpRequest.RequestIf(
+        HttpRequest.Request()
+            .WithMethod("POST")
+            .WithHeader("content-type", "application/json"),
+        HttpRequest.Request()
+            .WithJsonSchemaBody("{\"type\": \"object\", \"required\": [\"orderId\"]}"),
+        HttpRequest.Request()
+            .WithMethod("GET")
+    )
+).Respond(
+    HttpResponse.Response()
+        .WithStatusCode(200)
 );</code></pre>
     </div>
     <button class="accordion inner">Rust</button>
     <div class="panel">
-        <pre class="prettyprint lang-rust code"><code class="code">use reqwest::blocking::Client;
+        <pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::{Body, ClientBuilder, HttpRequest, HttpResponse};
 
-let client = Client::new();
-// no typed setter — submit the raw expectation JSON over HTTP
-let body = r#"{
-    "httpRequest": {
-        "if": {
-            "method": "POST",
-            "headers": { "content-type": ["application/json"] }
-        },
-        "then": {
-            "body": {
-                "type": "JSON_SCHEMA",
-                "jsonSchema": "{\"type\": \"object\", \"required\": [\"orderId\"]}"
-            }
-        },
-        "else": {
-            "method": "GET"
-        }
-    },
-    "httpResponse": {
-        "statusCode": 200
-    }
-}"#;
-client.put("http://localhost:1080/mockserver/expectation")
-    .header("Content-Type", "application/json")
-    .body(body.to_string())
-    .send()
-    .unwrap();</code></pre>
+let client = ClientBuilder::new("localhost", 1080).build().unwrap();
+client.when(
+    HttpRequest::conditional(
+        HttpRequest::new()
+            .method("POST")
+            .header("content-type", "application/json"),
+        HttpRequest::new()
+            .body_value(Body::json_schema(r#"{"type": "object", "required": ["orderId"]}"#)),
+        HttpRequest::new().method("GET"),
+    ),
+).respond(
+    HttpResponse::new().status_code(200),
+).unwrap();</code></pre>
     </div>
     <button class="accordion inner">PHP</button>
     <div class="panel">
-        <pre class="prettyprint lang-php code"><code class="code">$json = &lt;&lt;&lt;'JSON'
-{
-    "httpRequest": {
-        "if": {
-            "method": "POST",
-            "headers": { "content-type": ["application/json"] }
-        },
-        "then": {
-            "body": {
-                "type": "JSON_SCHEMA",
-                "jsonSchema": "{\"type\": \"object\", \"required\": [\"orderId\"]}"
-            }
-        },
-        "else": {
-            "method": "GET"
-        }
-    },
-    "httpResponse": {
-        "statusCode": 200
-    }
-}
-JSON;
+        <pre class="prettyprint lang-php code"><code class="code">use MockServer\MockServerClient;
+use MockServer\HttpRequest;
+use MockServer\HttpResponse;
 
-// no typed setter — submit the raw expectation JSON over HTTP
-$ch = curl_init('http://localhost:1080/mockserver/expectation');
-curl_setopt_array($ch, [
-    CURLOPT_CUSTOMREQUEST  =&gt; 'PUT',
-    CURLOPT_POSTFIELDS     =&gt; $json,
-    CURLOPT_HTTPHEADER     =&gt; ['Content-Type: application/json; charset=utf-8'],
-    CURLOPT_RETURNTRANSFER =&gt; true,
-]);
-curl_exec($ch);
-curl_close($ch);</code></pre>
+$client = new MockServerClient('localhost', 1080);
+$client-&gt;when(
+    HttpRequest::conditional(
+        HttpRequest::request()-&gt;method('POST')-&gt;header('content-type', 'application/json'),
+        HttpRequest::request()-&gt;jsonSchemaBody('{"type": "object", "required": ["orderId"]}'),
+        HttpRequest::request()-&gt;method('GET')
+    )
+)-&gt;respond(
+    HttpResponse::response()-&gt;statusCode(200)
+);</code></pre>
     </div>
     <button class="accordion inner">REST API</button>
     <div class="panel">

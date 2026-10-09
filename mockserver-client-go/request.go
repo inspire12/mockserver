@@ -57,6 +57,22 @@ type HttpRequest struct {
 	SpecUrlOrPayload  interface{} `json:"specUrlOrPayload,omitempty"`
 	OperationId       string      `json:"operationId,omitempty"`
 	ContextPathPrefix string      `json:"contextPathPrefix,omitempty"`
+
+	// --- Conditional request definition (ConditionalRequestDefinition) ---
+	// When If is set, the request is matched with if/then/else logic: if If
+	// matches, Then must match too; otherwise Else must (when Else is nil the
+	// matcher matches whenever If does not). Not inverts the result. Each
+	// branch is an HTTP, OpenAPI or nested conditional matcher. Build one with
+	// ConditionalRequest or RequestBuilder.If/Then/Else.
+	If   *HttpRequest `json:"if,omitempty"`
+	Then *HttpRequest `json:"then,omitempty"`
+	Else *HttpRequest `json:"else,omitempty"`
+}
+
+// ConditionalRequest builds a conditional (if/then/else) request matcher.
+// thenReq and elseReq may be nil.
+func ConditionalRequest(ifReq, thenReq, elseReq *HttpRequest) *HttpRequest {
+	return &HttpRequest{If: ifReq, Then: thenReq, Else: elseReq}
 }
 
 // SocketAddress represents a socket address constraint.
@@ -160,6 +176,25 @@ func (b *RequestBuilder) Secure(secure bool) *RequestBuilder {
 // KeepAlive sets whether the request must be keep-alive.
 func (b *RequestBuilder) KeepAlive(keepAlive bool) *RequestBuilder {
 	b.request.KeepAlive = &keepAlive
+	return b
+}
+
+// If makes this a conditional (if/then/else) matcher whose guard is req. See
+// HttpRequest.If.
+func (b *RequestBuilder) If(req *RequestBuilder) *RequestBuilder {
+	b.request.If = req.BuildPtr()
+	return b
+}
+
+// Then sets the branch that must match when the If guard matches.
+func (b *RequestBuilder) Then(req *RequestBuilder) *RequestBuilder {
+	b.request.Then = req.BuildPtr()
+	return b
+}
+
+// Else sets the branch that must match when the If guard does not.
+func (b *RequestBuilder) Else(req *RequestBuilder) *RequestBuilder {
+	b.request.Else = req.BuildPtr()
 	return b
 }
 

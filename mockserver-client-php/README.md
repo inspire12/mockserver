@@ -131,6 +131,29 @@ $client->when(
 );
 ```
 
+### Conditional and OpenAPI Request Matchers
+
+`HttpRequest::conditional($if, $then, $else)` builds an if/then/else matcher,
+written as an `httpRequest` holding `if`, `then` and `else`: when `$if` matches,
+`$then` must match too, otherwise `$else` must (with no else, it matches
+whenever `$if` does not). Each branch is an `HttpRequest`, including an OpenAPI
+matcher (`HttpRequest::openAPI($specUrlOrPayload, $operationId)`) or another
+conditional; `->not()` inverts any matcher. `HttpRequest::fromArray()` reads
+these back, and `Expectation::fromArray()` exposes the typed request through
+`getHttpRequest()`. These need a client released after 8.0.0.
+
+```php
+$client->when(
+    HttpRequest::conditional(
+        HttpRequest::request()->method('POST')->header('content-type', 'application/json'),
+        HttpRequest::request()->jsonSchemaBody('{"type": "object", "required": ["orderId"]}'),
+        HttpRequest::request()->method('GET')
+    )
+)->respond(
+    HttpResponse::response()->statusCode(200)
+);
+```
+
 ### Class Callbacks
 
 A **class callback** references a server-side class (already on MockServer's
@@ -250,6 +273,7 @@ gated behind a server start-up flag and raise `FeatureNotEnabledException`
 (HTTP 403) until that flag is set.
 
 ```php
+use MockServer\LoadCheck;
 use MockServer\LoadScenario;
 use MockServer\LoadProfile;
 use MockServer\LoadStage;
@@ -278,6 +302,19 @@ $client->clearLoadScenarios();               // DELETE — remove all
 
 // Or register-and-start in one call:
 $client->runLoadScenario($scenario);
+
+// Per-step checks (LoadCheck) assert on each response; failures feed the
+// CHECK_FAILURE_RATE threshold. LoadCheck::fromArray() reads them back.
+$checked = LoadScenario::scenario('checked-scenario')
+    ->profile(LoadProfile::of(LoadStage::vuHold(5, 60000)))
+    ->addStep(
+        HttpRequest::request()->method('GET')->path('/api/orders/123'),
+        checks: [
+            LoadCheck::status('EQUALS', '200'),
+            LoadCheck::header('Content-Type', 'CONTAINS', 'application/json'),
+            LoadCheck::bodyJsonPath('$.status', 'EQUALS', 'CONFIRMED'),
+        ],
+    );
 
 // Service-scoped HTTP chaos for a downstream host (optional TTL dead-man's switch)
 $client->setServiceChaos('payments.internal:8443', [

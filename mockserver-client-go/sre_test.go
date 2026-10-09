@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -523,7 +524,7 @@ func TestClient_LoadScenario_OptionalAdvancedFieldsOmitted(t *testing.T) {
 	}
 	steps := m["steps"].([]interface{})
 	step0 := steps[0].(map[string]interface{})
-	for _, k := range []string{"weight", "captures"} {
+	for _, k := range []string{"weight", "captures", "checks"} {
 		if _, ok := step0[k]; ok {
 			t.Errorf("expected step %q to be omitted, got %v", k, step0[k])
 		}
@@ -1054,5 +1055,121 @@ func TestClient_StartChaosExperiment_Invalid(t *testing.T) {
 	err := client.StartChaosExperiment(ChaosExperiment{Name: "x"})
 	if err == nil {
 		t.Fatal("expected error for 400 status")
+	}
+}
+
+// TestLoadStep_ChecksWebsiteExample builds exactly what the Go tab of
+// load_injection.html (button_load_step_checks) builds and asserts the register
+// body equals that example's REST API JSON.
+func TestLoadStep_ChecksWebsiteExample(t *testing.T) {
+	var body []byte
+	ts := stubServer(t, 200, `{"name":"checked-scenario","state":"LOADED"}`, nil, nil, &body)
+	defer ts.Close()
+
+	client := NewFromURL(ts.URL)
+
+	order := Request().Method("GET").Path("/api/orders/123").Build()
+	order.SocketAddress = &SocketAddress{Host: "target", Port: 8080}
+
+	scenario := LoadScenario{
+		Name: "checked-scenario",
+		Profile: &LoadProfile{
+			Stages: []LoadStage{
+				ConstantVusStage(5, 60000),
+			},
+		},
+		Thresholds: []LoadThreshold{
+			{Metric: LoadThresholdCheckFailureRate, Comparator: "LESS_THAN", Threshold: 0.01},
+		},
+		Steps: []LoadStep{
+			{Request: &order,
+				Checks: []LoadCheck{
+					{Source: LoadCheckStatus, Comparator: LoadCheckEquals, Value: "200"},
+					{Source: LoadCheckHeader, HeaderName: "Content-Type", Comparator: LoadCheckContains, Value: "application/json"},
+					{Source: LoadCheckBodyJSONPath, JSONPath: "$.status", Comparator: LoadCheckEquals, Value: "CONFIRMED"},
+				}},
+		},
+	}
+
+	if _, err := client.LoadScenario(scenario); err != nil {
+		t.Fatal(err)
+	}
+
+	want := decodeJSON(t, []byte(`{
+    "name": "checked-scenario",
+    "profile": { "stages": [ { "type": "VU", "vus": 5, "durationMillis": 60000 } ] },
+    "thresholds": [
+      { "metric": "CHECK_FAILURE_RATE", "comparator": "LESS_THAN", "threshold": 0.01 }
+    ],
+    "steps": [
+      {
+        "request": { "method": "GET", "path": "/api/orders/123",
+                     "socketAddress": { "host": "target", "port": 8080 } },
+        "checks": [
+          { "source": "STATUS", "comparator": "EQUALS", "value": "200" },
+          { "source": "HEADER", "headerName": "Content-Type", "comparator": "CONTAINS", "value": "application/json" },
+          { "source": "BODY_JSONPATH", "jsonPath": "$.status", "comparator": "EQUALS", "value": "CONFIRMED" }
+        ]
+      }
+    ]
+  }`))
+	if got := decodeJSON(t, body); !reflect.DeepEqual(want, got) {
+		t.Errorf("website example JSON mismatch\ngot: %s", body)
+	}
+}
+
+// TestLoadStep_EmptyChecksOmitted proves an empty (non-nil) Checks slice is
+// left off the wire, as an unset one is.
+func TestLoadStep_EmptyChecksOmitted(t *testing.T) {
+	out, err := json.Marshal(LoadStep{Request: &HttpRequest{Path: "/x"}, Checks: []LoadCheck{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "checks") {
+		t.Errorf("expected checks to be omitted, got %s", out)
+	}
+}
+
+// TestClient_GetLoadScenario_ReadsChecks reads checks back from a server-style
+// registry entry whose step carries a key the model does not declare ("valid",
+// which the server echoes); decoding must not fail and the checks must
+// re-marshal unchanged.
+func TestClient_GetLoadScenario_ReadsChecks(t *testing.T) {
+	step := `{
+      "request": {"method": "GET", "path": "/api/orders/123"},
+      "checks": [
+        {"source": "STATUS", "comparator": "EQUALS", "value": "200"},
+        {"source": "HEADER", "headerName": "Content-Type", "comparator": "CONTAINS", "value": "application/json"},
+        {"source": "BODY_JSONPATH", "jsonPath": "$.total", "comparator": "GTE", "value": "10"}
+      ]
+    }`
+	var withValid map[string]interface{}
+	if err := json.Unmarshal([]byte(step), &withValid); err != nil {
+		t.Fatal(err)
+	}
+	withValid["valid"] = true
+	serverStep, _ := json.Marshal(withValid)
+
+	ts := stubServer(t, 200, `{"name":"checked-scenario","state":"LOADED","definition":{"name":"checked-scenario","steps":[`+string(serverStep)+`]}}`, nil, nil, nil)
+	defer ts.Close()
+
+	entry, err := NewFromURL(ts.URL).GetLoadScenario("checked-scenario")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Definition == nil || len(entry.Definition.Steps) != 1 {
+		t.Fatalf("unexpected definition: %+v", entry.Definition)
+	}
+	checks := entry.Definition.Steps[0].Checks
+	if len(checks) != 3 || checks[1].HeaderName != "Content-Type" || checks[2].JSONPath != "$.total" || checks[2].Comparator != LoadCheckGTE {
+		t.Fatalf("checks not read: %+v", checks)
+	}
+
+	out, err := json.Marshal(entry.Definition.Steps[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decodeJSON(t, []byte(step)), decodeJSON(t, out)) {
+		t.Errorf("step did not round-trip\nwant: %s\ngot : %s", step, out)
 	}
 }

@@ -463,6 +463,34 @@ pub struct HttpRequest {
     /// [`cookie_matcher`](Self::cookie_matcher).
     pub cookie_matchers: Option<HashMap<String, MatcherValue>>,
 
+    /// Guard of a conditional (if/then/else) request matcher (`"if"`). When
+    /// set, this request is a conditional matcher: if the guard matches,
+    /// [`then_request`](Self::then_request) must match too, otherwise
+    /// [`else_request`](Self::else_request) must (with no `else`, it matches
+    /// whenever the guard does not). Each branch is an HTTP matcher, an OpenAPI
+    /// matcher or another conditional. Build with [`conditional`](Self::conditional).
+    pub if_request: Option<Box<HttpRequest>>,
+
+    /// The `"then"` branch of a conditional matcher. See [`if_request`](Self::if_request).
+    pub then_request: Option<Box<HttpRequest>>,
+
+    /// The `"else"` branch of a conditional matcher. See [`if_request`](Self::if_request).
+    pub else_request: Option<Box<HttpRequest>>,
+
+    /// OpenAPI matcher: a spec URL, file path or classpath resource (a JSON
+    /// string), or an inline spec (a JSON string or object) (`"specUrlOrPayload"`).
+    /// When set, this request matches against an OpenAPI operation. Build with
+    /// [`open_api`](Self::open_api).
+    pub spec_url_or_payload: Option<serde_json::Value>,
+
+    /// OpenAPI matcher: the operation to match (`"operationId"`); all
+    /// operations when unset.
+    pub operation_id: Option<String>,
+
+    /// OpenAPI matcher: a path prefix prepended to the spec's paths
+    /// (`"contextPathPrefix"`).
+    pub context_path_prefix: Option<String>,
+
     /// Forward-compatibility catch-all for request fields the typed model does
     /// not yet name (e.g. `clientCertificate`, `localAddress`, `remoteAddress`).
     pub extra: Extra,
@@ -589,6 +617,18 @@ impl Serialize for HttpRequest {
             path_parameters: &'a Option<HashMap<String, ParameterValues>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             cookies: Option<HashMap<String, MatcherValue>>,
+            #[serde(rename = "if", skip_serializing_if = "Option::is_none")]
+            if_request: &'a Option<Box<HttpRequest>>,
+            #[serde(rename = "then", skip_serializing_if = "Option::is_none")]
+            then_request: &'a Option<Box<HttpRequest>>,
+            #[serde(rename = "else", skip_serializing_if = "Option::is_none")]
+            else_request: &'a Option<Box<HttpRequest>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            spec_url_or_payload: &'a Option<serde_json::Value>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            operation_id: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            context_path_prefix: &'a Option<String>,
             #[serde(flatten)]
             extra: &'a Extra,
         }
@@ -610,6 +650,12 @@ impl Serialize for HttpRequest {
             protocol: &self.protocol,
             path_parameters: &self.path_parameters,
             cookies: effective_single(&self.cookies, &self.cookie_matchers),
+            if_request: &self.if_request,
+            then_request: &self.then_request,
+            else_request: &self.else_request,
+            spec_url_or_payload: &self.spec_url_or_payload,
+            operation_id: &self.operation_id,
+            context_path_prefix: &self.context_path_prefix,
             extra: &self.extra,
         }
         .serialize(serializer)
@@ -650,6 +696,18 @@ impl<'de> Deserialize<'de> for HttpRequest {
             path_parameters: Option<HashMap<String, ParameterValues>>,
             #[serde(default)]
             cookies: Option<HashMap<String, MatcherValue>>,
+            #[serde(default, rename = "if")]
+            if_request: Option<Box<HttpRequest>>,
+            #[serde(default, rename = "then")]
+            then_request: Option<Box<HttpRequest>>,
+            #[serde(default, rename = "else")]
+            else_request: Option<Box<HttpRequest>>,
+            #[serde(default)]
+            spec_url_or_payload: Option<serde_json::Value>,
+            #[serde(default)]
+            operation_id: Option<String>,
+            #[serde(default)]
+            context_path_prefix: Option<String>,
             #[serde(flatten)]
             extra: Extra,
         }
@@ -676,6 +734,12 @@ impl<'de> Deserialize<'de> for HttpRequest {
             header_matchers,
             query_string_parameter_matchers,
             cookie_matchers,
+            if_request: wire.if_request,
+            then_request: wire.then_request,
+            else_request: wire.else_request,
+            spec_url_or_payload: wire.spec_url_or_payload,
+            operation_id: wire.operation_id,
+            context_path_prefix: wire.context_path_prefix,
             extra: wire.extra,
         })
     }
@@ -951,6 +1015,80 @@ impl HttpRequest {
                 *slot = ParameterValues::Matcher(serde_json::Value::Array(vec![element]));
             }
         }
+        self
+    }
+
+    /// A conditional (if/then/else) request matcher: when `if_request` matches,
+    /// `then_request` must match too, otherwise `else_request` must. Serialises
+    /// to `{ "if": …, "then": …, "else": … }`. For a matcher with no `else`
+    /// branch, use `HttpRequest::new().if_request(..).then_request(..)`.
+    ///
+    /// # Example
+    /// ```
+    /// use mockserver_client::HttpRequest;
+    ///
+    /// let request = HttpRequest::conditional(
+    ///     HttpRequest::new().method("POST"),
+    ///     HttpRequest::new().path("/orders"),
+    ///     HttpRequest::new().method("GET"),
+    /// );
+    /// assert_eq!(
+    ///     serde_json::to_value(&request).unwrap(),
+    ///     serde_json::json!({
+    ///         "if": { "method": "POST" },
+    ///         "then": { "path": "/orders" },
+    ///         "else": { "method": "GET" }
+    ///     })
+    /// );
+    /// ```
+    pub fn conditional(
+        if_request: HttpRequest,
+        then_request: HttpRequest,
+        else_request: HttpRequest,
+    ) -> Self {
+        Self::new()
+            .if_request(if_request)
+            .then_request(then_request)
+            .else_request(else_request)
+    }
+
+    /// Set the guard (`"if"`) of a conditional matcher.
+    pub fn if_request(mut self, request: HttpRequest) -> Self {
+        self.if_request = Some(Box::new(request));
+        self
+    }
+
+    /// Set the `"then"` branch of a conditional matcher.
+    pub fn then_request(mut self, request: HttpRequest) -> Self {
+        self.then_request = Some(Box::new(request));
+        self
+    }
+
+    /// Set the `"else"` branch of a conditional matcher.
+    pub fn else_request(mut self, request: HttpRequest) -> Self {
+        self.else_request = Some(Box::new(request));
+        self
+    }
+
+    /// An OpenAPI request matcher for a spec URL, file path, classpath resource
+    /// or inline spec — a string, or an inline spec object as a
+    /// [`serde_json::Value`].
+    pub fn open_api(spec_url_or_payload: impl Into<serde_json::Value>) -> Self {
+        Self {
+            spec_url_or_payload: Some(spec_url_or_payload.into()),
+            ..Self::default()
+        }
+    }
+
+    /// Set the OpenAPI operation to match (`"operationId"`).
+    pub fn operation_id(mut self, operation_id: impl Into<String>) -> Self {
+        self.operation_id = Some(operation_id.into());
+        self
+    }
+
+    /// Set the OpenAPI context path prefix (`"contextPathPrefix"`).
+    pub fn context_path_prefix(mut self, context_path_prefix: impl Into<String>) -> Self {
+        self.context_path_prefix = Some(context_path_prefix.into());
         self
     }
 }
@@ -5179,6 +5317,7 @@ impl LoadShape {
 /// `metric` enum.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[non_exhaustive]
 pub enum LoadThresholdMetric {
     /// 50th-percentile latency in milliseconds.
     LatencyP50,
@@ -5192,6 +5331,9 @@ pub enum LoadThresholdMetric {
     ErrorRate,
     /// Throughput in requests/second over the run's elapsed time.
     ThroughputRps,
+    /// Failed per-step [`LoadCheck`]s / evaluated checks, as a 0.0-1.0
+    /// fraction (0 when no checks ran).
+    CheckFailureRate,
 }
 
 /// How a [`LoadThreshold`]'s observed value is compared to its threshold. Maps
@@ -5222,7 +5364,8 @@ pub struct LoadThreshold {
     pub comparator: LoadComparator,
 
     /// The threshold value (milliseconds for latency metrics, a 0.0-1.0
-    /// fraction for `ERROR_RATE`, requests/second for `THROUGHPUT_RPS`).
+    /// fraction for `ERROR_RATE` or `CHECK_FAILURE_RATE`, requests/second for
+    /// `THROUGHPUT_RPS`).
     pub threshold: f64,
 }
 
@@ -5314,7 +5457,7 @@ pub enum LoadFeederStrategy {
 #[serde(rename_all = "camelCase")]
 pub struct LoadFeeder {
     /// Inline dataset: a list of column-name to value maps, one per row.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rows: Vec<HashMap<String, String>>,
 
     /// Optional raw inline dataset parsed server-side into rows per `format`.
@@ -5412,6 +5555,121 @@ impl LoadCapture {
     }
 }
 
+/// Where a [`LoadCheck`] reads its observed value from. Maps to the check
+/// `source` enum.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum LoadCheckSource {
+    /// The response status code.
+    Status,
+    /// A response header (named by `header_name`).
+    Header,
+    /// A JSONPath over the response body (`json_path`).
+    BodyJsonpath,
+}
+
+/// How a [`LoadCheck`] compares the observed value with its expected value.
+/// Maps to the check `comparator` enum. `Equals`/`NotEquals`/`Contains`/
+/// `Matches` (a full-match regex) compare strings; `Gt`/`Lt`/`Gte`/`Lte` parse
+/// both sides as numbers and fail the check when either is not a number.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum LoadCheckComparator {
+    Equals,
+    NotEquals,
+    Contains,
+    Matches,
+    Gt,
+    Lt,
+    Gte,
+    Lte,
+}
+
+/// A per-step response assertion for a load scenario: reads a value from the
+/// step's response and compares it with `value`. A failing check never fails
+/// the request; failures feed the `CHECK_FAILURE_RATE` threshold. Maps to the
+/// `LoadCheck` schema.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadCheck {
+    /// Where to read the observed value from.
+    pub source: LoadCheckSource,
+
+    /// The response header to read (required when `source` is `HEADER`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header_name: Option<String>,
+
+    /// The JSONPath over the response body (required when `source` is
+    /// `BODY_JSONPATH`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub json_path: Option<String>,
+
+    /// How the observed value is compared with `value`.
+    pub comparator: LoadCheckComparator,
+
+    /// The expected value / comparand.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+}
+
+impl LoadCheck {
+    /// Create a check reading from `source` and comparing with `comparator`.
+    pub fn new(source: LoadCheckSource, comparator: LoadCheckComparator) -> Self {
+        Self {
+            source,
+            header_name: None,
+            json_path: None,
+            comparator,
+            value: None,
+        }
+    }
+
+    /// A check on the response status code.
+    pub fn status(comparator: LoadCheckComparator, value: impl Into<String>) -> Self {
+        Self::new(LoadCheckSource::Status, comparator).value(value)
+    }
+
+    /// A check on the response header `header_name`.
+    pub fn header(
+        header_name: impl Into<String>,
+        comparator: LoadCheckComparator,
+        value: impl Into<String>,
+    ) -> Self {
+        Self::new(LoadCheckSource::Header, comparator)
+            .header_name(header_name)
+            .value(value)
+    }
+
+    /// A check on the response body value at JSONPath `json_path`.
+    pub fn body_json_path(
+        json_path: impl Into<String>,
+        comparator: LoadCheckComparator,
+        value: impl Into<String>,
+    ) -> Self {
+        Self::new(LoadCheckSource::BodyJsonpath, comparator)
+            .json_path(json_path)
+            .value(value)
+    }
+
+    /// Set the response header to read.
+    pub fn header_name(mut self, header_name: impl Into<String>) -> Self {
+        self.header_name = Some(header_name.into());
+        self
+    }
+
+    /// Set the JSONPath to evaluate over the response body.
+    pub fn json_path(mut self, json_path: impl Into<String>) -> Self {
+        self.json_path = Some(json_path.into());
+        self
+    }
+
+    /// Set the expected value.
+    pub fn value(mut self, value: impl Into<String>) -> Self {
+        self.value = Some(value.into());
+        self
+    }
+}
+
 /// How each iteration of a load scenario selects which steps to run. Maps to
 /// the `stepSelection` enum.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -5435,7 +5693,7 @@ pub enum LoadStepSelection {
 pub struct LoadProfile {
     /// Ordered stages run one after another. Omitted (empty) when a `shape` is
     /// used.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stages: Vec<LoadStage>,
 
     /// A named shape that expands server-side into stages. Use a shape OR
@@ -5499,8 +5757,13 @@ pub struct LoadStep {
     /// Optional cross-step capture rules applied to this step's response. Each
     /// binds an extracted value to a variable name visible to SUBSEQUENT steps
     /// in the same iteration.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub captures: Vec<LoadCapture>,
+
+    /// Optional per-step response assertions. A failing check never fails the
+    /// request; failures feed the `CHECK_FAILURE_RATE` threshold.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<LoadCheck>,
 
     /// Relative selection weight, used only when the scenario's
     /// `stepSelection` is `WEIGHTED`. Must be > 0 when `WEIGHTED`; ignored
@@ -5516,6 +5779,7 @@ impl LoadStep {
             request,
             think_time: None,
             captures: Vec::new(),
+            checks: Vec::new(),
             weight: None,
         }
     }
@@ -5529,6 +5793,12 @@ impl LoadStep {
     /// Append a cross-step capture rule applied to this step's response.
     pub fn capture(mut self, capture: LoadCapture) -> Self {
         self.captures.push(capture);
+        self
+    }
+
+    /// Append a response check evaluated against this step's response.
+    pub fn check(mut self, check: LoadCheck) -> Self {
+        self.checks.push(check);
         self
     }
 
@@ -5569,11 +5839,11 @@ pub struct LoadScenario {
 
     /// Optional in-run pass/fail thresholds; the run carries a PASS verdict iff
     /// all hold, FAIL otherwise. Empty/omitted means no verdict is computed.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub thresholds: Vec<LoadThreshold>,
 
     /// When true, a FAIL verdict aborts the run early. Default false (omitted).
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub abort_on_fail: bool,
 
     /// Suppress `abort_on_fail` for the first N milliseconds of the run so noisy

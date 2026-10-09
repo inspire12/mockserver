@@ -15,6 +15,7 @@ use MockServer\Exception\InvalidRequestException;
 use MockServer\Exception\VerificationException;
 use MockServer\HttpRequest;
 use MockServer\LoadCapture;
+use MockServer\LoadCheck;
 use MockServer\LoadFeeder;
 use MockServer\LoadPacing;
 use MockServer\LoadProfile;
@@ -869,6 +870,88 @@ class MockServerClientSreTest extends TestCase
         $me = $body['steps'][1];
         $this->assertEquals(3.0, $me['weight']);
         $this->assertArrayNotHasKey('captures', $me);
+        $this->assertArrayNotHasKey('checks', $login);
+        $this->assertArrayNotHasKey('checks', $me);
+    }
+
+    public function testLoadStepChecksSerialiseToTheLoadCheckContract(): void
+    {
+        $history = [];
+        $client = $this->createClientWithMock([
+            new Response(200, [], '{}'),
+        ], $history);
+
+        $client->loadScenario(
+            LoadScenario::scenario('checked')
+                ->profile(LoadProfile::constant(1, 1000))
+                ->addStep(
+                    HttpRequest::request()->method('GET')->path('/api/orders/123'),
+                    checks: [
+                        LoadCheck::status('EQUALS', '200'),
+                        LoadCheck::header('Content-Type', 'contains', 'application/json'),
+                        LoadCheck::bodyJsonPath('$.status', 'EQUALS', 'CONFIRMED'),
+                        LoadCheck::of('status', 'LT', '500'),
+                    ],
+                )
+                ->addStep(HttpRequest::request()->path('/unchecked'), checks: [])
+        );
+
+        $body = json_decode((string) $history[0]['request']->getBody(), true);
+
+        $this->assertSame([
+            ['source' => 'STATUS', 'comparator' => 'EQUALS', 'value' => '200'],
+            ['source' => 'HEADER', 'headerName' => 'Content-Type', 'comparator' => 'CONTAINS', 'value' => 'application/json'],
+            ['source' => 'BODY_JSONPATH', 'jsonPath' => '$.status', 'comparator' => 'EQUALS', 'value' => 'CONFIRMED'],
+            ['source' => 'STATUS', 'comparator' => 'LT', 'value' => '500'],
+        ], $body['steps'][0]['checks']);
+        $this->assertArrayNotHasKey('checks', $body['steps'][1]);
+    }
+
+    public function testLoadCheckRoundTripsThroughFromArray(): void
+    {
+        $checks = [
+            ['source' => 'STATUS', 'comparator' => 'EQUALS', 'value' => '200'],
+            ['source' => 'HEADER', 'headerName' => 'Content-Type', 'comparator' => 'CONTAINS', 'value' => 'application/json'],
+            ['source' => 'BODY_JSONPATH', 'jsonPath' => '$.status', 'comparator' => 'EQUALS', 'value' => 'CONFIRMED'],
+        ];
+
+        $read = array_map(static fn (array $c): LoadCheck => LoadCheck::fromArray($c), $checks);
+
+        $this->assertSame('HEADER', $read[1]->getSource());
+        $this->assertSame('Content-Type', $read[1]->getHeaderName());
+        $this->assertSame('$.status', $read[2]->getJsonPath());
+        $this->assertSame(
+            $checks,
+            array_map(static fn (LoadCheck $c): array => $c->toArray(), $read),
+        );
+    }
+
+    public function testLoadStepChecksReadFromTheScenarioDefinitionTheServerReturns(): void
+    {
+        $client = $this->createClientWithMock([
+            new Response(200, [], json_encode([
+                'name' => 'checked',
+                'state' => 'LOADED',
+                'definition' => [
+                    'name' => 'checked',
+                    'profile' => ['stages' => [['type' => 'VU', 'vus' => 5, 'durationMillis' => 60000]]],
+                    'steps' => [[
+                        'request' => ['method' => 'GET', 'path' => '/'],
+                        'checks' => [
+                            ['comparator' => 'GTE', 'source' => 'STATUS', 'valid' => true, 'value' => '200'],
+                        ],
+                    ]],
+                ],
+            ], JSON_THROW_ON_ERROR)),
+        ]);
+
+        $definition = $client->getLoadScenario('checked')['definition'];
+        $check = LoadCheck::fromArray($definition['steps'][0]['checks'][0]);
+
+        $this->assertSame('STATUS', $check->getSource());
+        $this->assertSame('GTE', $check->getComparator());
+        $this->assertSame('200', $check->getValue());
+        $this->assertSame(['source' => 'STATUS', 'comparator' => 'GTE', 'value' => '200'], $check->toArray());
     }
 
     public function testLoadProfileFromShapeSpike(): void
