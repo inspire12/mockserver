@@ -48,6 +48,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.RunnableScheduledFuture;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicLong;
@@ -3222,15 +3223,33 @@ public class DashboardWebSocketHandlerTest {
         DashboardWebSocketHandler handler = track(new DashboardWebSocketHandler(httpState, false, true));
 
         handler.registerListeners();
+        ScheduledThreadPoolExecutor throttle = (ScheduledThreadPoolExecutor) throttleExecutorOf(handler);
         handler.registerListeners();
         handler.registerListeners();
 
-        java.lang.reflect.Field field = DashboardWebSocketHandler.class.getDeclaredField("throttleExecutorService");
-        field.setAccessible(true);
-        ScheduledThreadPoolExecutor throttle = (ScheduledThreadPoolExecutor) field.get(handler);
+        assertThat("registrations replaced the throttle executor", throttleExecutorOf(handler), sameInstance(throttle));
+        assertThat(throttle.getCorePoolSize(), is(1));
 
-        // One periodic task, whatever the number of registrations. A fixed-rate task sits in the
-        // queue between runs, so the queue depth is the number of schedules that were made.
-        assertThat("throttle refill scheduled more than once", throttle.getQueue().size(), is(1));
+        // A periodic task leaves the queue while it runs, so park the executor's only thread on a
+        // blocker first: then no refill can be running and every scheduled refill is in the queue.
+        CountDownLatch blockerRunning = new CountDownLatch(1);
+        CountDownLatch releaseBlocker = new CountDownLatch(1);
+        throttle.execute(() -> {
+            blockerRunning.countDown();
+            try {
+                releaseBlocker.await(30, SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        try {
+            assertThat("throttle thread never reached the blocker", blockerRunning.await(30, SECONDS), is(true));
+            long scheduledRefills = throttle.getQueue().stream()
+                .filter(task -> task instanceof RunnableScheduledFuture && ((RunnableScheduledFuture<?>) task).isPeriodic())
+                .count();
+            assertThat("periodic throttle refills scheduled", scheduledRefills, is(1L));
+        } finally {
+            releaseBlocker.countDown();
+        }
     }
 }
