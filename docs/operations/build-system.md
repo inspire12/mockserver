@@ -338,6 +338,8 @@ Manual activation"]
 | `kill_mockserver_instances` | Auto on Unix (`/usr/bin/env` exists) | Kills existing MockServer processes during `clean` phase |
 | `disable-java8-doclint` | Auto on JDK 8+ | Disables strict Javadoc linting |
 | `release` | Manual (`-P release`) | Adds source JARs, Javadoc JARs, GPG signing, Maven release plugin |
+| `git-worktree-commit-hash` (`mockserver-core`) | Auto when the repo root has no `.git/HEAD` (a linked git worktree, where `.git` is a file) | Resolves the commit hash with native `git` run in the module directory, so a worktree build reports its own HEAD; the plugin's JGit path maps a worktree to the main checkout and reported that HEAD instead |
+| `no-git-commit-hash` (`mockserver-core`) | Auto when the repo root has no `.git` (e.g. a source tarball) | Skips `git-commit-id-maven-plugin`, leaving the hash empty; without it the worktree profile's native `git` call would fail the build |
 | `netty-it-skip` (`mockserver-netty`) | Manual; CI's `:maven: build` when `MOCKSERVER_NETTY_ITS_IN_SHARDS=true` | Skips the module's integration tests, which the CI shard steps run instead |
 | `netty-it-shard-proxy-http`, `netty-it-shard-mock`, `netty-it-shard-rest` (`mockserver-netty`) | Manual (`-P`); the CI shard steps | Narrow Failsafe to one shard: the packages in `mockserver.nettyItShard.proxyHttp`, those in `mockserver.nettyItShard.mock`, or everything else. Together they run every integration test once. See [ci-cd.md](../infrastructure/ci-cd.md#step-3b-netty-integration-test-shards) |
 
@@ -346,8 +348,8 @@ Manual activation"]
 | Plugin | Version | Phase | Purpose |
 |--------|---------|-------|---------|
 | `maven-compiler-plugin` | 3.15.0 | compile | Java 17 compilation with `-Xlint:all` |
-| `git-commit-id-maven-plugin` | 9.0.1 | initialize | Resolves the abbreviated git commit hash into `${git.commit.id.abbrev}` for the version class (mockserver-core only); degrades to an empty hash when no git metadata is present |
-| `templating-maven-plugin` | 3.1.0 | generate-sources | Generates version class from templates (version, group/artifact id, git hash) |
+| `git-commit-id-maven-plugin` | 10.0.1 | initialize | Resolves the abbreviated git commit hash into `${git.commit.id.abbrev}` for the version class (mockserver-core only) with JGit; degrades to an empty hash when no git metadata is present. In a linked git worktree the `git-worktree-commit-hash` profile switches it to native `git` |
+| `templating-maven-plugin` | 3.1.1 | generate-sources | Generates version class from templates (version, group/artifact id, git hash) |
 | `maven-jar-plugin` | 3.5.0 | package | JAR packaging with MANIFEST.MF metadata |
 | `maven-clean-plugin` | 3.5.0 | clean | Removes `.log`, keystore, and temp files |
 | `maven-surefire-plugin` | 3.6.0 | test | Unit tests (`*Test.java`, excludes `*IntegrationTest.java`) |

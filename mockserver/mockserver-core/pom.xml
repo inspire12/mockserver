@@ -656,11 +656,7 @@
                     <includeOnlyProperties>
                         <includeOnlyProperty>^git\.commit\.id\.abbrev$</includeOnlyProperty>
                     </includeOnlyProperties>
-                    <!--
-                        NOTE: inside a linked git worktree the resolved hash is that of the shared
-                        repository HEAD, not the worktree's own HEAD. Single-working-tree clones
-                        (Buildkite CI and the release pipeline, which is what ships) resolve correctly.
-                    -->
+                    <!-- linked git worktrees: see the git-worktree-commit-hash profile -->
                 </configuration>
             </plugin>
             <!--
@@ -1216,5 +1212,57 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!--
+            In a linked git worktree .git is a file, and the plugin resolves it to the shared
+            repository, so JGit would report the main checkout's HEAD. Run native git from this
+            module's directory instead, which honours the worktree. Clones (CI, release) keep JGit:
+            native git can fail its ownership check on a checkout bind-mounted into a container.
+        -->
+        <profile>
+            <id>git-worktree-commit-hash</id>
+            <activation>
+                <file>
+                    <missing>${basedir}/../../.git/HEAD</missing>
+                </file>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>io.github.git-commit-id</groupId>
+                        <artifactId>git-commit-id-maven-plugin</artifactId>
+                        <configuration>
+                            <useNativeGit>true</useNativeGit>
+                            <dotGitDirectory>${project.basedir}</dotGitDirectory>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <!--
+            No .git at all (e.g. a source tarball) also activates the profile above, and native git
+            then fails the build, so skip the plugin: the hash stays empty as it did with JGit.
+        -->
+        <profile>
+            <id>no-git-commit-hash</id>
+            <activation>
+                <file>
+                    <missing>${basedir}/../../.git</missing>
+                </file>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>io.github.git-commit-id</groupId>
+                        <artifactId>git-commit-id-maven-plugin</artifactId>
+                        <configuration>
+                            <skip>true</skip>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 
 </project>

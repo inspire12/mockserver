@@ -1919,7 +1919,7 @@ CONFIG_JSON="$(jq -n \
     # OCI label. They are not the same format, so per the "only compare when both are
     # well-formed 40-hex; otherwise record both and check nothing" rule, both are recorded
     # and neither is normalised into the other — a prefix compare would manufacture false
-    # reds (and the abbrev can resolve to shared-repo HEAD in a linked worktree build).
+    # reds.
     mockserver_git_hash: (if $git_hash=="" then null else $git_hash end),
     image: $image,
     image_digest: $image_digest,
