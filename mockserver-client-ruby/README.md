@@ -85,7 +85,7 @@ client.close
 
 ## Models
 
-All 26 domain model classes are available under the `MockServer` module:
+All 27 domain model classes are available under the `MockServer` module:
 
 - `Delay`, `Times`, `TimeToLive`
 - `KeyToMultiValue`, `Body`, `SocketAddress`
@@ -94,7 +94,7 @@ All 26 domain model classes are available under the `MockServer` module:
 - `HttpOverrideForwardedRequest`, `HttpRequestAndHttpResponse`
 - `ConnectionOptions`
 - `Expectation`, `ExpectationId`
-- `OpenAPIDefinition`, `OpenAPIExpectation`
+- `OpenAPIDefinition`, `OpenAPIExpectation`, `ConditionalRequestDefinition`
 - `Verification`, `VerificationSequence`, `VerificationTimes`
 - `Ports`
 - `RequestDefinition` (alias for `HttpRequest`)
@@ -133,6 +133,21 @@ An `httpRequest` holding `specUrlOrPayload` is read as an `OpenAPIDefinition`
 matcher, and `HttpOverrideForwardedRequest` carries `request_override`,
 `response_override` and `response_template`. These need a client released
 after 8.0.0.
+
+An `httpRequest` holding `if` is read as a `ConditionalRequestDefinition`: when
+`if_request` matches, `then_request` must match too, otherwise `else_request`
+must. A load scenario `LoadStep` takes `checks`, a list of `LoadCheck`
+assertions on each step's response. These need a client released after 8.0.0.
+
+```ruby
+client.when(
+  MockServer::ConditionalRequestDefinition.new(
+    if_request: MockServer::HttpRequest.new(method: 'POST'),
+    then_request: MockServer::HttpRequest.new(path: '/orders'),
+    else_request: MockServer::HttpRequest.new(method: 'GET')
+  )
+).respond(MockServer::HttpResponse.new(status_code: 200))
+```
 
 ## JWT and combined body matchers
 

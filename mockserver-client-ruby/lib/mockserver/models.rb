@@ -251,9 +251,11 @@ module MockServer
   end
 
   # @api private
-  # An httpRequest naming an OpenAPI spec (specUrlOrPayload) is an OpenAPI
-  # matcher; anything else is an HTTP (or DNS) request matcher.
+  # An httpRequest holding if is a conditional matcher, one naming an OpenAPI
+  # spec (specUrlOrPayload) is an OpenAPI matcher; anything else is an HTTP (or
+  # DNS) request matcher.
   def self.deserialize_request_definition(data)
+    return ConditionalRequestDefinition.from_hash(data) if data.is_a?(Hash) && data.key?('if')
     return OpenAPIDefinition.from_hash(data) if data.is_a?(Hash) && data.key?('specUrlOrPayload')
 
     HttpRequest.from_hash(data)
@@ -2944,6 +2946,43 @@ module MockServer
     end
   end
 
+  # A conditional (if/then/else) request matcher, written as an httpRequest
+  # holding if, then and else. When +if_request+ matches, +then_request+ must
+  # match too; otherwise +else_request+ must (with none, the matcher matches
+  # whenever +if_request+ does not). Each branch is an HttpRequest, an
+  # OpenAPIDefinition or another ConditionalRequestDefinition.
+  class ConditionalRequestDefinition
+    # not_condition inverts the match (the server's +not+ field).
+    attr_accessor :if_request, :then_request, :else_request, :not_condition
+
+    def initialize(if_request: nil, then_request: nil, else_request: nil, not_condition: nil)
+      @if_request = if_request
+      @then_request = then_request
+      @else_request = else_request
+      @not_condition = not_condition
+    end
+
+    def to_h
+      MockServer.strip_none({
+        'not'  => @not_condition,
+        'if'   => @if_request&.to_h,
+        'then' => @then_request&.to_h,
+        'else' => @else_request&.to_h
+      })
+    end
+
+    def self.from_hash(data)
+      return nil if data.nil?
+
+      new(
+        if_request:    MockServer.deserialize_request_definition(data['if']),
+        then_request:  MockServer.deserialize_request_definition(data['then']),
+        else_request:  MockServer.deserialize_request_definition(data['else']),
+        not_condition: data['not']
+      )
+    end
+  end
+
   class OpenAPIExpectation
     attr_accessor :spec_url_or_payload, :operations_and_responses
 
@@ -3452,20 +3491,61 @@ module MockServer
     end
   end
 
+  # A per-step response assertion for a load scenario: reads a value from the
+  # step's response (+source+ +STATUS+, +HEADER+ with +header_name+, or
+  # +BODY_JSONPATH+ with +json_path+) and compares it with +value+ using
+  # +comparator+ (+EQUALS+, +NOT_EQUALS+, +CONTAINS+, +MATCHES+, +GT+, +LT+,
+  # +GTE+ or +LTE+). A failing check never fails the request; failures feed the
+  # +CHECK_FAILURE_RATE+ threshold.
+  class LoadCheck
+    attr_accessor :source, :header_name, :json_path, :comparator, :value
+
+    def initialize(source:, comparator:, header_name: nil, json_path: nil, value: nil)
+      @source = source
+      @comparator = comparator
+      @header_name = header_name
+      @json_path = json_path
+      @value = value
+    end
+
+    def to_h
+      MockServer.strip_none({
+        'source'     => @source,
+        'headerName' => @header_name,
+        'jsonPath'   => @json_path,
+        'comparator' => @comparator,
+        'value'      => @value
+      })
+    end
+
+    def self.from_hash(data)
+      return nil if data.nil?
+
+      new(
+        source:      data['source'],
+        header_name: data['headerName'],
+        json_path:   data['jsonPath'],
+        comparator:  data['comparator'],
+        value:       data['value']
+      )
+    end
+  end
+
   # A single step within a load scenario. Each step fires +request+ (an HttpRequest)
   # against the target, optionally pausing for +think_time+ (a Delay) afterwards.
   # +captures+ binds values from this step's response for later steps in the same
-  # iteration; +weight+ is the relative selection weight when the scenario's
-  # +step_selection+ is +WEIGHTED+.
+  # iteration; +checks+ (LoadCheck) assert on that response; +weight+ is the
+  # relative selection weight when the scenario's +step_selection+ is +WEIGHTED+.
   class LoadStep
-    attr_accessor :name, :labels, :think_time, :request, :captures, :weight
+    attr_accessor :name, :labels, :think_time, :request, :captures, :checks, :weight
 
-    def initialize(request:, name: nil, labels: nil, think_time: nil, captures: nil, weight: nil)
+    def initialize(request:, name: nil, labels: nil, think_time: nil, captures: nil, checks: nil, weight: nil)
       @request = request
       @name = name
       @labels = labels
       @think_time = think_time
       @captures = captures
+      @checks = checks
       @weight = weight
     end
 
@@ -3476,6 +3556,7 @@ module MockServer
         'thinkTime' => @think_time&.to_h,
         'request'   => @request&.to_h,
         'captures'  => @captures.nil? ? nil : @captures.map(&:to_h),
+        'checks'    => @checks.nil? ? nil : @checks.map(&:to_h),
         'weight'    => @weight
       })
     end
@@ -3484,12 +3565,14 @@ module MockServer
       return nil if data.nil?
 
       captures_data = data['captures']
+      checks_data = data['checks']
       new(
         name:       data['name'],
         labels:     data['labels'],
         think_time: Delay.from_hash(data['thinkTime']),
         request:    HttpRequest.from_hash(data['request']),
         captures:   captures_data ? captures_data.map { |c| LoadCapture.from_hash(c) } : nil,
+        checks:     checks_data ? checks_data.map { |c| LoadCheck.from_hash(c) } : nil,
         weight:     data['weight']
       )
     end

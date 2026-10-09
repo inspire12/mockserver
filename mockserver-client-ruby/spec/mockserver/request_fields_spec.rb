@@ -3,8 +3,8 @@
 require 'json'
 
 # Fields and input shapes the website examples use: the override-forwarded-request
-# overrides, an OpenAPI matcher in httpRequest, keyMatchStyle, and keyToMultiValue
-# collections given as a Hash.
+# overrides, an OpenAPI or conditional matcher in httpRequest, keyMatchStyle, and
+# keyToMultiValue collections given as a Hash.
 RSpec.describe 'request fields used by the website examples' do
   def wire(model)
     JSON.parse(JSON.generate(model.to_h))
@@ -93,6 +93,74 @@ RSpec.describe 'request fields used by the website examples' do
     it 'leaves a plain request matcher an HttpRequest' do
       expectation = MockServer::Expectation.from_hash('httpRequest' => { 'path' => '/a' })
       expect(expectation.http_request).to be_a(MockServer::HttpRequest)
+    end
+  end
+
+  describe 'a conditional (if/then/else) request matcher in httpRequest' do
+    let(:matcher) do
+      {
+        'if' => { 'method' => 'POST', 'headers' => [{ 'name' => 'content-type', 'values' => ['application/json'] }] },
+        'then' => { 'body' => { 'type' => 'JSON_SCHEMA',
+                                'jsonSchema' => '{"type": "object", "required": ["orderId"]}' } },
+        'else' => { 'method' => 'GET' }
+      }
+    end
+
+    it 'reads an expectation matcher holding if as a ConditionalRequestDefinition' do
+      expectation = MockServer::Expectation.from_hash('httpRequest' => matcher, 'httpResponse' => { 'statusCode' => 200 })
+      condition = expectation.http_request
+      expect(condition).to be_a(MockServer::ConditionalRequestDefinition)
+      expect([condition.if_request, condition.then_request, condition.else_request].map(&:class))
+        .to eq([MockServer::HttpRequest] * 3)
+      expect(condition.if_request.method).to eq('POST')
+      expect(condition.then_request.body.type).to eq('JSON_SCHEMA')
+      expect(condition.else_request.method).to eq('GET')
+      expect(wire(expectation)).to eq('httpRequest' => matcher, 'httpResponse' => { 'statusCode' => 200 })
+    end
+
+    it 'writes typed branches as if, then and else inside httpRequest' do
+      expectation = MockServer::Expectation.new(
+        http_request: MockServer::ConditionalRequestDefinition.new(
+          if_request: MockServer::HttpRequest.new(method: 'POST', headers: { 'content-type' => ['application/json'] }),
+          then_request: MockServer::HttpRequest.new(
+            body: MockServer::Body.json_schema('{"type": "object", "required": ["orderId"]}')
+          ),
+          else_request: MockServer::HttpRequest.new(method: 'GET')
+        ),
+        http_response: MockServer::HttpResponse.new(status_code: 200)
+      )
+      expect(wire(expectation)).to eq('httpRequest' => matcher, 'httpResponse' => { 'statusCode' => 200 })
+    end
+
+    it 'reads nested conditional and OpenAPI branches, and not' do
+      nested = {
+        'not' => true,
+        'if' => { 'path' => '/a' },
+        'then' => { 'if' => { 'method' => 'POST' }, 'then' => { 'specUrlOrPayload' => 'https://example.com/o.json' } }
+      }
+      model = MockServer::ConditionalRequestDefinition.from_hash(nested)
+      expect(model.not_condition).to eq(true)
+      expect(model.then_request).to be_a(MockServer::ConditionalRequestDefinition)
+      expect(model.then_request.then_request).to be_a(MockServer::OpenAPIDefinition)
+      expect(model.else_request).to be_nil
+      expect(wire(model)).to eq(nested)
+    end
+
+    it 'reads verification and verifySequence matchers the same way' do
+      verification = { 'httpRequest' => matcher, 'times' => { 'atLeast' => 1 } }
+      expect(MockServer::Verification.from_hash(verification).http_request)
+        .to be_a(MockServer::ConditionalRequestDefinition)
+      expect(wire(MockServer::Verification.from_hash(verification))).to eq(verification)
+      sequence = { 'httpRequests' => [matcher, { 'path' => '/b' }] }
+      model = MockServer::VerificationSequence.from_hash(sequence)
+      expect(model.http_requests.map(&:class)).to eq([MockServer::ConditionalRequestDefinition, MockServer::HttpRequest])
+      expect(wire(model)).to eq(sequence)
+    end
+
+    it 'reads a symbol-key Hash' do
+      expectation = MockServer::Expectation.from_hash(httpRequest: { if: { method: 'POST' }, else: { method: 'GET' } })
+      expect(expectation.http_request).to be_a(MockServer::ConditionalRequestDefinition)
+      expect(wire(expectation)).to eq('httpRequest' => { 'if' => { 'method' => 'POST' }, 'else' => { 'method' => 'GET' } })
     end
   end
 

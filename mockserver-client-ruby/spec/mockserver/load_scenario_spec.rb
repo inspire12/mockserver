@@ -440,6 +440,42 @@ RSpec.describe MockServer::Client do
       expect(roundtrip.steps[0].captures[0].name).to eq('token')
     end
 
+    it 'serialises step checks to the LoadCheck JSON contract and round-trips them' do
+      step = MockServer::LoadStep.new(
+        request: MockServer::HttpRequest.new(method: 'GET', path: '/api/orders/123'),
+        checks: [
+          MockServer::LoadCheck.new(source: 'STATUS', comparator: 'EQUALS', value: '200'),
+          MockServer::LoadCheck.new(source: 'HEADER', header_name: 'Content-Type', comparator: 'CONTAINS',
+                                    value: 'application/json'),
+          MockServer::LoadCheck.new(source: 'BODY_JSONPATH', json_path: '$.status', comparator: 'EQUALS',
+                                    value: 'CONFIRMED')
+        ]
+      )
+      checks = [
+        { 'source' => 'STATUS', 'comparator' => 'EQUALS', 'value' => '200' },
+        { 'source' => 'HEADER', 'headerName' => 'Content-Type', 'comparator' => 'CONTAINS', 'value' => 'application/json' },
+        { 'source' => 'BODY_JSONPATH', 'jsonPath' => '$.status', 'comparator' => 'EQUALS', 'value' => 'CONFIRMED' }
+      ]
+      hash = JSON.parse(JSON.generate(step.to_h))
+      expect(hash['checks']).to eq(checks)
+
+      roundtrip = MockServer::LoadStep.from_hash(hash)
+      expect(roundtrip.checks.map(&:class)).to eq([MockServer::LoadCheck] * 3)
+      expect(roundtrip.checks[1].header_name).to eq('Content-Type')
+      expect(roundtrip.checks[2].json_path).to eq('$.status')
+      expect(roundtrip.to_h).to eq(hash)
+    end
+
+    it 'reads the checks of a scenario definition the server returns' do
+      definition = {
+        'name' => 'checked', 'profile' => { 'stages' => [{ 'type' => 'VU', 'vus' => 5, 'durationMillis' => 60_000 }] },
+        'steps' => [{ 'request' => { 'method' => 'GET', 'path' => '/' },
+                      'checks' => [{ 'comparator' => 'GTE', 'source' => 'STATUS', 'valid' => true, 'value' => '200' }] }]
+      }
+      check = MockServer::LoadScenario.from_hash(definition).steps[0].checks[0]
+      expect(check.to_h).to eq('source' => 'STATUS', 'comparator' => 'GTE', 'value' => '200')
+    end
+
     it 'omits the new advanced fields when unset so existing scenarios serialise unchanged' do
       hash = sample_scenario.to_h
       %w[thresholds abortOnFail abortGraceMillis pacing feeder stepSelection].each do |key|
@@ -447,6 +483,7 @@ RSpec.describe MockServer::Client do
       end
       expect(hash['profile']).not_to have_key('shape')
       expect(hash['steps'][0]).not_to have_key('captures')
+      expect(hash['steps'][0]).not_to have_key('checks')
       expect(hash['steps'][0]).not_to have_key('weight')
     end
   end

@@ -2460,25 +2460,24 @@ include MockServer
 
 client = Client.new('localhost', 1080)
 
-# The typed LoadStep has no `checks` field yet, so submit the scenario as a raw Hash.
-scenario = {
-  'name' =&gt; 'checked-scenario',
-  'profile' =&gt; { 'stages' =&gt; [ { 'type' =&gt; 'VU', 'vus' =&gt; 5, 'durationMillis' =&gt; 60_000 } ] },
-  'thresholds' =&gt; [
-    { 'metric' =&gt; 'CHECK_FAILURE_RATE', 'comparator' =&gt; 'LESS_THAN', 'threshold' =&gt; 0.01 }
+scenario = LoadScenario.new(
+  name: 'checked-scenario',
+  profile: LoadProfile.new(stages: [LoadStage.vu(60_000, vus: 5)]),
+  thresholds: [
+    LoadThreshold.new(metric: 'CHECK_FAILURE_RATE', comparator: 'LESS_THAN', threshold: 0.01)
   ],
-  'steps' =&gt; [
-    {
-      'request' =&gt; { 'method' =&gt; 'GET', 'path' =&gt; '/api/orders/123',
-                     'socketAddress' =&gt; { 'host' =&gt; 'target', 'port' =&gt; 8080 } },
-      'checks' =&gt; [
-        { 'source' =&gt; 'STATUS', 'comparator' =&gt; 'EQUALS', 'value' =&gt; '200' },
-        { 'source' =&gt; 'HEADER', 'headerName' =&gt; 'Content-Type', 'comparator' =&gt; 'CONTAINS', 'value' =&gt; 'application/json' },
-        { 'source' =&gt; 'BODY_JSONPATH', 'jsonPath' =&gt; '$.status', 'comparator' =&gt; 'EQUALS', 'value' =&gt; 'CONFIRMED' }
+  steps: [
+    LoadStep.new(
+      request: HttpRequest.new(method: 'GET', path: '/api/orders/123',
+                               socket_address: SocketAddress.new(host: 'target', port: 8080)),
+      checks: [
+        LoadCheck.new(source: 'STATUS', comparator: 'EQUALS', value: '200'),
+        LoadCheck.new(source: 'HEADER', header_name: 'Content-Type', comparator: 'CONTAINS', value: 'application/json'),
+        LoadCheck.new(source: 'BODY_JSONPATH', json_path: '$.status', comparator: 'EQUALS', value: 'CONFIRMED')
       ]
-    }
+    )
   ]
-}
+)
 
 client.run_load_scenario(scenario)             # register + start (needs loadGenerationEnabled=true)
 client.stop_load_scenarios('checked-scenario')

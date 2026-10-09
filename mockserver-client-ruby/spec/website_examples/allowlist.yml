@@ -178,7 +178,7 @@ mock_server/_includes/load_scenario_code_examples.html#button_load_rate_soak:
   reason: Ruby also stops the scenario after starting it; the REST API tab registers and starts it.
 mock_server/load_injection.html#button_load_step_checks:
   status: differs
-  digest: a0aff751aaa3
+  digest: c3e484c46c0d
   reason: Ruby also stops the scenario after starting it; the REST API tab registers and starts it.
 mock_server/load_injection.html#in_run_thresholds_fail_the_run_on_a_latency_or_error_budget_breach:
   status: differs

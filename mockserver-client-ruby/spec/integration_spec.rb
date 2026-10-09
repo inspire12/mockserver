@@ -226,6 +226,49 @@ RSpec.describe 'Integration', :integration do
       resp2 = make_request(host, port, 'GET', '/once-only')
       expect(resp2.code).to eq('404')
     end
+
+    it 'matches with a conditional (if/then/else) request definition' do
+      client.when(
+        MockServer::ConditionalRequestDefinition.new(
+          if_request: MockServer::HttpRequest.new(method: 'POST', headers: { 'content-type' => ['application/json'] }),
+          then_request: MockServer::HttpRequest.new(
+            body: MockServer::Body.json_schema('{"type": "object", "required": ["orderId"]}')
+          ),
+          else_request: MockServer::HttpRequest.new(method: 'GET')
+        )
+      ).respond(
+        MockServer::HttpResponse.new(status_code: 200)
+      )
+
+      json = { 'Content-Type' => 'application/json' }
+      expect(make_request(host, port, 'POST', '/orders', body: '{"orderId": "A1"}', headers: json).code).to eq('200')
+      expect(make_request(host, port, 'POST', '/orders', body: '{"other": "A1"}', headers: json).code).to eq('404')
+      expect(make_request(host, port, 'GET', '/orders').code).to eq('200')
+      expect(make_request(host, port, 'DELETE', '/orders').code).to eq('404')
+      expect(client.retrieve_active_expectations.first.http_request).to be_a(MockServer::ConditionalRequestDefinition)
+    end
+  end
+
+  describe 'load scenario steps' do
+    it 'registers per-step checks the server reads back' do
+      checks = [
+        MockServer::LoadCheck.new(source: 'STATUS', comparator: 'EQUALS', value: '200'),
+        MockServer::LoadCheck.new(source: 'BODY_JSONPATH', json_path: '$.status', comparator: 'EQUALS', value: 'OK')
+      ]
+      client.load_scenario(MockServer::LoadScenario.new(
+        name: 'ruby-checked-scenario',
+        profile: MockServer::LoadProfile.new(stages: [MockServer::LoadStage.vu(1_000, vus: 1)]),
+        steps: [MockServer::LoadStep.new(
+          request: MockServer::HttpRequest.new(method: 'GET', path: '/'),
+          checks: checks
+        )]
+      ))
+      definition = client.get_load_scenario('ruby-checked-scenario')['definition']
+      read_back = MockServer::LoadScenario.from_hash(definition).steps[0].checks
+      expect(read_back.map(&:to_h)).to eq(checks.map(&:to_h))
+    ensure
+      client.delete_load_scenario('ruby-checked-scenario')
+    end
   end
 
   describe 'verification' do

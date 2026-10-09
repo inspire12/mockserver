@@ -2495,7 +2495,7 @@ curl_close($ch);</code></pre>
 
 <h4>Conditional (if/then/else) Request Matcher</h4>
 
-<p>A <strong>conditionalRequestDefinition</strong> lets you combine request matchers with if/then/else logic. If the <code>if</code> guard matches the incoming request, the <code>then</code> branch must also match; otherwise the <code>else</code> branch must match (when absent, the expectation matches whenever the guard is false). Each branch can be any request definition — an <code>httpRequest</code>, an OpenAPI definition, or even a nested <code>conditionalRequestDefinition</code>.</p>
+<p>To combine request matchers with if/then/else logic, give the expectation's <code>httpRequest</code> an <code>if</code>, a <code>then</code> and an optional <code>else</code> in place of the usual request fields. If the <code>if</code> guard matches the incoming request, the <code>then</code> branch must also match; otherwise the <code>else</code> branch must match (when absent, the expectation matches whenever the guard is false). Each branch can be any request matcher — the usual request fields, an OpenAPI definition, or another <code>if</code>/<code>then</code>/<code>else</code>.</p>
 
 
 <p>This expectation matches either a JSON POST whose body contains an <code>orderId</code> field, or a GET request. Existing AND-only expectations are unchanged — this construct is entirely opt-in.</p>
@@ -2505,12 +2505,13 @@ curl_close($ch);</code></pre>
     <button class="accordion inner">Java</button>
     <div class="panel">
         <pre class="prettyprint lang-java code"><code class="code">import static org.mockserver.model.ConditionalRequestDefinition.requestIf;
+import static org.mockserver.model.JsonSchemaBody.jsonSchema;
 
 new MockServerClient("localhost", 1080)
     .when(
         requestIf(
             request().withMethod("POST").withHeader("content-type", "application/json"),
-            request().withBody(json("{\"orderId\": \"${json-unit.any-string}\"}")),
+            request().withBody(jsonSchema("{\"type\": \"object\", \"required\": [\"orderId\"]}")),
             request().withMethod("GET")
         )
     )
@@ -2520,7 +2521,7 @@ new MockServerClient("localhost", 1080)
     <div class="panel">
         <pre class="prettyprint lang-javascript code"><code class="code">var mockServerClient = require('mockserver-client').mockServerClient;
 mockServerClient("localhost", 1080).mockAnyResponse({
-    "conditionalRequestDefinition": {
+    "httpRequest": {
         "if": {
             "method": "POST",
             "headers": { "content-type": ["application/json"] }
@@ -2557,7 +2558,7 @@ requests.put(
     "http://localhost:1080/mockserver/expectation",
     headers={"Content-Type": "application/json"},
     data='''{
-    "conditionalRequestDefinition": {
+    "httpRequest": {
         "if": {
             "method": "POST",
             "headers": { "content-type": ["application/json"] }
@@ -2580,35 +2581,20 @@ requests.put(
     </div>
     <button class="accordion inner">Ruby</button>
     <div class="panel">
-        <pre class="prettyprint lang-ruby code"><code class="code">require 'net/http'
+        <pre class="prettyprint lang-ruby code"><code class="code">require 'mockserver-client'
+include MockServer
 
-uri = URI('http://localhost:1080/mockserver/expectation')
-http = Net::HTTP.new(uri.host, uri.port)
-# no typed setter — submit the raw expectation JSON over HTTP
-request = Net::HTTP::Put.new(uri, 'Content-Type' =&gt; 'application/json')
-request.body = &lt;&lt;~'JSON'
-{
-    "conditionalRequestDefinition": {
-        "if": {
-            "method": "POST",
-            "headers": { "content-type": ["application/json"] }
-        },
-        "then": {
-            "body": {
-                "type": "JSON_SCHEMA",
-                "jsonSchema": "{\"type\": \"object\", \"required\": [\"orderId\"]}"
-            }
-        },
-        "else": {
-            "method": "GET"
-        }
-    },
-    "httpResponse": {
-        "statusCode": 200
-    }
-}
-JSON
-http.request(request)</code></pre>
+client = Client.new('localhost', 1080)
+client.when(
+  ConditionalRequestDefinition.new(
+    if_request: HttpRequest.new(method: 'POST', headers: { 'content-type' =&gt; ['application/json'] }),
+    then_request: HttpRequest.new(body: Body.json_schema('{"type": "object", "required": ["orderId"]}')),
+    else_request: HttpRequest.new(method: 'GET')
+  )
+).respond(
+  HttpResponse.new(status_code: 200)
+)
+client.close</code></pre>
     </div>
     <button class="accordion inner">Go</button>
     <div class="panel">
@@ -2622,7 +2608,7 @@ import (
 func main() {
     // no typed setter — submit the raw expectation JSON over HTTP
     body := []byte(`{
-    "conditionalRequestDefinition": {
+    "httpRequest": {
         "if": {
             "method": "POST",
             "headers": { "content-type": ["application/json"] }
@@ -2656,7 +2642,7 @@ using System.Text;
 using var httpClient = new HttpClient();
 // no typed setter — submit the raw expectation JSON over HTTP
 var json = @"{
-    ""conditionalRequestDefinition"": {
+    ""httpRequest"": {
         ""if"": {
             ""method"": ""POST"",
             ""headers"": { ""content-type"": [""application/json""] }
@@ -2687,7 +2673,7 @@ await httpClient.PutAsync(
 let client = Client::new();
 // no typed setter — submit the raw expectation JSON over HTTP
 let body = r#"{
-    "conditionalRequestDefinition": {
+    "httpRequest": {
         "if": {
             "method": "POST",
             "headers": { "content-type": ["application/json"] }
@@ -2716,7 +2702,7 @@ client.put("http://localhost:1080/mockserver/expectation")
     <div class="panel">
         <pre class="prettyprint lang-php code"><code class="code">$json = &lt;&lt;&lt;'JSON'
 {
-    "conditionalRequestDefinition": {
+    "httpRequest": {
         "if": {
             "method": "POST",
             "headers": { "content-type": ["application/json"] }
@@ -2751,7 +2737,7 @@ curl_close($ch);</code></pre>
     <button class="accordion inner">REST API</button>
     <div class="panel">
         <pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/expectation" -d '{
-    "conditionalRequestDefinition": {
+    "httpRequest": {
         "if": {
             "method": "POST",
             "headers": { "content-type": ["application/json"] }
