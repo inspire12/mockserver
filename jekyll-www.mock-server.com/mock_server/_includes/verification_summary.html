@@ -183,7 +183,7 @@ $client-&gt;verify(
     <div class="panel">
             <pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/verify" -d '{
     "httpRequest": {
-        "path": "/simple"
+        "path": "/some/path"
     },
     "times": {
         "atLeast": 2
@@ -289,7 +289,7 @@ $client-&gt;verify(
     <div class="panel">
         <pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/verify" -d '{
     "httpRequest": {
-        "path": "/simple"
+        "path": "/some/path"
     },
     "times": {
         "atMost": 2
@@ -395,7 +395,7 @@ $client-&gt;verify(
     <div class="panel">
             <pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/verify" -d '{
     "httpRequest": {
-        "path": "/simple"
+        "path": "/some/path"
     },
     "times": {
         "atLeast": 2,
@@ -969,7 +969,7 @@ $client-&gt;verify(
     <div class="panel">
             <pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/verify" -d '{
     "httpRequest": {
-        "path": "/simple"
+        "path": "/some/path"
     },
     "times": {
         "atMost": 0

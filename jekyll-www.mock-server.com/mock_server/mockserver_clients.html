@@ -954,10 +954,10 @@ mockServerClient("localhost", 1080)
   .verify(
     {
       'path': '/some/path'
-    }, 2, false)
+    }, 2)
   .then(
     function () {
-      console.log("request found exactly 2 times");
+      console.log("request found at least 2 times");
     },
     function (error) {
       console.log(error);
@@ -972,10 +972,10 @@ mockServerClient("localhost", 1080)
     .verify(
       {
         'path': '/some/path'
-      }, 2, false)
+      }, 2)
     .then(
       function () {
-        console.log("request found exactly 2 times");
+        console.log("request found at least 2 times");
       },
       function (error) {
         console.log(error);
@@ -1011,7 +1011,7 @@ client.verify(
 client := mockserver.New("localhost", 1080)
 err := client.Verify(
     mockserver.Request().Path("/some/path"),
-    mockserver.ExactlyTimes(2),
+    mockserver.AtLeast(2),
 )
 if err != nil {
     log.Fatal(err)
@@ -1025,7 +1025,7 @@ using MockServer.Client.Models;
 using var client = new MockServerClient("localhost", 1080);
 client.Verify(
     HttpRequest.Request().WithPath("/some/path"),
-    VerificationTimes.ExactlyTimes(2)
+    VerificationTimes.AtLeastTimes(2)
 );</code></pre>
         </div>
         <button class="accordion inner">Rust</button>
@@ -1035,7 +1035,7 @@ client.Verify(
 let client = ClientBuilder::new("localhost", 1080).build().unwrap();
 client.verify(
     HttpRequest::new().path("/some/path"),
-    VerificationTimes::exactly(2),
+    VerificationTimes::at_least(2),
 ).unwrap();</code></pre>
         </div>
         <button class="accordion inner">PHP</button>
@@ -1047,18 +1047,17 @@ use MockServer\VerificationTimes;
 $client = new MockServerClient('localhost', 1080);
 $client-&gt;verify(
     HttpRequest::request()-&gt;path('/some/path'),
-    VerificationTimes::exactly(2)
+    VerificationTimes::atLeast(2)
 );</code></pre>
         </div>
         <button class="accordion inner">REST API</button>
         <div class="panel">
             <pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/verify" -d '{
     "httpRequest": {
-        "path": "/simple"
+        "path": "/some/path"
     },
     "times": {
-        "atLeast": 2,
-        "atMost": 2
+        "atLeast": 2
     }
 }'</code></pre>
         </div>
@@ -1921,7 +1920,7 @@ $client-&gt;reset();</code></pre>
         </div>
         <button class="accordion inner">REST API</button>
         <div class="panel">
-            <pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/reset</code></pre>
+            <pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/reset"</code></pre>
         </div>
     </div>
     <button id="button_client_bind_to_additional_free_port" class="accordion">bind to additional free port</button>
@@ -1999,9 +1998,8 @@ $boundPorts = $client-&gt;bind(0);</code></pre>
         </div>
         <button class="accordion inner">REST API</button>
         <div class="panel">
-            <pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/bind -d '{
+            <pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/bind" -d '{
     "ports": [
-        0,
         0
     ]
 }'</code></pre>
@@ -2082,7 +2080,7 @@ $boundPorts = $client-&gt;bind(1081, 1082);</code></pre>
         </div>
         <button class="accordion inner">REST API</button>
         <div class="panel">
-            <pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/bind -d '{
+            <pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/bind" -d '{
     "ports": [
         1081,
         1082

@@ -1385,7 +1385,7 @@ $client-&gt;when(
     },
     "httpResponse": {
         "statusCode": 418,
-        "reasonPhrase": "I'm a teapot"
+        "reasonPhrase": "I'\''m a teapot"
     }
 }'</code></pre>
         <p>See <a  href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/expectation/put_expectation" target="_blank" rel="noopener noreferrer">REST API</a> for full JSON specification</p>
@@ -4858,9 +4858,9 @@ $client-&gt;deleteFile('sample.json');</code></pre>
     <button class="accordion inner">REST API</button>
     <div class="panel">
         <pre class="prettyprint code"><code class="code"># Store a file
-curl -v -X PUT "http://localhost:1080/mockserver/files/store?name=sample.json" \
+curl -v -X PUT "http://localhost:1080/mockserver/files/store" \
     -H "Content-Type: application/json" \
-    -d '{"id": 1, "name": "example"}'
+    -d '{"name": "sample.json", "content": "{\"id\": 1, \"name\": \"example\"}"}'
 
 # Retrieve a file
 curl -v -X PUT "http://localhost:1080/mockserver/files/retrieve" \
@@ -4877,7 +4877,7 @@ curl -v -X PUT "http://localhost:1080/mockserver/files/delete" \
     </div>
     <p><strong>Endpoints:</strong></p>
     <ul>
-        <li><strong>PUT /mockserver/files/store?name=&lt;filename&gt;</strong> &mdash; stores a file with the given name; the request body is the file content</li>
+        <li><strong>PUT /mockserver/files/store</strong> &mdash; stores a file; the request body is a JSON object with a <code class="inline code">"name"</code> field and a <code class="inline code">"content"</code> field (the file content as a string, or base64 with <code class="inline code">"base64": true</code> for binary content)</li>
         <li><strong>PUT /mockserver/files/retrieve</strong> &mdash; retrieves a stored file; the request body is a JSON object with a <code class="inline code">"name"</code> field</li>
         <li><strong>PUT /mockserver/files/list</strong> &mdash; lists all stored file names</li>
         <li><strong>PUT /mockserver/files/delete</strong> &mdash; deletes a stored file; the request body is a JSON object with a <code class="inline code">"name"</code> field</li>

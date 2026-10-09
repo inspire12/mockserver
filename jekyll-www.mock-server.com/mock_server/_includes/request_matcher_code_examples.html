@@ -53,11 +53,14 @@ mockServerClient("localhost", 1080).mockAnyResponse({
     <button class="accordion inner">Python</button>
     <div class="panel">
         <pre class="prettyprint lang-python code"><code class="code">from mockserver.client import MockServerClient
-from mockserver.models import HttpRequest, HttpResponse
+from mockserver.models import HttpRequest, HttpResponse, Times, TimeToLive
 
 client = MockServerClient("localhost", 1080)
 client.when(
-    HttpRequest.request("/some/path")
+    HttpRequest.request("/some/path"),
+    times=Times.exactly(1),
+    time_to_live=TimeToLive.exactly(60, "SECONDS"),
+    priority=10
 ).respond(
     HttpResponse.response(body="some_response_body")
 )</code></pre>
@@ -83,7 +86,9 @@ client.when(
 client := mockserver.New("localhost", 1080)
 client.When(
     mockserver.Request().Path("/some/path"),
-).Respond(
+    mockserver.WithTimes(mockserver.Exactly(1)),
+    mockserver.WithTimeToLive(mockserver.TTL("SECONDS", 60)),
+).WithPriority(10).Respond(
     mockserver.Response().Body("some_response_body"),
 )</code></pre>
     </div>
@@ -94,17 +99,23 @@ using MockServer.Client.Models;
 
 using var client = new MockServerClient("localhost", 1080);
 client.When(
-    HttpRequest.Request().WithPath("/some/path")
+    HttpRequest.Request().WithPath("/some/path"),
+    Times.Exactly(1),
+    TimeToLive.ExactlyTtl(TimeUnit.SECONDS, 60),
+    10
 ).Respond(
     HttpResponse.Response().WithBody("some_response_body")
 );</code></pre>
     </div>
     <button class="accordion inner">Rust</button>
     <div class="panel">
-        <pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::{ClientBuilder, HttpRequest, HttpResponse};
+        <pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::{ClientBuilder, HttpRequest, HttpResponse, Times, TimeToLive};
 
 let client = ClientBuilder::new("localhost", 1080).build().unwrap();
 client.when(HttpRequest::new().path("/some/path"))
+    .times(Times::exactly(1))
+    .time_to_live(TimeToLive::seconds(60))
+    .priority(10)
     .respond(HttpResponse::new().body("some_response_body"))
     .unwrap();</code></pre>
     </div>
@@ -114,11 +125,15 @@ client.when(HttpRequest::new().path("/some/path"))
 use MockServer\HttpRequest;
 use MockServer\HttpResponse;
 use MockServer\Times;
+use MockServer\TimeToLive;
 
 $client = new MockServerClient('localhost', 1080);
 $client-&gt;when(
     HttpRequest::request()
-        -&gt;path('/some/path'), Times::exactly(1)
+        -&gt;path('/some/path'),
+    Times::exactly(1),
+    TimeToLive::exactly('SECONDS', 60),
+    10
 )-&gt;respond(
     HttpResponse::response()
         -&gt;body('some_response_body')
@@ -195,11 +210,14 @@ mockServerClient("localhost", 1080).mockAnyResponse({
     <button class="accordion inner">Python</button>
     <div class="panel">
         <pre class="prettyprint lang-python code"><code class="code">from mockserver.client import MockServerClient
-from mockserver.models import HttpRequest, HttpResponse
+from mockserver.models import HttpRequest, HttpResponse, Times, TimeToLive
 
 client = MockServerClient("localhost", 1080)
 client.when(
-    HttpRequest.request()
+    HttpRequest.request(),
+    times=Times.exactly(1),
+    time_to_live=TimeToLive.exactly(60, "SECONDS"),
+    priority=-10
 ).respond(
     HttpResponse.response(body="some_default_response_body")
 )</code></pre>
@@ -225,7 +243,9 @@ client.when(
 client := mockserver.New("localhost", 1080)
 client.When(
     mockserver.Request(),
-).Respond(
+    mockserver.WithTimes(mockserver.Exactly(1)),
+    mockserver.WithTimeToLive(mockserver.TTL("SECONDS", 60)),
+).WithPriority(-10).Respond(
     mockserver.Response().Body("some_default_response_body"),
 )</code></pre>
     </div>
@@ -236,17 +256,23 @@ using MockServer.Client.Models;
 
 using var client = new MockServerClient("localhost", 1080);
 client.When(
-    HttpRequest.Request()
+    HttpRequest.Request(),
+    Times.Exactly(1),
+    TimeToLive.ExactlyTtl(TimeUnit.SECONDS, 60),
+    -10
 ).Respond(
     HttpResponse.Response().WithBody("some_default_response_body")
 );</code></pre>
     </div>
     <button class="accordion inner">Rust</button>
     <div class="panel">
-        <pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::{ClientBuilder, HttpRequest, HttpResponse};
+        <pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::{ClientBuilder, HttpRequest, HttpResponse, Times, TimeToLive};
 
 let client = ClientBuilder::new("localhost", 1080).build().unwrap();
 client.when(HttpRequest::new())
+    .times(Times::exactly(1))
+    .time_to_live(TimeToLive::seconds(60))
+    .priority(-10)
     .respond(HttpResponse::new().body("some_default_response_body"))
     .unwrap();</code></pre>
     </div>
@@ -256,10 +282,14 @@ client.when(HttpRequest::new())
 use MockServer\HttpRequest;
 use MockServer\HttpResponse;
 use MockServer\Times;
+use MockServer\TimeToLive;
 
 $client = new MockServerClient('localhost', 1080);
 $client-&gt;when(
-    HttpRequest::request(), Times::exactly(1)
+    HttpRequest::request(),
+    Times::exactly(1),
+    TimeToLive::exactly('SECONDS', 60),
+    -10
 )-&gt;respond(
     HttpResponse::response()
         -&gt;body('some_default_response_body')
@@ -619,11 +649,12 @@ mockServerClient("localhost", 1080).mockAnyResponse({
     <button class="accordion inner">Python</button>
     <div class="panel">
         <pre class="prettyprint lang-python code"><code class="code">from mockserver.client import MockServerClient
-from mockserver.models import HttpRequest, HttpResponse
+from mockserver.models import HttpRequest, HttpResponse, Times
 
 client = MockServerClient("localhost", 1080)
 client.when(
-    HttpRequest.request("/some/path")
+    HttpRequest.request("/some/path"),
+    times=Times.exactly(2)
 ).respond(
     HttpResponse.response(body="some_response_body")
 )</code></pre>
@@ -647,6 +678,7 @@ client.when(
 client := mockserver.New("localhost", 1080)
 client.When(
     mockserver.Request().Path("/some/path"),
+    mockserver.WithTimes(mockserver.Exactly(2)),
 ).Respond(
     mockserver.Response().Body("some_response_body"),
 )</code></pre>
@@ -658,17 +690,19 @@ using MockServer.Client.Models;
 
 using var client = new MockServerClient("localhost", 1080);
 client.When(
-    HttpRequest.Request().WithPath("/some/path")
+    HttpRequest.Request().WithPath("/some/path"),
+    Times.Exactly(2)
 ).Respond(
     HttpResponse.Response().WithBody("some_response_body")
 );</code></pre>
     </div>
     <button class="accordion inner">Rust</button>
     <div class="panel">
-        <pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::{ClientBuilder, HttpRequest, HttpResponse};
+        <pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::{ClientBuilder, HttpRequest, HttpResponse, Times};
 
 let client = ClientBuilder::new("localhost", 1080).build().unwrap();
 client.when(HttpRequest::new().path("/some/path"))
+    .times(Times::exactly(2))
     .respond(HttpResponse::new().body("some_response_body"))
     .unwrap();</code></pre>
     </div>
@@ -682,7 +716,8 @@ use MockServer\Times;
 $client = new MockServerClient('localhost', 1080);
 $client-&gt;when(
     HttpRequest::request()
-        -&gt;path('/some/path'), Times::exactly(2)
+        -&gt;path('/some/path'),
+    Times::exactly(2)
 )-&gt;respond(
     HttpResponse::response()
         -&gt;body('some_response_body')
@@ -756,11 +791,13 @@ mockServerClient("localhost", 1080).mockAnyResponse({
     <button class="accordion inner">Python</button>
     <div class="panel">
         <pre class="prettyprint lang-python code"><code class="code">from mockserver.client import MockServerClient
-from mockserver.models import HttpRequest, HttpResponse
+from mockserver.models import HttpRequest, HttpResponse, Times, TimeToLive
 
 client = MockServerClient("localhost", 1080)
 client.when(
-    HttpRequest.request("/some/path")
+    HttpRequest.request("/some/path"),
+    times=Times.exactly(1),
+    time_to_live=TimeToLive.exactly(60, "SECONDS")
 ).respond(
     HttpResponse.response(body="some_response_body")
 )</code></pre>
@@ -785,6 +822,8 @@ client.when(
 client := mockserver.New("localhost", 1080)
 client.When(
     mockserver.Request().Path("/some/path"),
+    mockserver.WithTimes(mockserver.Exactly(1)),
+    mockserver.WithTimeToLive(mockserver.TTL("SECONDS", 60)),
 ).Respond(
     mockserver.Response().Body("some_response_body"),
 )</code></pre>
@@ -796,17 +835,21 @@ using MockServer.Client.Models;
 
 using var client = new MockServerClient("localhost", 1080);
 client.When(
-    HttpRequest.Request().WithPath("/some/path")
+    HttpRequest.Request().WithPath("/some/path"),
+    Times.Exactly(1),
+    TimeToLive.ExactlyTtl(TimeUnit.SECONDS, 60)
 ).Respond(
     HttpResponse.Response().WithBody("some_response_body")
 );</code></pre>
     </div>
     <button class="accordion inner">Rust</button>
     <div class="panel">
-        <pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::{ClientBuilder, HttpRequest, HttpResponse};
+        <pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::{ClientBuilder, HttpRequest, HttpResponse, Times, TimeToLive};
 
 let client = ClientBuilder::new("localhost", 1080).build().unwrap();
 client.when(HttpRequest::new().path("/some/path"))
+    .times(Times::exactly(1))
+    .time_to_live(TimeToLive::seconds(60))
     .respond(HttpResponse::new().body("some_response_body"))
     .unwrap();</code></pre>
     </div>
@@ -816,11 +859,14 @@ client.when(HttpRequest::new().path("/some/path"))
 use MockServer\HttpRequest;
 use MockServer\HttpResponse;
 use MockServer\Times;
+use MockServer\TimeToLive;
 
 $client = new MockServerClient('localhost', 1080);
 $client-&gt;when(
     HttpRequest::request()
-        -&gt;path('/some/path'), Times::exactly(1)
+        -&gt;path('/some/path'),
+    Times::exactly(1),
+    TimeToLive::exactly('SECONDS', 60)
 )-&gt;respond(
     HttpResponse::response()
         -&gt;body('some_response_body')
@@ -3336,11 +3382,11 @@ mockServerClient("localhost", 1080).mockAnyResponse({
     </div>
     <button class="accordion inner">Python</button>
     <div class="panel">
-        <pre class="prettyprint lang-python code"><code class="code">from mockserver.client import MockServerClient
-from mockserver.models import Expectation
+        <pre class="prettyprint lang-python code"><code class="code">import requests
 
-client = MockServerClient("localhost", 1080)
-client.upsert(Expectation.from_dict({
+# The Python client has no keyMatchStyle setting for query parameters;
+# use the REST API directly
+requests.put("http://localhost:1080/mockserver/expectation", json={
     "httpRequest" : {
         "path" : "/some/path",
         "queryStringParameters" : {
@@ -3361,7 +3407,7 @@ client.upsert(Expectation.from_dict({
     "httpResponse" : {
         "body" : "some_response_body"
     }
-}))</code></pre>
+})</code></pre>
     </div>
     <button class="accordion inner">Ruby</button>
     <div class="panel">
@@ -4786,18 +4832,23 @@ mockServerClient("localhost", 1080).mockAnyResponse({
     </div>
     <button class="accordion inner">Python</button>
     <div class="panel">
-        <pre class="prettyprint lang-python code"><code class="code">from mockserver.client import MockServerClient
-from mockserver.models import HttpRequest, HttpResponse
+        <pre class="prettyprint lang-python code"><code class="code">import requests
 
-client = MockServerClient("localhost", 1080)
-client.when(
-    HttpRequest.request("/some/path")
-        .with_header("keyMatchStyle", "M", "A", "T", "C", "H", "I", "N", "G", "_", "K", "E", "Y")
-        .with_header("multiValuedHeader", "value.*")
-        .with_header("headerTwo", "headerTwoValue")
-).respond(
-    HttpResponse.response(body="some_response_body")
-)</code></pre>
+# The Python client has no keyMatchStyle setting for headers;
+# use the REST API directly
+requests.put("http://localhost:1080/mockserver/expectation", json={
+    "httpRequest" : {
+        "path" : "/some/path",
+        "headers" : {
+            "keyMatchStyle" : "MATCHING_KEY",
+            "multiValuedHeader" : [ "value.*" ],
+            "headerTwo" : [ "headerTwoValue" ]
+        }
+    },
+    "httpResponse" : {
+        "body" : "some_response_body"
+    }
+})</code></pre>
     </div>
     <button class="accordion inner">Ruby</button>
     <div class="panel">
@@ -4814,53 +4865,109 @@ client.when(
     </div>
     <button class="accordion inner">Go</button>
     <div class="panel">
-        <pre class="prettyprint lang-go code"><code class="code">import mockserver "github.com/mock-server/mockserver-monorepo/mockserver-client-go/v7"
+        <pre class="prettyprint lang-go code"><code class="code">package main
 
-client := mockserver.New("localhost", 1080)
-client.When(
-    mockserver.Request().Path("/some/path").Header("keyMatchStyle", "M", "A", "T", "C", "H", "I", "N", "G", "_", "K", "E", "Y").Header("multiValuedHeader", "value.*").Header("headerTwo", "headerTwoValue"),
-).Respond(
-    mockserver.Response().Body("some_response_body"),
-)</code></pre>
+import (
+    "bytes"
+    "net/http"
+)
+
+func main() {
+    body := []byte(`{
+    "httpRequest" : {
+        "path" : "/some/path",
+        "headers" : {
+            "keyMatchStyle" : "MATCHING_KEY",
+            "multiValuedHeader" : [ "value.*" ],
+            "headerTwo" : [ "headerTwoValue" ]
+        }
+    },
+    "httpResponse" : {
+        "body" : "some_response_body"
+    }
+}`)
+    req, _ := http.NewRequest("PUT",
+        "http://localhost:1080/mockserver/expectation",
+        bytes.NewReader(body))
+    req.Header.Set("Content-Type", "application/json")
+    http.DefaultClient.Do(req)
+}</code></pre>
     </div>
     <button class="accordion inner">.NET</button>
     <div class="panel">
-        <pre class="prettyprint lang-csharp code"><code class="code">using MockServer.Client;
-using MockServer.Client.Models;
+        <pre class="prettyprint lang-csharp code"><code class="code">using System.Net.Http;
+using System.Text;
 
-using var client = new MockServerClient("localhost", 1080);
-client.When(
-    HttpRequest.Request().WithPath("/some/path").WithHeader("keyMatchStyle", "M", "A", "T", "C", "H", "I", "N", "G", "_", "K", "E", "Y").WithHeader("multiValuedHeader", "value.*").WithHeader("headerTwo", "headerTwoValue")
-).Respond(
-    HttpResponse.Response().WithBody("some_response_body")
+using var httpClient = new HttpClient();
+var json = @"{
+    ""httpRequest"" : {
+        ""path"" : ""/some/path"",
+        ""headers"" : {
+            ""keyMatchStyle"" : ""MATCHING_KEY"",
+            ""multiValuedHeader"" : [ ""value.*"" ],
+            ""headerTwo"" : [ ""headerTwoValue"" ]
+        }
+    },
+    ""httpResponse"" : {
+        ""body"" : ""some_response_body""
+    }
+}";
+await httpClient.PutAsync(
+    "http://localhost:1080/mockserver/expectation",
+    new StringContent(json, Encoding.UTF8, "application/json")
 );</code></pre>
     </div>
     <button class="accordion inner">Rust</button>
     <div class="panel">
-        <pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::{ClientBuilder, HttpRequest, HttpResponse};
+        <pre class="prettyprint lang-rust code"><code class="code">use reqwest::blocking::Client;
 
-let client = ClientBuilder::new("localhost", 1080).build().unwrap();
-client.when(HttpRequest::new().path("/some/path").header("keyMatchStyle", "M").header("keyMatchStyle", "A").header("keyMatchStyle", "T").header("keyMatchStyle", "C").header("keyMatchStyle", "H").header("keyMatchStyle", "I").header("keyMatchStyle", "N").header("keyMatchStyle", "G").header("keyMatchStyle", "_").header("keyMatchStyle", "K").header("keyMatchStyle", "E").header("keyMatchStyle", "Y").header("multiValuedHeader", "value.*").header("headerTwo", "headerTwoValue"))
-    .respond(HttpResponse::new().body("some_response_body"))
+let client = Client::new();
+let body = r#"{
+    "httpRequest" : {
+        "path" : "/some/path",
+        "headers" : {
+            "keyMatchStyle" : "MATCHING_KEY",
+            "multiValuedHeader" : [ "value.*" ],
+            "headerTwo" : [ "headerTwoValue" ]
+        }
+    },
+    "httpResponse" : {
+        "body" : "some_response_body"
+    }
+}"#;
+client.put("http://localhost:1080/mockserver/expectation")
+    .header("Content-Type", "application/json")
+    .body(body.to_string())
+    .send()
     .unwrap();</code></pre>
     </div>
     <button class="accordion inner">PHP</button>
     <div class="panel">
-        <pre class="prettyprint lang-php code"><code class="code">use MockServer\MockServerClient;
-use MockServer\HttpRequest;
-use MockServer\HttpResponse;
+        <pre class="prettyprint lang-php code"><code class="code">$json = &lt;&lt;&lt;'JSON'
+{
+    "httpRequest" : {
+        "path" : "/some/path",
+        "headers" : {
+            "keyMatchStyle" : "MATCHING_KEY",
+            "multiValuedHeader" : [ "value.*" ],
+            "headerTwo" : [ "headerTwoValue" ]
+        }
+    },
+    "httpResponse" : {
+        "body" : "some_response_body"
+    }
+}
+JSON;
 
-$client = new MockServerClient('localhost', 1080);
-$client-&gt;when(
-    HttpRequest::request()
-        -&gt;path('/some/path')
-        -&gt;header('keyMatchStyle', 'MATCHING_KEY')
-        -&gt;header('multiValuedHeader', 'value.*')
-        -&gt;header('headerTwo', 'headerTwoValue')
-)-&gt;respond(
-    HttpResponse::response()
-        -&gt;body('some_response_body')
-);</code></pre>
+$ch = curl_init('http://localhost:1080/mockserver/expectation');
+curl_setopt_array($ch, [
+    CURLOPT_CUSTOMREQUEST  =&gt; 'PUT',
+    CURLOPT_POSTFIELDS     =&gt; $json,
+    CURLOPT_HTTPHEADER     =&gt; ['Content-Type: application/json; charset=utf-8'],
+    CURLOPT_RETURNTRANSFER =&gt; true,
+]);
+curl_exec($ch);
+curl_close($ch);</code></pre>
     </div>
     <button class="accordion inner">REST API</button>
     <div class="panel">
@@ -5087,17 +5194,34 @@ mockServerClient("localhost", 1080).mockAnyResponse({
     <button class="accordion inner">Python</button>
     <div class="panel">
         <pre class="prettyprint lang-python code"><code class="code">from mockserver.client import MockServerClient
-from mockserver.models import HttpRequest, HttpResponse
+from mockserver.models import Expectation
 
 client = MockServerClient("localhost", 1080)
-client.when(
-    HttpRequest.request("/view/cart")
-        .with_method("GET")
-        .with_query_param("cartId", "055CA455-1DF7-45BB-8535-4F83E7266092")
-        .with_cookie("session", "4930456C-C718-476F-971F-CB8E047AB349")
-).respond(
-    HttpResponse.response(body="some_response_body")
-)</code></pre>
+client.upsert(Expectation.from_dict({
+    "httpRequest": {
+        "method": "GET",
+        "path": "/view/cart",
+        "queryStringParameters": {
+            "cartId": [{
+                "schema": {
+                    "type": "string",
+                    "format": "uuid"
+                }
+            }]
+        },
+        "cookies": {
+            "session": {
+                "schema": {
+                    "type": "string",
+                    "format": "uuid"
+                }
+            }
+        }
+    },
+    "httpResponse": {
+        "body": "some_response_body"
+    }
+}))</code></pre>
     </div>
     <button class="accordion inner">Ruby</button>
     <div class="panel">
@@ -5114,70 +5238,184 @@ client.when(
     </div>
     <button class="accordion inner">Go</button>
     <div class="panel">
-        <pre class="prettyprint lang-go code"><code class="code">import mockserver "github.com/mock-server/mockserver-monorepo/mockserver-client-go/v7"
+        <pre class="prettyprint lang-go code"><code class="code">package main
 
-client := mockserver.New("localhost", 1080)
-client.When(
-    mockserver.Request().Path("/view/cart").Method("GET").QueryStringParameter("cartId", "055CA455-1DF7-45BB-8535-4F83E7266092").Cookie("session", "4930456C-C718-476F-971F-CB8E047AB349"),
-).Respond(
-    mockserver.Response().Body("some_response_body"),
-)</code></pre>
+import (
+    "bytes"
+    "net/http"
+)
+
+func main() {
+    body := []byte(`{
+    "httpRequest": {
+        "method": "GET",
+        "path": "/view/cart",
+        "queryStringParameters": {
+            "cartId": [{
+                "schema": {
+                    "type": "string",
+                    "format": "uuid"
+                }
+            }]
+        },
+        "cookies": {
+            "session": {
+                "schema": {
+                    "type": "string",
+                    "format": "uuid"
+                }
+            }
+        }
+    },
+    "httpResponse": {
+        "body": "some_response_body"
+    }
+}`)
+    req, _ := http.NewRequest("PUT",
+        "http://localhost:1080/mockserver/expectation",
+        bytes.NewReader(body))
+    req.Header.Set("Content-Type", "application/json")
+    http.DefaultClient.Do(req)
+}</code></pre>
     </div>
     <button class="accordion inner">.NET</button>
     <div class="panel">
-        <pre class="prettyprint lang-csharp code"><code class="code">using MockServer.Client;
-using MockServer.Client.Models;
+        <pre class="prettyprint lang-csharp code"><code class="code">using System.Net.Http;
+using System.Text;
 
-using var client = new MockServerClient("localhost", 1080);
-client.When(
-    HttpRequest.Request().WithPath("/view/cart").WithMethod("GET").WithQueryStringParameter("cartId", "055CA455-1DF7-45BB-8535-4F83E7266092")
-).Respond(
-    HttpResponse.Response().WithBody("some_response_body")
+using var httpClient = new HttpClient();
+var json = @"{
+    ""httpRequest"": {
+        ""method"": ""GET"",
+        ""path"": ""/view/cart"",
+        ""queryStringParameters"": {
+            ""cartId"": [{
+                ""schema"": {
+                    ""type"": ""string"",
+                    ""format"": ""uuid""
+                }
+            }]
+        },
+        ""cookies"": {
+            ""session"": {
+                ""schema"": {
+                    ""type"": ""string"",
+                    ""format"": ""uuid""
+                }
+            }
+        }
+    },
+    ""httpResponse"": {
+        ""body"": ""some_response_body""
+    }
+}";
+await httpClient.PutAsync(
+    "http://localhost:1080/mockserver/expectation",
+    new StringContent(json, Encoding.UTF8, "application/json")
 );</code></pre>
     </div>
     <button class="accordion inner">Rust</button>
     <div class="panel">
-        <pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::{ClientBuilder, HttpRequest, HttpResponse};
+        <pre class="prettyprint lang-rust code"><code class="code">use reqwest::blocking::Client;
 
-let client = ClientBuilder::new("localhost", 1080).build().unwrap();
-client.when(HttpRequest::new().method("GET").path("/view/cart").query_param("cartId", "055CA455-1DF7-45BB-8535-4F83E7266092"))
-    .respond(HttpResponse::new().body("some_response_body"))
+let client = Client::new();
+let body = r#"{
+    "httpRequest": {
+        "method": "GET",
+        "path": "/view/cart",
+        "queryStringParameters": {
+            "cartId": [{
+                "schema": {
+                    "type": "string",
+                    "format": "uuid"
+                }
+            }]
+        },
+        "cookies": {
+            "session": {
+                "schema": {
+                    "type": "string",
+                    "format": "uuid"
+                }
+            }
+        }
+    },
+    "httpResponse": {
+        "body": "some_response_body"
+    }
+}"#;
+client.put("http://localhost:1080/mockserver/expectation")
+    .header("Content-Type", "application/json")
+    .body(body.to_string())
+    .send()
     .unwrap();</code></pre>
     </div>
     <button class="accordion inner">PHP</button>
     <div class="panel">
-        <pre class="prettyprint lang-php code"><code class="code">use MockServer\MockServerClient;
-use MockServer\HttpRequest;
-use MockServer\HttpResponse;
+        <pre class="prettyprint lang-php code"><code class="code">$json = &lt;&lt;&lt;'JSON'
+{
+    "httpRequest": {
+        "method": "GET",
+        "path": "/view/cart",
+        "queryStringParameters": {
+            "cartId": [{
+                "schema": {
+                    "type": "string",
+                    "format": "uuid"
+                }
+            }]
+        },
+        "cookies": {
+            "session": {
+                "schema": {
+                    "type": "string",
+                    "format": "uuid"
+                }
+            }
+        }
+    },
+    "httpResponse": {
+        "body": "some_response_body"
+    }
+}
+JSON;
 
-$client = new MockServerClient('localhost', 1080);
-$client-&gt;when(
-    HttpRequest::request()
-        -&gt;method('GET')
-        -&gt;path('/view/cart')
-        -&gt;queryStringParameter('cartId', '055CA455-1DF7-45BB-8535-4F83E7266092')
-        -&gt;cookie('session', '4930456C-C718-476F-971F-CB8E047AB349')
-)-&gt;respond(
-    HttpResponse::response()
-        -&gt;body('some_response_body')
-);</code></pre>
+$ch = curl_init('http://localhost:1080/mockserver/expectation');
+curl_setopt_array($ch, [
+    CURLOPT_CUSTOMREQUEST  =&gt; 'PUT',
+    CURLOPT_POSTFIELDS     =&gt; $json,
+    CURLOPT_HTTPHEADER     =&gt; ['Content-Type: application/json; charset=utf-8'],
+    CURLOPT_RETURNTRANSFER =&gt; true,
+]);
+curl_exec($ch);
+curl_close($ch);</code></pre>
     </div>
     <button class="accordion inner">REST API</button>
     <div class="panel">
         <pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/expectation" -d '{
-  "httpRequest" : {
-    "method" : "GET",
-    "path" : "/view/cart",
-    "queryStringParameters" : {
-      "cartId" : [ "055CA455-1DF7-45BB-8535-4F83E7266092" ]
+    "httpRequest": {
+        "method": "GET",
+        "path": "/view/cart",
+        "queryStringParameters": {
+            "cartId": [{
+                "schema": {
+                    "type": "string",
+                    "format": "uuid"
+                }
+            }]
+        },
+        "cookies": {
+            "session": {
+                "schema": {
+                    "type": "string",
+                    "format": "uuid"
+                }
+            }
+        }
     },
-    "cookies" : {
-      "session" : "4930456C-C718-476F-971F-CB8E047AB349"
+    "httpResponse": {
+        "body": "some_response_body"
     }
-  },
-  "httpResponse" : {
-    "body" : "some_response_body"
-  }
 }'</code></pre>
         <p>See <a  href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/expectation/put_expectation" target="_blank" rel="noopener noreferrer">REST API</a> for full JSON specification</p>
     </div>

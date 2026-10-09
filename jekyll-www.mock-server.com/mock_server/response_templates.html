@@ -1604,7 +1604,7 @@ curl_close($ch);</code></pre>
         "path": "/some/path"
     },
     "httpResponseTemplate": {
-        "template": "{ 'statusCode': 200, 'cookies': { 'session': '&lbrace;&lbrace; request.headers.Session-Id.0 &rbrace;&rbrace;' }, 'headers': { 'Client-User-Agent': [ '&lbrace;&lbrace; request.headers.User-Agent.0 &rbrace;&rbrace;' ] }, 'body': '&lbrace;&lbrace; request.body &rbrace;&rbrace;' }",
+        "template": "{ '\''statusCode'\'': 200, '\''cookies'\'': { '\''session'\'': '\''&lbrace;&lbrace; request.headers.Session-Id.0 &rbrace;&rbrace;'\'' }, '\''headers'\'': { '\''Client-User-Agent'\'': [ '\''&lbrace;&lbrace; request.headers.User-Agent.0 &rbrace;&rbrace;'\'' ] }, '\''body'\'': '\''&lbrace;&lbrace; request.body &rbrace;&rbrace;'\'' }",
         "templateType": "MUSTACHE"
     }
 }'</code></pre>
@@ -2004,7 +2004,7 @@ curl_close($ch);</code></pre>
         "path": "/some/path"
     },
     "httpResponseTemplate": {
-        "template": "{ 'statusCode': 200, 'cookies': { 'session': '$!request.headers['Session-Id'][0]' }, 'headers': { 'Client-User-Agent': [ '$!request.headers['User-Agent'][0]' ] }, 'body': '$!request.body' }",
+        "template": "{ '\''statusCode'\'': 200, '\''cookies'\'': { '\''session'\'': '\''$!request.headers['\''Session-Id'\''][0]'\'' }, '\''headers'\'': { '\''Client-User-Agent'\'': [ '\''$!request.headers['\''User-Agent'\''][0]'\'' ] }, '\''body'\'': '\''$!request.body'\'' }",
         "templateType": "VELOCITY"
     }
 }'</code></pre>
@@ -2365,7 +2365,7 @@ curl_close($ch);</code></pre>
         "path": "/some/path"
     },
     "httpResponseTemplate": {
-        "template": "return { 'statusCode': 200, 'cookies': { 'session' : request.headers['session-id'][0] }, 'headers': { 'Client-User-Agent': request.headers['User-Agent'] }, 'body': request.body };",
+        "template": "return { '\''statusCode'\'': 200, '\''cookies'\'': { '\''session'\'' : request.headers['\''session-id'\''][0] }, '\''headers'\'': { '\''Client-User-Agent'\'': request.headers['\''User-Agent'\''] }, '\''body'\'': request.body };",
         "templateType": "JAVASCRIPT"
     }
 }'</code></pre>

@@ -542,7 +542,7 @@ curl -X PUT http://localhost:1080/mockserver/expectation -d '{
   "httpRequest": { "method": "POST", "path": "/order/step3" },
   "httpResponseTemplate": {
     "templateType": "JAVASCRIPT",
-    "template": "return { statusCode: 200, body: JSON.stringify({ orderId: scenario.get('orderId'), status: 'complete' }) };"
+    "template": "return { statusCode: 200, body: JSON.stringify({ orderId: scenario.get('\''orderId'\''), status: '\''complete'\'' }) };"
   }
 }'
 
@@ -690,12 +690,13 @@ client.upsert(&amp;[expectation]).unwrap();</code></pre>
     <button class="accordion inner">REST API</button>
     <div class="panel">
         <pre class="prettyprint lang-bash code"><code class="code">curl -X PUT http://localhost:1080/mockserver/expectation -d '{
-  "httpRequest": { "path": "/api/status" },
+  "httpRequest": { "method": "GET", "path": "/api/status" },
   "httpResponses": [
     { "statusCode": 200, "body": "{\"status\": \"ok\"}" },
     { "statusCode": 503, "body": "{\"status\": \"degraded\"}" },
     { "statusCode": 200, "body": "{\"status\": \"ok\"}" }
-  ]
+  ],
+  "responseMode": "SEQUENTIAL"
 }'
 # GET /api/status 4 times -&gt; 200, 503, 200, 200 (4th cycles back to first)</code></pre>
     </div>
@@ -823,7 +824,7 @@ client.upsert(&amp;[expectation]).unwrap();</code></pre>
     <button class="accordion inner">REST API</button>
     <div class="panel">
         <pre class="prettyprint lang-bash code"><code class="code">curl -X PUT http://localhost:1080/mockserver/expectation -d '{
-  "httpRequest": { "path": "/api/orders" },
+  "httpRequest": { "method": "GET", "path": "/api/orders" },
   "httpResponses": [
     { "statusCode": 200, "body": "{\"status\": \"ok\"}" },
     { "statusCode": 503, "body": "{\"status\": \"unavailable\"}" }
@@ -957,7 +958,7 @@ client.upsert(&amp;[expectation]).unwrap();</code></pre>
     <button class="accordion inner">REST API</button>
     <div class="panel">
         <pre class="prettyprint lang-bash code"><code class="code">curl -X PUT http://localhost:1080/mockserver/expectation -d '{
-  "httpRequest": { "path": "/api/payments" },
+  "httpRequest": { "method": "GET", "path": "/api/payments" },
   "httpResponses": [
     { "statusCode": 200, "body": "{\"status\": \"ok\"}" },
     { "statusCode": 503, "body": "{\"status\": \"unavailable\"}" }
@@ -1242,7 +1243,7 @@ mockServerClient
         <pre class="prettyprint lang-javascript code"><code class="code">await client.mockAnyResponse([
     {
         httpRequest: { method: 'GET', path: '/events' },
-        httpResponse: { statusCode: 200, body: JSON.stringify({ stream: 'open' }) },
+        httpResponse: { statusCode: 200 },
         crossProtocolScenarios: [{
             trigger: 'HTTP_REQUEST',
             matchPattern: '/events',
@@ -1266,7 +1267,7 @@ mockServerClient
 client.upsert(
     Expectation(
         http_request=HttpRequest(method='GET', path='/events'),
-        http_response=HttpResponse().with_status_code(200).with_body('{"status":"subscribed"}'),
+        http_response=HttpResponse().with_status_code(200),
         cross_protocol_scenarios=[
             CrossProtocolScenario(
                 trigger='HTTP_REQUEST',
@@ -1319,12 +1320,12 @@ client.upsert(
         ScenarioName: "ConnFlow",
         TargetState:  "Connected",
     }).
-    Respond(mockserver.Response().StatusCode(200).JSONBody(`{"status":"listening"}`))
+    Respond(mockserver.Response().StatusCode(200))
 
-apiStatusReq := mockserver.Request().Method("GET").Path("/api/status").Build()
+connStatusReq := mockserver.Request().Method("GET").Path("/api/conn-status").Build()
 connected := mockserver.Response().StatusCode(200).JSONBody(`{"status":"connected"}`).Build()
 client.Upsert(mockserver.Expectation{
-    HttpRequest:   &amp;apiStatusReq,
+    HttpRequest:   &amp;connStatusReq,
     HttpResponse:  &amp;connected,
     ScenarioName:  "ConnFlow",
     ScenarioState: "Connected",
@@ -1341,7 +1342,7 @@ client.Upsert(mockserver.Expectation{
         ScenarioName = "ConnFlow",
         TargetState = "Connected"
     })
-    .Respond(HttpResponse.Response().WithStatusCode(200).WithBody("{\"events\":\"subscribed\"}"));
+    .Respond(HttpResponse.Response().WithStatusCode(200));
 
 client.When(HttpRequest.Request().WithMethod("GET").WithPath("/api/conn-status"))
     .WithScenarioName("ConnFlow")
@@ -1359,7 +1360,7 @@ let expectations = vec![
             CrossProtocolScenario::new(CrossProtocolTrigger::HttpRequest, "ConnFlow", "Connected")
                 .match_pattern("/events"),
         )
-        .respond(HttpResponse::new().status_code(200).body(r#"{"events":"subscribed"}"#)),
+        .respond(HttpResponse::new().status_code(200)),
     Expectation::new(HttpRequest::new().method("GET").path("/api/conn-status"))
         .scenario_name("ConnFlow")
         .scenario_state("Connected")
@@ -1398,7 +1399,7 @@ $client-&gt;upsertExpectation(
         <pre class="prettyprint lang-bash code"><code class="code"># Expectation 1: /events fires the cross-protocol trigger
 curl -X PUT http://localhost:1080/mockserver/expectation -d '{
   "httpRequest": { "method": "GET", "path": "/events" },
-  "httpResponse": { "statusCode": 200, "body": "event-stream" },
+  "httpResponse": { "statusCode": 200 },
   "crossProtocolScenarios": [
     {
       "trigger": "HTTP_REQUEST",
@@ -1412,7 +1413,7 @@ curl -X PUT http://localhost:1080/mockserver/expectation -d '{
 # Expectation 2: only active once ConnFlow is Connected
 curl -X PUT http://localhost:1080/mockserver/expectation -d '{
   "httpRequest": { "method": "GET", "path": "/api/conn-status" },
-  "httpResponse": { "statusCode": 200, "body": "connected" },
+  "httpResponse": { "statusCode": 200, "body": "{\"status\":\"connected\"}" },
   "scenarioName": "ConnFlow",
   "scenarioState": "Connected"
 }'
