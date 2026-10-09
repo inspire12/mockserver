@@ -207,7 +207,7 @@ client.When(
         Path("/com.example.grpc.GreetingService/Greeting").
         Header("x-grpc-service", "com.example.grpc.GreetingService").
         Header("x-grpc-method", "Greeting").
-        Body(`{"name": "World"}`),
+        JSONBody(`{"name": "World"}`),
 ).Respond(
     mockserver.Response().
         StatusCode(200).
@@ -227,7 +227,7 @@ client.When(
         .WithPath("/com.example.grpc.GreetingService/Greeting")
         .WithHeader("x-grpc-service", "com.example.grpc.GreetingService")
         .WithHeader("x-grpc-method", "Greeting")
-        .WithBody("{\"name\": \"World\"}")
+        .WithJsonBody("{\"name\": \"World\"}")
 ).Respond(
     HttpResponse.Response()
         .WithStatusCode(200)
@@ -238,6 +238,7 @@ client.When(
     <button class="accordion inner">Rust</button>
     <div class="panel">
     <pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::{ClientBuilder, HttpRequest, HttpResponse};
+use serde_json::json;
 
 let client = ClientBuilder::new("localhost", 1080).build().unwrap();
 client.when(
@@ -246,7 +247,7 @@ client.when(
         .path("/com.example.grpc.GreetingService/Greeting")
         .header("x-grpc-service", "com.example.grpc.GreetingService")
         .header("x-grpc-method", "Greeting")
-        .body(r#"{"name": "World"}"#)
+        .json_body(json!({"name": "World"}))
 ).respond(
     HttpResponse::new()
         .status_code(200)

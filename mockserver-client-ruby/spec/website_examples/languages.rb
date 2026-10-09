@@ -490,6 +490,7 @@ module WebsiteExamples
           mockserver-client = { path = "#{client}" }
           reqwest = { version = "0.12", features = ["blocking", "json"] }
           serde_json = "1"
+          uuid = { version = "1", features = ["v4"] }
 
           [workspace]
         TOML

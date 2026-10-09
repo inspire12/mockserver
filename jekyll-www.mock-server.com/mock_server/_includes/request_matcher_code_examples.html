@@ -5081,7 +5081,7 @@ using MockServer.Client.Models;
 
 using var client = new MockServerClient("localhost", 1080);
 client.When(
-    HttpRequest.Request().WithPath("/view/cart").WithMethod("GET").WithQueryStringParameter("cartId", "055CA455-1DF7-45BB-8535-4F83E7266092")
+    HttpRequest.Request().WithPath("/view/cart").WithMethod("GET").WithQueryStringParameter("cartId", "055CA455-1DF7-45BB-8535-4F83E7266092").WithCookieMatcher("session", "4930456C-C718-476F-971F-CB8E047AB349")
 ).Respond(
     HttpResponse.Response().WithBody("some_response_body")
 );</code></pre>
@@ -5091,7 +5091,7 @@ client.When(
         <pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::{ClientBuilder, HttpRequest, HttpResponse};
 
 let client = ClientBuilder::new("localhost", 1080).build().unwrap();
-client.when(HttpRequest::new().method("GET").path("/view/cart").query_param("cartId", "055CA455-1DF7-45BB-8535-4F83E7266092"))
+client.when(HttpRequest::new().method("GET").path("/view/cart").query_param("cartId", "055CA455-1DF7-45BB-8535-4F83E7266092").cookie("session", "4930456C-C718-476F-971F-CB8E047AB349"))
     .respond(HttpResponse::new().body("some_response_body"))
     .unwrap();</code></pre>
     </div>

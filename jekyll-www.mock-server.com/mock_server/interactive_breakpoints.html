@@ -581,7 +581,7 @@ client.clear_breakpoint_matchers</code></pre>
     mockserver "github.com/mock-server/mockserver-monorepo/mockserver-client-go/v7"
 )
 
-client := mockserver.NewClient("localhost", 1080)
+client := mockserver.New("localhost", 1080)
 
 // REQUEST-only breakpoint
 id, _ := client.AddRequestBreakpoint(

@@ -124,11 +124,15 @@ client.when(
     <button class="accordion inner">Go</button>
     <div class="panel">
         <pre class="prettyprint lang-go code"><code class="code">import (
-    "github.com/google/uuid"
+    "crypto/rand"
+    "fmt"
+
     mockserver "github.com/mock-server/mockserver-monorepo/mockserver-client-go/v7"
 )
 
-sessionId := uuid.New().String()
+random := make([]byte, 16)
+rand.Read(random)
+sessionId := fmt.Sprintf("%x", random)
 
 client := mockserver.New("localhost", 1080)
 client.When(
@@ -154,7 +158,7 @@ client.When(
     HttpRequest.Request()
         .WithMethod("GET")
         .WithPath("/somePath")
-        .WithCookie("sessionId", sessionId)
+        .WithCookieMatcher("sessionId", sessionId)
 ).Respond(
     HttpResponse.Response()
         .WithStatusCode(200)

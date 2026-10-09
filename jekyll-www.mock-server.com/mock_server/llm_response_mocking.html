@@ -168,6 +168,26 @@ requests.put(
             }
         }
     }
+)
+
+# Anthropic — POST /v1/messages
+requests.put(
+    "http://localhost:1080/mockserver/expectation",
+    json={
+        "httpRequest": {
+            "method": "POST",
+            "path": "/v1/messages"
+        },
+        "httpLlmResponse": {
+            "provider": "ANTHROPIC",
+            "model": "claude-sonnet-4-20250514",
+            "completion": {
+                "text": "MockServer is an open-source HTTP mock server.",
+                "stopReason": "end_turn",
+                "usage": {"inputTokens": 12, "outputTokens": 8}
+            }
+        }
+    }
 )</code></pre>
 </div>
 
@@ -221,19 +241,25 @@ import (
     "net/http"
 )
 
-// OpenAI — POST /v1/chat/completions
-func createLlmExpectation() {
+func createLlmExpectations() {
+    // OpenAI — POST /v1/chat/completions
+    putExpectation("/v1/chat/completions", "OPENAI", "gpt-4o", "stop")
+    // Anthropic — POST /v1/messages
+    putExpectation("/v1/messages", "ANTHROPIC", "claude-sonnet-4-20250514", "end_turn")
+}
+
+func putExpectation(path, provider, model, stopReason string) {
     body, _ := json.Marshal(map[string]interface{}{
         "httpRequest": map[string]interface{}{
             "method": "POST",
-            "path":   "/v1/chat/completions",
+            "path":   path,
         },
         "httpLlmResponse": map[string]interface{}{
-            "provider": "OPENAI",
-            "model":    "gpt-4o",
+            "provider": provider,
+            "model":    model,
             "completion": map[string]interface{}{
                 "text":       "MockServer is an open-source HTTP mock server.",
-                "stopReason": "stop",
+                "stopReason": stopReason,
                 "usage":      map[string]int{"inputTokens": 12, "outputTokens": 8},
             },
         },
@@ -251,8 +277,10 @@ func createLlmExpectation() {
 using System.Text;
 using System.Text.Json;
 
+using var client = new HttpClient();
+
 // OpenAI — POST /v1/chat/completions
-var expectation = new
+var openAi = new
 {
     httpRequest = new { method = "POST", path = "/v1/chat/completions" },
     httpLlmResponse = new
@@ -267,11 +295,29 @@ var expectation = new
         }
     }
 };
-using var client = new HttpClient();
-var json = JsonSerializer.Serialize(expectation);
 await client.PutAsync(
     "http://localhost:1080/mockserver/expectation",
-    new StringContent(json, Encoding.UTF8, "application/json"));</code></pre>
+    new StringContent(JsonSerializer.Serialize(openAi), Encoding.UTF8, "application/json"));
+
+// Anthropic — POST /v1/messages
+var anthropic = new
+{
+    httpRequest = new { method = "POST", path = "/v1/messages" },
+    httpLlmResponse = new
+    {
+        provider = "ANTHROPIC",
+        model = "claude-sonnet-4-20250514",
+        completion = new
+        {
+            text = "MockServer is an open-source HTTP mock server.",
+            stopReason = "end_turn",
+            usage = new { inputTokens = 12, outputTokens = 8 }
+        }
+    }
+};
+await client.PutAsync(
+    "http://localhost:1080/mockserver/expectation",
+    new StringContent(JsonSerializer.Serialize(anthropic), Encoding.UTF8, "application/json"));</code></pre>
 </div>
 
 <button class="accordion inner">Rust</button>
@@ -297,31 +343,68 @@ client.put("http://localhost:1080/mockserver/expectation")
         }
     }))
     .send()
+    .unwrap();
+
+// Anthropic — POST /v1/messages
+client.put("http://localhost:1080/mockserver/expectation")
+    .json(&json!({
+        "httpRequest": {
+            "method": "POST",
+            "path": "/v1/messages"
+        },
+        "httpLlmResponse": {
+            "provider": "ANTHROPIC",
+            "model": "claude-sonnet-4-20250514",
+            "completion": {
+                "text": "MockServer is an open-source HTTP mock server.",
+                "stopReason": "end_turn",
+                "usage": { "inputTokens": 12, "outputTokens": 8 }
+            }
+        }
+    }))
+    .send()
     .unwrap();</code></pre>
 </div>
 
 <button class="accordion inner">PHP</button>
 <div class="panel">
 <pre class="prettyprint lang-php code"><code class="code">&lt;?php
-// OpenAI — POST /v1/chat/completions
-$expectation = [
-    'httpRequest' => ['method' => 'POST', 'path' => '/v1/chat/completions'],
-    'httpLlmResponse' => [
-        'provider' => 'OPENAI',
-        'model' => 'gpt-4o',
-        'completion' => [
-            'text' => 'MockServer is an open-source HTTP mock server.',
-            'stopReason' => 'stop',
-            'usage' => ['inputTokens' => 12, 'outputTokens' => 8],
+$expectations = [
+    // OpenAI — POST /v1/chat/completions
+    [
+        'httpRequest' => ['method' => 'POST', 'path' => '/v1/chat/completions'],
+        'httpLlmResponse' => [
+            'provider' => 'OPENAI',
+            'model' => 'gpt-4o',
+            'completion' => [
+                'text' => 'MockServer is an open-source HTTP mock server.',
+                'stopReason' => 'stop',
+                'usage' => ['inputTokens' => 12, 'outputTokens' => 8],
+            ],
+        ],
+    ],
+    // Anthropic — POST /v1/messages
+    [
+        'httpRequest' => ['method' => 'POST', 'path' => '/v1/messages'],
+        'httpLlmResponse' => [
+            'provider' => 'ANTHROPIC',
+            'model' => 'claude-sonnet-4-20250514',
+            'completion' => [
+                'text' => 'MockServer is an open-source HTTP mock server.',
+                'stopReason' => 'end_turn',
+                'usage' => ['inputTokens' => 12, 'outputTokens' => 8],
+            ],
         ],
     ],
 ];
-$ch = curl_init('http://localhost:1080/mockserver/expectation');
-curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'PUT');
-curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($expectation));
-curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
-curl_exec($ch);
-curl_close($ch);</code></pre>
+foreach ($expectations as $expectation) {
+    $ch = curl_init('http://localhost:1080/mockserver/expectation');
+    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'PUT');
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($expectation));
+    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+    curl_exec($ch);
+    curl_close($ch);
+}</code></pre>
 </div>
 
 <button class="accordion inner">REST API</button>

@@ -519,13 +519,13 @@ const response = await fetch("http://localhost:1080/mockserver/debugMismatch", {
 console.log(await response.text());</code></pre></div>
     <button class="accordion inner">Python</button>
     <div class="panel"><pre class="prettyprint lang-python code"><code class="code">import requests
-from mockserver import MockServerClient, HttpRequest, HttpResponse
+from mockserver import MockServerClient, HttpRequest, HttpResponse, Body
 
 client = MockServerClient("localhost", 1080)
 
 # 1. Set up your expectation
 client.when(
-    HttpRequest(method="POST", path="/api/users", body={"name": "foo"})
+    HttpRequest(method="POST", path="/api/users", body=Body(type="JSON", json={"name": "foo"}))
 ).respond(
     HttpResponse(status_code=201)
 )

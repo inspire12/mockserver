@@ -117,6 +117,11 @@ mock_server/mockserver_clients.html#button_client_retrieve_logs:
   digest: 81639d207003
   reason: The Rust client asks for format=LOG_ENTRIES so it can parse the entries;
     the REST API tab takes the default format.
+mock_server/running_tests_in_parallel.html#button_parallel_tests_unique_session_id:
+  status: differs
+  digest: a52815ca8944
+  reason: Rust generates a fresh session id with Uuid::new_v4(); the REST API tab shows
+    a fixed one.
 
 # --- The check cannot run it ---
 mock_server/CORS_support.html#button_enabled_permissive_cors_for_all_response:
@@ -159,58 +164,6 @@ mock_server/using_openapi.html#button_wsdl_file:
   digest: a619ec8b1bd6
   reason: Rust reads the WSDL from a placeholder path (/path/to/...); the REST API
     tab sends it from a file with -d @.
-
-# --- Tab defect not fixed here (294t) ---
-mock_server/_includes/grpc_mocking.html#button_grpc_unary:
-  status: differs
-  digest: 0bc3a8afc596
-  reason: '294t: the Rust tab matches the request body as a JSON string; the REST
-    API tab as a JSON body matcher.'
-mock_server/_includes/request_matcher_code_examples.html#button_match_request_by_cookies_and_query_parameters:
-  status: differs
-  digest: 26e3b81e0077
-  reason: '294t: the Rust tab leaves out the session cookie matcher the REST API tab
-    has.'
-mock_server/_includes/response_action_code_examples.html#button_response_literal_status_code_and_reason_phrase:
-  status: differs
-  digest: d72febab28c8
-  reason: '294t: the Rust tab sets the status code but not the reason phrase the REST
-    API tab sets.'
-mock_server/_includes/response_action_code_examples.html#button_response_with_distribution_delay:
-  status: differs
-  digest: f19c419f866f
-  reason: '294t: the Rust tab shows one delay distribution; the REST API tab (and
-    the Ruby tab) show all three.'
-mock_server/_includes/verification_summary.html#button_verify_response_with_request:
-  status: does_not_compile
-  digest: b852a009cc70
-  reason: '294t: the Rust tab calls a verify-with-response API the client does not
-    have in that form, so it does not build or run.'
-mock_server/llm_response_mocking.html#tabs-1:
-  status: differs
-  digest: 8eccf60faed0
-  reason: '294t: the Rust tab mocks only OpenAI; the REST API tab (and the Ruby tab)
-    also mock Anthropic.'
-mock_server/load_injection.html#attach_custom_metric_labels_to_a_run:
-  status: differs
-  digest: b162a9e94d84
-  reason: '294t: the Rust client cannot set load scenario or step labels and step
-    names (the tab says so); the REST API tab sets them.'
-mock_server/load_injection.html#weighted_step_selection_a_mixed_workload_in_one_scenario:
-  status: differs
-  digest: 6ce0f13fa25a
-  reason: '294t: the Rust client cannot name load steps; the REST API tab names each
-    step.'
-mock_server/mockserver_clients.html#button_client_create_expectation:
-  status: differs
-  digest: 26e3b81e0077
-  reason: '294t: the Rust tab leaves out the session cookie matcher the REST API tab
-    has.'
-mock_server/running_tests_in_parallel.html#button_parallel_tests_unique_session_id:
-  status: does_not_compile
-  digest: cb4ec9f06d39
-  reason: '294t: the Rust tab imports a uuid package the client does not depend on;
-    a reader adds it, the check cannot.'
 
 # --- Not compared ---
 mock_server/_includes/ai_protocol_mocking.html#button_a2a_basic:

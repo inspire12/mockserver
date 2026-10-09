@@ -1146,8 +1146,8 @@ from mockserver.models import HttpRequest, HttpResponse, VerificationTimes
 client = MockServerClient("localhost", 1080)
 client.verify(
     HttpRequest(path="/some/path"),
-    HttpResponse(status_code=200, body='{"status": "ok"}'),
-    VerificationTimes.at_least(1)
+    VerificationTimes.at_least(1),
+    response=HttpResponse(status_code=200, body='{"status": "ok"}')
 )</code></pre>
     </div>
     <button class="accordion inner">Ruby</button>
@@ -1166,7 +1166,7 @@ client.verify(
         <pre class="prettyprint lang-go code"><code class="code">import mockserver "github.com/mock-server/mockserver-monorepo/mockserver-client-go/v7"
 
 client := mockserver.New("localhost", 1080)
-err := client.Verify(
+err := client.VerifyResponse(
     mockserver.Request().Path("/some/path"),
     mockserver.Response().StatusCode(200).Body(`{"status": "ok"}`),
     mockserver.AtLeast(1),
@@ -1189,7 +1189,7 @@ client.Verify(
         <pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::{ClientBuilder, HttpRequest, HttpResponse, VerificationTimes};
 
 let client = ClientBuilder::new("localhost", 1080).build().unwrap();
-client.verify_with_response(
+client.verify_request_and_response(
     HttpRequest::new().path("/some/path"),
     HttpResponse::new().status_code(200).body(r#"{"status": "ok"}"#),
     VerificationTimes::at_least(1),
@@ -1203,7 +1203,7 @@ use MockServer\HttpResponse;
 use MockServer\VerificationTimes;
 
 $client = new MockServerClient('localhost', 1080);
-$client-&gt;verify(
+$client-&gt;verifyRequestAndResponse(
     HttpRequest::request()-&gt;path('/some/path'),
     HttpResponse::response()-&gt;statusCode(200)-&gt;body('{"status": "ok"}'),
     VerificationTimes::atLeast(1)
@@ -1293,6 +1293,7 @@ client.verify(
 
 client := mockserver.New("localhost", 1080)
 err := client.VerifyResponse(
+    nil,
     mockserver.Response().StatusCode(200).
         Header("Content-Type", "application/json"),
     mockserver.AtLeast(1),
@@ -1305,6 +1306,7 @@ using MockServer.Client.Models;
 
 using var client = new MockServerClient("localhost", 1080);
 client.Verify(
+    null,
     HttpResponse.Response().WithStatusCode(200)
         .WithHeader("Content-Type", "application/json"),
     VerificationTimes.AtLeastTimes(1)
@@ -1328,7 +1330,7 @@ use MockServer\HttpResponse;
 use MockServer\VerificationTimes;
 
 $client = new MockServerClient('localhost', 1080);
-$client-&gt;verify(
+$client-&gt;verifyResponse(
     HttpResponse::response()-&gt;statusCode(200)
         -&gt;header('Content-Type', 'application/json'),
     VerificationTimes::atLeast(1)
@@ -2147,10 +2149,8 @@ from mockserver.models import HttpRequest, HttpResponse
 
 client = MockServerClient("localhost", 1080)
 client.verify_sequence(
-    requests=[
-        HttpRequest(path="/api/login"),
-        HttpRequest(path="/api/data"),
-    ],
+    HttpRequest(path="/api/login"),
+    HttpRequest(path="/api/data"),
     responses=[
         HttpResponse(status_code=200),
         HttpResponse(status_code=200, body='{"result": "success"}'),
@@ -2176,12 +2176,12 @@ client.verify_sequence(
         <pre class="prettyprint lang-go code"><code class="code">import mockserver "github.com/mock-server/mockserver-monorepo/mockserver-client-go/v7"
 
 client := mockserver.New("localhost", 1080)
-err := client.VerifySequenceWithResponses(
-    []mockserver.RequestDefinition{
+err := client.VerifyResponseSequence(
+    []*mockserver.RequestBuilder{
         mockserver.Request().Path("/api/login"),
         mockserver.Request().Path("/api/data"),
     },
-    []mockserver.HttpResponse{
+    []*mockserver.ResponseBuilder{
         mockserver.Response().StatusCode(200),
         mockserver.Response().StatusCode(200).Body(`{"result": "success"}`),
     },
@@ -2194,11 +2194,11 @@ using MockServer.Client.Models;
 
 using var client = new MockServerClient("localhost", 1080);
 client.VerifySequence(
-    new[] {
+    new HttpRequest[] {
         HttpRequest.Request().WithPath("/api/login"),
         HttpRequest.Request().WithPath("/api/data")
     },
-    new[] {
+    new HttpResponse[] {
         HttpResponse.Response().WithStatusCode(200),
         HttpResponse.Response().WithStatusCode(200).WithBody("{\"result\": \"success\"}")
     }
@@ -2227,7 +2227,7 @@ use MockServer\HttpRequest;
 use MockServer\HttpResponse;
 
 $client = new MockServerClient('localhost', 1080);
-$client-&gt;verifySequence(
+$client-&gt;verifySequenceWithResponses(
     [
         HttpRequest::request()-&gt;path('/api/login'),
         HttpRequest::request()-&gt;path('/api/data'),

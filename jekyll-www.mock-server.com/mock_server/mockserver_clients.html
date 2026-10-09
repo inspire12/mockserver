@@ -674,7 +674,6 @@ client.When(
 using MockServer.Client.Models;
 
 using var client = new MockServerClient("localhost", 1080);
-// .NET client uses raw JSON for cookie matchers
 client.Upsert(new Expectation
 {
     HttpRequest = new HttpRequest
@@ -684,6 +683,10 @@ client.Upsert(new Expectation
         QueryStringParameters = new Dictionary&lt;string, List&lt;string&gt;&gt;
         {
             { "cartId", new List&lt;string&gt; { "055CA455-1DF7-45BB-8535-4F83E7266092" } }
+        },
+        Cookies = new Dictionary&lt;string, string&gt;
+        {
+            { "session", "4930456C-C718-476F-971F-CB8E047AB349" }
         }
     },
     HttpResponse = new HttpResponse { Body = "some_response_body" }
@@ -698,7 +701,8 @@ client.when(
     HttpRequest::new()
         .method("GET")
         .path("/view/cart")
-        .query_param("cartId", "055CA455-1DF7-45BB-8535-4F83E7266092"),
+        .query_param("cartId", "055CA455-1DF7-45BB-8535-4F83E7266092")
+        .cookie("session", "4930456C-C718-476F-971F-CB8E047AB349"),
 ).respond(
     HttpResponse::new().body("some_response_body"),
 ).unwrap();</code></pre>

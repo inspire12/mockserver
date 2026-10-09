@@ -5848,6 +5848,16 @@ impl LoadProfile {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LoadStep {
+    /// Optional step name, used as the `step` metric label in place of the
+    /// step index.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// Optional step-level custom labels, merged over the scenario labels
+    /// (step keys win).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub labels: HashMap<String, String>,
+
     /// The templated request to fire each iteration.
     pub request: HttpRequest,
 
@@ -5877,12 +5887,26 @@ impl LoadStep {
     /// Create a step from a request matcher/template.
     pub fn new(request: HttpRequest) -> Self {
         Self {
+            name: None,
+            labels: HashMap::new(),
             request,
             think_time: None,
             captures: Vec::new(),
             checks: Vec::new(),
             weight: None,
         }
+    }
+
+    /// Set the step name.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Add a step-level custom label.
+    pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.labels.insert(key.into(), value.into());
+        self
     }
 
     /// Set the inter-step pause.
@@ -5922,6 +5946,11 @@ impl LoadStep {
 pub struct LoadScenario {
     /// Human-readable scenario name.
     pub name: String,
+
+    /// Optional scenario-level custom labels, exported on every load
+    /// measurement (as Prometheus labels only for allow-listed keys).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub labels: HashMap<String, String>,
 
     /// Template engine for per-iteration rendering — `"VELOCITY"` (default) or
     /// `"MUSTACHE"`. (JavaScript is rejected for load steps.)
@@ -5977,6 +6006,7 @@ impl LoadScenario {
     pub fn new(name: impl Into<String>, profile: LoadProfile, steps: Vec<LoadStep>) -> Self {
         Self {
             name: name.into(),
+            labels: HashMap::new(),
             template_type: None,
             max_requests: None,
             start_delay_millis: None,
@@ -5989,6 +6019,12 @@ impl LoadScenario {
             profile,
             steps,
         }
+    }
+
+    /// Add a scenario-level custom label.
+    pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.labels.insert(key.into(), value.into());
+        self
     }
 
     /// Add an in-run pass/fail threshold.

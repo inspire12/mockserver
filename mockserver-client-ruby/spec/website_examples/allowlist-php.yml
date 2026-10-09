@@ -130,28 +130,6 @@ mock_server/using_openapi.html#button_wsdl_file:
   reason: PHP reads the WSDL from a placeholder path (/path/to/...), so it sends no
     body; the REST API tab sends it from a file with -d @.
 
-# --- Tab defect not fixed here (294t) ---
-mock_server/_includes/verification_summary.html#button_verify_response_only:
-  status: raised
-  digest: ad55b68d6470
-  reason: '294t: the PHP tab calls the client''s verify-by-response API wrongly, so
-    it does not build or run.'
-mock_server/_includes/verification_summary.html#button_verify_response_with_request:
-  status: raised
-  digest: d85a8b4667ba
-  reason: '294t: the PHP tab calls a verify-with-response API the client does not
-    have in that form, so it does not build or run.'
-mock_server/_includes/verification_summary.html#button_verify_sequence_with_responses:
-  status: raised
-  digest: ab74ccd9d241
-  reason: '294t: the PHP tab calls a verify-sequence-with-responses API the client
-    does not have in that form, so it does not build or run.'
-mock_server/llm_response_mocking.html#tabs-1:
-  status: differs
-  digest: 8eccf60faed0
-  reason: '294t: the PHP tab mocks only OpenAI; the REST API tab (and the Ruby tab)
-    also mock Anthropic.'
-
 # --- Not compared ---
 mock_server/_includes/ai_protocol_mocking.html#button_a2a_basic:
   status: not_compared

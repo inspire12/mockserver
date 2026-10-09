@@ -2853,9 +2853,9 @@ let profile = LoadProfile::of(vec![
     LoadStage::vu_hold(20, 60_000),
 ]);
 let steps = vec![
-    LoadStep::new(browse).weight(7.0),
-    LoadStep::new(search).weight(2.0),
-    LoadStep::new(checkout).weight(1.0),
+    LoadStep::new(browse).name("browse").weight(7.0),
+    LoadStep::new(search).name("search").weight(2.0),
+    LoadStep::new(checkout).name("checkout").weight(1.0),
 ];
 let scenario = LoadScenario::new("mixed-shop-workload", profile, steps)
     .step_selection(LoadStepSelection::Weighted);
@@ -4492,15 +4492,18 @@ await client.LoadScenarioAsync(scenario);   // register (Prometheus needs the la
     <div class="panel">
         <pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::SocketAddress;
 
-// Rust client: custom labels / step names are not exposed
 let profile = LoadProfile::of(vec![LoadStage::vu_hold(10, 30_000)]);
 let steps = vec![
     LoadStep::new(HttpRequest::new().method("GET").path("/api/orders/$iteration.index")
-        .socket_address(SocketAddress::new("orders.svc", 8080))),
+        .socket_address(SocketAddress::new("orders.svc", 8080)))
+        .name("get-order")
+        .label("team", "orders"),
 ];
-let scenario = LoadScenario::new("checkout-load", profile, steps);
+let scenario = LoadScenario::new("checkout-load", profile, steps)
+    .label("env", "staging")
+    .label("region", "eu-west-1");
 
-client.load_scenario(&amp;scenario).unwrap();   // register</code></pre>
+client.load_scenario(&amp;scenario).unwrap();   // register (Prometheus needs the label keys allow-listed at startup)</code></pre>
     </div>
     <button class="accordion inner">PHP</button>
     <div class="panel">

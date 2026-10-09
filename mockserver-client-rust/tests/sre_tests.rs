@@ -939,6 +939,52 @@ fn test_load_step_checks_website_example_matches_rest_tab() {
 }
 
 #[test]
+fn test_load_scenario_and_step_names_and_labels_round_trip() {
+    let profile = LoadProfile::of(vec![LoadStage::vu_hold(10, 30_000)]);
+    let steps = vec![LoadStep::new(
+        HttpRequest::new()
+            .method("GET")
+            .path("/api/orders/$iteration.index")
+            .socket_address(SocketAddress::new("orders.svc", 8080)),
+    )
+    .name("get-order")
+    .label("team", "orders")];
+    let scenario = LoadScenario::new("checkout-load", profile, steps)
+        .label("env", "staging")
+        .label("region", "eu-west-1");
+
+    let rest_tab = serde_json::json!({
+        "name": "checkout-load",
+        "labels": { "env": "staging", "region": "eu-west-1" },
+        "profile": { "stages": [ { "type": "VU", "vus": 10, "durationMillis": 30000 } ] },
+        "steps": [
+            {
+                "name": "get-order",
+                "labels": { "team": "orders" },
+                "request": { "method": "GET", "path": "/api/orders/$iteration.index",
+                             "socketAddress": { "host": "orders.svc", "port": 8080 } }
+            }
+        ]
+    });
+    assert_eq!(serde_json::to_value(&scenario).unwrap(), rest_tab);
+    let back: LoadScenario = serde_json::from_value(rest_tab).unwrap();
+    assert_eq!(back, scenario);
+}
+
+#[test]
+fn test_load_scenario_and_step_omit_name_and_labels_when_unset() {
+    let scenario = LoadScenario::new(
+        "plain",
+        LoadProfile::of(vec![LoadStage::vu_hold(1, 1_000)]),
+        vec![LoadStep::new(HttpRequest::new().method("GET").path("/x"))],
+    );
+    let json = serde_json::to_value(&scenario).unwrap();
+    assert!(json.get("labels").is_none());
+    assert!(json["steps"][0].get("name").is_none());
+    assert!(json["steps"][0].get("labels").is_none());
+}
+
+#[test]
 fn test_load_step_omits_checks_when_unset() {
     let step = LoadStep::new(HttpRequest::new().method("GET").path("/x"));
     let json = serde_json::to_value(&step).unwrap();
