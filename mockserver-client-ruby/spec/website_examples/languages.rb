@@ -268,8 +268,11 @@ module WebsiteExamples
       # The digest keeps an error's type and drops the detail an operating
       # system words its own way ("(0x80004005)", an OpenSSL or Security
       # framework message), so CI and a laptop agree on it.
+      # A download URL names the platform (darwin-aarch64 locally, linux-x86_64 in CI) and version.
       def error_class(error)
-        error.gsub('()', '').sub(/[\s:]*[(\[{<"'].*\z/m, '')
+        error.gsub(/(?:darwin|linux|windows)-(?:x86_64|aarch64|arm64|amd64)/, 'PLATFORM')
+             .gsub(/\b\d+\.\d+\.\d+(?:-SNAPSHOT)?\b/, 'VERSION')
+             .gsub('()', '').sub(/[\s:]*[(\[{<"'].*\z/m, '')
       end
 
       # Paths, addresses and times vary between machines; the digest must not.

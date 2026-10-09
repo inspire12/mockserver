@@ -106,12 +106,12 @@ mock_server/using_openapi.html#button_open_api_inline_yaml_specification:
 # --- The check cannot run it ---
 mock_server/CORS_support.html#button_enabled_permissive_cors_for_all_response:
   status: raised
-  digest: 3069e347b091
+  digest: 256209398be8
   reason: PHP starts a server with the CORS properties (the binary launcher, which
     would download the server); the REST API tab sets them on a running server.
 mock_server/CORS_support.html#button_enabled_permissive_cors_for_control_plane_api:
   status: raised
-  digest: 3069e347b091
+  digest: 256209398be8
   reason: PHP starts a server with the CORS properties (the binary launcher, which
     would download the server); the REST API tab sets them on a running server.
 mock_server/HTTPS_TLS.html#button_client_mtls_connection:
