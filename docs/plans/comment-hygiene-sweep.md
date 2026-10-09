@@ -23,7 +23,7 @@ The material being removed is not worthless; it moves:
 | Material | Moves to |
 |---|---|
 | Why the change, what was verified | already in the commit message — just delete |
-| Measured figures, experiments, inconclusive results | `docs/plans/performance-programme.md` or `docs/code/` |
+| Measured figures, experiments, inconclusive results | `docs/plans/performance-measurement-backlog.md` or `docs/code/` |
 | Behaviour of a property or API | Javadoc + `jekyll-www.mock-server.com/` |
 
 ## Scope, worst first

@@ -7,8 +7,8 @@ repeat-in-Docker run on a developer Mac (no Docker-gated or load testing runs lo
 work; see `AGENTS.md`). The [Parked](#parked) section below holds rows accepted as out of scope
 for now, each blocked on something outside this programme (an upstream dependency, a
 next-major-only change), not on a measurement run. They were split out of
-[performance-programme.md](performance-programme.md) on 2026-10-07 so that file can close once
-its remaining code-fix rows land; this file is deleted once every row below is read and closed.
+the performance programme plan on 2026-10-07, which closed on 2026-10-09 once its code-fix rows
+landed; this file is deleted once every row below is read and closed.
 For how each run is produced, gated and read, see
 [docs/code/performance-measurement.md](../code/performance-measurement.md).
 
@@ -77,7 +77,7 @@ For how each run is produced, gated and read, see
 
 Rows accepted as out of scope for now, each blocked on something outside this programme's
 control (an upstream dependency, a next-major-only change), not on a measurement run. Moved
-from [performance-programme.md](performance-programme.md) on 2026-10-07.
+from the performance programme plan (closed 2026-10-09) on 2026-10-07.
 
 | # | Item | Blocked on | Parked because |
 |---|---|---|---|
