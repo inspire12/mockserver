@@ -88,6 +88,7 @@ import {
   type StandardForwardTemplateState,
   type StandardForwardClassCallbackState,
   type StandardGrpcStreamState,
+  type StandardListItemDraft,
   type StandardDnsMatcher,
   type DnsRecordType,
   type DnsRecordClass,
@@ -1314,7 +1315,40 @@ interface ActionPrefill {
   dnsResponseState?: StandardDnsState;
   forwardTemplateState?: StandardForwardTemplateState;
   forwardClassCallbackState?: StandardForwardClassCallbackState;
-  grpcStreamState?: StandardGrpcStreamState;
+  grpcStreamState?: GrpcStreamState;
+}
+
+let lastListItemId = 0;
+
+/** A hidden identity for a list row, unique across loads, so an edit can tell which loaded item a row is. */
+function nextListItemId(): number {
+  return ++lastListItemId;
+}
+
+function listItemRow(text: string): StandardListItemDraft {
+  return { itemId: nextListItemId(), text };
+}
+
+/** One row per loaded item whose `key` is text (a binary message has none); one empty row when there are none. */
+function listRowsFrom(raw: unknown, key: 'text' | 'json'): StandardListItemDraft[] {
+  const rows = (Array.isArray(raw) ? (raw as unknown[]) : [])
+    .map((m) => (m && typeof m === 'object' ? (m as Record<string, unknown>)[key] : undefined))
+    .filter((t): t is string => typeof t === 'string')
+    .map(listItemRow);
+  return rows.length > 0 ? rows : [listItemRow('')];
+}
+
+function emptySseEvent(): StandardSseEventDraft {
+  return { itemId: nextListItemId(), event: '', data: '', id: '', retry: '' };
+}
+
+/** `items` with the item at `idx` moved one place up (-1) or down (+1). */
+function moveItem<T>(items: T[], idx: number, delta: -1 | 1): T[] {
+  const to = idx + delta;
+  if (to < 0 || to >= items.length) return items;
+  const next = [...items];
+  [next[idx], next[to]] = [next[to]!, next[idx]!];
+  return next;
 }
 
 function unwrapBody(body: unknown): string {
@@ -1574,26 +1608,22 @@ function actionFromExpectation(item: JsonListItem): ActionPrefill | null {
   // WebSocket response
   if (v['httpWebSocketResponse'] && typeof v['httpWebSocketResponse'] === 'object') {
     const ws = v['httpWebSocketResponse'] as Record<string, unknown>;
-    const msgs = Array.isArray(ws['messages'])
-      ? (ws['messages'] as Record<string, unknown>[]).map((m) => typeof m['text'] === 'string' ? m['text'] as string : '').join('\n')
-      : '';
     const rawMatchers = Array.isArray(ws['matchers']) ? (ws['matchers'] as Record<string, unknown>[]) : [];
     const matchers: WebSocketMatcherRow[] = rawMatchers.map((m) => ({
+      itemId: nextListItemId(),
       frameType: (['TEXT', 'BINARY', 'PING', 'PONG', 'ANY'].includes(m['frameType'] as string)
         ? m['frameType'] as WebSocketFrameType
         : 'ANY'),
       // The WebSocketMessageMatcherDTO serialises textMatcher as a plain string (value only),
       // but denottable also tolerates a NottableString object form defensively.
       textMatcher: denottable(m['textMatcher']),
-      responses: Array.isArray(m['responses'])
-        ? (m['responses'] as Record<string, unknown>[]).map((r) => typeof r['text'] === 'string' ? r['text'] as string : '').join('\n')
-        : '',
+      responses: listRowsFrom(m['responses'], 'text'),
     }));
     return {
       type: 'websocket',
       websocketState: {
         subprotocol: typeof ws['subprotocol'] === 'string' ? (ws['subprotocol'] as string) : '',
-        messages: msgs,
+        messages: listRowsFrom(ws['messages'], 'text'),
         // Absent means CLOSE for WebSocket (HttpWebSocketResponseActionHandler reads
         // `== null || value`), so an absent field must load as ON — see the SSE note below.
         closeConnection: ws['closeConnection'] !== false,
@@ -1607,6 +1637,7 @@ function actionFromExpectation(item: JsonListItem): ActionPrefill | null {
     const sse = v['httpSseResponse'] as Record<string, unknown>;
     const rawEvents = Array.isArray(sse['events']) ? (sse['events'] as Record<string, unknown>[]) : [];
     const events: StandardSseEventDraft[] = rawEvents.map((ev) => ({
+      itemId: nextListItemId(),
       event: typeof ev['event'] === 'string' ? (ev['event'] as string) : '',
       data: typeof ev['data'] === 'string' ? (ev['data'] as string) : '',
       id: typeof ev['id'] === 'string' ? (ev['id'] as string) : '',
@@ -1617,7 +1648,7 @@ function actionFromExpectation(item: JsonListItem): ActionPrefill | null {
       sseState: {
         statusCode: typeof sse['statusCode'] === 'number' ? (sse['statusCode'] as number) : 200,
         headers: headersToText(sse['headers']),
-        events: events.length > 0 ? events : [{ event: '', data: '', id: '', retry: '' }],
+        events: events.length > 0 ? events : [emptySseEvent()],
         // Absent means CLOSE for SSE (HttpSseResponseActionHandler reads `== null || value`).
         // Loading absent as OFF would misreport the live behaviour, and because the generator
         // now always emits the value, re-saving an untouched expectation would write
@@ -1686,8 +1717,7 @@ function actionFromExpectation(item: JsonListItem): ActionPrefill | null {
   // gRPC stream response
   if (v['grpcStreamResponse'] && typeof v['grpcStreamResponse'] === 'object') {
     const grpc = v['grpcStreamResponse'] as Record<string, unknown>;
-    const rawMsgs = Array.isArray(grpc['messages']) ? (grpc['messages'] as Record<string, unknown>[]) : [];
-    const msgs = rawMsgs.map((m) => typeof m['json'] === 'string' ? m['json'] as string : '').join('\n');
+    const msgs = listRowsFrom(grpc['messages'], 'json');
     return {
       type: 'grpc_stream',
       grpcStreamState: {
@@ -2385,16 +2415,160 @@ function ForwardFallbackPanel({
 // ---------------------------------------------------------------------------
 
 interface WebSocketMatcherRow {
+  itemId?: number;
   frameType: WebSocketFrameType;
   textMatcher: string;
-  responses: string; // one message per line
+  responses: StandardListItemDraft[];
 }
 
 interface WebSocketState {
   subprotocol: string;
-  messages: string; // one message per line
+  messages: StandardListItemDraft[];
   closeConnection: boolean;
   matchers: WebSocketMatcherRow[];
+}
+
+/** Up / down / remove buttons for row `idx` of a list of `count` rows, named e.g. "Move message 2 up". */
+function RowControls({
+  noun,
+  idx,
+  count,
+  onMove,
+  onRemove,
+}: {
+  noun: string;
+  idx: number;
+  count: number;
+  onMove: (delta: -1 | 1) => void;
+  onRemove: () => void;
+}) {
+  // The row is keyed by its id, so this instance follows it; a move re-renders it at its new
+  // index, where the clicked button (or, at the end of the list, the other one) gets focus back.
+  const up = useRef<HTMLButtonElement>(null);
+  const down = useRef<HTMLButtonElement>(null);
+  const refocus = useRef<-1 | 1 | null>(null);
+  useEffect(() => {
+    if (refocus.current === null) return;
+    const atEnd = refocus.current === -1 ? idx === 0 : idx === count - 1;
+    ((refocus.current === -1) !== atEnd ? up : down).current?.focus();
+    refocus.current = null;
+  }, [idx, count]);
+  const move = (delta: -1 | 1) => {
+    refocus.current = delta;
+    onMove(delta);
+  };
+  return (
+    <Box sx={{ display: 'flex', gap: 0.25, flexShrink: 0 }}>
+      <IconButton ref={up} size="small" onClick={() => move(-1)} disabled={idx === 0} aria-label={`Move ${noun} ${idx + 1} up`}>
+        <ArrowUpwardIcon fontSize="small" />
+      </IconButton>
+      <IconButton ref={down} size="small" onClick={() => move(1)} disabled={idx === count - 1} aria-label={`Move ${noun} ${idx + 1} down`}>
+        <ArrowDownwardIcon fontSize="small" />
+      </IconButton>
+      <IconButton size="small" color="error" onClick={onRemove} aria-label={`Remove ${noun} ${idx + 1}`}>
+        <DeleteIcon fontSize="small" />
+      </IconButton>
+    </Box>
+  );
+}
+
+/** Whether `text` as a whole is one JSON value (such as a pretty-printed object), which a paste must not split. */
+function isJson(text: string): boolean {
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The non-blank lines of `text`, untrimmed. */
+function nonBlankLines(text: string): string[] {
+  return text.split(/\r?\n/).filter((l) => l.trim());
+}
+
+/** `items` with row `idx` replaced by one row per line of `text`; the first keeps the row's id. */
+function splitRow(items: StandardListItemDraft[], idx: number, text: string): StandardListItemDraft[] {
+  const [first = '', ...rest] = nonBlankLines(text);
+  return [...items.slice(0, idx), { ...items[idx]!, text: first }, ...rest.map(listItemRow), ...items.slice(idx + 1)];
+}
+
+/**
+ * A list of text messages edited one per row, so each keeps its identity when rows move.
+ * Several lines pasted into an empty row become one row each, unless the paste is one JSON
+ * value; a row holding several lines stays one multi-line message and offers to split it.
+ */
+function MessageRows({
+  noun,
+  groupLabel,
+  items,
+  onChange,
+  placeholder,
+}: {
+  noun: string;
+  groupLabel: string;
+  items: StandardListItemDraft[];
+  onChange: (items: StandardListItemDraft[]) => void;
+  placeholder: string;
+}) {
+  const label = noun.charAt(0).toUpperCase() + noun.slice(1);
+  return (
+    <Box role="group" aria-label={groupLabel} sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+      {items.map((item, idx) => {
+        const lines = nonBlankLines(item.text).length;
+        return (
+          <Box key={item.itemId ?? idx} sx={{ display: 'flex', gap: 0.5, alignItems: 'flex-start' }}>
+            <Box sx={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
+              <TextField
+                label={`${label} ${idx + 1}`}
+                size="small"
+                multiline
+                maxRows={6}
+                fullWidth
+                value={item.text}
+                onChange={(e) => onChange(items.map((it, i) => (i === idx ? { ...it, text: e.target.value } : it)))}
+                onPaste={(e) => {
+                  const pasted = e.clipboardData.getData('text');
+                  const oneLine = /^[^\r\n]*\r?\n$/.test(pasted);
+                  if (item.text === '' && !oneLine && nonBlankLines(pasted).length > 1 && !isJson(pasted)) {
+                    e.preventDefault();
+                    onChange(splitRow(items, idx, pasted));
+                  } else if (oneLine) {
+                    e.preventDefault();
+                    const field = e.target as HTMLTextAreaElement;
+                    const text = field.value.slice(0, field.selectionStart) + pasted.replace(/\r?\n$/, '') + field.value.slice(field.selectionEnd);
+                    onChange(items.map((it, i) => (i === idx ? { ...it, text } : it)));
+                  }
+                }}
+                placeholder={placeholder}
+                slotProps={{ input: { sx: { fontFamily: monospaceFontFamily, fontSize: '0.78rem' } } }}
+              />
+              {lines > 1 && (
+                <Button size="small" onClick={() => onChange(splitRow(items, idx, item.text))} sx={{ px: 0.5 }}>
+                  Split {noun} {idx + 1} into {lines} {noun}s
+                </Button>
+              )}
+            </Box>
+            <RowControls
+              noun={noun}
+              idx={idx}
+              count={items.length}
+              onMove={(delta) => onChange(moveItem(items, idx, delta))}
+              onRemove={() => onChange(items.filter((_, i) => i !== idx))}
+            />
+          </Box>
+        );
+      })}
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+        <Button size="small" variant="outlined" onClick={() => onChange([...items, listItemRow('')])}>
+          Add {noun}
+        </Button>
+        <Typography variant="caption" color="text.secondary">
+          One {noun} per row; use Add {noun} for another.
+        </Typography>
+      </Box>
+    </Box>
+  );
 }
 
 function WebSocketPanel({
@@ -2407,11 +2581,8 @@ function WebSocketPanel({
   const addMatcher = () => {
     setState({
       ...state,
-      matchers: [...state.matchers, { frameType: 'ANY', textMatcher: '', responses: '' }],
+      matchers: [...state.matchers, { itemId: nextListItemId(), frameType: 'ANY', textMatcher: '', responses: [listItemRow('')] }],
     });
-  };
-  const removeMatcher = (idx: number) => {
-    setState({ ...state, matchers: state.matchers.filter((_, i) => i !== idx) });
   };
   const updateMatcher = (idx: number, patch: Partial<WebSocketMatcherRow>) => {
     setState({
@@ -2434,15 +2605,15 @@ function WebSocketPanel({
         placeholder="graphql-ws"
         slotProps={{ input: { sx: { fontFamily: monospaceFontFamily, fontSize: '0.78rem' } } }}
       />
-      <TextField
-        label="Initial messages (one per line)"
-        multiline
-        minRows={3}
-        maxRows={10}
-        value={state.messages}
-        onChange={(e) => setState({ ...state, messages: e.target.value })}
-        placeholder={'{"type":"connection_ack"}\n{"type":"ka"}'}
-        slotProps={{ input: { sx: { fontFamily: monospaceFontFamily, fontSize: '0.78rem' } } }}
+      <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>
+        Initial messages
+      </Typography>
+      <MessageRows
+        noun="message"
+        groupLabel="Initial messages"
+        items={state.messages}
+        onChange={(messages) => setState({ ...state, messages })}
+        placeholder={'{"type":"connection_ack"}'}
       />
       <FormControlLabel
         control={
@@ -2469,7 +2640,14 @@ function WebSocketPanel({
         </Button>
       </Box>
       {state.matchers.map((m, idx) => (
-        <Paper key={idx} variant="outlined" sx={{ p: 1.5, display: 'flex', flexDirection: 'column', gap: 1 }}>
+        <Paper
+          key={m.itemId ?? idx}
+          variant="outlined"
+          data-testid={`websocket-matcher-${idx + 1}`}
+          role="group"
+          aria-label={`Matcher ${idx + 1}`}
+          sx={{ p: 1.5, display: 'flex', flexDirection: 'column', gap: 1 }}
+        >
           <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
             <TextField
               label="Frame type"
@@ -2492,25 +2670,23 @@ function WebSocketPanel({
               placeholder='e.g. {"type":"ping"}'
               slotProps={{ input: { sx: { fontFamily: monospaceFontFamily, fontSize: '0.78rem' } } }}
             />
-            <Button
-              size="small"
-              color="error"
-              variant="outlined"
-              onClick={() => removeMatcher(idx)}
-              sx={{ minWidth: 'auto', px: 1 }}
-            >
-              Remove
-            </Button>
+            <RowControls
+              noun="matcher"
+              idx={idx}
+              count={state.matchers.length}
+              onMove={(delta) => setState({ ...state, matchers: moveItem(state.matchers, idx, delta) })}
+              onRemove={() => setState({ ...state, matchers: state.matchers.filter((_, i) => i !== idx) })}
+            />
           </Box>
-          <TextField
-            label="Responses (one message per line)"
-            multiline
-            minRows={2}
-            maxRows={6}
-            value={m.responses}
-            onChange={(e) => updateMatcher(idx, { responses: e.target.value })}
-            placeholder={'{"type":"pong"}\n{"type":"ka"}'}
-            slotProps={{ input: { sx: { fontFamily: monospaceFontFamily, fontSize: '0.78rem' } } }}
+          <Typography variant="caption" color="text.secondary">
+            Responses
+          </Typography>
+          <MessageRows
+            noun="response"
+            groupLabel={`Matcher ${idx + 1} responses`}
+            items={m.responses}
+            onChange={(responses) => updateMatcher(idx, { responses })}
+            placeholder={'{"type":"pong"}'}
           />
         </Paper>
       ))}
@@ -2634,10 +2810,7 @@ function SsePanel({
   setState: (s: StandardSseState) => void;
 }) {
   const addEvent = () => {
-    setState({ ...state, events: [...state.events, { event: '', data: '', id: '', retry: '' }] });
-  };
-  const removeEvent = (idx: number) => {
-    setState({ ...state, events: state.events.filter((_, i) => i !== idx) });
+    setState({ ...state, events: [...state.events, emptySseEvent()] });
   };
   const updateEvent = (idx: number, patch: Partial<StandardSseEventDraft>) => {
     setState({
@@ -2681,7 +2854,7 @@ function SsePanel({
         </Button>
       </Box>
       {state.events.map((ev, idx) => (
-        <Paper key={idx} variant="outlined" sx={{ p: 1.5, display: 'flex', flexDirection: 'column', gap: 1 }}>
+        <Paper key={ev.itemId ?? idx} variant="outlined" role="group" aria-label={`Event ${idx + 1}`} sx={{ p: 1.5, display: 'flex', flexDirection: 'column', gap: 1 }}>
           <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
             <TextField
               label="Event type"
@@ -2706,15 +2879,13 @@ function SsePanel({
               value={ev.retry}
               onChange={(e) => updateEvent(idx, { retry: e.target.value })}
             />
-            <Button
-              size="small"
-              color="error"
-              variant="outlined"
-              onClick={() => removeEvent(idx)}
-              sx={{ minWidth: 'auto', px: 1 }}
-            >
-              Remove
-            </Button>
+            <RowControls
+              noun="event"
+              idx={idx}
+              count={state.events.length}
+              onMove={(delta) => setState({ ...state, events: moveItem(state.events, idx, delta) })}
+              onRemove={() => setState({ ...state, events: state.events.filter((_, i) => i !== idx) })}
+            />
           </Box>
           <TextField
             label="Data"
@@ -3054,12 +3225,15 @@ function ForwardClassCallbackPanel({
 // gRPC stream response panel
 // ---------------------------------------------------------------------------
 
+/** The gRPC stream form state: its messages are edited one per row. */
+type GrpcStreamState = Omit<StandardGrpcStreamState, 'messages'> & { messages: StandardListItemDraft[] };
+
 function GrpcStreamPanel({
   state,
   setState,
 }: {
-  state: StandardGrpcStreamState;
-  setState: (s: StandardGrpcStreamState) => void;
+  state: GrpcStreamState;
+  setState: (s: GrpcStreamState) => void;
 }) {
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
@@ -3095,15 +3269,15 @@ function GrpcStreamPanel({
         placeholder={'grpc-encoding: identity'}
         slotProps={{ input: { sx: { fontFamily: monospaceFontFamily, fontSize: '0.78rem' } } }}
       />
-      <TextField
-        label="Messages (one JSON per line)"
-        multiline
-        minRows={4}
-        maxRows={12}
-        value={state.messages}
-        onChange={(e) => setState({ ...state, messages: e.target.value })}
-        placeholder={'{"name":"Alice"}\n{"name":"Bob"}'}
-        slotProps={{ input: { sx: { fontFamily: monospaceFontFamily, fontSize: '0.78rem' } } }}
+      <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>
+        Messages (JSON)
+      </Typography>
+      <MessageRows
+        noun="message"
+        groupLabel="Messages"
+        items={state.messages}
+        onChange={(messages) => setState({ ...state, messages })}
+        placeholder={'{"name":"Alice"}'}
       />
       <FormControlLabel
         control={
@@ -4109,14 +4283,14 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
   });
   const [websocketState, setWebsocketState] = useState<WebSocketState>({
     subprotocol: '',
-    messages: '',
+    messages: [listItemRow('')],
     closeConnection: false,
     matchers: [],
   });
   const [sseState, setSseState] = useState<StandardSseState>({
     statusCode: 200,
     headers: '',
-    events: [{ event: '', data: '', id: '', retry: '' }],
+    events: [emptySseEvent()],
     closeConnection: false,
   });
   const [binaryResponseState, setBinaryResponseState] = useState<StandardBinaryResponseState>({
@@ -4134,11 +4308,11 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
   const [forwardClassCallbackState, setForwardClassCallbackState] = useState<StandardForwardClassCallbackState>({
     callbackClass: '',
   });
-  const [grpcStreamState, setGrpcStreamState] = useState<StandardGrpcStreamState>({
+  const [grpcStreamState, setGrpcStreamState] = useState<GrpcStreamState>({
     statusName: '',
     statusMessage: '',
     headers: '',
-    messages: '',
+    messages: [listItemRow('')],
     closeConnection: false,
   });
 

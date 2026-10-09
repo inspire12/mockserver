@@ -241,15 +241,30 @@ export interface StandardForwardFallbackState {
 
 export type WebSocketFrameType = 'TEXT' | 'BINARY' | 'PING' | 'PONG' | 'ANY';
 
+/**
+ * One row of a list the composer edits row by row. `itemId` is a hidden identity the
+ * composer gives every row, so an edit merges each item with the one it was loaded from
+ * (see {@link mergeItems}); it is never emitted.
+ */
+export interface StandardListItemDraft {
+  itemId?: number;
+  text: string;
+}
+
+/** A list of messages: one per line of text, or one per row. */
+export type StandardTextList = string | StandardListItemDraft[];
+
 export interface WebSocketMatcherDraft {
+  /** See {@link StandardListItemDraft.itemId}. */
+  itemId?: number;
   frameType: WebSocketFrameType;
   textMatcher: string;
-  responses: string; // one message per line
+  responses: StandardTextList;
 }
 
 export interface StandardWebSocketState {
   subprotocol: string;
-  messages: string; // one message per line (text frames)
+  messages: StandardTextList; // text frames
   closeConnection: boolean;
   matchers: WebSocketMatcherDraft[];
 }
@@ -260,6 +275,8 @@ export interface StandardWebSocketState {
 // ---------------------------------------------------------------------------
 
 export interface StandardSseEventDraft {
+  /** See {@link StandardListItemDraft.itemId}. */
+  itemId?: number;
   event: string;
   data: string;
   id: string;
@@ -337,7 +354,7 @@ export interface StandardGrpcStreamState {
   statusName: string;
   statusMessage: string;
   headers: string; // "Name: value" lines
-  messages: string; // one JSON message per line
+  messages: StandardTextList; // JSON messages
   closeConnection: boolean;
 }
 
@@ -1388,21 +1405,17 @@ export function buildExpectationJson(
         const ws = action.websocket;
         const wsPayload: Record<string, unknown> = {};
         if (ws.subprotocol.trim()) wsPayload['subprotocol'] = ws.subprotocol.trim();
-        const msgLines = ws.messages.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-        if (msgLines.length > 0) {
-          wsPayload['messages'] = msgLines.map((text) => ({ text }));
-        }
+        const wsMessages = wireTextItems(ws.messages, 'text');
+        if (wsMessages.length > 0) wsPayload['messages'] = wsMessages;
         wsPayload['closeConnection'] = ws.closeConnection;
         if (ws.matchers.length > 0) {
-          wsPayload['matchers'] = ws.matchers.map((m) => {
+          wsPayload['matchers'] = withItemIds(ws.matchers.map((m) => {
             const matcherObj: Record<string, unknown> = { frameType: m.frameType };
             if (m.textMatcher.trim()) matcherObj['textMatcher'] = m.textMatcher.trim();
-            const respLines = m.responses.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-            if (respLines.length > 0) {
-              matcherObj['responses'] = respLines.map((text) => ({ text }));
-            }
+            const responses = wireTextItems(m.responses, 'text');
+            if (responses.length > 0) matcherObj['responses'] = responses;
             return matcherObj;
-          });
+          }), ws.matchers.map((m) => m.itemId));
         }
         out['httpWebSocketResponse'] = wsPayload;
       }
@@ -1415,17 +1428,16 @@ export function buildExpectationJson(
         const sseHeaders = parseKeyValueLines(sse.headers, ':');
         if (sseHeaders) ssePayload['headers'] = sseHeaders;
         if (sse.events.length > 0) {
-          ssePayload['events'] = sse.events
-            .filter((ev) => ev.data.trim() || ev.event.trim())
-            .map((ev) => {
-              const evObj: Record<string, unknown> = {};
-              if (ev.event.trim()) evObj['event'] = ev.event.trim();
-              if (ev.data.trim()) evObj['data'] = ev.data.trim();
-              if (ev.id.trim()) evObj['id'] = ev.id.trim();
-              const retryNum = parseInt(ev.retry, 10);
-              if (!isNaN(retryNum) && retryNum > 0) evObj['retry'] = retryNum;
-              return evObj;
-            });
+          const events = sse.events.filter((ev) => ev.data.trim() || ev.event.trim());
+          ssePayload['events'] = withItemIds(events.map((ev) => {
+            const evObj: Record<string, unknown> = {};
+            if (ev.event.trim()) evObj['event'] = ev.event.trim();
+            if (ev.data.trim()) evObj['data'] = ev.data.trim();
+            if (ev.id.trim()) evObj['id'] = ev.id.trim();
+            const retryNum = parseInt(ev.retry, 10);
+            if (!isNaN(retryNum) && retryNum > 0) evObj['retry'] = retryNum;
+            return evObj;
+          }), events.map((ev) => ev.itemId));
         }
         ssePayload['closeConnection'] = sse.closeConnection;
         out['httpSseResponse'] = ssePayload;
@@ -1487,10 +1499,8 @@ export function buildExpectationJson(
         if (grpc.statusMessage.trim()) grpcPayload['statusMessage'] = grpc.statusMessage.trim();
         const grpcHeaders = parseKeyValueLines(grpc.headers, ':');
         if (grpcHeaders) grpcPayload['headers'] = grpcHeaders;
-        const grpcMsgLines = grpc.messages.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-        if (grpcMsgLines.length > 0) {
-          grpcPayload['messages'] = grpcMsgLines.map((json) => ({ json }));
-        }
+        const grpcMessages = wireTextItems(grpc.messages, 'json');
+        if (grpcMessages.length > 0) grpcPayload['messages'] = grpcMessages;
         grpcPayload['closeConnection'] = grpc.closeConnection;
         out['grpcStreamResponse'] = grpcPayload;
       }
@@ -1748,6 +1758,45 @@ function isMergeableObject(v: unknown): v is Record<string, unknown> {
   return isPlainObject(v) && !isDuration(v);
 }
 
+/**
+ * The form's hidden item ids for each list {@link buildExpectationJson} emitted from rows,
+ * keyed by the emitted array, so the ids never appear in the JSON itself.
+ */
+const LIST_ITEM_IDS = new WeakMap<unknown[], (number | undefined)[]>();
+
+function withItemIds(wire: unknown[], ids: (number | undefined)[]): unknown[] {
+  LIST_ITEM_IDS.set(wire, ids);
+  return wire;
+}
+
+/** The non-blank items of `list` as `{[key]: text}`, trimmed; a list of rows records its item ids. */
+function wireTextItems(list: StandardTextList, key: 'text' | 'json'): unknown[] {
+  if (typeof list === 'string') {
+    return list.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).map((text) => ({ [key]: text }));
+  }
+  const items = list.filter((item) => item.text.trim());
+  return withItemIds(items.map((item) => ({ [key]: item.text.trim() })), items.map((item) => item.itemId));
+}
+
+/** Whether every list in `form` holds the same items, in the same order, as in `baseline`. */
+function sameItemIds(form: unknown, baseline: unknown): boolean {
+  if (Array.isArray(form) && Array.isArray(baseline)) {
+    const formIds = LIST_ITEM_IDS.get(form);
+    const baselineIds = LIST_ITEM_IDS.get(baseline);
+    if (formIds && baselineIds && formIds.some((id, i) => id !== baselineIds[i])) return false;
+    return form.every((item, i) => sameItemIds(item, baseline[i]));
+  }
+  if (isPlainObject(form) && isPlainObject(baseline)) {
+    return Object.keys(form).every((k) => sameItemIds(form[k], baseline[k]));
+  }
+  return true;
+}
+
+/** Whether the form left this value as it loaded it: equal, with no list items moved. */
+function unchangedByForm(form: unknown, baseline: unknown): boolean {
+  return deepEqualCanonical(form, baseline) && sameItemIds(form, baseline);
+}
+
 type FieldPath = (string | number)[];
 
 /** A value the edit merge keeps from the original although the form does not show it as saved. */
@@ -1769,11 +1818,12 @@ function underKey(kept: KeptLeaf[], key: string | number, originalKey: string | 
   return kept.map((k) => ({ ...k, path: [key, ...k.path], originalPath: [originalKey, ...k.originalPath] }));
 }
 
-/** Whether `baselineItem` is what the form loaded from `originalItem` (every field it shows is equal). */
+/** Whether `baselineItem` is what the form loaded from `originalItem` (every field it shows, at any depth, is equal). */
 function loadedFrom(originalItem: unknown, baselineItem: unknown): boolean {
   if (isMergeableObject(originalItem) && isMergeableObject(baselineItem)) {
-    return Object.keys(baselineItem).every((k) => deepEqualCanonical(originalItem[k], baselineItem[k]));
+    return Object.keys(baselineItem).every((k) => loadedFrom(originalItem[k], baselineItem[k]));
   }
+  if (Array.isArray(originalItem) && Array.isArray(baselineItem)) return alignItems(originalItem, baselineItem) !== undefined;
   return deepEqualCanonical(originalItem, baselineItem);
 }
 
@@ -1822,18 +1872,18 @@ interface Merged {
  * Keeps `original` except where the form changed a field: a field whose `form`
  * value differs from the `baseline` (what the form produced on load) takes the
  * form's value, or is removed when the form dropped it. Nested objects merge the
- * same way and so do arrays, item by item (see {@link mergeItems}); scalars and
- * durations are replaced whole when changed. `kept` lists the original's values
- * the result carries that the form does not show.
+ * same way and so do the form's lists of rows, item by item (see {@link mergeItems});
+ * scalars, durations and other arrays are replaced whole when changed. `kept` lists
+ * the original's values the result carries that the form does not show.
  */
 function mergeTracked(original: unknown, form: unknown, baseline: unknown): Merged {
-  if (deepEqualCanonical(form, baseline)) return { value: structuredClone(original), kept: keptDiff(original, baseline) };
+  if (unchangedByForm(form, baseline)) return { value: structuredClone(original), kept: keptDiff(original, baseline) };
   if (isMergeableObject(original) && isMergeableObject(form) && isMergeableObject(baseline)) {
     const value: Record<string, unknown> = structuredClone(original);
     const kept: KeptLeaf[] = [];
     const formKeys = new Set([...Object.keys(form), ...Object.keys(baseline)]);
     for (const k of formKeys) {
-      if (deepEqualCanonical(form[k], baseline[k])) {
+      if (unchangedByForm(form[k], baseline[k])) {
         if (k in original) kept.push(...underKey(keptDiff(original[k], baseline[k]), k, k));
       } else if (!(k in form)) {
         delete value[k];
@@ -1854,29 +1904,26 @@ function mergeTracked(original: unknown, form: unknown, baseline: unknown): Merg
 }
 
 /**
- * Merges an edited array item by item, so an item keeps the fields the form does not
- * show. A form item equal to a loaded one (even after a move) is that original item; an
- * edited item merges with the original at its position; a new item is taken as is.
+ * Merges an edited list of rows item by item, so an item keeps the fields the form does
+ * not show. A form item is the loaded item with the same hidden item id (wherever it
+ * moved, and whatever was edited); an item with no loaded id is new and taken as is.
  * Original items the form could not load stay after their original predecessor.
- * Undefined when the baseline does not line up with the original.
+ * Undefined when the list carries no item ids or the baseline does not line up with the original.
  */
 function mergeItems(original: unknown[], form: unknown[], baseline: unknown[]): Merged | undefined {
+  const formIds = LIST_ITEM_IDS.get(form);
+  const baselineIds = LIST_ITEM_IDS.get(baseline);
+  if (!formIds || !baselineIds) return undefined;
   const pairs = alignItems(original, baseline);
   if (!pairs) return undefined;
-  const claimed = baseline.map(() => false);
-  const source: (number | undefined)[] = form.map(() => undefined);
-  const claim = (i: number, k: number) => { source[i] = k; claimed[k] = true; };
-  form.forEach((item, i) => { if (i < baseline.length && deepEqualCanonical(item, baseline[i])) claim(i, i); });
-  form.forEach((item, i) => {
-    if (source[i] !== undefined) return;
-    const k = baseline.findIndex((b, bk) => !claimed[bk] && deepEqualCanonical(item, b));
-    if (k >= 0) claim(i, k);
-  });
-  form.forEach((_, i) => { if (source[i] === undefined && i < baseline.length && !claimed[i]) claim(i, i); });
+  const loadedAt = new Map<number, number>();
+  baselineIds.forEach((id, k) => { if (id !== undefined) loadedAt.set(id, k); });
 
   const items: { value: unknown; kept: KeptLeaf[]; from?: number }[] = form.map((item, i) => {
-    const k = source[i];
+    const id = formIds[i];
+    const k = id === undefined ? undefined : loadedAt.get(id);
     if (k === undefined) return { value: item, kept: [] };
+    loadedAt.delete(id!);
     const merged = mergeTracked(original[pairs[k]!], item, baseline[k]);
     return { ...merged, from: pairs[k] };
   });

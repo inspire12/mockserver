@@ -146,7 +146,7 @@ describe('kept action fields in the composer', () => {
       httpWebSocketResponse: { messages: [{ text: 'a', delay }, { text: 'b', delay: { timeUnit: 'SECONDS', value: 2 } }] },
     });
     expect(await screen.findByTestId('kept-action-fields')).toHaveTextContent('messages[1].delay 2 SECONDS');
-    await replaceText(/^Initial messages/, 'a2\nb');
+    await replaceText('Message 1', 'a2');
     const sent = await save(fetchMock);
     expect((sent['httpWebSocketResponse'] as Record<string, unknown>)['messages']).toEqual([
       { text: 'a2', delay },
@@ -155,12 +155,15 @@ describe('kept action fields in the composer', () => {
   });
 
   it('deleting a WebSocket message does not move its delay onto the next one', async () => {
+    const user = userEvent.setup({ delay: null });
     load({
       id: 'kept-ws-delete',
       httpRequest: http('/ws'),
       httpWebSocketResponse: { messages: [{ text: 'a', delay }, { text: 'b' }, { text: 'c' }] },
     });
-    await replaceText(/^Initial messages/, 'b\nc\nd');
+    await user.click(await screen.findByRole('button', { name: 'Remove message 1' }));
+    await user.click(screen.getByRole('button', { name: 'Add message' }));
+    await replaceText('Message 3', 'd');
     const sent = await save(fetchMock);
     expect((sent['httpWebSocketResponse'] as Record<string, unknown>)['messages']).toEqual([{ text: 'b' }, { text: 'c' }, { text: 'd' }]);
   });
@@ -174,7 +177,7 @@ describe('kept action fields in the composer', () => {
     });
     const panel = await screen.findByTestId('kept-action-fields');
     expect(panel).toHaveTextContent('messages[1] {"binary":"AAE="}');
-    await replaceText(/^Initial messages/, 'a\n\nc2');
+    await replaceText('Message 2', 'c2');
     const before = await save(fetchMock);
     expect((before['httpWebSocketResponse'] as Record<string, unknown>)['messages']).toEqual([{ text: 'a' }, { binary: 'AAE=' }, { text: 'c2' }]);
 
@@ -197,7 +200,7 @@ describe('kept action fields in the composer', () => {
       httpRequest: { method: 'POST', path: '/pkg.Svc/Method' },
       grpcStreamResponse: { statusName: 'OK', messages: [{ json: '{"a":1}', delay }] },
     });
-    await replaceText(/^Messages \(one JSON per line\)/, '{{"a":2}');
+    await replaceText('Message 1', '{{"a":2}');
     const sent = await save(fetchMock);
     expect((sent['grpcStreamResponse'] as Record<string, unknown>)['messages']).toEqual([{ json: '{"a":2}', delay }]);
   });
