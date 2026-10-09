@@ -16,7 +16,7 @@
  * source of truth for field names and shapes (see `mockserver-client-rust/src/model.rs`).
  */
 import { buildExpectationJson, type StandardMatcher, type StandardActionPayload } from '../standardCodegen.ts';
-import { clientHostPort } from './shared.ts';
+import { clientHostPort, rustClientVersionRequirement } from './shared.ts';
 
 // ---------------------------------------------------------------------------
 // Low-level literal helpers
@@ -1308,7 +1308,7 @@ export function standardToRust(matcher: StandardMatcher, action: StandardActionP
     expectationExtras.length > 0 || [...setup, ...expCalls].some((l) => l.includes('serde_json::'));
 
   const body: string[] = [];
-  body.push('// Cargo.toml: mockserver-client = "7"' + (usesSerde ? ', serde_json = "1"' : ''));
+  body.push(`// Cargo.toml: mockserver-client = "${rustClientVersionRequirement()}"` + (usesSerde ? ', serde_json = "1"' : ''));
   body.push('use mockserver_client::*;');
   body.push('');
   body.push('fn main() -> mockserver_client::Result<()> {');

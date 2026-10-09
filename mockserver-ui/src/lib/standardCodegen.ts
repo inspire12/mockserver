@@ -3422,7 +3422,7 @@ function collectJavaImports(
       break;
     case 'binary_response':
       imp.add('import static org.mockserver.model.BinaryResponse.binaryResponse;');
-      imp.add('import java.util.Base64;');
+      if (action.binaryResponse?.binaryData.trim()) imp.add('import java.util.Base64;');
       if (action.binaryResponse?.upstream) imp.add('import org.mockserver.model.BinaryResponse.Upstream;');
       break;
     case 'dns_response':
@@ -3797,7 +3797,7 @@ export function standardToCurl(
 // working unchanged.
 // ---------------------------------------------------------------------------
 
-export { clientHostPort, indentAfterFirst, toPythonLiteral, rustRawString } from './codegen/shared.ts';
+export { clientHostPort, indentAfterFirst, toPythonLiteral, rustRawString, rustClientVersionRequirement } from './codegen/shared.ts';
 export { standardToNode } from './codegen/node.ts';
 export { standardToPython } from './codegen/python.ts';
 export { standardToGo } from './codegen/go.ts';

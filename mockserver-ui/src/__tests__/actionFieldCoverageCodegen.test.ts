@@ -18,6 +18,7 @@ import { standardToRust } from '../lib/codegen/rust';
 import { actionFieldCombos, FULL_ACTIONS } from '../lib/codegen/actionFieldCases';
 import type { Combo } from '../lib/codegen/extractParityCases';
 import { actionFieldGolden } from '../lib/codegen/__fixtures__/actionFieldGolden';
+import { withRustClientMajorPlaceholder } from '../lib/codegen/__fixtures__/rustClientMajorPlaceholder';
 
 type Wire = Record<string, unknown>;
 type Emit = (c: Combo) => string;
@@ -55,7 +56,7 @@ describe('all-fields action edits', () => {
 
   for (const [language, emit] of Object.entries(EMITTERS)) {
     it.each(actionFieldCombos.map((c) => [c.name, c] as const))(`${language}: %s matches the golden`, (_name, c) => {
-      expect(emit(c)).toBe(actionFieldGolden[language]![c.name]);
+      expect(withRustClientMajorPlaceholder(emit(c))).toBe(actionFieldGolden[language]![c.name]);
     });
   }
 

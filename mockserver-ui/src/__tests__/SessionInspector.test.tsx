@@ -1,10 +1,11 @@
-import { describe, it, expect, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ThemeProvider } from '@mui/material/styles';
 import { buildTheme } from '../theme';
 import SessionInspector from '../components/SessionInspector';
 import { useDashboardStore } from '../store';
+import { AUTO_LOAD_MAX_CHARACTERS } from '../hooks/useLoadFullRow';
 import type { JsonListItem } from '../types';
 
 function renderInspector() {
@@ -389,5 +390,90 @@ describe('SessionInspector', () => {
     expect(screen.getByText('turn-one-followup')).toBeInTheDocument();
     expect(screen.getByText('turn-two-followup')).toBeInTheDocument();
     expect(screen.getAllByText('turn-zero-question')).toHaveLength(1);
+  });
+});
+
+describe('SessionInspector with a body too large to load by itself', () => {
+  const logEntryId = 'huge-openai-entry';
+
+  // The server sends only the first 64 KiB of a long body, as a plain string, and marks the row.
+  function shortenedOpenAiRequest(): { row: JsonListItem; fullRequest: Record<string, unknown> } {
+    const whole = makeOpenAiRequest('huge-1');
+    const fullRequest = whole.value.httpRequest as Record<string, unknown>;
+    const prefix = '{"model":"gpt-4o","messages":[{"role":"user","content":"Where is my order? ' + 'x'.repeat(200);
+    return {
+      fullRequest,
+      row: {
+        ...whole,
+        value: { ...whole.value, httpRequest: { ...fullRequest, body: prefix } },
+        truncatedBodies: {
+          httpRequest: { logEntryId, part: 'request', originalLength: AUTO_LOAD_MAX_CHARACTERS + 1, shownLength: 65536 },
+        },
+      },
+    };
+  }
+
+  function serveFullRequest(fullRequest: Record<string, unknown>) {
+    const fetchMock = vi.fn(async (input: unknown) => {
+      const url = String(input);
+      if (url.includes(`/mockserver/logEntryBody?id=${logEntryId}&part=request`)) {
+        return { ok: true, status: 200, json: async () => ({ httpRequest: fullRequest }) };
+      }
+      return { ok: false, status: 404, statusText: 'Not Found', json: async () => ({}) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  beforeEach(() => {
+    useDashboardStore.setState({ proxiedRequests: [], recordedRequests: [], activeExpectations: [], fullMessages: {} });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('shows the shortened-body notice instead of a conversation for the request, until the body is loaded', async () => {
+    const user = userEvent.setup();
+    const { row, fullRequest } = shortenedOpenAiRequest();
+    const fetchMock = serveFullRequest(fullRequest);
+    useDashboardStore.setState({ proxiedRequests: [row] });
+
+    renderInspector();
+    await user.click(screen.getByText(/\[0\] POST \/v1\/chat\/completions/));
+
+    const detail = screen.getByTestId('trace-request-shortened');
+    expect(within(detail).getByTestId('truncated-body-notice')).toHaveTextContent('Body shortened: showing the first 64 KiB of 4.0 MiB');
+    expect(within(detail).getByText(/conversation is shown once the full body is loaded/)).toBeInTheDocument();
+    // The whole response would otherwise render as a complete conversation with no prompt.
+    expect(screen.queryByText('Checking now.')).not.toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    await user.click(within(detail).getByTestId('load-full-body'));
+
+    await waitFor(() => expect(screen.getByText('Where is my order?')).toBeInTheDocument());
+    expect(screen.getByText('Checking now.')).toBeInTheDocument();
+    expect(screen.queryByTestId('truncated-body-notice')).not.toBeInTheDocument();
+  });
+
+  it('leaves a shortened request out of the trace conversation and offers to load it', async () => {
+    const user = userEvent.setup();
+    const { row, fullRequest } = shortenedOpenAiRequest();
+    serveFullRequest(fullRequest);
+    useDashboardStore.setState({ proxiedRequests: [row] });
+
+    renderInspector();
+    await user.click(screen.getByRole('button', { name: 'Conversation' }));
+
+    const shortened = screen.getByTestId('trace-conversation-shortened');
+    expect(shortened).toHaveTextContent('[0] POST /v1/chat/completions is left out of the conversation until its full body is loaded.');
+    expect(within(shortened).getByTestId('truncated-body-notice')).toBeInTheDocument();
+    expect(screen.queryByText('Checking now.')).not.toBeInTheDocument();
+
+    await user.click(within(shortened).getByTestId('load-full-body'));
+
+    await waitFor(() => expect(screen.getByText('Where is my order?')).toBeInTheDocument());
+    expect(screen.getByText('Checking now.')).toBeInTheDocument();
+    expect(screen.queryByTestId('trace-conversation-shortened')).not.toBeInTheDocument();
   });
 });

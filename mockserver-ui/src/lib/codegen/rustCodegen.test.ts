@@ -18,12 +18,13 @@ import { describe, it, expect } from 'vitest';
 import { standardToRust } from './rust';
 import { rustCombos } from './rustCodegenCases';
 import { rustGolden } from './__fixtures__/rustGolden';
+import { withRustClientMajorPlaceholder } from './__fixtures__/rustClientMajorPlaceholder';
 
 describe('standardToRust — typed construction', () => {
   describe('byte-exact golden', () => {
     for (const combo of rustCombos) {
       it(combo.name, () => {
-        expect(standardToRust(combo.matcher, combo.action, combo.baseUrl)).toBe(rustGolden[combo.name]);
+        expect(withRustClientMajorPlaceholder(standardToRust(combo.matcher, combo.action, combo.baseUrl))).toBe(rustGolden[combo.name]);
       });
     }
   });

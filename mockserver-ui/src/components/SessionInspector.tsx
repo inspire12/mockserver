@@ -15,7 +15,10 @@ import SearchIcon from '@mui/icons-material/Search';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import { useDashboardStore } from '../store';
-import { useAutoLoadLlmRows } from '../hooks/useLoadFullRow';
+import { useAutoLoadLlmRows, useLoadFullRow } from '../hooks/useLoadFullRow';
+import { hasTruncatedBodies } from '../lib/fullBody';
+import TruncatedBodyNotice from './TruncatedBodyNotice';
+import type { JsonListItem } from '../types';
 import { groupBySession, parseIsolationSource, shortenScenarioName, type Session, type SessionRequest } from '../lib/sessionGrouping';
 import {
   getModelLabel,
@@ -93,8 +96,30 @@ function RequestChip({ request, turnIndex, selected, onClick }: RequestChipProps
 // Request detail (expanded below the chip timeline)
 // ---------------------------------------------------------------------------
 
+/** The same notice Traffic shows for a row whose body the server shortened, with Load Full Body. */
+function ShortenedBodyNotice({ item }: { item: JsonListItem }) {
+  const loadFullRow = useLoadFullRow();
+  const load = useCallback(async () => {
+    await loadFullRow(item);
+  }, [loadFullRow, item]);
+  const marker = item.truncatedBodies?.httpRequest ?? item.truncatedBodies?.httpResponse;
+  return marker ? <TruncatedBodyNotice marker={marker} onLoad={load} /> : null;
+}
+
 function RequestDetail({ request }: { request: SessionRequest }) {
   const { parsed } = request;
+
+  // A conversation parsed from the first part of a body would read as complete but be missing messages.
+  if (hasTruncatedBodies(request.item)) {
+    return (
+      <Box sx={{ p: 1 }} data-testid="trace-request-shortened">
+        <ShortenedBodyNotice item={request.item} />
+        <Typography variant="caption" color="text.secondary">
+          The conversation is shown once the full body is loaded.
+        </Typography>
+      </Box>
+    );
+  }
 
   if (parsed.kind === 'anthropic') {
     return <AnthropicConversationView parsed={parsed} />;
@@ -176,19 +201,26 @@ function SessionConversation({ requests }: { requests: SessionRequest[] }) {
     () => requests.filter((r) => CONVERSATION_KINDS.has(r.parsed.kind)),
     [requests],
   );
+  // Requests with a shortened body stay out of the threads until loaded whole: parsed from a prefix
+  // they would show a turn with messages missing as if it were complete.
+  const wholeRequests = useMemo(() => convRequests.filter((r) => !hasTruncatedBodies(r.item)), [convRequests]);
+  const shortenedRequests = useMemo(
+    () => requests.flatMap((r, turnIndex) => (CONVERSATION_KINDS.has(r.parsed.kind) && hasTruncatedBodies(r.item) ? [{ request: r, turnIndex }] : [])),
+    [requests],
+  );
   // Group consecutive growing-history requests into threads. `requests` is already
   // sorted chronologically (oldest first) by the session grouping, which is the
   // order the prefix walk needs.
   const groups = useMemo(
     () =>
       groupConversationTurns(
-        convRequests.map((r) => ({
+        wholeRequests.map((r) => ({
           parsed: r.parsed,
           host: summarizeTraffic(r.item.value).host,
           data: r,
         })),
       ),
-    [convRequests],
+    [wholeRequests],
   );
 
   if (convRequests.length === 0) return null;
@@ -216,6 +248,14 @@ function SessionConversation({ requests }: { requests: SessionRequest[] }) {
       </Button>
       <Collapse in={open} unmountOnExit>
         <Box sx={{ mt: 0.5, maxHeight: 500, overflowY: 'auto' }}>
+          {shortenedRequests.map(({ request, turnIndex }) => (
+            <Box key={request.item.key} data-testid="trace-conversation-shortened">
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                [{turnIndex}] {request.method ?? '?'} {request.path ?? '/'} is left out of the conversation until its full body is loaded.
+              </Typography>
+              <ShortenedBodyNotice item={request.item} />
+            </Box>
+          ))}
           {multipleThreads && (
             <Typography
               variant="caption"

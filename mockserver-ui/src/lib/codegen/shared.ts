@@ -10,6 +10,14 @@
  * keep working unchanged.
  */
 
+/** The `mockserver-client` crate requirement Rust snippets name in their Cargo.toml comment: the crate's
+ *  major version, set from mockserver-client-rust/Cargo.toml by Vite's `define` or, for the Node-run
+ *  emitter scripts, by scripts/define-build-constants.mjs (see build-constants.ts). */
+export function rustClientVersionRequirement(): string {
+  if (typeof __RUST_CLIENT_MAJOR_VERSION__ === 'string') return __RUST_CLIENT_MAJOR_VERSION__;
+  throw new Error('__RUST_CLIENT_MAJOR_VERSION__ is not set: build with Vite, or import scripts/define-build-constants.mjs first');
+}
+
 /** Derive the client host/port from a base URL, defaulting to localhost:1080
  *  (or :443 for https) and falling back to localhost:1080 on a parse failure. */
 export function clientHostPort(baseUrl: string): { host: string; port: number } {

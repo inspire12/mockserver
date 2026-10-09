@@ -39,6 +39,14 @@ describe('a binary response with no data', () => {
     const code = standardToJava(matcher, empty);
     expect(code).toContain('binaryResponse()');
     expect(code).not.toContain('withBinaryData');
+    expect(code).not.toContain('import java.util.Base64;');
+    expect(standardToJava(matcher, blank)).not.toContain('import java.util.Base64;');
+  });
+
+  it('Java still imports Base64 when it decodes data', () => {
+    const code = standardToJava(matcher, { type: 'binary_response', binaryResponse: { binaryData: 'SGk=' } });
+    expect(code).toContain('import java.util.Base64;');
+    expect(code).toContain('.withBinaryData(Base64.getDecoder().decode("SGk="))');
   });
 
   it('Python builds BinaryResponse() without binary_data', () => {

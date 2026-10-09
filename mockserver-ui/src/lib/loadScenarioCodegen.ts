@@ -26,7 +26,7 @@
  * stages, etc.).
  */
 
-import { clientHostPort, toPythonLiteral } from './standardCodegen';
+import { clientHostPort, toPythonLiteral, rustClientVersionRequirement } from './standardCodegen';
 import type {
   LoadScenarioDTO,
   LoadStageDTO,
@@ -857,7 +857,7 @@ export function loadToRust(input: LoadScenarioCodegenInput): string {
   const steps = scenario.steps ?? [];
 
   const lines: string[] = [
-    '// Cargo.toml: mockserver-client = "7"',
+    `// Cargo.toml: mockserver-client = "${rustClientVersionRequirement()}"`,
     'use mockserver_client::{',
     '    ClientBuilder, LoadScenario, LoadProfile, LoadStage, LoadStep,',
     '    RampCurve, HttpRequest, SocketAddress, Delay,',

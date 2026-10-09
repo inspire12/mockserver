@@ -1,5 +1,6 @@
 import { defineConfig, configDefaults } from 'vitest/config';
 import react from '@vitejs/plugin-react';
+import { rustClientMajorVersion } from './build-constants';
 
 export default defineConfig({
   plugins: [react()],
@@ -7,6 +8,7 @@ export default defineConfig({
   // compiles and reports a stable version string.
   define: {
     __APP_VERSION__: JSON.stringify('test'),
+    __RUST_CLIENT_MAJOR_VERSION__: JSON.stringify(rustClientMajorVersion()),
   },
   test: {
     environment: 'jsdom',

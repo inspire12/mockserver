@@ -16,6 +16,7 @@ import {
   toPythonLiteral,
   rustRawString,
   indentAfterFirst,
+  rustClientVersionRequirement,
 } from './standardCodegen';
 import {
   buildVerifyBody,
@@ -725,7 +726,7 @@ export function verifyToRust(input: VerificationCodegenInput): string {
   const hasResp = hasKeys(input.httpResponse);
 
   const lines: string[] = [
-    '// Cargo.toml: mockserver-client = "7" and serde_json = "1"',
+    `// Cargo.toml: mockserver-client = "${rustClientVersionRequirement()}" and serde_json = "1"`,
     'use mockserver_client::{ClientBuilder, HttpRequest, HttpResponse, VerificationTimes};',
     '',
     'fn main() -> mockserver_client::Result<()> {',

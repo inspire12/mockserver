@@ -29,6 +29,7 @@
 //
 // USAGE: node scripts/emit-client-codegen-samples.mjs <python|ruby|go|rust> <out-dir>
 
+import './define-build-constants.mjs';
 import { mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { combos } from '../src/lib/codegen/extractParityCases.ts';

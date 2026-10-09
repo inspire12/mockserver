@@ -2,6 +2,7 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { rustClientMajorVersion } from './build-constants';
 
 const mockserverTarget = process.env.MOCKSERVER_URL || 'http://localhost:1080';
 
@@ -24,6 +25,7 @@ export default defineConfig({
   base: '/mockserver/dashboard/',
   define: {
     __APP_VERSION__: JSON.stringify(readAppVersion()),
+    __RUST_CLIENT_MAJOR_VERSION__: JSON.stringify(rustClientMajorVersion()),
   },
   build: {
     outDir: 'build',
