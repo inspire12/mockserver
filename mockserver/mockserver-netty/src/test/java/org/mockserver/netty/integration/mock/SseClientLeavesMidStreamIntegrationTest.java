@@ -15,6 +15,7 @@ import org.mockserver.client.MockServerClient;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.mock.Expectation;
+import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpSseResponse;
 import org.mockserver.model.SseEvent;
 import org.mockserver.netty.MockServer;
@@ -48,7 +49,8 @@ import static org.mockserver.stop.Stop.stopQuietly;
  * A client that leaves in the middle of a mocked server-sent-events response has only left: nothing is logged at WARN
  * or above, and the failed write is logged at DEBUG. The client takes the first event and closes its connection while
  * MockServer is still writing the second, which it cannot finish: on HTTP/2 the stream's window is smaller than the
- * event, and on HTTP/1.1 the event is larger than the socket buffers between the two.
+ * event, and on HTTP/1.1 the event is larger than the socket buffers between the two. Through a CONNECT tunnel the
+ * relay may still take or drop the event once the client has gone, so that case has the client leave again.
  */
 @RunWith(Parameterized.class)
 public class SseClientLeavesMidStreamIntegrationTest {
@@ -102,7 +104,7 @@ public class SseClientLeavesMidStreamIntegrationTest {
         server.getConfiguration().logLevel("WARN");
         client.reset();
         boolean http2 = route == Route.HTTP2_DIRECT || route == Route.HTTP2_CONNECT_TUNNEL;
-        client.upsert(new Expectation(request().withPath("/sse")).thenRespondWithSse(HttpSseResponse.sseResponse().withEvents(
+        client.upsert(new Expectation(request().withPath("/sse/.*")).thenRespondWithSse(HttpSseResponse.sseResponse().withEvents(
             SseEvent.sseEvent().withData("first"),
             SseEvent.sseEvent().withData(StringUtils.repeat('x', http2 ? HTTP2_EVENT_BYTES : HTTP1_EVENT_BYTES)),
             SseEvent.sseEvent().withData("last"))));
@@ -111,16 +113,36 @@ public class SseClientLeavesMidStreamIntegrationTest {
 
     @Test
     public void shouldLogNothingAtWarnForAClientThatLeavesInTheMiddleOfAnSseResponse() throws Exception {
+        // Through an HTTP/1.1 tunnel MockServer writes to the relay, which reads and drops the rest of the response once
+        // the client has gone: the second event can then be written whole and no write fails, so the client leaves again
+        int attempts = route == Route.HTTP1_CONNECT_TUNNEL ? 5 : 1;
+        String path = "/sse/1";
+        List<LogEntry> entries = leaveAndAwaitTheSecondEvent(path);
+        for (int attempt = 2; attempt <= attempts && !secondEventSent(entries, path).isEmpty(); attempt++) {
+            path = "/sse/" + attempt;
+            entries = leaveAndAwaitTheSecondEvent(path);
+        }
+        assertThat("a client that leaves is not an error", warningsAndErrors(entries), is(empty()));
+        List<String> left = clientLeft(entries, path);
+        assertThat("the write of the second event failed, and is logged at DEBUG", left.size(), is(1));
+        assertThat(left.get(0), matchesPattern(Pattern.compile("client left before streaming chunk\\s+2\\s+was sent:\\s+\\w+(: [^\\n]+)?\\s+for request:.*", Pattern.DOTALL)));
+    }
+
+    /**
+     * Has the client request the path and leave, and returns the server's log once MockServer has closed the connection
+     * the client left and logged how the write of the second event ended.
+     */
+    private List<LogEntry> leaveAndAwaitTheSecondEvent(String path) throws Exception {
         int connectionsBefore = server.getInboundConnectionCount();
         switch (route) {
             case HTTP1_DIRECT:
-                leaveHttp1(false);
+                leaveHttp1(path, false);
                 break;
             case HTTP1_CONNECT_TUNNEL:
-                leaveHttp1(true);
+                leaveHttp1(path, true);
                 break;
             default:
-                leaveHttp2(route == Route.HTTP2_CONNECT_TUNNEL);
+                leaveHttp2(path, route == Route.HTTP2_CONNECT_TUNNEL);
                 break;
         }
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
@@ -132,17 +154,14 @@ public class SseClientLeavesMidStreamIntegrationTest {
         // awaited too: a closed connection is counted out before its pending write is failed and logged
         deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
         List<LogEntry> entries = server.logEntries();
-        while (clientLeft(entries).isEmpty() && System.nanoTime() < deadline) {
+        while (clientLeft(entries, path).isEmpty() && secondEventSent(entries, path).isEmpty() && warningsAndErrors(entries).isEmpty() && System.nanoTime() < deadline) {
             Thread.sleep(10);
             entries = server.logEntries();
         }
-        assertThat("a client that leaves is not an error", warningsAndErrors(entries), is(empty()));
-        List<String> left = clientLeft(entries);
-        assertThat("the write of the second event failed, and is logged at DEBUG", left.size(), is(1));
-        assertThat(left.get(0), matchesPattern(Pattern.compile("client left before streaming chunk\\s+2\\s+was sent:\\s+\\w+(: [^\\n]+)?\\s+for request:.*", Pattern.DOTALL)));
+        return entries;
     }
 
-    private void leaveHttp1(boolean throughTunnel) throws Exception {
+    private void leaveHttp1(String path, boolean throughTunnel) throws Exception {
         Socket socket = new Socket();
         // a small window, so little of the second event can leave MockServer while it is not being read
         socket.setReceiveBufferSize(4096);
@@ -155,7 +174,7 @@ public class SseClientLeavesMidStreamIntegrationTest {
                 socket.getOutputStream().flush();
                 assertThat(readUntil(socket.getInputStream(), "\r\n\r\n"), startsWith("HTTP/1.1 200 "));
             }
-            socket.getOutputStream().write(("GET /sse HTTP/1.1\r\nHost: " + authority + "\r\nAccept: text/event-stream\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
+            socket.getOutputStream().write(("GET " + path + " HTTP/1.1\r\nHost: " + authority + "\r\nAccept: text/event-stream\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
             socket.getOutputStream().flush();
             assertThat(readUntil(socket.getInputStream(), "data: first\n\n"), startsWith("HTTP/1.1 200 "));
             // the second event is being written: it is sent as soon as the first has been
@@ -166,13 +185,13 @@ public class SseClientLeavesMidStreamIntegrationTest {
         }
     }
 
-    private void leaveHttp2(boolean throughTunnel) throws Exception {
+    private void leaveHttp2(String path, boolean throughTunnel) throws Exception {
         String authority = throughTunnel ? "localhost:443" : "localhost:" + server.getLocalPort();
         try (Http2TestClient http2 = throughTunnel
             ? Http2TestClient.throughConnect(clientGroup, server.getLocalPort(), "localhost", 443, true)
             : Http2TestClient.tls(clientGroup, server.getLocalPort())) {
             http2.streamWindow(HTTP2_STREAM_WINDOW);
-            Http2Headers headers = new DefaultHttp2Headers().method("GET").scheme("https").authority(authority).path("/sse").add("accept", "text/event-stream");
+            Http2Headers headers = new DefaultHttp2Headers().method("GET").scheme("https").authority(authority).path(path).add("accept", "text/event-stream");
             Http2TestClient.Exchange exchange = http2.sendReadingOnlyTheResponseHeaders(headers, true);
             assertThat(exchange.status(), is(200));
             exchange.readOneFrame();
@@ -194,16 +213,27 @@ public class SseClientLeavesMidStreamIntegrationTest {
         return read.toString(StandardCharsets.ISO_8859_1);
     }
 
-    private static List<String> clientLeft(List<LogEntry> entries) {
+    private static List<String> clientLeft(List<LogEntry> entries, String path) {
+        return debugEntries(entries, path, "client left before streaming chunk");
+    }
+
+    private static List<String> secondEventSent(List<LogEntry> entries, String path) {
+        return debugEntries(entries, path, "sent streaming chunk").stream()
+            .filter(message -> message.matches("(?s)sent streaming chunk\\s+2\\s+of.*"))
+            .collect(Collectors.toList());
+    }
+
+    private static List<String> debugEntries(List<LogEntry> entries, String path, String messageFormatStart) {
         return entries.stream()
-            .filter(entry -> entry.getLogLevel() == Level.DEBUG && entry.getMessageFormat() != null && entry.getMessageFormat().startsWith("client left before streaming chunk"))
+            .filter(entry -> entry.getLogLevel() == Level.DEBUG && entry.getMessageFormat() != null && entry.getMessageFormat().startsWith(messageFormatStart))
+            .filter(entry -> entry.getHttpRequest() instanceof HttpRequest && path.equals(((HttpRequest) entry.getHttpRequest()).getPath().getValue()))
             .map(LogEntry::getMessage)
             .collect(Collectors.toList());
     }
 
     /**
-     * What MockServer logged at WARN or above since the last reset, other than the notice it logs when it first
-     * intercepts TLS for a tunnel.
+     * What MockServer logged at WARN or above since the last reset, for any path, other than the notice it logs when it
+     * first intercepts TLS for a tunnel.
      */
     private static List<String> warningsAndErrors(List<LogEntry> entries) {
         return entries.stream()
