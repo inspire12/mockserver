@@ -54,3 +54,22 @@ export function rustRawString(s: string): string {
   while (s.includes('"' + hashes)) hashes += '#';
   return `r${hashes}"${s}"${hashes}`;
 }
+
+/**
+ * Wire fields a snippet leaves out because its client model cannot hold them. Each emitter
+ * records them while it renders, then names them in one NOTE instead of dropping them silently.
+ */
+export class OmittedFields {
+  private readonly paths: string[] = [];
+
+  /** Records each key of `o` outside `known`, as `<at>.<key>`. */
+  unknown(at: string, o: Record<string, unknown>, known: readonly string[]): void {
+    for (const key of Object.keys(o)) if (!known.includes(key)) this.paths.push(`${at}.${key}`);
+  }
+
+  /** `<comment> NOTE: …` naming every recorded field, or undefined when none was recorded. */
+  note(comment: string, language: string): string | undefined {
+    if (this.paths.length === 0) return undefined;
+    return `${comment} NOTE: the ${language} snippet omits field(s) its client model cannot hold: ${this.paths.join(', ')} -- see the JSON tab.`;
+  }
+}

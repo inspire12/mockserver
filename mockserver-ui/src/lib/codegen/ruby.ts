@@ -27,10 +27,18 @@
  * typed field for it.
  */
 import { buildExpectationJson, type StandardMatcher, type StandardActionPayload } from '../standardCodegen.ts';
-import { clientHostPort } from './shared.ts';
+import { clientHostPort, OmittedFields } from './shared.ts';
 
 type Json = unknown;
 type Obj = Record<string, Json>;
+
+/** What the snippet being rendered leaves out; {@link standardToRuby} starts each snippet afresh. */
+let omitted = new OmittedFields();
+
+/** Records each key of `w` outside `keys`, so the snippet names it rather than drop it. */
+function known(at: string, w: Obj, keys: readonly string[]): void {
+  omitted.unknown(at, w, keys);
+}
 
 // ---------------------------------------------------------------------------
 // Low-level Ruby literal helpers
@@ -132,14 +140,27 @@ function cookies(map: Obj, indent: number): string {
 // Small typed leaves
 // ---------------------------------------------------------------------------
 
-function delay(w: Obj, indent: number): string {
+function delay(w: Obj, indent: number, at: string): string {
+  known(at, w, ['timeUnit', 'value', 'distribution']);
   const args: Arg[] = [];
   if ('timeUnit' in w) args.push({ name: 'time_unit', value: rb(String(w['timeUnit'])) });
   if ('value' in w) args.push({ name: 'value', value: scalar(w['value']) });
+  if ('distribution' in w) args.push({ name: 'distribution', value: delayDistribution(w['distribution'] as Obj, indent + 2, `${at}.distribution`) });
   return ctor('Delay', args, indent);
 }
 
-function connectionOptions(w: Obj, indent: number): string {
+function delayDistribution(w: Obj, indent: number, at: string): string {
+  const spec: [string, string][] = [
+    ['type', 'type'], ['min', 'min'], ['max', 'max'], ['median', 'median'],
+    ['p99', 'p99'], ['mean', 'mean'], ['stdDev', 'std_dev'],
+  ];
+  known(at, w, spec.map(([wk]) => wk));
+  const args: Arg[] = [];
+  for (const [wk, arg] of spec) if (wk in w) args.push({ name: arg, value: scalar(w[wk]) });
+  return ctor('DelayDistribution', args, indent);
+}
+
+function connectionOptions(w: Obj, indent: number, at: string): string {
   const spec: [string, string][] = [
     ['keepAliveOverride', 'keep_alive_override'],
     ['closeSocket', 'close_socket'],
@@ -148,9 +169,15 @@ function connectionOptions(w: Obj, indent: number): string {
     ['suppressContentLengthHeader', 'suppress_content_length_header'],
     ['suppressConnectionHeader', 'suppress_connection_header'],
     ['chunkSize', 'chunk_size'],
+    ['chunkDelay', 'chunk_delay'],
   ];
+  known(at, w, spec.map(([wk]) => wk));
   const args: Arg[] = [];
-  for (const [wk, arg] of spec) if (wk in w) args.push({ name: arg, value: scalar(w[wk]) });
+  for (const [wk, arg] of spec) {
+    if (!(wk in w)) continue;
+    const isDelay = wk === 'closeSocketDelay' || wk === 'chunkDelay';
+    args.push({ name: arg, value: isDelay ? delay(w[wk] as Obj, indent + 2, `${at}.${wk}`) : scalar(w[wk]) });
+  }
   return ctor('ConnectionOptions', args, indent);
 }
 
@@ -199,13 +226,14 @@ const BODY_FIELDS: Record<string, { arg: string; opaque?: boolean }> = {
   optional: { arg: 'optional' },
 };
 
-function body(w: Json, indent: number): string {
+function body(w: Json, indent: number, at: string): string {
   if (typeof w === 'string') return rb(w);
   if (w === null || typeof w !== 'object' || Array.isArray(w)) return rbValue(w, indent);
   const b = w as Obj;
   const type = b['type'];
 
   if (type === 'GRAPHQL') {
+    known(at, b, ['type', 'query', 'operationName', 'variablesSchema', 'selectionSetMatchType', 'fields']);
     const args: Arg[] = [];
     if ('query' in b) args.push({ name: 'query', value: rb(String(b['query'])) });
     if ('operationName' in b) args.push({ name: 'operation_name', value: rb(String(b['operationName'])) });
@@ -215,19 +243,22 @@ function body(w: Json, indent: number): string {
     return ctor('GraphQLBody', args, indent);
   }
   if (type === 'JSON_RPC') {
+    known(at, b, ['type', 'method', 'paramsSchema']);
     const args: Arg[] = [];
     if ('method' in b) args.push({ name: 'method_name', value: rb(String(b['method'])) });
     if ('paramsSchema' in b) args.push({ name: 'params_schema', value: rbValue(b['paramsSchema'], indent + 2) });
     return ctor('JsonRpcBody', args, indent);
   }
   if (type === 'ALL_OF') {
-    const subs = ((b['bodyAllOf'] as Json[]) ?? []).map((sb) => body(sb, indent + 2));
+    known(at, b, ['type', 'bodyAllOf']);
+    const subs = ((b['bodyAllOf'] as Json[]) ?? []).map((sb, n) => body(sb, indent + 2, `${at}.bodyAllOf[${n}]`));
     return ctor('Body', [
       { name: 'type', value: rb('ALL_OF') },
       { name: 'body_all_of', value: arrayOf(subs, indent + 2) },
     ], indent);
   }
 
+  known(at, b, ['type', ...Object.keys(BODY_FIELDS)]);
   const args: Arg[] = [{ name: 'type', value: rb(String(type)) }];
   for (const [wk, val] of Object.entries(b)) {
     if (wk === 'type') continue;
@@ -242,9 +273,11 @@ function body(w: Json, indent: number): string {
 // Request / response
 // ---------------------------------------------------------------------------
 
-function httpRequest(w: Obj, indent: number): string {
+function httpRequest(w: Obj, indent: number, at: string): string {
   const args: Arg[] = [];
+  const keys: string[] = [];
   const push = (wk: string, arg: string, render: (v: Json) => string) => {
+    keys.push(wk);
     if (wk in w) args.push({ name: arg, value: render(w[wk]) });
   };
   push('method', 'method', (v) => rb(String(v)));
@@ -253,7 +286,7 @@ function httpRequest(w: Obj, indent: number): string {
   push('queryStringParameters', 'query_string_parameters', (v) => kmv(v as Obj, indent + 2));
   push('cookies', 'cookies', (v) => cookies(v as Obj, indent + 2));
   push('pathParameters', 'path_parameters', (v) => kmv(v as Obj, indent + 2));
-  push('body', 'body', (v) => body(v, indent + 2));
+  push('body', 'body', (v) => body(v, indent + 2, `${at}.body`));
   push('secure', 'secure', (v) => scalar(v));
   push('protocol', 'protocol', (v) => rb(String(v)));
   push('keepAlive', 'keep_alive', (v) => scalar(v));
@@ -262,23 +295,35 @@ function httpRequest(w: Obj, indent: number): string {
   push('dnsName', 'dns_name', (v) => rb(String(v)));
   push('dnsType', 'dns_type', (v) => rb(String(v)));
   push('dnsClass', 'dns_class', (v) => rb(String(v)));
+  push('socketAddress', 'socket_address', (v) => socketAddress(v as Obj, indent + 2, `${at}.socketAddress`));
+  known(at, w, keys);
   return ctor('HttpRequest', args, indent);
 }
 
-function httpResponse(className: 'HttpResponse', w: Obj, indent: number): string {
+function socketAddress(w: Obj, indent: number, at: string): string {
+  known(at, w, ['host', 'port', 'scheme']);
   const args: Arg[] = [];
+  for (const wk of ['host', 'port', 'scheme']) if (wk in w) args.push({ name: wk, value: scalar(w[wk]) });
+  return ctor('SocketAddress', args, indent);
+}
+
+function httpResponse(className: 'HttpResponse', w: Obj, indent: number, at: string): string {
+  const args: Arg[] = [];
+  const keys: string[] = [];
   const push = (wk: string, arg: string, render: (v: Json) => string) => {
+    keys.push(wk);
     if (wk in w) args.push({ name: arg, value: render(w[wk]) });
   };
   push('statusCode', 'status_code', (v) => scalar(v));
   push('reasonPhrase', 'reason_phrase', (v) => rb(String(v)));
-  push('body', 'body', (v) => body(v, indent + 2));
+  push('body', 'body', (v) => body(v, indent + 2, `${at}.body`));
   push('headers', 'headers', (v) => kmv(v as Obj, indent + 2));
   push('cookies', 'cookies', (v) => cookies(v as Obj, indent + 2));
-  push('connectionOptions', 'connection_options', (v) => connectionOptions(v as Obj, indent + 2));
+  push('connectionOptions', 'connection_options', (v) => connectionOptions(v as Obj, indent + 2, `${at}.connectionOptions`));
   push('trailers', 'trailers', (v) => kmv(v as Obj, indent + 2));
-  push('delay', 'delay', (v) => delay(v as Obj, indent + 2));
+  push('delay', 'delay', (v) => delay(v as Obj, indent + 2, `${at}.delay`));
   push('primary', 'primary', (v) => scalar(v));
+  known(at, w, keys);
   return ctor(className, args, indent);
 }
 
@@ -287,75 +332,84 @@ function httpResponse(className: 'HttpResponse', w: Obj, indent: number): string
 // ---------------------------------------------------------------------------
 
 /** The delay and primary every action inherits. */
-function inherited(w: Obj, args: Arg[], indent: number): Arg[] {
-  if ('delay' in w) args.push({ name: 'delay', value: delay(w['delay'] as Obj, indent + 2) });
+function inherited(w: Obj, args: Arg[], indent: number, at: string): Arg[] {
+  if ('delay' in w) args.push({ name: 'delay', value: delay(w['delay'] as Obj, indent + 2, `${at}.delay`) });
   if ('primary' in w) args.push({ name: 'primary', value: scalar(w['primary']) });
   return args;
 }
 
-function httpForward(w: Obj, indent: number): string {
+function httpForward(w: Obj, indent: number, at: string): string {
+  known(at, w, ['host', 'port', 'scheme', 'delay', 'primary']);
   const args: Arg[] = [];
   for (const [wk, arg] of [['host', 'host'], ['port', 'port'], ['scheme', 'scheme']] as [string, string][]) {
     if (wk in w) args.push({ name: arg, value: scalar(w[wk]) });
   }
-  if ('delay' in w) args.push({ name: 'delay', value: delay(w['delay'] as Obj, indent + 2) });
-  if ('primary' in w) args.push({ name: 'primary', value: scalar(w['primary']) });
-  return ctor('HttpForward', args, indent);
+  return ctor('HttpForward', inherited(w, args, indent, at), indent);
 }
 
-function httpTemplate(w: Obj, indent: number): string {
+function httpTemplate(w: Obj, indent: number, at: string): string {
+  known(at, w, ['templateType', 'template', 'templateFile', 'delay', 'primary']);
   const args: Arg[] = [];
   if ('templateType' in w) args.push({ name: 'template_type', value: rb(String(w['templateType'])) });
   if ('template' in w) args.push({ name: 'template', value: rb(String(w['template'])) });
   if ('templateFile' in w) args.push({ name: 'template_file', value: rb(String(w['templateFile'])) });
-  return ctor('HttpTemplate', inherited(w, args, indent), indent);
+  return ctor('HttpTemplate', inherited(w, args, indent, at), indent);
 }
 
-function httpClassCallback(w: Obj, indent: number): string {
+function httpClassCallback(w: Obj, indent: number, at: string): string {
+  known(at, w, ['callbackClass', 'delay', 'primary']);
   const args: Arg[] = [];
   if ('callbackClass' in w) args.push({ name: 'callback_class', value: rb(String(w['callbackClass'])) });
-  return ctor('HttpClassCallback', inherited(w, args, indent), indent);
+  return ctor('HttpClassCallback', inherited(w, args, indent, at), indent);
 }
 
-function httpError(w: Obj, indent: number): string {
+function httpError(w: Obj, indent: number, at: string): string {
+  known(at, w, ['dropConnection', 'responseBytes', 'streamError', 'delay', 'primary']);
   const args: Arg[] = [];
   if ('dropConnection' in w) args.push({ name: 'drop_connection', value: scalar(w['dropConnection']) });
   if ('responseBytes' in w) args.push({ name: 'response_bytes', value: rb(String(w['responseBytes'])) });
   if ('streamError' in w) args.push({ name: 'stream_error', value: scalar(w['streamError']) });
-  return ctor('HttpError', inherited(w, args, indent), indent);
+  return ctor('HttpError', inherited(w, args, indent, at), indent);
 }
 
-function httpForwardWithFallback(w: Obj, indent: number): string {
+function httpForwardWithFallback(w: Obj, indent: number, at: string): string {
+  known(at, w, ['httpForward', 'fallbackResponse', 'fallbackOnStatusCodes', 'fallbackOnTimeout', 'delay', 'primary']);
   const args: Arg[] = [];
-  if ('httpForward' in w) args.push({ name: 'http_forward', value: httpForward(w['httpForward'] as Obj, indent + 2) });
-  if ('fallbackResponse' in w) args.push({ name: 'fallback_response', value: httpResponse('HttpResponse', w['fallbackResponse'] as Obj, indent + 2) });
+  if ('httpForward' in w) args.push({ name: 'http_forward', value: httpForward(w['httpForward'] as Obj, indent + 2, `${at}.httpForward`) });
+  if ('fallbackResponse' in w) args.push({ name: 'fallback_response', value: httpResponse('HttpResponse', w['fallbackResponse'] as Obj, indent + 2, `${at}.fallbackResponse`) });
   if ('fallbackOnStatusCodes' in w) args.push({ name: 'fallback_on_status_codes', value: rbValue(w['fallbackOnStatusCodes'], indent + 2) });
   if ('fallbackOnTimeout' in w) args.push({ name: 'fallback_on_timeout', value: scalar(w['fallbackOnTimeout']) });
-  return ctor('HttpForwardWithFallback', inherited(w, args, indent), indent);
+  return ctor('HttpForwardWithFallback', inherited(w, args, indent, at), indent);
 }
 
-function webSocketMessage(w: Obj, indent: number): string {
+/** The gem holds a binary message as raw bytes, which it base64-encodes back onto the wire. */
+function webSocketMessage(w: Obj, indent: number, at: string): string {
+  known(at, w, ['text', 'binary', 'delay']);
   const args: Arg[] = [];
   if ('text' in w) args.push({ name: 'text', value: rb(String(w['text'])) });
-  if ('delay' in w) args.push({ name: 'delay', value: delay(w['delay'] as Obj, indent + 2) });
+  if ('binary' in w) args.push({ name: 'binary', value: `Base64.strict_decode64(${rb(String(w['binary']))})` });
+  if ('delay' in w) args.push({ name: 'delay', value: delay(w['delay'] as Obj, indent + 2, `${at}.delay`) });
   return ctor('WebSocketMessage', args, indent);
 }
 
-function httpWebSocketResponse(w: Obj, indent: number): string {
+function httpWebSocketResponse(w: Obj, indent: number, at: string): string {
+  known(at, w, ['subprotocol', 'messages', 'matchers', 'closeConnection', 'delay', 'primary']);
   const args: Arg[] = [];
   if ('subprotocol' in w) args.push({ name: 'subprotocol', value: rb(String(w['subprotocol'])) });
   if ('messages' in w) {
-    const msgs = (w['messages'] as Json[]).map((m) => webSocketMessage(m as Obj, indent + 4));
+    const msgs = (w['messages'] as Json[]).map((m, n) => webSocketMessage(m as Obj, indent + 4, `${at}.messages[${n}]`));
     args.push({ name: 'messages', value: arrayOf(msgs, indent + 2) });
   }
   if ('matchers' in w) {
-    const matchers = (w['matchers'] as Json[]).map((m) => {
+    const matchers = (w['matchers'] as Json[]).map((m, n) => {
       const mo = m as Obj;
+      const mat = `${at}.matchers[${n}]`;
+      known(mat, mo, ['frameType', 'textMatcher', 'responses']);
       const ma: Arg[] = [];
       if ('frameType' in mo) ma.push({ name: 'frame_type', value: rb(String(mo['frameType'])) });
       if ('textMatcher' in mo) ma.push({ name: 'text_matcher', value: rb(String(mo['textMatcher'])) });
       if ('responses' in mo) {
-        const resps = (mo['responses'] as Json[]).map((r) => webSocketMessage(r as Obj, indent + 6));
+        const resps = (mo['responses'] as Json[]).map((r, k) => webSocketMessage(r as Obj, indent + 6, `${mat}.responses[${k}]`));
         ma.push({ name: 'responses', value: arrayOf(resps, indent + 4) });
       }
       return ctor('WebSocketFrameMatcher', ma, indent + 4);
@@ -363,35 +417,38 @@ function httpWebSocketResponse(w: Obj, indent: number): string {
     args.push({ name: 'matchers', value: arrayOf(matchers, indent + 2) });
   }
   if ('closeConnection' in w) args.push({ name: 'close_connection', value: scalar(w['closeConnection']) });
-  return ctor('HttpWebSocketResponse', inherited(w, args, indent), indent);
+  return ctor('HttpWebSocketResponse', inherited(w, args, indent, at), indent);
 }
 
-function httpSseResponse(w: Obj, indent: number): string {
+function httpSseResponse(w: Obj, indent: number, at: string): string {
+  known(at, w, ['statusCode', 'headers', 'events', 'closeConnection', 'delay', 'primary']);
   const args: Arg[] = [];
   if ('statusCode' in w) args.push({ name: 'status_code', value: scalar(w['statusCode']) });
   if ('headers' in w) args.push({ name: 'headers', value: kmv(w['headers'] as Obj, indent + 2) });
   if ('events' in w) {
-    const events = (w['events'] as Json[]).map((e) => {
+    const events = (w['events'] as Json[]).map((e, n) => {
       const eo = e as Obj;
+      known(`${at}.events[${n}]`, eo, ['event', 'data', 'id', 'retry', 'delay']);
       const ea: Arg[] = [];
       if ('event' in eo) ea.push({ name: 'event', value: rb(String(eo['event'])) });
       if ('data' in eo) ea.push({ name: 'data', value: rb(String(eo['data'])) });
       if ('id' in eo) ea.push({ name: 'id', value: rb(String(eo['id'])) });
       if ('retry' in eo) ea.push({ name: 'retry_ms', value: scalar(eo['retry']) });
-      if ('delay' in eo) ea.push({ name: 'delay', value: delay(eo['delay'] as Obj, indent + 6) });
+      if ('delay' in eo) ea.push({ name: 'delay', value: delay(eo['delay'] as Obj, indent + 6, `${at}.events[${n}].delay`) });
       return ctor('SseEvent', ea, indent + 4);
     });
     args.push({ name: 'events', value: arrayOf(events, indent + 2) });
   }
   if ('closeConnection' in w) args.push({ name: 'close_connection', value: scalar(w['closeConnection']) });
-  return ctor('HttpSseResponse', inherited(w, args, indent), indent);
+  return ctor('HttpSseResponse', inherited(w, args, indent, at), indent);
 }
 
-function binaryResponse(w: Obj, indent: number): string {
+function binaryResponse(w: Obj, indent: number, at: string): string {
+  known(at, w, ['binaryData', 'upstream', 'delay', 'primary']);
   const args: Arg[] = [];
   if ('binaryData' in w) args.push({ name: 'binary_data', value: rb(String(w['binaryData'])) });
   if (typeof w['upstream'] === 'string') args.push({ name: 'upstream', value: rb(w['upstream']) });
-  return ctor('BinaryResponse', inherited(w, args, indent), indent);
+  return ctor('BinaryResponse', inherited(w, args, indent, at), indent);
 }
 
 const DNS_RECORD_FIELDS: [string, string][] = [
@@ -399,11 +456,13 @@ const DNS_RECORD_FIELDS: [string, string][] = [
   ['value', 'value'], ['priority', 'priority'], ['weight', 'weight'], ['port', 'port'],
 ];
 
-function dnsResponse(w: Obj, indent: number): string {
+function dnsResponse(w: Obj, indent: number, at: string): string {
+  known(at, w, ['responseCode', 'answerRecords', 'authorityRecords', 'additionalRecords', 'delay', 'primary']);
   const args: Arg[] = [];
   if ('responseCode' in w) args.push({ name: 'response_code', value: rb(String(w['responseCode'])) });
-  const records = (key: string) => (w[key] as Json[]).map((r) => {
+  const records = (key: string) => (w[key] as Json[]).map((r, n) => {
     const ro = r as Obj;
+    known(`${at}.${key}[${n}]`, ro, DNS_RECORD_FIELDS.map(([wk]) => wk));
     const ra: Arg[] = [];
     for (const [wk, arg] of DNS_RECORD_FIELDS) if (wk in ro) ra.push({ name: arg, value: scalar(ro[wk]) });
     return ctor('DnsRecord', ra, indent + 4);
@@ -411,27 +470,21 @@ function dnsResponse(w: Obj, indent: number): string {
   if ('answerRecords' in w) args.push({ name: 'answer_records', value: arrayOf(records('answerRecords'), indent + 2) });
   if ('authorityRecords' in w) args.push({ name: 'authority_records', value: arrayOf(records('authorityRecords'), indent + 2) });
   if ('additionalRecords' in w) args.push({ name: 'additional_records', value: arrayOf(records('additionalRecords'), indent + 2) });
-  return ctor('DnsResponse', inherited(w, args, indent), indent);
+  return ctor('DnsResponse', inherited(w, args, indent, at), indent);
 }
 
-function grpcStreamResponse(w: Obj, indent: number): string {
+function grpcStreamResponse(w: Obj, indent: number, at: string): string {
+  known(at, w, ['statusName', 'statusMessage', 'headers', 'messages', 'closeConnection', 'delay', 'primary']);
   const args: Arg[] = [];
   if ('statusName' in w) args.push({ name: 'status_name', value: rb(String(w['statusName'])) });
   if ('statusMessage' in w) args.push({ name: 'status_message', value: rb(String(w['statusMessage'])) });
   if ('headers' in w) args.push({ name: 'headers', value: kmv(w['headers'] as Obj, indent + 2) });
   if ('messages' in w) {
-    const msgs = (w['messages'] as Json[]).map((m) => {
-      const mo = m as Obj;
-      const ma: Arg[] = [];
-      if ('json' in mo) ma.push({ name: 'json', value: rb(String(mo['json'])) });
-      if ('templateType' in mo) ma.push({ name: 'template_type', value: rb(String(mo['templateType'])) });
-      if ('delay' in mo) ma.push({ name: 'delay', value: delay(mo['delay'] as Obj, indent + 6) });
-      return ctor('GrpcStreamMessage', ma, indent + 4);
-    });
+    const msgs = (w['messages'] as Json[]).map((m, n) => grpcStreamMessage(m as Obj, indent + 4, `${at}.messages[${n}]`));
     args.push({ name: 'messages', value: arrayOf(msgs, indent + 2) });
   }
   if ('closeConnection' in w) args.push({ name: 'close_connection', value: scalar(w['closeConnection']) });
-  return ctor('GrpcStreamResponse', inherited(w, args, indent), indent);
+  return ctor('GrpcStreamResponse', inherited(w, args, indent, at), indent);
 }
 
 /** camelCase wire key → snake_case attr, for the flat HttpChaosProfile fields. */
@@ -443,9 +496,9 @@ function httpChaosProfile(w: Obj, indent: number): string {
   const args: Arg[] = [];
   for (const [wk, val] of Object.entries(w)) {
     if (wk === 'latency' && val && typeof val === 'object') {
-      args.push({ name: 'latency', value: delay(val as Obj, indent + 2) });
+      args.push({ name: 'latency', value: delay(val as Obj, indent + 2, 'chaos.latency') });
     } else if (wk === 'slowResponseChunkDelay' && val && typeof val === 'object') {
-      args.push({ name: 'slow_response_chunk_delay', value: delay(val as Obj, indent + 2) });
+      args.push({ name: 'slow_response_chunk_delay', value: delay(val as Obj, indent + 2, 'chaos.slowResponseChunkDelay') });
     } else {
       args.push({ name: camelToSnake(wk), value: scalar(val) });
     }
@@ -453,30 +506,30 @@ function httpChaosProfile(w: Obj, indent: number): string {
   return ctor('HttpChaosProfile', args, indent);
 }
 
-function afterAction(w: Obj, indent: number): string {
+function afterAction(w: Obj, indent: number, at: string): string {
   const args: Arg[] = [];
-  if ('httpRequest' in w) args.push({ name: 'http_request', value: httpRequest(w['httpRequest'] as Obj, indent + 2) });
-  if ('httpClassCallback' in w) args.push({ name: 'http_class_callback', value: httpClassCallback(w['httpClassCallback'] as Obj, indent + 2) });
-  if ('delay' in w) args.push({ name: 'delay', value: delay(w['delay'] as Obj, indent + 2) });
+  if ('httpRequest' in w) args.push({ name: 'http_request', value: httpRequest(w['httpRequest'] as Obj, indent + 2, `${at}.httpRequest`) });
+  if ('httpClassCallback' in w) args.push({ name: 'http_class_callback', value: httpClassCallback(w['httpClassCallback'] as Obj, indent + 2, `${at}.httpClassCallback`) });
+  if ('delay' in w) args.push({ name: 'delay', value: delay(w['delay'] as Obj, indent + 2, `${at}.delay`) });
   if ('blocking' in w) args.push({ name: 'blocking', value: scalar(w['blocking']) });
-  if ('timeout' in w) args.push({ name: 'timeout', value: delay(w['timeout'] as Obj, indent + 2) });
+  if ('timeout' in w) args.push({ name: 'timeout', value: delay(w['timeout'] as Obj, indent + 2, `${at}.timeout`) });
   if ('failurePolicy' in w) args.push({ name: 'failure_policy', value: rb(String(w['failurePolicy'])) });
   return ctor('AfterAction', args, indent);
 }
 
-function expectationStep(w: Obj, indent: number): string {
+function expectationStep(w: Obj, indent: number, at: string): string {
   const args: Arg[] = [];
-  if ('httpRequest' in w) args.push({ name: 'http_request', value: httpRequest(w['httpRequest'] as Obj, indent + 2) });
-  if ('httpResponse' in w) args.push({ name: 'http_response', value: httpResponse('HttpResponse', w['httpResponse'] as Obj, indent + 2) });
-  if ('httpForward' in w) args.push({ name: 'http_forward', value: httpForward(w['httpForward'] as Obj, indent + 2) });
+  if ('httpRequest' in w) args.push({ name: 'http_request', value: httpRequest(w['httpRequest'] as Obj, indent + 2, `${at}.httpRequest`) });
+  if ('httpResponse' in w) args.push({ name: 'http_response', value: httpResponse('HttpResponse', w['httpResponse'] as Obj, indent + 2, `${at}.httpResponse`) });
+  if ('httpForward' in w) args.push({ name: 'http_forward', value: httpForward(w['httpForward'] as Obj, indent + 2, `${at}.httpForward`) });
   // requestOverride model gap (see file header) — raw-hash passthrough.
   if ('httpOverrideForwardedRequest' in w) args.push({ name: 'http_override_forwarded_request', value: rbValue(w['httpOverrideForwardedRequest'], indent + 2) });
-  if ('httpClassCallback' in w) args.push({ name: 'http_class_callback', value: httpClassCallback(w['httpClassCallback'] as Obj, indent + 2) });
-  if ('httpError' in w) args.push({ name: 'http_error', value: httpError(w['httpError'] as Obj, indent + 2) });
+  if ('httpClassCallback' in w) args.push({ name: 'http_class_callback', value: httpClassCallback(w['httpClassCallback'] as Obj, indent + 2, `${at}.httpClassCallback`) });
+  if ('httpError' in w) args.push({ name: 'http_error', value: httpError(w['httpError'] as Obj, indent + 2, `${at}.httpError`) });
   if ('responder' in w) args.push({ name: 'responder', value: scalar(w['responder']) });
-  if ('delay' in w) args.push({ name: 'delay', value: delay(w['delay'] as Obj, indent + 2) });
+  if ('delay' in w) args.push({ name: 'delay', value: delay(w['delay'] as Obj, indent + 2, `${at}.delay`) });
   if ('blocking' in w) args.push({ name: 'blocking', value: scalar(w['blocking']) });
-  if ('timeout' in w) args.push({ name: 'timeout', value: delay(w['timeout'] as Obj, indent + 2) });
+  if ('timeout' in w) args.push({ name: 'timeout', value: delay(w['timeout'] as Obj, indent + 2, `${at}.timeout`) });
   if ('failurePolicy' in w) args.push({ name: 'failure_policy', value: rb(String(w['failurePolicy'])) });
   return ctor('ExpectationStep', args, indent);
 }
@@ -510,29 +563,33 @@ function timeToLive(w: Obj, indent: number): string {
 // — see llm() below).
 // ---------------------------------------------------------------------------
 
-function grpcStreamMessage(mo: Obj, indent: number): string {
+function grpcStreamMessage(mo: Obj, indent: number, at: string): string {
+  known(at, mo, ['json', 'templateType', 'delay']);
   const ma: Arg[] = [];
   if ('json' in mo) ma.push({ name: 'json', value: rb(String(mo['json'])) });
   if ('templateType' in mo) ma.push({ name: 'template_type', value: rb(String(mo['templateType'])) });
+  if ('delay' in mo) ma.push({ name: 'delay', value: delay(mo['delay'] as Obj, indent + 2, `${at}.delay`) });
   return ctor('GrpcStreamMessage', ma, indent);
 }
 
-function grpcBidiResponse(w: Obj, indent: number): string {
+function grpcBidiResponse(w: Obj, indent: number, at: string): string {
+  known(at, w, ['statusName', 'statusMessage', 'headers', 'messages', 'rules', 'closeConnection', 'delay', 'primary']);
   const args: Arg[] = [];
   if ('statusName' in w) args.push({ name: 'status_name', value: rb(String(w['statusName'])) });
   if ('statusMessage' in w) args.push({ name: 'status_message', value: rb(String(w['statusMessage'])) });
   if ('headers' in w) args.push({ name: 'headers', value: kmv(w['headers'] as Obj, indent + 2) });
   if ('messages' in w) {
-    const msgs = (w['messages'] as Json[]).map((m) => grpcStreamMessage(m as Obj, indent + 4));
+    const msgs = (w['messages'] as Json[]).map((m, n) => grpcStreamMessage(m as Obj, indent + 4, `${at}.messages[${n}]`));
     args.push({ name: 'messages', value: arrayOf(msgs, indent + 2) });
   }
   if ('rules' in w) {
-    const rules = (w['rules'] as Json[]).map((r) => {
+    const rules = (w['rules'] as Json[]).map((r, n) => {
       const ro = r as Obj;
+      known(`${at}.rules[${n}]`, ro, ['matchJson', 'responses']);
       const ra: Arg[] = [];
       if ('matchJson' in ro) ra.push({ name: 'match_json', value: rb(String(ro['matchJson'])) });
       if ('responses' in ro) {
-        const resps = (ro['responses'] as Json[]).map((rr) => grpcStreamMessage(rr as Obj, indent + 6));
+        const resps = (ro['responses'] as Json[]).map((rr, k) => grpcStreamMessage(rr as Obj, indent + 6, `${at}.rules[${n}].responses[${k}]`));
         ra.push({ name: 'responses', value: arrayOf(resps, indent + 4) });
       }
       return ctor('GrpcBidiRule', ra, indent + 4);
@@ -540,32 +597,30 @@ function grpcBidiResponse(w: Obj, indent: number): string {
     args.push({ name: 'rules', value: arrayOf(rules, indent + 2) });
   }
   if ('closeConnection' in w) args.push({ name: 'close_connection', value: scalar(w['closeConnection']) });
-  if ('delay' in w) args.push({ name: 'delay', value: delay(w['delay'] as Obj, indent + 2) });
-  if ('primary' in w) args.push({ name: 'primary', value: scalar(w['primary']) });
-  return ctor('GrpcBidiResponse', args, indent);
+  return ctor('GrpcBidiResponse', inherited(w, args, indent, at), indent);
 }
 
-function httpObjectCallback(w: Obj, indent: number): string {
+function httpObjectCallback(w: Obj, indent: number, at: string): string {
+  known(at, w, ['clientId', 'responseCallback', 'delay', 'primary']);
   const args: Arg[] = [];
   if ('clientId' in w) args.push({ name: 'client_id', value: rb(String(w['clientId'])) });
   if ('responseCallback' in w) args.push({ name: 'response_callback', value: scalar(w['responseCallback']) });
-  if ('delay' in w) args.push({ name: 'delay', value: delay(w['delay'] as Obj, indent + 2) });
-  if ('primary' in w) args.push({ name: 'primary', value: scalar(w['primary']) });
-  return ctor('HttpObjectCallback', args, indent);
+  return ctor('HttpObjectCallback', inherited(w, args, indent, at), indent);
 }
 
-function httpForwardValidateAction(w: Obj, indent: number): string {
+function httpForwardValidateAction(w: Obj, indent: number, at: string): string {
   const spec: [string, string, 'str' | 'scalar'][] = [
     ['specUrlOrPayload', 'spec_url_or_payload', 'str'], ['host', 'host', 'str'],
     ['port', 'port', 'scalar'], ['scheme', 'scheme', 'str'],
     ['validateRequest', 'validate_request', 'scalar'], ['validateResponse', 'validate_response', 'scalar'],
     ['validationMode', 'validation_mode', 'str'], ['primary', 'primary', 'scalar'],
   ];
+  known(at, w, [...spec.map(([wk]) => wk), 'delay']);
   const args: Arg[] = [];
   for (const [wk, arg, kind] of spec) {
     if (wk in w) args.push({ name: arg, value: kind === 'str' ? rb(String(w[wk])) : scalar(w[wk]) });
   }
-  if ('delay' in w) args.push({ name: 'delay', value: delay(w['delay'] as Obj, indent + 2) });
+  if ('delay' in w) args.push({ name: 'delay', value: delay(w['delay'] as Obj, indent + 2, `${at}.delay`) });
   return ctor('HttpForwardValidateAction', args, indent);
 }
 
@@ -611,31 +666,31 @@ function llm(v: Json, indent: number): string {
 // Rendered in this fixed order for a stable, readable snippet.
 // ---------------------------------------------------------------------------
 
-type Renderer = (v: Json, indent: number) => string;
+type Renderer = (v: Json, indent: number, at: string) => string;
 
 const EXPECTATION_FIELDS: [string, string, Renderer][] = [
-  ['httpRequest', 'http_request', (v, i) => httpRequest(v as Obj, i)],
-  ['httpResponse', 'http_response', (v, i) => httpResponse('HttpResponse', v as Obj, i)],
-  ['httpResponseTemplate', 'http_response_template', (v, i) => httpTemplate(v as Obj, i)],
-  ['httpResponseClassCallback', 'http_response_class_callback', (v, i) => httpClassCallback(v as Obj, i)],
-  ['httpForward', 'http_forward', (v, i) => httpForward(v as Obj, i)],
-  ['httpForwardTemplate', 'http_forward_template', (v, i) => httpTemplate(v as Obj, i)],
-  ['httpForwardClassCallback', 'http_forward_class_callback', (v, i) => httpClassCallback(v as Obj, i)],
+  ['httpRequest', 'http_request', (v, i, at) => httpRequest(v as Obj, i, at)],
+  ['httpResponse', 'http_response', (v, i, at) => httpResponse('HttpResponse', v as Obj, i, at)],
+  ['httpResponseTemplate', 'http_response_template', (v, i, at) => httpTemplate(v as Obj, i, at)],
+  ['httpResponseClassCallback', 'http_response_class_callback', (v, i, at) => httpClassCallback(v as Obj, i, at)],
+  ['httpForward', 'http_forward', (v, i, at) => httpForward(v as Obj, i, at)],
+  ['httpForwardTemplate', 'http_forward_template', (v, i, at) => httpTemplate(v as Obj, i, at)],
+  ['httpForwardClassCallback', 'http_forward_class_callback', (v, i, at) => httpClassCallback(v as Obj, i, at)],
   // requestOverride model gap (see file header) — raw-hash passthrough.
   ['httpOverrideForwardedRequest', 'http_override_forwarded_request', (v, i) => rbValue(v, i)],
-  ['httpForwardWithFallback', 'http_forward_with_fallback', (v, i) => httpForwardWithFallback(v as Obj, i)],
-  ['httpError', 'http_error', (v, i) => httpError(v as Obj, i)],
-  ['httpWebSocketResponse', 'http_websocket_response', (v, i) => httpWebSocketResponse(v as Obj, i)],
-  ['httpSseResponse', 'http_sse_response', (v, i) => httpSseResponse(v as Obj, i)],
-  ['binaryResponse', 'binary_response', (v, i) => binaryResponse(v as Obj, i)],
-  ['dnsResponse', 'dns_response', (v, i) => dnsResponse(v as Obj, i)],
-  ['grpcStreamResponse', 'grpc_stream_response', (v, i) => grpcStreamResponse(v as Obj, i)],
+  ['httpForwardWithFallback', 'http_forward_with_fallback', (v, i, at) => httpForwardWithFallback(v as Obj, i, at)],
+  ['httpError', 'http_error', (v, i, at) => httpError(v as Obj, i, at)],
+  ['httpWebSocketResponse', 'http_websocket_response', (v, i, at) => httpWebSocketResponse(v as Obj, i, at)],
+  ['httpSseResponse', 'http_sse_response', (v, i, at) => httpSseResponse(v as Obj, i, at)],
+  ['binaryResponse', 'binary_response', (v, i, at) => binaryResponse(v as Obj, i, at)],
+  ['dnsResponse', 'dns_response', (v, i, at) => dnsResponse(v as Obj, i, at)],
+  ['grpcStreamResponse', 'grpc_stream_response', (v, i, at) => grpcStreamResponse(v as Obj, i, at)],
   // Edit-preserved actions/siblings the standard composer form cannot model.
-  ['httpResponses', 'http_responses', (v, i) => arrayOf((v as Json[]).map((r) => httpResponse('HttpResponse', r as Obj, i + 2)), i)],
-  ['httpResponseObjectCallback', 'http_response_object_callback', (v, i) => httpObjectCallback(v as Obj, i)],
-  ['httpForwardObjectCallback', 'http_forward_object_callback', (v, i) => httpObjectCallback(v as Obj, i)],
-  ['httpForwardValidateAction', 'http_forward_validate_action', (v, i) => httpForwardValidateAction(v as Obj, i)],
-  ['grpcBidiResponse', 'grpc_bidi_response', (v, i) => grpcBidiResponse(v as Obj, i)],
+  ['httpResponses', 'http_responses', (v, i, at) => arrayOf((v as Json[]).map((r, n) => httpResponse('HttpResponse', r as Obj, i + 2, `${at}[${n}]`)), i)],
+  ['httpResponseObjectCallback', 'http_response_object_callback', (v, i, at) => httpObjectCallback(v as Obj, i, at)],
+  ['httpForwardObjectCallback', 'http_forward_object_callback', (v, i, at) => httpObjectCallback(v as Obj, i, at)],
+  ['httpForwardValidateAction', 'http_forward_validate_action', (v, i, at) => httpForwardValidateAction(v as Obj, i, at)],
+  ['grpcBidiResponse', 'grpc_bidi_response', (v, i, at) => grpcBidiResponse(v as Obj, i, at)],
   ['httpLlmResponse', 'http_llm_response', (v, i) => llm(v, i)],
   ['rateLimit', 'rate_limit', (v, i) => rateLimit(v as Obj, i)],
   ['crossProtocolScenarios', 'cross_protocol_scenarios', (v, i) => arrayOf((v as Json[]).map((c) => crossProtocolScenario(c as Obj, i + 2)), i)],
@@ -645,9 +700,9 @@ const EXPECTATION_FIELDS: [string, string, Renderer][] = [
   ['percentage', 'percentage', (v) => scalar(v)],
   ['timestamp', 'timestamp', (v) => rb(String(v))],
   ['chaos', 'chaos', (v, i) => httpChaosProfile(v as Obj, i)],
-  ['beforeActions', 'before_actions', (v, i) => arrayOf((v as Json[]).map((a) => afterAction(a as Obj, i + 2)), i)],
-  ['afterActions', 'after_actions', (v, i) => arrayOf((v as Json[]).map((a) => afterAction(a as Obj, i + 2)), i)],
-  ['steps', 'steps', (v, i) => arrayOf((v as Json[]).map((s) => expectationStep(s as Obj, i + 2)), i)],
+  ['beforeActions', 'before_actions', (v, i, at) => arrayOf((v as Json[]).map((a, n) => afterAction(a as Obj, i + 2, `${at}[${n}]`)), i)],
+  ['afterActions', 'after_actions', (v, i, at) => arrayOf((v as Json[]).map((a, n) => afterAction(a as Obj, i + 2, `${at}[${n}]`)), i)],
+  ['steps', 'steps', (v, i, at) => arrayOf((v as Json[]).map((s, n) => expectationStep(s as Obj, i + 2, `${at}[${n}]`)), i)],
   ['capture', 'capture', (v, i) => arrayOf((v as Json[]).map((c) => captureRule(c as Obj, i + 2)), i)],
   ['id', 'id', (v) => rb(String(v))],
   ['priority', 'priority', (v) => scalar(v)],
@@ -663,18 +718,20 @@ export function standardToRuby(matcher: StandardMatcher, action: StandardActionP
   const { host, port } = clientHostPort(baseUrl);
   const wire = buildExpectationJson(matcher, action) as Obj;
 
+  omitted = new OmittedFields();
   // Expectation.new(...) sits at indent 4 (two levels in: client.upsert( <exp> )),
   // so its keyword args live at indent 4 and its children at indent 6.
   const args: Arg[] = [];
   for (const [wireKey, arg, render] of EXPECTATION_FIELDS) {
     if (wireKey in wire) {
-      const a: Arg = { name: arg, value: render(wire[wireKey], 4) };
+      const a: Arg = { name: arg, value: render(wire[wireKey], 4, wireKey) };
       // The gem models the LLM action as a verbatim Hash (see llm()); flag why.
       if (wireKey === 'httpLlmResponse') a.comment = "LLM action: the gem carries httpLlmResponse as a verbatim Hash (MockServer::LLM builders emit Hashes)";
       args.push(a);
     }
   }
   const expectation = ctor('Expectation', args, 2);
+  const note = omitted.note('#', 'Ruby');
 
   return [
     "require 'mockserver-client'",
@@ -684,5 +741,6 @@ export function standardToRuby(matcher: StandardMatcher, action: StandardActionP
     'client.upsert(',
     '  ' + expectation,
     ')',
+    ...(note ? [note] : []),
   ].join('\n');
 }

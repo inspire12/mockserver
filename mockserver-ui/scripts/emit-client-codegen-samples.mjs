@@ -10,8 +10,9 @@
 // The generated code would ship broken silently. This script drives the SHARED
 // representative composer matrix (../src/lib/codegen/extractParityCases.ts — the
 // exact `combos` the per-language byte-identity parity tests use, chosen to cover
-// every buildExpectationJson branch and per-language escaping path) through the
-// requested language's emitter and writes the output as real source files, so a
+// every buildExpectationJson branch and per-language escaping path), plus one edit
+// per action type carrying every schema field (../src/lib/codegen/actionFieldCases.ts),
+// through the requested language's emitter and writes the output as real source files, so a
 // CI step can compile / syntax-check them with that language's toolchain and fail
 // on drift. It mirrors scripts/emit-java-codegen-samples.mjs (the Java arm).
 //
@@ -31,6 +32,7 @@
 import { mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { combos } from '../src/lib/codegen/extractParityCases.ts';
+import { actionFieldCombos } from '../src/lib/codegen/actionFieldCases.ts';
 import { standardToPython } from '../src/lib/codegen/python.ts';
 import { standardToGo } from '../src/lib/codegen/go.ts';
 import { standardToRuby } from '../src/lib/codegen/ruby.ts';
@@ -64,7 +66,7 @@ mkdirSync(finalOut, { recursive: true });
 const safe = (s) => s.replace(/[^A-Za-z0-9]+/g, '_');
 
 let n = 0;
-for (const c of combos) {
+for (const c of [...combos, ...actionFieldCombos]) {
   const idx = String(n).padStart(2, '0');
   const name = `sample_${idx}_${safe(c.name)}`;
   let code;

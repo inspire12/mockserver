@@ -482,7 +482,7 @@ sitemap:
 <h3>Standard HTTP Expectation</h3>
 
 <p>The <strong>Edit existing or add new</strong> dropdown lists every active non-LLM expectation. Picking one prefills all fields so you can edit it in place; the Reset button clears the selection to start fresh.</p>
-<p>Saving an edited mock changes only the fields you edited. Fields this form cannot edit (for example a per-message delay, or <code>primary</code>) are listed under <strong>Other fields</strong> below the action and are saved as shown; use a field's remove button to drop it. The code tabs include these fields, so the code you copy registers the same mock.</p>
+<p>Saving an edited mock changes only the fields you edited. Fields this form cannot edit (for example a per-message delay, or <code>primary</code>) are listed under <strong>Other fields</strong> below the action and are saved as shown; use a field's remove button to drop it. The code tabs include these fields, so the code you copy registers the same mock. Where a language's client library has no place for a field (for example a WebSocket response's <code>templateType</code> in the Python and Ruby clients), the snippet names that field in a <code>NOTE</code> comment instead of leaving it out silently; the JSON and curl tabs always carry every field.</p>
 
 <p>The form is split into four steps:</p>
 

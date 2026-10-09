@@ -30,7 +30,7 @@
  * the `httpRequest` alias of the wire `requestOverride` field.
  */
 import { buildExpectationJson, type StandardMatcher, type StandardActionPayload } from '../standardCodegen.ts';
-import { clientHostPort, toPythonLiteral } from './shared.ts';
+import { clientHostPort, OmittedFields, toPythonLiteral } from './shared.ts';
 
 type Json = Record<string, unknown>;
 type Kw = [string, string];
@@ -88,11 +88,34 @@ function intArray(values: unknown): string {
 // Emitter — walks buildExpectationJson output into typed constructors.
 // ---------------------------------------------------------------------------
 
+/** `Body` keyword arguments after the ones each body type renders first, in output order. */
+const BODY_KWARGS: [string, string, 'str' | 'bool'][] = [
+  ['string', 'string', 'str'], ['base64Bytes', 'base64_bytes', 'str'], ['filePath', 'file_path', 'str'],
+  ['templateType', 'template_type', 'str'], ['contentType', 'content_type', 'str'], ['charset', 'charset', 'str'],
+  ['matchType', 'match_type', 'str'], ['subString', 'sub_string', 'bool'],
+  ['matchNumbersAsStrings', 'match_numbers_as_strings', 'bool'], ['not', 'not_body', 'bool'], ['optional', 'optional', 'bool'],
+];
+
+/** The wire keys each `Body` type renders before the rest of {@link BODY_KWARGS}. */
+const BODY_FIRST: Record<string, string[]> = {
+  JSON: ['json', 'matchType'],
+  STRING: ['string', 'subString'],
+  BINARY: ['base64Bytes'],
+  FILE: ['filePath', 'templateType', 'contentType'],
+};
+
 class PyBuilder {
   readonly imports = new Set<string>();
+  /** Set when a binary WebSocket message needs `base64.b64decode`. */
+  usesBase64 = false;
+  readonly omitted = new OmittedFields();
 
   private use(name: string): void {
     this.imports.add(name);
+  }
+
+  private known(at: string, o: Json, keys: readonly string[]): void {
+    this.omitted.unknown(at, o, keys);
   }
 
   /** `{name: [values]}` object-map (headers / query params) → `[KeyToMultiValue(...)]`. */
@@ -115,52 +138,82 @@ class PyBuilder {
     return renderList(items, indent);
   }
 
-  private delay(v: unknown): string {
+  private delay(v: unknown, at: string): string {
     this.use('Delay');
     const o = v as Json;
+    this.known(at, o, ['timeUnit', 'value', 'distribution']);
     const kw: Kw[] = [];
     if (o['timeUnit'] != null) kw.push(['time_unit', pyStr(o['timeUnit'])]);
     if (o['value'] != null) kw.push(['value', pyNum(o['value'])]);
+    if (o['distribution'] != null) kw.push(['distribution', this.delayDistribution(o['distribution'], `${at}.distribution`)]);
     return renderInline('Delay', kw);
   }
 
+  private delayDistribution(v: unknown, at: string): string {
+    this.use('DelayDistribution');
+    const o = v as Json;
+    const fields: [string, string][] = [
+      ['type', 'type'], ['min', 'min'], ['max', 'max'], ['median', 'median'],
+      ['p99', 'p99'], ['mean', 'mean'], ['stdDev', 'std_dev'],
+    ];
+    this.known(at, o, fields.map(([wire]) => wire));
+    const kw: Kw[] = [];
+    for (const [wire, py] of fields) {
+      if (o[wire] != null) kw.push([py, typeof o[wire] === 'string' ? pyStr(o[wire]) : pyNum(o[wire])]);
+    }
+    return renderInline('DelayDistribution', kw);
+  }
+
   /** The delay and primary every action inherits. */
-  private inherited(o: Json, kw: Kw[]): Kw[] {
-    if (o['delay'] != null) kw.push(['delay', this.delay(o['delay'])]);
+  private inherited(o: Json, kw: Kw[], at: string): Kw[] {
+    if (o['delay'] != null) kw.push(['delay', this.delay(o['delay'], `${at}.delay`)]);
     if (typeof o['primary'] === 'boolean') kw.push(['primary', pyBool(o['primary'])]);
     return kw;
   }
 
+  /**
+   * A JSON, STRING, BINARY or FILE body → `Body(...)`: the type's own fields first, then
+   * every other field the `Body` model holds.
+   */
+  private plainBody(o: Json, type: string, indent: number, at: string): string {
+    this.use('Body');
+    const first = BODY_FIRST[type] ?? [];
+    this.known(at, o, ['type', 'json', ...BODY_KWARGS.map(([wire]) => wire)]);
+    const kw: Kw[] = [['type', pyStr(type)]];
+    const arg = (wire: string): Kw | undefined => {
+      if (o[wire] == null) return undefined;
+      if (wire === 'json') return ['json', toPythonLiteral(o['json'], indent + 4)];
+      const [, py, kind] = BODY_KWARGS.find(([w]) => w === wire)!;
+      return [py, kind === 'bool' ? pyBool(o[wire]) : pyStr(o[wire])];
+    };
+    for (const wire of first) {
+      const a = arg(wire);
+      if (a) kw.push(a);
+    }
+    for (const [wire] of BODY_KWARGS) {
+      if (first.includes(wire)) continue;
+      const a = arg(wire);
+      if (a) kw.push(a);
+    }
+    if (type !== 'JSON' && o['json'] != null) kw.push(arg('json')!);
+    return type === 'JSON' ? renderCall('Body', kw, indent) : renderInline('Body', kw);
+  }
+
   /** A request/response body wire value → the typed Body / *Body matcher. */
-  private body(v: unknown, indent: number): string {
+  private body(v: unknown, indent: number, at: string): string {
     if (typeof v === 'string') return pyStr(v);
     if (!v || typeof v !== 'object') return pyStr(v);
     const o = v as Json;
     const type = o['type'];
+    const known = (...keys: string[]) => this.known(at, o, ['type', ...keys]);
     switch (type) {
-      case 'JSON': {
-        this.use('Body');
-        const kw: Kw[] = [['type', '"JSON"'], ['json', toPythonLiteral(o['json'], indent + 4)]];
-        if (o['matchType'] != null) kw.push(['match_type', pyStr(o['matchType'])]);
-        return renderCall('Body', kw, indent);
-      }
-      case 'STRING': {
-        this.use('Body');
-        const kw: Kw[] = [['type', '"STRING"'], ['string', pyStr(o['string'])]];
-        if (o['subString']) kw.push(['sub_string', 'True']);
-        return renderInline('Body', kw);
-      }
+      case 'JSON':
+      case 'STRING':
       case 'BINARY':
-        this.use('Body');
-        return renderInline('Body', [['type', '"BINARY"'], ['base64_bytes', pyStr(o['base64Bytes'])]]);
-      case 'FILE': {
-        this.use('Body');
-        const kw: Kw[] = [['type', '"FILE"'], ['file_path', pyStr(o['filePath'])]];
-        if (o['templateType'] != null) kw.push(['template_type', pyStr(o['templateType'])]);
-        if (o['contentType'] != null) kw.push(['content_type', pyStr(o['contentType'])]);
-        return renderInline('Body', kw);
-      }
+      case 'FILE':
+        return this.plainBody(o, type, indent, at);
       case 'GRAPHQL': {
+        known('query', 'selectionSetMatchType', 'fields');
         this.use('GraphQLBody');
         const kw: Kw[] = [['query', pyStr(o['query'])]];
         if (o['selectionSetMatchType'] != null) kw.push(['selection_set_match_type', pyStr(o['selectionSetMatchType'])]);
@@ -168,36 +221,45 @@ class PyBuilder {
         return renderCall('GraphQLBody', kw, indent);
       }
       case 'JSON_SCHEMA':
+        known('jsonSchema');
         this.use('JsonSchemaBody');
         return renderCall('JsonSchemaBody', [['json_schema', pyStr(o['jsonSchema'])]], indent);
       case 'JSON_PATH':
+        known('jsonPath');
         this.use('JsonPathBody');
         return renderInline('JsonPathBody', [['json_path', pyStr(o['jsonPath'])]]);
       case 'XML':
+        known('xml');
         this.use('XmlBody');
         return renderInline('XmlBody', [['xml', pyStr(o['xml'])]]);
       case 'XML_SCHEMA':
+        known('xmlSchema');
         this.use('XmlSchemaBody');
         return renderCall('XmlSchemaBody', [['xml_schema', pyStr(o['xmlSchema'])]], indent);
       case 'XPATH':
+        known('xpath');
         this.use('XPathBody');
         return renderInline('XPathBody', [['xpath', pyStr(o['xpath'])]]);
       case 'REGEX':
+        known('regex');
         this.use('RegexBody');
         return renderInline('RegexBody', [['regex', pyStr(o['regex'])]]);
       case 'WASM':
+        known('moduleName');
         this.use('WasmBody');
         return renderInline('WasmBody', [['module_name', pyStr(o['moduleName'])]]);
       case 'PARAMETERS':
+        known('parameters');
         this.use('ParameterBody');
         return renderCall('ParameterBody', [
           ['parameters', this.keyMultiList(o['parameters'], indent + 4)],
           ['parameters_as_map', 'True'],
         ], indent);
       case 'ALL_OF': {
+        known('bodyAllOf');
         this.use('AllOfBody');
         const subs = (o['bodyAllOf'] as unknown[]) ?? [];
-        const items = subs.map((s) => this.body(s, indent + 8));
+        const items = subs.map((s, n) => this.body(s, indent + 8, `${at}.bodyAllOf[${n}]`));
         return renderCall('AllOfBody', [['body_all_of', renderList(items, indent + 4)]], indent);
       }
       default:
@@ -220,8 +282,12 @@ class PyBuilder {
     return renderCall('Jwt', kw, indent);
   }
 
-  private request(v: Json, indent: number): string {
+  private request(v: Json, indent: number, at: string): string {
     this.use('HttpRequest');
+    this.known(at, v, [
+      'method', 'path', 'headers', 'queryStringParameters', 'cookies', 'pathParameters', 'body', 'jwt', 'secure',
+      'keepAlive', 'respondBeforeBody', 'protocol', 'socketAddress', 'not',
+    ]);
     const kw: Kw[] = [];
     if (v['method'] != null) kw.push(['method', pyStr(v['method'])]);
     if (v['path'] != null) kw.push(['path', pyStr(v['path'])]);
@@ -229,11 +295,26 @@ class PyBuilder {
     if (v['queryStringParameters'] != null) kw.push(['query_string_parameters', this.keyMultiList(v['queryStringParameters'], indent + 4)]);
     if (v['cookies'] != null) kw.push(['cookies', this.cookieList(v['cookies'], indent + 4)]);
     if (v['pathParameters'] != null) kw.push(['path_parameters', this.keyMultiList(v['pathParameters'], indent + 4)]);
-    if (v['body'] != null) kw.push(['body', this.body(v['body'], indent + 4)]);
+    if (v['body'] != null) kw.push(['body', this.body(v['body'], indent + 4, `${at}.body`)]);
     if (v['jwt'] != null) kw.push(['jwt', this.jwt(v['jwt'], indent + 4)]);
     // typeof, not truthiness: secure:false is an HTTP-only matcher, not an absent field
     if (typeof v['secure'] === 'boolean') kw.push(['secure', v['secure'] ? 'True' : 'False']);
+    if (typeof v['keepAlive'] === 'boolean') kw.push(['keep_alive', pyBool(v['keepAlive'])]);
+    if (typeof v['respondBeforeBody'] === 'boolean') kw.push(['respond_before_body', pyBool(v['respondBeforeBody'])]);
+    if (v['protocol'] != null) kw.push(['protocol', pyStr(v['protocol'])]);
+    if (v['socketAddress'] != null) kw.push(['socket_address', this.socketAddress(v['socketAddress'] as Json, `${at}.socketAddress`)]);
+    if (typeof v['not'] === 'boolean') kw.push(['not_request', pyBool(v['not'])]);
     return renderCall('HttpRequest', kw, indent);
+  }
+
+  private socketAddress(o: Json, at: string): string {
+    this.use('SocketAddress');
+    this.known(at, o, ['host', 'port', 'scheme']);
+    const kw: Kw[] = [];
+    if (o['host'] != null) kw.push(['host', pyStr(o['host'])]);
+    if (o['port'] != null) kw.push(['port', pyNum(o['port'])]);
+    if (o['scheme'] != null) kw.push(['scheme', pyStr(o['scheme'])]);
+    return renderInline('SocketAddress', kw);
   }
 
   private dnsRequest(v: Json, indent: number): string {
@@ -245,10 +326,10 @@ class PyBuilder {
   }
 
   private requestOrDns(v: Json, indent: number): string {
-    return 'dnsName' in v ? this.dnsRequest(v, indent) : this.request(v, indent);
+    return 'dnsName' in v ? this.dnsRequest(v, indent) : this.request(v, indent, 'httpRequest');
   }
 
-  private connectionOptions(v: unknown, indent: number): string {
+  private connectionOptions(v: unknown, indent: number, at: string): string {
     this.use('ConnectionOptions');
     const o = v as Json;
     const map: [string, string][] = [
@@ -257,189 +338,230 @@ class PyBuilder {
       ['contentLengthHeaderOverride', 'content_length_header_override'],
       ['suppressContentLengthHeader', 'suppress_content_length_header'],
       ['suppressConnectionHeader', 'suppress_connection_header'],
+      ['chunkSize', 'chunk_size'],
     ];
+    const delays: [string, string][] = [['closeSocketDelay', 'close_socket_delay'], ['chunkDelay', 'chunk_delay']];
+    this.known(at, o, [...map, ...delays].map(([wire]) => wire));
     const kw: Kw[] = [];
     for (const [wire, py] of map) {
       if (o[wire] == null) continue;
       const val = o[wire];
       kw.push([py, typeof val === 'boolean' ? pyBool(val) : pyNum(val)]);
     }
+    for (const [wire, py] of delays) {
+      if (o[wire] != null) kw.push([py, this.delay(o[wire], `${at}.${wire}`)]);
+    }
     return renderCall('ConnectionOptions', kw, indent);
   }
 
-  private response(v: unknown, indent: number): string {
+  private response(v: unknown, indent: number, at: string): string {
     this.use('HttpResponse');
     const o = v as Json;
+    this.known(at, o, ['statusCode', 'reasonPhrase', 'body', 'headers', 'cookies', 'delay', 'connectionOptions', 'primary', 'trailers']);
     const kw: Kw[] = [];
     if (o['statusCode'] != null) kw.push(['status_code', pyNum(o['statusCode'])]);
     if (o['reasonPhrase'] != null) kw.push(['reason_phrase', pyStr(o['reasonPhrase'])]);
-    if (o['body'] != null) kw.push(['body', this.body(o['body'], indent + 4)]);
+    if (o['body'] != null) kw.push(['body', this.body(o['body'], indent + 4, `${at}.body`)]);
     if (o['headers'] != null) kw.push(['headers', this.keyMultiList(o['headers'], indent + 4)]);
     if (o['cookies'] != null) kw.push(['cookies', this.cookieList(o['cookies'], indent + 4)]);
-    if (o['delay'] != null) kw.push(['delay', this.delay(o['delay'])]);
-    if (o['connectionOptions'] != null) kw.push(['connection_options', this.connectionOptions(o['connectionOptions'], indent + 4)]);
+    if (o['delay'] != null) kw.push(['delay', this.delay(o['delay'], `${at}.delay`)]);
+    if (o['connectionOptions'] != null) kw.push(['connection_options', this.connectionOptions(o['connectionOptions'], indent + 4, `${at}.connectionOptions`)]);
     if (typeof o['primary'] === 'boolean') kw.push(['primary', pyBool(o['primary'])]);
+    if (o['trailers'] != null) kw.push(['trailers', this.keyMultiList(o['trailers'], indent + 4)]);
     return renderCall('HttpResponse', kw, indent);
   }
 
-  private forward(v: unknown, indent: number): string {
+  private forward(v: unknown, indent: number, at: string): string {
     this.use('HttpForward');
     const o = v as Json;
+    this.known(at, o, ['scheme', 'host', 'port', 'delay', 'primary']);
     const kw: Kw[] = [];
     if (o['scheme'] != null) kw.push(['scheme', pyStr(o['scheme'])]);
     if (o['host'] != null) kw.push(['host', pyStr(o['host'])]);
     if (o['port'] != null) kw.push(['port', pyNum(o['port'])]);
-    return renderCall('HttpForward', this.inherited(o, kw), indent);
+    return renderCall('HttpForward', this.inherited(o, kw, at), indent);
   }
 
-  private override(v: unknown, indent: number): string {
+  /**
+   * The model serialises its request and response under the `httpRequest` / `httpResponse`
+   * aliases the server also accepts for `requestOverride` / `responseOverride`.
+   */
+  private override(v: unknown, indent: number, at: string): string {
     this.use('HttpOverrideForwardedRequest');
     const o = v as Json;
-    const req = o['requestOverride'] as Json | undefined;
+    const reqKey = 'requestOverride' in o ? 'requestOverride' : 'httpRequest';
+    const respKey = 'responseOverride' in o ? 'responseOverride' : 'httpResponse';
+    this.known(at, o, [reqKey, respKey, 'responseTemplate', 'requestModifier', 'responseModifier', 'delay', 'primary']);
     const kw: Kw[] = [];
-    if (req) kw.push(['http_request', this.request(req, indent + 4)]);
-    return renderCall('HttpOverrideForwardedRequest', this.inherited(o, kw), indent);
+    if (o[reqKey] != null) kw.push(['http_request', this.request(o[reqKey] as Json, indent + 4, `${at}.${reqKey}`)]);
+    if (o[respKey] != null) kw.push(['http_response', this.response(o[respKey], indent + 4, `${at}.${respKey}`)]);
+    if (o['responseTemplate'] != null) kw.push(['response_template', this.template(o['responseTemplate'], indent + 4, `${at}.responseTemplate`)]);
+    if (o['requestModifier'] != null) kw.push(['request_modifier', toPythonLiteral(o['requestModifier'], indent + 4)]);
+    if (o['responseModifier'] != null) kw.push(['response_modifier', toPythonLiteral(o['responseModifier'], indent + 4)]);
+    return renderCall('HttpOverrideForwardedRequest', this.inherited(o, kw, at), indent);
   }
 
-  private classCallback(v: unknown, indent: number): string {
+  private classCallback(v: unknown, indent: number, at: string): string {
     this.use('HttpClassCallback');
     const o = v as Json;
-    return renderCall('HttpClassCallback', this.inherited(o, [['callback_class', pyStr(o['callbackClass'])]]), indent);
+    this.known(at, o, ['callbackClass', 'delay', 'primary']);
+    return renderCall('HttpClassCallback', this.inherited(o, [['callback_class', pyStr(o['callbackClass'])]], at), indent);
   }
 
-  private template(v: unknown, indent: number): string {
+  private template(v: unknown, indent: number, at: string): string {
     this.use('HttpTemplate');
     const o = v as Json;
+    this.known(at, o, ['templateType', 'template', 'templateFile', 'delay', 'primary']);
     const kw: Kw[] = [['template_type', pyStr(o['templateType'])]];
     if (o['template'] != null) kw.push(['template', pyStr(o['template'])]);
     if (o['templateFile'] != null) kw.push(['template_file', pyStr(o['templateFile'])]);
-    return renderCall('HttpTemplate', this.inherited(o, kw), indent);
+    return renderCall('HttpTemplate', this.inherited(o, kw, at), indent);
   }
 
-  private error(v: unknown, indent: number): string {
+  private error(v: unknown, indent: number, at: string): string {
     this.use('HttpError');
     const o = v as Json;
+    this.known(at, o, ['dropConnection', 'responseBytes', 'streamError', 'delay', 'primary']);
     const kw: Kw[] = [];
     if (o['dropConnection'] != null) kw.push(['drop_connection', pyBool(o['dropConnection'])]);
     if (o['responseBytes'] != null) kw.push(['response_bytes', pyStr(o['responseBytes'])]);
-    return renderCall('HttpError', this.inherited(o, kw), indent);
+    if (o['streamError'] != null) kw.push(['stream_error', pyNum(o['streamError'])]);
+    return renderCall('HttpError', this.inherited(o, kw, at), indent);
   }
 
-  private forwardWithFallback(v: unknown, indent: number): string {
+  private forwardWithFallback(v: unknown, indent: number, at: string): string {
     this.use('HttpForwardWithFallback');
     const o = v as Json;
+    this.known(at, o, ['httpForward', 'fallbackResponse', 'fallbackOnStatusCodes', 'fallbackOnTimeout', 'delay', 'primary']);
     const kw: Kw[] = [];
-    if (o['httpForward'] != null) kw.push(['http_forward', this.forward(o['httpForward'], indent + 4)]);
-    if (o['fallbackResponse'] != null) kw.push(['fallback_response', this.response(o['fallbackResponse'], indent + 4)]);
+    if (o['httpForward'] != null) kw.push(['http_forward', this.forward(o['httpForward'], indent + 4, `${at}.httpForward`)]);
+    if (o['fallbackResponse'] != null) kw.push(['fallback_response', this.response(o['fallbackResponse'], indent + 4, `${at}.fallbackResponse`)]);
     if (o['fallbackOnStatusCodes'] != null) kw.push(['fallback_on_status_codes', intArray(o['fallbackOnStatusCodes'])]);
     if (o['fallbackOnTimeout'] != null) kw.push(['fallback_on_timeout', pyBool(o['fallbackOnTimeout'])]);
-    return renderCall('HttpForwardWithFallback', this.inherited(o, kw), indent);
+    return renderCall('HttpForwardWithFallback', this.inherited(o, kw, at), indent);
   }
 
-  private webSocket(v: unknown, indent: number): string {
+  private webSocket(v: unknown, indent: number, at: string): string {
     this.use('HttpWebSocketResponse');
     const o = v as Json;
+    this.known(at, o, ['subprotocol', 'messages', 'closeConnection', 'matchers', 'delay', 'primary']);
     const kw: Kw[] = [];
     if (o['subprotocol'] != null) kw.push(['subprotocol', pyStr(o['subprotocol'])]);
-    if (o['messages'] != null) kw.push(['messages', this.wsMessages(o['messages'], indent + 4)]);
+    if (o['messages'] != null) kw.push(['messages', this.wsMessages(o['messages'], indent + 4, `${at}.messages`)]);
     if (o['closeConnection'] != null) kw.push(['close_connection', pyBool(o['closeConnection'])]);
     if (o['matchers'] != null) {
       this.use('WebSocketFrameMatcher');
-      const matchers = (o['matchers'] as Json[]).map((m) => {
+      const matchers = (o['matchers'] as Json[]).map((m, n) => {
+        this.known(`${at}.matchers[${n}]`, m, ['frameType', 'textMatcher', 'responses']);
         const mk: Kw[] = [];
         if (m['frameType'] != null) mk.push(['frame_type', pyStr(m['frameType'])]);
         if (m['textMatcher'] != null) mk.push(['text_matcher', pyStr(m['textMatcher'])]);
-        if (m['responses'] != null) mk.push(['responses', this.wsMessages(m['responses'], indent + 12)]);
+        if (m['responses'] != null) mk.push(['responses', this.wsMessages(m['responses'], indent + 12, `${at}.matchers[${n}].responses`)]);
         return renderCall('WebSocketFrameMatcher', mk, indent + 8);
       });
       kw.push(['matchers', renderList(matchers, indent + 4)]);
     }
-    return renderCall('HttpWebSocketResponse', this.inherited(o, kw), indent);
+    return renderCall('HttpWebSocketResponse', this.inherited(o, kw, at), indent);
   }
 
-  private wsMessages(v: unknown, indent: number): string {
+  /** The model holds a binary message as bytes, which it base64-encodes back onto the wire. */
+  private wsMessages(v: unknown, indent: number, at: string): string {
     this.use('WebSocketMessage');
-    const items = (v as Json[]).map((m) => {
-      const mk: Kw[] = [['text', pyStr(m['text'])]];
-      if (m['delay'] != null) mk.push(['delay', this.delay(m['delay'])]);
+    const items = (v as Json[]).map((m, n) => {
+      this.known(`${at}[${n}]`, m, ['text', 'binary', 'delay']);
+      const mk: Kw[] = [];
+      if (m['text'] != null) mk.push(['text', pyStr(m['text'])]);
+      if (m['binary'] != null) {
+        this.usesBase64 = true;
+        mk.push(['binary', `base64.b64decode(${pyStr(m['binary'])})`]);
+      }
+      if (m['delay'] != null) mk.push(['delay', this.delay(m['delay'], `${at}[${n}].delay`)]);
       return renderInline('WebSocketMessage', mk);
     });
     return renderList(items, indent);
   }
 
-  private sse(v: unknown, indent: number): string {
+  private sse(v: unknown, indent: number, at: string): string {
     this.use('HttpSseResponse');
     const o = v as Json;
+    this.known(at, o, ['statusCode', 'headers', 'events', 'closeConnection', 'delay', 'primary']);
     const kw: Kw[] = [];
     if (o['statusCode'] != null) kw.push(['status_code', pyNum(o['statusCode'])]);
     if (o['headers'] != null) kw.push(['headers', this.keyMultiList(o['headers'], indent + 4)]);
     if (o['events'] != null) {
       this.use('SseEvent');
-      const events = (o['events'] as Json[]).map((e) => {
+      const events = (o['events'] as Json[]).map((e, n) => {
+        this.known(`${at}.events[${n}]`, e, ['event', 'data', 'id', 'retry', 'delay']);
         const ek: Kw[] = [];
         if (e['event'] != null) ek.push(['event', pyStr(e['event'])]);
         if (e['data'] != null) ek.push(['data', pyStr(e['data'])]);
         if (e['id'] != null) ek.push(['id', pyStr(e['id'])]);
         if (e['retry'] != null) ek.push(['retry', pyNum(e['retry'])]);
-        if (e['delay'] != null) ek.push(['delay', this.delay(e['delay'])]);
+        if (e['delay'] != null) ek.push(['delay', this.delay(e['delay'], `${at}.events[${n}].delay`)]);
         return renderInline('SseEvent', ek);
       });
       kw.push(['events', renderList(events, indent + 4)]);
     }
     if (o['closeConnection'] != null) kw.push(['close_connection', pyBool(o['closeConnection'])]);
-    return renderCall('HttpSseResponse', this.inherited(o, kw), indent);
+    return renderCall('HttpSseResponse', this.inherited(o, kw, at), indent);
   }
 
-  private binary(v: unknown, indent: number): string {
+  private binary(v: unknown, indent: number, at: string): string {
     this.use('BinaryResponse');
     const o = v as Json;
+    this.known(at, o, ['binaryData', 'upstream', 'delay', 'primary']);
     // No data is a valid binary response: the message has no reply.
     const kw: Kw[] = typeof o['binaryData'] === 'string' && o['binaryData'] !== ''
       ? [['binary_data', pyStr(o['binaryData'])]]
       : [];
     if (typeof o['upstream'] === 'string') kw.push(['upstream', pyStr(o['upstream'])]);
-    if (o['delay'] != null) kw.push(['delay', this.delay(o['delay'])]);
-    if (typeof o['primary'] === 'boolean') kw.push(['primary', pyBool(o['primary'])]);
-    return renderCall('BinaryResponse', kw, indent);
+    return renderCall('BinaryResponse', this.inherited(o, kw, at), indent);
   }
 
-  private dnsResponse(v: unknown, indent: number): string {
+  private dnsResponse(v: unknown, indent: number, at: string): string {
     this.use('DnsResponse');
     const o = v as Json;
+    const sections: [string, string][] = [
+      ['answerRecords', 'answer_records'], ['authorityRecords', 'authority_records'], ['additionalRecords', 'additional_records'],
+    ];
+    this.known(at, o, ['responseCode', ...sections.map(([wire]) => wire), 'delay', 'primary']);
+    const fieldMap: [string, string][] = [
+      ['name', 'name'], ['type', 'type'], ['dnsClass', 'dns_class'], ['ttl', 'ttl'],
+      ['value', 'value'], ['priority', 'priority'], ['weight', 'weight'], ['port', 'port'],
+    ];
     const kw: Kw[] = [];
     if (o['responseCode'] != null) kw.push(['response_code', pyStr(o['responseCode'])]);
-    if (Array.isArray(o['answerRecords'])) {
+    for (const [wire, py] of sections) {
+      if (!Array.isArray(o[wire])) continue;
       this.use('DnsRecord');
-      const fieldMap: [string, string][] = [
-        ['name', 'name'], ['type', 'type'], ['dnsClass', 'dns_class'], ['ttl', 'ttl'],
-        ['value', 'value'], ['priority', 'priority'], ['weight', 'weight'], ['port', 'port'],
-      ];
-      const records = (o['answerRecords'] as Json[]).map((r) => {
+      const records = (o[wire] as Json[]).map((r, n) => {
+        this.known(`${at}.${wire}[${n}]`, r, fieldMap.map(([w]) => w));
         const rk: Kw[] = [];
-        for (const [wire, py] of fieldMap) {
-          if (r[wire] == null) continue;
-          rk.push([py, typeof r[wire] === 'number' ? pyNum(r[wire]) : pyStr(r[wire])]);
+        for (const [rw, rp] of fieldMap) {
+          if (r[rw] == null) continue;
+          rk.push([rp, typeof r[rw] === 'number' ? pyNum(r[rw]) : pyStr(r[rw])]);
         }
         return renderInline('DnsRecord', rk);
       });
-      kw.push(['answer_records', renderList(records, indent + 4)]);
+      kw.push([py, renderList(records, indent + 4)]);
     }
-    return renderCall('DnsResponse', this.inherited(o, kw), indent);
+    return renderCall('DnsResponse', this.inherited(o, kw, at), indent);
   }
 
-  private grpc(v: unknown, indent: number): string {
+  private grpc(v: unknown, indent: number, at: string): string {
     this.use('GrpcStreamResponse');
     const o = v as Json;
+    this.known(at, o, ['statusName', 'statusMessage', 'headers', 'messages', 'closeConnection', 'delay', 'primary']);
     const kw: Kw[] = [];
     if (o['statusName'] != null) kw.push(['status_name', pyStr(o['statusName'])]);
     if (o['statusMessage'] != null) kw.push(['status_message', pyStr(o['statusMessage'])]);
     if (o['headers'] != null) kw.push(['headers', this.keyMultiList(o['headers'], indent + 4)]);
     if (o['messages'] != null) {
       this.use('GrpcStreamMessage');
-      kw.push(['messages', this.grpcMessages(o['messages'], indent + 4)]);
+      kw.push(['messages', this.grpcMessages(o['messages'], indent + 4, `${at}.messages`)]);
     }
     if (o['closeConnection'] != null) kw.push(['close_connection', pyBool(o['closeConnection'])]);
-    return renderCall('GrpcStreamResponse', this.inherited(o, kw), indent);
+    return renderCall('GrpcStreamResponse', this.inherited(o, kw, at), indent);
   }
 
   private chaos(v: unknown, indent: number): string {
@@ -449,21 +571,21 @@ class PyBuilder {
     if (o['errorStatus'] != null) kw.push(['error_status', pyNum(o['errorStatus'])]);
     if (o['errorProbability'] != null) kw.push(['error_probability', pyNum(o['errorProbability'])]);
     if (o['retryAfter'] != null) kw.push(['retry_after', pyStr(o['retryAfter'])]);
-    if (o['latency'] != null) kw.push(['latency', this.delay(o['latency'])]);
+    if (o['latency'] != null) kw.push(['latency', this.delay(o['latency'], 'chaos.latency')]);
     if (o['seed'] != null) kw.push(['seed', pyNum(o['seed'])]);
     if (o['succeedFirst'] != null) kw.push(['succeed_first', pyNum(o['succeedFirst'])]);
     if (o['failRequestCount'] != null) kw.push(['fail_request_count', pyNum(o['failRequestCount'])]);
     return renderCall('HttpChaosProfile', kw, indent);
   }
 
-  private actions(v: unknown, indent: number): string {
+  private actions(v: unknown, indent: number, at: string): string {
     this.use('AfterAction');
-    const items = (v as Json[]).map((a) => {
+    const items = (v as Json[]).map((a, n) => {
       const ak: Kw[] = [];
-      if (a['httpRequest'] != null) ak.push(['http_request', this.request(a['httpRequest'] as Json, indent + 8)]);
-      if (a['delay'] != null) ak.push(['delay', this.delay(a['delay'])]);
+      if (a['httpRequest'] != null) ak.push(['http_request', this.request(a['httpRequest'] as Json, indent + 8, `${at}[${n}].httpRequest`)]);
+      if (a['delay'] != null) ak.push(['delay', this.delay(a['delay'], `${at}[${n}].delay`)]);
       if (a['blocking'] != null) ak.push(['blocking', pyBool(a['blocking'])]);
-      if (a['timeout'] != null) ak.push(['timeout', this.delay(a['timeout'])]);
+      if (a['timeout'] != null) ak.push(['timeout', this.delay(a['timeout'], `${at}[${n}].timeout`)]);
       if (a['failurePolicy'] != null) ak.push(['failure_policy', pyStr(a['failurePolicy'])]);
       return renderCall('AfterAction', ak, indent + 4);
     });
@@ -472,26 +594,26 @@ class PyBuilder {
 
   private steps(v: unknown, indent: number): string {
     this.use('ExpectationStep');
-    const stepActions: [string, string, (x: unknown, i: number) => string][] = [
-      ['httpResponse', 'http_response', (x, i) => this.response(x, i)],
-      ['httpForward', 'http_forward', (x, i) => this.forward(x, i)],
-      ['httpOverrideForwardedRequest', 'http_override_forwarded_request', (x, i) => this.override(x, i)],
-      ['httpError', 'http_error', (x, i) => this.error(x, i)],
-      ['httpRequest', 'http_request', (x, i) => this.request(x as Json, i)],
-      ['httpClassCallback', 'http_class_callback', (x, i) => this.classCallback(x, i)],
+    const stepActions: [string, string, (x: unknown, i: number, at: string) => string][] = [
+      ['httpResponse', 'http_response', (x, i, p) => this.response(x, i, p)],
+      ['httpForward', 'http_forward', (x, i, p) => this.forward(x, i, p)],
+      ['httpOverrideForwardedRequest', 'http_override_forwarded_request', (x, i, p) => this.override(x, i, p)],
+      ['httpError', 'http_error', (x, i, p) => this.error(x, i, p)],
+      ['httpRequest', 'http_request', (x, i, p) => this.request(x as Json, i, p)],
+      ['httpClassCallback', 'http_class_callback', (x, i, p) => this.classCallback(x, i, p)],
     ];
-    const items = (v as Json[]).map((s) => {
+    const items = (v as Json[]).map((s, n) => {
       const sk: Kw[] = [];
       for (const [wire, py, emit] of stepActions) {
         if (s[wire] != null) {
-          sk.push([py, emit(s[wire], indent + 8)]);
+          sk.push([py, emit(s[wire], indent + 8, `steps[${n}].${wire}`)]);
           break;
         }
       }
       if (s['responder'] != null) sk.push(['responder', pyBool(s['responder'])]);
-      if (s['delay'] != null) sk.push(['delay', this.delay(s['delay'])]);
+      if (s['delay'] != null) sk.push(['delay', this.delay(s['delay'], `steps[${n}].delay`)]);
       if (s['blocking'] != null) sk.push(['blocking', pyBool(s['blocking'])]);
-      if (s['timeout'] != null) sk.push(['timeout', this.delay(s['timeout'])]);
+      if (s['timeout'] != null) sk.push(['timeout', this.delay(s['timeout'], `steps[${n}].timeout`)]);
       if (s['failurePolicy'] != null) sk.push(['failure_policy', pyStr(s['failurePolicy'])]);
       return renderCall('ExpectationStep', sk, indent + 4);
     });
@@ -508,59 +630,62 @@ class PyBuilder {
   private typed(
     className: string,
     o: Json,
-    spec: Array<[string, string, (v: unknown, indent: number) => string]>,
+    spec: Array<[string, string, (v: unknown, indent: number, at: string) => string]>,
     indent: number,
+    at: string,
   ): string {
     this.use(className);
+    this.known(at, o, spec.map(([wire]) => wire));
     const kw: Kw[] = [];
     for (const [wire, py, fn] of spec) {
-      if (o[wire] != null) kw.push([py, fn(o[wire], indent + 4)]);
+      if (o[wire] != null) kw.push([py, fn(o[wire], indent + 4, `${at}.${wire}`)]);
     }
     return renderCall(className, kw, indent);
   }
 
   // --- LLM response (httpLlmResponse) — fully typed tree ---------------------
 
-  private llm(v: unknown, indent: number): string {
+  private llm(v: unknown, indent: number, at: string): string {
     const S = (x: unknown) => pyStr(x);
     const B = (x: unknown) => pyBool(x);
     return this.typed('HttpLlmResponse', v as Json, [
       ['provider', 'provider', S],
       ['model', 'model', S],
-      ['completion', 'completion', (x, i) => this.completion(x, i)],
-      ['embedding', 'embedding', (x, i) => this.embedding(x, i)],
-      ['rerank', 'rerank', (x, i) => this.rerank(x, i)],
-      ['moderation', 'moderation', (x, i) => this.moderation(x, i)],
-      ['contentFilter', 'content_filter', (x, i) => this.contentFilter(x, i)],
-      ['conversationPredicates', 'conversation_predicates', (x, i) => this.conversationPredicates(x, i)],
-      ['chaos', 'chaos', (x, i) => this.llmChaos(x, i)],
-      ['delay', 'delay', (x) => this.delay(x)],
+      ['completion', 'completion', (x, i, p) => this.completion(x, i, p)],
+      ['embedding', 'embedding', (x, i, p) => this.embedding(x, i, p)],
+      ['rerank', 'rerank', (x, i, p) => this.rerank(x, i, p)],
+      ['moderation', 'moderation', (x, i, p) => this.moderation(x, i, p)],
+      ['contentFilter', 'content_filter', (x, i, p) => this.contentFilter(x, i, p)],
+      ['conversationPredicates', 'conversation_predicates', (x, i, p) => this.conversationPredicates(x, i, p)],
+      ['chaos', 'chaos', (x, i, p) => this.llmChaos(x, i, p)],
+      ['delay', 'delay', (x, _i, p) => this.delay(x, p)],
       ['primary', 'primary', B],
-    ], indent);
+    ], indent, at);
   }
 
-  private completion(v: unknown, indent: number): string {
+  private completion(v: unknown, indent: number, at: string): string {
     const S = (x: unknown) => pyStr(x);
     const B = (x: unknown) => pyBool(x);
     return this.typed('Completion', v as Json, [
       ['text', 'text', S],
-      ['toolCalls', 'tool_calls', (x, i) => this.toolCalls(x, i)],
+      ['toolCalls', 'tool_calls', (x, i, p) => this.toolCalls(x, i, p)],
       ['stopReason', 'stop_reason', S],
-      ['usage', 'usage', (x, i) => this.usage(x, i)],
+      ['usage', 'usage', (x, i, p) => this.usage(x, i, p)],
       ['streaming', 'streaming', B],
-      ['streamingPhysics', 'streaming_physics', (x, i) => this.streamingPhysics(x, i)],
+      ['streamingPhysics', 'streaming_physics', (x, i, p) => this.streamingPhysics(x, i, p)],
       ['outputSchema', 'output_schema', S],
       ['enforceOutputSchema', 'enforce_output_schema', B],
       ['toolChoice', 'tool_choice', S],
       ['reasoningText', 'reasoning_text', S],
       ['reasoningSignature', 'reasoning_signature', S],
       ['model', 'model', S],
-    ], indent);
+    ], indent, at);
   }
 
-  private toolCalls(v: unknown, indent: number): string {
+  private toolCalls(v: unknown, indent: number, at: string): string {
     this.use('ToolUse');
-    const items = (v as Json[]).map((t) => {
+    const items = (v as Json[]).map((t, n) => {
+      this.known(`${at}[${n}]`, t, ['name', 'id', 'arguments']);
       const kw: Kw[] = [];
       if (t['name'] != null) kw.push(['name', pyStr(t['name'])]);
       if (t['id'] != null) kw.push(['id', pyStr(t['id'])]);
@@ -570,34 +695,36 @@ class PyBuilder {
     return renderList(items, indent);
   }
 
-  private usage(v: unknown, indent: number): string {
+  private usage(v: unknown, indent: number, at: string): string {
     void indent;
     this.use('Usage');
     const o = v as Json;
-    const kw: Kw[] = [];
-    for (const [wire, py] of [
+    const fields: [string, string][] = [
       ['inputTokens', 'input_tokens'], ['outputTokens', 'output_tokens'],
       ['cachedInputTokens', 'cached_input_tokens'], ['cacheCreationTokens', 'cache_creation_tokens'],
       ['reasoningTokens', 'reasoning_tokens'],
-    ] as [string, string][]) {
+    ];
+    this.known(at, o, fields.map(([wire]) => wire));
+    const kw: Kw[] = [];
+    for (const [wire, py] of fields) {
       if (o[wire] != null) kw.push([py, pyNum(o[wire])]);
     }
     return renderInline('Usage', kw);
   }
 
-  private streamingPhysics(v: unknown, indent: number): string {
+  private streamingPhysics(v: unknown, indent: number, at: string): string {
     const N = (x: unknown) => pyNum(x);
     const B = (x: unknown) => pyBool(x);
     return this.typed('StreamingPhysics', v as Json, [
-      ['timeToFirstToken', 'time_to_first_token', (x) => this.delay(x)],
+      ['timeToFirstToken', 'time_to_first_token', (x, _i, p) => this.delay(x, p)],
       ['tokensPerSecond', 'tokens_per_second', N],
       ['jitter', 'jitter', N],
       ['seed', 'seed', N],
       ['subwordStreaming', 'subword_streaming', B],
-    ], indent);
+    ], indent, at);
   }
 
-  private conversationPredicates(v: unknown, indent: number): string {
+  private conversationPredicates(v: unknown, indent: number, at: string): string {
     const S = (x: unknown) => pyStr(x);
     const N = (x: unknown) => pyNum(x);
     return this.typed('ConversationPredicates', v as Json, [
@@ -607,11 +734,11 @@ class PyBuilder {
       ['latestMessageRole', 'latest_message_role', S],
       ['containsToolResultFor', 'contains_tool_result_for', S],
       ['semanticMatchAgainst', 'semantic_match_against', S],
-      ['normalization', 'normalization', (x, i) => this.normalization(x, i)],
-    ], indent);
+      ['normalization', 'normalization', (x, i, p) => this.normalization(x, i, p)],
+    ], indent, at);
   }
 
-  private normalization(v: unknown, indent: number): string {
+  private normalization(v: unknown, indent: number, at: string): string {
     const B = (x: unknown) => pyBool(x);
     const SL = (x: unknown) => strArray(x);
     return this.typed('NormalizationOptions', v as Json, [
@@ -620,46 +747,46 @@ class PyBuilder {
       ['sortJsonKeys', 'sort_json_keys', B],
       ['dropBuiltInVolatileFields', 'drop_built_in_volatile_fields', B],
       ['dropVolatileFields', 'drop_volatile_fields', SL],
-    ], indent);
+    ], indent, at);
   }
 
-  private embedding(v: unknown, indent: number): string {
+  private embedding(v: unknown, indent: number, at: string): string {
     const N = (x: unknown) => pyNum(x);
     const B = (x: unknown) => pyBool(x);
     return this.typed('EmbeddingResponse', v as Json, [
       ['dimensions', 'dimensions', N],
       ['deterministicFromInput', 'deterministic_from_input', B],
       ['seed', 'seed', N],
-    ], indent);
+    ], indent, at);
   }
 
-  private rerank(v: unknown, indent: number): string {
+  private rerank(v: unknown, indent: number, at: string): string {
     const N = (x: unknown) => pyNum(x);
     const B = (x: unknown) => pyBool(x);
     return this.typed('RerankResponse', v as Json, [
       ['topN', 'top_n', N],
       ['deterministicFromInput', 'deterministic_from_input', B],
       ['seed', 'seed', N],
-    ], indent);
+    ], indent, at);
   }
 
-  private moderation(v: unknown, indent: number): string {
+  private moderation(v: unknown, indent: number, at: string): string {
     const S = (x: unknown) => pyStr(x);
     const SL = (x: unknown) => strArray(x);
     return this.typed('ModerationResponse', v as Json, [
       ['flaggedCategories', 'flagged_categories', SL],
       ['model', 'model', S],
-    ], indent);
+    ], indent, at);
   }
 
-  private contentFilter(v: unknown, indent: number): string {
+  private contentFilter(v: unknown, indent: number, at: string): string {
     const S = (x: unknown) => pyStr(x);
     return this.typed('ContentFilter', v as Json, [
       ['hate', 'hate', S], ['sexual', 'sexual', S], ['violence', 'violence', S], ['selfHarm', 'self_harm', S],
-    ], indent);
+    ], indent, at);
   }
 
-  private llmChaos(v: unknown, indent: number): string {
+  private llmChaos(v: unknown, indent: number, at: string): string {
     const S = (x: unknown) => pyStr(x);
     const N = (x: unknown) => pyNum(x);
     const B = (x: unknown) => pyBool(x);
@@ -679,17 +806,17 @@ class PyBuilder {
       ['tokenQuotaWindowMillis', 'token_quota_window_millis', N],
       ['contentFilterBlockProbability', 'content_filter_block_probability', N],
       ['errorKind', 'error_kind', S],
-    ], indent);
+    ], indent, at);
   }
 
   // --- Non-LLM edit-preserved siblings / actions ----------------------------
 
   private httpResponses(v: unknown, indent: number): string {
-    const items = (v as Json[]).map((r) => this.response(r, indent + 4));
+    const items = (v as Json[]).map((r, n) => this.response(r, indent + 4, `httpResponses[${n}]`));
     return renderList(items, indent);
   }
 
-  private rateLimit(v: unknown, indent: number): string {
+  private rateLimit(v: unknown, indent: number, at: string): string {
     const S = (x: unknown) => pyStr(x);
     const N = (x: unknown) => pyNum(x);
     return this.typed('RateLimit', v as Json, [
@@ -701,32 +828,32 @@ class PyBuilder {
       ['refillPerSecond', 'refill_per_second', N],
       ['errorStatus', 'error_status', N],
       ['retryAfter', 'retry_after', S],
-    ], indent);
+    ], indent, at);
   }
 
   private crossProtocol(v: unknown, indent: number): string {
     const S = (x: unknown) => pyStr(x);
-    const items = (v as Json[]).map((c) => this.typed('CrossProtocolScenario', c, [
+    const items = (v as Json[]).map((c, n) => this.typed('CrossProtocolScenario', c, [
       ['trigger', 'trigger', S],
       ['matchPattern', 'match_pattern', S],
       ['scenarioName', 'scenario_name', S],
       ['targetState', 'target_state', S],
-    ], indent + 4));
+    ], indent + 4, `crossProtocolScenarios[${n}]`));
     return renderList(items, indent);
   }
 
-  private objectCallback(v: unknown, indent: number): string {
+  private objectCallback(v: unknown, indent: number, at: string): string {
     const S = (x: unknown) => pyStr(x);
     const B = (x: unknown) => pyBool(x);
     return this.typed('HttpObjectCallback', v as Json, [
       ['clientId', 'client_id', S],
       ['responseCallback', 'response_callback', B],
-      ['delay', 'delay', (x) => this.delay(x)],
+      ['delay', 'delay', (x, _i, p) => this.delay(x, p)],
       ['primary', 'primary', B],
-    ], indent);
+    ], indent, at);
   }
 
-  private forwardValidate(v: unknown, indent: number): string {
+  private forwardValidate(v: unknown, indent: number, at: string): string {
     const S = (x: unknown) => pyStr(x);
     const N = (x: unknown) => pyNum(x);
     const B = (x: unknown) => pyBool(x);
@@ -738,42 +865,43 @@ class PyBuilder {
       ['validateRequest', 'validate_request', B],
       ['validateResponse', 'validate_response', B],
       ['validationMode', 'validation_mode', S],
-      ['delay', 'delay', (x) => this.delay(x)],
+      ['delay', 'delay', (x, _i, p) => this.delay(x, p)],
       ['primary', 'primary', B],
-    ], indent);
+    ], indent, at);
   }
 
-  private grpcMessages(v: unknown, indent: number): string {
+  private grpcMessages(v: unknown, indent: number, at: string): string {
     this.use('GrpcStreamMessage');
-    const items = (v as Json[]).map((m) => {
+    const items = (v as Json[]).map((m, n) => {
+      this.known(`${at}[${n}]`, m, ['json', 'delay', 'templateType']);
       const mk: Kw[] = [['json', pyStr(m['json'])]];
-      if (m['delay'] != null) mk.push(['delay', this.delay(m['delay'])]);
+      if (m['delay'] != null) mk.push(['delay', this.delay(m['delay'], `${at}[${n}].delay`)]);
       if (m['templateType'] != null) mk.push(['template_type', pyStr(m['templateType'])]);
       return renderInline('GrpcStreamMessage', mk);
     });
     return renderList(items, indent);
   }
 
-  private grpcBidi(v: unknown, indent: number): string {
+  private grpcBidi(v: unknown, indent: number, at: string): string {
     const S = (x: unknown) => pyStr(x);
     const B = (x: unknown) => pyBool(x);
     return this.typed('GrpcBidiResponse', v as Json, [
       ['statusName', 'status_name', S],
       ['statusMessage', 'status_message', S],
       ['headers', 'headers', (x, i) => this.keyMultiList(x, i)],
-      ['messages', 'messages', (x, i) => this.grpcMessages(x, i)],
-      ['rules', 'rules', (x, i) => this.grpcBidiRules(x, i)],
+      ['messages', 'messages', (x, i, p) => this.grpcMessages(x, i, p)],
+      ['rules', 'rules', (x, i, p) => this.grpcBidiRules(x, i, p)],
       ['closeConnection', 'close_connection', B],
-      ['delay', 'delay', (x) => this.delay(x)],
+      ['delay', 'delay', (x, _i, p) => this.delay(x, p)],
       ['primary', 'primary', B],
-    ], indent);
+    ], indent, at);
   }
 
-  private grpcBidiRules(v: unknown, indent: number): string {
-    const items = (v as Json[]).map((r) => this.typed('GrpcBidiRule', r, [
+  private grpcBidiRules(v: unknown, indent: number, at: string): string {
+    const items = (v as Json[]).map((r, n) => this.typed('GrpcBidiRule', r, [
       ['matchJson', 'match_json', (x) => pyStr(x)],
-      ['responses', 'responses', (x, i) => this.grpcMessages(x, i)],
-    ], indent + 4));
+      ['responses', 'responses', (x, i, p) => this.grpcMessages(x, i, p)],
+    ], indent + 4, `${at}[${n}]`));
     return renderList(items, indent);
   }
 
@@ -812,38 +940,38 @@ class PyBuilder {
   expectation(json: Json, indent: number): Kw[] {
     this.use('Expectation');
     const kw: Kw[] = [];
-    const emit = (wire: string, py: string, fn: (x: unknown, i: number) => string) => {
-      if (json[wire] != null) kw.push([py, fn(json[wire], indent + 4)]);
+    const emit = (wire: string, py: string, fn: (x: unknown, i: number, at: string) => string) => {
+      if (json[wire] != null) kw.push([py, fn(json[wire], indent + 4, wire)]);
     };
 
     // Request matcher first, then the (mutually-exclusive) action, then modifiers —
     // matching the reading order of the website examples.
     emit('httpRequest', 'http_request', (x, i) => this.requestOrDns(x as Json, i));
-    emit('httpResponse', 'http_response', (x, i) => this.response(x, i));
-    emit('httpForward', 'http_forward', (x, i) => this.forward(x, i));
-    emit('httpOverrideForwardedRequest', 'http_override_forwarded_request', (x, i) => this.override(x, i));
-    emit('httpResponseClassCallback', 'http_response_class_callback', (x, i) => this.classCallback(x, i));
-    emit('httpResponseTemplate', 'http_response_template', (x, i) => this.template(x, i));
-    emit('httpError', 'http_error', (x, i) => this.error(x, i));
-    emit('httpForwardWithFallback', 'http_forward_with_fallback', (x, i) => this.forwardWithFallback(x, i));
-    emit('httpWebSocketResponse', 'http_websocket_response', (x, i) => this.webSocket(x, i));
-    emit('httpSseResponse', 'http_sse_response', (x, i) => this.sse(x, i));
-    emit('binaryResponse', 'binary_response', (x, i) => this.binary(x, i));
-    emit('dnsResponse', 'dns_response', (x, i) => this.dnsResponse(x, i));
-    emit('httpForwardTemplate', 'http_forward_template', (x, i) => this.template(x, i));
-    emit('httpForwardClassCallback', 'http_forward_class_callback', (x, i) => this.classCallback(x, i));
-    emit('grpcStreamResponse', 'grpc_stream_response', (x, i) => this.grpc(x, i));
+    emit('httpResponse', 'http_response', (x, i, p) => this.response(x, i, p));
+    emit('httpForward', 'http_forward', (x, i, p) => this.forward(x, i, p));
+    emit('httpOverrideForwardedRequest', 'http_override_forwarded_request', (x, i, p) => this.override(x, i, p));
+    emit('httpResponseClassCallback', 'http_response_class_callback', (x, i, p) => this.classCallback(x, i, p));
+    emit('httpResponseTemplate', 'http_response_template', (x, i, p) => this.template(x, i, p));
+    emit('httpError', 'http_error', (x, i, p) => this.error(x, i, p));
+    emit('httpForwardWithFallback', 'http_forward_with_fallback', (x, i, p) => this.forwardWithFallback(x, i, p));
+    emit('httpWebSocketResponse', 'http_websocket_response', (x, i, p) => this.webSocket(x, i, p));
+    emit('httpSseResponse', 'http_sse_response', (x, i, p) => this.sse(x, i, p));
+    emit('binaryResponse', 'binary_response', (x, i, p) => this.binary(x, i, p));
+    emit('dnsResponse', 'dns_response', (x, i, p) => this.dnsResponse(x, i, p));
+    emit('httpForwardTemplate', 'http_forward_template', (x, i, p) => this.template(x, i, p));
+    emit('httpForwardClassCallback', 'http_forward_class_callback', (x, i, p) => this.classCallback(x, i, p));
+    emit('grpcStreamResponse', 'grpc_stream_response', (x, i, p) => this.grpc(x, i, p));
     // Edit-preserved actions the standard composer form cannot model but an edit
     // overlay carries through verbatim — emitted TYPED, never dropped or blobbed.
-    emit('httpLlmResponse', 'http_llm_response', (x, i) => this.llm(x, i));
+    emit('httpLlmResponse', 'http_llm_response', (x, i, p) => this.llm(x, i, p));
     emit('httpResponses', 'http_responses', (x, i) => this.httpResponses(x, i));
-    emit('httpResponseObjectCallback', 'http_response_object_callback', (x, i) => this.objectCallback(x, i));
-    emit('httpForwardObjectCallback', 'http_forward_object_callback', (x, i) => this.objectCallback(x, i));
-    emit('httpForwardValidateAction', 'http_forward_validate_action', (x, i) => this.forwardValidate(x, i));
-    emit('grpcBidiResponse', 'grpc_bidi_response', (x, i) => this.grpcBidi(x, i));
+    emit('httpResponseObjectCallback', 'http_response_object_callback', (x, i, p) => this.objectCallback(x, i, p));
+    emit('httpForwardObjectCallback', 'http_forward_object_callback', (x, i, p) => this.objectCallback(x, i, p));
+    emit('httpForwardValidateAction', 'http_forward_validate_action', (x, i, p) => this.forwardValidate(x, i, p));
+    emit('grpcBidiResponse', 'grpc_bidi_response', (x, i, p) => this.grpcBidi(x, i, p));
     emit('steps', 'steps', (x, i) => this.steps(x, i));
-    emit('beforeActions', 'before_actions', (x, i) => this.actions(x, i));
-    emit('afterActions', 'after_actions', (x, i) => this.actions(x, i));
+    emit('beforeActions', 'before_actions', (x, i, p) => this.actions(x, i, p));
+    emit('afterActions', 'after_actions', (x, i, p) => this.actions(x, i, p));
     emit('chaos', 'chaos', (x, i) => this.chaos(x, i));
     emit('capture', 'capture', (x, i) => this.capture(x, i));
     emit('scenarioName', 'scenario_name', (x) => pyStr(x));
@@ -855,7 +983,7 @@ class PyBuilder {
     emit('responseMode', 'response_mode', (x) => pyStr(x));
     emit('responseWeights', 'response_weights', (x) => intArray(x));
     emit('switchAfter', 'switch_after', (x) => pyNum(x));
-    emit('rateLimit', 'rate_limit', (x, i) => this.rateLimit(x, i));
+    emit('rateLimit', 'rate_limit', (x, i, p) => this.rateLimit(x, i, p));
     emit('crossProtocolScenarios', 'cross_protocol_scenarios', (x, i) => this.crossProtocol(x, i));
     emit('times', 'times', (x) => this.times(x));
     emit('timeToLive', 'time_to_live', (x) => this.ttl(x));
@@ -877,13 +1005,16 @@ export function standardToPython(matcher: StandardMatcher, action: StandardActio
 
   const names = ['MockServerClient', ...builder.imports];
   const importBlock = renderImports(names);
+  const note = builder.omitted.note('#', 'Python');
 
   return [
+    ...(builder.usesBase64 ? ['import base64', ''] : []),
     importBlock,
     '',
     `MockServerClient("${host}", ${port}).upsert(`,
     `    ${expectation}`,
     ')',
+    ...(note ? [note] : []),
   ].join('\n');
 }
 

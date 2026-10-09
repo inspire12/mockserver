@@ -123,13 +123,23 @@ class Ctx {
 // Delay / Times / TimeToLive
 // ---------------------------------------------------------------------------
 
+/**
+ * An inline NOTE comment naming each field of `o` outside `known`, for a model with no
+ * `extra` map to carry it; empty when there is none.
+ */
+function gapNote(model: string, o: Record<string, unknown>, known: readonly string[]): string {
+  const missing = Object.keys(o).filter((k) => !known.includes(k));
+  return missing.length > 0 ? `/* NOTE: the Rust ${model} model has no ${missing.join(', ')}; omitted */ ` : '';
+}
+
 function delayExpr(d: Record<string, unknown>): string {
+  const note = gapNote('Delay', d, ['timeUnit', 'value']);
   const unit = String(d['timeUnit'] ?? 'MILLISECONDS');
   const value = Number(d['value'] ?? 0);
-  if (unit === 'MILLISECONDS') return `Delay::milliseconds(${numLit(value)})`;
-  if (unit === 'SECONDS') return `Delay::seconds(${numLit(value)})`;
+  if (unit === 'MILLISECONDS') return `${note}Delay::milliseconds(${numLit(value)})`;
+  if (unit === 'SECONDS') return `${note}Delay::seconds(${numLit(value)})`;
   // MINUTES (and any other unit) has no constructor — use a typed struct literal.
-  return `Delay { time_unit: ${rustStr(unit)}.to_string(), value: ${numLit(value)} }`;
+  return `${note}Delay { time_unit: ${rustStr(unit)}.to_string(), value: ${numLit(value)} }`;
 }
 
 function timesExpr(t: Record<string, unknown>): string {
@@ -315,6 +325,12 @@ const CONNECTION_OPTION_FIELDS: Record<string, string> = {
   contentLengthHeaderOverride: 'content_length_header_override',
   suppressContentLengthHeader: 'suppress_content_length_header',
   suppressConnectionHeader: 'suppress_connection_header',
+  chunkSize: 'chunk_size',
+};
+
+const CONNECTION_OPTION_DELAYS: Record<string, string> = {
+  closeSocketDelay: 'close_socket_delay',
+  chunkDelay: 'chunk_delay',
 };
 
 function connectionOptionsExpr(co: Record<string, unknown>, indent: number): string {
@@ -326,6 +342,11 @@ function connectionOptionsExpr(co: Record<string, unknown>, indent: number): str
       fields.push(`${rustField}: Some(${lit}),`);
     }
   }
+  for (const [wireKey, rustField] of Object.entries(CONNECTION_OPTION_DELAYS)) {
+    if (isObjR(co[wireKey])) fields.push(`${rustField}: Some(${delayExpr(co[wireKey])}),`);
+  }
+  const extra = extraField(unmodelled(co, [...Object.keys(CONNECTION_OPTION_FIELDS), ...Object.keys(CONNECTION_OPTION_DELAYS)]), indent + 4);
+  if (extra) fields.push(extra);
   const inner = pad(indent + 4);
   return 'ConnectionOptions {\n' + fields.map((f) => inner + f).join('\n') + '\n' + inner + '..Default::default()\n' + pad(indent) + '}';
 }
@@ -416,23 +437,44 @@ function inheritedCalls(o: Record<string, unknown>): string[] {
   return calls;
 }
 
+/** The fields of `o` outside `known`, which a model with an `extra` map carries verbatim. */
+function unmodelled(o: Record<string, unknown>, known: readonly string[]): [string, unknown][] {
+  return Object.entries(o).filter(([k]) => !known.includes(k));
+}
+
+/** An `extra: { … },` struct field holding `extras`, or undefined when there are none. */
+function extraField(extras: [string, unknown][], indent: number): string | undefined {
+  if (extras.length === 0) return undefined;
+  const inner = pad(indent + 4);
+  const inserts = extras.map(([k, v]) => `${inner}m.insert(${rustStr(k)}.to_string(), ${jsonMacro(v, indent + 4)});`).join('\n');
+  return `extra: {\n${inner}let mut m = serde_json::Map::new();\n${inserts}\n${inner}m\n${pad(indent)}},`;
+}
+
 /**
- * `base` with the inherited delay and primary set through struct-update syntax, for
- * models that expose them as public fields without builder methods.
+ * `base` with `fields` set through struct-update syntax, for model fields that have no
+ * builder method (including the `extra` map).
  */
-function withInheritedFields(
-  typeName: string,
-  base: (indent: number) => string,
-  o: Record<string, unknown>,
-  indent: number,
-): string {
-  const fields: string[] = [];
-  if (o['delay'] && typeof o['delay'] === 'object') fields.push(`delay: Some(${delayExpr(o['delay'] as Record<string, unknown>)}),`);
-  if (typeof o['primary'] === 'boolean') fields.push(`primary: Some(${o['primary']}),`);
+function withFields(typeName: string, base: (indent: number) => string, fields: string[], indent: number): string {
   if (fields.length === 0) return base(indent);
   const inner = pad(indent + 4);
   return `${typeName} {\n${fields.map((f) => inner + f).join('\n')}\n${inner}..${base(indent + 4)}\n${pad(indent)}}`;
 }
+
+/** {@link withFields} with only the `extra` map: the fields of `o` outside `known`. */
+function withExtra(typeName: string, base: (indent: number) => string, o: Record<string, unknown>, known: readonly string[], indent: number): string {
+  const extra = extraField(unmodelled(o, known), indent + 4);
+  return withFields(typeName, base, extra ? [extra] : [], indent);
+}
+
+/** The delay and primary every action inherits, as struct fields. */
+function inheritedFields(o: Record<string, unknown>): string[] {
+  const fields: string[] = [];
+  if (o['delay'] && typeof o['delay'] === 'object') fields.push(`delay: Some(${delayExpr(o['delay'] as Record<string, unknown>)}),`);
+  if (typeof o['primary'] === 'boolean') fields.push(`primary: Some(${o['primary']}),`);
+  return fields;
+}
+
+const TEMPLATE_FIELDS = ['templateType', 'template', 'templateFile', 'delay', 'primary'];
 
 function forwardExpr(f: Record<string, unknown>, indent: number): string {
   const host = rustStr(String(f['host'] ?? ''));
@@ -440,9 +482,11 @@ function forwardExpr(f: Record<string, unknown>, indent: number): string {
   const calls: string[] = [];
   if (typeof f['scheme'] === 'string') calls.push(`.scheme(${rustStr(f['scheme'])})`);
   calls.push(...inheritedCalls(f));
-  return chain(`HttpForward::new(${host}, ${port})`, calls, indent);
+  const base = (ind: number) => chain(`HttpForward::new(${host}, ${port})`, calls, ind);
+  return withExtra('HttpForward', base, f, ['host', 'port', 'scheme', 'delay', 'primary'], indent);
 }
 
+/** The HttpTemplate model has no `extra` map, so callers name what it lacks with {@link gapNote}. */
 function templateExpr(t: Record<string, unknown>, indent: number): string {
   const type = rustStr(String(t['templateType'] ?? ''));
   const file = t['templateFile'];
@@ -457,10 +501,12 @@ function templateExpr(t: Record<string, unknown>, indent: number): string {
 
 function errorExpr(e: Record<string, unknown>, indent: number): string {
   const calls: string[] = [];
-  if (e['dropConnection'] === true) calls.push('.drop_connection(true)');
+  if (typeof e['dropConnection'] === 'boolean') calls.push(`.drop_connection(${e['dropConnection']})`);
   if (typeof e['responseBytes'] === 'string') calls.push(`.response_bytes(${rustStr(e['responseBytes'])})`);
+  if (typeof e['streamError'] === 'number') calls.push(`.stream_error(${numLit(e['streamError'])})`);
   calls.push(...inheritedCalls(e));
-  return chain('HttpError::new()', calls, indent);
+  const base = (ind: number) => chain('HttpError::new()', calls, ind);
+  return withExtra('HttpError', base, e, ['dropConnection', 'responseBytes', 'streamError', 'delay', 'primary'], indent);
 }
 
 // ---------------------------------------------------------------------------
@@ -468,13 +514,14 @@ function errorExpr(e: Record<string, unknown>, indent: number): string {
 // ---------------------------------------------------------------------------
 
 function sseEventExpr(ev: Record<string, unknown>, indent: number): string {
+  const note = gapNote('SseEvent', ev, ['event', 'data', 'id', 'retry', 'delay']);
   const calls: string[] = [];
   if (typeof ev['event'] === 'string') calls.push(`.event(${rustStr(ev['event'])})`);
   if (typeof ev['data'] === 'string') calls.push(`.data(${rustStr(ev['data'])})`);
   if (typeof ev['id'] === 'string') calls.push(`.id(${rustStr(ev['id'])})`);
   if (typeof ev['retry'] === 'number') calls.push(`.retry(${numLit(ev['retry'])})`);
   if (ev['delay'] && typeof ev['delay'] === 'object') calls.push(`.delay(${delayExpr(ev['delay'] as Record<string, unknown>)})`);
-  return chain('SseEvent::new()', calls, indent);
+  return note + chain('SseEvent::new()', calls, indent);
 }
 
 function sseExpr(sse: Record<string, unknown>, indent: number): string {
@@ -494,14 +541,17 @@ function sseExpr(sse: Record<string, unknown>, indent: number): string {
   // generate code that closes the connection the user asked to keep open.
   if (typeof sse['closeConnection'] === 'boolean') calls.push(`.close_connection(${sse['closeConnection'] ? 'true' : 'false'})`);
   calls.push(...inheritedCalls(sse));
-  return chain('HttpSseResponse::new()', calls, indent);
+  if (typeof sse['templateType'] === 'string') calls.push(`.template_type(${rustStr(sse['templateType'])})`);
+  const base = (ind: number) => chain('HttpSseResponse::new()', calls, ind);
+  return withExtra('HttpSseResponse', base, sse, ['statusCode', 'headers', 'events', 'closeConnection', 'delay', 'primary', 'templateType'], indent);
 }
 
 function wsMessageExpr(m: Record<string, unknown>): string {
+  const note = gapNote('WebSocketMessage', m, ['text', 'binary', 'delay']);
   const base = typeof m['binary'] === 'string'
     ? `WebSocketMessage::binary_base64(${rustStr(m['binary'])})`
     : `WebSocketMessage::text(${rustStr(String(m['text'] ?? ''))})`;
-  return m['delay'] && typeof m['delay'] === 'object' ? `${base}.delay(${delayExpr(m['delay'] as Record<string, unknown>)})` : base;
+  return note + (m['delay'] && typeof m['delay'] === 'object' ? `${base}.delay(${delayExpr(m['delay'] as Record<string, unknown>)})` : base);
 }
 
 function wsMatcherExpr(m: Record<string, unknown>, indent: number): string {
@@ -510,7 +560,18 @@ function wsMatcherExpr(m: Record<string, unknown>, indent: number): string {
   if (typeof m['textMatcher'] === 'string') calls.push(`.text_matcher(${rustStr(m['textMatcher'])})`);
   const responses = m['responses'];
   if (Array.isArray(responses)) for (const r of responses) calls.push(`.response(${wsMessageExpr(r as Record<string, unknown>)})`);
-  return chain('WebSocketMatcher::new()', calls, indent);
+  const base = (ind: number) => chain('WebSocketMatcher::new()', calls, ind);
+  return withExtra('WebSocketMatcher', base, m, ['frameType', 'textMatcher', 'responses'], indent);
+}
+
+function graphqlFilterExpr(f: Record<string, unknown>, indent: number): string {
+  const calls: string[] = [];
+  if (typeof f['operationName'] === 'string') calls.push(`.operation_name(${rustStr(f['operationName'])})`);
+  if (typeof f['variablesSchema'] === 'string') calls.push(`.variables_schema(${rustStr(f['variablesSchema'])})`);
+  if (typeof f['selectionSetMatchType'] === 'string') calls.push(`.selection_set_match_type(${rustStr(f['selectionSetMatchType'])})`);
+  if (Array.isArray(f['fields'])) calls.push(`.fields(vec![${f['fields'].map((x) => `${rustStr(String(x))}.to_string()`).join(', ')}])`);
+  const base = (ind: number) => chain(`GraphqlSubscriptionFilter::new(${rustStr(String(f['query'] ?? ''))})`, calls, ind);
+  return withExtra('GraphqlSubscriptionFilter', base, f, ['query', 'operationName', 'variablesSchema', 'selectionSetMatchType', 'fields'], indent);
 }
 
 function webSocketExpr(ws: Record<string, unknown>, indent: number): string {
@@ -523,7 +584,13 @@ function webSocketExpr(ws: Record<string, unknown>, indent: number): string {
   // Emitted whenever present, including `false` — see sseExpr.
   if (typeof ws['closeConnection'] === 'boolean') calls.push(`.close_connection(${ws['closeConnection'] ? 'true' : 'false'})`);
   calls.push(...inheritedCalls(ws));
-  return chain('HttpWebSocketResponse::new()', calls, indent);
+  if (typeof ws['templateType'] === 'string') calls.push(`.template_type(${rustStr(ws['templateType'])})`);
+  if (isObjR(ws['graphqlSubscriptionFilter'])) {
+    calls.push(`.graphql_subscription_filter(${graphqlFilterExpr(ws['graphqlSubscriptionFilter'], indent + 4)})`);
+  }
+  const base = (ind: number) => chain('HttpWebSocketResponse::new()', calls, ind);
+  const known = ['subprotocol', 'messages', 'matchers', 'closeConnection', 'delay', 'primary', 'templateType', 'graphqlSubscriptionFilter'];
+  return withExtra('HttpWebSocketResponse', base, ws, known, indent);
 }
 
 const DNS_RECORD_FIELDS = new Set(['name', 'type', 'ttl', 'value', 'class', 'dnsClass', 'priority', 'weight', 'port']);
@@ -566,7 +633,8 @@ function dnsResponseExpr(dns: Record<string, unknown>, indent: number): string |
     }
   }
   calls.push(...inheritedCalls(dns));
-  return chain('DnsResponse::new()', calls, indent);
+  const base = (ind: number) => chain('DnsResponse::new()', calls, ind);
+  return withExtra('DnsResponse', base, dns, ['responseCode', ...sections.map(([wireKey]) => wireKey), 'delay', 'primary'], indent);
 }
 
 function grpcStreamExpr(grpc: Record<string, unknown>, indent: number): string {
@@ -583,7 +651,7 @@ function grpcStreamExpr(grpc: Record<string, unknown>, indent: number): string {
   if (Array.isArray(messages)) {
     for (const m of messages) {
       const mo = m as Record<string, unknown>;
-      let call = `GrpcStreamMessage::json(${rustStr(String(mo['json'] ?? ''))})`;
+      let call = gapNote('GrpcStreamMessage', mo, ['json', 'templateType', 'delay']) + `GrpcStreamMessage::json(${rustStr(String(mo['json'] ?? ''))})`;
       if (typeof mo['templateType'] === 'string') call += `.template_type(${rustStr(mo['templateType'])})`;
       if (mo['delay'] && typeof mo['delay'] === 'object') call += `.delay(${delayExpr(mo['delay'] as Record<string, unknown>)})`;
       calls.push(`.message(${call})`);
@@ -592,7 +660,8 @@ function grpcStreamExpr(grpc: Record<string, unknown>, indent: number): string {
   // Emitted whenever present, including `false` — see sseExpr.
   if (typeof grpc['closeConnection'] === 'boolean') calls.push(`.close_connection(${grpc['closeConnection'] ? 'true' : 'false'})`);
   calls.push(...inheritedCalls(grpc));
-  return chain('GrpcStreamResponse::new()', calls, indent);
+  const base = (ind: number) => chain('GrpcStreamResponse::new()', calls, ind);
+  return withExtra('GrpcStreamResponse', base, grpc, ['statusName', 'statusMessage', 'headers', 'messages', 'closeConnection', 'delay', 'primary'], indent);
 }
 
 // ---------------------------------------------------------------------------
@@ -951,9 +1020,9 @@ function renderPrimaryAction(key: string, value: unknown, ctx: Ctx, indent: numb
     case 'httpForward':
       return inline(`.forward(${forwardExpr(obj, indent + 4)})`);
     case 'httpResponseTemplate':
-      return inline(`.respond_template(${templateExpr(obj, indent + 4)})`);
+      return inline(`.respond_template(${gapNote('HttpTemplate', obj, TEMPLATE_FIELDS)}${templateExpr(obj, indent + 4)})`);
     case 'httpForwardTemplate':
-      return inline(`.forward_template(${templateExpr(obj, indent + 4)})`);
+      return inline(`.forward_template(${gapNote('HttpTemplate', obj, TEMPLATE_FIELDS)}${templateExpr(obj, indent + 4)})`);
     case 'httpError':
       return inline(`.error(${errorExpr(obj, indent + 4)})`);
     case 'httpResponseClassCallback':
@@ -961,8 +1030,9 @@ function renderPrimaryAction(key: string, value: unknown, ctx: Ctx, indent: numb
       const cls = rustStr(String(obj['callbackClass'] ?? ''));
       const calls = inheritedCalls(obj);
       const respond = key === 'httpResponseClassCallback';
-      if (calls.length === 0) return inline(`.${respond ? 'respond_with' : 'forward_with'}_class_callback(${cls})`);
-      return inline(`.${respond ? 'respond' : 'forward'}_class_callback(${chain(`HttpClassCallback::new(${cls})`, calls, indent + 4)})`);
+      const note = gapNote('HttpClassCallback', obj, ['callbackClass', 'delay', 'primary']);
+      if (calls.length === 0) return inline(`.${respond ? 'respond_with' : 'forward_with'}_class_callback(${note}${cls})`);
+      return inline(`.${respond ? 'respond' : 'forward'}_class_callback(${note}${chain(`HttpClassCallback::new(${cls})`, calls, indent + 4)})`);
     }
     case 'httpSseResponse':
       return inline(`.respond_sse(${sseExpr(obj, indent + 4)})`);
@@ -974,7 +1044,8 @@ function renderPrimaryAction(key: string, value: unknown, ctx: Ctx, indent: numb
         ? `BinaryResponse::from_base64(${rustStr(obj['binaryData'])})`
         : 'BinaryResponse::new()';
       const upstream = typeof obj['upstream'] === 'string' ? `.upstream(BinaryUpstream::${pascalEnum(obj['upstream'])})` : '';
-      return inline(`.respond_binary(${chain(base + upstream, calls, indent + 4)})`);
+      const binary = (ind: number) => chain(base + upstream, calls, ind);
+      return inline(`.respond_binary(${withExtra('BinaryResponse', binary, obj, ['binaryData', 'upstream', 'delay', 'primary'], indent + 4)})`);
     }
     case 'grpcStreamResponse':
       return inline(`.respond_grpc_stream(${grpcStreamExpr(obj, indent + 4)})`);
@@ -998,8 +1069,28 @@ function renderPrimaryAction(key: string, value: unknown, ctx: Ctx, indent: numb
         setup.push(...r.setup);
         calls.push(`.response_override(${r.expr})`);
       }
+      // No builder methods for these: set as fields through struct-update syntax.
+      const fields = inheritedFields(obj);
+      for (const [wireKey, field] of [['requestModifier', 'request_modifier'], ['responseModifier', 'response_modifier']] as const) {
+        if (obj[wireKey] != null) fields.push(`${field}: Some(${jsonMacro(obj[wireKey], indent + 8)}),`);
+      }
+      const rt = obj['responseTemplate'];
+      if (isObjR(rt)) fields.push(`response_template: Some(${gapNote('HttpTemplate', rt, TEMPLATE_FIELDS)}${templateExpr(rt, indent + 8)}),`);
+      if (isObjR(obj['httpRequest'])) {
+        const r = renderHttpRequest(obj['httpRequest'], ctx, indent, 'override_http_request');
+        setup.push(...r.setup);
+        fields.push(`http_request: Some(${r.expr}),`);
+      }
+      if (isObjR(obj['httpResponse'])) {
+        const r = renderHttpResponse(obj['httpResponse'], ctx, indent, 'override_http_response');
+        setup.push(...r.setup);
+        fields.push(`http_response: Some(${r.expr}),`);
+      }
+      const known = ['requestOverride', 'responseOverride', 'requestModifier', 'responseModifier', 'responseTemplate', 'httpRequest', 'httpResponse', 'delay', 'primary'];
+      const extra = extraField(unmodelled(obj, known), indent + 8);
+      if (extra) fields.push(extra);
       const override = (ind: number) => chain('HttpOverrideForwardedRequest::new()', calls, ind);
-      return { setup, expr: `.override_forwarded_request(${withInheritedFields('HttpOverrideForwardedRequest', override, obj, indent + 4)})` };
+      return { setup, expr: `.override_forwarded_request(${withFields('HttpOverrideForwardedRequest', override, fields, indent + 4)})` };
     }
     case 'httpForwardWithFallback': {
       const setup: string[] = [];
@@ -1015,7 +1106,11 @@ function renderPrimaryAction(key: string, value: unknown, ctx: Ctx, indent: numb
       if (typeof obj['fallbackOnTimeout'] === 'boolean') calls.push(`.fallback_on_timeout(${obj['fallbackOnTimeout'] ? 'true' : 'false'})`);
       const head = `HttpForwardWithFallback::new(${forwardExpr(fwd, indent + 4)}, ${fbRendered.expr})`;
       const fallback = (ind: number) => chain(head, calls, ind);
-      return { setup, expr: `.forward_with_fallback(${withInheritedFields('HttpForwardWithFallback', fallback, obj, indent + 4)})` };
+      const fields = inheritedFields(obj);
+      const known = ['httpForward', 'fallbackResponse', 'fallbackOnStatusCodes', 'fallbackOnTimeout', 'delay', 'primary'];
+      const extra = extraField(unmodelled(obj, known), indent + 8);
+      if (extra) fields.push(extra);
+      return { setup, expr: `.forward_with_fallback(${withFields('HttpForwardWithFallback', fallback, fields, indent + 4)})` };
     }
     default:
       return { expectationExtra: [key, value] };

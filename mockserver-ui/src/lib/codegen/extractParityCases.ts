@@ -479,7 +479,7 @@ export const combos: Combo[] = [
  * An edit of a form-modeled action whose original carries extra fields: `addKept`
  * turns the form's own output (the edit baseline) into the loaded original.
  */
-function keptFieldsEdit(
+export function keptFieldsEdit(
   name: string,
   form: StandardActionPayload,
   key: string,
