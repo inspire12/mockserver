@@ -17,7 +17,11 @@ export interface BundleMeta {
 export interface BinaryOptions {
   /** Logging callback (default: no-op). */
   log?: (message: string) => void;
-  /** Additional spawn options for runBinary. */
+  /**
+   * Additional spawn options for runBinary, which runs the bundled java
+   * directly. `shell` is always false; on Windows `argv0` and
+   * `windowsVerbatimArguments` are set by runBinary.
+   */
   spawnOptions?: object;
 }
 

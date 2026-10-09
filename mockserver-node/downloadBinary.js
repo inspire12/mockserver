@@ -549,65 +549,133 @@ async function ensureBinary(version, opts) {
   return launcher;
 }
 
-// ---------- H4: safe Windows .bat spawning ----------
+// ---------- H4: launch without a shell ----------
 
 /**
- * Escape a single argument for cmd.exe (H4).
- * Wraps the argument in double quotes and escapes internal double quotes and
- * special characters that cmd.exe would interpret.
+ * How the bundle builder (scripts/build-binary-bundle.sh) writes each
+ * launcher's java line: the java path, the -D options baked in at build time
+ * (the analytics settings), then the MOCKSERVER_JAVA_OPTS reference.
+ */
+var WINDOWS_LAUNCHER = { java: '"%DIR%\\runtime\\bin\\java.exe"', javaOpts: '%MOCKSERVER_JAVA_OPTS%', exe: 'java.exe' };
+var POSIX_LAUNCHER = { java: 'exec "$DIR/runtime/bin/java"', javaOpts: '${MOCKSERVER_JAVA_OPTS:-}', exe: 'java' };
+var BAKED_OPTION = /^-D[^\s"'%&|<>^$`;]+$/;
+
+function isBakedOption(option) { return BAKED_OPTION.test(option); }
+
+/**
+ * Read the JVM options baked into a bundle's launcher script, the text
+ * between the java path and the MOCKSERVER_JAVA_OPTS reference on its java line.
+ * @param {string} launcher
+ * @param {{ java: string, javaOpts: string }} format
+ * @returns {string[]}
+ * @throws {Error} if the file is not the launcher the bundle builder writes
+ */
+function bakedJavaOptions(launcher, format) {
+  var lines = fs.readFileSync(launcher, 'utf8').split('\n');
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i].trim();
+    var end = line.indexOf(format.javaOpts);
+    if (line.indexOf(format.java) === 0 && end !== -1) {
+      var options = line.slice(format.java.length, end).split(/\s+/).filter(Boolean);
+      if (options.every(isBakedOption)) { return options; }
+      break;
+    }
+  }
+  throw new Error(launcher + ' is not a recognised MockServer launcher');
+}
+
+/**
+ * Split MOCKSERVER_JAVA_OPTS into JVM arguments: whitespace separates them, and
+ * a run inside double or single quotes is kept together with the quotes
+ * removed, so -Dx="a b" gives -Dx=a b. Nothing else is interpreted: no
+ * variables, wildcards or escapes. An unclosed quote runs to the end.
+ * @param {string} value
+ * @returns {string[]}
+ */
+function splitJavaOpts(value) {
+  var options = [];
+  var current = '';
+  var inOption = false;
+  var quote = null;
+  for (var i = 0; i < value.length; i++) {
+    var c = value.charAt(i);
+    if (quote) {
+      if (c === quote) { quote = null; } else { current += c; }
+    } else if (c === '"' || c === '\'') {
+      quote = c;
+      inOption = true;
+    } else if (/\s/.test(c)) {
+      if (inOption) { options.push(current); current = ''; inOption = false; }
+    } else {
+      current += c;
+      inOption = true;
+    }
+  }
+  if (inOption) { options.push(current); }
+  return options;
+}
+
+/**
+ * Quote one argument so java.exe reads it back unchanged (the C runtime's
+ * rules): backslashes double only before a quote, and every argument is quoted
+ * so java.exe never expands * or ? in it as a file wildcard.
  * @param {string} arg
  * @returns {string}
  */
-function escapeCmdArg(arg) {
-  // If the arg contains no special characters, return it as-is
-  if (/^[A-Za-z0-9_.\/:-]+$/.test(arg)) { return arg; }
-  // cmd.exe uses "" (doubling) to escape a literal double-quote inside a
-  // double-quoted string — backslash-escaping (\") is NOT recognised by cmd.exe
-  // and would break the quoting boundary. Additionally, a trailing backslash
-  // before the closing quote (...\") would be misinterpreted, so we double it.
-  var escaped = arg.replace(/"/g, '""');
-  // If the arg ends with a backslash, double it so it does not escape the
-  // closing double-quote character
-  var trimmed = trimTrailing(escaped, '\\');
-  escaped += escaped.slice(trimmed.length);
-  return '"' + escaped + '"';
+function quoteWindowsArg(arg) {
+  var out = '"';
+  var backslashes = 0;
+  for (var i = 0; i < arg.length; i++) {
+    var c = arg.charAt(i);
+    if (c === '\\') {
+      backslashes++;
+    } else {
+      out += '\\'.repeat(c === '"' ? backslashes * 2 + 1 : backslashes) + c;
+      backslashes = 0;
+    }
+  }
+  return out + '\\'.repeat(backslashes * 2) + '"';
 }
 
-/** A line break or NUL ends a cmd.exe command line, even inside double quotes. */
-var CMD_LINE_END = /[\r\n\0]/;
+/**
+ * Find an environment variable's key; Windows ignores case in variable names.
+ * @param {Object} env
+ * @param {string} name
+ * @param {boolean} windows
+ * @returns {string|undefined}
+ */
+function envKey(env, name, windows) {
+  return Object.keys(env).find(function (k) { return windows ? k.toUpperCase() === name : k === name; });
+}
 
 /**
- * Build the arguments for cmd.exe to run a .bat launcher with the given args (H4).
- * /d skips AutoRun, /v:off keeps ! literal, /s /c runs the quoted line as is.
- * cmd.exe replaces %NAME% with a variable's value even inside quotes, and no
- * escape works there, so a line with two or more % is refused; a single % is
- * left as it is (a percent-encoded URL with one escape, for example).
- * @param {string} launcher
+ * Do what the bundle's launcher script (bin/mockserver or bin/mockserver.bat)
+ * does, without a shell: run the bundled java on the jar with the script's
+ * baked options, then MOCKSERVER_JAVA_OPTS (see splitJavaOpts), then the
+ * caller's arguments, and set MOCKSERVER_LAUNCHER unless the caller set it.
+ * @param {string} launcher  path to the launcher script
  * @param {string[]} args
- * @returns {string[]}
- * @throws {Error} if the launcher path or an argument cannot be passed to cmd.exe safely
+ * @param {Object} env  the child's environment
+ * @param {boolean} windows
+ * @returns {{ command: string, args: string[], env: Object }}
  */
-function windowsCommandArgs(launcher, args) {
-  if (CMD_LINE_END.test(launcher) || launcher.indexOf('"') !== -1) {
-    throw new Error('launcher path cannot be run through cmd.exe safely (contains ", a line break or NUL): ' + launcher);
+function bundleLaunch(launcher, args, env, windows) {
+  var format = windows ? WINDOWS_LAUNCHER : POSIX_LAUNCHER;
+  var bundleDir = path.dirname(path.dirname(launcher));
+  var javaOptsKey = envKey(env, 'MOCKSERVER_JAVA_OPTS', windows);
+  var javaOpts = javaOptsKey ? splitJavaOpts(String(env[javaOptsKey])) : [];
+  var childEnv = Object.assign({}, env);
+  var launcherKey = envKey(env, 'MOCKSERVER_LAUNCHER', windows);
+  // the .bat sets it only when undefined; the sh script also when empty
+  if (!launcherKey || (!windows && !env[launcherKey])) {
+    childEnv.MOCKSERVER_LAUNCHER = path.basename(launcher, '.bat');
   }
-  // errors name an argument by its position only: its value may be a secret
-  var cmdLine = '"' + launcher + '"';
-  var withPercent = launcher.indexOf('%') !== -1 ? ['the launcher path'] : [];
-  args.forEach(function (a, i) {
-    a = String(a);
-    if (CMD_LINE_END.test(a)) {
-      throw new Error('argument ' + i + ' cannot be passed through cmd.exe safely (contains a line break or NUL)');
-    }
-    if (a.indexOf('%') !== -1) { withPercent.push('argument ' + i); }
-    cmdLine += ' ' + escapeCmdArg(a);
-  });
-  if (cmdLine.indexOf('%') !== cmdLine.lastIndexOf('%')) {
-    throw new Error('the launcher path and arguments contain more than one %, which cmd.exe would expand as an ' +
-      'environment variable reference (%NAME%); remove the % characters to run on Windows (% found in: ' +
-      withPercent.join(', ') + ')');
-  }
-  return ['/d', '/v:off', '/s', '/c', '"' + cmdLine + '"'];
+  return {
+    command: path.join(bundleDir, 'runtime', 'bin', format.exe),
+    args: bakedJavaOptions(launcher, format).concat(javaOpts, ['-jar', path.join(bundleDir, 'lib', 'mockserver.jar')],
+      args.map(String)),
+    env: childEnv
+  };
 }
 
 // ---------- runBinary ----------
@@ -616,7 +684,9 @@ function windowsCommandArgs(launcher, args) {
  * Download (if needed) and spawn the binary with the given args.
  * Returns a Promise that resolves to the child process.
  *
- * H4: On Windows, spawns via cmd.exe with properly escaped arguments.
+ * H4: No shell ever runs: the bundled java runs directly (see bundleLaunch),
+ * since the launcher scripts need sh or cmd.exe, and a spawnOptions.shell
+ * setting is overridden.
  * H5: Uses stdio: 'inherit' by default to avoid pipe-buffer deadlock.
  *
  * @param {string} version
@@ -630,16 +700,19 @@ function runBinary(version, args, opts) {
   opts = opts || {};
   args = args || [];
   return ensureBinary(version, opts).then(function (launcher) {
-    var spawnOpts = Object.assign({ stdio: 'inherit' }, opts.spawnOptions || {});
+    var spawnOpts = Object.assign({ stdio: 'inherit' }, opts.spawnOptions || {}, { shell: false });
+    var windows = process.platform === 'win32';
+    var launch = bundleLaunch(launcher, args, spawnOpts.env || process.env, windows);
+    spawnOpts.env = launch.env;
 
-    if (process.platform === 'win32') {
-      // H4: on Windows, .bat files must be executed via cmd.exe.
-      return spawn('cmd.exe', windowsCommandArgs(launcher, args), Object.assign(
-        spawnOpts, { windowsVerbatimArguments: true }
-      ));
+    if (windows) {
+      return spawn(launch.command, launch.args.map(quoteWindowsArg), Object.assign(spawnOpts, {
+        argv0: quoteWindowsArg(launch.command),
+        windowsVerbatimArguments: true
+      }));
     }
 
-    return spawn(launcher, args, spawnOpts);
+    return spawn(launch.command, launch.args, spawnOpts);
   });
 }
 
@@ -648,8 +721,9 @@ var internal = {
   compareVersions: compareVersions,
   parseVersionSegments: parseVersionSegments,
   assertWithinBase: assertWithinBase,
-  escapeCmdArg: escapeCmdArg,
-  windowsCommandArgs: windowsCommandArgs,
+  quoteWindowsArg: quoteWindowsArg,
+  bundleLaunch: bundleLaunch,
+  splitJavaOpts: splitJavaOpts,
   trimTrailing: trimTrailing,
   isSnapshot: isSnapshot,
   download: download,

@@ -859,89 +859,70 @@ test('pruneOldVersions with default maxPrevious=1 keeps release, prunes SNAPSHOT
 });
 
 // ================================================================
-// 24. escapeCmdArg uses cmd.exe-correct quoting (H4)
+// 24. No shell: every path and argument reaches the server literally (H4)
 // ================================================================
 
-test('escapeCmdArg uses doubled quotes and handles trailing backslash (H4)', function () {
-  var escape = binary._internal.escapeCmdArg;
-  // Simple args pass through without quoting
-  assert.strictEqual(escape('--serverPort'), '--serverPort');
-  assert.strictEqual(escape('1080'), '1080');
-  // Args with spaces get quoted
-  assert.strictEqual(escape('hello world'), '"hello world"');
-  // Internal double quotes are doubled (not backslash-escaped)
-  assert.strictEqual(escape('say "hi"'), '"say ""hi"""');
-  // Trailing backslash is doubled to prevent escaping the closing quote
-  assert.strictEqual(escape('C:\\Users\\test\\'), '"C:\\Users\\test\\\\"');
-  // Multiple trailing backslashes are all doubled
-  assert.strictEqual(escape('path\\\\'), '"path\\\\\\\\"');
-  // Backslashes that are not trailing are left alone
-  assert.strictEqual(escape('a\\b c'), '"a\\b c"');
-});
+/** Characters a shell (sh or cmd.exe) or java.exe's wildcard expansion would act on. */
+var HOSTILE_ARGS = [
+  'a b', 'it\'s', 'say "hi"', '$(touch MARKER)', '`touch MARKER`', '; touch MARKER', 'x && touch MARKER',
+  'a | b', '> out', '%PATH%', '%PATH% %OS%', '!x!', '^&', '*', 'a?b', 'C:\\dir\\', 'C:\\dir\\\\', 'a\\"b',
+  '\\\\"', 'line\nbreak', 'tab\there', ''
+];
 
-test('escapeCmdArg is linear on a long run of backslashes that is not trailing', function () {
-  var escape = binary._internal.escapeCmdArg;
-  var arg = ' ' + '\\'.repeat(100000) + 'x';
-  var started = Date.now();
-  var escaped = escape(arg);
-  assert.ok(Date.now() - started < 1000, 'took ' + (Date.now() - started) + ' ms');
-  assert.strictEqual(escaped, '"' + arg + '"');
-});
+/**
+ * Test-side reading of a Windows command line, by the rules java.exe (like the
+ * C runtime) uses: a run of 2n backslashes before " gives n backslashes and
+ * toggles quoting; 2n+1 gives n backslashes and a literal "; other backslashes
+ * are literal; unquoted spaces and tabs separate arguments.
+ */
+function parseWindowsCommandLine(line) {
+  var args = [];
+  var cur = '';
+  var inArg = false;
+  var inQuotes = false;
+  var i = 0;
+  while (i < line.length) {
+    var c = line.charAt(i);
+    if (c === '\\') {
+      var n = 0;
+      while (line.charAt(i) === '\\') { n++; i++; }
+      if (line.charAt(i) === '"') {
+        cur += '\\'.repeat(Math.floor(n / 2));
+        if (n % 2 === 1) { cur += '"'; i++; }
+      } else {
+        cur += '\\'.repeat(n);
+      }
+      inArg = true;
+    } else if (c === '"') {
+      inQuotes = !inQuotes;
+      inArg = true;
+      i++;
+    } else if ((c === ' ' || c === '\t') && !inQuotes) {
+      if (inArg) { args.push(cur); cur = ''; inArg = false; }
+      i++;
+    } else {
+      cur += c;
+      inArg = true;
+      i++;
+    }
+  }
+  if (inArg) { args.push(cur); }
+  return args;
+}
 
-// ================================================================
-// 24b. windowsCommandArgs: the cmd.exe line for a .bat launcher (H4)
-// ================================================================
+/** The java line the bundle builder (scripts/build-binary-bundle.sh) writes into bin/mockserver.bat. */
+function windowsLauncherScript(bakedOptions) {
+  return '@echo off\r\nsetlocal\r\nset "DIR=%~dp0.."\r\n' +
+    'if not defined MOCKSERVER_LAUNCHER set "MOCKSERVER_LAUNCHER=%~n0"\r\n' +
+    '"%DIR%\\runtime\\bin\\java.exe" ' + (bakedOptions ? bakedOptions + ' ' : '') +
+    '%MOCKSERVER_JAVA_OPTS% -jar "%DIR%\\lib\\mockserver.jar" %*\n';
+}
 
-test('windowsCommandArgs quotes the launcher and each argument for cmd.exe', function () {
-  var cmdArgs = binary._internal.windowsCommandArgs('C:\\cache dir\\bin\\mockserver.bat', ['-serverPort', '1080', 'a & b', 'say "hi"']);
-  assert.deepStrictEqual(cmdArgs, [
-    '/d', '/v:off', '/s', '/c',
-    '""C:\\cache dir\\bin\\mockserver.bat" -serverPort 1080 "a & b" "say ""hi"""' + '"'
-  ]);
-});
-
-test('windowsCommandArgs refuses an argument that would cut the cmd.exe line short', function () {
-  var cmdArgs = binary._internal.windowsCommandArgs;
-  ['line\nbreak', 'carriage\rreturn', 'nul\0byte'].forEach(function (arg) {
-    assert.throws(function () { cmdArgs('C:\\bin\\mockserver.bat', ['-logLevel', arg]); },
-      /argument 1 cannot be passed through cmd\.exe safely/, JSON.stringify(arg));
-  });
-});
-
-test('windowsCommandArgs refuses a launcher path cmd.exe would misquote or cut short', function () {
-  var cmdArgs = binary._internal.windowsCommandArgs;
-  ['C:\\a"b\\mockserver.bat', 'C:\\a\nb\\mockserver.bat'].forEach(function (launcher) {
-    assert.throws(function () { cmdArgs(launcher, []); }, /launcher path cannot be run through cmd\.exe safely/, JSON.stringify(launcher));
-  });
-});
-
-test('windowsCommandArgs refuses a line cmd.exe would expand as %NAME%', function () {
-  var cmdArgs = binary._internal.windowsCommandArgs;
-  var expandOnWindows = /contain more than one %, which cmd\.exe would expand/;
-  assert.throws(function () { cmdArgs('C:\\bin\\mockserver.bat', ['%PATH%']); }, expandOnWindows);
-  assert.throws(function () { cmdArgs('C:\\bin\\mockserver.bat', ['https://h/a%20b%20c.yaml']); }, expandOnWindows);
-  // a pair split across two arguments, or between the launcher path and an argument
-  assert.throws(function () { cmdArgs('C:\\bin\\mockserver.bat', ['50%', 'x%']); }, expandOnWindows);
-  assert.throws(function () { cmdArgs('C:\\100%\\bin\\mockserver.bat', ['x%']); }, expandOnWindows);
-});
-
-test('windowsCommandArgs errors name an argument by position, never its value', function () {
-  var cmdArgs = binary._internal.windowsCommandArgs;
-  assert.throws(function () { cmdArgs('C:\\bin\\mockserver.bat', ['-token', 'se%cr%et']); },
-    function (e) {
-      assert.match(e.message, /% found in: argument 1\)$/);
-      assert.ok(e.message.indexOf('se%cr%et') === -1, e.message);
-      return true;
-    });
-  assert.throws(function () { cmdArgs('C:\\bin\\mockserver.bat', ['-token', 'sec\nret']); },
-    function (e) {
-      assert.match(e.message, /^argument 1 cannot be passed through cmd\.exe safely/);
-      assert.ok(e.message.indexOf('sec') === -1, e.message);
-      return true;
-    });
-});
-
-test('runBinary on Windows spawns cmd.exe with the line windowsCommandArgs builds', async function () {
+/**
+ * Load downloadBinary.js as it behaves on Windows, with child_process.spawn
+ * recorded instead of run, and call fn(winBinary, calls, cacheBase).
+ */
+async function withFakeWindows(fn) {
   var modulePath = require.resolve('../downloadBinary');
   var savedModule = require.cache[modulePath];
   var savedSpawn = child_process.spawn;
@@ -954,20 +935,10 @@ test('runBinary on Windows spawns cmd.exe with the line windowsCommandArgs build
     child_process.spawn = function (cmd, cmdArgs, opts) { calls.push({ cmd: cmd, args: cmdArgs, opts: opts }); return { fake: true }; };
     delete require.cache[modulePath];
     var winBinary = require('../downloadBinary');
-    process.env.MOCKSERVER_BINARY_CACHE = tmp.base;
-    var name = winBinary.bundleBaseName('1.2.3').name;
-    var launcher = path.join(tmp.base, '1.2.3', name, 'bin', 'mockserver.bat');
-    fs.mkdirSync(path.dirname(launcher), { recursive: true });
-    fs.writeFileSync(launcher, '@echo off\r\n');
-
-    await winBinary.runBinary('1.2.3', ['-serverPort', '1080', 'a & b']);
-    assert.strictEqual(calls.length, 1);
-    assert.strictEqual(calls[0].cmd, 'cmd.exe');
-    assert.deepStrictEqual(calls[0].args, winBinary._internal.windowsCommandArgs(launcher, ['-serverPort', '1080', 'a & b']));
-    assert.strictEqual(calls[0].opts.windowsVerbatimArguments, true);
-
-    await assert.rejects(winBinary.runBinary('1.2.3', ['%PATH%']), /more than one %/);
-    assert.strictEqual(calls.length, 1, 'a refused line is not spawned');
+    // " cannot appear in a Windows path; every other character cmd.exe acts on can
+    var cacheBase = path.join(tmp.base, 'cache dir \'q $(x);y & %PATH% ^!');
+    process.env.MOCKSERVER_BINARY_CACHE = cacheBase;
+    await fn(winBinary, calls, cacheBase);
   } finally {
     Object.defineProperty(process, 'platform', savedPlatform);
     child_process.spawn = savedSpawn;
@@ -976,12 +947,207 @@ test('runBinary on Windows spawns cmd.exe with the line windowsCommandArgs build
     else { process.env.MOCKSERVER_BINARY_CACHE = prevCache; }
     tmp.cleanup();
   }
+}
+
+function writeWindowsBundle(winBinary, cacheBase, script) {
+  var bundleDir = path.join(cacheBase, '1.2.3', winBinary.bundleBaseName('1.2.3').name);
+  var launcher = path.join(bundleDir, 'bin', 'mockserver.bat');
+  fs.mkdirSync(path.dirname(launcher), { recursive: true });
+  fs.writeFileSync(launcher, script);
+  return bundleDir;
+}
+
+test('runBinary on Windows runs the bundled java.exe directly, never cmd.exe, with every argument literal', async function () {
+  await withFakeWindows(async function (winBinary, calls, cacheBase) {
+    var baked = '-Dmockserver.dashboardAnalyticsEndpoint=https://a.example/c -Dmockserver.dashboardAnalyticsKey=k1 ' +
+      '-Dmockserver.dashboardAnalyticsDistribution=binary';
+    var bundleDir = writeWindowsBundle(winBinary, cacheBase, windowsLauncherScript(baked));
+    var java = path.join(bundleDir, 'runtime', 'bin', 'java.exe');
+
+    await winBinary.runBinary('1.2.3', ['-serverPort', '1080'].concat(HOSTILE_ARGS), {
+      spawnOptions: { shell: true, windowsVerbatimArguments: false, env: { MOCKSERVER_JAVA_OPTS: ' -Xmx64m  -Dfoo=bar -Dx="a b" ' } }
+    });
+
+    assert.strictEqual(calls.length, 1);
+    var call = calls[0];
+    assert.strictEqual(call.cmd, java, 'runs java.exe, not cmd.exe or the .bat');
+    assert.strictEqual(call.opts.shell, false, 'a caller cannot turn a shell on');
+    assert.strictEqual(call.opts.windowsVerbatimArguments, true);
+    assert.strictEqual(call.opts.argv0, '"' + java + '"');
+    assert.strictEqual(call.opts.env.MOCKSERVER_LAUNCHER, 'mockserver');
+    call.args.forEach(function (a) {
+      assert.ok(a.charAt(0) === '"' && a.charAt(a.length - 1) === '"', 'quoted, so java.exe expands no wildcard: ' + a);
+    });
+    var argv = parseWindowsCommandLine([call.opts.argv0].concat(call.args).join(' '));
+    assert.deepStrictEqual(argv, [
+      java,
+      '-Dmockserver.dashboardAnalyticsEndpoint=https://a.example/c', '-Dmockserver.dashboardAnalyticsKey=k1',
+      '-Dmockserver.dashboardAnalyticsDistribution=binary',
+      '-Xmx64m', '-Dfoo=bar', '-Dx=a b',
+      '-jar', path.join(bundleDir, 'lib', 'mockserver.jar'),
+      '-serverPort', '1080'
+    ].concat(HOSTILE_ARGS));
+  });
 });
 
-test('windowsCommandArgs passes a single % through, which cmd.exe leaves as it is', function () {
-  var cmdArgs = binary._internal.windowsCommandArgs;
-  assert.strictEqual(cmdArgs('C:\\bin\\mockserver.bat', ['--openapi', 'https://h/a%20b.yaml'])[4],
-    '""C:\\bin\\mockserver.bat" --openapi "https://h/a%20b.yaml""');
+test('runBinary on Windows keeps a caller\'s MOCKSERVER_LAUNCHER and works without baked options', async function () {
+  await withFakeWindows(async function (winBinary, calls, cacheBase) {
+    var bundleDir = writeWindowsBundle(winBinary, cacheBase, windowsLauncherScript(''));
+    await winBinary.runBinary('1.2.3', [], { spawnOptions: { env: { mockserver_launcher: 'mine' } } });
+    assert.strictEqual(calls.length, 1);
+    assert.strictEqual(calls[0].opts.env.mockserver_launcher, 'mine');
+    assert.ok(!Object.prototype.hasOwnProperty.call(calls[0].opts.env, 'MOCKSERVER_LAUNCHER'),
+      'Windows variable names ignore case, so the caller\'s value is kept as it is');
+    assert.deepStrictEqual(parseWindowsCommandLine(calls[0].args.join(' ')),
+      ['-jar', path.join(bundleDir, 'lib', 'mockserver.jar')]);
+  });
+});
+
+test('runBinary on Windows refuses a launcher it does not recognise, without spawning anything', async function () {
+  await withFakeWindows(async function (winBinary, calls, cacheBase) {
+    writeWindowsBundle(winBinary, cacheBase, '@echo off\r\necho not a mockserver launcher\r\n');
+    await assert.rejects(winBinary.runBinary('1.2.3', []), /not a recognised MockServer launcher/);
+    writeWindowsBundle(winBinary, cacheBase, windowsLauncherScript('-Dok=1 & calc.exe'));
+    await assert.rejects(winBinary.runBinary('1.2.3', []), /not a recognised MockServer launcher/);
+    assert.strictEqual(calls.length, 0);
+  });
+});
+
+test('quoteWindowsArg round-trips any argument through java.exe\'s command-line rules', function () {
+  var quote = binary._internal.quoteWindowsArg;
+  HOSTILE_ARGS.concat(['\\', '\\\\', '"', '""', 'a\\\\\\"b\\', ' ' + '\\'.repeat(5000) + 'x']).forEach(function (arg) {
+    assert.deepStrictEqual(parseWindowsCommandLine(quote(arg)), [arg], JSON.stringify(arg));
+  });
+});
+
+/** Resolve with everything a child writes to stdout, or reject if it exits non-zero. */
+function childStdout(child) {
+  return new Promise(function (resolve, reject) {
+    var chunks = [];
+    child.stdout.on('data', function (d) { chunks.push(d); });
+    child.on('error', reject);
+    child.on('close', function (code) {
+      if (code !== 0) { reject(new Error('launcher exited ' + code)); return; }
+      resolve(Buffer.concat(chunks).toString('utf8'));
+    });
+  });
+}
+
+/** The java line the bundle builder writes into the POSIX bin/mockserver. */
+function posixLauncherScript(bakedOptions) {
+  return '#!/bin/sh\nDIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)\n' +
+    'export MOCKSERVER_LAUNCHER="${MOCKSERVER_LAUNCHER:-$(basename -- "$0")}"\n' +
+    'exec "$DIR/runtime/bin/java" ' + (bakedOptions ? bakedOptions + ' ' : '') +
+    '${MOCKSERVER_JAVA_OPTS:-} -jar "$DIR/lib/mockserver.jar" "$@"\n';
+}
+
+/** A POSIX bundle whose runtime/bin/java prints MOCKSERVER_LAUNCHER and its arguments, NUL-separated. */
+function writePosixBundle(cacheBase, script) {
+  var bundleDir = path.join(cacheBase, '1.2.3', binary.bundleBaseName('1.2.3').name);
+  fs.mkdirSync(path.join(bundleDir, 'bin'), { recursive: true });
+  fs.mkdirSync(path.join(bundleDir, 'runtime', 'bin'), { recursive: true });
+  fs.writeFileSync(path.join(bundleDir, 'bin', 'mockserver'), script);
+  fs.chmodSync(path.join(bundleDir, 'bin', 'mockserver'), 0o755);
+  var java = path.join(bundleDir, 'runtime', 'bin', 'java');
+  fs.writeFileSync(java, '#!/bin/sh\nprintf \'%s\\0\' "$MOCKSERVER_LAUNCHER"\nfor a in "$@"; do printf \'%s\\0\' "$a"; done\n');
+  fs.chmodSync(java, 0o755);
+  return bundleDir;
+}
+
+test('runBinary passes paths and arguments literally on POSIX, even when spawnOptions asks for a shell', async function () {
+  if (process.platform === 'win32') { return; } // the java stub below is a POSIX script
+  var tmp = makeTempDir('ms-noshell-');
+  var prevCache = process.env.MOCKSERVER_BINARY_CACHE;
+  var marker = path.join(tmp.base, 'MARKER');
+  var args = HOSTILE_ARGS.map(function (a) { return a.split('MARKER').join(marker); });
+  try {
+    var cacheBase = path.join(tmp.base, 'cache dir \'q" $(touch ' + marker + ');y');
+    process.env.MOCKSERVER_BINARY_CACHE = cacheBase;
+    var bundleDir = writePosixBundle(cacheBase, posixLauncherScript('-Dmockserver.dashboardAnalyticsKey=k1'));
+    var env = Object.assign({}, process.env, {
+      MOCKSERVER_JAVA_OPTS: ' -Xmx64m -Dx="a b" -Dy=\'c d\'  -Dz=$(touch ' + marker + ') * '
+    });
+    delete env.MOCKSERVER_LAUNCHER;
+    var expected = ['mockserver', '-Dmockserver.dashboardAnalyticsKey=k1',
+      '-Xmx64m', '-Dx=a b', '-Dy=c d', '-Dz=$(touch', marker + ')', '*',
+      '-jar', path.join(bundleDir, 'lib', 'mockserver.jar')].concat(args);
+
+    var spawnOptionVariants = [{ stdio: 'pipe' }, { stdio: 'pipe', shell: true }, { stdio: 'pipe', shell: '/bin/sh' }];
+    for (var i = 0; i < spawnOptionVariants.length; i++) {
+      var options = Object.assign({ env: env }, spawnOptionVariants[i]);
+      var out = await childStdout(await binary.runBinary('1.2.3', args, { spawnOptions: options }));
+      assert.deepStrictEqual(out.split('\0').slice(0, -1), expected, JSON.stringify(spawnOptionVariants[i]));
+    }
+    assert.ok(!fs.existsSync(marker), 'no shell ran a command from a path, an argument or MOCKSERVER_JAVA_OPTS');
+  } finally {
+    if (prevCache === undefined) { delete process.env.MOCKSERVER_BINARY_CACHE; }
+    else { process.env.MOCKSERVER_BINARY_CACHE = prevCache; }
+    tmp.cleanup();
+  }
+});
+
+test('runBinary on POSIX keeps a caller\'s MOCKSERVER_LAUNCHER, sets an empty one, and refuses an unrecognised launcher', async function () {
+  if (process.platform === 'win32') { return; } // the java stub below is a POSIX script
+  var tmp = makeTempDir('ms-posix-launcher-');
+  var prevCache = process.env.MOCKSERVER_BINARY_CACHE;
+  try {
+    process.env.MOCKSERVER_BINARY_CACHE = tmp.base;
+    writePosixBundle(tmp.base, posixLauncherScript(''));
+    var env = Object.assign({}, process.env, { MOCKSERVER_LAUNCHER: 'mine' });
+    delete env.MOCKSERVER_JAVA_OPTS;
+    var out = await childStdout(await binary.runBinary('1.2.3', ['-p'], { spawnOptions: { stdio: 'pipe', env: env } }));
+    assert.deepStrictEqual(out.split('\0').slice(0, 1), ['mine']);
+    env.MOCKSERVER_LAUNCHER = '';
+    out = await childStdout(await binary.runBinary('1.2.3', ['-p'], { spawnOptions: { stdio: 'pipe', env: env } }));
+    assert.deepStrictEqual(out.split('\0').slice(0, 1), ['mockserver'], 'like ${MOCKSERVER_LAUNCHER:-...}');
+
+    writePosixBundle(tmp.base, posixLauncherScript('-Dok=1; touch x'));
+    await assert.rejects(binary.runBinary('1.2.3', []), /not a recognised MockServer launcher/);
+    writePosixBundle(tmp.base, '#!/bin/sh\necho stub\n');
+    await assert.rejects(binary.runBinary('1.2.3', []), /not a recognised MockServer launcher/);
+  } finally {
+    if (prevCache === undefined) { delete process.env.MOCKSERVER_BINARY_CACHE; }
+    else { process.env.MOCKSERVER_BINARY_CACHE = prevCache; }
+    tmp.cleanup();
+  }
+});
+
+test('splitJavaOpts groups quoted text like the launcher scripts did, and interprets nothing else', function () {
+  var split = binary._internal.splitJavaOpts;
+  assert.deepStrictEqual(split(''), []);
+  assert.deepStrictEqual(split('  \t '), []);
+  assert.deepStrictEqual(split(' -Xmx64m\t -Dfoo=bar '), ['-Xmx64m', '-Dfoo=bar']);
+  assert.deepStrictEqual(split('-Dx="a b" -Dy=\'c d\''), ['-Dx=a b', '-Dy=c d']);
+  assert.deepStrictEqual(split('"-Da=it\'s" \'-Db=say "hi"\''), ['-Da=it\'s', '-Db=say "hi"']);
+  assert.deepStrictEqual(split('-Dempty="" ""'), ['-Dempty=', '']);
+  assert.deepStrictEqual(split('-Da="x"y\'z\''), ['-Da=xyz']);
+  assert.deepStrictEqual(split('$HOME %PATH% * a?b $(x) `y` ; & | C:\\dir\\'),
+    ['$HOME', '%PATH%', '*', 'a?b', '$(x)', '`y`', ';', '&', '|', 'C:\\dir\\']);
+  assert.deepStrictEqual(split('-Dx="unclosed value'), ['-Dx=unclosed value']);
+});
+
+test('ensureBinary downloads and extracts into a cache path a shell would misread', async function () {
+  var tmp = makeTempDir('ms-hostile-cache-');
+  var prevCache = process.env.MOCKSERVER_BINARY_CACHE;
+  var prevBase = process.env.MOCKSERVER_BINARY_BASE_URL;
+  var marker = path.join(tmp.base, 'MARKER');
+  try {
+    var fixtureDir = path.join(tmp.base, 'fixtures');
+    fs.mkdirSync(fixtureDir, { recursive: true });
+    createFixtureArchive(fixtureDir, '1.2.3');
+    process.env.MOCKSERVER_BINARY_BASE_URL = 'file://' + fixtureDir;
+    process.env.MOCKSERVER_BINARY_CACHE = path.join(tmp.base, 'a b \'q" $(touch ' + marker + '); touch ' + marker);
+    var launcher = await binary.ensureBinary('1.2.3');
+    assert.ok(launcher.indexOf(process.env.MOCKSERVER_BINARY_CACHE) === 0, launcher);
+    assert.ok(fs.statSync(launcher).size > 0);
+    assert.ok(!fs.existsSync(marker), 'no shell ran a command from the cache path');
+  } finally {
+    if (prevCache === undefined) { delete process.env.MOCKSERVER_BINARY_CACHE; }
+    else { process.env.MOCKSERVER_BINARY_CACHE = prevCache; }
+    if (prevBase === undefined) { delete process.env.MOCKSERVER_BINARY_BASE_URL; }
+    else { process.env.MOCKSERVER_BINARY_BASE_URL = prevBase; }
+    tmp.cleanup();
+  }
 });
 
 test('assetUrl trims trailing slashes from the mirror in linear time', function () {

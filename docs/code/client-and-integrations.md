@@ -561,19 +561,37 @@ When adding a client, add its version location to **both**.
 
 Hardening common to all: version strings are validated and resolved cache paths are asserted to stay
 within the cache root (no path traversal); SHA-256 verification is mandatory on the public path; no launcher
-runs through a shell, and on Windows each builds the `cmd.exe` command line itself (see
-*Launching without a shell* below); child process stdout/stderr are drained to avoid
+runs through a shell: the Node launcher runs the bundled `java` directly and the other clients
+build the `cmd.exe` command line themselves on Windows (see *Launching without a shell* below); child process stdout/stderr are drained to avoid
 pipe-buffer deadlock; HTTP downloads use timeouts and stream to disk. Tests are hermetic (no live
 network) using `file://` fixtures and a stubbed downloader, plus one integration test that runs only
 when a real bundle is available. *(Known minor follow-up: the PHP pruner relies on `version_compare`,
 which can treat `8.0.0` and `8.0.0-SNAPSHOT` as equal — prune order between those two is not
 guaranteed; tracked as a follow-up.)*
 
-**Launching without a shell.** On Linux and macOS every launcher executes `bin/mockserver` directly,
-with no shell. On Windows a `.bat` file can only run under `cmd.exe`, which parses its command line
-itself, so the Node launcher and the Python, Ruby, Go, Rust, .NET and PHP clients build that line
-rather than letting a runtime quote it (runtime quoting follows the C runtime's rules, which
-`cmd.exe` does not):
+**Launching without a shell.** On Linux and macOS the Python, Ruby, Go, Rust, .NET and PHP clients
+execute `bin/mockserver` directly, with no shell.
+
+The Node launcher runs no launcher script at all, on any platform: `bin/mockserver` needs `sh` and
+`bin/mockserver.bat` needs `cmd.exe`. It does what the script does instead. It runs
+`runtime/bin/java` (`runtime\bin\java.exe` on Windows) with the `-D` options the bundle builder
+baked into the script's java line (read from the file, which is refused unless it has that line
+and only `-D` options on it), then `MOCKSERVER_JAVA_OPTS`, then `-jar lib/mockserver.jar` and the
+caller's arguments. It sets `MOCKSERVER_LAUNCHER=mockserver` unless the caller set it (or, on
+Linux and macOS, set it empty, as the script does). `MOCKSERVER_JAVA_OPTS` is split on whitespace,
+and text inside double or single quotes stays together with the quotes removed, so
+`-Dx="a b"` gives `-Dx=a b`; nothing else in it is interpreted (no variables, wildcards or
+command substitution). `shell: false` is forced over any `spawnOptions` a caller passes.
+
+On Windows every argument is double-quoted by the C runtime's rules (backslashes doubled only
+before a `"`) and passed with `windowsVerbatimArguments`, with the `java.exe` path as a quoted
+`argv0`. The tests prove that line reads back as the original arguments under the C runtime's
+rules, which `java.exe` follows; quoting every argument also keeps `java.exe` from treating `*`
+or `?` as a file wildcard. Nothing is refused for containing `%`, `&`, `|` or quotes.
+
+The Python, Ruby, Go, Rust, .NET and PHP clients still run the `.bat` under `cmd.exe`, so they build
+that line rather than letting a runtime quote it (runtime quoting follows the C runtime's rules,
+which `cmd.exe` does not):
 
 - the line is `cmd.exe /d /v:off /s /c ""<launcher>" "<arg>" ..."`: `/d` skips AutoRun, `/v:off` keeps
   `!` literal, and each part is double-quoted so `&`, `|`, `<`, `>`, `^` and parentheses are text;
@@ -581,19 +599,19 @@ rather than letting a runtime quote it (runtime quoting follows the C runtime's 
   the line;
 - a line with two or more `%` is refused, because `cmd.exe` expands `%NAME%` even inside quotes and
   nothing escapes it there; so is a launcher path or argument containing a line break or NUL, and
-  a launcher path containing `"`. Node doubles a `"` in an argument; the other clients refuse it;
-- the line reaches `CreateProcess` unchanged: Node sets `windowsVerbatimArguments`, Python passes a
-  string with `shell=False`, Go sets `SysProcAttr.CmdLine`, Rust uses `raw_arg`, .NET sets
-  `Arguments`, and PHP passes a string with `bypass_shell`. Python, Go, Rust and .NET run cmd.exe
-  by its `%ComSpec%` path (else `%SystemRoot%\System32\cmd.exe`, else an error); Node, Ruby and
-  PHP run it by name;
+  a launcher path containing `"`, and a `"` in an argument;
+- the line reaches `CreateProcess` unchanged: Python passes a string with `shell=False`, Go sets
+  `SysProcAttr.CmdLine`, Rust uses `raw_arg`, .NET sets `Arguments`, and PHP passes a string with
+  `bypass_shell`. Python, Go, Rust and .NET run cmd.exe by its `%ComSpec%` path (else
+  `%SystemRoot%\System32\cmd.exe`, else an error); Ruby and PHP run it by name;
 - Ruby has no verbatim form: a command string goes to `CreateProcess` unchanged only while it holds
   no redirection, so Ruby also refuses `<`, `>`, `|` and `&`, and needs a native (mswin or mingw)
   Ruby, since a Cygwin Ruby would hand the string to `/bin/sh`;
-- in the six clients a refusal names the part (`the launcher path` or `argument <i>`) but never
+- a refusal names the part (`the launcher path` or `argument <i>`) but never
   its value, which may be a secret, and the `%` refusal does not print the line.
 
-The command-line builders are unit-tested in each launcher's suite; no CI agent runs Windows.
+The command-line builders are unit-tested in each launcher's suite (Node's against a test-side
+reading of the line by the C runtime's rules); no CI agent runs Windows.
 The JetBrains plugin passes only the launcher path and a port to IntelliJ's `GeneralCommandLine`,
 and the VS Code extension runs the bundled `java` directly.
 
