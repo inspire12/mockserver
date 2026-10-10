@@ -632,8 +632,9 @@
                 from the parent pom) substitutes into the generated Version class so it can be surfaced
                 on the /mockserver/status endpoint and the Prometheus build_info metric. Runs in the
                 initialize phase, before generate-sources where the Version class is filtered.
-                failOnNoGitDirectory / failOnUnableToExtractRepoInfo are false so builds without git
-                metadata (e.g. a source tarball) degrade to an empty hash instead of failing.
+                failOnNoGitDirectory is false so builds without git metadata (e.g. a source tarball)
+                degrade to an empty hash instead of failing (plugin 10.0.1 never reads
+                failOnUnableToExtractRepoInfo; linked worktrees are handled by the profiles below).
             -->
             <plugin>
                 <groupId>io.github.git-commit-id</groupId>
@@ -1215,10 +1216,10 @@
 
     <profiles>
         <!--
-            In a linked git worktree .git is a file, and the plugin resolves it to the shared
-            repository, so JGit would report the main checkout's HEAD. Run native git from this
-            module's directory instead, which honours the worktree. Clones (CI, release) keep JGit:
-            native git can fail its ownership check on a checkout bind-mounted into a container.
+            In a linked git worktree (.git is a file) the plugin's JGit reports the main checkout's
+            HEAD, and its native git fails the build when the worktree's gitdir is unreachable (e.g. a
+            container mounting only the worktree). Run git from Ant instead, which honours the worktree
+            and tolerates failure, and pass the hash, or an empty one, to Version.java as a filter.
         -->
         <profile>
             <id>git-worktree-commit-hash</id>
@@ -1228,30 +1229,9 @@
                 </file>
             </activation>
             <build>
-                <plugins>
-                    <plugin>
-                        <groupId>io.github.git-commit-id</groupId>
-                        <artifactId>git-commit-id-maven-plugin</artifactId>
-                        <configuration>
-                            <useNativeGit>true</useNativeGit>
-                            <dotGitDirectory>${project.basedir}</dotGitDirectory>
-                        </configuration>
-                    </plugin>
-                </plugins>
-            </build>
-        </profile>
-        <!--
-            No .git at all (e.g. a source tarball) also activates the profile above, and native git
-            then fails the build, so skip the plugin: the hash stays empty as it did with JGit.
-        -->
-        <profile>
-            <id>no-git-commit-hash</id>
-            <activation>
-                <file>
-                    <missing>${basedir}/../../.git</missing>
-                </file>
-            </activation>
-            <build>
+                <filters>
+                    <filter>${project.build.directory}/git-worktree-commit-hash.properties</filter>
+                </filters>
                 <plugins>
                     <plugin>
                         <groupId>io.github.git-commit-id</groupId>
@@ -1259,6 +1239,49 @@
                         <configuration>
                             <skip>true</skip>
                         </configuration>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-antrun-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>resolve-worktree-git-commit-hash</id>
+                                <phase>initialize</phase>
+                                <goals>
+                                    <goal>run</goal>
+                                </goals>
+                                <configuration>
+                                    <target xmlns:if="ant:if">
+                                        <condition property="worktree.git.present">
+                                            <and>
+                                                <available file="${project.basedir}/../../.git"/>
+                                                <not>
+                                                    <istrue value="${maven.gitcommitid.skip}"/>
+                                                </not>
+                                            </and>
+                                        </condition>
+                                        <exec executable="git" dir="${project.basedir}" failonerror="false" failifexecutionfails="false" outputproperty="worktree.git.output" errorproperty="worktree.git.error" resultproperty="worktree.git.result" if:set="worktree.git.present">
+                                            <arg line="rev-parse --verify --short=8 HEAD"/>
+                                        </exec>
+                                        <condition property="worktree.git.hash" value="${worktree.git.output}" else="">
+                                            <equals arg1="${worktree.git.result}" arg2="0"/>
+                                        </condition>
+                                        <condition property="worktree.git.failed">
+                                            <and>
+                                                <isset property="worktree.git.present"/>
+                                                <not>
+                                                    <equals arg1="${worktree.git.result}" arg2="0"/>
+                                                </not>
+                                            </and>
+                                        </condition>
+                                        <property name="worktree.git.error" value="git could not be run"/>
+                                        <echo message="git commit hash unavailable, leaving it empty: ${worktree.git.error}" if:set="worktree.git.failed"/>
+                                        <mkdir dir="${project.build.directory}"/>
+                                        <echo file="${project.build.directory}/git-worktree-commit-hash.properties" message="git.commit.id.abbrev=${worktree.git.hash}"/>
+                                    </target>
+                                </configuration>
+                            </execution>
+                        </executions>
                     </plugin>
                 </plugins>
             </build>
