@@ -659,7 +659,7 @@ public class ResponseWriteStallTimeoutIntegrationTest {
     }
 
     @Test
-    public void shouldResetAStalledHttp2StreamWhoseClientOverflowsAnEarlierStreamsWindowWithItsInitialWindow() throws Exception {
+    public void shouldCloseAnHttp2ConnectionWhoseClientOverflowsAnEarlierStreamsWindowWithItsInitialWindow() throws Exception {
         try (Http2Client client = Http2Client.open(mockServer)) {
             Http2Client.Stream holder = client.request("/forward/fixed?test=http2-overflow-holder");
             awaitData(holder);
@@ -668,18 +668,11 @@ public class ResponseWriteStallTimeoutIntegrationTest {
             Http2Client.Stream overflowing = client.request("/forward/fixed?test=http2-overflow-overflowing");
             client.onEventLoop(() -> client.windowUpdate(overflowing, Integer.MAX_VALUE - Http2CodecUtil.DEFAULT_WINDOW_SIZE));
             Http2Client.Stream stalled = client.request("/forward/fixed?test=http2-overflow-stalled");
-            // Netty stops applying each rise at the stream it would overflow, so the stalled stream, opened after it,
-            // keeps its send window while the initial window moves
-            AtomicInteger initialWindow = new AtomicInteger(Http2CodecUtil.DEFAULT_WINDOW_SIZE);
-            client.every(STALL_MILLIS / 3, () -> client.initialWindow(initialWindow.incrementAndGet()));
-            assertThat("the stalled stream ended", stalled.ended.await(CUT_WITHIN_MILLIS, TimeUnit.MILLISECONDS), is(true));
-            assertThat("the stalled stream was reset", stalled.resetErrorCode.get(), is(Http2Error.CANCEL.code()));
-            assertThat("the client was sent none of it", stalled.dataBytes.get(), is(0L));
-            // the overflow is an error of the earlier stream, which is reset for it with that error's code
-            assertThat("the overflowing stream ended", overflowing.ended.await(CUT_WITHIN_MILLIS, TimeUnit.MILLISECONDS), is(true));
-            assertThat("the overflowing stream was reset for the overflow", overflowing.resetErrorCode.get(), is(Http2Error.FLOW_CONTROL_ERROR.code()));
-            assertThat("MockServer took the client's rises while the stream was stalled", client.settingsAcks.get(), greaterThan(3));
-            assertThat("the connection, whose socket kept being read, stayed open", client.channel.isActive(), is(true));
+            // RFC 9113 6.9.2: a connection error, so no stream is left behind with a window the rise skipped
+            client.onEventLoop(() -> client.initialWindow(Http2CodecUtil.DEFAULT_WINDOW_SIZE + 1));
+            assertThat("MockServer closed the connection", client.channel.closeFuture().await(CUT_WITHIN_MILLIS, TimeUnit.MILLISECONDS), is(true));
+            assertThat("its GOAWAY named the overflow", client.goAwayErrorCode.get(), is(Http2Error.FLOW_CONTROL_ERROR.code()));
+            assertThat("the client was sent none of the stalled stream", stalled.dataBytes.get(), is(0L));
         }
     }
 
@@ -904,6 +897,7 @@ public class ResponseWriteStallTimeoutIntegrationTest {
         private final ReadGate readGate = new ReadGate();
         private final ConnectionWindowUpdateGate connectionWindowUpdateGate = new ConnectionWindowUpdateGate();
         private final AtomicBoolean goAwayReceived = new AtomicBoolean();
+        private final AtomicReference<Long> goAwayErrorCode = new AtomicReference<>();
         private final AtomicInteger settingsAcks = new AtomicInteger();
         private final List<Future<?>> repeating = new CopyOnWriteArrayList<>();
         private Channel channel;
@@ -1116,6 +1110,7 @@ public class ResponseWriteStallTimeoutIntegrationTest {
             try {
                 if (msg instanceof Http2GoAwayFrame) {
                     goAwayReceived.set(true);
+                    goAwayErrorCode.set(((Http2GoAwayFrame) msg).errorCode());
                 } else if (msg instanceof Http2SettingsAckFrame) {
                     settingsAcks.incrementAndGet();
                 }

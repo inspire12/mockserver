@@ -31,6 +31,7 @@ import io.netty.handler.codec.http2.Http2FrameStream;
 import io.netty.handler.codec.http2.Http2FrameStreamEvent;
 import io.netty.handler.codec.http2.Http2FrameStreamException;
 import io.netty.handler.codec.http2.Http2FrameTypes;
+import io.netty.handler.codec.http2.Http2GoAwayFrame;
 import io.netty.handler.codec.http2.Http2HeadersFrame;
 import io.netty.handler.codec.http2.Http2RemoteFlowController;
 import io.netty.handler.codec.http2.Http2ResetFrame;
@@ -63,6 +64,7 @@ import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.lessThan;
 import static org.hamcrest.Matchers.nullValue;
+import static org.junit.Assert.assertThrows;
 import static org.mockserver.configuration.Configuration.configuration;
 
 /**
@@ -1412,56 +1414,49 @@ public class Http2StreamWriteStallHandlerTest {
     }
 
     @Test
-    public void shouldResetAStalledStreamWhoseClientOverflowsAnEarlierStreamsWindowWithItsInitialWindow() throws Exception {
-        // Netty raises the initial window stream by stream and stops at the one it would overflow, so the streams
-        // opened after that one keep their windows while the initial window has moved; no data leaves for any of them
+    public void shouldCloseTheConnectionWhenItsClientOverflowsAnEarlierStreamsWindowWithItsInitialWindow() throws Exception {
+        // RFC 9113 6.9.2: a connection error, so no stream is left behind with a window the rise skipped
         connect(Http2CodecUtil.DEFAULT_WINDOW_SIZE);
         dropConnectionWindowUpdates = true;
-        ClientStream holder = clientHandler.request(LARGE_RESPONSE_PATH);
+        clientHandler.request(LARGE_RESPONSE_PATH);
         ClientStream overflowing = clientHandler.request(LARGE_RESPONSE_PATH);
         ClientStream stalled = clientHandler.request(LARGE_RESPONSE_PATH);
         exchange();
         assertThat(serverWindow(0), is(0));
         clientHandler.windowUpdate(overflowing, Integer.MAX_VALUE - Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+        exchange();
 
-        int[] initialWindow = new int[]{Http2CodecUtil.DEFAULT_WINDOW_SIZE};
-        runChecks(CHECKS, () -> clientHandler.initialStreamWindow(++initialWindow[0]));
+        clientHandler.initialStreamWindow(Http2CodecUtil.DEFAULT_WINDOW_SIZE + 1);
+        Http2Exception connectionError = assertThrows(Http2Exception.class, this::exchange);
+        exchange();
 
-        assertThat("the server took every rise", serverInitialWindow(), is(initialWindow[0]));
-        assertThat("the rises overflowed the earlier stream's window", responder.streamErrors, is(greaterThan(1)));
-        assertThat("the stalled stream was reset", stalled.resetErrorCode, is(Http2Error.CANCEL.code()));
+        assertThat(connectionError.error(), is(Http2Error.FLOW_CONTROL_ERROR));
+        assertThat("the overflow closed the connection", server.isOpen(), is(false));
+        assertThat(clientHandler.goAwayErrorCode, is(Http2Error.FLOW_CONTROL_ERROR.code()));
         assertThat("its client had taken none of it", stalled.dataBytes, is(0));
-        // the codec leaves the overflowing stream to the pipeline, so here it stays, and is reset as stalled itself
-        assertThat(overflowing.resetErrorCode, is(Http2Error.CANCEL.code()));
-        assertThat(holder.resetErrorCode, is(Http2Error.CANCEL.code()));
-        assertThat(Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP2_STREAM), is(3L));
+        assertThat(Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP2_STREAM), is(0L));
     }
 
     @Test
-    public void shouldResetAStalledStreamInsideATunnelWhoseClientOverflowsEarlierStreamsWindowsWithItsInitialWindow() throws Exception {
+    public void shouldCloseATunnelsConnectionWhenItsClientOverflowsAnEarlierStreamsWindowWithItsInitialWindow() throws Exception {
         connectThroughRelayHandler(Http2CodecUtil.DEFAULT_WINDOW_SIZE);
         dropConnectionWindowUpdates = true;
-        ClientStream holder = clientHandler.request(LARGE_RESPONSE_PATH);
-        // the relay's connection handler resets a stream whose window overflows, so each rise spends another
-        ClientStream[] overflowing = new ClientStream[CHECKS];
-        for (int i = 0; i < overflowing.length; i++) {
-            overflowing[i] = clientHandler.request(LARGE_RESPONSE_PATH);
-        }
+        clientHandler.request(LARGE_RESPONSE_PATH);
+        ClientStream overflowing = clientHandler.request(LARGE_RESPONSE_PATH);
         ClientStream stalled = clientHandler.request(LARGE_RESPONSE_PATH);
         exchange();
         assertThat(serverWindow(0), is(0));
+        clientHandler.windowUpdate(overflowing, Integer.MAX_VALUE - Http2CodecUtil.DEFAULT_WINDOW_SIZE);
+        exchange();
 
-        int[] rises = new int[1];
-        runChecks(CHECKS, () -> {
-            clientHandler.windowUpdate(overflowing[rises[0]], Integer.MAX_VALUE - Http2CodecUtil.DEFAULT_WINDOW_SIZE);
-            clientHandler.initialStreamWindow(Http2CodecUtil.DEFAULT_WINDOW_SIZE + ++rises[0]);
-        });
+        clientHandler.initialStreamWindow(Http2CodecUtil.DEFAULT_WINDOW_SIZE + 1);
+        exchange();
 
-        assertThat("the server took every rise", serverInitialWindow(), is(Http2CodecUtil.DEFAULT_WINDOW_SIZE + CHECKS));
-        assertThat("the first rise overflowed the first earlier stream's window", overflowing[0].resetErrorCode, is(Http2Error.FLOW_CONTROL_ERROR.code()));
-        assertThat("the stalled stream was reset", stalled.resetErrorCode, is(Http2Error.CANCEL.code()));
+        assertThat("the overflow closed the connection", server.isOpen(), is(false));
+        assertThat(clientHandler.goAwayErrorCode, is(Http2Error.FLOW_CONTROL_ERROR.code()));
+        assertThat("the overflowing stream was not reset on its own", overflowing.resetErrorCode, is(nullValue()));
         assertThat("its client had taken none of it", stalled.dataBytes, is(0));
-        assertThat(holder.resetErrorCode, is(Http2Error.CANCEL.code()));
+        assertThat(Metrics.getResponseWriteStallsCount(Metrics.ResponseWriteStall.HTTP2_STREAM), is(0L));
     }
 
     @Test
@@ -2101,7 +2096,6 @@ public class Http2StreamWriteStallHandlerTest {
         private final List<ByteBuf> bodies = new ArrayList<>();
         private final List<ChannelFuture> bodyWrites = new ArrayList<>();
         private Runnable writeRest;
-        private int streamErrors;
         private int streamWritabilityChanges;
 
         @Override
@@ -2112,12 +2106,10 @@ public class Http2StreamWriteStallHandlerTest {
             ctx.fireUserEventTriggered(evt);
         }
 
-        // with no multiplex handler after the codec, a stream error is only counted here and its stream stays open
+        // with no multiplex handler after the codec, a stream error stops here and its stream stays open
         @Override
         public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-            if (cause instanceof Http2FrameStreamException) {
-                streamErrors++;
-            } else {
+            if (!(cause instanceof Http2FrameStreamException)) {
                 ctx.fireExceptionCaught(cause);
             }
         }
@@ -2208,6 +2200,7 @@ public class Http2StreamWriteStallHandlerTest {
         private final Http2FrameCodec codec;
         private final Map<Http2FrameStream, ClientStream> streams = new HashMap<>();
         private ChannelHandlerContext ctx;
+        private Long goAwayErrorCode;
 
         private Client(Http2FrameCodec codec) {
             this.codec = codec;
@@ -2294,6 +2287,9 @@ public class Http2StreamWriteStallHandlerTest {
         @Override
         public void channelRead(ChannelHandlerContext ctx, Object msg) {
             try {
+                if (msg instanceof Http2GoAwayFrame) {
+                    goAwayErrorCode = ((Http2GoAwayFrame) msg).errorCode();
+                }
                 ClientStream stream = msg instanceof Http2StreamFrame ? streams.get(((Http2StreamFrame) msg).stream()) : null;
                 if (stream == null) {
                     return;

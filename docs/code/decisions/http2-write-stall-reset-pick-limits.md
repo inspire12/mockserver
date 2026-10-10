@@ -8,8 +8,9 @@ observe (or, for one, as the documented contract), not as open bugs to fix:
    wrong because no stream-level signal distinguishes a healthy stream from a stalled one.
 2. A client that returns one byte of window per check period keeps every open-windowed
    stream on its connection alive — accepted as the contract; no rate floor.
-3. An HTTP/2 `SETTINGS_INITIAL_WINDOW_SIZE` overflow raises a Netty stream error instead
-   of the RFC 9113 connection error, and the watcher does nothing about it as such.
+3. An HTTP/2 `SETTINGS_INITIAL_WINDOW_SIZE` overflow raised a Netty stream error instead
+   of the RFC 9113 connection error, and the watcher did nothing about it as such.
+   **No longer applies:** since Netty 4.2.19 the overflow is a connection error (see Row 127).
 
 **Status:** Decided 2026-10-05 (owner). Closes performance-programme rows 107, 114 and 127.
 
@@ -166,6 +167,13 @@ slow or constrained link.
 
 ## Row 127 — `SETTINGS_INITIAL_WINDOW_SIZE` overflow is a stream error, not a connection error
 
+**Resolved upstream.** Netty 4.2.19's `DefaultHttp2RemoteFlowController` turns the overflow
+into a connection error (`FLOW_CONTROL_ERROR`), so the connection is closed with a GOAWAY on
+both the frame-codec path and the relay's client leg, and no stream is left with a window the
+rise skipped. `Http2StreamWriteStallHandlerTest.shouldCloseTheConnectionWhenItsClientOverflowsAnEarlierStreamsWindowWithItsInitialWindow`
+and its tunnel twin assert this (both fail on Netty 4.2.18). The text below records the
+4.2.18 behaviour the decision was made on.
+
 RFC 9113 §6.9.2 asks for a connection error (`FLOW_CONTROL_ERROR`) when a
 `SETTINGS_INITIAL_WINDOW_SIZE` change would make a stream's flow-control window exceed
 2³¹−1. Netty 4.2.18's `DefaultHttp2RemoteFlowController` instead raises a stream error at
@@ -197,8 +205,8 @@ already closed — the watcher counts only data written for a stream, see
   scenario sweep this record describes.
 - No rate floor will be added for the one-byte-per-period case (row 114); a genuinely slow
   reader is treated identically to a deliberate trickle, and that is intentional.
-- The `SETTINGS_INITIAL_WINDOW_SIZE` overflow (row 127) stays a Netty-inherited stream
-  error; MockServer does not special-case it.
+- The `SETTINGS_INITIAL_WINDOW_SIZE` overflow (row 127) was left to Netty, not
+  special-cased; Netty 4.2.19 made it the RFC 9113 connection error.
 
 ## What would reopen this
 
@@ -209,9 +217,8 @@ already closed — the watcher counts only data written for a stream, see
 - **Row 114:** evidence that the one-byte-trickle contract is being exploited in practice
   (a DoS report), weighed against how many genuinely slow readers a rate floor would newly
   cut off.
-- **Row 127:** Netty fixing `DefaultHttp2RemoteFlowController` to raise the RFC 9113
-  connection error, or a user report that a client relies on connection-level signalling
-  there.
+- **Row 127:** nothing left to reopen: Netty 4.2.19 raises the RFC 9113 connection error.
+  A Netty release that went back to a stream error would fail the two tests named above.
 
 ## Pointers
 
