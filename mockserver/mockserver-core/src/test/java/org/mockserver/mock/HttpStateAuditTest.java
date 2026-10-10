@@ -160,6 +160,41 @@ public class HttpStateAuditTest {
     }
 
     @Test
+    public void resetRequestClearsEarlierEntriesButKeepsTheRecordOfTheReset() {
+        handle(request("/mockserver/expectation").withMethod("PUT").withRemoteAddress("10.0.0.7:7777")
+            .withBody("[{\"httpRequest\":{\"path\":\"/x\"},\"httpResponse\":{\"statusCode\":200}}]"));
+        handle(request("/mockserver/reset").withMethod("PUT").withRemoteAddress("10.0.0.8:8888"));
+
+        List<AuditEntry> entries = AuditStore.getInstance().getRecent(10);
+        assertThat(entries.size(), is(1));
+        assertThat(entries.get(0).getOperation(), is("reset"));
+        assertThat(entries.get(0).getSourceAddress(), is("10.0.0.8:8888"));
+        assertThat(entries.get(0).getOutcome(), is("AUTHORIZED"));
+    }
+
+    @Test
+    public void resetWithAuditOffDoesNotReAddAnEarlierThreadsResetRecord() {
+        handle(request("/mockserver/reset").withMethod("PUT"));
+        assertThat(AuditStore.getInstance().size(), is(1));
+        rebuild(false, false);
+
+        handle(request("/mockserver/reset").withMethod("PUT"));
+
+        assertThat(AuditStore.getInstance().size(), is(0));
+    }
+
+    @Test
+    public void entriesCarryASummaryOfTheOperation() {
+        handle(request("/mockserver/expectation").withMethod("PUT")
+            .withBody("[{\"httpRequest\":{\"path\":\"/x\"},\"httpResponse\":{\"statusCode\":200}}]"));
+        handle(request("/mockserver/chaosExperiment").withMethod("DELETE"));
+
+        List<AuditEntry> entries = AuditStore.getInstance().getRecent(10);
+        assertThat(entries.get(1).getSummary(), is("Created or updated expectations"));
+        assertThat(entries.get(0).getSummary(), is("Deleted chaosExperiment"));
+    }
+
+    @Test
     public void verifiedOidcResultRecordsVerifiedPrincipalAndSource() {
         // a handler that returns a VERIFIED principal must override the best-effort extraction
         httpState.setControlPlaneAuthenticationHandler(new AuthenticationHandler() {

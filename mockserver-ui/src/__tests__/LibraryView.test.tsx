@@ -580,3 +580,39 @@ describe('LibraryView WASM Modules tab — test a module', () => {
     });
   });
 });
+
+describe('LibraryView WASM Modules tab — WASM turned off on the server', () => {
+  it('explains how to turn WASM on, disables Upload and stops polling until Refresh', async () => {
+    fetchCalls = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        fetchCalls.push({ url, init });
+        const body = 'WASM support is disabled; set wasmEnabled=true to enable';
+        return { ok: false, status: 403, statusText: 'Forbidden', json: async () => body, text: async () => body };
+      }),
+    );
+    const listCalls = () => fetchCalls.filter((c) => c.url.endsWith('/mockserver/wasm/modules')).length;
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      render(<LibraryView connectionParams={connectionParams} />);
+      await user.click(screen.getAllByRole('tab')[3]!); // WASM Modules tab
+
+      expect(await screen.findByText(/WASM rules are turned off on this server/)).toBeInTheDocument();
+      expect(screen.getByText('-Dmockserver.wasmEnabled=true')).toBeInTheDocument();
+      expect(screen.queryByText(/HTTP 403/)).not.toBeInTheDocument();
+      expect(screen.queryByText('No WASM modules loaded.')).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Upload' })).toBeDisabled();
+      expect(listCalls()).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(listCalls()).toBe(1);
+
+      await user.click(screen.getByRole('button', { name: 'Refresh WASM modules' }));
+      await waitFor(() => expect(listCalls()).toBe(2));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

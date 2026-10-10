@@ -291,7 +291,7 @@ curl_close($ch);</code></pre>
 <ul>
     <li><strong>specUrlOrPayload</strong> - mandatory value containing an <a target="_blank" href="https://swagger.io/docs/specification/basic-structure/" rel="noopener noreferrer"><strong>OpenAPI v3</strong></a> specifications in either JSON or YAML format as an:
         <ul>
-            <li><strong><a href="#button_open_api_remote_specification">HTTP/HTTPS URL</a></strong></li>
+            <li><strong><a href="#button_open_api_remote_specification">HTTP/HTTPS URL</a></strong> &mdash; any URL works, including ones without a <span class="inline_code">.json</span> / <span class="inline_code">.yaml</span> suffix such as Spring's <span class="inline_code">/v3/api-docs</span> or a URL with a query string; the URL may also be served by this MockServer itself</li>
             <li><strong><a href="#button_open_api_filepath">File URL</a></strong></li>
             <li><strong><a href="#button_open_api_classpath">classpath location</a></strong> (without the classpath: scheme)</li>
             <li><strong><a href="#button_open_api_inline_json_specification">inline JSON object</a></strong></li>

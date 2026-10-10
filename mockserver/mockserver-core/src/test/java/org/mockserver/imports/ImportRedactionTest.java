@@ -12,6 +12,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.allOf;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.not;
 
 /**
@@ -151,7 +152,7 @@ public class ImportRedactionTest {
     public void harPreservesExpectationIdAfterRedaction() {
         Expectation expectation = harImporter.importExpectations(SENSITIVE_HAR).get(0);
 
-        assertThat(expectation.getId(), is("har-0"));
+        assertThat(expectation.getId(), matchesPattern("har-[0-9a-f]{12}"));
     }
 
     @Test
@@ -230,7 +231,7 @@ public class ImportRedactionTest {
     public void postmanPreservesExpectationIdAfterRedaction() {
         Expectation expectation = postmanImporter.importExpectations(SENSITIVE_POSTMAN).get(0);
 
-        assertThat(expectation.getId(), is("postman-0-login"));
+        assertThat(expectation.getId(), matchesPattern("postman-login-[0-9a-f]{12}"));
     }
 
     @Test

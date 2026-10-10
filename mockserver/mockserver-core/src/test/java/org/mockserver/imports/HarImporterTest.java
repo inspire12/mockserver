@@ -13,6 +13,7 @@ import java.util.List;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.Assert.assertThrows;
 
@@ -85,7 +86,7 @@ public class HarImporterTest {
         List<Expectation> expectations = importer.importExpectations(SIMPLE_HAR);
         Expectation first = expectations.get(0);
 
-        assertThat(first.getId(), is("har-0"));
+        assertThat(first.getId(), matchesPattern("har-[0-9a-f]{12}"));
         HttpRequest request = (HttpRequest) first.getHttpRequest();
         assertThat(request.getMethod().getValue(), is("GET"));
         assertThat(request.getPath().getValue(), is("/users"));
@@ -139,7 +140,7 @@ public class HarImporterTest {
         List<Expectation> expectations = importer.importExpectations(SIMPLE_HAR);
         Expectation second = expectations.get(1);
 
-        assertThat(second.getId(), is("har-1"));
+        assertThat(second.getId(), matchesPattern("har-[0-9a-f]{12}"));
 
         HttpRequest request = (HttpRequest) second.getHttpRequest();
         assertThat(request.getMethod().getValue(), is("POST"));
@@ -254,5 +255,68 @@ public class HarImporterTest {
         String har = "{\"log\":{\"entries\":[]}}";
         List<Expectation> expectations = importer.importExpectations(har);
         assertThat(expectations.size(), is(0));
+    }
+    private static String harWith(String path, String responseText, String mimeType) {
+        return "{\"log\":{\"version\":\"1.2\",\"entries\":[{" +
+            "\"request\":{\"method\":\"GET\",\"url\":\"http://example.com" + path + "\",\"headers\":[]}," +
+            "\"response\":{\"status\":200,\"headers\":[],\"content\":{\"mimeType\":\"" + mimeType + "\",\"text\":" + "\"" + responseText + "\"}}}]}}";
+    }
+
+    private static String id(String har) {
+        return new HarImporter().importExpectations(har).get(0).getId();
+    }
+
+    @Test
+    public void reimportingTheSameFileProducesTheSameIds() {
+        assertThat(importer.importExpectations(SIMPLE_HAR).stream().map(Expectation::getId).collect(java.util.stream.Collectors.toList()),
+            is(new HarImporter().importExpectations(SIMPLE_HAR).stream().map(Expectation::getId).collect(java.util.stream.Collectors.toList())));
+    }
+
+    @Test
+    public void aDifferentFileGetsDifferentIdsSoItDoesNotReplaceTheFirst() {
+        assertThat(id(harWith("/first", "one", "text/plain")).equals(id(harWith("/second", "two", "text/plain"))), is(false));
+    }
+
+    @Test
+    public void aChangedResponseForTheSameRequestKeepsItsIdSoItUpdatesInPlace() {
+        assertThat(id(harWith("/same", "old", "text/plain")), is(id(harWith("/same", "new", "text/plain"))));
+    }
+
+    @Test
+    public void aRequestRepeatedInOneFileIsNumbered() {
+        String twice = "{\"log\":{\"entries\":[" +
+            "{\"request\":{\"method\":\"GET\",\"url\":\"http://example.com/poll\"},\"response\":{\"status\":200}}," +
+            "{\"request\":{\"method\":\"GET\",\"url\":\"http://example.com/poll\"},\"response\":{\"status\":204}}]}}";
+
+        List<Expectation> expectations = importer.importExpectations(twice);
+
+        assertThat(expectations.get(1).getId(), is(expectations.get(0).getId() + "-2"));
+    }
+
+    @Test
+    public void contentMimeTypeBecomesTheContentTypeWhenNoHeaderSetsOne() {
+        HttpResponse response = importer.importExpectations(harWith("/typed", "{}", "application/json")).get(0).getHttpResponse();
+
+        assertThat(response.getFirstHeader("Content-Type"), is("application/json"));
+    }
+
+    @Test
+    public void anExplicitContentTypeHeaderWinsOverTheMimeType() {
+        HttpResponse response = importer.importExpectations(SIMPLE_HAR.replace("\"content\": {\n", "\"content\": {\n            \"mimeType\": \"text/html\",\n")).get(0).getHttpResponse();
+
+        assertThat(response.getHeader("Content-Type"), is(List.of("application/json")));
+    }
+    @Test
+    public void hopByHopAndTransportRequestHeadersAreNotRequiredMatchers() {
+        String har = "{\"log\":{\"entries\":[{\"request\":{\"method\":\"GET\",\"url\":\"http://example.com/proxied\",\"headers\":[" +
+            "{\"name\":\"Proxy-Connection\",\"value\":\"Keep-Alive\"},{\"name\":\"TE\",\"value\":\"trailers\"}," +
+            "{\"name\":\"Trailer\",\"value\":\"Expires\"},{\"name\":\"Proxy-Authenticate\",\"value\":\"Basic\"}," +
+            "{\"name\":\"Host\",\"value\":\"example.com\"},{\"name\":\"X-Tenant\",\"value\":\"acme\"}]}," +
+            "\"response\":{\"status\":200}}]}}";
+
+        HttpRequest request = (HttpRequest) importer.importExpectations(har).get(0).getHttpRequest();
+
+        assertThat(request.getHeaderList().size(), is(1));
+        assertThat(request.getFirstHeader("X-Tenant"), is("acme"));
     }
 }

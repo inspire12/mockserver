@@ -50,6 +50,18 @@ export async function testWasmModule(
   return (await res.json()) as WasmTestResult;
 }
 
+/**
+ * Thrown by {@link listWasmModules} when the server has WASM rules turned off
+ * (`wasmEnabled=false`, the default): it answers 403 with a body naming the property.
+ * A 403 for any other reason (control-plane authorization) is a plain Error.
+ */
+export class WasmDisabledError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WasmDisabledError';
+  }
+}
+
 /** List all loaded WASM module names. */
 export async function listWasmModules(
   params: ConnectionParams,
@@ -57,7 +69,11 @@ export async function listWasmModules(
 ): Promise<string[]> {
   const res = await fetch(endpoint(params), { signal });
   if (!res.ok) {
-    throw new Error(`HTTP ${res.status} ${res.statusText}`);
+    const body = await res.text().catch(() => '');
+    if (res.status === 403 && body.includes('wasmEnabled')) {
+      throw new WasmDisabledError(body);
+    }
+    throw new Error(`MockServer returned ${res.status}: ${body || res.statusText}`);
   }
   const body = await res.json();
   return Array.isArray(body) ? body : [];

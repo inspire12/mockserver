@@ -649,4 +649,20 @@ public class HarConverterTest {
         assertThat(writer.toString(), is(harConverter.serialize(pairs)));
         assertThat(objectMapper.readTree(writer.toString()).get("log").get("entries").size(), is(entries));
     }
+    @Test
+    public void responseMimeTypeIsTheContentTypeAsServed() throws Exception {
+        LogEventRequestAndResponse withHeader = new LogEventRequestAndResponse()
+            .withHttpRequest(request("/header"))
+            .withHttpResponse(response().withHeader("Content-Type", "application/problem+json").withBody("{}"));
+        org.mockserver.mock.Expectation jsonExpectation = new org.mockserver.serialization.ExpectationSerializer(new org.mockserver.logging.MockServerLogger())
+            .deserialize("{\"httpRequest\":{\"path\":\"/json\"},\"httpResponse\":{\"statusCode\":201,\"body\":{\"two\":2}}}");
+        LogEventRequestAndResponse jsonBody = new LogEventRequestAndResponse()
+            .withHttpRequest((HttpRequest) jsonExpectation.getHttpRequest())
+            .withHttpResponse(jsonExpectation.getHttpResponse());
+
+        JsonNode entries = objectMapper.readTree(harConverter.serialize(Arrays.asList(withHeader, jsonBody))).get("log").get("entries");
+
+        assertThat(entries.get(0).at("/response/content/mimeType").asText(), is("application/problem+json"));
+        assertThat(entries.get(1).at("/response/content/mimeType").asText(), startsWith("application/json"));
+    }
 }

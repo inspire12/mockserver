@@ -43,6 +43,7 @@ import {
   uploadWasmModule,
   deleteWasmModule,
   testWasmModule,
+  WasmDisabledError,
   type WasmSampleRequest,
   type WasmTestResult,
 } from '../lib/wasm';
@@ -636,26 +637,36 @@ function WasmModulesTab({ connectionParams }: { connectionParams: ConnectionPara
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [testTarget, setTestTarget] = useState<string | null>(null);
+  const [wasmDisabled, setWasmDisabled] = useState(false);
 
-  // Poll modules list
+  // Poll modules list; a server with WASM turned off is not polled again until Refresh.
   useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
 
     async function poll(): Promise<void> {
+      let keepPolling = true;
       try {
         const result = await listWasmModules(connectionParams, controller.signal);
         if (cancelled) return;
         setModules(result);
+        setWasmDisabled(false);
         setError(null);
         setLoading(false);
       } catch (e) {
         if (cancelled || controller.signal.aborted) return;
-        setError(humanizeError(e));
+        if (e instanceof WasmDisabledError) {
+          keepPolling = false;
+          setWasmDisabled(true);
+          setModules([]);
+          setError(null);
+        } else {
+          setError(humanizeError(e));
+        }
         setLoading(false);
       } finally {
-        if (!cancelled) timer = setTimeout(() => void poll(), WASM_POLL_INTERVAL_MS);
+        if (!cancelled && keepPolling) timer = setTimeout(() => void poll(), WASM_POLL_INTERVAL_MS);
       }
     }
 
@@ -741,7 +752,7 @@ function WasmModulesTab({ connectionParams }: { connectionParams: ConnectionPara
         <Button
           variant="contained"
           size="small"
-          disabled={busy}
+          disabled={busy || wasmDisabled}
           onClick={() => void handleUpload()}
           sx={{ height: 40 }}
         >
@@ -762,8 +773,17 @@ function WasmModulesTab({ connectionParams }: { connectionParams: ConnectionPara
         <HumanErrorAlert error={error} variant="outlined" />
       )}
 
+      {wasmDisabled && (
+        <Alert severity="info">
+          WASM rules are turned off on this server. Turn them on by starting MockServer with{' '}
+          <code>-Dmockserver.wasmEnabled=true</code> (or the <code>MOCKSERVER_WASM_ENABLED=true</code>{' '}
+          environment variable), or at runtime with <code>PUT /mockserver/configuration</code> and the body{' '}
+          <code>{'{"wasmEnabled": true}'}</code>, then press Refresh.
+        </Alert>
+      )}
+
       {/* Modules table */}
-      {loading ? (
+      {wasmDisabled ? null : loading ? (
         <Typography variant="body2" color="text.secondary">Loading…</Typography>
       ) : modules.length === 0 ? (
         <Typography variant="body2" color="text.secondary">No WASM modules loaded.</Typography>

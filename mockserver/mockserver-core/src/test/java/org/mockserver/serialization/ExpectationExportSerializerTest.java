@@ -270,8 +270,35 @@ public class ExpectationExportSerializerTest {
         JsonNode root = parseJson(openApi);
         JsonNode content = root.at("/paths/~1json/get/responses/200/content");
         assertThat(content.has("application/json"), is(true));
-        assertThat(content.path("application/json").path("example").asText(),
-            containsString("hello"));
+        assertThat(content.path("application/json").path("example"), is(objectMapper.readTree("{\"hello\":\"world\"}")));
+    }
+
+    @Test
+    public void jsonExampleIsTheJsonValueNotAJsonEncodedString() throws Exception {
+        Expectation jsonBody = new Expectation(request().withMethod("POST").withPath("/two"))
+            .thenRespond(response().withStatusCode(201).withBody(json("{\"two\":2}")));
+        Expectation stringBodyWithJsonHeader = new Expectation(request().withMethod("GET").withPath("/list"))
+            .thenRespond(response().withHeader("Content-Type", "application/problem+json").withBody("[1, 2]"));
+
+        JsonNode root = parseJson(serializer.serializeAsOpenApi(Arrays.asList(jsonBody, stringBodyWithJsonHeader)));
+
+        JsonNode twoExample = root.at("/paths/~1two/post/responses/201/content").elements().next().path("example");
+        assertThat(twoExample.isObject(), is(true));
+        assertThat(twoExample, is(objectMapper.readTree("{\"two\":2}")));
+        assertThat(root.at("/paths/~1list/get/responses/200/content/application~1problem+json/example"), is(objectMapper.readTree("[1,2]")));
+    }
+
+    @Test
+    public void textThatIsNotJsonStaysAStringExampleEvenUnderAJsonMediaType() throws Exception {
+        Expectation notJson = new Expectation(request().withMethod("GET").withPath("/broken"))
+            .thenRespond(response().withHeader("Content-Type", "application/json").withBody("not { json"));
+        Expectation text = new Expectation(request().withMethod("GET").withPath("/text"))
+            .thenRespond(response().withBody("{\"looks\":\"like json\"}").withHeader("Content-Type", "text/plain"));
+
+        JsonNode root = parseJson(serializer.serializeAsOpenApi(Arrays.asList(notJson, text)));
+
+        assertThat(root.at("/paths/~1broken/get/responses/200/content/application~1json/example").asText(), is("not { json"));
+        assertThat(root.at("/paths/~1text/get/responses/200/content/text~1plain/example").asText(), is("{\"looks\":\"like json\"}"));
     }
 
     @Test
@@ -464,5 +491,22 @@ public class ExpectationExportSerializerTest {
             }
         }
         return entries;
+    }
+    @Test
+    public void postmanExampleCarriesTheContentTypeAndTheStatusReasonPhrase() throws Exception {
+        Expectation created = new Expectation(request().withMethod("POST").withPath("/two"))
+            .thenRespond(response().withStatusCode(201).withBody(json("{\"two\":2}")));
+        Expectation explicit = new Expectation(request().withMethod("GET").withPath("/xml"))
+            .thenRespond(response().withHeader("content-type", "application/xml").withBody("<a/>"));
+
+        JsonNode items = parseJson(serializer.serializeAsPostmanCollection(Arrays.asList(created, explicit))).get("item");
+
+        JsonNode createdExample = items.get(0).get("response").get(0);
+        assertThat(createdExample.get("status").asText(), is("Created"));
+        assertThat(createdExample.get("header").get(0).get("key").asText(), is("Content-Type"));
+        assertThat(createdExample.get("header").get(0).get("value").asText(), containsString("application/json"));
+        JsonNode explicitHeaders = items.get(1).get("response").get(0).get("header");
+        assertThat(explicitHeaders.size(), is(1));
+        assertThat(explicitHeaders.get(0).get("value").asText(), is("application/xml"));
     }
 }

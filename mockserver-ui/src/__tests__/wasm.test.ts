@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { testWasmModule } from '../lib/wasm';
+import { listWasmModules, testWasmModule, WasmDisabledError } from '../lib/wasm';
 
 const params = { host: '127.0.0.1', port: '1080', secure: false };
 
@@ -57,5 +57,26 @@ describe('testWasmModule', () => {
     await expect(testWasmModule(params, 'ghost', { method: 'GET', path: '/' })).rejects.toThrow(
       "MockServer returned 404: {\"error\":\"WASM module 'ghost' not found\"}",
     );
+  });
+});
+
+describe('listWasmModules', () => {
+  it('returns the module names', async () => {
+    stubFetch(200, ['a', 'b']);
+    expect(await listWasmModules(params)).toEqual(['a', 'b']);
+  });
+
+  it('throws WasmDisabledError when the server has WASM rules turned off', async () => {
+    stubFetch(403, 'WASM support is disabled; set wasmEnabled=true to enable');
+    const error = await listWasmModules(params).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(WasmDisabledError);
+    expect((error as Error).message).toContain('wasmEnabled=true');
+  });
+
+  it('keeps any other 403 (control-plane authorization) as a plain error carrying the server body', async () => {
+    stubFetch(403, 'Forbidden for control plane');
+    const error = await listWasmModules(params).catch((e: unknown) => e);
+    expect(error).not.toBeInstanceOf(WasmDisabledError);
+    expect((error as Error).message).toBe('MockServer returned 403: Forbidden for control plane');
   });
 });

@@ -1170,7 +1170,7 @@ public class HttpStateTest {
     }
 
     @Test
-    public void shouldHandleAddOpenAPIJsonRequest() throws JsonProcessingException {
+    public void shouldHandleAddOpenAPIJsonRequest() throws JsonProcessingException, InterruptedException {
         // given
         HttpRequest request = request("/mockserver/openapi").withMethod("PUT").withBody(
             openAPIExpectationSerializer.serialize(openAPIExpectation(
@@ -1181,6 +1181,7 @@ public class HttpStateTest {
 
         // when
         boolean handle = httpState.handle(request, responseWriter, false);
+        responseWriter.awaitResponse();
 
         // then
         assertThat(handle, is(true));
@@ -1190,7 +1191,7 @@ public class HttpStateTest {
     }
 
     @Test
-    public void shouldHandleAddOpenAPIJsonRequestWithSpecificResponses() throws JsonProcessingException {
+    public void shouldHandleAddOpenAPIJsonRequestWithSpecificResponses() throws JsonProcessingException, InterruptedException {
         // given
         HttpRequest request = request("/mockserver/openapi").withMethod("PUT").withBody(
             openAPIExpectationSerializer.serialize(openAPIExpectation(
@@ -1205,6 +1206,7 @@ public class HttpStateTest {
 
         // when
         boolean handle = httpState.handle(request, responseWriter, false);
+        responseWriter.awaitResponse();
 
         // then
         assertThat(handle, is(true));
@@ -1214,7 +1216,7 @@ public class HttpStateTest {
     }
 
     @Test
-    public void shouldHandleInvalidOpenAPIJsonRequest() {
+    public void shouldHandleInvalidOpenAPIJsonRequest() throws InterruptedException {
         // given
         HttpRequest request = request("/mockserver/openapi").withMethod("PUT").withBody(
             openAPIExpectationSerializer.serialize(openAPIExpectation("" +
@@ -1228,6 +1230,7 @@ public class HttpStateTest {
 
         // when
         boolean handle = httpState.handle(request, responseWriter, false);
+        responseWriter.awaitResponse();
 
         // then
         assertThat(handle, is(true));
@@ -1243,7 +1246,7 @@ public class HttpStateTest {
     }
 
     @Test
-    public void shouldHandleAddOpenAPIYamlRequest() {
+    public void shouldHandleAddOpenAPIYamlRequest() throws InterruptedException {
         // given
         HttpRequest request = request("/mockserver/openapi").withMethod("PUT").withBody(
             openAPIExpectationSerializer.serialize(openAPIExpectation(
@@ -1254,6 +1257,7 @@ public class HttpStateTest {
 
         // when
         boolean handle = httpState.handle(request, responseWriter, false);
+        responseWriter.awaitResponse();
 
         // then
         assertThat(handle, is(true));
@@ -1263,7 +1267,7 @@ public class HttpStateTest {
     }
 
     @Test
-    public void shouldHandleAddOpenAPIYamlRequestWithSpecificResponses() {
+    public void shouldHandleAddOpenAPIYamlRequestWithSpecificResponses() throws InterruptedException {
         // given
         HttpRequest request = request("/mockserver/openapi").withMethod("PUT").withBody(
             openAPIExpectationSerializer.serialize(openAPIExpectation(
@@ -1278,6 +1282,7 @@ public class HttpStateTest {
 
         // when
         boolean handle = httpState.handle(request, responseWriter, false);
+        responseWriter.awaitResponse();
 
         // then
         assertThat(handle, is(true));
@@ -1287,7 +1292,7 @@ public class HttpStateTest {
     }
 
     @Test
-    public void shouldHandleInvalidOpenAPIYamlRequest() {
+    public void shouldHandleInvalidOpenAPIYamlRequest() throws InterruptedException {
         // given
         HttpRequest request = request("/mockserver/openapi").withMethod("PUT").withBody(
             openAPIExpectationSerializer.serialize(openAPIExpectation(
@@ -1298,6 +1303,7 @@ public class HttpStateTest {
 
         // when
         boolean handle = httpState.handle(request, responseWriter, false);
+        responseWriter.awaitResponse();
 
         // then
         assertThat(handle, is(true));

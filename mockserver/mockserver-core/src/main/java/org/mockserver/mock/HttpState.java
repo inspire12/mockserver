@@ -2298,36 +2298,14 @@ public class HttpState {
             } else if (request.matches("PUT", PATH_PREFIX + "/openapi", "/openapi")) {
 
                 if (controlPlaneRequestAuthenticated(request, responseWriter)) {
-                    try {
-                        List<Expectation> upsertedExpectations = new ArrayList<>();
-                        String requestBody = request.getBodyAsJsonOrXmlString();
-                        String contentType = request.getFirstHeader(CONTENT_TYPE.toString());
-                        if (contentType != null) {
-                            String baseType = contentType.split(";")[0].trim().toLowerCase();
-                            if ("application/yaml".equals(baseType) || "application/x-yaml".equals(baseType) || "text/yaml".equals(baseType)) {
-                                requestBody = YamlToJsonConverter.convertYamlToJson(requestBody);
-                            }
-                        }
-                        for (OpenAPIExpectation openAPIExpectation : getOpenAPIExpectationSerializer().deserializeArray(requestBody, false)) {
-                            upsertedExpectations.addAll(add(openAPIExpectation));
-                        }
-                        responseWriter.writeResponse(request, response()
-                            .withStatusCode(CREATED.code())
-                            .withBody(getExpectationSerializer().serialize(upsertedExpectations), MediaType.JSON_UTF_8), true);
-                    } catch (IllegalArgumentException iae) {
-                        mockServerLogger.logEvent(
-                            new LogEntry()
-                                .setLogLevel(Level.ERROR)
-                                .setMessageFormat("exception handling request for open api expectation:{}error:{}")
-                                .setArguments(request, iae.getMessage())
-                                .setThrowable(iae)
-                        );
-                        responseWriter.writeResponse(
-                            request,
-                            BAD_REQUEST,
-                            (!iae.getMessage().startsWith(OPEN_API_LOAD_ERROR) ? OPEN_API_LOAD_ERROR + (isNotBlank(iae.getMessage()) ? ", " : "") : "") + iae.getMessage(),
-                            MediaType.create("text", "plain").toString()
-                        );
+                    // A spec URL is fetched with blocking I/O. On an event-loop thread that self-deadlocks when the
+                    // URL is served by this server and the fetch reuses a kept-alive connection pinned to the same
+                    // loop, so the import runs on the scheduler and writes its own response. A servlet container
+                    // has no event loop and needs the response written before handle() returns.
+                    if (warDeployment) {
+                        importOpenAPI(request, responseWriter);
+                    } else {
+                        importOpenAPIOffTheEventLoop(request, responseWriter);
                     }
                 }
                 canHandle.complete(true);
@@ -2775,7 +2753,13 @@ public class HttpState {
             } else if (request.matches("PUT", PATH_PREFIX + "/reset", "/reset")) {
 
                 if (controlPlaneRequestAuthenticated(request, responseWriter)) {
+                    org.mockserver.mock.audit.AuditEntry resetAuditEntry = AUTHORIZED_RESET_AUDIT_ENTRY.get();
+                    AUTHORIZED_RESET_AUDIT_ENTRY.remove();
                     reset();
+                    // reset() empties the audit trail too; the record of who reset it stays, as its first entry
+                    if (resetAuditEntry != null) {
+                        org.mockserver.mock.audit.AuditStore.getInstance().add(resetAuditEntry);
+                    }
                     responseWriter.writeResponse(request, OK);
                 }
                 canHandle.complete(true);
@@ -6539,9 +6523,12 @@ public class HttpState {
                 principalAndSource[0],
                 principalAndSource[1],
                 outcome,
-                null
+                auditSummary(method, operation)
             );
             org.mockserver.mock.audit.AuditStore.getInstance().add(entry);
+            if ("reset".equals(operation) && "AUTHORIZED".equals(outcome)) {
+                AUTHORIZED_RESET_AUDIT_ENTRY.set(entry);
+            }
             // Optional durable NDJSON file sink — observes the same entry the in-memory
             // ring holds, appending one JSON line per record. No-op unless auditLogFile is
             // set; never crashes request handling (it self-disables on IO error).
@@ -6587,6 +6574,39 @@ public class HttpState {
             return path.substring(1);
         }
         return path;
+    }
+
+    // The audit entry recordAudit made for the PUT /reset being handled on this thread, re-added after the reset.
+    private static final ThreadLocal<org.mockserver.mock.audit.AuditEntry> AUTHORIZED_RESET_AUDIT_ENTRY = new ThreadLocal<>();
+
+    private static final java.util.Map<String, String> AUDIT_SUMMARIES = java.util.Map.ofEntries(
+        java.util.Map.entry("expectation", "Created or updated expectations"),
+        java.util.Map.entry("clear", "Cleared expectations or recorded requests"),
+        java.util.Map.entry("reset", "Reset all expectations, recorded requests and state"),
+        java.util.Map.entry("configuration", "Changed the configuration"),
+        java.util.Map.entry("openapi", "Imported expectations from an OpenAPI spec"),
+        java.util.Map.entry("wsdl", "Imported expectations from a WSDL"),
+        java.util.Map.entry("import", "Imported expectations"),
+        java.util.Map.entry("pact/import", "Imported expectations from a Pact contract"),
+        java.util.Map.entry("recordings/promote", "Promoted recorded traffic to expectations"),
+        java.util.Map.entry("retrieve", "Retrieved recorded requests, expectations or logs"),
+        java.util.Map.entry("verify", "Verified received requests"),
+        java.util.Map.entry("verifySequence", "Verified a sequence of received requests"),
+        java.util.Map.entry("mode", "Changed the server mode"),
+        java.util.Map.entry("stop", "Stopped MockServer")
+    );
+
+    /**
+     * A fixed description of the operation, built only from the method and path: never from a header, query value or
+     * body, so the audit trail cannot leak what the request carried.
+     */
+    static String auditSummary(String method, String operation) {
+        String summary = AUDIT_SUMMARIES.get(operation);
+        if (summary != null) {
+            return summary;
+        }
+        String verb = "GET".equalsIgnoreCase(method) ? "Read" : "DELETE".equalsIgnoreCase(method) ? "Deleted" : "Changed";
+        return verb + " " + (operation == null || operation.isEmpty() ? "control plane" : operation);
     }
 
     private static boolean isControlPlaneRead(String method, String operation) {
@@ -7297,6 +7317,59 @@ public class HttpState {
             work.run();
         } else {
             executor.submit(work);
+        }
+    }
+
+    private void importOpenAPIOffTheEventLoop(HttpRequest request, ResponseWriter responseWriter) {
+        try {
+            runOffTheEventLoop(() -> importOpenAPI(request, responseWriter));
+        } catch (Exception submitFailure) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.ERROR)
+                    .setHttpRequest(request)
+                    .setMessageFormat("exception offloading open api expectation request:{}error:{}")
+                    .setArguments(request, submitFailure.getMessage())
+                    .setThrowable(submitFailure)
+            );
+            responseWriter.writeResponse(request, SERVICE_UNAVAILABLE, "unable to schedule open api import", MediaType.create("text", "plain").toString());
+        }
+    }
+
+    private void importOpenAPI(HttpRequest request, ResponseWriter responseWriter) {
+        try {
+            List<Expectation> upsertedExpectations = new ArrayList<>();
+            String requestBody = request.getBodyAsJsonOrXmlString();
+            String contentType = request.getFirstHeader(CONTENT_TYPE.toString());
+            if (contentType != null) {
+                String baseType = contentType.split(";")[0].trim().toLowerCase();
+                if ("application/yaml".equals(baseType) || "application/x-yaml".equals(baseType) || "text/yaml".equals(baseType)) {
+                    requestBody = YamlToJsonConverter.convertYamlToJson(requestBody);
+                }
+            }
+            for (OpenAPIExpectation openAPIExpectation : getOpenAPIExpectationSerializer().deserializeArray(requestBody, false)) {
+                upsertedExpectations.addAll(add(openAPIExpectation));
+            }
+            responseWriter.writeResponse(request, response()
+                .withStatusCode(CREATED.code())
+                .withBody(getExpectationSerializer().serialize(upsertedExpectations), MediaType.JSON_UTF_8), true);
+        } catch (IllegalArgumentException iae) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.ERROR)
+                    .setMessageFormat("exception handling request for open api expectation:{}error:{}")
+                    .setArguments(request, iae.getMessage())
+                    .setThrowable(iae)
+            );
+            String message = iae.getMessage() != null ? iae.getMessage() : "";
+            responseWriter.writeResponse(
+                request,
+                BAD_REQUEST,
+                (!message.startsWith(OPEN_API_LOAD_ERROR) ? OPEN_API_LOAD_ERROR + (isNotBlank(message) ? ", " : "") : "") + message,
+                MediaType.create("text", "plain").toString()
+            );
+        } catch (Throwable throwable) {
+            org.mockserver.responsewriter.ControlPlaneFailureResponse.write(mockServerLogger, responseWriter, request, throwable);
         }
     }
 

@@ -2,6 +2,7 @@ package org.mockserver.imports;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.mockserver.filters.TransportHeaderFilter;
 import org.mockserver.mock.Expectation;
 import org.mockserver.model.Header;
 import org.mockserver.model.Parameter;
@@ -115,18 +116,16 @@ public class HarImporter {
         }
 
         List<Expectation> expectations = new ArrayList<>();
-        int index = 0;
         for (JsonNode entry : entries) {
-            Expectation expectation = buildExpectation(entry, index);
+            Expectation expectation = buildExpectation(entry);
             if (expectation != null) {
                 expectations.add(expectation);
             }
-            index++;
         }
-        return ImportRedaction.redact(expectations, redactionOptions);
+        return ImportIds.fromRequestMatchers(ImportRedaction.redact(expectations, redactionOptions));
     }
 
-    private Expectation buildExpectation(JsonNode entry, int index) {
+    private Expectation buildExpectation(JsonNode entry) {
         JsonNode reqNode = entry.path("request");
         JsonNode resNode = entry.path("response");
         if (reqNode.isMissingNode() || resNode.isMissingNode()) {
@@ -171,6 +170,7 @@ public class HarImporter {
 
         // Request headers (only non-volatile, meaningful ones)
         List<Header> requestHeaders = filterHeaders(reqNode.path("headers"), VOLATILE_REQUEST_HEADERS);
+        requestHeaders.removeIf(header -> TransportHeaderFilter.isTransportHeader(header.getName().getValue()));
         if (!requestHeaders.isEmpty()) {
             httpRequest.withHeaders(requestHeaders);
         }
@@ -192,12 +192,17 @@ public class HarImporter {
 
         // Response headers (filter volatile)
         List<Header> responseHeaders = filterHeaders(resNode.path("headers"), VOLATILE_RESPONSE_HEADERS);
+        JsonNode content = resNode.path("content");
+        String mimeType = textOrNull(content, "mimeType");
+        boolean hasContentTypeHeader = responseHeaders.stream().anyMatch(header -> header.getName().getValue().equalsIgnoreCase("content-type"));
+        if (!hasContentTypeHeader && mimeType != null && !mimeType.isBlank()) {
+            responseHeaders.add(Header.header("Content-Type", mimeType));
+        }
         if (!responseHeaders.isEmpty()) {
             httpResponse.withHeaders(responseHeaders);
         }
 
         // Response body
-        JsonNode content = resNode.path("content");
         if (!content.isMissingNode()) {
             String bodyText = textOrNull(content, "text");
             if (bodyText != null && !bodyText.isEmpty()) {
@@ -214,7 +219,7 @@ public class HarImporter {
         }
 
         return new Expectation(httpRequest)
-            .withId("har-" + index)
+            .withId("har")
             .thenRespond(httpResponse);
     }
 

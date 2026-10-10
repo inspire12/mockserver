@@ -22,6 +22,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import static io.swagger.v3.parser.OpenAPIV3Parser.getExtensions;
@@ -34,6 +35,9 @@ public class OpenAPIParser {
     private final static LRUCache<CacheKey, OpenAPI> openAPILRUCache = new LRUCache<>(new MockServerLogger(), 250, MINUTES.toMillis(30));
 
     public static final String OPEN_API_LOAD_ERROR = "Unable to load API spec";
+
+    // An inline spec always holds whitespace or starts with '{' or a YAML key, so it never matches.
+    private static final Pattern ABSOLUTE_URL = Pattern.compile("(?i)(https?|file):\\S+");
 
     /**
      * A parse made with forwardProxyBlockPrivateNetworks off fetched without the check, so it must never answer a
@@ -50,11 +54,13 @@ public class OpenAPIParser {
     /**
      * Helper function that checks if the provided string is a reference to an API specification file
      * @param specUrlOrPayload - string that might contain an API specification file reference
-     * @return <b>true</b> if the provided string ends with special file suffix
+     * @return <b>true</b> if the provided string ends with special file suffix, or is a single absolute http(s) or
+     * file URL (such as Spring's {@code /v3/api-docs}, or a URL with a query string), whatever its suffix
      */
     public static boolean isSpecUrl(String specUrlOrPayload) {
         return specUrlOrPayload != null && (
             specUrlOrPayload.endsWith(".json") || specUrlOrPayload.endsWith(".yaml") || specUrlOrPayload.endsWith(".yml")
+                || ABSOLUTE_URL.matcher(specUrlOrPayload).matches()
         );
     }
 

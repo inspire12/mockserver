@@ -2,9 +2,11 @@ package org.mockserver.serialization;
 
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.netty.handler.codec.http.HttpResponseStatus;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.mock.Expectation;
 import org.mockserver.model.Body;
@@ -12,6 +14,7 @@ import org.mockserver.model.Header;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.model.LogEventRequestAndResponse;
+import org.mockserver.model.MediaType;
 import org.mockserver.model.NottableSchemaString;
 import org.mockserver.model.NottableString;
 import org.mockserver.model.Parameter;
@@ -265,9 +268,8 @@ public class ExpectationExportSerializer {
                 return;
             }
             // No structured body but a string is available (e.g. captured pairs).
-            ObjectNode content = respNode.putObject("content");
             String mediaType = isNotBlank(contentTypeHeader) ? contentTypeHeader : detectContentType(bodyString);
-            content.putObject(mediaType).put("example", bodyString);
+            emitExample(respNode, mediaType, bodyString);
             return;
         }
 
@@ -327,7 +329,24 @@ public class ExpectationExportSerializer {
 
     private void emitExample(ObjectNode respNode, String mediaType, String bodyString) {
         ObjectNode mediaTypeNode = respNode.putObject("content").putObject(mediaType);
-        mediaTypeNode.put("example", bodyString != null ? bodyString : "");
+        // A JSON example must be the JSON value itself: written as a string, an importer serves the string literal.
+        JsonNode jsonExample = MediaType.parse(mediaType).isJson() ? parseJsonOrNull(bodyString) : null;
+        if (jsonExample != null) {
+            mediaTypeNode.set("example", jsonExample);
+        } else {
+            mediaTypeNode.put("example", bodyString != null ? bodyString : "");
+        }
+    }
+
+    private JsonNode parseJsonOrNull(String bodyString) {
+        if (bodyString == null || bodyString.isBlank()) {
+            return null;
+        }
+        try {
+            return objectMapper.readTree(bodyString);
+        } catch (JsonProcessingException notJson) {
+            return null;
+        }
     }
 
     /**
@@ -548,9 +567,10 @@ public class ExpectationExportSerializer {
         ArrayNode responseArr = item.putArray("response");
         if (response != null) {
             ObjectNode resp = responseArr.addObject();
+            int code = response.getStatusCode() != null ? response.getStatusCode() : 200;
             resp.put("name", "Example response");
-            resp.put("status", response.getReasonPhrase() != null ? response.getReasonPhrase() : "OK");
-            resp.put("code", response.getStatusCode() != null ? response.getStatusCode() : 200);
+            resp.put("status", response.getReasonPhrase() != null ? response.getReasonPhrase() : HttpResponseStatus.valueOf(code).reasonPhrase());
+            resp.put("code", code);
             String bodyString = response.getBodyAsText();
             if (bodyString != null) {
                 resp.put("body", bodyString);
@@ -563,6 +583,12 @@ public class ExpectationExportSerializer {
                     hn.put("value", h.getValues() != null && !h.getValues().isEmpty()
                         ? h.getValues().get(0).getValue() : "");
                 }
+            }
+            // The body's content type is served as Content-Type when no header sets one, so the example carries it.
+            if (!response.containsHeader("Content-Type") && response.getBody() != null && isNotBlank(response.getBody().getContentType())) {
+                ObjectNode hn = respHeaders.addObject();
+                hn.put("key", "Content-Type");
+                hn.put("value", response.getBody().getContentType());
             }
         }
     }

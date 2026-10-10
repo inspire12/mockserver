@@ -377,7 +377,9 @@ public class HarConverter {
             return content;
         }
 
-        String contentType = body.getContentType();
+        // As served: an explicit Content-Type header wins over the body's own content type.
+        String contentTypeHeader = httpResponse.getFirstHeader("Content-Type");
+        String contentType = isNotBlank(contentTypeHeader) ? contentTypeHeader : body.getContentType();
         content.withMimeType(contentType != null ? contentType : "");
 
         byte[] rawBytes = body.getRawBytes();

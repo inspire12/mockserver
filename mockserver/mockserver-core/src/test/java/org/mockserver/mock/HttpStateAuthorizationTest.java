@@ -114,6 +114,21 @@ public class HttpStateAuthorizationTest {
     }
 
     @Test
+    public void aForbiddenResetIsNeverReAddedByALaterReset() {
+        authenticateWithScopes("viewer", Set.of("viewers"));
+        assertThat(handle(request("/mockserver/reset").withMethod("PUT")).getStatusCode(), is(403));
+        assertThat(AuditStore.getInstance().getRecent(1).get(0).getOutcome(), is("FORBIDDEN"));
+        AuditStore.getInstance().clear();
+        Configuration auditOff = configuration().controlPlaneAuditEnabled(false);
+        httpState.stop();
+        httpState = new HttpState(auditOff, new MockServerLogger(auditOff, HttpStateAuthorizationTest.class), new Scheduler(auditOff, new MockServerLogger(auditOff, HttpStateAuthorizationTest.class), true));
+
+        assertThat(handle(request("/mockserver/reset").withMethod("PUT")).getStatusCode(), is(200));
+
+        assertThat(AuditStore.getInstance().size(), is(0));
+    }
+
+    @Test
     public void mutateRolePrincipalCanMutate() {
         authenticateWithScopes("qa", Set.of("qa-team"));
         HttpResponse response = handle(putExpectation());

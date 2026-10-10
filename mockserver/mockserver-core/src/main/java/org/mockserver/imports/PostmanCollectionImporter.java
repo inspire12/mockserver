@@ -82,25 +82,23 @@ public class PostmanCollectionImporter {
         }
 
         List<Expectation> expectations = new ArrayList<>();
-        AtomicInteger index = new AtomicInteger(0);
         AtomicInteger skippedCount = new AtomicInteger(0);
 
-        walkItems(items, expectations, index, skippedCount);
+        walkItems(items, expectations, skippedCount);
 
         if (skippedCount.get() > 0) {
             LOG.info("skipped {} Postman request(s) without saved example responses", skippedCount.get());
         }
 
-        return ImportRedaction.redact(expectations, redactionOptions);
+        return ImportIds.fromRequestMatchers(ImportRedaction.redact(expectations, redactionOptions));
     }
 
-    private void walkItems(JsonNode items, List<Expectation> expectations,
-                           AtomicInteger index, AtomicInteger skippedCount) {
+    private void walkItems(JsonNode items, List<Expectation> expectations, AtomicInteger skippedCount) {
         for (JsonNode item : items) {
             // Folder: has nested item[] without a request
             JsonNode nestedItems = item.path("item");
             if (nestedItems.isArray() && !nestedItems.isEmpty()) {
-                walkItems(nestedItems, expectations, index, skippedCount);
+                walkItems(nestedItems, expectations, skippedCount);
                 continue;
             }
 
@@ -119,7 +117,7 @@ public class PostmanCollectionImporter {
             String itemName = textOrNull(item, "name");
 
             for (JsonNode exampleResponse : responses) {
-                Expectation expectation = buildExpectation(requestNode, exampleResponse, itemName, index.getAndIncrement());
+                Expectation expectation = buildExpectation(requestNode, exampleResponse, itemName);
                 if (expectation != null) {
                     expectations.add(expectation);
                 }
@@ -128,7 +126,7 @@ public class PostmanCollectionImporter {
     }
 
     private Expectation buildExpectation(JsonNode requestNode, JsonNode exampleResponse,
-                                         String itemName, int index) {
+                                         String itemName) {
         // --- Parse request ---
         String method = resolveMethod(requestNode);
         UrlComponents urlComponents = resolveUrl(requestNode);
@@ -177,13 +175,11 @@ public class PostmanCollectionImporter {
             httpResponse.withBody(responseBody);
         }
 
-        // Build ID. The per-example index is ALWAYS included to guarantee uniqueness:
-        // a single request item can have multiple saved example responses, and without
-        // the index they would collide and silently overwrite each other on upsert.
+        // The readable part of the id; ImportIds completes it once the expectations are redacted.
         String suffix = (itemName != null && !itemName.isEmpty())
             ? sanitizeForId(itemName)
             : "item";
-        String id = "postman-" + index + "-" + suffix;
+        String id = "postman-" + suffix;
 
         return new Expectation(httpRequest)
             .withId(id)

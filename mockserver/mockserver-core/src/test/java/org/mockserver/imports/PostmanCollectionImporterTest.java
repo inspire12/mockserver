@@ -10,6 +10,7 @@ import java.util.List;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.matchesPattern;
 import static org.junit.Assert.assertThrows;
 
 public class PostmanCollectionImporterTest {
@@ -119,7 +120,7 @@ public class PostmanCollectionImporterTest {
         List<Expectation> expectations = importer.importExpectations(POSTMAN_COLLECTION);
         Expectation first = expectations.get(0);
 
-        assertThat(first.getId(), is("postman-0-get-user"));
+        assertThat(first.getId(), matchesPattern("postman-get-user-[0-9a-f]{12}"));
 
         HttpRequest request = (HttpRequest) first.getHttpRequest();
         assertThat(request.getMethod().getValue(), is("GET"));
@@ -157,7 +158,7 @@ public class PostmanCollectionImporterTest {
         List<Expectation> expectations = importer.importExpectations(POSTMAN_COLLECTION);
         Expectation healthCheck = expectations.get(2);
 
-        assertThat(healthCheck.getId(), is("postman-2-health-check"));
+        assertThat(healthCheck.getId(), matchesPattern("postman-health-check-[0-9a-f]{12}"));
 
         HttpRequest request = (HttpRequest) healthCheck.getHttpRequest();
         assertThat(request.getMethod().getValue(), is("GET"));
@@ -264,5 +265,29 @@ public class PostmanCollectionImporterTest {
 
         List<Expectation> expectations = importer.importExpectations(collection);
         assertThat(expectations.size(), is(0));
+    }
+    private static String collectionWith(String name, String path, String body) {
+        return "{\"info\":{\"name\":\"" + name + "\"},\"item\":[{\"name\":\"get it\",\"request\":{\"method\":\"GET\",\"url\":\"http://example.com" + path + "\"}," +
+            "\"response\":[{\"code\":200,\"body\":\"" + body + "\"}]}]}";
+    }
+
+    @Test
+    public void reimportingTheSameCollectionProducesTheSameIds() {
+        assertThat(importer.importExpectations(POSTMAN_COLLECTION).stream().map(Expectation::getId).collect(java.util.stream.Collectors.toList()),
+            is(new PostmanCollectionImporter().importExpectations(POSTMAN_COLLECTION).stream().map(Expectation::getId).collect(java.util.stream.Collectors.toList())));
+    }
+
+    @Test
+    public void aDifferentCollectionWithTheSameItemNameDoesNotReplaceTheFirst() {
+        String first = importer.importExpectations(collectionWith("A", "/a", "one")).get(0).getId();
+        String second = importer.importExpectations(collectionWith("B", "/b", "two")).get(0).getId();
+
+        assertThat(first.equals(second), is(false));
+    }
+
+    @Test
+    public void aChangedExampleForTheSameRequestKeepsItsId() {
+        assertThat(importer.importExpectations(collectionWith("A", "/a", "old")).get(0).getId(),
+            is(importer.importExpectations(collectionWith("A", "/a", "new")).get(0).getId()));
     }
 }
