@@ -37,6 +37,10 @@ module "buildkite_stack" {
   source  = "buildkite/elastic-ci-stack-for-aws/buildkite"
   version = "~> 1.0.0"
 
+  # Agent v4 (module 1.0) cut the cancel grace to 10s; keep v3's so trap cleanups finish.
+  buildkite_agent_cancel_signal_timeout  = "59s"
+  buildkite_agent_cancel_cleanup_timeout = "1s"
+
   stack_name            = "buildkite-mockserver"
   buildkite_agent_token = var.buildkite_agent_token
   buildkite_queue       = "default"
@@ -68,6 +72,10 @@ module "buildkite_stack" {
 module "buildkite_trigger_stack" {
   source  = "buildkite/elastic-ci-stack-for-aws/buildkite"
   version = "~> 1.0.0"
+
+  # Agent v4 (module 1.0) cut the cancel grace to 10s; keep v3's so trap cleanups finish.
+  buildkite_agent_cancel_signal_timeout  = "59s"
+  buildkite_agent_cancel_cleanup_timeout = "1s"
 
   stack_name            = "buildkite-mockserver-trigger"
   buildkite_agent_token = var.buildkite_agent_token
@@ -101,6 +109,10 @@ module "buildkite_perf_stack" {
   source  = "buildkite/elastic-ci-stack-for-aws/buildkite"
   version = "~> 1.0.0"
 
+  # Agent v4 (module 1.0) cut the cancel grace to 10s; keep v3's so trap cleanups finish.
+  buildkite_agent_cancel_signal_timeout  = "59s"
+  buildkite_agent_cancel_cleanup_timeout = "1s"
+
   stack_name            = "buildkite-mockserver-perf"
   buildkite_agent_token = var.buildkite_agent_token
   buildkite_queue       = "perf"
@@ -131,6 +143,10 @@ module "buildkite_perf_xl_stack" {
   source  = "buildkite/elastic-ci-stack-for-aws/buildkite"
   version = "~> 1.0.0"
 
+  # Agent v4 (module 1.0) cut the cancel grace to 10s; keep v3's so trap cleanups finish.
+  buildkite_agent_cancel_signal_timeout  = "59s"
+  buildkite_agent_cancel_cleanup_timeout = "1s"
+
   stack_name            = "buildkite-mockserver-perf-xl"
   buildkite_agent_token = var.buildkite_agent_token
   buildkite_queue       = "perf-xl"
@@ -155,6 +171,10 @@ module "buildkite_perf_xl_stack" {
 module "buildkite_release_stack" {
   source  = "buildkite/elastic-ci-stack-for-aws/buildkite"
   version = "~> 1.0.0"
+
+  # Agent v4 (module 1.0) cut the cancel grace to 10s; keep v3's so trap cleanups finish.
+  buildkite_agent_cancel_signal_timeout  = "59s"
+  buildkite_agent_cancel_cleanup_timeout = "1s"
 
   stack_name            = "buildkite-mockserver-release"
   buildkite_agent_token = var.buildkite_agent_token
