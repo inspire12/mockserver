@@ -241,7 +241,9 @@ public class McpToolTargetPrivateNetworkIntegrationTest {
         when(server.getScheduler()).thenReturn(mock(Scheduler.class));
         when(server.getLocalPorts()).thenReturn(Collections.singletonList(1080));
         when(server.isRunning()).thenReturn(true);
-        HttpState httpState = new HttpState(configuration, new RecordingLogger(warnings), mock(Scheduler.class));
+        // warnings are logged only at WARN or finer, so the level is the instance's, not the build's default
+        configuration.logLevel(Level.WARN);
+        HttpState httpState = new HttpState(configuration, new RecordingLogger(configuration, warnings), mock(Scheduler.class));
         httpStates.add(httpState);
         return new McpToolRegistry(httpState, server);
     }
@@ -250,7 +252,8 @@ public class McpToolTargetPrivateNetworkIntegrationTest {
     private static class RecordingLogger extends MockServerLogger {
         private final List<LogEntry> warnings;
 
-        RecordingLogger(List<LogEntry> warnings) {
+        RecordingLogger(Configuration configuration, List<LogEntry> warnings) {
+            super(configuration, McpToolTargetPrivateNetworkIntegrationTest.class);
             this.warnings = warnings;
         }
 
