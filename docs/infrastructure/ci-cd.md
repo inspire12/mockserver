@@ -166,7 +166,7 @@ It also runs the **perf baseline-freshness assertion** (`perf-baseline-freshness
 it lives here, in a *different* pipeline from the perf producer, so it survives that
 producer dying. It keys off **producer liveness via the Buildkite API** — that the
 daily `mockserver-performance-test` schedule is still firing and its most recent
-*scheduled* build passed — rather than the raw age of the S3 baseline object, because
+completed run passed — rather than the raw age of the S3 baseline object, because
 the producer is commit-gated not to write on a quiet day, so object age cannot tell a
 dead producer apart from a legitimately quiet master. It queries by **time, not by
 count**: it pages (100 per page, following the `Link` header) through builds created in
@@ -183,6 +183,25 @@ classes against a fake API. So that it has a guaranteed cadence rather than depe
 on an infra-path commit, it runs on its **own daily Buildkite schedule**
 (`infra_baseline_freshness_daily` at 16:00 UTC, offset from
 the producer's 04:00 run) as well as on every infra-path build.
+
+**A measured manual run also counts for the pass/fail verdict.** The verdict comes from the
+newest finished run in the lookback window: the last finished daily scheduled build, or a
+newer non-scheduled build that measured the same thing. So after a failed daily run,
+`bk build create -p mockserver-performance-test -b master -m "[perf-run] ..."` clears the
+check once it passes, without waiting for the next 04:00 run. The check counts a
+non-scheduled build only if all of these hold:
+
+| Condition | Why |
+|---|---|
+| The message contains `[perf-run]`, or the build was started from the UI | Without either, the commit guard dispatches nothing |
+| No build env overrides (`env` is empty) | Overrides mark an A/B experiment, not the default configuration the daily run measures |
+| Its `perf-run`, `perf-microbench` and `perf-compare` steps all executed (`passed` or `failed`) | A build that skipped measurement shows them `broken` or not at all, and measured nothing |
+| It has finished | An in-flight build has no verdict yet |
+| No `[perf-soak]` in the message | The soak is not the baseline producer |
+
+A counted manual build that failed fails the check (`NOT_PASSED`), the same as a failed
+scheduled one. Only scheduled builds prove the cron is firing, so a manual run never clears
+`STALLED` or `NO_SCHEDULE`.
 
 ### Buildkite Pipelines
 

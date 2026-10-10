@@ -61,6 +61,15 @@ flowchart TD
 `perf-test-guard.sh` skips the entire chain when `master` has not moved since the last run, so
 the daily job is a no-op on unchanged code.
 
+`mockserver-infra`'s "assert perf baseline is fresh" step (`perf-baseline-freshness.sh`) reads
+this pipeline's builds. It fails when the daily schedule stops firing, or when the newest finished
+run did not pass. That run is either the last daily scheduled build or a newer manual
+`[perf-run]` build that ran the run, micro-benchmark and compare steps with no build env
+overrides. So a passing manual run clears a failed daily run without waiting for 04:00, but never
+stands in for a schedule that has stopped. A manual build that skipped measurement, or an A/B
+build with env overrides, is ignored. The full rules are in
+[ci-cd.md](../infrastructure/ci-cd.md).
+
 The `perf` queue runs up to three agents, one per machine, so the four measurement steps run in
 parallel, each on its own c5.12xlarge, and pass results to `perf-test-compare.sh` only as
 Buildkite artifacts. Different steps, and builds that run at the same time, therefore measure on
@@ -1465,6 +1474,57 @@ fork underestimates real run-to-run dispersion and makes any derived budget too 
 `alloc_bytes_per_op` is noise-free and is the stronger of the two signals. `time_per_op` is
 wall-clock; the gate is self-calibrating (rolling `median + 3 × 1.4826 × MAD` with a 5% floor)
 rather than a fixed number.
+
+#### How `time_per_op` is scored: a trimmed mean, not JMH's mean
+
+**`time_per_op` is the mean of the measured iterations of both forks after dropping the single
+highest and the single lowest one** (with `-f 2 -i 3`, the middle four of six). JMH's own mean is
+kept beside it as `time_per_op_jmh_mean`, recorded but not compared. The scoring lives in
+`.buildkite/scripts/steps/lib/perf-microbench-reshape.jq` and is tested by
+`.buildkite/scripts/test/perf-microbench-score-test.sh`, which runs in the lint step on the
+iterations that scheduled builds 620 to 653 recorded. The threshold is unchanged at +5%.
+
+```mermaid
+flowchart LR
+  raw["JMH rawData\n2 forks x 3 measured iterations"]
+  trim["sort, drop highest and lowest\nmean of the other 4"]
+  gate["perf-test-compare.sh\nvs rolling baseline, +5% floor"]
+  raw --> trim --> gate
+```
+
+Why: in scheduled build 653 one fork's first measured iteration ran at 1629 µs/op while the other
+five ran at 1258 to 1294. That single iteration lifted JMH's mean of six to 1329.1, over the
+1322.9 threshold, and failed the build with no code change behind it. The trimmed mean of the same
+run is 1271.8. A real slowdown moves every iteration, so it moves the trimmed mean as much as the
+mean.
+
+The options were compared by replaying the gate (`median + 3σ` or +5% over the previous 10 runs)
+over the per-iteration data in the micro-benchmark job logs of 64 builds (550 to 653, all
+`-f 2 -wi 2 -i 3`), for all three arms, with every run's iterations also shifted +5%, +6% and +7%:
+
+| Option | Removes the 653 false positive | Trips on a +6% shift (EXACT / REGEX / JSON_BODY, of 59) | Other cost |
+|---|---|---|---|
+| JMH mean (before) | No | 38 / 42 / 43 | none |
+| **Trimmed mean (chosen)** | **Yes** | **39 / 45 / 44** | none |
+| Median of the six | Yes | 36 / 40 / 43 | REGEX run-to-run spread (1.4826 × MAD) is 1.73% against 0.97% for the mean, which puts its `3σ` term at 5.2%, above the 5% floor, and so loosens its threshold |
+| A third warmup iteration (`-wi 3`) | Only when the slow spell lasts exactly one extra iteration | 38 / 40 / 40 (estimated by dropping each fork's first measured iteration) | Changes the `config.jmh` fingerprint, so `microbench.*` time **and allocation** gating stop for 5 runs; about 12 s more per run |
+| Breach must hold in both forks | Yes | 23 / 31 / 26 | Loses about a third of the detections, because each fork's mean of three is noisier than the run's |
+
+On build 653's own baseline (1259.941, threshold 1322.938), the trimmed mean and JMH's mean give
+the same verdict for every recorded scheduled run (620, 636, 644 and 649 to 653), as recorded and
+shifted +5% and +6%, except 653 as recorded. All eight trip at +6%. At exactly +5% about half do, under either
+score: a run whose own value sits below the baseline median needs slightly more than 5% to cross
+it. That is a property of the +5% threshold, not of the scoring.
+
+What the trimmed mean does not absorb: a slow spell covering two or more measured iterations, or a
+whole fork landing in a slower JIT mode (builds 565 and 577, both experimental manual builds, had a
+fork 19 to 35% slower than the other). Neither has appeared in a scheduled build in this history.
+
+The change keeps the `config.jmh` fingerprint as it was, so the baseline is not reset. Across those
+64 runs the trimmed mean is within -0.43% to +0.14% of JMH's mean for 80% of runs (10th to 90th
+percentile) and centred on zero, so the baseline window, which still holds JMH means, turns over
+within 10 runs without shifting the threshold. Missing `rawData` or fewer than three measured
+iterations fails the step rather than falling back to JMH's mean.
 
 It runs the **shipped default**, `detailedMatchFailures=true`, so the gate tracks what users run.
 Rows are keyed `<matcherType>_<expectationCount>_detailed` (for example `EXACT_100_detailed`); a

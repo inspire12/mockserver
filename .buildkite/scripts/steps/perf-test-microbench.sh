@@ -205,8 +205,10 @@ if [ ! -f "$REPO_ROOT/$RESULT_RAW" ]; then
   exit 1
 fi
 
-# Reshape JMH's array into {microbench: {<matcherType>_<count>[_detailed]: {time_per_op, time_unit, alloc_bytes_per_op}}}.
-# The `_detailed` suffix marks a detailedMatchFailures=true row (see the pin note on JMH_ARGS).
+# Reshape JMH's array into {microbench: {<matcherType>_<count>[_detailed]: {time_per_op, ...}}}
+# with lib/perf-microbench-reshape.jq, which scores the gating time_per_op as a trimmed mean of the
+# measured iterations rather than JMH's mean (see that file). The `_detailed` suffix marks a
+# detailedMatchFailures=true row (see the pin note on JMH_ARGS).
 #
 # Also record the JMH METHODOLOGY under .config.jmh (item 15c baseline-discontinuity
 # guard). The .microbench.*.time_per_op metric GATES, and its S3 rolling baseline was
@@ -230,16 +232,7 @@ fi
 # window for zero benefit. Keep it out; the proxy metrics are notify-only, so at worst
 # a future proxy-arg change causes a harmless notify-only annotation on those rows.
 jq --arg args "$JMH_ARGS" --arg argsExtra "$JMH_ARGS_EXTRA" --arg argsScaling "$JMH_ARGS_SCALING" \
-   '[.[] | {
-      key: (.params.matcherType + "_" + .params.expectationCount
-            + (if .params.detailedMatchFailures == "true" then "_detailed" else "" end)),
-      value: {
-        time_per_op: .primaryMetric.score,
-        time_unit: .primaryMetric.scoreUnit,
-        alloc_bytes_per_op: (.secondaryMetrics["gc.alloc.rate.norm"].score // null)
-      }
-    }] | from_entries
-    | { microbench: ., config: { jmh: { args: $args, args_extra: $argsExtra, args_scaling: $argsScaling } } }' \
+   -f "$SCRIPT_DIR/lib/perf-microbench-reshape.jq" \
   "$REPO_ROOT/$RESULT_RAW" > "$OUT_JSON"
 
 echo "--- perf-microbench.json"

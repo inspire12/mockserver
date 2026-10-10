@@ -547,9 +547,11 @@ The pipeline compare step (`perf-test-compare.sh`) merges two artifacts and pers
 ```json
 {
   "microbench": {
-    "<matcherType>_<count>_detailed": { "time_per_op": 0, "time_unit": "ns/op", "alloc_bytes_per_op": 0 }
+    "<matcherType>_<count>_detailed": { "time_per_op": 0, "time_per_op_jmh_mean": 0, "time_unit": "us/op", "alloc_bytes_per_op": 0 }
   }
 }
 ```
+
+`time_per_op` is the trimmed mean of the measured iterations (the gated score); `time_per_op_jmh_mean` is JMH's own mean, recorded only. See [performance-measurement.md](../code/performance-measurement.md#how-time_per_op-is-scored-a-trimmed-mean-not-jmhs-mean).
 
 `<op>_<proto>` keys are `match_http`, `forward_http`, `template_http`, `large_http`, and their `_https_h2` counterparts. The merged run is stored at `s3://mockserver-ci-perf-results/runs/<branch>/<iso>__<sha>.json`.

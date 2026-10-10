@@ -89,9 +89,10 @@ steps:
   # in mockserver-infra, ON PURPOSE: a check that lives inside the system it monitors
   # (the perf pipeline) dies with it, so it sits in a DIFFERENT pipeline. It keys off
   # PRODUCER LIVENESS via the Buildkite API — that the daily mockserver-performance-test
-  # schedule is still firing and its last completed scheduled build passed — NOT raw S3
-  # object age (which cannot tell a dead producer apart from a legitimately quiet master,
-  # because the producer is commit-gated not to write on a quiet day). See the script
+  # schedule is still firing and its last completed run (scheduled, or a newer measured
+  # manual [perf-run] build) passed — NOT raw S3 object age (which cannot tell a dead
+  # producer apart from a legitimately quiet master, because the producer is
+  # commit-gated not to write on a quiet day). See the script
   # header for the full rationale. Cheap `trigger` queue: one Secrets Manager read + a
   # few time-bounded, paged Buildkite API calls + jq, no build, and the trigger queue
   # already holds the API token. Both steps run on infra-path builds AND on the daily

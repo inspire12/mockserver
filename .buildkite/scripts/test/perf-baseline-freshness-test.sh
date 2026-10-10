@@ -192,6 +192,42 @@ for bad_age in abc 1.5; do
 done
 b 541 schedule passed 2 | run "malformed lookback" 1 "CONFIG (LOOKBACK_HOURS is not a positive integer)" PERF_FRESHNESS_LOOKBACK_HOURS=2d
 
+echo "--- 6. a measured manual [perf-run] build: the newest finished run gives the verdict"
+# mb(number, state, hours_ago, step_state[, source[, message[, env_json]]]) -> a manual build
+# whose perf-run, perf-microbench and perf-compare jobs are in step_state (as the API lists them)
+mb() {
+  local env='{}'
+  [ $# -ge 7 ] && env="$7"
+  b "$1" "${5:-api}" "$2" "$3" "${6:-[perf-run] confirm after a failed daily}" \
+    | jq -c --arg js "$4" --argjson env "$env" '. + {env: $env,
+        jobs: [{step_key: null, state: "passed"},
+               ({step_key: ("perf-run", "perf-microbench", "perf-compare"), state: $js})]}'
+}
+{ mb 660 passed 1 passed; b 653 schedule failed 5; } \
+  | run "failed scheduled, newer measured manual passed" 0 "last completed #660 passed, manual [perf-run]"
+{ b 654 schedule passed 1; mb 660 failed 3 failed; b 653 schedule failed 26; } \
+  | run "scheduled newest passed, older manual failed" 0 "last completed #654 passed, scheduled"
+{ mb 660 failed 1 failed; b 653 schedule passed 5; } \
+  | run "measured manual newest failed" 1 "NOT_PASSED (last completed manual [perf-run] run was 'failed')"
+{ mb 660 passed 1 broken; b 653 schedule failed 5; } \
+  | run "manual that skipped measurement (steps broken) is ignored" 1 "NOT_PASSED (last completed scheduled run was 'failed')"
+{ b 660 api passed 1 "[perf-run] guard only"; b 653 schedule failed 5; } \
+  | run "manual with no measurement jobs is ignored" 1 "NOT_PASSED (last completed scheduled run was 'failed')"
+{ mb 660 passed 1 passed api "re-run without the tag"; b 653 schedule failed 5; } \
+  | run "untagged api build is ignored" 1 "NOT_PASSED (last completed scheduled run was 'failed')"
+{ mb 660 passed 1 passed ui "Rebuild from the UI"; b 653 schedule failed 5; } \
+  | run "a UI build needs no tag" 0 "last completed #660 passed, manual [perf-run]"
+{ mb 660 passed 1 passed api "[perf-run] A/B" '{"PERF_XL":"true"}'; b 653 schedule failed 5; } \
+  | run "a manual A/B build with env overrides is ignored" 1 "NOT_PASSED (last completed scheduled run was 'failed')"
+{ mb 660 running 1 passed; b 653 schedule failed 5; } \
+  | run "a manual build still running is ignored" 1 "NOT_PASSED (last completed scheduled run was 'failed')"
+{ mb 660 passed 1 passed api "[perf-run] [perf-soak] soak"; b 653 schedule failed 5; } \
+  | run "a manual soak build is ignored" 1 "NOT_PASSED (last completed scheduled run was 'failed')"
+{ mb 660 passed 1 passed; b 500 schedule passed 40; } \
+  | run "a passing manual run does not rescue a stalled schedule" 1 "STALLED (no scheduled build within 30h)"
+{ b 654 schedule running 1; mb 660 passed 2 passed; b 653 schedule failed 5; } \
+  | run "in-flight scheduled, measured manual newer than the failed one" 0 "last completed #660 passed, manual [perf-run]"
+
 FAILS=$(wc -l < "$WORK/fails" | tr -d ' ')
 [ "$FAILS" -eq 0 ] || { echo "FAILED: $FAILS check(s)" >&2; exit 1; }
 echo "OK: all perf-baseline-freshness checks passed"

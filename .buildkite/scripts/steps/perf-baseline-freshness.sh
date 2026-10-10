@@ -32,8 +32,13 @@ set -euo pipefail
 # WHAT LIVENESS DETECTS — AND THE RESIDUAL GAP IT DOES NOT
 # --------------------------------------------------------
 # DETECTED: the schedule stopped firing (STALLED / NO_SCHEDULE), and the most
-# recent COMPLETED scheduled build did not pass (NOT_PASSED — the run broke, or a
-# gating regression fired).
+# recent COMPLETED run did not pass (NOT_PASSED — the run broke, or a gating
+# regression fired). "Run" is a daily scheduled build or a MEASURED manual build: a
+# non-scheduled build tagged [perf-run] (or started from the UI) with no build env
+# overrides, whose run, micro-benchmark and compare steps all executed. Whichever of
+# the two is newest gives the verdict, so a passing manual run can clear a failed
+# scheduled one. Only scheduled builds prove the cron is firing, so a manual run never
+# rescues STALLED, and a manual build that measured nothing is ignored.
 #
 # NOT DETECTED: a scheduled build that goes GREEN while writing no fresh baseline.
 # perf-test-compare.sh currently has two such paths — an invalid run annotates an
@@ -75,9 +80,10 @@ set -euo pipefail
 #                   cron stopped firing) — including when none falls in the lookback
 #                   and the older history inspected has none either — or none in the
 #                   lookback has finished (the producer is wedged).
-#   - NOT_PASSED  : the most recent COMPLETED scheduled build did not pass (the
-#                   producer ran but broke, or flagged a gating regression — either
-#                   way a human must look before the baseline is trusted).
+#   - NOT_PASSED  : the most recent COMPLETED run (scheduled, or a measured manual
+#                   [perf-run] build newer than it) did not pass (the producer ran but
+#                   broke, or flagged a gating regression — either way a human must
+#                   look before the baseline is trusted).
 #   - TRUNCATED   : the page cap was reached before the builds needed for a verdict
 #                   were seen, so liveness is unknown.
 #   - DENIED      : the Buildkite API token is missing/expired or unauthorised.
@@ -130,7 +136,7 @@ fail() {
 
 $2
 
-_Producer:_ Buildkite pipeline \`${PRODUCER_PIPELINE}\`, branch \`${PRODUCER_BRANCH}\`, scheduled builds · _liveness window:_ ${PRODUCER_MAX_AGE_HOURS}h.
+_Producer:_ Buildkite pipeline \`${PRODUCER_PIPELINE}\`, branch \`${PRODUCER_BRANCH}\`, scheduled builds (a newer measured \`[perf-run]\` build with no env overrides also counts for the pass/fail verdict) · _liveness window:_ ${PRODUCER_MAX_AGE_HOURS}h.
 _This step lives in \`mockserver-infra\` (a different pipeline from the daily perf producer) and runs on its own schedule so it survives the producer dying. It asserts the daily perf pipeline is still running and passing; investigate that pipeline first._"
   exit 1
 }
@@ -201,9 +207,25 @@ CURL_CFG="$WORK/curl.cfg"
 # Only source==schedule builds prove the cron is alive. The weekly [perf-soak] schedule
 # is not the baseline producer: counting it would let a fresh or passing soak mask a
 # dead or failed daily. Every scan applies this one filter.
-DAILY_SCHEDULED='[ .[] | select(.source == "schedule" and ((.message // "") | test("\\[perf-soak\\]") | not)) ]'
+NOT_SOAK='((.message // "") | test("\\[perf-soak\\]") | not)'
+DAILY_SCHEDULED_SEL="(.source == \"schedule\" and ${NOT_SOAK})"
+# A measured manual build: the steps the guard dispatches for a full run all executed
+# (passed or failed; a skipped build shows them `broken` or omits them). Build env
+# overrides mark an A/B experiment, not the default configuration the daily run measures.
+MEASURED_STEPS='["perf-run", "perf-microbench", "perf-compare"]'
+MEASURED_MANUAL_SEL="(.source != \"schedule\" and ${NOT_SOAK}
+  and (.source == \"ui\" or ((.message // \"\") | test(\"\\\\[perf-run\\\\]\")))
+  and ((.env // {}) == {})
+  and ((.jobs // []) as \$jobs | all(${MEASURED_STEPS}[]; . as \$k | any(\$jobs[]; .step_key == \$k and (.state == \"passed\" or .state == \"failed\")))))"
 # A guard-skip (master unchanged) lands as `passed`: the producer working correctly.
 IS_TERMINAL='(.state | . == "passed" or . == "failed" or . == "canceled" or . == "skipped" or . == "not_run" or . == "blocked")'
+# Every scan keeps the daily scheduled builds and the finished measured manual builds,
+# each tagged with its kind and trimmed to the fields read below.
+KEEP="[ .[] | {number, source, state, created_at, web_url, message} as \$b
+  | if ${DAILY_SCHEDULED_SEL} then \$b + {kind: \"scheduled\"}
+    elif (${MEASURED_MANUAL_SEL}) and ${IS_TERMINAL} then \$b + {kind: \"manual\"}
+    else empty end ]"
+SCHEDULED_ONLY='[ .[] | select(.kind == "scheduled") ]'
 
 # api_get(header_file, body_file, curl args...)
 api_get() {
@@ -254,7 +276,7 @@ next_link() {
 }
 
 # scan(name, time_filter, stop_jq): collect daily scheduled builds, newest first, into
-# $WORK/<name>.json until stop_jq holds, the last page (SCAN_EXHAUSTED=true), or the cap.
+# $WORK/<name>.json (plus measured manual builds, see KEEP) until stop_jq holds, the last page (SCAN_EXHAUSTED=true), or the cap.
 scan() {
   local name="$1" time_filter="$2" stop_jq="$3" url="" page=0 hdr body next
   SCAN_EXHAUSTED=false
@@ -277,7 +299,7 @@ scan() {
     check_body "$body"
     SCAN_PAGES=$page
     SCAN_BUILDS=$(( SCAN_BUILDS + $(jq 'length' "$body") ))
-    jq -s ".[0] + (.[1] | ${DAILY_SCHEDULED})" "$WORK/$name.json" "$body" > "$WORK/$name.acc"
+    jq -s ".[0] + (.[1] | ${KEEP})" "$WORK/$name.json" "$body" > "$WORK/$name.acc"
     mv "$WORK/$name.acc" "$WORK/$name.json"
     if jq -e "$stop_jq" "$WORK/$name.json" >/dev/null 2>&1; then
       return 0
@@ -304,8 +326,11 @@ if [ -z "$WINDOW_START" ]; then
 fi
 
 # --- 3. the lookback window -------------------------------------------------
-scan window "created_from=${WINDOW_START}" "any(.[]; ${IS_TERMINAL})"
-SCHED="$(cat "$WORK/window.json")"
+# Stops at the first finished scheduled build; the API returns newest first, so every
+# measured manual build newer than it has been read by then.
+scan window "created_from=${WINDOW_START}" "any(.[]; .kind == \"scheduled\" and ${IS_TERMINAL})"
+WINDOW_ALL="$(cat "$WORK/window.json")"
+SCHED="$(jq -c "$SCHEDULED_ONLY" <<<"$WINDOW_ALL")"
 SCHED_COUNT="$(jq 'length' <<<"$SCHED")"
 WINDOW_PAGES=$SCAN_PAGES
 WINDOW_BUILDS=$SCAN_BUILDS
@@ -317,8 +342,8 @@ if [ "$SCHED_COUNT" -eq 0 ]; then
     fail "TRUNCATED (page cap reached inside the lookback window)" \
       "The newest ${INSPECTED} hold no daily scheduled build, but more builds in the window remain unread after ${MAX_PAGES} page(s). Liveness cannot be decided; fails closed. Raise \`PERF_FRESHNESS_MAX_PAGES\` if manual builds legitimately exceed $(( MAX_PAGES * PER_PAGE )) in ${LOOKBACK_HOURS}h."
   fi
-  scan older "created_to=${WINDOW_START}" 'length > 0'
-  OLDER="$(cat "$WORK/older.json")"
+  scan older "created_to=${WINDOW_START}" 'any(.[]; .kind == "scheduled")'
+  OLDER="$(jq -c "$SCHEDULED_ONLY" "$WORK/older.json")"
   if [ "$(jq 'length' <<<"$OLDER")" -eq 0 ]; then
     if [ "$SCAN_EXHAUSTED" = true ]; then
       fail "NO_SCHEDULE (producer has no scheduled builds)" \
@@ -368,14 +393,21 @@ if [ -z "$TERMINAL" ]; then
   fail "STALLED (no scheduled build has completed in ${LOOKBACK_HOURS}h — producer wedged)" \
     "\`${PRODUCER_PIPELINE}\` has $(jq 'length' <<<"$SCHED") daily scheduled build(s) on \`${PRODUCER_BRANCH}\` in the last ${LOOKBACK_HOURS}h (newest #${NEWEST_NUMBER}, ${NEWEST_STATE}) but none has reached a terminal state. The producer is wedged (queued or running indefinitely), not producing baselines; an older pass cannot vouch for it. Fails closed."
 fi
+# The verdict comes from the newest finished run in the window: that scheduled build, or a
+# measured manual build created after it (KEEP admits only finished ones, newest first).
+SCHED_TERM_NUMBER="$(jq -r '.number' <<<"$TERMINAL")"
+VERDICT="$(jq -c --argjson n "$SCHED_TERM_NUMBER" \
+  '[ .[] | select(.kind == "manual" or (.kind == "scheduled" and .number == $n)) ][0]' <<<"$WINDOW_ALL")"
+if [ "$(jq -r '.kind' <<<"$VERDICT")" = "manual" ]; then TERMINAL="$VERDICT"; fi
 TERM_STATE="$(jq -r '.state' <<<"$TERMINAL")"
 TERM_NUMBER="$(jq -r '.number' <<<"$TERMINAL")"
 TERM_URL="$(jq -r '.web_url // ""' <<<"$TERMINAL")"
 TERM_CREATED="$(jq -r '.created_at' <<<"$TERMINAL")"
+TERM_KIND="$(jq -r 'if .kind == "manual" then "manual [perf-run]" else "scheduled" end' <<<"$TERMINAL")"
 
 if [ "$TERM_STATE" != "passed" ]; then
-  fail "NOT_PASSED (last completed scheduled run was '${TERM_STATE}')" \
-    "The most recent COMPLETED scheduled build of \`${PRODUCER_PIPELINE}\` (#${TERM_NUMBER}, created \`${TERM_CREATED}\`) is **${TERM_STATE}**, not passed. The producer ran but did not succeed — it either broke or flagged a gating regression. Either way the freshest baseline cannot be trusted until a human looks.
+  fail "NOT_PASSED (last completed ${TERM_KIND} run was '${TERM_STATE}')" \
+    "The most recent COMPLETED ${TERM_KIND} build of \`${PRODUCER_PIPELINE}\` (#${TERM_NUMBER}, created \`${TERM_CREATED}\`) is **${TERM_STATE}**, not passed. The producer ran but did not succeed — it either broke or flagged a gating regression. Either way the freshest baseline cannot be trusted until a human looks.
 
 - build: ${TERM_URL:-#${TERM_NUMBER}}
 
@@ -383,12 +415,12 @@ Investigate that build before relying on the perf regression comparison."
 fi
 
 # --- 5. PASS ------------------------------------------------------------------
-annotate "success" ":white_check_mark: **Perf baseline producer is live** — the daily \`${PRODUCER_PIPELINE}\` schedule is firing and its last completed scheduled build passed.
+annotate "success" ":white_check_mark: **Perf baseline producer is live** — the daily \`${PRODUCER_PIPELINE}\` schedule is firing and its last completed run (${TERM_KIND}) passed.
 
 - newest scheduled build: #${NEWEST_NUMBER} (${NEWEST_STATE}), ${AGE_HOURS}h ago (window ${PRODUCER_MAX_AGE_HOURS}h)
-- last completed scheduled build: #${TERM_NUMBER} (passed)
+- last completed run: #${TERM_NUMBER} (${TERM_KIND}, passed)
 - inspected: ${INSPECTED}
 
 A passed scheduled build means the producer either ran and passed, or was correctly skipped by the commit guard because master had not moved — both are healthy."
-echo "OK: producer live (newest scheduled #${NEWEST_NUMBER} ${AGE_HOURS}h ago, last completed #${TERM_NUMBER} passed)"
+echo "OK: producer live (newest scheduled #${NEWEST_NUMBER} ${AGE_HOURS}h ago, last completed #${TERM_NUMBER} passed, ${TERM_KIND})"
 exit 0

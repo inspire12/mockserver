@@ -111,6 +111,9 @@ bash "$REPO_ROOT/.buildkite/scripts/test/perf-sut-recvq-test.sh"
 echo "--- weekly soak checks (provenance, drift from the per-window series, event-log bound, the step on stubbed docker and curl)"
 bash "$REPO_ROOT/.buildkite/scripts/test/perf-soak-test.sh"
 
+echo "--- gating JMH time_per_op score checks (lib/perf-microbench-reshape.jq: one slow iteration cannot trip it, a 5-6% slowdown still does)"
+bash "$REPO_ROOT/.buildkite/scripts/test/perf-microbench-score-test.sh"
+
 echo "--- byte-compiling the SSE fidelity reader (item 12)"
 # The reader is pure-stdlib python3 run on the perf agent by perf-test-run.sh; a
 # syntax error would only surface mid-run, so compile it here. Skip (do not fail)
