@@ -22,6 +22,7 @@ import Tabs from '@mui/material/Tabs';
 import Tab from '@mui/material/Tab';
 import Chip from '@mui/material/Chip';
 import type { ConnectionParams } from '../hooks/useConnectionParams';
+import { useDashboardStore } from '../store';
 import { humanizeError, type HumanError } from '../lib/errorMessage';
 import { monospaceFontFamily } from '../theme';
 import HumanErrorAlert from './HumanErrorAlert';
@@ -146,6 +147,7 @@ export default function ConfigurationDialog({
         const next = await getConfiguration(connectionParams);
         if (cancelled) return;
         setConfig(next);
+        useDashboardStore.getState().setServerConfiguration(next);
         setError(null);
       } catch (e) {
         if (!cancelled) setError(humanizeError(e));

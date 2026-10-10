@@ -165,12 +165,15 @@ export default function App() {
   // activation completes (activation is async — the `[view]` effect below has
   // already fired-and-dropped by then). initAnalytics is idempotent (one-shot
   // decision), so a duplicate call under StrictMode remount is a no-op. Failure
-  // to fetch config simply means analytics stays off — never surfaced.
+  // to fetch config simply means analytics stays off — never surfaced. The
+  // configuration is also kept in the store for views that depend on it.
   useEffect(() => {
     const controller = new AbortController();
+    useDashboardStore.getState().setServerConfiguration(null);
     void getConfiguration(params, controller.signal)
       .then((config) => {
         if (!controller.signal.aborted) {
+          useDashboardStore.getState().setServerConfiguration(config);
           initAnalytics(config, {
             validViews: ALL_VIEWS,
             initialView: useDashboardStore.getState().view,
@@ -178,7 +181,8 @@ export default function App() {
         }
       })
       .catch(() => {
-        /* config endpoint unavailable — analytics stays off */
+        // Analytics stays off; views that depend on the configuration fall back.
+        if (!controller.signal.aborted) useDashboardStore.getState().setServerConfigurationUnavailable();
       });
     return () => controller.abort();
   }, [params]);
@@ -302,7 +306,7 @@ export default function App() {
           {(view === 'dashboard' || view === 'traffic') && (
             <LogPressureBanner connectionParams={params} />
           )}
-          {(view === 'dashboard' || view === 'traffic') && <FrameLimitBanner />}
+          {(view === 'dashboard' || view === 'traffic') && <FrameLimitBanner view={view} />}
           <AnalyticsBanner />
           {(view === 'dashboard' || view === 'traffic' || view === 'sessions') && (
             <FilterPanel onFilterChange={handleFilterChange} />

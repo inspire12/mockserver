@@ -494,8 +494,17 @@ interface DashboardState {
   activeExpectationsIncludeLlm: boolean | undefined;
   recordedRequests: JsonListItem[];
   proxiedRequests: JsonListItem[];
-  /** The last update reached its size limit, so older log rows were left out of it. */
+  /** The last update reached its size limit, so older request rows were left out of it. */
   frameLimitReached: boolean;
+  /** The last update's log messages reached their share of its size limit, so older log messages were left out. */
+  logMessagesLimitReached: boolean;
+  /**
+   * The server's configuration (`GET /mockserver/configuration`), loaded at startup and again whenever
+   * the Configuration dialog loads it. `null` until loaded, or when it could not be loaded.
+   */
+  serverConfiguration: Record<string, unknown> | null;
+  /** The configuration could not be loaded (for example control-plane authentication refused it). */
+  serverConfigurationUnavailable: boolean;
   /**
    * Request and response messages loaded whole for rows whose bodies the server shortened, by row
    * key. Applied to the row on every update until the row leaves the window, so every panel and
@@ -643,6 +652,8 @@ interface DashboardState {
   setFilterExpanded: (expanded: boolean) => void;
   toggleFilterExpanded: () => void;
   setConnectionStatus: (status: ConnectionStatus) => void;
+  setServerConfiguration: (configuration: Record<string, unknown> | null) => void;
+  setServerConfigurationUnavailable: () => void;
   setThemeMode: (mode: ThemeMode) => void;
   toggleThemeMode: () => void;
   setAutoScroll: (enabled: boolean) => void;
@@ -692,6 +703,9 @@ export const useDashboardStore = create<DashboardState>()((set) => ({
   recordedRequests: [],
   proxiedRequests: [],
   frameLimitReached: false,
+  logMessagesLimitReached: false,
+  serverConfiguration: null,
+  serverConfigurationUnavailable: false,
   fullMessages: {},
 
   view: initialView,
@@ -861,6 +875,9 @@ export const useDashboardStore = create<DashboardState>()((set) => ({
         frameLimitReached: message.recordedRequests !== undefined
           ? message.frameLimitReached === true
           : s.frameLimitReached,
+        logMessagesLimitReached: message.logMessages !== undefined
+          ? message.logMessagesLimitReached === true
+          : s.logMessagesLimitReached,
         fullMessages: message.recordedRequests !== undefined && message.proxiedRequests !== undefined
           ? keepLoadedMessagesFor(s.fullMessages, message.recordedRequests, message.proxiedRequests)
           : s.fullMessages,
@@ -907,6 +924,7 @@ export const useDashboardStore = create<DashboardState>()((set) => ({
       recordedRequests: [],
       proxiedRequests: [],
       frameLimitReached: false,
+      logMessagesLimitReached: false,
       fullMessages: {},
       selectedTrafficKey: null,
       pendingEditExpectation: null,
@@ -947,6 +965,8 @@ export const useDashboardStore = create<DashboardState>()((set) => ({
   setFilterExpanded: (expanded) => set({ filterExpanded: expanded }),
   toggleFilterExpanded: () => set((s) => ({ filterExpanded: !s.filterExpanded })),
   setConnectionStatus: (status) => set({ connectionStatus: status }),
+  setServerConfiguration: (configuration) => set({ serverConfiguration: configuration, serverConfigurationUnavailable: false }),
+  setServerConfigurationUnavailable: () => set({ serverConfiguration: null, serverConfigurationUnavailable: true }),
   setThemeMode: (mode) => {
     try { globalThis.localStorage?.setItem('mockserver-theme', mode); } catch { /* noop */ }
     set({ themeMode: mode });

@@ -1040,7 +1040,7 @@ describe('TrafficInspector — Repeat Advanced', () => {
 
     await user.click(screen.getByText(/\/api\/repeat-me/));
 
-    const repeatBtn = screen.getByRole('button', { name: /Repeat/i });
+    const repeatBtn = screen.getByRole('button', { name: /^Repeat/i });
     await user.click(repeatBtn);
 
     expect(screen.getByText('Repeat Request')).toBeInTheDocument();
@@ -1065,7 +1065,7 @@ describe('TrafficInspector — Repeat Advanced', () => {
 
     renderTrafficInspector();
     await user.click(screen.getByText(/\/api\/repeat-me/));
-    await user.click(screen.getByRole('button', { name: /Repeat/i }));
+    await user.click(screen.getByRole('button', { name: /^Repeat/i }));
 
     const dialog = screen.getByRole('dialog');
     const iterationsInput = within(dialog).getByLabelText('Iterations');
@@ -1097,7 +1097,7 @@ describe('TrafficInspector — Repeat Advanced', () => {
 
     renderTrafficInspector();
     await user.click(screen.getByText(/\/api\/repeat-me/));
-    await user.click(screen.getByRole('button', { name: /Repeat/i }));
+    await user.click(screen.getByRole('button', { name: /^Repeat/i }));
 
     const dialog = screen.getByRole('dialog');
     const iterationsInput = within(dialog).getByLabelText('Iterations');
@@ -1122,7 +1122,7 @@ describe('TrafficInspector — Repeat Advanced', () => {
 
     renderTrafficInspector();
     await user.click(screen.getByText(/\/api\/repeat-me/));
-    await user.click(screen.getByRole('button', { name: /Repeat/i }));
+    await user.click(screen.getByRole('button', { name: /^Repeat/i }));
 
     const dialog = screen.getByRole('dialog');
     const iterationsInput = within(dialog).getByLabelText('Iterations');

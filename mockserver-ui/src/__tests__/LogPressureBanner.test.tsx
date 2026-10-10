@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { ThemeProvider } from '@mui/material/styles';
 import { buildTheme } from '../theme';
 import LogPressureBanner from '../components/LogPressureBanner';
+import { useDashboardStore } from '../store';
 import type { ConnectionParams } from '../hooks/useConnectionParams';
 
 const params: ConnectionParams = { host: 'localhost', port: '1080', secure: false };
@@ -60,6 +61,7 @@ async function nextPoll(ms: number): Promise<void> {
 describe('LogPressureBanner', () => {
   beforeEach(() => {
     vi.useRealTimers();
+    useDashboardStore.setState({ serverConfiguration: { metricsEnabled: true }, serverConfigurationUnavailable: false });
   });
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -154,6 +156,41 @@ describe('LogPressureBanner', () => {
 
     await waitFor(() => expect(fetch).toHaveBeenCalled());
     expect(screen.queryByTestId('log-pressure-banner')).not.toBeInTheDocument();
+  });
+
+  it('never requests metrics from a server whose configuration says metrics are off', async () => {
+    useDashboardStore.setState({ serverConfiguration: { metricsEnabled: false } });
+    mockMetrics({ status: 404 });
+    renderBanner();
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('log-pressure-banner')).toBeNull();
+  });
+
+  it('waits for the configuration before requesting metrics, then polls once it says metrics are on', async () => {
+    useDashboardStore.setState({ serverConfiguration: null });
+    mockMetrics({ body: scrape({ ringFull: 3 }) });
+    renderBanner();
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(fetch).not.toHaveBeenCalled();
+
+    act(() => useDashboardStore.setState({ serverConfiguration: { metricsEnabled: true } }));
+    expect(await screen.findByTestId('log-pressure-banner')).toHaveTextContent('3 events were dropped');
+    expect(fetch).toHaveBeenCalledWith('http://localhost:1080/mockserver/metrics', expect.anything());
+  });
+
+  it('probes metrics when the configuration could not be loaded, so the warning still works', async () => {
+    useDashboardStore.setState({ serverConfiguration: null, serverConfigurationUnavailable: true });
+    mockMetrics({ body: scrape({ ringFull: 5 }) });
+    renderBanner();
+
+    expect(await screen.findByTestId('log-pressure-banner')).toHaveTextContent('5 events were dropped');
   });
 
   it('can be dismissed', async () => {

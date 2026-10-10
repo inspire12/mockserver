@@ -1114,8 +1114,11 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
                         .put("recordedRequests", recordedRequests)
                         .put("proxiedRequests", proxiedRequests); // reverse
                     // only when it applies, so an update under the ceiling is unchanged
-                    if (budget.limitReached()) {
+                    if (budget.rowsLimitReached()) {
                         frame.put("frameLimitReached", true);
+                    }
+                    if (budget.logMessagesLimitReached()) {
+                        frame.put("logMessagesLimitReached", true);
                     }
                     ImmutableMap<String, Object> message = frame.build();
                     if (deliverInline) {
@@ -1184,32 +1187,63 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
     }
 
     /**
-     * Roughly how many characters an update may hold. Rows arrive newest first, so once a row would take the
-     * update past this, it and every older row are left out and the update says so (frameLimitReached).
+     * Roughly how many characters an update may hold. Rows arrive newest first, so once a log message or a
+     * request row would take the update past this, it and every older one of its kind are left out and the
+     * update says so. Log messages may use only part of the update, so the request rows always keep a share:
+     * an unmatched request logs one message per expectation it was compared with, and with many expectations
+     * those would otherwise fill the update before the rows Traffic shows.
      */
     static final class FrameBudget {
         private final long maxCharacters;
+        private final long maxLogMessageCharacters;
         private long usedCharacters;
-        private boolean limitReached;
+        private long logMessageCharacters;
+        private long rowCharacters;
+        private boolean logMessagesLimitReached;
+        private boolean rowsLimitReached;
 
         FrameBudget(long maxCharacters) {
-            this.maxCharacters = maxCharacters;
+            this(maxCharacters, maxCharacters / 4 * 3);
         }
 
-        boolean admit(long characters) {
-            if (limitReached) {
+        FrameBudget(long maxCharacters, long maxLogMessageCharacters) {
+            this.maxCharacters = maxCharacters;
+            this.maxLogMessageCharacters = maxLogMessageCharacters;
+        }
+
+        boolean admitLogMessage(long characters) {
+            if (logMessagesLimitReached) {
                 return false;
             }
-            if (usedCharacters > 0 && usedCharacters + characters > maxCharacters) {
-                limitReached = true;
+            if (logMessageCharacters > 0
+                && (logMessageCharacters + characters > maxLogMessageCharacters || usedCharacters + characters > maxCharacters)) {
+                logMessagesLimitReached = true;
                 return false;
             }
+            logMessageCharacters += characters;
             usedCharacters += characters;
             return true;
         }
 
-        boolean limitReached() {
-            return limitReached;
+        boolean admitRow(long characters) {
+            if (rowsLimitReached) {
+                return false;
+            }
+            if (rowCharacters > 0 && usedCharacters + characters > maxCharacters) {
+                rowsLimitReached = true;
+                return false;
+            }
+            rowCharacters += characters;
+            usedCharacters += characters;
+            return true;
+        }
+
+        boolean logMessagesLimitReached() {
+            return logMessagesLimitReached;
+        }
+
+        boolean rowsLimitReached() {
+            return rowsLimitReached;
         }
     }
 
@@ -1274,25 +1308,21 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
         // responses by correlationId and look them up when the
         // matching request is processed.
         Map<String, RowMessage> responsesByCorrelationId = new HashMap<>();
-        // Short-circuit once all three output categories are full, or the update has reached its size
-        // ceiling. The stream is sequential and ordered and this predicate is evaluated BEFORE each element,
-        // so an element only reaches the body while at least one category still has room. Once logMessages,
-        // recordedRequests and proxiedRequests have each hit logItemLimit no later element could be added to
-        // ANY of them (every add below is guarded by the same size check, and responsesByCorrelationId is
-        // only ever consumed to enrich recordedRequests, which is full), so stopping here drops only entries
-        // the old full walk would have discarded -- the emitted frame is byte-identical while the walk
-        // becomes O(depth needed) not O(entire log).
+        // Short-circuit once each output category is full or has reached its share of the size ceiling (log
+        // messages and request rows reach it separately). The stream is sequential and ordered and this predicate
+        // is evaluated BEFORE each element, so once it is false no later element could be added to ANY section
+        // (every add below is guarded by the same checks, and responsesByCorrelationId only enriches
+        // recordedRequests): the emitted frame is byte-identical to a full walk, which becomes O(depth needed).
         Stream<DashboardLogEntryDTO> boundedStream = shortCircuit
             ? reverseLogEventsStream.takeWhile(logEntryDTO ->
-                !budget.limitReached()
-                    && (logMessages.size() < logItemLimit
-                    || recordedRequests.size() < logItemLimit
-                    || proxiedRequests.size() < logItemLimit))
+                (!budget.logMessagesLimitReached() && logMessages.size() < logItemLimit)
+                    || (!budget.rowsLimitReached()
+                    && (recordedRequests.size() < logItemLimit || proxiedRequests.size() < logItemLimit)))
             : reverseLogEventsStream;
         boundedStream
             .forEach(logEntryDTO -> {
                 if (logEntryDTO != null) {
-                    if (logMessages.size() < logItemLimit && budget.admit(logEntryDTO.estimatedLogMessageCharacters())) {
+                    if (logMessages.size() < logItemLimit && budget.admitLogMessage(logEntryDTO.estimatedLogMessageCharacters())) {
                         DashboardLogEntryDTO dashboardLogEntryDTO = logEntryDTO.setDescription(logMessagesDescriptionProcessor.description(logEntryDTO));
                         if (isNotBlank(logEntryDTO.getCorrelationId()) && logEntryDTO.getType() != TRACE) {
                             DashboardLogEntryDTOGroup logEntryGroup = logEntryGroups.get(logEntryDTO.getCorrelationId());
@@ -1320,7 +1350,7 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
                                 RowMessage responseMessage = isNotBlank(logEntryDTO.getCorrelationId())
                                     ? responsesByCorrelationId.get(logEntryDTO.getCorrelationId())
                                     : null;
-                                if (!budget.admit(requestMessage.characters() + (responseMessage != null ? responseMessage.characters() : 0))) {
+                                if (!budget.admitRow(requestMessage.characters() + (responseMessage != null ? responseMessage.characters() : 0))) {
                                     break;
                                 }
                                 Map<String, Object> value = new LinkedHashMap<>();
@@ -1364,7 +1394,7 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
                         }
                         entry.put("value", value);
                         entry.put("key", logEntryDTO.getId() + "_proxied");
-                        if (!value.isEmpty() && budget.admit((requestMessage != null ? requestMessage.characters() : 0) + (responseMessage != null ? responseMessage.characters() : 0))) {
+                        if (!value.isEmpty() && budget.admitRow((requestMessage != null ? requestMessage.characters() : 0) + (responseMessage != null ? responseMessage.characters() : 0))) {
                             entry.put("timestamp", logEntryDTO.getTimestamp());
                             markTruncated(entry, "httpRequest", requestMessage, true);
                             markTruncated(entry, "httpResponse", responseMessage, true);

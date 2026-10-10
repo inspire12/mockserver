@@ -40,8 +40,10 @@ import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.core.Is.is;
 import static org.mockserver.configuration.Configuration.configuration;
 import static org.mockserver.log.model.LogEntry.LogMessageType.EXPECTATION_MATCHED;
+import static org.mockserver.log.model.LogEntry.LogMessageType.EXPECTATION_NOT_MATCHED;
 import static org.mockserver.log.model.LogEntry.LogMessageType.EXPECTATION_RESPONSE;
 import static org.mockserver.log.model.LogEntry.LogMessageType.FORWARDED_REQUEST;
+import static org.mockserver.log.model.LogEntry.LogMessageType.NO_MATCH_RESPONSE;
 import static org.mockserver.log.model.LogEntry.LogMessageType.RECEIVED_REQUEST;
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
@@ -95,28 +97,34 @@ public class DashboardFrameBodyCapTest {
         private final String text;
         private final JsonNode json;
         private final boolean limitReached;
+        private final boolean logMessagesLimitReached;
 
-        private Frame(String text, boolean limitReached) throws Exception {
+        private Frame(String text, boolean limitReached, boolean logMessagesLimitReached) throws Exception {
             this.text = text;
             this.json = MAPPER.readTree(text);
             this.limitReached = limitReached;
+            this.logMessagesLimitReached = logMessagesLimitReached;
         }
     }
 
     private static Frame render(List<DashboardLogEntryDTO> reverse, long maxCharacters) throws Exception {
+        return render(reverse, maxCharacters, true);
+    }
+
+    private static Frame render(List<DashboardLogEntryDTO> reverse, long maxCharacters, boolean shortCircuit) throws Exception {
         List<Object> logMessages = new LinkedList<>();
         List<Map<String, Object>> recordedRequests = new LinkedList<>();
         List<Map<String, Object>> proxiedRequests = new LinkedList<>();
         DashboardWebSocketHandler.FrameBudget budget = new DashboardWebSocketHandler.FrameBudget(maxCharacters);
         DashboardWebSocketHandler.populateLogSections(
-            reverse.stream(), true, 100, budget,
+            reverse.stream(), shortCircuit, 100, budget,
             logMessages, recordedRequests, proxiedRequests,
             new DescriptionProcessor(configuration()), new DescriptionProcessor(configuration()), new DescriptionProcessor(configuration()));
         Map<String, Object> sections = new LinkedHashMap<>();
         sections.put("logMessages", logMessages);
         sections.put("recordedRequests", recordedRequests);
         sections.put("proxiedRequests", proxiedRequests);
-        return new Frame(WRITER.writeValueAsString(sections), budget.limitReached());
+        return new Frame(WRITER.writeValueAsString(sections), budget.rowsLimitReached(), budget.logMessagesLimitReached());
     }
 
     @Test
@@ -189,6 +197,86 @@ public class DashboardFrameBodyCapTest {
         assertThat("the update stays near its ceiling", (long) frame.text.length(), lessThan(5L * 1024 * 1024));
     }
 
+    // Newest first, as the dashboard walks the log: each request matched none of the expectations, so it
+    // logs one "didn't match" message per expectation between its request and its 404.
+    private static List<DashboardLogEntryDTO> unmatchedExchanges(int count, int expectations) {
+        List<DashboardLogEntryDTO> reverse = new ArrayList<>();
+        for (int i = count - 1; i >= 0; i--) {
+            String correlationId = "unmatched-" + i;
+            HttpRequest request = request("/seed/" + i);
+            reverse.add(dto(new LogEntry().setType(NO_MATCH_RESPONSE).setCorrelationId(correlationId)
+                .setHttpRequest(request).setHttpResponse(response().withStatusCode(404).withReasonPhrase("Not Found"))
+                .setMessageFormat("no expectation for:{}returning response:{}").setArguments(request, response().withStatusCode(404))));
+            for (int e = expectations - 1; e >= 0; e--) {
+                Expectation expectation = new Expectation(request("/cnt/" + e)).thenRespond(response().withStatusCode(200));
+                reverse.add(dto(new LogEntry().setType(EXPECTATION_NOT_MATCHED).setCorrelationId(correlationId)
+                    .setHttpRequest(request).setExpectation(expectation)
+                    .setMessageFormat("request:{}didn't match expectation:{}because:{}")
+                    .setArguments(request, expectation, "path /seed/" + i + " didn't match /cnt/" + e)));
+            }
+            reverse.add(dto(new LogEntry().setType(RECEIVED_REQUEST).setCorrelationId(correlationId)
+                .setHttpRequest(request).setMessageFormat("received request:{}").setArguments(request)));
+        }
+        return reverse;
+    }
+
+    @Test
+    public void shouldKeepTheNewestRequestRowsWhenManyDidNotMatchMessagesFillTheLogShare() throws Exception {
+        List<DashboardLogEntryDTO> reverse = unmatchedExchanges(120, 150);
+
+        Frame frame = render(reverse, DashboardWebSocketHandler.MAX_UPDATE_CHARACTERS);
+
+        JsonNode recorded = frame.json.get("recordedRequests");
+        assertThat("every row of the window is sent", recorded.size(), is(100));
+        assertThat(recorded.get(0).get("value").get("httpRequest").get("path").asText(), is("/seed/119"));
+        assertThat(recorded.get(99).get("value").get("httpRequest").get("path").asText(), is("/seed/20"));
+        assertThat("each row still carries its 404", recorded.get(99).get("value").get("httpResponse").get("statusCode").asInt(), is(404));
+        assertThat("no request row was left out", frame.limitReached, is(false));
+        assertThat("older log messages were left out, and the update says so", frame.logMessagesLimitReached, is(true));
+        int groups = frame.json.get("logMessages").size();
+        assertThat(groups, greaterThan(0));
+        assertThat(groups, lessThan(100));
+        assertThat("the update stays within its ceiling", (long) frame.text.length(), lessThan(DashboardWebSocketHandler.MAX_UPDATE_CHARACTERS));
+        assertThat("stopping the walk early sends the same update as a full walk",
+            frame.text, is(render(reverse, DashboardWebSocketHandler.MAX_UPDATE_CHARACTERS, false).text));
+    }
+
+    @Test
+    public void shouldLetLogMessagesUseOnlyTheirShareOfTheUpdate() {
+        DashboardWebSocketHandler.FrameBudget budget = new DashboardWebSocketHandler.FrameBudget(100, 75);
+
+        assertThat(budget.admitLogMessage(70), is(true));
+        assertThat("past the log share", budget.admitLogMessage(10), is(false));
+        assertThat(budget.logMessagesLimitReached(), is(true));
+        assertThat("every older log message is left out too", budget.admitLogMessage(1), is(false));
+        assertThat("rows still have the rest of the update", budget.admitRow(30), is(true));
+        assertThat(budget.rowsLimitReached(), is(false));
+        assertThat("past the whole update", budget.admitRow(1), is(false));
+        assertThat(budget.rowsLimitReached(), is(true));
+        assertThat("every older row is left out too", budget.admitRow(0), is(false));
+    }
+
+    @Test
+    public void shouldStopLogMessagesAtTheWholeUpdateEvenUnderTheirShare() {
+        DashboardWebSocketHandler.FrameBudget budget = new DashboardWebSocketHandler.FrameBudget(100, 75);
+
+        assertThat(budget.admitRow(60), is(true));
+        assertThat(budget.admitLogMessage(30), is(true));
+        assertThat("under the log share but past the whole update", budget.admitLogMessage(20), is(false));
+        assertThat(budget.logMessagesLimitReached(), is(true));
+        assertThat(budget.rowsLimitReached(), is(false));
+    }
+
+    @Test
+    public void shouldAlwaysAdmitTheFirstOfEachKind() {
+        DashboardWebSocketHandler.FrameBudget budget = new DashboardWebSocketHandler.FrameBudget(100, 75);
+
+        assertThat("one message larger than the share is still shown", budget.admitLogMessage(200), is(true));
+        assertThat("one row is still shown after it", budget.admitRow(200), is(true));
+        assertThat(budget.admitRow(1), is(false));
+        assertThat(budget.admitLogMessage(1), is(false));
+    }
+
     @Test
     public void shouldSendCutBodiesAndTheCeilingFlagInTheUpdateItself() throws Exception {
         MockServerLogger logger = new MockServerLogger(DashboardFrameBodyCapTest.class);
@@ -227,6 +315,63 @@ public class DashboardFrameBodyCapTest {
             assertThat(frame.get("recordedRequests").get(0).get("truncatedBodies").get("httpRequest").get("originalLength").asLong(), is(100_000L));
             assertThat((long) text.length(), lessThan(DashboardWebSocketHandler.MAX_UPDATE_CHARACTERS + 2L * 1024 * 1024));
             assertThat(text, not(containsString(body("request-59-", CAP + 1))));
+        } finally {
+            if (handler != null) {
+                stopExecutors(handler);
+            }
+            if (channel.frame != null) {
+                channel.frame.release();
+            }
+            channel.finishAndReleaseAll();
+            httpState.stop();
+            scheduler.shutdown();
+        }
+    }
+
+    @Test
+    public void shouldSayInTheUpdateItselfWhenOnlyLogMessagesWereLeftOut() throws Exception {
+        MockServerLogger logger = new MockServerLogger(DashboardFrameBodyCapTest.class);
+        Configuration configuration = configuration().disableSystemOut(true).maxLogEntries(20_000);
+        Scheduler scheduler = new Scheduler(configuration, logger, true);
+        HttpState httpState = new HttpState(configuration, logger, scheduler);
+        DashboardWebSocketHandler handler = null;
+        CapturingChannel channel = new CapturingChannel();
+        try {
+            int requests = 40;
+            int expectations = 150;
+            for (int i = 0; i < requests; i++) {
+                String correlationId = "unmatched-live-" + i;
+                HttpRequest request = request("/seed/" + i);
+                httpState.getMockServerLog().add(new LogEntry().setType(RECEIVED_REQUEST).setCorrelationId(correlationId)
+                    .setHttpRequest(request).setMessageFormat("received request:{}").setArguments(request));
+                for (int e = 0; e < expectations; e++) {
+                    Expectation expectation = new Expectation(request("/cnt/" + e)).thenRespond(response().withStatusCode(200));
+                    httpState.getMockServerLog().add(new LogEntry().setType(EXPECTATION_NOT_MATCHED).setCorrelationId(correlationId)
+                        .setHttpRequest(request).setExpectation(expectation)
+                        .setMessageFormat("request:{}didn't match expectation:{}because:{}")
+                        .setArguments(request, expectation, "path /seed/" + i + " didn't match /cnt/" + e));
+                }
+                httpState.getMockServerLog().add(new LogEntry().setType(NO_MATCH_RESPONSE).setCorrelationId(correlationId)
+                    .setHttpRequest(request).setHttpResponse(response().withStatusCode(404).withReasonPhrase("Not Found"))
+                    .setMessageFormat("no expectation for:{}returning response:{}").setArguments(request, response().withStatusCode(404)));
+            }
+            CompletableFuture<Integer> recorded = new CompletableFuture<>();
+            httpState.getMockServerLog().retrieveMessageLogEntries(null, entries -> recorded.complete(entries.size()));
+            assertThat(recorded.get(30, SECONDS) >= requests * (expectations + 2), is(true));
+            handler = new DashboardWebSocketHandler(httpState, false, false).registerListeners();
+
+            long deadline = System.currentTimeMillis() + 20_000;
+            while (channel.frame == null && System.currentTimeMillis() < deadline) {
+                handler.sendUpdate(channel, request());
+                Thread.sleep(500);
+            }
+
+            assertThat("an update was sent", channel.frame, notNullValue());
+            JsonNode frame = MAPPER.readTree(channel.frame.text());
+            assertThat(frame.get("logMessagesLimitReached").asBoolean(), is(true));
+            assertThat("no request row was left out", frame.get("frameLimitReached"), nullValue());
+            assertThat(frame.get("recordedRequests").size(), is(requests));
+            assertThat(frame.get("logMessages").size(), lessThan(requests));
         } finally {
             if (handler != null) {
                 stopExecutors(handler);

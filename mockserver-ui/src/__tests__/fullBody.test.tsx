@@ -98,6 +98,15 @@ describe('store: shortened rows and the update size limit', () => {
     expect(useDashboardStore.getState().frameLimitReached).toBe(false);
   });
 
+  it('records separately whether older log messages were left out', () => {
+    useDashboardStore.getState().applyMessage({ ...message([row('a')]), logMessagesLimitReached: true });
+    expect(useDashboardStore.getState().logMessagesLimitReached).toBe(true);
+    expect(useDashboardStore.getState().frameLimitReached).toBe(false);
+
+    useDashboardStore.getState().applyMessage(message([row('a')]));
+    expect(useDashboardStore.getState().logMessagesLimitReached).toBe(false);
+  });
+
   it('keeps showing a loaded body when later updates send the row shortened again', () => {
     const { applyMessage, applyFullMessages } = useDashboardStore.getState();
     applyMessage(message([row('a'), row('b')]));

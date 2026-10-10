@@ -5,6 +5,7 @@ import Box from '@mui/material/Box';
 import Link from '@mui/material/Link';
 import type { ConnectionParams } from '../hooks/useConnectionParams';
 import { useLogPressure } from '../hooks/useLogPressure';
+import { useDashboardStore } from '../store';
 import { totalDropped } from '../lib/logPressure';
 import { monospaceFontFamily } from '../theme';
 
@@ -23,8 +24,9 @@ import { monospaceFontFamily } from '../theme';
  *
  * Drops are a warning; eviction alone is informational, since a busy server
  * keeps evicting by design. The counts come from the Prometheus metrics endpoint
- * (see {@link useLogPressure}); the banner stays hidden unless a count is
- * non-zero, so it never appears on a healthy server or when metrics are disabled.
+ * (see {@link useLogPressure}), which is polled only when the server's
+ * configuration says metrics are enabled; the banner stays hidden unless a count
+ * is non-zero, so it never appears on a healthy server or when metrics are disabled.
  *
  * Dismissal is remembered at the counts seen at dismiss time: the banner
  * re-appears only if *more* events are dropped. Further eviction alone does not
@@ -51,7 +53,12 @@ function plural(count: number, one: string, many: string): string {
 }
 
 export default function LogPressureBanner({ connectionParams }: LogPressureBannerProps) {
-  const pressure = useLogPressure(connectionParams);
+  // Without the configuration (e.g. refused by control-plane authentication) it cannot
+  // know whether metrics are on, so it probes once; a 404 then stops polling.
+  const probeMetrics = useDashboardStore(
+    (s) => s.serverConfiguration?.['metricsEnabled'] === true || s.serverConfigurationUnavailable,
+  );
+  const pressure = useLogPressure(connectionParams, probeMetrics);
   // The counts at the moment the user last dismissed the banner (null = never dismissed).
   const [dismissedAt, setDismissedAt] = useState<Acknowledged | null>(null);
 

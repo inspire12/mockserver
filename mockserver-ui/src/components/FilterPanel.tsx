@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Box from '@mui/material/Box';
+import ButtonBase from '@mui/material/ButtonBase';
 import Card from '@mui/material/Card';
 import CardContent from '@mui/material/CardContent';
 import Chip from '@mui/material/Chip';
@@ -393,26 +394,30 @@ export default function FilterPanel({ onFilterChange }: FilterPanelProps) {
 
   return (
     <Card variant="outlined" sx={{ mx: 1, mt: 1, flexShrink: 0 }}>
-      <Box
+      <ButtonBase
         onClick={toggleExpanded}
+        aria-expanded={expanded}
+        aria-controls="request-filter-content"
         sx={{
           display: 'flex',
-          alignItems: 'center',
+          width: '100%',
+          justifyContent: 'flex-start',
+          textAlign: 'left',
           px: 2,
           py: 1,
-          cursor: 'pointer',
           bgcolor: filterEnabled ? 'primary.main' : 'action.hover',
           color: filterEnabled ? 'primary.contrastText' : 'text.primary',
           '&:hover': { opacity: 0.9 },
+          '&.Mui-focusVisible': { outline: 2, outlineColor: 'primary.main', outlineOffset: -2 },
         }}
       >
         <FilterListIcon sx={{ mr: 1 }} fontSize="small" />
-        <Typography variant="subtitle2" sx={{ flex: 1 }}>
+        <Typography variant="subtitle2" component="span" sx={{ flex: 1 }}>
           Request Filter
         </Typography>
         {expanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
-      </Box>
-      <Collapse in={expanded}>
+      </ButtonBase>
+      <Collapse in={expanded} id="request-filter-content">
         <CardContent>
           <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2 }}>
             <Box sx={{ minWidth: 100 }}>

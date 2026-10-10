@@ -48,6 +48,23 @@ describe('FilterPanel', () => {
     expect(screen.getByText('Enabled')).toBeInTheDocument();
   });
 
+  it('the header is a button the Tab key reaches, and Enter and Space toggle it', async () => {
+    const user = userEvent.setup();
+    renderFilterPanel();
+
+    await user.tab();
+    const header = screen.getByRole('button', { name: 'Request Filter' });
+    expect(header).toHaveFocus();
+    expect(header).toHaveAttribute('aria-expanded', 'false');
+
+    await user.keyboard('{Enter}');
+    expect(header).toHaveAttribute('aria-expanded', 'true');
+    expect(useDashboardStore.getState().filterExpanded).toBe(true);
+
+    await user.keyboard(' ');
+    expect(header).toHaveAttribute('aria-expanded', 'false');
+  });
+
   it('shows method, path, and toggle fields when expanded', async () => {
     const user = userEvent.setup();
     renderFilterPanel();

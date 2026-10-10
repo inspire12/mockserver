@@ -120,8 +120,10 @@ export interface WebSocketMessage {
   activeExpectationsIncludeLlm?: boolean;
   recordedRequests: JsonListItem[];
   proxiedRequests: JsonListItem[];
-  /** The update reached its size limit, so older log rows were left out of it. */
+  /** The update reached its size limit, so older request rows were left out of it. */
   frameLimitReached?: boolean;
+  /** The log messages reached their share of the update's size limit, so older log messages were left out. */
+  logMessagesLimitReached?: boolean;
   error?: string;
 }
 

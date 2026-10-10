@@ -65,11 +65,6 @@ function HealthRow({ row }: { row: McpServerHealth }) {
           )}
         </Box>
       </TableCell>
-      <TableCell align="right">{/* No absolute count: this aggregates the capped live window, so it
-                  sums to at most the cap however much traffic ran. The rates and
-                  percentiles beside it are ratios over that sample and remain
-                  meaningful. */}
-                  —</TableCell>
       <TableCell align="right">
         <Typography
           component="span"
@@ -129,8 +124,10 @@ export default function McpServerHealthPanel() {
           <Table size="small" aria-label="MCP server health" data-testid="mcp-health-table">
             <TableHead>
               <TableRow>
+                {/* No Calls column: this aggregates the capped live window, so a count
+                    sums to at most the cap however much traffic ran. The rates and
+                    percentiles are ratios over that sample and remain meaningful. */}
                 <TableCell>Server</TableCell>
-                <TableCell align="right">Calls</TableCell>
                 <TableCell align="right">Errors</TableCell>
                 <TableCell align="right">Median</TableCell>
                 <TableCell align="right">p95</TableCell>

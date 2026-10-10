@@ -1,6 +1,6 @@
 import { useMemo, useState, useCallback, useRef, useLayoutEffect, memo } from 'react';
 import { useTransientFlag } from '../hooks/useTransientFlag';
-import type { ReactNode } from 'react';
+import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
 import Box from '@mui/material/Box';
 import Paper from '@mui/material/Paper';
 import Typography from '@mui/material/Typography';
@@ -549,6 +549,11 @@ export function isUnmatchedResponse(value: Record<string, unknown>): boolean {
   return typeof rp === 'string' && rp.trim().toLowerCase() === 'not found';
 }
 
+/** The keyboard-operable Traffic rows mounted in the list's scroll region, in list order. */
+function rowElements(region: Element | null): HTMLElement[] {
+  return Array.from(region?.querySelectorAll<HTMLElement>('[data-traffic-row-key][role="button"]') ?? []);
+}
+
 /** Single-quote a string for a POSIX shell, escaping embedded single quotes. */
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
@@ -686,6 +691,12 @@ interface TrafficRowProps {
   selectChecked?: boolean;
   /** Stable handler — receives this row's `itemKey`. */
   onSelectToggle?: (key: string) => void;
+  /** The one row the Tab key reaches (roving tab index); the arrow keys move between rows. */
+  tabbable?: boolean;
+  /** Stable handler — receives this row's element and the direction an arrow key moves focus. */
+  onMoveFocus?: (row: HTMLElement, delta: 1 | -1) => void;
+  /** Stable handler — receives this row's `itemKey` when the row takes focus. */
+  onRowFocus?: (key: string) => void;
 }
 
 // `TrafficRow` is wrapped in `React.memo` (see the `export`/assignment below) so
@@ -711,6 +722,9 @@ function TrafficRowImpl({
   selectMode,
   selectChecked,
   onSelectToggle,
+  tabbable = false,
+  onMoveFocus,
+  onRowFocus,
 }: TrafficRowProps) {
   const model = getModelLabel(summary.parsed);
   const tokens = getTokenSummary(summary.parsed);
@@ -725,6 +739,23 @@ function TrafficRowImpl({
     () => onSelectToggle?.(itemKey),
     [onSelectToggle, itemKey],
   );
+  // In compare and select mode the row's checkbox is the control, so the row
+  // itself is not a button (a button may not contain another control).
+  const keyboardRow = !compareMode && !selectMode;
+  const handleKeyDown = useCallback(
+    (e: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (e.target !== e.currentTarget) return;
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        onSelect(itemKey);
+      } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        onMoveFocus?.(e.currentTarget, e.key === 'ArrowDown' ? 1 : -1);
+      }
+    },
+    [onSelect, onMoveFocus, itemKey],
+  );
+  const handleFocus = useCallback(() => onRowFocus?.(itemKey), [onRowFocus, itemKey]);
 
   // Accessible name keyed on request IDENTITY (method + path), not the row
   // ordinal: the list is a capped live window that renumbers on every push, so an
@@ -736,6 +767,12 @@ function TrafficRowImpl({
   return (
     <Box
       onClick={handleClick}
+      role={keyboardRow ? 'button' : undefined}
+      tabIndex={keyboardRow ? (tabbable ? 0 : -1) : undefined}
+      aria-pressed={keyboardRow ? selected : undefined}
+      onKeyDown={keyboardRow ? handleKeyDown : undefined}
+      onFocus={keyboardRow ? handleFocus : undefined}
+      data-traffic-row-key={itemKey}
       sx={{
         display: 'flex',
         alignItems: 'center',
@@ -743,6 +780,7 @@ function TrafficRowImpl({
         px: 1,
         py: 0.5,
         cursor: 'pointer',
+        '&:focus-visible': { outline: 2, outlineColor: 'primary.main', outlineOffset: -2 },
         bgcolor: selected ? 'action.selected' : 'transparent',
         transition: transitions.forProps(['background-color']),
         '&:hover': { bgcolor: selected ? 'action.selected' : 'action.hover' },
@@ -805,7 +843,7 @@ function TrafficRowImpl({
       >
         {summary.method ?? '?'}
       </Typography>
-      <Tooltip title={`${summary.host ?? ''}${summary.path ?? ''}`}>
+      <Tooltip title={`${summary.host ?? ''}${summary.path ?? ''}`} disableInteractive>
         <Typography
           variant="caption"
           noWrap
@@ -1792,7 +1830,7 @@ function GenericSummaryHeader({ summary }: { summary: TrafficSummary }) {
       >
         {summary.method ?? '?'}
       </Typography>
-      <Tooltip title={`${summary.host ?? ''}${summary.path ?? ''}`}>
+      <Tooltip title={`${summary.host ?? ''}${summary.path ?? ''}`} disableInteractive>
         <Typography
           variant="caption"
           noWrap
@@ -2093,29 +2131,33 @@ function DetailPane({ item, summary, scriptedTurns, onCaptureAsMock, onReplay, o
       <LlmUsageDetail parsed={summary.parsed} />
       {summary.parsed.kind === 'generic' && <GenericSummaryHeader summary={summary} />}
       {summary.timing && <TimingWaterfall timing={summary.timing} />}
-      <Box sx={{ display: 'flex', alignItems: 'center', flexShrink: 0 }}>
+      {/* The actions wrap onto their own line rather than squeezing the tabs,
+          whose labels would otherwise be cut behind a scroll arrow. */}
+      <Box data-testid="traffic-detail-header" sx={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', flexShrink: 0 }}>
         <Tabs
           value={safeTab}
           onChange={(_, v: number) => setDetailTab(v)}
           variant="scrollable"
           scrollButtons="auto"
-          sx={{ flexGrow: 1, minHeight: 32, '& .MuiTab-root': { minHeight: 32, py: 0.5, fontSize: '0.75rem' } }}
+          sx={{ flex: '1 1 auto', minWidth: 0, minHeight: 32, '& .MuiTab-root': { minHeight: 32, py: 0.5, fontSize: '0.75rem' } }}
         >
           {tabs.map((label) => (
             <Tab key={label} label={label} />
           ))}
         </Tabs>
-        <DetailActions
-          item={item}
-          summary={summary}
-          canCapture={canCapture}
-          unmatched={unmatched}
-          onCaptureAsMock={onCaptureAsMock}
-          onReplay={onReplay}
-          onRepeat={onRepeat}
-          onAddToDiffPool={onAddToDiffPool}
-          inDiffPool={inDiffPool}
-        />
+        <Box sx={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end', ml: 'auto' }}>
+          <DetailActions
+            item={item}
+            summary={summary}
+            canCapture={canCapture}
+            unmatched={unmatched}
+            onCaptureAsMock={onCaptureAsMock}
+            onReplay={onReplay}
+            onRepeat={onRepeat}
+            onAddToDiffPool={onAddToDiffPool}
+            inDiffPool={inDiffPool}
+          />
+        </Box>
       </Box>
       <Divider />
       <Box sx={{ flex: 1, overflowY: 'auto', p: 1, minHeight: 0 }}>
@@ -2362,6 +2404,15 @@ export default function TrafficInspector() {
     [activeExpectations],
   );
 
+  // Above INFO the server does not log the 404 it returns for a request that
+  // matched nothing (it is an INFO entry), so such rows have no response and
+  // nothing marks them unmatched. Say so rather than silently showing less.
+  const logLevel = useDashboardStore((s) => s.serverConfiguration?.['logLevel']);
+  const [logLevelHintDismissed, setLogLevelHintDismissed] = useState(false);
+  const showLogLevelHint = !logLevelHintDismissed
+    && (logLevel === 'WARN' || logLevel === 'ERROR' || logLevel === 'OFF')
+    && recordedRequests.some((item) => !item.value['httpResponse']);
+
   // Build summaries for every captured request (proxied + mocked).
   const allRequests = useMemo(
     () => [...proxiedRequests, ...recordedRequests],
@@ -2514,6 +2565,33 @@ export default function TrafficInspector() {
     },
     [compareMode, selectMode, toggleCompareKey, toggleSelectKey, handleRowClick],
   );
+
+  // Roving tab index: Tab reaches one row (the last one focused, else the open
+  // one, else the newest) and the arrow keys move between rows. Neighbours are
+  // found in the DOM, where the windowed list keeps the rows near the viewport.
+  const [rovingKey, setRovingKey] = useState<string | null>(null);
+  const tabbableKey = useMemo(() => {
+    const present = (key: string | null) => key !== null && filtered.some(({ item }) => item.key === key);
+    if (present(rovingKey)) return rovingKey;
+    if (present(selectedKey)) return selectedKey;
+    return filtered.length > 0 ? filtered[filtered.length - 1]!.item.key : null;
+  }, [filtered, rovingKey, selectedKey]);
+  const handleMoveFocus = useCallback((row: HTMLElement, delta: 1 | -1) => {
+    const rows = rowElements(row.closest('[data-testid="traffic-scroll-region"]'));
+    const next = rows[rows.indexOf(row) + delta];
+    if (!next) return;
+    setRovingKey(next.dataset.trafficRowKey ?? null);
+    next.focus();
+  }, []);
+  // When the reader scrolls the Tab-reachable row out of the window, hand the
+  // tab stop to the first row in view so Tab can still reach the list.
+  const keepTabStopInView = useCallback((region: HTMLElement) => {
+    const rows = rowElements(region);
+    if (rows.length === 0 || rows.some((row) => row.tabIndex === 0)) return;
+    const top = region.getBoundingClientRect().top;
+    const inView = rows.find((row) => row.getBoundingClientRect().bottom > top) ?? rows[0]!;
+    setRovingKey(inView.dataset.trafficRowKey ?? null);
+  }, []);
 
   // Whether the currently-selected detail entry is already staged in the pool,
   // and a handler to stage it. Extracted from the selected summary so the pooled
@@ -2713,14 +2791,8 @@ export default function TrafficInspector() {
           <Typography variant="subtitle2" sx={{ fontWeight: 600, fontSize: '0.79rem' }}>
             Traffic
           </Typography>
-          {allRequests.length > 0 && (
-            <Chip
-              label={allRequests.length > 999 ? '999+' : allRequests.length}
-              color="primary"
-              size="small"
-              sx={{ height: 18, fontSize: '0.65rem', '& .MuiChip-label': { px: 0.75 } }}
-            />
-          )}
+          {/* No row count: the list is the server's capped live window, so a count
+              pins at the cap however much traffic ran. */}
           {/* Follow control, mirroring Panel's. A reader who scrolls up to read
               turns following off (via onScroll below) and needs a visible way to
               resume; a reader parked at the tail sees it lit. Clicking it jumps
@@ -2861,6 +2933,18 @@ export default function TrafficInspector() {
             </span>
           </Tooltip>
         </Box>
+        {showLogLevelHint && (
+          <Alert
+            severity="info"
+            data-testid="traffic-log-level-hint"
+            onClose={() => setLogLevelHintDismissed(true)}
+            sx={{ mx: 1, my: 0.5, py: 0, fontSize: '0.75rem' }}
+          >
+            MockServer is logging at {String(logLevel)}, so it does not record the response to a request
+            that matches no expectation. Those requests show no status here, and the unmatched badge, Why
+            Didn&apos;t This Match? and Generate Stub need the log level INFO (set it in Configuration).
+          </Alert>
+        )}
         {trafficSearch && shortenedRows.length > 0 && (
           <Alert
             severity="info"
@@ -2884,7 +2968,10 @@ export default function TrafficInspector() {
           ref={scrollRef}
           data-testid="traffic-scroll-region"
           sx={{ flex: 1, overflowY: 'auto', bgcolor: 'background.default' }}
-          onScroll={(e) => handleScroll(e.currentTarget)}
+          onScroll={(e) => {
+            handleScroll(e.currentTarget);
+            keepTabStopInView(e.currentTarget);
+          }}
         >
           {filtered.length === 0 ? (
             allRequests.length === 0 ? (
@@ -2963,6 +3050,9 @@ export default function TrafficInspector() {
                     selectMode={selectMode}
                     selectChecked={selectedKeys.has(item.key)}
                     onSelectToggle={toggleSelectKey}
+                    tabbable={item.key === tabbableKey}
+                    onMoveFocus={handleMoveFocus}
+                    onRowFocus={setRovingKey}
                   />
                 );
               }}

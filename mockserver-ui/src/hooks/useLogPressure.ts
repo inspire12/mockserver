@@ -12,9 +12,10 @@ import { parseLogPressure, type LogPressure } from '../lib/logPressure';
  * - Reuses `GET /mockserver/metrics` (already polled by the Metrics view) rather
  *   than a bespoke endpoint. Polls slowly (default 15s): the counters only ever
  *   grow and the banner is advisory, so a low cadence keeps overhead trivial.
- * - Stops polling permanently on a 404 — that means the server was started
- *   without metrics enabled, so the counters are unavailable and the banner can
- *   never fire; there is no point re-scraping.
+ * - Polls only while `enabled` — the caller passes the server's `metricsEnabled`
+ *   setting — because a server without metrics answers 404, which every browser
+ *   logs as a console error. It still stops polling for good on a 404 (metrics
+ *   switched off since the configuration was read).
  * - Pauses while the tab is hidden (mirrors {@link useMetricsPolling}).
  * - Returns `null` until the first successful scrape (and after a server change);
  *   callers treat `null` as "unknown — show nothing".
@@ -23,6 +24,7 @@ const DEFAULT_POLL_INTERVAL_MS = 15000;
 
 export function useLogPressure(
   params: ConnectionParams,
+  enabled: boolean,
   intervalMs: number = DEFAULT_POLL_INTERVAL_MS,
 ): LogPressure | null {
   const baseUrl = buildBaseUrl(params);
@@ -38,6 +40,7 @@ export function useLogPressure(
   }
 
   useEffect(() => {
+    if (!enabled) return undefined;
     let cancelled = false;
     let metricsDisabled = false;
     // Guards against overlapping poll chains: a hidden→visible transition (or a
@@ -99,7 +102,7 @@ export function useLogPressure(
         document.removeEventListener('visibilitychange', onVisibilityChange);
       }
     };
-  }, [baseUrl, intervalMs]);
+  }, [baseUrl, intervalMs, enabled]);
 
-  return pressure;
+  return enabled ? pressure : null;
 }
