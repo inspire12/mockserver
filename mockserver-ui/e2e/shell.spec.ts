@@ -68,7 +68,7 @@ test.beforeEach(async ({ page, request }) => {
 // Several tests pass through the Metrics view on the main server, whose metrics
 // are off. That view (only it) probes GET /mockserver/metrics and reads the 404
 // as "disabled" to show its guidance; the browser logs that 404.
-const METRICS_VIEW_PROBE_404 = new RegExp(`status of 404 .* @ ${ORIGIN.replace(/[.]/g, '\\.')}/mockserver/metrics$`);
+const METRICS_VIEW_PROBE_404 = new RegExp(`status of 404 .* @ ${ORIGIN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/mockserver/metrics$`);
 
 test.afterEach(async ({ page }) => {
   const allowed = [METRICS_VIEW_PROBE_404, ...(allowedConsole.get(page) ?? [])];
