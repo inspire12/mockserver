@@ -67,10 +67,8 @@ public class NettyResponseWriter extends ResponseWriter {
     }
 
     @Override
-    public void respondingDirectly(ChannelHandlerContext ctx) {
-        if (inFlightRequest != null) {
-            inFlightRequest.completeWhenResponseEnds(ctx);
-        }
+    public Runnable respondingDirectly() {
+        return inFlightRequest != null ? inFlightRequest::complete : super.respondingDirectly();
     }
 
     @Override

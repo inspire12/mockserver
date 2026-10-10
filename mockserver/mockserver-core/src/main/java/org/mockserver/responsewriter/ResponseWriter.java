@@ -1,6 +1,5 @@
 package org.mockserver.responsewriter;
 
-import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.cors.CORSHeaders;
@@ -135,11 +134,16 @@ public abstract class ResponseWriter {
     public abstract void sendResponse(HttpRequest request, HttpResponse response);
 
     /**
-     * Announces that this exchange's response is about to be written straight to {@code ctx} rather than
-     * through {@link #sendResponse}, as SSE, WebSocket, gRPC stream and raw-bytes error responses are, so a
-     * writer that tracks the exchange can watch the channel for the end of that response. Does nothing here.
+     * Announces that this exchange's response is about to be written straight to the channel rather than
+     * through {@link #sendResponse}, as SSE, WebSocket, gRPC stream and raw-bytes error responses are. Returns
+     * what the handler writing that response runs once it has ended (its last part written, or the exchange
+     * ended without one), so a writer that tracks the exchange can release it. Only that handler holds it: on a
+     * connection carrying other exchanges too, their ends do not run it. It may run more than once. Does
+     * nothing here.
      */
-    public void respondingDirectly(ChannelHandlerContext ctx) {
+    public Runnable respondingDirectly() {
+        return () -> {
+        };
     }
 
     protected HttpResponse addConnectionHeader(final HttpRequest request, final HttpResponse response) {

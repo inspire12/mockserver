@@ -1,22 +1,10 @@
 package org.mockserver.netty;
 
-import io.netty.buffer.Unpooled;
-import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
-import io.netty.handler.codec.http.DefaultFullHttpResponse;
-import io.netty.handler.codec.http.DefaultHttpContent;
-import io.netty.handler.codec.http.DefaultHttpResponse;
-import io.netty.handler.codec.http.HttpResponseStatus;
-import io.netty.handler.codec.http.HttpVersion;
-import io.netty.handler.codec.http.LastHttpContent;
 import org.junit.Test;
-import org.mockserver.codec.StreamAddressedHttpContent;
 import org.mockserver.lifecycle.LifeCycle;
-import org.mockserver.responsewriter.HttpExchangeEndedEvent;
 
 import java.lang.ref.WeakReference;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -140,132 +128,6 @@ public class InFlightRequestTest {
         token.complete();
 
         // then
-        assertThat(inFlight.get(), is(0));
-    }
-
-    /**
-     * A token whose response is written straight to the channel, with {@code handler} standing in for
-     * the request handler that writes it, on a connection kept open throughout.
-     */
-    private InFlightRequest directResponse(EmbeddedChannel connection, AtomicInteger inFlight) {
-        InFlightRequest token = InFlightRequest.started(counterBackedServer(inFlight));
-        token.trackConnectionClose(connection);
-        token.completeWhenResponseEnds(connection.pipeline().context("handler"));
-        return token;
-    }
-
-    private static EmbeddedChannel keepAliveConnection() {
-        EmbeddedChannel connection = new EmbeddedChannel();
-        connection.pipeline().addLast("handler", new ChannelInboundHandlerAdapter());
-        return connection;
-    }
-
-    private static boolean watching(EmbeddedChannel connection) {
-        return connection.pipeline().get(InFlightRequest.ResponseEndWatcher.class) != null;
-    }
-
-    @Test
-    public void directResponseIsReleasedWhenItsLastContentIsWrittenNotBefore() {
-        EmbeddedChannel connection = keepAliveConnection();
-        AtomicInteger inFlight = new AtomicInteger(0);
-        directResponse(connection, inFlight);
-        ChannelHandlerContext handler = connection.pipeline().context("handler");
-
-        handler.writeAndFlush(new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK));
-        handler.writeAndFlush(new DefaultHttpContent(Unpooled.copiedBuffer("data: first\n\n", StandardCharsets.UTF_8)));
-        assertThat("the head and an event do not end the response", inFlight.get(), is(1));
-
-        handler.writeAndFlush(LastHttpContent.EMPTY_LAST_CONTENT);
-        assertThat("the last content ends it", inFlight.get(), is(0));
-        assertThat("the watcher leaves once the response has ended", watching(connection), is(false));
-        assertThat(connection.isOpen(), is(true));
-        connection.finishAndReleaseAll();
-    }
-
-    @Test
-    public void directResponseIsReleasedOnlyOnceTheLastContentWriteHasCompleted() {
-        EmbeddedChannel connection = keepAliveConnection();
-        AtomicInteger inFlight = new AtomicInteger(0);
-        directResponse(connection, inFlight);
-        ChannelHandlerContext handler = connection.pipeline().context("handler");
-
-        handler.write(LastHttpContent.EMPTY_LAST_CONTENT);
-        assertThat("queued but not yet written", inFlight.get(), is(1));
-
-        connection.flush();
-        assertThat(inFlight.get(), is(0));
-        connection.finishAndReleaseAll();
-    }
-
-    @Test
-    public void interimResponseDoesNotEndTheExchangeButSwitchingProtocolsDoes() {
-        EmbeddedChannel connection = keepAliveConnection();
-        AtomicInteger inFlight = new AtomicInteger(0);
-        directResponse(connection, inFlight);
-        ChannelHandlerContext handler = connection.pipeline().context("handler");
-
-        handler.writeAndFlush(new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.CONTINUE));
-        assertThat("100 Continue precedes the response", inFlight.get(), is(1));
-
-        handler.channel().writeAndFlush(new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.SWITCHING_PROTOCOLS));
-        assertThat("101 hands the connection to WebSocket", inFlight.get(), is(0));
-        assertThat(watching(connection), is(false));
-        connection.finishAndReleaseAll();
-    }
-
-    @Test
-    public void directResponseIsReleasedByItsEndOfStreamFrame() {
-        EmbeddedChannel connection = keepAliveConnection();
-        AtomicInteger inFlight = new AtomicInteger(0);
-        directResponse(connection, inFlight);
-        ChannelHandlerContext handler = connection.pipeline().context("handler");
-
-        handler.writeAndFlush(new StreamAddressedHttpContent(Unpooled.copiedBuffer("event", StandardCharsets.UTF_8), 3, false));
-        assertThat(inFlight.get(), is(1));
-
-        handler.writeAndFlush(new StreamAddressedHttpContent(Unpooled.EMPTY_BUFFER, 3, true));
-        assertThat(inFlight.get(), is(0));
-        connection.finishAndReleaseAll();
-    }
-
-    @Test
-    public void directResponseIsReleasedWhenTheExchangeEndsWithoutOne() {
-        for (HttpExchangeEndedEvent ended : new HttpExchangeEndedEvent[]{HttpExchangeEndedEvent.INSTANCE, HttpExchangeEndedEvent.RAW_RESPONSE_WRITTEN}) {
-            EmbeddedChannel connection = keepAliveConnection();
-            AtomicInteger inFlight = new AtomicInteger(0);
-            directResponse(connection, inFlight);
-
-            connection.pipeline().fireUserEventTriggered(ended);
-
-            assertThat(ended + " ends the exchange", inFlight.get(), is(0));
-            assertThat(watching(connection), is(false));
-            connection.finishAndReleaseAll();
-        }
-    }
-
-    @Test
-    public void directResponseIsReleasedOnceWhenTheConnectionAlsoCloses() {
-        EmbeddedChannel connection = keepAliveConnection();
-        AtomicInteger inFlight = new AtomicInteger(0);
-        directResponse(connection, inFlight);
-        // a second exchange on the same connection, still in flight, shows a double release
-        InFlightRequest.started(counterBackedServer(inFlight));
-
-        connection.pipeline().context("handler").writeAndFlush(LastHttpContent.EMPTY_LAST_CONTENT);
-        connection.close();
-
-        assertThat(inFlight.get(), is(1));
-        connection.finishAndReleaseAll();
-    }
-
-    @Test
-    public void directResponseOnAClosedConnectionIsReleasedByTheCloseFuture() {
-        EmbeddedChannel connection = keepAliveConnection();
-        AtomicInteger inFlight = new AtomicInteger(0);
-        directResponse(connection, inFlight);
-
-        connection.close();
-
         assertThat(inFlight.get(), is(0));
     }
 

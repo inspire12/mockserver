@@ -684,14 +684,16 @@ public class HttpActionHandlerTest {
         expectation = new Expectation(request).thenError(error);
         when(mockHttpStateHandler.firstMatchingExpectation(request)).thenReturn(expectation);
         ResponseWriter mockResponseWriter = mock(ResponseWriter.class);
+        Runnable responseEnded = () -> {
+        };
+        when(mockResponseWriter.respondingDirectly()).thenReturn(responseEnded);
         ChannelHandlerContext mockChannelHandlerContext = mock(ChannelHandlerContext.class);
 
         // when
         actionHandler.processAction(request, mockResponseWriter, mockChannelHandlerContext, new HashSet<>(), false, true);
 
-        // then
-        verify(mockResponseWriter).respondingDirectly(mockChannelHandlerContext);
-        verify(mockHttpErrorActionHandler).handle(error, request, mockChannelHandlerContext);
+        // then - the error handler is given this exchange's own end, not the connection's
+        verify(mockHttpErrorActionHandler).handle(error, request, mockChannelHandlerContext, responseEnded);
         verify(mockServerLogger).logEvent(
             new LogEntry()
                 .setType(RECEIVED_REQUEST)
@@ -765,7 +767,7 @@ public class HttpActionHandlerTest {
         actionHandler.processAction(request, plainResponseWriter, mockChannelHandlerContext, new HashSet<>(), false, true);
 
         // then - the netty HttpErrorActionHandler applies the reset/connection-drop
-        verify(mockHttpErrorActionHandler).handle(error, request, mockChannelHandlerContext);
+        verify(mockHttpErrorActionHandler).handle(eq(error), eq(request), eq(mockChannelHandlerContext), any());
     }
 
     /**
@@ -895,7 +897,7 @@ public class HttpActionHandlerTest {
             actionHandler.processAction(request, responseWriter, ctx, new HashSet<>(), false, true);
 
             // then - announced, so the writer can see the response end on a connection that stays open
-            verify(responseWriter, description(directExpectation.getAction().getType() + " is announced")).respondingDirectly(ctx);
+            verify(responseWriter, description(directExpectation.getAction().getType() + " is announced")).respondingDirectly();
         }
     }
 
@@ -910,7 +912,7 @@ public class HttpActionHandlerTest {
 
         // then
         verify(responseWriter).writeResponse(request, this.response, false);
-        verify(responseWriter, never()).respondingDirectly(any());
+        verify(responseWriter, never()).respondingDirectly();
     }
 
     @Test

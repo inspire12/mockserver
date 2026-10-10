@@ -1,6 +1,7 @@
 package org.mockserver.mock.action.http;
 
 import io.netty.buffer.Unpooled;
+import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.http.HttpServerCodec;
@@ -35,6 +36,15 @@ public class HttpErrorActionHandler {
     }
 
     public void handle(HttpError httpError, HttpRequest request, ChannelHandlerContext ctx) {
+        handle(httpError, request, ctx, () -> {
+        });
+    }
+
+    /**
+     * Applies the error, running {@code responseEnded} once it has: the raw bytes written, the stream reset or the
+     * connection closed, or straight away when nothing is written and the connection stays open.
+     */
+    public void handle(HttpError httpError, HttpRequest request, ChannelHandlerContext ctx, Runnable responseEnded) {
         if (httpError.getResponseBytes() != null) {
             // write byte directly by skipping over HTTP codec
             ChannelHandlerContext httpCodecContext = ctx.pipeline().context(HttpServerCodec.class);
@@ -45,7 +55,8 @@ public class HttpErrorActionHandler {
                 ChannelPromise written = httpCodecContext.newPromise();
                 written.addListener(future -> {
                     httpCodecContext.fireUserEventTriggered(HttpExchangeEndedEvent.RAW_RESPONSE_WRITTEN);
-                    resetStreamOrDropConnection(httpError, request, ctx);
+                    responseEnded.run();
+                    resetStreamOrDropConnection(httpError, request, ctx, responseEnded);
                 });
                 byte[] responseBytes = httpError.getResponseBytes();
                 // announced in the task that issues the write, so no other write can come between the two
@@ -67,50 +78,61 @@ public class HttpErrorActionHandler {
                 return;
             }
         }
-        if (!resetStreamOrDropConnection(httpError, request, ctx)) {
+        if (!resetStreamOrDropConnection(httpError, request, ctx, responseEnded)) {
             // nothing is written and the connection stays open: this exchange is abandoned
             HttpExchangeEndedEvent.fire(ctx);
+            responseEnded.run();
         }
     }
 
     /**
-     * Apply the stream error or connection drop, returning true if either was applied.
+     * Apply the stream error or connection drop, returning true if either was applied, and run {@code applied} once
+     * the reset or close it issued has completed.
      */
-    private boolean resetStreamOrDropConnection(HttpError httpError, HttpRequest request, ChannelHandlerContext ctx) {
+    private boolean resetStreamOrDropConnection(HttpError httpError, HttpRequest request, ChannelHandlerContext ctx, Runnable applied) {
         if (httpError.getStreamError() != null) {
             // reset only this stream, leaving other multiplexed streams on the connection alive.
             // HTTP/3 (QuicStreamChannel) is handled earlier by the StreamErrorWriter seam in the
             // HTTP/3 response writer (mockserver-netty), so we only reach here for HTTP/2 (reset the
             // matched stream) and HTTP/1.1 (no stream concept -> fall back to dropping the connection).
-            boolean reset = resetHttp2Stream(httpError.getStreamError(), request, ctx);
+            boolean reset = resetHttp2Stream(httpError.getStreamError(), request, ctx, applied);
             if (!reset) {
                 // HTTP/1.1 (or HTTP/2 stream id unavailable): there is no stream to reset, so fall
                 // back to the existing HttpError connection-drop behaviour.
                 ctx.disconnect();
-                ctx.close();
+                runWhenDone(ctx.close(), applied);
             }
             return true;
         }
         if (httpError.getDropConnection() != null && httpError.getDropConnection()) {
             ctx.disconnect();
-            ctx.close();
+            runWhenDone(ctx.close(), applied);
             return true;
         }
         return false;
     }
 
+    private static void runWhenDone(ChannelFuture future, Runnable runnable) {
+        if (future != null) {
+            future.addListener(done -> runnable.run());
+        } else {
+            runnable.run();
+        }
+    }
+
     /**
-     * Reset the matched HTTP/2 stream with the given error code, returning true if a reset was issued.
+     * Reset the matched HTTP/2 stream with the given error code, returning true if a reset was issued, and run
+     * {@code reset} once it has been written.
      * Supports both the connection-level pipeline ({@link Http2ConnectionHandler}, the default path)
      * and the multiplex pipeline (per-stream {@link Http2StreamChannel} child channels, used when gRPC
      * bidi streaming is enabled).
      */
-    private boolean resetHttp2Stream(long errorCode, HttpRequest request, ChannelHandlerContext ctx) {
+    private boolean resetHttp2Stream(long errorCode, HttpRequest request, ChannelHandlerContext ctx, Runnable reset) {
         // Multiplex path: the request is processed on a per-stream Http2StreamChannel child channel, so
         // writing a DefaultHttp2ResetFrame on that child channel resets exactly that stream. The parent
         // Http2MultiplexHandler/Http2FrameCodec translates it into a RST_STREAM frame for the stream.
         if (ctx.channel() instanceof Http2StreamChannel) {
-            ctx.writeAndFlush(new DefaultHttp2ResetFrame(errorCode));
+            runWhenDone(ctx.writeAndFlush(new DefaultHttp2ResetFrame(errorCode)), reset);
             return true;
         }
         // Connection-level path: a single Http2ConnectionHandler multiplexes all streams over one
@@ -119,7 +141,7 @@ public class HttpErrorActionHandler {
         ChannelHandlerContext connectionHandlerContext = ctx.pipeline().context(Http2ConnectionHandler.class);
         if (connectionHandlerContext != null && request != null && request.getStreamId() != null) {
             Http2ConnectionHandler connectionHandler = (Http2ConnectionHandler) connectionHandlerContext.handler();
-            connectionHandler.resetStream(connectionHandlerContext, request.getStreamId(), errorCode, connectionHandlerContext.newPromise());
+            runWhenDone(connectionHandler.resetStream(connectionHandlerContext, request.getStreamId(), errorCode, connectionHandlerContext.newPromise()), reset);
             connectionHandlerContext.flush();
             return true;
         }

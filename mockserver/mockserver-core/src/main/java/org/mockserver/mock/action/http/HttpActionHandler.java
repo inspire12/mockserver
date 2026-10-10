@@ -224,8 +224,7 @@ public class HttpActionHandler {
         if (isEmpty(host)) {
             return false;
         }
-        responseWriter.respondingDirectly(ctx);
-        getWebSocketProxyRelayHandler().relay(request, ctx, host, port, tls);
+        getWebSocketProxyRelayHandler().relay(request, ctx, host, port, tls, responseWriter.respondingDirectly());
         return true;
     }
 
@@ -698,8 +697,7 @@ public class HttpActionHandler {
                                     .setMessageFormat("returning SSE response for request:{}for action:{}from expectation:{}")
                                     .setArguments(request, action, action.getExpectationId())
                             );
-                            responseWriter.respondingDirectly(ctx);
-                            getHttpSseResponseActionHandler().handle((HttpSseResponse) action, ctx, request);
+                            getHttpSseResponseActionHandler().handle((HttpSseResponse) action, ctx, request, org.mockserver.llm.StreamingFormat.SSE, responseWriter.respondingDirectly());
                         } catch (Throwable throwable) {
                             if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
                                 mockServerLogger.logEvent(
@@ -778,8 +776,7 @@ public class HttpActionHandler {
                                     .withHeader("content-type", contentType)
                                     .withHeader("cache-control", "no-cache")
                                     .withEvents(sseEvents);
-                                responseWriter.respondingDirectly(ctx);
-                                getHttpSseResponseActionHandler().handle(sseResponse, ctx, request, streamingFormat);
+                                getHttpSseResponseActionHandler().handle(sseResponse, ctx, request, streamingFormat, responseWriter.respondingDirectly());
                             } catch (Throwable throwable) {
                                 if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
                                     mockServerLogger.logEvent(
@@ -859,8 +856,7 @@ public class HttpActionHandler {
                                     .setMessageFormat("returning WebSocket response for request:{}for action:{}from expectation:{}")
                                     .setArguments(request, action, action.getExpectationId())
                             );
-                            responseWriter.respondingDirectly(ctx);
-                            getHttpWebSocketResponseActionHandler().handle((HttpWebSocketResponse) action, ctx, request);
+                            getHttpWebSocketResponseActionHandler().handle((HttpWebSocketResponse) action, ctx, request, responseWriter.respondingDirectly());
                         } catch (Throwable throwable) {
                             if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
                                 mockServerLogger.logEvent(
@@ -937,8 +933,7 @@ public class HttpActionHandler {
                                     .setMessageFormat("returning gRPC stream response for request:{}for action:{}from expectation:{}")
                                     .setArguments(request, action, action.getExpectationId())
                             );
-                            responseWriter.respondingDirectly(ctx);
-                            getGrpcStreamResponseActionHandler().handle((GrpcStreamResponse) action, ctx, request);
+                            getGrpcStreamResponseActionHandler().handle((GrpcStreamResponse) action, ctx, request, responseWriter.respondingDirectly());
                         } catch (Throwable throwable) {
                             if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
                                 mockServerLogger.logEvent(
@@ -4067,8 +4062,7 @@ public class HttpActionHandler {
         if (httpError.getStreamError() != null && responseWriter instanceof StreamErrorWriter) {
             ((StreamErrorWriter) responseWriter).writeStreamError(httpError.getStreamError());
         } else {
-            responseWriter.respondingDirectly(ctx);
-            getHttpErrorActionHandler().handle(httpError, request, ctx);
+            getHttpErrorActionHandler().handle(httpError, request, ctx, responseWriter.respondingDirectly());
         }
         mockServerLogger.logEvent(
             new LogEntry()

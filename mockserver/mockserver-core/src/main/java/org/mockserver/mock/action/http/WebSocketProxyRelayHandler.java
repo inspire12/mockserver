@@ -119,6 +119,16 @@ public class WebSocketProxyRelayHandler {
      */
     public void relay(final HttpRequest request, final ChannelHandlerContext clientCtx,
                       final String upstreamHost, final int upstreamPort, final boolean tlsUpstream) {
+        relay(request, clientCtx, upstreamHost, upstreamPort, tlsUpstream, () -> {
+        });
+    }
+
+    /**
+     * As {@link #relay(HttpRequest, ChannelHandlerContext, String, int, boolean)}, running {@code responseEnded} once
+     * the client's handshake response has been written. A relay that fails closes the client's connection instead.
+     */
+    public void relay(final HttpRequest request, final ChannelHandlerContext clientCtx,
+                      final String upstreamHost, final int upstreamPort, final boolean tlsUpstream, final Runnable responseEnded) {
         final Channel clientChannel = clientCtx.channel();
         // forwardProxyBlockPrivateNetworks, as for any forward; connecting to the address checked means a second
         // DNS answer for the name cannot reach a blocked address. Unchanged (connect by name) when the setting is off.
@@ -187,7 +197,7 @@ public class WebSocketProxyRelayHandler {
                     pipeline.addLast(codec);
                     pipeline.addLast(lineEndSplitGuard.afterCodec());
                     pipeline.addLast(new HttpObjectAggregator(MAX_FRAME_PAYLOAD_LENGTH));
-                    pipeline.addLast(new UpstreamHandshakeHandler(request, clientCtx, upstreamHandshaker, subprotocol, transcript, maxHeaderSize, handshakeTimeoutMillis, handshakeTimeoutName));
+                    pipeline.addLast(new UpstreamHandshakeHandler(request, clientCtx, upstreamHandshaker, subprotocol, transcript, maxHeaderSize, handshakeTimeoutMillis, handshakeTimeoutName, responseEnded));
                 }
             });
 
@@ -348,6 +358,7 @@ public class WebSocketProxyRelayHandler {
         private final int maxHeaderSize;
         private final long handshakeTimeoutMillis;
         private final String handshakeTimeoutName;
+        private final Runnable responseEnded;
         // the client has been answered 502, or has gone: whatever the upstream connection reports after that is not reported
         private boolean failed;
         private ScheduledFuture<?> handshakeTimeout;
@@ -355,7 +366,7 @@ public class WebSocketProxyRelayHandler {
         private UpstreamHandshakeHandler(HttpRequest request, ChannelHandlerContext clientCtx,
                                          WebSocketClientHandshaker handshaker, String requestedSubprotocol,
                                          FrameTranscript transcript, int maxHeaderSize, long handshakeTimeoutMillis,
-                                         String handshakeTimeoutName) {
+                                         String handshakeTimeoutName, Runnable responseEnded) {
             this.request = request;
             this.clientCtx = clientCtx;
             this.handshaker = handshaker;
@@ -364,6 +375,7 @@ public class WebSocketProxyRelayHandler {
             this.maxHeaderSize = maxHeaderSize;
             this.handshakeTimeoutMillis = handshakeTimeoutMillis;
             this.handshakeTimeoutName = handshakeTimeoutName;
+            this.responseEnded = responseEnded;
         }
 
         private void fail(ChannelHandlerContext ctx, String message) {
@@ -466,13 +478,14 @@ public class WebSocketProxyRelayHandler {
                 wsUrl, negotiatedSubprotocol, true, MAX_FRAME_PAYLOAD_LENGTH);
             final WebSocketServerHandshaker serverHandshaker = wsFactory.newHandshaker(nettyRequest);
             if (serverHandshaker == null) {
-                WebSocketServerHandshakerFactory.sendUnsupportedVersionResponse(clientChannel);
+                WebSocketServerHandshakerFactory.sendUnsupportedVersionResponse(clientChannel).addListener(future -> responseEnded.run());
                 nettyRequest.release();
                 upstreamChannel.close();
                 return;
             }
             serverHandshaker.handshake(clientChannel, nettyRequest, responseHeaders, clientChannel.newPromise()).addListener((ChannelFutureListener) future -> {
                 try {
+                    responseEnded.run();
                     if (future.isSuccess()) {
                         removeHttpServerHandlers(clientCtx);
                         maybeAddIdleHandler(clientChannel.pipeline());

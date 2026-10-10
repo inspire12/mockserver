@@ -45,6 +45,15 @@ public class HttpWebSocketResponseActionHandler {
     }
 
     public void handle(HttpWebSocketResponse httpWebSocketResponse, ChannelHandlerContext ctx, org.mockserver.model.HttpRequest request) {
+        handle(httpWebSocketResponse, ctx, request, () -> {
+        });
+    }
+
+    /**
+     * Answers the upgrade straight on {@code ctx}, running {@code responseEnded} once the handshake response has
+     * been written, after which the connection carries WebSocket frames rather than HTTP exchanges.
+     */
+    public void handle(HttpWebSocketResponse httpWebSocketResponse, ChannelHandlerContext ctx, org.mockserver.model.HttpRequest request, Runnable responseEnded) {
         FullHttpRequest nettyRequest = buildNettyRequest(request);
         String host = request.getFirstHeader("Host");
         String uri = request.getPath().getValue();
@@ -58,7 +67,7 @@ public class HttpWebSocketResponseActionHandler {
         WebSocketServerHandshaker handshaker = wsFactory.newHandshaker(nettyRequest);
 
         if (handshaker == null) {
-            WebSocketServerHandshakerFactory.sendUnsupportedVersionResponse(ctx.channel());
+            WebSocketServerHandshakerFactory.sendUnsupportedVersionResponse(ctx.channel()).addListener(future -> responseEnded.run());
             nettyRequest.release();
             return;
         }
@@ -99,6 +108,7 @@ public class HttpWebSocketResponseActionHandler {
         nettyRequest.retain();
         handshaker.handshake(ctx.channel(), nettyRequest).addListener(future -> {
             try {
+                responseEnded.run();
                 if (future.isSuccess()) {
                     // fire cross-protocol event for WebSocket connect
                     org.mockserver.mock.CrossProtocolEventBus.getInstance().fire(

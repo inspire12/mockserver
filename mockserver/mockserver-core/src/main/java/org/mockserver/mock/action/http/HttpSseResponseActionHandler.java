@@ -62,6 +62,15 @@ public class HttpSseResponseActionHandler {
     }
 
     public void handle(HttpSseResponse httpSseResponse, ChannelHandlerContext ctx, org.mockserver.model.HttpRequest request, StreamingFormat format) {
+        handle(httpSseResponse, ctx, request, format, () -> {
+        });
+    }
+
+    /**
+     * Writes the response straight to {@code ctx}, running {@code responseEnded} once its last part has been
+     * written, unless the connection has closed first.
+     */
+    public void handle(HttpSseResponse httpSseResponse, ChannelHandlerContext ctx, org.mockserver.model.HttpRequest request, StreamingFormat format, Runnable responseEnded) {
         int statusCode = httpSseResponse.getStatusCode() != null ? httpSseResponse.getStatusCode() : 200;
         DefaultHttpResponse initialResponse = new DefaultHttpResponse(
             HttpVersion.HTTP_1_1,
@@ -114,9 +123,9 @@ public class HttpSseResponseActionHandler {
         StreamBreakpoint streamBreakpoint = streamBreakpoint(ctx, request);
         List<SseEvent> events = httpSseResponse.getEvents();
         if (events != null && !events.isEmpty()) {
-            scheduleEvents(events, 0, ctx, httpSseResponse, request, format, streamBreakpoint);
+            scheduleEvents(events, 0, ctx, httpSseResponse, request, format, streamBreakpoint, responseEnded);
         } else {
-            finishStream(ctx, httpSseResponse, request, streamBreakpoint);
+            finishStream(ctx, httpSseResponse, request, streamBreakpoint, responseEnded);
         }
     }
 
@@ -144,9 +153,9 @@ public class HttpSseResponseActionHandler {
         return new StreamBreakpoint(matcher, streamId, releaseOnClose);
     }
 
-    private void scheduleEvents(List<SseEvent> events, int index, ChannelHandlerContext ctx, HttpSseResponse httpSseResponse, org.mockserver.model.HttpRequest request, StreamingFormat format, StreamBreakpoint streamBreakpoint) {
+    private void scheduleEvents(List<SseEvent> events, int index, ChannelHandlerContext ctx, HttpSseResponse httpSseResponse, org.mockserver.model.HttpRequest request, StreamingFormat format, StreamBreakpoint streamBreakpoint, Runnable responseEnded) {
         if (index >= events.size() || !ctx.channel().isActive()) {
-            finishStream(ctx, httpSseResponse, request, streamBreakpoint);
+            finishStream(ctx, httpSseResponse, request, streamBreakpoint, responseEnded);
             return;
         }
 
@@ -169,12 +178,12 @@ public class HttpSseResponseActionHandler {
                         request.getReceivedTimestamp(), configuration, mockServerLogger, webSocketClientRegistry)
                     : null;
                 if (decisionFuture == null) {
-                    writeChunk(chunkBytes, null, events, index, ctx, httpSseResponse, request, format, streamBreakpoint);
+                    writeChunk(chunkBytes, null, events, index, ctx, httpSseResponse, request, format, streamBreakpoint, responseEnded);
                 } else {
                     // the next event is scheduled only once this one is decided and written, so the
                     // end of the stream waits for every held event
                     decisionFuture.thenAccept(decision -> ctx.channel().eventLoop().execute(() ->
-                        applyDecision(decision, chunkBytes, events, index, ctx, httpSseResponse, request, format, streamBreakpoint)));
+                        applyDecision(decision, chunkBytes, events, index, ctx, httpSseResponse, request, format, streamBreakpoint, responseEnded)));
                 }
             } catch (Exception e) {
                 if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
@@ -188,7 +197,7 @@ public class HttpSseResponseActionHandler {
                             .setThrowable(e)
                     );
                 }
-                finishStream(ctx, httpSseResponse, request, streamBreakpoint);
+                finishStream(ctx, httpSseResponse, request, streamBreakpoint, responseEnded);
             }
         };
 
@@ -200,27 +209,27 @@ public class HttpSseResponseActionHandler {
     }
 
     private void applyDecision(StreamFrameDecision decision, byte[] chunkBytes, List<SseEvent> events, int index, ChannelHandlerContext ctx,
-                               HttpSseResponse httpSseResponse, org.mockserver.model.HttpRequest request, StreamingFormat format, StreamBreakpoint streamBreakpoint) {
+                               HttpSseResponse httpSseResponse, org.mockserver.model.HttpRequest request, StreamingFormat format, StreamBreakpoint streamBreakpoint, Runnable responseEnded) {
         if (!ctx.channel().isActive()) {
-            finishStream(ctx, httpSseResponse, request, streamBreakpoint);
+            finishStream(ctx, httpSseResponse, request, streamBreakpoint, responseEnded);
             return;
         }
         switch (decision.getAction()) {
             case MODIFY:
-                writeChunk(decision.getReplacementBody(), null, events, index, ctx, httpSseResponse, request, format, streamBreakpoint);
+                writeChunk(decision.getReplacementBody(), null, events, index, ctx, httpSseResponse, request, format, streamBreakpoint, responseEnded);
                 break;
             case DROP:
-                scheduleEvents(events, index + 1, ctx, httpSseResponse, request, format, streamBreakpoint);
+                scheduleEvents(events, index + 1, ctx, httpSseResponse, request, format, streamBreakpoint, responseEnded);
                 break;
             case INJECT:
-                writeChunk(chunkBytes, decision.getInjectedBody(), events, index, ctx, httpSseResponse, request, format, streamBreakpoint);
+                writeChunk(chunkBytes, decision.getInjectedBody(), events, index, ctx, httpSseResponse, request, format, streamBreakpoint, responseEnded);
                 break;
             case CLOSE:
-                finishStream(ctx, httpSseResponse, request, streamBreakpoint);
+                finishStream(ctx, httpSseResponse, request, streamBreakpoint, responseEnded);
                 break;
             case CONTINUE:
             default:
-                writeChunk(chunkBytes, null, events, index, ctx, httpSseResponse, request, format, streamBreakpoint);
+                writeChunk(chunkBytes, null, events, index, ctx, httpSseResponse, request, format, streamBreakpoint, responseEnded);
                 break;
         }
     }
@@ -238,7 +247,7 @@ public class HttpSseResponseActionHandler {
     }
 
     private void writeChunk(byte[] chunkBytes, byte[] injectedBytes, List<SseEvent> events, int index, ChannelHandlerContext ctx,
-                            HttpSseResponse httpSseResponse, org.mockserver.model.HttpRequest request, StreamingFormat format, StreamBreakpoint streamBreakpoint) {
+                            HttpSseResponse httpSseResponse, org.mockserver.model.HttpRequest request, StreamingFormat format, StreamBreakpoint streamBreakpoint, Runnable responseEnded) {
         try {
             if (injectedBytes != null) {
                 ctx.write(chunkContent(chunkBytes, request));
@@ -257,7 +266,7 @@ public class HttpSseResponseActionHandler {
                                 .setArguments(index + 1, events.size(), request)
                         );
                     }
-                    scheduleEvents(events, index + 1, ctx, httpSseResponse, request, format, streamBreakpoint);
+                    scheduleEvents(events, index + 1, ctx, httpSseResponse, request, format, streamBreakpoint, responseEnded);
                 } else if (clientGoneException(future.cause())) {
                     // a client that has gone is an ordinary end of the response
                     if (mockServerLogger.isEnabledForInstance(Level.DEBUG)) {
@@ -270,7 +279,7 @@ public class HttpSseResponseActionHandler {
                                 .setArguments(index + 1, causeDescription(future.cause()), request)
                         );
                     }
-                    finishStream(ctx, httpSseResponse, request, streamBreakpoint);
+                    finishStream(ctx, httpSseResponse, request, streamBreakpoint, responseEnded);
                 } else {
                     if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
                         mockServerLogger.logEvent(
@@ -283,7 +292,7 @@ public class HttpSseResponseActionHandler {
                                 .setThrowable(future.cause())
                         );
                     }
-                    finishStream(ctx, httpSseResponse, request, streamBreakpoint);
+                    finishStream(ctx, httpSseResponse, request, streamBreakpoint, responseEnded);
                 }
             });
         } catch (Exception e) {
@@ -298,7 +307,7 @@ public class HttpSseResponseActionHandler {
                         .setThrowable(e)
                 );
             }
-            finishStream(ctx, httpSseResponse, request, streamBreakpoint);
+            finishStream(ctx, httpSseResponse, request, streamBreakpoint, responseEnded);
         }
     }
 
@@ -321,7 +330,7 @@ public class HttpSseResponseActionHandler {
             .withRetry(event.getRetry());
     }
 
-    private void finishStream(ChannelHandlerContext ctx, HttpSseResponse httpSseResponse, org.mockserver.model.HttpRequest request, StreamBreakpoint streamBreakpoint) {
+    private void finishStream(ChannelHandlerContext ctx, HttpSseResponse httpSseResponse, org.mockserver.model.HttpRequest request, StreamBreakpoint streamBreakpoint, Runnable responseEnded) {
         if (streamBreakpoint != null) {
             ctx.channel().closeFuture().removeListener(streamBreakpoint.releaseOnClose);
             StreamFrameBreakpointRegistry.getInstance().evictStream(streamBreakpoint.streamId);
@@ -340,6 +349,7 @@ public class HttpSseResponseActionHandler {
                 ? new StreamAddressedHttpContent(Unpooled.EMPTY_BUFFER, request.getStreamId(), true)
                 : LastHttpContent.EMPTY_LAST_CONTENT;
             ctx.writeAndFlush(terminal).addListener(future -> {
+                responseEnded.run();
                 // END_STREAM has already closed this stream. On HTTP/2 ctx is the stream's own child
                 // channel; we deliberately do NOT call ctx.close() here - the stream is finished by
                 // END_STREAM, and closing is both unnecessary and wrong when closeConnection:true,
