@@ -1,4 +1,4 @@
-import { useCallback, memo, useRef, useMemo } from 'react';
+import { useCallback, memo, useEffect, useRef, useMemo } from 'react';
 import Typography from '@mui/material/Typography';
 import { useDashboardStore } from '../store';
 import { isLogGroup } from '../types';
@@ -11,6 +11,7 @@ import { useHeldItems } from '../hooks/useHeldItems';
 import { useFollow } from '../hooks/useFollow';
 import { matchesLogSearch, isForwardedLogEntry } from '../lib/searchMatcher';
 import { LOG_FILTER_OPTIONS } from '../lib/filterDSL';
+import { registerLogSearchInput } from '../lib/logSearchFocus';
 
 // Log rows carry no httpRequest/httpResponse, so `matchesLogSearch` can satisfy
 // no field operator at all. Declaring that to the search box (rather than
@@ -27,6 +28,11 @@ function LogPanel() {
   const setSearch = useDashboardStore((s) => s.setLogSearch);
   const showForwarded = useDashboardStore((s) => s.logShowForwarded);
   const searchRef = useRef<HTMLInputElement>(null);
+  // Cmd/Ctrl+K (handled in App) focuses this field through the registry.
+  useEffect(() => {
+    const el = searchRef.current;
+    return el ? registerLogSearchInput(el) : undefined;
+  }, []);
 
   const filtered = useMemo(() => {
     let rows = logMessages;

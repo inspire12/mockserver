@@ -176,16 +176,22 @@ export default function OnboardingPanel({ connectionParams }: OnboardingPanelPro
 
   return (
     <Box
+      data-testid="onboarding-scroller"
       sx={{
         flex: 1,
         display: 'flex',
         flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
         p: 4,
         overflow: 'auto',
       }}
     >
+      {/* Centred with auto margins, not justify-content: when the content is
+          taller than the window, auto margins collapse to 0 and it overflows
+          downwards into the scroll area instead of above its top edge. */}
+      <Box
+        data-testid="onboarding-content"
+        sx={{ my: 'auto', width: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center' }}
+      >
       <Typography variant="h5" gutterBottom sx={{ fontWeight: 700 }}>
         Welcome to MockServer
       </Typography>
@@ -301,6 +307,7 @@ export default function OnboardingPanel({ connectionParams }: OnboardingPanelPro
             </Box>
           ))}
         </Box>
+      </Box>
       </Box>
 
       <OpenApiImportDialog

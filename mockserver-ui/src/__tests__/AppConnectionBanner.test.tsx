@@ -88,4 +88,63 @@ describe('App connection-loss banner', () => {
     act(() => { vi.advanceTimersByTime(9000); });
     expect(screen.getByTestId('connection-loss-banner')).toBeInTheDocument();
   });
+
+  // Each reconnect attempt passes through "connecting" (the back-off is 3/6/9/12/15 s).
+  // An attempt must not restart the 8 s clock, hide the banner, or re-arm a dismissal.
+  function failedRetry() {
+    setStatus('connecting');
+    setStatus('disconnected');
+  }
+
+  it('appears 8 s into an outage even though reconnect attempts keep cycling through connecting', () => {
+    render(<App />);
+    setStatus('disconnected');
+    act(() => { vi.advanceTimersByTime(3000); });
+    failedRetry();
+    act(() => { vi.advanceTimersByTime(3000); });
+    failedRetry();
+    act(() => { vi.advanceTimersByTime(2100); });
+    expect(screen.getByTestId('connection-loss-banner')).toBeInTheDocument();
+  });
+
+  it('stays visible while a retry is in flight', () => {
+    render(<App />);
+    setStatus('disconnected');
+    act(() => { vi.advanceTimersByTime(9000); });
+    setStatus('connecting');
+    expect(screen.getByTestId('connection-loss-banner')).toBeInTheDocument();
+    setStatus('disconnected');
+    expect(screen.getByTestId('connection-loss-banner')).toBeInTheDocument();
+  });
+
+  it('stays dismissed through later retries of the same outage', () => {
+    render(<App />);
+    setStatus('disconnected');
+    act(() => { vi.advanceTimersByTime(9000); });
+    act(() => { screen.getByLabelText('Close').click(); });
+    for (let i = 0; i < 4; i++) {
+      failedRetry();
+      act(() => { vi.advanceTimersByTime(9000); });
+      expect(screen.queryByTestId('connection-loss-banner')).not.toBeInTheDocument();
+    }
+  });
+
+  it('shows the banner when the server is unreachable from the first page load', () => {
+    useDashboardStore.setState({ connectionStatus: 'connecting' });
+    render(<App />);
+    setStatus('disconnected');
+    act(() => { vi.advanceTimersByTime(3000); });
+    failedRetry();
+    act(() => { vi.advanceTimersByTime(5100); });
+    expect(screen.getByTestId('connection-loss-banner')).toBeInTheDocument();
+  });
+
+  it('does not show for a brief connecting phase that ends connected', () => {
+    useDashboardStore.setState({ connectionStatus: 'connecting' });
+    render(<App />);
+    act(() => { vi.advanceTimersByTime(500); });
+    setStatus('connected');
+    act(() => { vi.advanceTimersByTime(20000); });
+    expect(screen.queryByTestId('connection-loss-banner')).not.toBeInTheDocument();
+  });
 });

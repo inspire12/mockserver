@@ -167,4 +167,20 @@ describe('JsonEditor', () => {
       expect(registeredSchemas()).toHaveLength(0);
     });
   });
+
+  it('renders the placeholder in the readable secondary text colour in dark mode', () => {
+    render(
+      <ThemeProvider theme={buildTheme('dark')}>
+        <JsonEditor value="" onChange={vi.fn()} placeholder='{"hello":"world"}' />
+      </ThemeProvider>,
+    );
+    // Stand in for the placeholder node Monaco renders inside its editor element.
+    const editor = document.createElement('div');
+    editor.className = 'monaco-editor';
+    const placeholder = document.createElement('div');
+    placeholder.className = 'editorPlaceholder';
+    editor.appendChild(placeholder);
+    screen.getByTestId('json-editor').appendChild(editor);
+    expect(getComputedStyle(placeholder).color).toBe(buildTheme('dark').palette.text.secondary.replace(/,(?=\S)/g, ', '));
+  });
 });

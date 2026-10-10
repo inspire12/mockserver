@@ -30,6 +30,8 @@ import LogPressureBanner from './components/LogPressureBanner';
 import FrameLimitBanner from './components/FrameLimitBanner';
 import { getConfiguration } from './lib/configuration';
 import { initAnalytics, trackView } from './lib/analytics';
+import { CLEAR_LOGS_CONFIRM_MESSAGE, CLEAR_LOGS_CONFIRM_TITLE } from './lib/clearServerText';
+import { requestLogSearchFocus } from './lib/logSearchFocus';
 import type { RequestFilter } from './types';
 
 // Lazy-loaded so the @mui/x-charts bundle only loads when the Metrics tab is
@@ -91,26 +93,27 @@ export default function App() {
   const connectionStatus = useDashboardStore((s) => s.connectionStatus);
   const theme = useMemo(() => buildTheme(themeMode), [themeMode]);
 
-  // Persistent connection-loss banner: shown once the socket has been down
-  // (disconnected/error) continuously for CONNECTION_LOSS_BANNER_DELAY_MS, and
-  // dismissable by the user. It re-arms on the next sustained outage.
-  const [lostSince, setLostSince] = useState(false);
-  const [bannerDismissed, setBannerDismissed] = useState(false);
-  const isDown = connectionStatus === 'disconnected' || connectionStatus === 'error';
+  // Persistent connection-loss banner: shown once the socket has not been
+  // connected for CONNECTION_LOSS_BANNER_DELAY_MS, and dismissable by the user.
+  // An outage spans every reconnect attempt: each retry passes through
+  // "connecting", which must neither restart the timer nor re-arm a dismissed
+  // banner. Only a successful reconnect ends the outage and re-arms it.
+  const isUp = connectionStatus === 'connected';
+  const [outage, setOutage] = useState({ up: isUp, overdue: false, dismissed: false });
+  if (outage.up !== isUp) {
+    setOutage({ up: isUp, overdue: false, dismissed: false });
+  }
   useEffect(() => {
-    if (!isDown) {
-      // Reconnected — arm the banner + dismissal for the next outage. Setting
-      // state from the effect cleanup (rather than synchronously in the body)
-      // keeps this off the synchronous render path.
-      return () => {
-        setLostSince(false);
-        setBannerDismissed(false);
-      };
-    }
-    const timer = setTimeout(() => setLostSince(true), CONNECTION_LOSS_BANNER_DELAY_MS);
+    if (isUp) return undefined;
+    const timer = setTimeout(
+      () => setOutage((o) => (o.up ? o : { ...o, overdue: true })),
+      CONNECTION_LOSS_BANNER_DELAY_MS,
+    );
     return () => clearTimeout(timer);
-  }, [isDown]);
-  const connectionLost = isDown && lostSince;
+  }, [isUp]);
+  const connectionLost = !isUp && outage.overdue;
+  const bannerDismissed = outage.dismissed;
+  const dismissBanner = useCallback(() => setOutage((o) => ({ ...o, dismissed: true })), []);
 
   const generateStubOpen = useDashboardStore((s) => s.generateStubOpen);
   const generateStubSuggestions = useDashboardStore((s) => s.generateStubSuggestions);
@@ -202,7 +205,6 @@ export default function App() {
     [sendFilter],
   );
 
-  const logSearchInputRef = useRef<HTMLInputElement>(null);
   const [clearLogsConfirm, setClearLogsConfirm] = useState(false);
   // The keyboard-shortcuts help dialog is owned here so both the `?` shortcut and
   // the AppBar keyboard-icon button open the same single instance.
@@ -211,7 +213,9 @@ export default function App() {
   const shortcutHandlers = useMemo(
     () => ({
       onSearch: () => {
-        logSearchInputRef.current?.focus();
+        // The log search field lives in the Dashboard view; from any other view,
+        // switch there and the field takes focus as soon as it mounts.
+        if (!requestLogSearchFocus()) useDashboardStore.getState().setView('dashboard');
       },
       onClear: () => {
         setClearLogsConfirm(true);
@@ -282,7 +286,7 @@ export default function App() {
               severity="warning"
               role="alert"
               aria-live="assertive"
-              onClose={() => setBannerDismissed(true)}
+              onClose={dismissBanner}
               sx={{ mx: 1, mt: 1, flexShrink: 0 }}
               data-testid="connection-loss-banner"
             >
@@ -454,8 +458,8 @@ export default function App() {
         />
         <ConfirmDialog
           open={clearLogsConfirm}
-          title="Clear server logs?"
-          message="This removes all server log messages. Expectations and recorded requests are kept."
+          title={CLEAR_LOGS_CONFIRM_TITLE}
+          message={CLEAR_LOGS_CONFIRM_MESSAGE}
           confirmLabel="Clear logs"
           onConfirm={() => { void clearServer('log'); }}
           onClose={() => setClearLogsConfirm(false)}

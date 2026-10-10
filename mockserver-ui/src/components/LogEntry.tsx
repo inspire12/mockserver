@@ -33,7 +33,7 @@ import { useSetBreakpointContext, type SetBreakpointFn } from '../hooks/SetBreak
 import { entryToText } from '../lib/logEntryText';
 import { parseEventLogLoss } from '../lib/eventLogLoss';
 import { parseLogTimestamp, formatCompactTime, formatAbsoluteTime } from '../lib/logEntryTime';
-import { monospaceFontFamily } from '../theme';
+import { logRowColor, monospaceFontFamily } from '../theme';
 import { useDashboardStore } from '../store';
 import { extractGenericExpectationFromCapture } from '../lib/expectationFromCapture';
 import { expectationToJsonObject } from '../lib/llmExpectationCodegen';
@@ -699,6 +699,7 @@ export function buildLaunchpadActions(
 
 function LogEntry({ entry, indent = false, divider = false, collapsible = false, entryKey, expanded: expandedProp, onToggleExpand }: LogEntryProps) {
   const style = entry.style ?? {};
+  const serverColor = style.color;
   const hasBody = entry.messageParts && entry.messageParts.length > 0;
   const canCollapse = collapsible && hasBody;
   const [internalExpanded, setInternalExpanded] = useState(false);
@@ -750,7 +751,7 @@ function LogEntry({ entry, indent = false, divider = false, collapsible = false,
         fontSize: indent ? '0.8em' : '0.85em',
         whiteSpace: style['style.whiteSpace'] || style['whiteSpace'] || 'nowrap',
         overflow: 'auto',
-        color: style.color ?? 'inherit',
+        color: serverColor ? (t: Theme) => logRowColor(serverColor, t.palette.mode) : 'inherit',
         position: 'relative',
         '&:hover .copy-btn': { opacity: 1 },
         ...(divider && {

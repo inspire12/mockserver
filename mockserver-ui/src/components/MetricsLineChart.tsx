@@ -43,6 +43,68 @@ export function formatTimeLabel(epochMillis: number, spanMillis = Infinity): str
   });
 }
 
+/** The tick label formatter for a window of sample timestamps (oldest first). */
+// eslint-disable-next-line react-refresh/only-export-components
+export function timeTickFormatter(timestamps: number[]): (epochMillis: number) => string {
+  const span = timestamps.length > 1 ? Math.abs(timestamps[timestamps.length - 1]! - timestamps[0]!) : 0;
+  return (epochMillis) => formatTimeLabel(epochMillis, span);
+}
+
+/**
+ * Point-scale tick filter: a tick only where its label differs from the previous
+ * sample's, so several samples inside one label period draw one tick, not a row
+ * of identical labels.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function distinctLabelTicks(
+  xData: number[],
+  label: (value: number) => string,
+): (value: number, index: number) => boolean {
+  return (value, index) => index === 0 || label(xData[index - 1]!) !== label(value);
+}
+
+// Upper bound on one character's width at the axis label font (x-charts measures
+// tick labels at 12px), so an estimate never comes out narrower than the label.
+const LABEL_CHAR_PX = 7.2;
+const Y_TICK_AND_GAP_PX = 14;
+
+const labelWidthPx = (text: string): number => Math.ceil(text.length * LABEL_CHAR_PX);
+
+/** `value` rounded away from zero to one significant figure: the axis's likely end tick. */
+function niceBound(value: number): number {
+  if (value === 0 || !Number.isFinite(value)) return 0;
+  const magnitude = 10 ** Math.floor(Math.log10(Math.abs(value)));
+  return Math.sign(value) * Math.ceil(Math.abs(value) / magnitude) * magnitude;
+}
+
+/**
+ * Width for the y-axis that fits its widest tick label. Computed on every render
+ * from the data, because the chart's own `width: 'auto'` measured the first
+ * labels only and then cut "100.0 ms" to "100.0…" once the values grew.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function yAxisWidthFor(series: MetricsSeries[], format: (v: number) => string = String): number {
+  const values = series.flatMap((s) => s.data.filter((v): v is number => v != null && Number.isFinite(v)));
+  const min = Math.min(0, ...values);
+  const max = Math.max(0, ...values);
+  const candidates = [min, max, niceBound(min), niceBound(max)];
+  const widest = Math.max(...candidates.map((v) => labelWidthPx(format(v))));
+  return Math.min(140, Math.max(28, widest + Y_TICK_AND_GAP_PX));
+}
+
+/** Room a centred tick label needs either side of its tick: half the widest label, plus a gap. */
+// eslint-disable-next-line react-refresh/only-export-components
+export function halfLabelRoomPx(values: number[], format: (v: number) => string): number {
+  const widest = Math.max(0, ...values.map((v) => labelWidthPx(format(v))));
+  return Math.ceil(widest / 2) + 4;
+}
+
+/** True when every value is a whole number, so the y-axis must not draw fractional ticks. */
+// eslint-disable-next-line react-refresh/only-export-components
+export function isWholeNumberData(series: MetricsSeries[]): boolean {
+  return series.every((s) => s.data.every((v) => v == null || Number.isInteger(v)));
+}
+
 /**
  * Thin wrapper around `@mui/x-charts` LineChart for the Metrics view. Renders a
  * real time x-axis (HH:MM tick labels from the snapshot timestamps), a soft area
@@ -85,7 +147,13 @@ export default function MetricsLineChart({ series, height = 220, valueFormatter,
   const xData = useTime
     ? (timestamps as number[]).slice(0, length)
     : Array.from({ length }, (_, i) => i);
-  const spanMillis = useTime ? Math.abs(xData[xData.length - 1]! - xData[0]!) : 0;
+  const timeLabel = useTime ? timeTickFormatter(xData) : undefined;
+  const yFormat = valueFormatter ?? ((v: number) => v.toLocaleString());
+  const yWidth = yAxisWidthFor(series, yFormat);
+  // The first and last time labels are centred on the chart's edges; x-charts
+  // ellipsises a label that would cross the SVG bounds, so leave half a label
+  // of room past each end (the y-axis already provides some on the left).
+  const edgeRoom = timeLabel ? halfLabelRoomPx(xData, timeLabel) : 12;
 
   // A single-series chart fills the area under the line for a stronger data-viz
   // read; multi-series charts keep clean lines so overlapping fills don't muddy.
@@ -106,12 +174,18 @@ export default function MetricsLineChart({ series, height = 220, valueFormatter,
       xAxis={[{
         data: xData,
         scaleType: 'point',
-        valueFormatter: useTime
-          ? (value: number) => formatTimeLabel(value, spanMillis)
-          : () => '',
+        valueFormatter: timeLabel ?? (() => ''),
+        ...(timeLabel ? { tickInterval: distinctLabelTicks(xData, timeLabel) } : {}),
       }]}
-      yAxis={[{ valueFormatter: valueFormatter ? (v: number) => valueFormatter(v) : undefined }]}
-      margin={{ left: 56, right: 12, top: 16, bottom: useTime ? 24 : 8 }}
+      // The y-axis is as wide as its widest label: the default fixed width cut
+      // "47.7 MB" or "100,000" down to "47.…" / "100…". Whole-number series
+      // (counts) never get fractional ticks that round to duplicates (0, 1, 1).
+      yAxis={[{
+        width: yWidth,
+        valueFormatter: valueFormatter ? (v: number) => valueFormatter(v) : undefined,
+        ...(isWholeNumberData(series) ? { tickMinStep: 1 } : {}),
+      }]}
+      margin={{ left: Math.max(4, edgeRoom - yWidth), right: edgeRoom, top: 16, bottom: 4 }}
       hideLegend={series.length <= 1}
       sx={{
         // Soften the filled area so it reads as a gradient-style wash under the

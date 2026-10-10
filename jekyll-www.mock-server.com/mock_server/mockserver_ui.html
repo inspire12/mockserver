@@ -68,9 +68,10 @@ sitemap:
 <ul>
     <li><strong style="color: green;">Connected</strong> — actively receiving updates</li>
     <li><strong style="color: orange;">Connecting</strong> — attempting to establish a connection</li>
-    <li><strong style="color: red;">Error</strong> — connection failed (will auto-retry with exponential backoff)</li>
-    <li><strong>Disconnected</strong> — not connected to MockServer</li>
+    <li><strong style="color: grey;">Disconnected</strong> — the connection is down; the dashboard retries automatically, waiting a little longer each time (3 seconds, then 6, 9 and 12, then every 15 seconds)</li>
 </ul>
+
+<p>If the connection drops, a message naming the host and port appears after the second failed retry, so a dashboard pointed at the wrong server is easy to spot. Once the connection has been down for 8 seconds a <strong>Connection lost</strong> banner also appears; it stays up through the retries until the connection comes back, and if you close it, it stays closed until the next time the connection is lost. Data shown while disconnected may be out of date.</p>
 
 <p>Updates are throttled to at most one per second to prevent UI flooding during high-traffic scenarios. If the browser has not yet received the previous update (for example over a slow network, or when captured requests have large bodies), MockServer waits for it to catch up and then sends the latest state, rather than queuing updates the browser cannot keep up with.</p>
 
@@ -94,6 +95,7 @@ sitemap:
 
 <p>Hover over any item to reveal a copy button. Clicking it copies the full content of that item to your clipboard as text. For grouped log entries (e.g. FORWARDED_REQUEST), the copy button copies the entire group including all child entries.</p>
 
+<a id="keyboard_shortcuts" class="anchor" href="#keyboard_shortcuts">&nbsp;</a>
 <h3>Keyboard Shortcuts</h3>
 
 <table class="table">
@@ -101,7 +103,7 @@ sitemap:
         <tr><th>Shortcut</th><th>Action</th></tr>
     </thead>
     <tbody>
-        <tr><td><code>⌘K</code> / <code>Ctrl+K</code></td><td>Focus the Log Messages search box</td></tr>
+        <tr><td><code>⌘K</code> / <code>Ctrl+K</code></td><td>Focus the Log Messages search box (from another view, switch to the Dashboard first)</td></tr>
         <tr><td><code>⌘⇧L</code> / <code>Ctrl+Shift+L</code></td><td>Clear the recorded logs and requests, after a confirmation. Your expectations are left registered</td></tr>
         <tr><td><code>⌘⇧F</code> / <code>Ctrl+Shift+F</code></td><td>Toggle the Request Filter panel</td></tr>
         <tr><td><code>?</code></td><td>Show this list of keyboard shortcuts</td></tr>
@@ -112,6 +114,7 @@ sitemap:
 
 <p>The dashboard defaults to dark mode. Click the sun/moon icon in the title bar to switch between dark and light themes. Your preference is saved in the browser's local storage.</p>
 
+<a id="follow_new_entries" class="anchor" href="#follow_new_entries">&nbsp;</a>
 <h3>Following New Entries</h3>
 
 <p>The live panels — Log Messages, Received Requests, Proxied Requests, and the Traffic list — show entries oldest-first, with the newest appended at the bottom, like a console in a build pipeline. Each of them has a <strong>Follow</strong> chip in its header, reading <strong>Following</strong> while it is on: the panel then stays pinned to the newest entries as they arrive. Turn it off and the view stays exactly where you left it, so you can read without the content moving. Scrolling up with the wheel or the keyboard turns Follow off for that panel, and scrolling back down to the bottom the same way turns it back on; clicking the chip works either way, and jumps you to the newest entries. The toolbar also has a master <strong>Follow new entries</strong> / <strong>Stop following new entries</strong> switch that sets every panel at once. <strong>Active Expectations</strong> is a set of registered mocks rather than a stream of events, so it keeps its own order and has no Follow chip.</p>
@@ -121,7 +124,7 @@ sitemap:
 <p>Click the clear icon in the title bar to access three options:</p>
 
 <ul>
-    <li><strong>Clear Server Logs</strong> — removes all log messages while keeping expectations and request history</li>
+    <li><strong>Clear Server Logs</strong> — clears the server's log, which also holds the recorded and proxied requests, so they are removed too (the same as <a href="/mock_server/clearing_and_resetting.html"><code>PUT /mockserver/clear?type=log</code></a>). Expectations are kept</li>
     <li><strong>Clear Server Expectations</strong> — removes all active expectations while keeping logs and request history</li>
     <li><strong>Reset Server (all)</strong> — clears everything: logs, expectations, received requests, and proxied requests</li>
 </ul>
@@ -136,7 +139,7 @@ sitemap:
     </thead>
     <tbody>
         <tr><td><strong>MockServer</strong></td><td>The product wordmark — clicking it has no action; it simply marks the dashboard.</td></tr>
-        <tr><td><strong>Connection status</strong></td><td>A chip showing the dashboard's WebSocket connection to the server: <em>connected</em> (green), <em>connecting</em> (amber), or <em>disconnected</em> (red). The dashboard reconnects automatically, so a brief <em>connecting</em>/<em>disconnected</em> state during a restart is normal.</td></tr>
+        <tr><td><strong>Connection status</strong></td><td>A chip showing the dashboard's WebSocket connection to the server: <em>connected</em> (green), <em>connecting</em> (amber), or <em>disconnected</em> (grey). The dashboard reconnects automatically, so a brief <em>connecting</em>/<em>disconnected</em> state during a restart is normal.</td></tr>
         <tr><td><strong>HTTP/3 (H3) chip</strong></td><td>Shown only when <a href="/mock_server/http3.html">HTTP/3 (QUIC)</a> is enabled. Displays the UDP port and the number of active HTTP/3 connections, e.g. <code>H3 :1080 (2)</code>.</td></tr>
     </tbody>
 </table>
@@ -150,10 +153,14 @@ sitemap:
         <tr><th>Tool</th><th>Description</th><th>Documentation</th></tr>
     </thead>
     <tbody>
+        <tr><td>New Workspace</td><td>Open another workspace: its own view and search filters, shown as tabs below the title bar once there is more than one</td><td>—</td></tr>
+        <tr><td>Keyboard Shortcuts</td><td>List the <a href="#keyboard_shortcuts">keyboard shortcuts</a></td><td>—</td></tr>
         <tr><td>Server Clock</td><td>Freeze or advance the server's clock to test time-sensitive behaviour</td><td><a href="/mock_server/clock_control.html">Clock Control</a></td></tr>
         <tr><td>Explain Unmatched Requests</td><td>Show why a request did not match any expectation (closest-match diff)</td><td><a href="/mock_server/troubleshooting_matching.html">Troubleshooting Matching</a></td></tr>
+        <tr><td>Matcher Test Playground</td><td>Try a request against a candidate expectation and see whether, and why, it matches</td><td><a href="/mock_server/troubleshooting_matching.html">Troubleshooting Matching</a></td></tr>
         <tr><td>Server Configuration</td><td>View and edit configuration properties at runtime</td><td><a href="/mock_server/configuration_properties.html">Configuration Properties</a></td></tr>
         <tr><td>Operating Mode (SIMULATE / SPY / CAPTURE)</td><td>Controls how unmatched requests are handled — return 404, or forward to the real upstream and record</td><td><a href="/mock_server/isolating_single_service.html#mock_mode">Operating Mode</a></td></tr>
+        <tr><td>Follow New Entries</td><td>Turn <strong>Follow</strong> on or off for every live panel at once (see <a href="#follow_new_entries">Following New Entries</a>)</td><td>—</td></tr>
     </tbody>
 </table>
 
@@ -858,7 +865,7 @@ sitemap:
 <p>When enabled, the view shows:</p>
 
 <ul>
-    <li><strong>Throughput</strong> — a derived requests-per-second figure with a trend chart.</li>
+    <li><strong>All requests received</strong> and <strong>Throughput</strong> — the total request count and a derived requests-per-second figure with a trend chart. Both count every request MockServer receives, including control-plane calls such as the dashboard's own refresh every 3 seconds, so they are not zero on an idle server. <strong>Matched</strong>, <strong>Not matched</strong> and <strong>Forwarded</strong> count only requests handled by expectations.</li>
     <li><strong>Request latency</strong> — p50, p95, and p99 response-time percentiles, derived from MockServer's request-duration histogram.</li>
     <li><strong>HTTP Chaos Faults</strong> — injected faults broken down by type, plus the currently active service-scoped chaos (see the <a href="#ui_chaos_section">Chaos</a> view).</li>
     <li><strong>Request activity</strong> and <strong>Actions executed</strong> — cumulative request and action counters over time.</li>

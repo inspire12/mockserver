@@ -359,7 +359,7 @@ grouped nav: 6 dropdown groups"]
 During the initial load (before the first scrape resolves) `MetricsView` renders MUI `Skeleton` placeholders — one text skeleton for the label and one rounded skeleton per chart — so the page shows structure rather than a blank area while waiting.
 
 It renders:
-- **KPI hero stat cards** — four prominent headline counters (requests received, matched, not-matched, forwarded) rendered as `Card` components above the chart stack. When latency histogram data is present, p50/p95/p99 cards join the row.
+- **KPI hero stat cards** — four prominent headline counters (all requests received, matched, not-matched, forwarded; the first and the throughput chart count every request, including control-plane calls such as the view's own scrape, and are labelled so) rendered as `Card` components above the chart stack. When latency histogram data is present, p50/p95/p99 cards join the row.
 - time-series charts with a **real time axis** and **area fill** (via `@mui/x-charts` `AreaChart`) for throughput and latency trends; `@mui/x-charts` is lazy-loaded with the whole `MetricsView` chunk so it stays off the initial bundle,
 - a derived requests-per-second throughput chart (Δcount / Δt between scrapes, since the metrics are monotonic gauges),
 - request latency percentiles (p50/p95/p99) from the `mock_server_request_duration_seconds` histogram (shown only when present),
@@ -910,11 +910,11 @@ The AppBar navigation is driven by `NAV_GROUPS` — six top-level group-button e
 | **AI** | LLM Optimise, MCP Health, Trace |
 | **Inspect** | Breakpoints, Library, Cluster |
 
-The group button whose group contains the active view is highlighted (a translucent-white tint in light mode; the theme action-selected overlay in dark mode). Clicking a group button opens a dropdown `Menu`; selecting an item calls `setView` and closes the menu. One shared `<Menu>` is reused across all groups rather than one per group.
+The group button whose group contains the active view is highlighted (a translucent-black overlay in light mode, which keeps the white label above 4.5:1; the theme action-selected overlay in dark mode) and carries `aria-current="true"`; the current view's menu item carries `aria-current="page"`, so screen readers announce the location too. Clicking a group button opens a dropdown `Menu`; selecting an item calls `setView` and closes the menu. One shared `<Menu>` is reused across all groups rather than one per group.
 
 Below the `lg` breakpoint (`useMediaQuery(theme.breakpoints.down('lg'))`) all six group buttons are replaced by a single hamburger icon that opens one flat `Menu` organised into the same six labelled sections (`ListSubheader` + `Divider` separators). The current view name appears inline next to the icon.
 
-**Light mode**: group buttons use `color="inherit"` (white text) with a translucent white border and a pale-tint active background. The connection-status chip uses pale tints (`#7fffa0` connected, `#ffd180` connecting, `#ff8a80` error) for visibility against the primary-coloured bar.
+**Light mode**: group buttons use `color="inherit"` (white text) with a translucent white border and a dark-overlay active background. The connection-status chip uses pale tints (`#ccffd8` connected, `#fff0d6` connecting, `#ffe3e6` error, 90% white disconnected), each at least 4.5:1 against the primary-coloured bar (`AppBarLightContrast.test.tsx`).
 
 **Dark mode**: MUI defaults are kept; no overrides applied.
 
@@ -951,8 +951,8 @@ The AppBar "Import / export" (wrench) menu groups one-off control-plane tools, e
 
 ## Destructive-Action Safety & Feedback
 
-- **Confirmation**: "Reset server (all)" and "Clear expectations" route through a reusable `ConfirmDialog` instead of firing immediately; Reset is styled in the error colour and separated by a divider. "Clear logs" is benign and fires directly.
-- **Keyboard**: `⌘/Ctrl-L` clears **logs only** (not a full reset) — a full reset is intentionally not bound to a keystroke.
+- **Confirmation**: all three clear-menu items ("Clear Server Logs", "Clear Server Expectations", "Reset Server (all)") route through a reusable `ConfirmDialog` instead of firing immediately; Reset is styled in the error colour and separated by a divider. "Clear Server Logs" sends `clear?type=log`, which also removes recorded and proxied requests because they are entries in the same server event log; its prompt says so (the copy lives in `src/lib/clearServerText.ts`, shared with the keyboard shortcut).
+- **Keyboard**: `⌘⇧L` / `Ctrl+Shift+L` opens the same "Clear Server Logs" confirmation — a full reset is intentionally not bound to a keystroke.
 - **Toasts**: a global `notification` in the store (`setNotification`) drives a `Snackbar` in `App.tsx`, giving success feedback for clear/reset and operating-mode changes. Failed operations use `severity="error"` consistently (not `warning`).
 
 ## Frontend Application
@@ -1005,8 +1005,10 @@ const ws = new WebSocket(url);
 
 - `onopen`: Sends the current filter (serialized `HttpRequest`), resets reconnect counter
 - `onmessage`: Parses JSON, calls `applyMessage()` to update all four entity arrays
-- `onclose`: Triggers reconnection with exponential backoff (max 10 retries)
-- `onerror`: Sets error status in store
+- `onclose`: Sets `disconnected` and schedules a reconnect with a linear, capped back-off (3 s, 6 s, 9 s, 12 s, then every 15 s, with no retry limit); after the second failure it sets an error naming the host and port
+- `onerror`: Sets error status in store (immediately followed by `onclose`)
+
+`App.tsx` shows a dismissable **Connection lost** banner once the socket has not been `connected` for 8 s (`CONNECTION_LOSS_BANNER_DELAY_MS`). The outage spans every retry: an attempt's `connecting` state neither restarts the delay nor re-arms a dismissed banner; only a successful reconnect ends the outage.
 
 ### Component Architecture
 
@@ -1235,8 +1237,9 @@ Copy buttons appear on hover (CSS `opacity: 0` → `opacity: 1` on parent `:hove
 
 | Export | Purpose |
 |--------|---------|
-| `logTypeColors` | Flat `rgb(…)` map keyed by log type — light-background variants, kept for backwards compatibility |
-| `logTypeColor(type, mode)` | Mode-aware accessor; returns a dark-override colour for types whose light-bg value has low contrast on the dark `#1e1e1e` canvas (`CREATED_EXPECTATION`, `EXPECTATION_NOT_MATCHED`, `CLEARED`, `UPDATED_EXPECTATION`, `INFO`, `SERVER_CONFIGURATION`, `ERROR`, `EXCEPTION`) |
+| `logTypeColors` | Flat `rgb(…)` map keyed by log type — the colours the server sends in each row's `style.color` |
+| `logTypeColor(type, mode)` | Mode-aware accessor; returns a light or dark variant of each type's colour that reaches WCAG AA (4.5:1) on that mode's paper and default backgrounds (`theme.test.ts` checks every type) |
+| `logRowColor(serverColor, mode)` | Maps a server `style.color` back to its log type and returns `logTypeColor(type, mode)`; an unknown colour passes through. `LogEntry` renders rows with it |
 | `transitions` | Shared motion tokens — `fast` (150 ms), `standard` (220 ms), `forProps(props[], ms?)` for property-scoped transitions |
 | `monospaceFontFamily` | Monospace font stack shared by log/JSON/code surfaces |
 
@@ -1248,9 +1251,10 @@ Handled by `useKeyboardShortcuts` hook in `App.tsx`:
 
 | Shortcut | Handler | Action |
 |----------|---------|--------|
-| `⌘K` / `Ctrl+K` | `onSearch` | Focus log messages search input |
-| `⌘L` / `Ctrl+L` | `onClear` | Call `clearServer('all')` (server reset + UI clear + WebSocket reconnect) |
-| `Escape` | `onToggleFilter` | Toggle filter panel expanded/collapsed |
+| `⌘K` / `Ctrl+K` | `onSearch` | Focus the Log Messages search input through `src/lib/logSearchFocus.ts` (LogPanel registers its field while mounted); from another view, switch to the Dashboard and focus the field when it mounts |
+| `⌘⇧L` / `Ctrl+Shift+L` | `onClear` | Open the "Clear Server Logs" confirmation |
+| `⌘⇧F` / `Ctrl+Shift+F` | `onToggleFilter` | Toggle filter panel expanded/collapsed |
+| `?` | `onShowShortcuts` | Open the keyboard-shortcuts help |
 
 ### Clear and Reset
 
@@ -1258,8 +1262,8 @@ The AppBar clear menu provides three server-side operations:
 
 | Menu Item | API Call | UI Behavior |
 |-----------|----------|-------------|
-| Clear server logs | `PUT /mockserver/clear?type=log` | Calls `clearUI()` after success |
-| Clear server expectations | `PUT /mockserver/clear?type=expectations` | Calls `clearUI()` after success |
+| Clear server logs | `PUT /mockserver/clear?type=log` | Empties the local log messages, recorded requests and proxied requests (all removed server-side); keeps expectations |
+| Clear server expectations | `PUT /mockserver/clear?type=expectations` | Empties the local active expectations; keeps logs and requests |
 | Reset server (all) | `PUT /mockserver/reset` | Calls `clearUI()` + reconnects WebSocket (server closes it on reset) |
 
 ### Filtering
@@ -1278,7 +1282,7 @@ The `connect()` function in `useWebSocket.ts` handles reconnection safely:
 1. Clears any pending reconnect timer (`reconnectTimerRef`)
 2. Nullifies `onclose`/`onerror` on the old socket before calling `close()` — prevents stale handlers from triggering spurious reconnection
 3. Sets `socketRef.current = null` before creating the new socket
-4. On `onclose`, schedules reconnection with exponential backoff (max 10 retries)
+4. On `onclose`, schedules reconnection with the capped linear back-off described above
 
 ### Test Coverage
 
@@ -1355,7 +1359,7 @@ The dashboard uses specialized Jackson serializers for UI-friendly output:
 
 ### Log Entry Color Coding
 
-The colour map lives in `src/theme.ts` as `logTypeColors` (light-background values). Use `logTypeColor(type, mode)` rather than indexing `logTypeColors` directly so dark-mode overrides are applied. Components that receive `themeMode` from the store pass it through to the colour accessor.
+The server's colours live in `src/theme.ts` as `logTypeColors`; most fall below 4.5:1 on the light paper. Render with `logTypeColor(type, mode)` (or `logRowColor(serverColor, mode)` for a row's `style.color`) rather than indexing `logTypeColors` directly, so the readable light or dark variant is used.
 
 | Log Type | Color | RGB (light) |
 |----------|-------|-----|

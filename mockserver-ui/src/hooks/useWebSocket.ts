@@ -3,6 +3,7 @@ import type { ConnectionParams } from './useConnectionParams';
 import type { ClearType, RequestFilter, WebSocketMessage } from '../types';
 import { useDashboardStore } from '../store';
 import { buildBaseUrl } from '../lib/mcpClient';
+import { CLEAR_LOGS_DONE_MESSAGE } from '../lib/clearServerText';
 
 const RECONNECT_DELAY_MS = 3000;
 
@@ -237,13 +238,13 @@ export function useWebSocket(params: ConnectionParams) {
           useDashboardStore.getState().clearUI();
           connect(lastFilterRef.current);
         } else if (type === 'log') {
-          // Only clear the log list locally — expectations and recorded requests
-          // still exist server-side and should remain visible.
-          useDashboardStore.setState({ logMessages: [] });
+          // Recorded and proxied requests live in the same server event log, so
+          // the log clear removed them too; only expectations remain.
+          useDashboardStore.setState({ logMessages: [], recordedRequests: [], proxiedRequests: [] });
         } else if (type === 'expectations') {
           useDashboardStore.setState({ activeExpectations: [] });
         }
-        const what = type === 'all' ? 'Server reset — all expectations, logs and recorded traffic cleared' : type === 'log' ? 'Server logs cleared' : 'Expectations cleared';
+        const what = type === 'all' ? 'Server reset — all expectations, logs and recorded traffic cleared' : type === 'log' ? CLEAR_LOGS_DONE_MESSAGE : 'Expectations cleared';
         useDashboardStore.getState().setNotification({ message: what, severity: 'success' });
       } catch {
         setError('Failed to clear server');

@@ -19,7 +19,7 @@ describe('ShortcutsDialog', () => {
     expect(screen.getByText('Keyboard Shortcuts')).toBeInTheDocument();
     expect(screen.getByText('Show this keyboard shortcuts help')).toBeInTheDocument();
     expect(screen.getByText('Focus the log search field')).toBeInTheDocument();
-    expect(screen.getByText('Clear server logs (asks for confirmation)')).toBeInTheDocument();
+    expect(screen.getByText('Clear server logs and recorded requests (asks for confirmation)')).toBeInTheDocument();
     expect(screen.getByText('Show / hide the request filter panel')).toBeInTheDocument();
     // The key bindings themselves are shown, including the rebound clear-logs and
     // filter-toggle chords and the ? help key.

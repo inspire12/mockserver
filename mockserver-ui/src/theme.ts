@@ -7,10 +7,10 @@ import type { ThemeMode } from './types';
  * Kept as a flat `rgb(...)` map for backwards compatibility (existing imports and
  * tests rely on this exact shape and on every value being an `rgb(...)` string).
  *
- * TODO(theme): consumers should switch to `logTypeColor(type, mode)` so each log
- * type renders with a colour that has adequate contrast on the *current* paper
- * background — several of the values below were picked for a light background and
- * look muddy on the dark `#1e1e1e` paper.
+ * These are the colours the server sends in each log row's `style.color`. Render
+ * with `logTypeColor(type, mode)` (or `logRowColor` for a server colour) instead:
+ * most of these values fall below WCAG AA (4.5:1) on the light paper, and a few on
+ * the dark one.
  */
 export const logTypeColors = {
   TRACE: 'rgb(215, 216, 154)',
@@ -65,6 +65,37 @@ const logTypeColorsDark: Partial<Record<LogType, string>> = {
   EXCEPTION: 'rgb(244, 96, 106)',
   // Match the EXCEPTION brightening so a failed template generation reads clearly on dark.
   TEMPLATE_GENERATION_FAILED: 'rgb(244, 96, 106)',
+  // Lifted just enough to reach 4.5:1 on both dark backgrounds.
+  NO_MATCH_RESPONSE: 'rgb(201, 112, 38)',
+  VERIFICATION_FAILED: 'rgb(235, 76, 113)',
+};
+
+/**
+ * Light-background overrides: each colour darkened along its own hue until it
+ * reaches WCAG AA (4.5:1) on both light backgrounds (`#ffffff` paper and
+ * `#fafafa` default). Types not listed already pass.
+ */
+const logTypeColorsLight: Partial<Record<LogType, string>> = {
+  TRACE: 'rgb(114, 114, 82)',
+  DEBUG: 'rgb(135, 100, 144)',
+  WARN: 'rgb(191, 74, 82)',
+  ERROR: 'rgb(166, 90, 113)',
+  CLEARED: 'rgb(113, 118, 42)',
+  RETRIEVED: 'rgb(153, 101, 66)',
+  UPDATED_EXPECTATION: 'rgb(111, 120, 16)',
+  CREATED_EXPECTATION: 'rgb(123, 113, 95)',
+  REMOVED_EXPECTATION: 'rgb(79, 118, 148)',
+  RECEIVED_REQUEST: 'rgb(84, 118, 143)',
+  EXPECTATION_RESPONSE: 'rgb(90, 116, 129)',
+  NO_MATCH_RESPONSE: 'rgb(178, 89, 15)',
+  EXPECTATION_MATCHED: 'rgb(76, 120, 121)',
+  EXPECTATION_NOT_MATCHED: 'rgb(133, 107, 106)',
+  VERIFICATION: 'rgb(128, 107, 135)',
+  VERIFICATION_FAILED: 'rgb(204, 58, 92)',
+  FORWARDED_REQUEST: 'rgb(85, 116, 143)',
+  TEMPLATE_GENERATED: 'rgb(140, 108, 16)',
+  SERVER_CONFIGURATION: 'rgb(94, 119, 92)',
+  DEFAULT: 'rgb(147, 91, 175)',
 };
 
 /**
@@ -77,7 +108,27 @@ export function logTypeColor(type: LogType, mode: ThemeMode): string {
   if (mode === 'dark') {
     return logTypeColorsDark[type] ?? logTypeColors[type];
   }
-  return logTypeColors[type];
+  return logTypeColorsLight[type] ?? logTypeColors[type];
+}
+
+const normaliseRgb = (colour: string): string => colour.replace(/\s+/g, '').toLowerCase();
+
+// Server colour -> log type. EXCEPTION and TEMPLATE_GENERATION_FAILED share a
+// colour; the first wins, and both render identically in every mode.
+const logTypeByServerColor = new Map<string, LogType>();
+for (const type of Object.keys(logTypeColors) as LogType[]) {
+  const key = normaliseRgb(logTypeColors[type]);
+  if (!logTypeByServerColor.has(key)) logTypeByServerColor.set(key, type);
+}
+
+/**
+ * The colour to render a log row in, given the `style.color` the server sent
+ * (which is tuned for one background only). A known log-type colour is mapped
+ * to its readable variant for `mode`; anything else is returned unchanged.
+ */
+export function logRowColor(serverColor: string, mode: ThemeMode): string {
+  const type = logTypeByServerColor.get(normaliseRgb(serverColor));
+  return type ? logTypeColor(type, mode) : serverColor;
 }
 
 export const becauseColors = {
@@ -156,11 +207,20 @@ export function buildTheme(mode: ThemeMode) {
               default: '#fafafa',
               paper: '#ffffff',
             },
+            // Every light-mode main colour reaches WCAG AA (4.5:1) as text on
+            // both light backgrounds, and white text on it does too (the app
+            // bar, filled chips and contained buttons).
             primary: {
-              main: '#00838f',
+              main: '#006d75',
             },
             secondary: {
-              main: '#e65100',
+              main: '#c43e00',
+            },
+            warning: {
+              main: '#b85000',
+            },
+            info: {
+              main: '#0277bd',
             },
           }),
     },

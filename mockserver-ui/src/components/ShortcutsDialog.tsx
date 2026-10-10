@@ -14,13 +14,13 @@ import { monospaceFontFamily } from '../theme';
  * shortcut help and must stay in sync with `src/hooks/useKeyboardShortcuts.ts`:
  *   - ?                 -> open this keyboard-shortcuts help
  *   - Cmd/Ctrl+K        -> focus the log search field
- *   - Cmd/Ctrl+Shift+L  -> open the "clear server logs" confirmation
+ *   - Cmd/Ctrl+Shift+L  -> open the "clear server logs and recorded requests" confirmation
  *   - Cmd/Ctrl+Shift+F  -> toggle the request-filter panel
  */
 const SHORTCUTS: { keys: string; action: string }[] = [
   { keys: '?', action: 'Show this keyboard shortcuts help' },
   { keys: '⌘K  /  Ctrl+K', action: 'Focus the log search field' },
-  { keys: '⌘⇧L  /  Ctrl+Shift+L', action: 'Clear server logs (asks for confirmation)' },
+  { keys: '⌘⇧L  /  Ctrl+Shift+L', action: 'Clear server logs and recorded requests (asks for confirmation)' },
   { keys: '⌘⇧F  /  Ctrl+Shift+F', action: 'Show / hide the request filter panel' },
 ];
 

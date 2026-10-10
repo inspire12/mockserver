@@ -51,3 +51,18 @@ describe('ExplainUnmatchedDialog chip wording', () => {
     expect(screen.queryByText(/matched 15\/16/)).not.toBeInTheDocument();
   });
 });
+
+describe('ExplainUnmatchedDialog accessible name', () => {
+  it('is named by its title alone, not "… Refresh"', async () => {
+    mockExplain.mockResolvedValue({
+      correlationId: 'c',
+      timestamp: 't',
+      unmatchedRequestCount: 0,
+      truncated: false,
+      unmatchedRequests: [],
+    });
+    render(<ExplainUnmatchedDialog open onClose={() => {}} connectionParams={connectionParams} />);
+    expect(screen.getByRole('dialog', { name: 'Explain Unmatched Requests' })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled());
+  });
+});

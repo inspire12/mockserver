@@ -91,6 +91,7 @@ import StorageIcon from '@mui/icons-material/Storage';
 import FolderOpenIcon from '@mui/icons-material/FolderOpen';
 import Divider from '@mui/material/Divider';
 import BaselineCompareDialog from './BaselineCompareDialog';
+import { CLEAR_LOGS_CONFIRM_MESSAGE, CLEAR_LOGS_CONFIRM_TITLE } from '../lib/clearServerText';
 
 function statusColor(status: ConnectionStatus): 'success' | 'warning' | 'error' | 'default' {
   switch (status) {
@@ -115,12 +116,13 @@ function statusColor(status: ConnectionStatus): 'success' | 'warning' | 'error' 
 function statusChipPaletteSx(themeMode: 'light' | 'dark', status: ConnectionStatus): Record<string, unknown> {
   if (themeMode === 'dark') return {};
   const tints: Record<ConnectionStatus, string> = {
-    connected: '#7fffa0',    // pale green
-    connecting: '#ffd180',   // pale amber
-    error: '#ff8a80',        // pale red
-    disconnected: 'rgba(255,255,255,0.85)',
+    // Each tint keeps at least 4.5:1 against the light primary bar.
+    connected: '#ccffd8',    // pale green
+    connecting: '#fff0d6',   // pale amber
+    error: '#ffe3e6',        // pale red
+    disconnected: 'rgba(255,255,255,0.9)',
   };
-  const tint = tints[status] ?? 'rgba(255,255,255,0.85)';
+  const tint = tints[status] ?? 'rgba(255,255,255,0.9)';
   return {
     color: tint,
     borderColor: tint,
@@ -416,8 +418,10 @@ export default function AppBar({ onClearServer, onClearLogs, onClearExpectations
   // styling) and the theme's translucent action-selected overlay in dark mode,
   // so selected nav reads consistently with other selected controls in each theme.
   const groupButtonSx = (active: boolean) => {
+    // Light mode darkens the bar under the active group: a white tint lowered
+    // the white label below 4.5:1 contrast.
     const activeBg = themeMode === 'light'
-      ? 'rgba(255, 255, 255, 0.18)'
+      ? 'rgba(0, 0, 0, 0.22)'
       : theme.palette.action.selected;
     return {
       ml: 0.5,
@@ -508,6 +512,7 @@ export default function AppBar({ onClearServer, onClearLogs, onClearExpectations
                   <MenuItem
                     key={`${group.id}-${tab.value}`}
                     selected={view === tab.value}
+                    aria-current={view === tab.value ? 'page' : undefined}
                     aria-label={tab.ariaLabel}
                     onClick={() => handleSelectView(tab.value)}
                   >
@@ -536,6 +541,7 @@ export default function AppBar({ onClearServer, onClearLogs, onClearExpectations
                   aria-label={group.ariaLabel}
                   aria-haspopup="menu"
                   aria-expanded={isOpen}
+                  aria-current={isActiveGroup ? 'true' : undefined}
                   endIcon={<ExpandMoreIcon sx={{ fontSize: '0.875rem' }} />}
                   onClick={(e) => handleOpenGroup(group.id, e.currentTarget)}
                   sx={groupButtonSx(isActiveGroup)}
@@ -556,6 +562,7 @@ export default function AppBar({ onClearServer, onClearLogs, onClearExpectations
                 <MenuItem
                   key={tab.value}
                   selected={view === tab.value}
+                  aria-current={view === tab.value ? 'page' : undefined}
                   aria-label={tab.ariaLabel}
                   onClick={() => handleSelectView(tab.value)}
                 >
@@ -682,8 +689,8 @@ export default function AppBar({ onClearServer, onClearLogs, onClearExpectations
             onClick={() => {
               setAnchorEl(null);
               setConfirm({
-                title: 'Clear server logs?',
-                message: 'This removes all server log messages. Expectations and recorded requests are kept.',
+                title: CLEAR_LOGS_CONFIRM_TITLE,
+                message: CLEAR_LOGS_CONFIRM_MESSAGE,
                 confirmLabel: 'Clear logs',
                 onConfirm: () => { void onClearLogs(); },
               });

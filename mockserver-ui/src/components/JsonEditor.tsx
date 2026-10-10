@@ -216,6 +216,8 @@ export default function JsonEditor({
           borderColor: markers.length > 0 ? 'error.main' : 'divider',
           borderRadius: 1,
           overflow: 'hidden',
+          // Monaco's own placeholder grey is about 3:1 on its dark background.
+          '& .monaco-editor .editorPlaceholder': { color: 'text.secondary' },
         }}
         data-testid="json-editor"
         aria-label={ariaLabel ?? label}

@@ -69,8 +69,10 @@ interface MetricsViewProps {
   connectionParams: ConnectionParams;
 }
 
+// The server's received counter counts every request, including control-plane
+// calls such as this view's own 3 s scrape, so the label says so.
 const SUMMARY: { name: string; label: string }[] = [
-  { name: 'requests_received_count', label: 'Requests received' },
+  { name: 'requests_received_count', label: 'All requests received' },
   { name: 'response_expectations_matched_count', label: 'Matched' },
   { name: 'expectations_not_matched_count', label: 'Not matched' },
   { name: 'forward_expectations_matched_count', label: 'Forwarded' },
@@ -392,11 +394,12 @@ MOCKSERVER_METRICS_ENABLED=true`}
           {/* Throughput */}
           <Paper variant="outlined" sx={{ p: 1.25, mb: 1.5 }}>
             <Box sx={{ display: 'flex', alignItems: 'baseline', gap: 1 }}>
-              <Typography variant="caption" color="text.secondary">Throughput (derived)</Typography>
+              <Typography variant="caption" color="text.secondary">Throughput (derived, all requests)</Typography>
               <Typography variant="h6" sx={{ fontWeight: 700 }}>{rps.toFixed(1)} req/s</Typography>
             </Box>
             <MetricsLineChart
-              timestamps={timestamps}
+              // One rate per interval between scrapes, stamped at the interval's end.
+              timestamps={timestamps.slice(1)}
               height={180}
               series={[{ data: ratePerSecond(history, 'requests_received_count'), label: 'req/s' }]}
               valueFormatter={(v) => `${v.toFixed(1)}/s`}

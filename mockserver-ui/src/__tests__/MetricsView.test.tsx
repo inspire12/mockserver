@@ -36,10 +36,10 @@ describe('MetricsView', () => {
       'requests_received_count 42.0\nresponse_expectations_matched_count 7.0\nexpectations_not_matched_count 3.0\n',
     );
     render(<MetricsView connectionParams={params} />);
-    await waitFor(() => expect(screen.getByText('Throughput (derived)')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Throughput (derived, all requests)')).toBeInTheDocument());
     expect(screen.getByText('HTTP request activity (cumulative)')).toBeInTheDocument();
     // the headline counters are now presented as KPI hero stat cards at the top
-    expect(screen.getByText('Requests received')).toBeInTheDocument();
+    expect(screen.getByText('All requests received')).toBeInTheDocument();
     expect(screen.getByText('42')).toBeInTheDocument();
   });
 
@@ -62,7 +62,7 @@ describe('MetricsView', () => {
   it('hides the Async message activity panel when no async metrics are present', async () => {
     stubFetch(200, 'requests_received_count 42.0\n');
     render(<MetricsView connectionParams={params} />);
-    await waitFor(() => expect(screen.getByText('Throughput (derived)')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Throughput (derived, all requests)')).toBeInTheDocument());
     expect(screen.queryByText('Async message activity (cumulative)')).not.toBeInTheDocument();
   });
 
@@ -109,7 +109,7 @@ describe('MetricsView', () => {
   it('hides the JVM section when JVM metrics are absent', async () => {
     stubFetch(200, 'requests_received_count 5.0\n');
     render(<MetricsView connectionParams={params} />);
-    await waitFor(() => expect(screen.getByText('Throughput (derived)')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Throughput (derived, all requests)')).toBeInTheDocument());
     expect(screen.queryByText('JVM heap memory')).not.toBeInTheDocument();
   });
 
@@ -149,7 +149,7 @@ describe('MetricsView', () => {
   it('hides the expectation store memory panel when the byte gauge is absent', async () => {
     stubFetch(200, 'requests_received_count 5.0\n');
     render(<MetricsView connectionParams={params} />);
-    await waitFor(() => expect(screen.getByText('Throughput (derived)')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Throughput (derived, all requests)')).toBeInTheDocument());
     expect(screen.queryByText(/Expectation store memory/)).not.toBeInTheDocument();
   });
 
@@ -206,7 +206,7 @@ describe('MetricsView', () => {
   it('hides the event-log capacity panels when the gauges are absent', async () => {
     stubFetch(200, 'requests_received_count 5.0\n');
     render(<MetricsView connectionParams={params} />);
-    await waitFor(() => expect(screen.getByText('Throughput (derived)')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Throughput (derived, all requests)')).toBeInTheDocument());
     expect(screen.queryByText(/Event log —/)).not.toBeInTheDocument();
   });
 
@@ -280,7 +280,7 @@ describe('MetricsView', () => {
     );
     render(<MetricsView connectionParams={params} />);
     // The four headline counters appear as labelled hero cards with their values.
-    await waitFor(() => expect(screen.getByText('Requests received')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('All requests received')).toBeInTheDocument());
     expect(screen.getByText('Matched')).toBeInTheDocument();
     expect(screen.getByText('Not matched')).toBeInTheDocument();
     expect(screen.getByText('Forwarded')).toBeInTheDocument();
@@ -291,7 +291,7 @@ describe('MetricsView', () => {
   it('hides the latency panel when the histogram is absent', async () => {
     stubFetch(200, 'requests_received_count 5.0\n');
     render(<MetricsView connectionParams={params} />);
-    await waitFor(() => expect(screen.getByText('Throughput (derived)')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Throughput (derived, all requests)')).toBeInTheDocument());
     expect(screen.queryByText('Request latency — cumulative since server start')).not.toBeInTheDocument();
   });
 
@@ -345,7 +345,7 @@ describe('MetricsView', () => {
   it('hides the HTTP Chaos Faults section when no chaos metric is present', async () => {
     stubFetch(200, 'requests_received_count 5.0\n');
     render(<MetricsView connectionParams={params} />);
-    await waitFor(() => expect(screen.getByText('Throughput (derived)')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Throughput (derived, all requests)')).toBeInTheDocument());
     expect(screen.queryByText('HTTP Chaos Faults')).not.toBeInTheDocument();
   });
 
@@ -362,7 +362,7 @@ describe('MetricsView', () => {
       ].join('\n'),
     );
     render(<MetricsView connectionParams={params} />);
-    await waitFor(() => expect(screen.getByText('Throughput (derived)')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Throughput (derived, all requests)')).toBeInTheDocument());
     expect(screen.queryByText('HTTP Chaos Faults')).not.toBeInTheDocument();
   });
 
@@ -459,7 +459,7 @@ describe('MetricsView', () => {
   it('hides auto-halt section when metric is absent', async () => {
     stubFetch(200, 'requests_received_count 5.0\n');
     render(<MetricsView connectionParams={params} />);
-    await waitFor(() => expect(screen.getByText('Throughput (derived)')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Throughput (derived, all requests)')).toBeInTheDocument());
     expect(screen.queryByText('Chaos auto-halt')).not.toBeInTheDocument();
   });
 

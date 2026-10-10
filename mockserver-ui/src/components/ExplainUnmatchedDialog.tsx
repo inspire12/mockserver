@@ -87,8 +87,10 @@ export default function ExplainUnmatchedDialog({
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth fullScreen={fullScreen} aria-labelledby="explain-unmatched-dialog-title">
-      <DialogTitle id="explain-unmatched-dialog-title">
-        Explain Unmatched Requests
+      {/* The dialog is named by the title text alone, not the Refresh button beside
+          it; the explicit id stops DialogTitle taking the labelledby id itself. */}
+      <DialogTitle id="explain-unmatched-dialog-title-row">
+        <span id="explain-unmatched-dialog-title">Explain Unmatched Requests</span>
         <Button size="small" sx={{ ml: 2 }} disabled={loading} onClick={refresh}>Refresh</Button>
       </DialogTitle>
       <DialogContent>

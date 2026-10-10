@@ -124,6 +124,12 @@ describe('AppBar', () => {
     await user.click(screen.getByText('Clear Server Logs'));
     expect(props.onClearLogs).not.toHaveBeenCalled();
     expect(screen.getByText('Clear server logs?')).toBeInTheDocument();
+    // PUT /mockserver/clear?type=log also removes recorded requests (they live in
+    // the same server log); the prompt must say so, not promise to keep them.
+    const confirm = screen.getByRole('dialog', { name: 'Clear server logs?' });
+    expect(confirm).toHaveTextContent(/every recorded and proxied request/);
+    expect(confirm).toHaveTextContent('Expectations are kept.');
+    expect(confirm).not.toHaveTextContent(/recorded requests are kept/i);
 
     // Confirm in the dialog.
     await user.click(screen.getByRole('button', { name: 'Clear logs' }));
@@ -475,4 +481,18 @@ describe('AppBar responsive navigation', () => {
     await user.click(metricsItem);
     expect(useDashboardStore.getState().view).toBe('metrics');
   });
+
+  it('tells assistive technology which nav group and view are current', async () => {
+    const user = userEvent.setup();
+    useDashboardStore.setState({ view: 'metrics' as ViewMode });
+    renderAppBar();
+    const observe = screen.getByRole('button', { name: 'Observe views' });
+    expect(observe).toHaveAttribute('aria-current', 'true');
+    expect(screen.getByRole('button', { name: 'Mock views' })).not.toHaveAttribute('aria-current');
+
+    await user.click(observe);
+    expect(await screen.findByRole('menuitem', { name: 'Metrics view' })).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByRole('menuitem', { name: 'Dashboard view' })).not.toHaveAttribute('aria-current');
+  });
 });
+

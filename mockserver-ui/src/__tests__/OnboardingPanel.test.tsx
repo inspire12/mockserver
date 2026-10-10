@@ -51,6 +51,20 @@ describe('OnboardingPanel', () => {
     expect(screen.getByText('Welcome to MockServer')).toBeInTheDocument();
   });
 
+  // justify-content:center on the overflow:auto box pushes the heading above the
+  // scroll origin when the content is taller than the window (1024x700), where it
+  // cannot be scrolled to. The content is centred with auto margins instead.
+  it('centres the content without pushing its top out of the scroll area', () => {
+    renderPanel();
+    const scroller = screen.getByTestId('onboarding-scroller');
+    const content = screen.getByTestId('onboarding-content');
+    expect(getComputedStyle(scroller).overflow).toBe('auto');
+    expect(getComputedStyle(scroller).justifyContent).not.toBe('center');
+    expect(getComputedStyle(content).marginTop).toBe('auto');
+    expect(getComputedStyle(content).marginBottom).toBe('auto');
+    expect(content).toContainElement(screen.getByText('Welcome to MockServer'));
+  });
+
   it('renders the six key features (tile layout + narrow bulleted list)', () => {
     renderPanel();
     // Each feature appears in both the wide-screen tiles and the narrow-screen
