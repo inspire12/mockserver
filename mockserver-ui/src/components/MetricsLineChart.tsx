@@ -20,16 +20,27 @@ interface MetricsLineChartProps {
   /**
    * Epoch-millis timestamp for each point (one per sample, in lockstep with the
    * series data). When supplied the x-axis renders readable wall-clock time
-   * labels (HH:MM) instead of bare indices; falls back to indices if omitted or
+   * labels (HH:MM, with seconds for short spans) instead of bare indices; falls back to indices if omitted or
    * length-mismatched.
    */
   timestamps?: number[];
 }
 
-/** HH:MM in the viewer's locale, used for the time x-axis tick labels. */
+/** Below this time span the x-axis ticks are under a minute apart, so they need seconds. */
+const SECONDS_LABEL_SPAN_MILLIS = 20 * 60_000;
+
+/**
+ * Time x-axis tick label in the viewer's locale: HH:MM, or HH:MM:SS when the chart spans less
+ * than {@link SECONDS_LABEL_SPAN_MILLIS} (otherwise every tick of a short run reads the same minute).
+ */
 // eslint-disable-next-line react-refresh/only-export-components
-export function formatTimeLabel(epochMillis: number): string {
-  return new Date(epochMillis).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+export function formatTimeLabel(epochMillis: number, spanMillis = Infinity): string {
+  const withSeconds = spanMillis < SECONDS_LABEL_SPAN_MILLIS;
+  return new Date(epochMillis).toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    ...(withSeconds ? { second: '2-digit' as const } : {}),
+  });
 }
 
 /**
@@ -74,6 +85,7 @@ export default function MetricsLineChart({ series, height = 220, valueFormatter,
   const xData = useTime
     ? (timestamps as number[]).slice(0, length)
     : Array.from({ length }, (_, i) => i);
+  const spanMillis = useTime ? Math.abs(xData[xData.length - 1]! - xData[0]!) : 0;
 
   // A single-series chart fills the area under the line for a stronger data-viz
   // read; multi-series charts keep clean lines so overlapping fills don't muddy.
@@ -95,7 +107,7 @@ export default function MetricsLineChart({ series, height = 220, valueFormatter,
         data: xData,
         scaleType: 'point',
         valueFormatter: useTime
-          ? (value: number) => formatTimeLabel(value)
+          ? (value: number) => formatTimeLabel(value, spanMillis)
           : () => '',
       }]}
       yAxis={[{ valueFormatter: valueFormatter ? (v: number) => valueFormatter(v) : undefined }]}

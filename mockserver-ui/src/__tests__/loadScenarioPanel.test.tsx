@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, onTestFinished } from 'vitest';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import LoadScenarioPanel from '../components/LoadScenarioPanel';
 
@@ -35,18 +35,30 @@ function stubFetch(getBody: unknown, status = 200) {
 }
 
 /**
- * A fetch mock that distinguishes the registry-list GET (returns `{scenarios}`) from
- * the legacy status GET (returns `{state:'none'}`). Both hit `/mockserver/loadScenario`,
- * so the stub returns the registry shape for plain GETs; PUT/DELETE are recorded.
+ * A fetch mock serving the registry listing (`{scenarios}`, the real GET /loadScenario shape)
+ * and the live configuration; PUT/DELETE are recorded. `startStatus` sets the /start response.
  */
-function stubRegistry(scenarios: unknown[]) {
+function stubRegistry(
+  scenarios: unknown[],
+  options: { config?: Record<string, unknown>; startStatus?: number } = {},
+) {
   const calls: Array<{ url: string; method: string; body?: unknown }> = [];
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     const method = init?.method ?? 'GET';
     const body = init?.body ? JSON.parse(init.body as string) : undefined;
     calls.push({ url: String(url), method, body });
+    if (method === 'GET' && String(url).endsWith('/mockserver/configuration')) {
+      return { ok: true, status: 200, json: async () => options.config ?? {} } as unknown as Response;
+    }
+    if (method === 'GET' && String(url).includes('/report')) {
+      return { ok: true, status: 200, blob: async () => new Blob(['<testsuite/>']) } as unknown as Response;
+    }
     if (method === 'GET') {
-      return { ok: true, status: 200, json: async () => ({ state: 'none', scenarios }) } as unknown as Response;
+      return { ok: true, status: 200, json: async () => ({ scenarios }) } as unknown as Response;
+    }
+    if (String(url).endsWith('/start') && options.startStatus && options.startStatus !== 200) {
+      const startStatus = options.startStatus;
+      return { ok: false, status: startStatus, statusText: 'Forbidden', json: async () => ({ error: 'load generation not enabled' }) } as unknown as Response;
     }
     return { ok: true, status: 200, json: async () => ({ status: 'ok' }) } as unknown as Response;
   });
@@ -218,17 +230,14 @@ describe('LoadScenarioPanel', () => {
   });
 
   it('reloads a definition that already carries request headers into the header rows on Edit', async () => {
-    stubFetch({
-      state: 'running',
+    stubRegistry([{
+      state: 'RUNNING',
       name: 'header-run',
       runId: 'rH',
       currentVus: 2,
       requestsSent: 5,
       succeeded: 5,
       failed: 0,
-      p50Millis: 5,
-      p95Millis: 9,
-      p99Millis: 12,
       elapsedMillis: 1000,
       definition: {
         name: 'header-run',
@@ -245,9 +254,9 @@ describe('LoadScenarioPanel', () => {
           },
         ],
       },
-    });
+    }]);
     render(<LoadScenarioPanel connectionParams={params} />);
-    await waitFor(() => expect(screen.getByTestId('load-live-status')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId('load-running-header-run')).toBeInTheDocument());
 
     fireEvent.click(screen.getByRole('button', { name: /Edit running/i }));
 
@@ -261,44 +270,24 @@ describe('LoadScenarioPanel', () => {
     expect(values.map((v) => v.value)).toEqual(['Bearer abc', 'acme']);
   });
 
-  it('shows live status from a mocked running GET', async () => {
-    stubFetch({
-      state: 'running',
-      name: 'live-run',
-      runId: 'r1',
-      currentVus: 4,
-      requestsSent: 1000,
-      succeeded: 950,
-      failed: 50,
-      p50Millis: 12,
-      p95Millis: 88,
-      p99Millis: 140,
-      elapsedMillis: 5000,
-    });
+  it('shows live status for a running scenario from the registry listing', async () => {
+    stubRegistry([{
+      name: 'live-run', state: 'RUNNING', runId: 'r1', currentVus: 4, requestsSent: 1000, succeeded: 950,
+      failed: 50, p50Millis: 12, p95Millis: 88, p99Millis: 140, elapsedMillis: 5000,
+    }]);
     render(<LoadScenarioPanel connectionParams={params} />);
-    await waitFor(() => expect(screen.getByTestId('load-live-status')).toBeInTheDocument());
-    const live = screen.getByTestId('load-live-status');
+    await waitFor(() => expect(screen.getByTestId('load-running-live-run')).toBeInTheDocument());
+    const live = screen.getByTestId('load-running-live-run');
     expect(within(live).getByText('1,000')).toBeInTheDocument(); // requests sent
     expect(within(live).getByText('5.0%')).toBeInTheDocument(); // error rate 50/1000
-    expect(screen.getByRole('button', { name: /Stop/i })).toBeInTheDocument();
+    expect(within(live).getByRole('button', { name: /Stop/i })).toBeInTheDocument();
+    expect(screen.getByTestId('load-header-state')).toHaveTextContent('running');
   });
 
   it('shows the active-stage readout from stageIndex/stageType/currentTarget', async () => {
-    stubFetch({
-      state: 'running',
-      name: 'staged-run',
-      runId: 'rS',
-      currentVus: 12,
-      stageIndex: 1,
-      stageType: 'RATE',
-      currentTarget: 50,
-      requestsSent: 200,
-      succeeded: 200,
-      failed: 0,
-      p50Millis: 5,
-      p95Millis: 9,
-      p99Millis: 12,
-      elapsedMillis: 4000,
+    stubRegistry([{
+      name: 'staged-run', state: 'RUNNING', runId: 'rS', currentVus: 12, stageIndex: 1, stageType: 'RATE',
+      currentTarget: 50, requestsSent: 200, succeeded: 200, failed: 0, elapsedMillis: 4000,
       definition: {
         name: 'staged-run',
         templateType: 'VELOCITY',
@@ -311,20 +300,20 @@ describe('LoadScenarioPanel', () => {
         },
         steps: [{ request: { method: 'GET', path: '/x', socketAddress: { host: 'h', port: 80, scheme: 'HTTP' } } }],
       },
-    });
+    }]);
     render(<LoadScenarioPanel connectionParams={params} />);
-    await waitFor(() => expect(screen.getByTestId('load-live-status')).toBeInTheDocument());
-    const readout = screen.getByTestId('load-stage-readout');
-    expect(readout).toHaveTextContent('Stage 2/3');
-    expect(readout).toHaveTextContent('RATE');
-    expect(readout).toHaveTextContent('target 50/s');
+    await waitFor(() => expect(screen.getByTestId('load-running-staged-run')).toBeInTheDocument());
+    const card = screen.getByTestId('load-running-staged-run');
+    expect(card).toHaveTextContent('Stage 2/3');
+    expect(card).toHaveTextContent('RATE');
+    expect(card).toHaveTextContent('target 50/s');
   });
 
   it('toggles a chart series on and off', async () => {
-    stubFetch({
-      state: 'running', name: 'r', runId: 'r1', currentVus: 2,
+    stubRegistry([{
+      name: 'r', state: 'RUNNING', runId: 'r1', currentVus: 2,
       requestsSent: 10, succeeded: 10, failed: 0, p50Millis: 5, p95Millis: 9, p99Millis: 12, elapsedMillis: 1000,
-    });
+    }]);
     render(<LoadScenarioPanel connectionParams={params} />);
     await waitFor(() => expect(screen.getByTestId('load-chart')).toBeInTheDocument());
 
@@ -342,20 +331,11 @@ describe('LoadScenarioPanel', () => {
   });
 
   it('loads the server-echoed definition into the form when editing a run started elsewhere', async () => {
-    // A run this tab never started (no in-session lastSubmitted) — the server echoes its full
+    // A run this tab never started (no in-session lastSubmitted) — the registry echoes its full
     // definition so "Edit running" can still populate the author form from it.
-    stubFetch({
-      state: 'running',
-      name: 'foreign-run',
-      runId: 'r9',
-      currentVus: 3,
-      requestsSent: 100,
-      succeeded: 100,
-      failed: 0,
-      p50Millis: 5,
-      p95Millis: 9,
-      p99Millis: 12,
-      elapsedMillis: 2000,
+    stubRegistry([{
+      name: 'foreign-run', state: 'RUNNING', runId: 'r9', currentVus: 3, requestsSent: 100, succeeded: 100,
+      failed: 0, elapsedMillis: 2000,
       definition: {
         name: 'foreign-run',
         templateType: 'VELOCITY',
@@ -364,16 +344,17 @@ describe('LoadScenarioPanel', () => {
           { request: { method: 'GET', path: '/echoed/path', socketAddress: { host: 'echoed.svc', port: 9090, scheme: 'HTTP' } } },
         ],
       },
-    });
+    }]);
     render(<LoadScenarioPanel connectionParams={params} />);
-    await waitFor(() => expect(screen.getByTestId('load-live-status')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId('load-running-foreign-run')).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole('button', { name: /Edit running/i }));
+    fireEvent.click(within(screen.getByTestId('load-running-foreign-run')).getByRole('button', { name: /Edit running/i }));
 
     // the author form is now populated from the server-provided definition, not any in-tab state
     await waitFor(() =>
       expect((screen.getByLabelText(/Scenario name/) as HTMLInputElement).value).toBe('foreign-run'),
     );
+    expect(screen.getByText('Edit / Restart Scenario')).toBeInTheDocument();
     // The single echoed VU-hold stage round-trips into one stage card with vus 7 / duration 45000.
     const stage0 = screen.getByTestId('load-stage-0');
     expect((within(stage0).getByLabelText('Virtual users (VUs)') as HTMLInputElement).value).toBe('7');
@@ -385,12 +366,107 @@ describe('LoadScenarioPanel', () => {
     expect((within(step0).getByLabelText('Target port') as HTMLInputElement).value).toBe('9090');
   });
 
-  it('shows the load-generation-disabled message on a 403', async () => {
-    stubFetch({ error: 'load generation not enabled' }, 403);
+  it('shows the end-of-run summary for the most recently finished run once nothing is active', async () => {
+    stubRegistry([
+      { name: 'older', state: 'COMPLETED', requestsSent: 10, succeeded: 10, failed: 0, startedAt: 1000, endedAt: 2000 },
+      {
+        name: 'newer', state: 'COMPLETED', requestsSent: 5, succeeded: 5, failed: 0, elapsedMillis: 2500,
+        startedAt: 3000, endedAt: 5500, verdict: 'PASS',
+        thresholdResults: [{ metric: 'ERROR_RATE', comparator: 'LESS_THAN', threshold: 0.1, observed: 0, satisfied: true }],
+      },
+      { name: 'never-run', state: 'LOADED' },
+    ]);
+    render(<LoadScenarioPanel connectionParams={params} />);
+    await waitFor(() => expect(screen.getByTestId('load-summary')).toBeInTheDocument());
+    const summary = screen.getByTestId('load-summary');
+    expect(summary).toHaveTextContent('Run complete');
+    expect(summary).toHaveTextContent('newer');
+    expect(summary).toHaveTextContent('Thresholds PASS');
+    expect(within(summary).getByTestId('load-report-json-newer')).toBeInTheDocument();
+    expect(screen.getByTestId('load-header-state')).toHaveTextContent('completed');
+  });
+
+  it('hides the end-of-run summary while a scenario is still running', async () => {
+    stubRegistry([
+      { name: 'done', state: 'COMPLETED', requestsSent: 10, succeeded: 10, failed: 0, endedAt: 2000 },
+      { name: 'busy', state: 'RUNNING', requestsSent: 3, succeeded: 3, failed: 0, currentVus: 1 },
+    ]);
+    render(<LoadScenarioPanel connectionParams={params} />);
+    await waitFor(() => expect(screen.getByTestId('load-running-busy')).toBeInTheDocument());
+    expect(screen.queryByTestId('load-summary')).not.toBeInTheDocument();
+  });
+
+  it('shows the header state as none when nothing has run', async () => {
+    stubRegistry([{ name: 'idle', state: 'LOADED' }]);
+    render(<LoadScenarioPanel connectionParams={params} />);
+    await waitFor(() => expect(screen.getByTestId('load-registry-row-idle')).toBeInTheDocument());
+    expect(screen.getByTestId('load-header-state')).toHaveTextContent('none');
+    expect(screen.queryByTestId('load-summary')).not.toBeInTheDocument();
+  });
+
+  it('shows the load-generation-disabled help up front when the configuration reports it off', async () => {
+    stubRegistry([], { config: { loadGenerationEnabled: false } });
     render(<LoadScenarioPanel connectionParams={params} />);
     await waitFor(() => expect(screen.getByTestId('load-disabled-alert')).toBeInTheDocument());
     expect(screen.getByText(/loadGenerationEnabled=true/)).toBeInTheDocument();
     expect(screen.getByText(/MOCKSERVER_LOAD_GENERATION_ENABLED/)).toBeInTheDocument();
+  });
+
+  it('does not show the disabled help when the configuration reports load generation on', async () => {
+    stubRegistry([{ name: 'a', state: 'LOADED' }], { config: { loadGenerationEnabled: true } });
+    render(<LoadScenarioPanel connectionParams={params} />);
+    await waitFor(() => expect(screen.getByTestId('load-registry-row-a')).toBeInTheDocument());
+    expect(screen.queryByTestId('load-disabled-alert')).not.toBeInTheDocument();
+  });
+
+  it('keeps the disabled help after a refused start even when the registry poll succeeds', async () => {
+    // The configuration cannot say (no loadGenerationEnabled key); the 403 on start is the signal.
+    const { calls } = stubRegistry([{ name: 'solo', state: 'LOADED' }], { startStatus: 403 });
+    render(<LoadScenarioPanel connectionParams={params} />);
+    await waitFor(() => expect(screen.getByTestId('load-registry-row-solo')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Start solo' }));
+    await waitFor(() => expect(screen.getByTestId('load-disabled-alert')).toBeInTheDocument());
+    // Later successful polls (Refresh re-runs both) must not hide it again.
+    const afterStart = calls.length;
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh load scenario status' }));
+    await waitFor(() => {
+      const later = calls.slice(afterStart).filter((c) => c.method === 'GET').map((c) => c.url);
+      expect(later.some((u) => u.endsWith('/mockserver/loadScenario'))).toBe(true);
+      expect(later.some((u) => u.endsWith('/mockserver/configuration'))).toBe(true);
+    });
+    await waitFor(() => expect(screen.getByTestId('load-registry-row-solo')).toBeInTheDocument());
+    expect(screen.getByTestId('load-disabled-alert')).toBeInTheDocument();
+  });
+
+  it('downloads a report as a file instead of opening a new tab', async () => {
+    const { calls } = stubRegistry([
+      { name: 'done', state: 'COMPLETED', requestsSent: 5, succeeded: 5, failed: 0, endedAt: 2000 },
+    ]);
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const createUrl = vi.fn(() => 'blob:report');
+    const revokeUrl = vi.fn();
+    const original = { create: URL.createObjectURL, revoke: URL.revokeObjectURL };
+    URL.createObjectURL = createUrl;
+    URL.revokeObjectURL = revokeUrl;
+    onTestFinished(() => {
+      URL.createObjectURL = original.create;
+      URL.revokeObjectURL = original.revoke;
+    });
+    const clicked: HTMLAnchorElement[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      clicked.push(this);
+    });
+    render(<LoadScenarioPanel connectionParams={params} />);
+    await waitFor(() => expect(screen.getByTestId('load-report-junit-done')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId('load-report-junit-done'));
+
+    await waitFor(() => expect(clicked).toHaveLength(1));
+    expect(clicked[0]!.download).toBe('done-report.xml');
+    expect(clicked[0]!.getAttribute('href')).toBe('blob:report');
+    expect(calls.some((c) => c.method === 'GET' && c.url.endsWith('/loadScenario/done/report?format=junit'))).toBe(true);
+    expect(openSpy).not.toHaveBeenCalled();
+    expect(revokeUrl).toHaveBeenCalledWith('blob:report');
   });
 
   // --- Wave C: registry UX ---
@@ -586,6 +662,10 @@ describe('LoadScenarioPanel', () => {
     await waitFor(() => expect(screen.getByTestId('load-registry-row-gone')).toBeInTheDocument());
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete gone' }));
+    // Nothing is deleted until the confirmation is accepted.
+    const dialog = await screen.findByRole('dialog');
+    expect(calls.find((c) => c.method === 'DELETE')).toBeUndefined();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
     await waitFor(() => expect(calls.find((c) => c.method === 'DELETE' && c.url.endsWith('/loadScenario/gone'))).toBeTruthy());
   });
 
@@ -595,6 +675,10 @@ describe('LoadScenarioPanel', () => {
     await waitFor(() => expect(screen.getByTestId('load-clear-all')).not.toBeDisabled());
 
     fireEvent.click(screen.getByTestId('load-clear-all'));
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent('all 2 registered scenarios');
+    expect(calls.find((c) => c.method === 'DELETE')).toBeUndefined();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Clear all' }));
     await waitFor(() =>
       expect(calls.find((c) => c.method === 'DELETE' && c.url.endsWith('/mockserver/loadScenario'))).toBeTruthy(),
     );

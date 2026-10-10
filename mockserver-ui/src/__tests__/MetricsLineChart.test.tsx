@@ -53,4 +53,20 @@ describe('MetricsLineChart', () => {
     expect(label).toMatch(/\b30\b/);
     expect(label.length).toBeLessThanOrEqual(8);
   });
+
+  it('adds seconds to the time labels of a short span so ticks in one minute differ', () => {
+    const start = new Date('2024-01-01T12:30:05').getTime();
+    const spanMillis = 30_000;
+    const a = formatTimeLabel(start, spanMillis);
+    const b = formatTimeLabel(start + 10_000, spanMillis);
+    expect(a).not.toBe(b);
+    expect(a).toMatch(/\b05\b/);
+    expect(b).toMatch(/\b15\b/);
+  });
+
+  it('keeps HH:MM labels for a long span', () => {
+    const start = new Date('2024-01-01T12:30:05').getTime();
+    expect(formatTimeLabel(start, 60 * 60_000)).toBe(formatTimeLabel(start));
+    expect(formatTimeLabel(start, 60 * 60_000)).not.toMatch(/\b05\b/);
+  });
 });

@@ -32,15 +32,16 @@ import EditIcon from '@mui/icons-material/Edit';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import SaveIcon from '@mui/icons-material/Save';
 import type { ConnectionParams } from '../hooks/useConnectionParams';
+import { getConfiguration } from '../lib/configuration';
+import ConfirmDialog from './ConfirmDialog';
 import {
-  fetchLoadScenario,
   registerLoadScenario,
   startScenariosByName,
   stopScenariosByName,
   listLoadScenarios,
   deleteLoadScenario,
   clearLoadScenarios,
-  stopLoadScenario,
+  latestFinishedScenario,
   loadScenarioReportUrl,
   generateFromOpenAPI,
   generateFromRecording,
@@ -1020,7 +1021,7 @@ export default function LoadScenarioPanel({ connectionParams }: LoadScenarioPane
   // scenario (form + generated code). Defaults to 'run' so monitoring is what you land on.
   const [view, setPanelView] = useState<'run' | 'author'>('run');
 
-  const [status, setStatus] = useState<LoadScenarioStatus | null>(null);
+  // True when the server reports loadGenerationEnabled=false, or refused a start with 403.
   const [disabled, setDisabled] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<HumanError | null>(null);
@@ -1034,10 +1035,8 @@ export default function LoadScenarioPanel({ connectionParams }: LoadScenarioPane
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   // "Generate from…" dialog: null = closed, otherwise which source.
   const [generateSource, setGenerateSource] = useState<'openapi' | 'recording' | null>(null);
-  const [samples, setSamples] = useState<Sample[]>([]);
   const [visible, setVisible] = useState<Set<SeriesKey>>(() => new Set(DEFAULT_VISIBLE));
-  // The runId whose samples are currently accumulated — reset when a new run starts.
-  const sampleRunId = useRef<string | null>(null);
+  const [confirm, setConfirm] = useState<{ title: string; message: string; confirmLabel: string; onConfirm: () => void } | null>(null);
 
   // Multi-scenario chart timeline: one frame per registry poll, each holding every running
   // scenario's snapshot. Scenarios the user has hidden from the chart (default: none → all shown).
@@ -1046,12 +1045,11 @@ export default function LoadScenarioPanel({ connectionParams }: LoadScenarioPane
   // Whether any scenario was running on the previous registry poll — lets a new batch of runs
   // start a fresh timeline instead of appending to a stale one.
   const framesActiveRef = useRef(false);
-  // Latest legacy single-run status, read by the registry poll so a legacy-only run still charts.
-  const latestStatusRef = useRef<LoadScenarioStatus | null>(null);
 
   const refresh = useCallback(() => setRefreshTick((t) => t + 1), []);
 
-  // Poll the load scenario status. Fast (1s) while running, slower when idle.
+  // Whether load generation is enabled comes from the live configuration, so the help is shown
+  // up front and stays put; a config that cannot be read leaves the current state unchanged.
   useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
@@ -1059,34 +1057,14 @@ export default function LoadScenarioPanel({ connectionParams }: LoadScenarioPane
 
     async function poll(): Promise<void> {
       try {
-        const result = await fetchLoadScenario(connectionParams, controller.signal);
+        const config = await getConfiguration(connectionParams, controller.signal);
         if (cancelled) return;
-        setStatus(result);
-        latestStatusRef.current = result;
-        setDisabled(false);
-        setLoadError(null);
-        // Accumulate a sample only while a run is active and identifiable.
-        if (result.state === 'running' && result.runId) {
-          setSamples((prev) => {
-            const fresh = sampleRunId.current !== result.runId;
-            if (fresh) sampleRunId.current = result.runId ?? null;
-            const base = fresh ? [] : prev;
-            return [...base, sampleOf(result, Date.now())].slice(-MAX_SAMPLES);
-          });
-        }
-      } catch (e) {
-        if (cancelled || controller.signal.aborted) return;
-        if (e instanceof LoadScenarioError && e.status === 403) {
-          setDisabled(true);
-          setLoadError(null);
-        } else {
-          setLoadError(e instanceof Error ? e.message : String(e));
-        }
+        const enabled = config['loadGenerationEnabled'];
+        if (typeof enabled === 'boolean') setDisabled(!enabled);
+      } catch {
+        // configuration unavailable: keep the last known state
       } finally {
-        if (!cancelled) {
-          const running = !cancelled && status?.state === 'running';
-          timer = setTimeout(() => void poll(), running ? RUNNING_POLL_MS : IDLE_POLL_MS);
-        }
+        if (!cancelled) timer = setTimeout(() => void poll(), IDLE_POLL_MS);
       }
     }
 
@@ -1096,12 +1074,11 @@ export default function LoadScenarioPanel({ connectionParams }: LoadScenarioPane
       controller.abort();
       if (timer) clearTimeout(timer);
     };
-    // status?.state intentionally drives the poll cadence (running → 1s).
-  }, [connectionParams, refreshTick, status?.state]);
+  }, [connectionParams, refreshTick]);
 
-  // Poll the registry listing. Faster while any scenario is RUNNING/PENDING (or a legacy run is
-  // active) so the concurrent-running view, state badges, and live chart stay live.
-  const anyActive = registry.some((s) => s.state === 'RUNNING' || s.state === 'PENDING') || status?.state === 'running';
+  // Poll the registry listing. Faster while any scenario is RUNNING/PENDING so the
+  // concurrent-running view, state badges, and live chart stay live.
+  const anyActive = registry.some((s) => s.state === 'RUNNING' || s.state === 'PENDING');
   useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
@@ -1112,23 +1089,18 @@ export default function LoadScenarioPanel({ connectionParams }: LoadScenarioPane
         const list = await listLoadScenarios(connectionParams, controller.signal);
         if (cancelled) return;
         setRegistry(list);
+        setLoadError(null);
         // Drop selections for scenarios that no longer exist.
         setSelected((prev) => {
           const names = new Set(list.map((s) => s.name));
           const next = new Set([...prev].filter((n) => names.has(n)));
           return next.size === prev.size ? prev : next;
         });
-        // Accumulate a chart frame from every actively-running scenario, plus the legacy run
-        // when it is not already represented by a registry entry (older single-run servers).
+        // Accumulate a chart frame from every actively-running scenario.
         const now = Date.now();
         const tracks: Record<string, Sample> = {};
         for (const entry of list) {
           if (entry.state === 'RUNNING' && entry.status) tracks[entry.name] = sampleOf(entry.status, now);
-        }
-        const legacy = latestStatusRef.current;
-        if (legacy?.state === 'running') {
-          const key = legacy.name && legacy.name.length > 0 ? legacy.name : 'current run';
-          if (!(key in tracks)) tracks[key] = sampleOf(legacy, now);
         }
         const active = Object.keys(tracks).length > 0;
         const wasActive = framesActiveRef.current;
@@ -1136,10 +1108,10 @@ export default function LoadScenarioPanel({ connectionParams }: LoadScenarioPane
         if (active) {
           setFrames((prev) => [...(wasActive ? prev : []), { at: now, tracks }].slice(-MAX_SAMPLES));
         }
-      } catch {
-        // Registry listing failures are non-fatal — the legacy status poll surfaces
-        // the disabled/error states. Leave the last-known registry in place.
+      } catch (e) {
+        // Leave the last-known registry in place and surface the failure.
         if (cancelled || controller.signal.aborted) return;
+        setLoadError(e instanceof Error ? e.message : String(e));
       } finally {
         if (!cancelled) {
           timer = setTimeout(() => void poll(), anyActive ? RUNNING_POLL_MS : IDLE_POLL_MS);
@@ -1155,8 +1127,20 @@ export default function LoadScenarioPanel({ connectionParams }: LoadScenarioPane
     };
   }, [connectionParams, refreshTick, anyActive]);
 
-  const running = status?.state === 'running';
-  const showSummary = status != null && (status.state === 'completed' || status.state === 'stopped');
+  // Every registered scenario that is currently RUNNING — drives the concurrent-running view.
+  const runningEntries = useMemo(
+    () => registry.filter((s) => s.state === 'RUNNING' && s.status),
+    [registry],
+  );
+  const running = runningEntries.length > 0;
+  // The end-of-run summary shows the most recently finished run once nothing is active.
+  const finished = useMemo(() => latestFinishedScenario(registry), [registry]);
+  const summary = !anyActive && finished?.status ? finished.status : null;
+  const headerState = running
+    ? 'running'
+    : anyActive
+      ? 'pending'
+      : finished?.status?.state ?? 'none';
 
   const runAction = useCallback(async (action: () => Promise<void>) => {
     setBusy(true);
@@ -1175,27 +1159,22 @@ export default function LoadScenarioPanel({ connectionParams }: LoadScenarioPane
     }
   }, [refresh]);
 
-  const handleStop = useCallback(() => {
-    void runAction(async () => {
-      await stopLoadScenario(connectionParams);
-    });
-  }, [connectionParams, runAction]);
-
   // Fallback for "Edit running" when the server does not echo a definition (older servers):
   // remember the last scenario this tab submitted so its full config can still be reloaded.
   const lastSubmitted = useRef<LoadScenarioDTO | null>(null);
 
-  // Load the running scenario's config back into the editor for tweak-and-restart. Prefer the
+  // Load a running scenario's config back into the editor for tweak-and-restart. Prefer the
   // server-echoed definition (works for ANY run — a client's or another tab's), and fall back to
-  // this tab's last-submitted scenario only when the server did not provide one.
-  const handleEditRunning = useCallback(() => {
-    const definition = status?.definition ?? lastSubmitted.current;
+  // this tab's last-submitted scenario of the same name only when the server did not provide one.
+  const handleEditRunning = useCallback((entry: RegisteredScenario) => {
+    const fallback = lastSubmitted.current?.name === entry.name ? lastSubmitted.current : null;
+    const definition = entry.definition ?? entry.status?.definition ?? fallback;
     if (definition) {
       setForm(scenarioToForm(definition));
     }
     setActionError(null);
     setPanelView('author'); // editing → jump to the Author sub-tab
-  }, [status?.definition]);
+  }, []);
 
   // (Author flow below registers/runs explicitly via handleLoad / handleLoadAndRun.)
 
@@ -1230,8 +1209,6 @@ export default function LoadScenarioPanel({ connectionParams }: LoadScenarioPane
       await runAction(async () => {
         await startScenariosByName(connectionParams, [scenario.name]);
         trackFeature('load_run_started');
-        setSamples([]);
-        sampleRunId.current = null;
       });
     })();
   }, [connectionParams, registerForm, runAction]);
@@ -1270,17 +1247,30 @@ export default function LoadScenarioPanel({ connectionParams }: LoadScenarioPane
     });
   }, [connectionParams, runAction]);
 
-  const deleteOne = useCallback((name: string) => {
-    void runAction(async () => {
-      await deleteLoadScenario(connectionParams, name);
+  const deleteOne = useCallback((entry: RegisteredScenario) => {
+    const active = entry.state === 'RUNNING' || entry.state === 'PENDING';
+    setConfirm({
+      title: `Delete ${entry.name}?`,
+      message: `This removes ${entry.name} from the registry${active ? ' and stops its run' : ''}. This cannot be undone.`,
+      confirmLabel: 'Delete',
+      onConfirm: () => void runAction(async () => {
+        await deleteLoadScenario(connectionParams, entry.name);
+      }),
     });
   }, [connectionParams, runAction]);
 
   const clearAll = useCallback(() => {
-    void runAction(async () => {
-      await clearLoadScenarios(connectionParams);
+    const activeCount = registry.filter((s) => s.state === 'RUNNING' || s.state === 'PENDING').length;
+    setConfirm({
+      title: 'Clear all load scenarios?',
+      message: `This removes all ${registry.length} registered scenario${registry.length === 1 ? '' : 's'}`
+        + `${activeCount > 0 ? ` and stops ${activeCount} active run${activeCount === 1 ? '' : 's'}` : ''}. This cannot be undone.`,
+      confirmLabel: 'Clear all',
+      onConfirm: () => void runAction(async () => {
+        await clearLoadScenarios(connectionParams);
+      }),
     });
-  }, [connectionParams, runAction]);
+  }, [connectionParams, registry, runAction]);
 
   // Load a registered scenario's definition back into the author form for tweaking.
   const editRegistered = useCallback((entry: RegisteredScenario) => {
@@ -1300,24 +1290,24 @@ export default function LoadScenarioPanel({ connectionParams }: LoadScenarioPane
     refresh();
   }, [refresh]);
 
-  // Download a run's end-of-run report (JSON or JUnit-XML) by opening its URL in a new tab.
+  // Download a run's end-of-run report (JSON or JUnit-XML) as a file rather than opening a tab.
   const downloadReport = useCallback((name: string, format?: 'junit') => {
-    const reportUrl = loadScenarioReportUrl(connectionParams, name, format);
-    // The URL is assembled from user-configured connection params, so validate the scheme
-    // before handing it to window.open — only ever open an http(s) report URL (rules out
-    // javascript:/data: redirection should a connection value ever carry an unexpected scheme).
-    let parsed: URL;
-    try {
-      parsed = new URL(reportUrl, window.location.href);
-    } catch {
-      setActionError({ message: 'Could not build a valid report URL.' });
-      return;
-    }
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      setActionError({ message: 'Report URL must use http or https.' });
-      return;
-    }
-    window.open(parsed.href, '_blank', 'noopener,noreferrer');
+    void (async () => {
+      try {
+        const res = await fetch(loadScenarioReportUrl(connectionParams, name, format));
+        if (!res.ok) throw new Error(`Could not download the report (HTTP ${res.status})`);
+        const url = URL.createObjectURL(await res.blob());
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = `${name}-report.${format === 'junit' ? 'xml' : 'json'}`;
+        document.body.appendChild(anchor);
+        anchor.click();
+        document.body.removeChild(anchor);
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        setActionError(humanizeError(e));
+      }
+    })();
   }, [connectionParams]);
 
   // --- form field setters ---
@@ -1482,12 +1472,6 @@ export default function LoadScenarioPanel({ connectionParams }: LoadScenarioPane
 
   const baseUrl = useMemo(() => buildBaseUrl(connectionParams), [connectionParams]);
 
-  // Every registered scenario that is currently RUNNING — drives the concurrent-running view.
-  const runningEntries = useMemo(
-    () => registry.filter((s) => s.state === 'RUNNING' && s.status),
-    [registry],
-  );
-
   // The code preview always renders from a best-effort PARTIAL scenario (only the filled-in fields),
   // so the generated builder chain grows field-by-field as the user types — never blocked on full
   // validity. The strict buildScenario still gates the Load / Load & Run submit actions above; here
@@ -1496,13 +1480,13 @@ export default function LoadScenarioPanel({ connectionParams }: LoadScenarioPane
   const validation = useMemo(() => buildScenario(form), [form]);
   const codeError = 'error' in validation ? validation.error : null;
 
-  const statusColor = running ? 'success' : status?.state === 'completed' ? 'info' : status?.state === 'stopped' ? 'warning' : 'default';
+  const statusColor = running ? 'success' : headerState === 'completed' ? 'info' : headerState === 'stopped' ? 'warning' : 'default';
 
   return (
     <Box sx={{ flex: 1, overflow: 'auto', p: 1.5 }} data-testid="load-scenario-panel">
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5, flexWrap: 'wrap' }}>
         <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>Performance — Load Scenarios</Typography>
-        <Chip size="small" label={status?.state ?? 'none'} color={statusColor} variant="outlined" />
+        <Chip size="small" label={headerState} color={statusColor} variant="outlined" data-testid="load-header-state" />
         <Box sx={{ flex: 1 }} />
         <Tooltip title="Refresh now">
           <IconButton size="small" onClick={refresh} aria-label="Refresh load scenario status">
@@ -1632,7 +1616,7 @@ MOCKSERVER_LOAD_GENERATION_ENABLED=true`}
               )}
               <Tooltip title="Remove from registry">
                 <span>
-                  <IconButton size="small" disabled={busy} onClick={() => deleteOne(entry.name)} aria-label={`Delete ${entry.name}`}>
+                  <IconButton size="small" disabled={busy} onClick={() => deleteOne(entry)} aria-label={`Delete ${entry.name}`}>
                     <DeleteIcon fontSize="small" />
                   </IconButton>
                 </span>
@@ -1675,6 +1659,9 @@ MOCKSERVER_LOAD_GENERATION_ENABLED=true`}
                   )}
                   {st && <VerdictBadge status={st} />}
                   <Box sx={{ flex: 1 }} />
+                  <Button size="small" variant="outlined" startIcon={<EditIcon />} disabled={busy} onClick={() => handleEditRunning(entry)}>
+                    Edit running
+                  </Button>
                   <Button size="small" color="error" variant="outlined" startIcon={<StopIcon />} disabled={busy} onClick={() => stopOne(entry.name)}>
                     Stop
                   </Button>
@@ -1697,56 +1684,6 @@ MOCKSERVER_LOAD_GENERATION_ENABLED=true`}
               </Box>
             );
           })}
-        </Paper>
-      )}
-
-      {/* Live status while a run is active */}
-      {running && status && (
-        <Paper variant="outlined" sx={{ p: 1.25, mb: 1.5 }} data-testid="load-live-status">
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1, flexWrap: 'wrap' }}>
-            <Typography variant="caption" color="text.secondary">
-              Running{status.name ? ` · ${status.name}` : ''}{status.runId ? ` · run ${status.runId}` : ''}
-            </Typography>
-            <Chip size="small" label={`${formatElapsed(status.elapsedMillis ?? 0)} elapsed`} variant="outlined" />
-            {stageReadout(status) && (
-              <Chip size="small" color="primary" variant="outlined" label={stageReadout(status)} data-testid="load-stage-readout" />
-            )}
-            <VerdictBadge status={status} />
-            <Box sx={{ flex: 1 }} />
-            <Button size="small" variant="outlined" startIcon={<EditIcon />} disabled={busy} onClick={handleEditRunning}>
-              Edit running
-            </Button>
-            <Button size="small" color="error" variant="contained" startIcon={<StopIcon />} disabled={busy} onClick={handleStop}>
-              Stop
-            </Button>
-          </Box>
-          <RunProgressBar status={status} definition={status.definition} />
-          <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 1 }}>
-            <Stat label="Active VUs" value={(status.currentVus ?? 0).toLocaleString()} />
-            <Stat label="Requests sent" value={(status.requestsSent ?? 0).toLocaleString()} />
-            <Stat label="Succeeded" value={(status.succeeded ?? 0).toLocaleString()} />
-            <Stat label="Failed" value={(status.failed ?? 0).toLocaleString()} />
-            <Stat label="Error rate" value={`${(errorRate(status) * 100).toFixed(1)}%`} />
-            <Stat label="p50" value={`${(status.p50Millis ?? 0).toFixed(0)} ms`} />
-            <Stat label="p95" value={`${(status.p95Millis ?? 0).toFixed(0)} ms`} />
-            <Stat label="p99" value={`${(status.p99Millis ?? 0).toFixed(0)} ms`} />
-            {status.p999Millis != null && <Stat label="p99.9" value={`${status.p999Millis.toFixed(0)} ms`} />}
-            {status.droppedIterations != null && status.droppedIterations > 0 && (
-              <Stat label="Dropped" value={status.droppedIterations.toLocaleString()} />
-            )}
-          </Box>
-          <ThresholdResultsTable results={status.thresholdResults} />
-          {status.name && <ReportButtons name={status.name} onDownload={downloadReport} />}
-          {status.labels && Object.keys(status.labels).length > 0 && (
-            <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap', mt: 1 }}>
-              {Object.entries(status.labels).map(([k, v]) => (
-                <Chip key={k} size="small" variant="outlined" label={`${k}=${v}`} />
-              ))}
-            </Box>
-          )}
-          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
-            Re-submitting the form below (Start) replaces and restarts the active run.
-          </Typography>
         </Paper>
       )}
 
@@ -1806,30 +1743,30 @@ MOCKSERVER_LOAD_GENERATION_ENABLED=true`}
       )}
 
       {/* Key metrics summary on stop/completion */}
-      {showSummary && status && (
+      {summary && (
         <Paper variant="outlined" sx={{ p: 1.25, mb: 1.5 }} data-testid="load-summary">
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
             <Typography variant="caption" color="text.secondary">
-              {status.state === 'completed' ? 'Run complete' : 'Run stopped'} — key metrics
-              {status.name ? ` · ${status.name}` : ''}
+              {summary.state === 'completed' ? 'Run complete' : 'Run stopped'} — key metrics
+              {summary.name ? ` · ${summary.name}` : ''}
             </Typography>
-            <VerdictBadge status={status} />
+            <VerdictBadge status={summary} />
           </Box>
           <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 1, mt: 1 }}>
-            <Stat label="Requests sent" value={(status.requestsSent ?? 0).toLocaleString()} />
-            <Stat label="Succeeded" value={(status.succeeded ?? 0).toLocaleString()} />
-            <Stat label="Failed" value={(status.failed ?? 0).toLocaleString()} />
-            <Stat label="Error rate" value={`${(errorRate(status) * 100).toFixed(1)}%`} />
-            <Stat label="Peak VUs" value={peakVus(samples, status).toLocaleString()} />
-            <Stat label="Throughput" value={`${throughput(status).toFixed(1)}/s`} />
-            <Stat label="p50" value={`${(status.p50Millis ?? 0).toFixed(0)} ms`} />
-            <Stat label="p95" value={`${(status.p95Millis ?? 0).toFixed(0)} ms`} />
-            <Stat label="p99" value={`${(status.p99Millis ?? 0).toFixed(0)} ms`} />
-            {status.p999Millis != null && <Stat label="p99.9" value={`${status.p999Millis.toFixed(0)} ms`} />}
-            {status.droppedIterations != null && <Stat label="Dropped" value={status.droppedIterations.toLocaleString()} />}
+            <Stat label="Requests sent" value={(summary.requestsSent ?? 0).toLocaleString()} />
+            <Stat label="Succeeded" value={(summary.succeeded ?? 0).toLocaleString()} />
+            <Stat label="Failed" value={(summary.failed ?? 0).toLocaleString()} />
+            <Stat label="Error rate" value={`${(errorRate(summary) * 100).toFixed(1)}%`} />
+            <Stat label="Peak VUs" value={peakVus(frames, summary).toLocaleString()} />
+            <Stat label="Throughput" value={`${throughput(summary).toFixed(1)}/s`} />
+            <Stat label="p50" value={`${(summary.p50Millis ?? 0).toFixed(0)} ms`} />
+            <Stat label="p95" value={`${(summary.p95Millis ?? 0).toFixed(0)} ms`} />
+            <Stat label="p99" value={`${(summary.p99Millis ?? 0).toFixed(0)} ms`} />
+            {summary.p999Millis != null && <Stat label="p99.9" value={`${summary.p999Millis.toFixed(0)} ms`} />}
+            {summary.droppedIterations != null && <Stat label="Dropped" value={summary.droppedIterations.toLocaleString()} />}
           </Box>
-          <ThresholdResultsTable results={status.thresholdResults} />
-          {status.name && <ReportButtons name={status.name} onDownload={downloadReport} />}
+          <ThresholdResultsTable results={summary.thresholdResults} />
+          {summary.name && <ReportButtons name={summary.name} onDownload={downloadReport} />}
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
             Deeper analysis lives in the{' '}
             <Link component="button" type="button" onClick={() => setView('metrics')}>Metrics tab</Link>{' '}
@@ -1839,7 +1776,7 @@ MOCKSERVER_LOAD_GENERATION_ENABLED=true`}
       )}
 
       {/* Empty state — nothing has run yet in this view */}
-      {runningEntries.length === 0 && !running && frames.length === 0 && !showSummary && (
+      {!running && frames.length === 0 && !summary && (
         <Paper variant="outlined" sx={{ p: 2, mb: 1.5, textAlign: 'center' }} data-testid="load-run-empty">
           <Typography variant="body2" color="text.secondary">
             Nothing running yet. Start a scenario from the registry above, or switch to the{' '}
@@ -2351,6 +2288,15 @@ MOCKSERVER_LOAD_GENERATION_ENABLED=true`}
       </>
       )}
 
+      <ConfirmDialog
+        open={confirm !== null}
+        title={confirm?.title ?? ''}
+        message={confirm?.message ?? ''}
+        confirmLabel={confirm?.confirmLabel ?? 'Confirm'}
+        onConfirm={() => confirm?.onConfirm()}
+        onClose={() => setConfirm(null)}
+      />
+
       {generateSource && (
         <GenerateDialog
           source={generateSource}
@@ -2655,9 +2601,10 @@ function stageReadout(status: LoadScenarioStatus): string {
 }
 
 /** Peak active VUs observed across samples, falling back to the final status. */
-function peakVus(samples: Sample[], status: LoadScenarioStatus): number {
-  const fromSamples = samples.reduce((m, s) => Math.max(m, s.currentVus), 0);
-  return Math.max(fromSamples, status.currentVus ?? 0);
+function peakVus(frames: Frame[], status: LoadScenarioStatus): number {
+  const name = status.name ?? '';
+  const fromFrames = frames.reduce((m, f) => Math.max(m, f.tracks[name]?.currentVus ?? 0), 0);
+  return Math.max(fromFrames, status.currentVus ?? 0);
 }
 
 /** Overall throughput (req/s) = requestsSent / elapsed seconds. */

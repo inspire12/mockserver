@@ -18,9 +18,8 @@
  *   - PUT    /loadScenario/start        start one/many registered scenarios by name
  *   - PUT    /loadScenario/stop         stop one/many (or all) running scenarios
  *
- * For backward compatibility the legacy single-scenario verbs still work: a bare
- * PUT/GET/DELETE on `/loadScenario` (with a scenario body / status shape) drive
- * the most-recent active run, which {@link fetchLoadScenario} continues to poll.
+ * Each listing entry carries its run's live status fields, so the panel derives
+ * everything (running view, end-of-run summary, header state) from the listing.
  */
 import { buildBaseUrl } from './mcpClient';
 import type { ConnectionParams } from '../hooks/useConnectionParams';
@@ -228,7 +227,7 @@ export interface LoadScenarioDTO {
   stepSelection?: LoadStepSelection;
 }
 
-export type LoadState = 'none' | 'running' | 'completed' | 'stopped';
+export type LoadState = 'none' | 'loaded' | 'pending' | 'running' | 'completed' | 'stopped';
 
 /**
  * Registry-level lifecycle state of a registered scenario (uppercase, as the server reports it):
@@ -256,7 +255,7 @@ export interface RegisteredScenario {
   status?: LoadScenarioStatus;
 }
 
-/** Live status of the current/most-recent load scenario (GET response). */
+/** Live status of one registered scenario's current or most recent run (from the registry listing). */
 export interface LoadScenarioStatus {
   name?: string;
   state: LoadState;
@@ -289,9 +288,8 @@ export interface LoadScenarioStatus {
   endedAt?: number;
   labels?: Record<string, string>;
   /**
-   * The full scenario definition this run was started with — echoed by the server whenever a run
-   * exists (omitted only when state is "none"). Lets any tab/client load the exact LoadScenario back
-   * into the author form, even one started elsewhere, and re-submit it verbatim as a PUT body.
+   * The scenario definition echoed on the registry node. Lets any tab/client load the exact
+   * LoadScenario back into the author form, even one started elsewhere, and re-submit it as a PUT body.
    */
   definition?: LoadScenarioDTO;
 }
@@ -327,21 +325,6 @@ async function ensureOk(res: Response): Promise<void> {
 }
 
 /**
- * Fetch the current load scenario status. A 403 means load generation is
- * disabled — surfaced as a LoadScenarioError with status 403 so the panel can
- * render the enablement help instead of a generic error.
- */
-export async function fetchLoadScenario(
-  params: ConnectionParams,
-  signal?: AbortSignal,
-): Promise<LoadScenarioStatus> {
-  const res = await fetch(endpoint(params), { signal });
-  await ensureOk(res);
-  const body = (await res.json()) as Partial<LoadScenarioStatus>;
-  return { ...body, state: body.state ?? 'none' };
-}
-
-/**
  * Register (or replace) a scenario in the registry — PUT /loadScenario with the
  * scenario JSON body. This does NOT run it and is allowed even when load
  * generation is disabled. Returns when the server accepts it.
@@ -357,13 +340,6 @@ export async function registerLoadScenario(
   });
   await ensureOk(res);
 }
-
-/**
- * Backwards-compatible alias retained for callers that still register via the
- * bare PUT verb. Prefer {@link registerLoadScenario} (register) +
- * {@link startScenariosByName} (run) for the explicit two-step flow.
- */
-export const startLoadScenario = registerLoadScenario;
 
 /**
  * The server emits each registered scenario's live status fields FLAT on the
@@ -397,6 +373,7 @@ function extractLoadScenarioStatus(node: Record<string, unknown>): LoadScenarioS
   ] as const;
   if (!liveKeys.some((k) => node[k] !== undefined)) return undefined;
   return {
+    name: node.name as string | undefined,
     // The nested status mirrors the node's lifecycle state (the panel's status.state
     // is the lowercase LoadState; map the uppercase registry state down to it).
     state: typeof node.state === 'string' ? (node.state.toLowerCase() as LoadState) : 'none',
@@ -420,6 +397,7 @@ function extractLoadScenarioStatus(node: Record<string, unknown>): LoadScenarioS
     startedAt: node.startedAt as number | undefined,
     endedAt: node.endedAt as number | undefined,
     labels: node.labels as Record<string, string> | undefined,
+    definition: node.definition as LoadScenarioDTO | undefined,
   };
 }
 
@@ -443,6 +421,24 @@ export async function listLoadScenarios(
   await ensureOk(res);
   const body = (await res.json()) as { scenarios?: Array<Record<string, unknown>> };
   return Array.isArray(body.scenarios) ? body.scenarios.map(toRegisteredScenario) : [];
+}
+
+/**
+ * The most recently finished run in the registry (COMPLETED or STOPPED with live
+ * status), by end time then start time, or null when no scenario has finished.
+ */
+export function latestFinishedScenario(list: RegisteredScenario[]): RegisteredScenario | null {
+  let latest: RegisteredScenario | null = null;
+  let latestAt = -Infinity;
+  for (const entry of list) {
+    if ((entry.state !== 'COMPLETED' && entry.state !== 'STOPPED') || !entry.status) continue;
+    const at = entry.status.endedAt ?? entry.status.startedAt ?? 0;
+    if (latest === null || at > latestAt) {
+      latest = entry;
+      latestAt = at;
+    }
+  }
+  return latest;
 }
 
 /** Fetch a single registered scenario by name (GET /loadScenario/{name}). */
@@ -501,15 +497,6 @@ export async function deleteLoadScenario(
 
 /** Clear the entire registry (DELETE /loadScenario). */
 export async function clearLoadScenarios(params: ConnectionParams): Promise<void> {
-  const res = await fetch(endpoint(params), { method: 'DELETE' });
-  await ensureOk(res);
-}
-
-/**
- * Stop the current load scenario via the legacy bare DELETE verb. Idempotent —
- * 200 whether or not one was running. Retained for the single-run live view.
- */
-export async function stopLoadScenario(params: ConnectionParams): Promise<void> {
   const res = await fetch(endpoint(params), { method: 'DELETE' });
   await ensureOk(res);
 }
@@ -583,11 +570,6 @@ export async function generateFromRecording(
   const body = (await res.json()) as { scenario?: LoadScenarioDTO };
   if (!body.scenario) throw new LoadScenarioError('Server returned no generated scenario', res.status);
   return body.scenario;
-}
-
-/** Whether the status represents an active (still-running) scenario. */
-export function isRunning(status: LoadScenarioStatus | null): boolean {
-  return status?.state === 'running';
 }
 
 /** Error rate (0..1) from the counts, or 0 when nothing has been sent. */

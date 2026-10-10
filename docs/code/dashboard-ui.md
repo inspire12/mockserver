@@ -209,8 +209,8 @@ When `resetKeys` changes (the user navigates to another tab), the boundary clear
 | MCP tools panel | `useAutoRefresh` (interval, 3 s) |
 | MCP Server Health | WebSocket push (reads `proxiedRequests` + `recordedRequests` from store; no independent polling) |
 | Chaos | `setInterval` poll every 4 s (predates `useAutoRefresh`) |
-| Performance — live status | `useAutoRefresh` (interval, 1 s) polling `GET /mockserver/loadScenario` |
-| Performance — metrics graph | `usePolling` (interval, 3 s) scraping `GET /mockserver/metrics` (shared with Metrics view) |
+| Performance — registry, live status, chart | `setTimeout` poll of `GET /mockserver/loadScenario` (1 s while a scenario runs, 5 s idle) |
+| Performance — load generation enabled | `setTimeout` poll of `GET /mockserver/configuration` (5 s) |
 | Metrics | `usePolling` directly in `useMetricsPolling` (3 s) |
 
 ## Shared Error Helpers
@@ -373,7 +373,7 @@ There is **no charting dependency** (inline SVG) and no server change required. 
 
 `ServiceChaosPanel.tsx` (view = `chaos`) manages **service-scoped chaos** interactively. Like the Metrics view it **polls** rather than using the WebSocket — `GET /mockserver/serviceChaos` every 4s via the control-plane helpers in `lib/serviceChaos.ts` (`fetchServiceChaos` / `registerServiceChaos` / `removeServiceChaos` / `clearServiceChaos`). It renders:
 - a **register form** — host plus error status / error probability / drop probability / latency-ms / optional TTL-ms fields; only the populated fields are sent in the `chaos` object (`buildChaosProfile`), and the register is rejected client-side if no fault is set,
-- a list of **active registrations**, each with a `summarizeChaosProfile` chip breakdown of its faults and a per-host **Remove** button,
+- a list of **active registrations**, each with a `summarizeChaosProfile` chip breakdown of its faults, a per-host **Remove** button, and an in-place **Edit** form. **Apply** re-registers the whole profile with `PUT` (`registerServiceChaos`), carrying the remaining TTL for a TTL-bearing host, rather than a `PATCH`: the server's `PATCH` merges only the non-null fields, so a fault the user cleared would otherwise survive. Clearing every fault is refused with a pointer to **Remove**,
 - a **live TTL auto-revert countdown** chip for any TTL-bearing registration — the remaining ms returned by the server's `ttlRemainingMillis` is decremented client-side by a 1s tick between polls (`formatTtl`),
 - a **Clear all** button.
 
@@ -397,7 +397,7 @@ A failed `updateConfiguration` (e.g. control-plane auth rejecting the write) sur
 
 **Layout.** A shared **Registered scenarios** section (the named-scenario registry: lifecycle-state badges, multi-select start, per-row edit/start/stop/delete) sits at the top, visible at all times. Below it, two sub-tabs separate the two things you do here:
 
-- **Run & Monitor** (default) — the live side: a "Running now" card per concurrently-running scenario, the single-run live status, the multi-scenario chart, and the post-run summary. An empty-state hint shows when nothing has run yet.
+- **Run & Monitor** (default) — the live side: a "Running now" card per concurrently-running scenario (with **Edit running** and **Stop**), the multi-scenario chart, and the post-run summary. An empty-state hint shows when nothing has run yet.
 - **Create / Edit** — author a scenario: the stage-builder form, with the generated client code (idiomatic MockServer client builders for each language, not raw JSON) rendered inline directly below it and updated live as you fill in fields (no separate Code tab).
 
 The view follows what you're doing: clicking **edit** on a registered scenario (or "Edit running") switches to **Create / Edit**; starting a run (Load & Run, Start selected, or a per-row Start) switches to **Run & Monitor**.
@@ -414,11 +414,11 @@ The view follows what you're doing: clicking **edit** on a registered scenario (
 
 Ramp curves offered: `LINEAR` / `QUADRATIC` / `EXPONENTIAL`. The builder prevents submitting a scenario that would exceed any safety cap (`loadGenerationMaxVirtualUsers`, `loadGenerationMaxRate`, `loadGenerationMaxStages`).
 
-**Live status.** Once a scenario is running, the panel polls `GET /mockserver/loadScenario` and surfaces the status DTO:
+**Live status.** Everything on Run & Monitor comes from one poll of the registry listing, `GET /mockserver/loadScenario` (`{"scenarios": [...]}`). Each entry carries its run's live fields flat beside `name`, `state` and `definition`; `listLoadScenarios` nests them as the entry's `status`. The header chip reads `running` while any scenario runs, `pending` while one waits out its start delay, and otherwise the state of the most recently finished run (`latestFinishedScenario`, by `endedAt`), or `none`. Once nothing is active, the **end-of-run summary** (key metrics, threshold results, report downloads) shows that most recent finished run. The live fields:
 
 | Status field | Meaning |
 |-------------|---------|
-| `state` | `running` / `completed` / `stopped` / `none` |
+| `state` | registry state of the entry (`RUNNING` / `COMPLETED` / `STOPPED` / …) |
 | `stageIndex` | 0-based index of the currently executing stage |
 | `stageType` | `VU` / `RATE` / `PAUSE` |
 | `currentTarget` | Target VU count or target arrival rate for the active stage |
@@ -429,7 +429,7 @@ Ramp curves offered: `LINEAR` / `QUADRATIC` / `EXPONENTIAL`. The builder prevent
 
 A **determinate** progress bar (not an indeterminate sweep) fills with `elapsedMillis / Σ stage durations` so you can see how far through the run is, and is coloured by phase — green while driving load, amber during a `PAUSE` stage. It falls back to an empty bar when the total duration is unknown (older server that doesn't echo the definition).
 
-**Metrics graph.** A live `@mui/x-charts` `LineChart` built entirely from the polled scenario status — no Prometheus dependency, so it works with `metricsEnabled` off. Each registry poll appends a *frame* to a shared timeline, capturing a snapshot of every scenario running at that instant (keyed by scenario name); the legacy single-run status is folded in too, so older single-run servers still chart. The graph has two independent sets of toggles:
+**Metrics graph.** A live `@mui/x-charts` `LineChart` built entirely from the polled scenario status — no Prometheus dependency, so it works with `metricsEnabled` off. Each registry poll appends a *frame* to a shared timeline, capturing a snapshot of every scenario running at that instant (keyed by scenario name). The time axis shows seconds when the chart spans under 20 minutes, so a short run's ticks do not all read the same minute. The graph has two independent sets of toggles:
 
 - **Metric toggles** — which series to plot: RPS, Active VUs, In-flight, p50/p95/p99 ms, Error rate % (default subset: RPS + p95 + Active VUs). RPS and error rate are derived per series (Δsent/Δt and failed/sent).
 - **Scenario toggles** — which scenarios to include (shown only when more than one scenario has data; **all enabled by default**). Hiding a scenario removes its lines and drops it from the total.
@@ -440,10 +440,12 @@ When two or more scenarios are enabled the chart draws, for each visible metric,
 
 | Panel area | Mechanism |
 |-----------|-----------|
-| Live status (legacy single run) | poll of `GET /mockserver/loadScenario` (1 s while running, 5 s idle) |
-| Registry list + chart frames | poll of `GET /mockserver/loadScenario` listing (1 s while any scenario runs, 5 s idle) |
+| Registry list, live status, summary, chart frames | poll of `GET /mockserver/loadScenario` listing (1 s while any scenario runs, 5 s idle) |
+| Load generation enabled | poll of `GET /mockserver/configuration` (5 s) |
 
-When `loadGenerationEnabled=false` the panel renders a configuration prompt (property name + environment variable) instead of the stage builder.
+When the configuration reports `loadGenerationEnabled=false`, or a start is refused with 403, the panel shows a persistent prompt with the property name and environment variable; the start buttons are disabled, and **Load** (register only) still works. The prompt goes away only when the configuration reports load generation enabled.
+
+**Destructive actions and reports.** **Clear all** and a row's **Delete** ask for confirmation (both stop a running scenario too). The report buttons fetch `GET /mockserver/loadScenario/{name}/report` (JSON, or `?format=junit`) and save it as `<name>-report.json` / `.xml`.
 
 ## Dashboard View
 

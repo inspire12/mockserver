@@ -182,6 +182,78 @@ describe('ServiceChaosPanel', () => {
     expect(puts).toHaveLength(0);
   });
 
+  it('edit replaces the whole profile so a cleared fault is removed', async () => {
+    const user = userEvent.setup({ delay: null });
+    const { puts } = stubServiceChaos({ services: { 'a.svc': { errorStatus: 503, errorProbability: 1 } } });
+    render(<ServiceChaosPanel connectionParams={params} />);
+    await waitFor(() => expect(screen.getByText('a.svc')).toBeInTheDocument());
+
+    await expandHttp(user);
+    await user.click(screen.getByRole('button', { name: 'Edit chaos for a.svc' }));
+    const editor = screen.getByRole('group', { name: 'Edit chaos profile for a.svc' });
+    await user.clear(within(editor).getByLabelText('Error status'));
+    await user.clear(within(editor).getByLabelText('Error prob (0–1)'));
+    await user.type(within(editor).getByLabelText('Latency ms'), '50');
+    await user.click(within(editor).getByRole('button', { name: 'Apply' }));
+
+    await waitFor(() => expect(puts.length).toBeGreaterThan(0));
+    expect(puts).toHaveLength(1);
+    expect(puts[0]?.body).toEqual({ host: 'a.svc', chaos: { latency: { timeUnit: 'MILLISECONDS', value: 50 } } });
+    const methods = vi.mocked(fetch).mock.calls.map(([, init]) => init?.method);
+    expect(methods).not.toContain('PATCH');
+  });
+
+  it('edit keeps a TTL-bearing registration expiring', async () => {
+    const user = userEvent.setup({ delay: null });
+    const { puts } = stubServiceChaos({
+      services: { 'a.svc': { errorStatus: 503 } },
+      ttlRemainingMillis: { 'a.svc': 60_000 },
+    });
+    render(<ServiceChaosPanel connectionParams={params} />);
+    await waitFor(() => expect(screen.getByText('a.svc')).toBeInTheDocument());
+
+    await expandHttp(user);
+    await user.click(screen.getByRole('button', { name: 'Edit chaos for a.svc' }));
+    const editor = screen.getByRole('group', { name: 'Edit chaos profile for a.svc' });
+    await user.clear(within(editor).getByLabelText('Error status'));
+    await user.type(within(editor).getByLabelText('Error status'), '429');
+    await user.click(within(editor).getByRole('button', { name: 'Apply' }));
+
+    await waitFor(() => expect(puts.length).toBeGreaterThan(0));
+    const body = puts[0]?.body as { chaos: unknown; ttlMillis: number };
+    expect(body.chaos).toEqual({ errorStatus: 429 });
+    expect(body.ttlMillis).toBeGreaterThan(50_000);
+    expect(body.ttlMillis).toBeLessThanOrEqual(60_000);
+  });
+
+  it('edit converts a non-millisecond latency to milliseconds', async () => {
+    const user = userEvent.setup({ delay: null });
+    stubServiceChaos({ services: { 'a.svc': { latency: { timeUnit: 'SECONDS', value: 2 } } } });
+    render(<ServiceChaosPanel connectionParams={params} />);
+    await waitFor(() => expect(screen.getByText('a.svc')).toBeInTheDocument());
+
+    await expandHttp(user);
+    await user.click(screen.getByRole('button', { name: 'Edit chaos for a.svc' }));
+    const editor = screen.getByRole('group', { name: 'Edit chaos profile for a.svc' });
+    expect(within(editor).getByLabelText('Latency ms')).toHaveValue('2000');
+  });
+
+  it('edit refuses to apply an empty profile and points at Remove', async () => {
+    const user = userEvent.setup({ delay: null });
+    const { puts } = stubServiceChaos({ services: { 'a.svc': { errorStatus: 503 } } });
+    render(<ServiceChaosPanel connectionParams={params} />);
+    await waitFor(() => expect(screen.getByText('a.svc')).toBeInTheDocument());
+
+    await expandHttp(user);
+    await user.click(screen.getByRole('button', { name: 'Edit chaos for a.svc' }));
+    const editor = screen.getByRole('group', { name: 'Edit chaos profile for a.svc' });
+    await user.clear(within(editor).getByLabelText('Error status'));
+    await user.click(within(editor).getByRole('button', { name: 'Apply' }));
+
+    expect(await screen.findByText(/use Remove to delete/)).toBeInTheDocument();
+    expect(puts).toHaveLength(0);
+  });
+
   it('removes a single host', async () => {
     const user = userEvent.setup({ delay: null });
     const { puts } = stubServiceChaos({ services: { 'a.svc': { errorStatus: 503 } } });

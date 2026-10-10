@@ -49,7 +49,7 @@ breach is detected without waiting for the next stage advance.
 | Endpoint | Action |
 |----------|--------|
 | `PUT /mockserver/chaosExperiment` | Start (or replace) an experiment. Body: experiment definition JSON. Returns 200 + current status, or 400 on a validation error or a refused start (`aborted_baseline_unhealthy`). |
-| `GET /mockserver/chaosExperiment` | Return current experiment status (JSON). Returns 200 with status or 404 when no experiment has run since last reset. |
+| `GET /mockserver/chaosExperiment` | Return current experiment status (JSON). Returns 200 with the status, or 200 with `{"status": "none"}` when no experiment has run since the last reset. |
 | `GET /mockserver/chaosExperiment/history` | Return the bounded ring of the most recent terminated experiments (newest first): `{"count": N, "history": [ { name, status, terminatedAtMillis, verdict? }, ... ]}`. Retains up to `MAX_HISTORY` (50) records; cleared on server reset. |
 | `DELETE /mockserver/chaosExperiment` | Stop the running experiment, clear chaos, return 204. Idempotent. |
 

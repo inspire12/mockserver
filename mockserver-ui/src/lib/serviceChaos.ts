@@ -100,20 +100,6 @@ export async function removeServiceChaos(params: ConnectionParams, host: string)
   await ensureOk(res);
 }
 
-/** Patch (partially update) the chaos profile for a host. */
-export async function patchServiceChaos(
-  params: ConnectionParams,
-  host: string,
-  partial: Partial<HttpChaosProfileDTO>,
-): Promise<void> {
-  const res = await fetch(endpoint(params), {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ host, chaos: partial }),
-  });
-  await ensureOk(res);
-}
-
 /** Clear all service-scoped chaos registrations. */
 export async function clearServiceChaos(params: ConnectionParams): Promise<void> {
   const res = await fetch(endpoint(params), {
@@ -128,7 +114,8 @@ function pct(value: number): string {
   return `${Math.round(value * 100)}%`;
 }
 
-function delayMillis(delay: DelayDTO | undefined): number | undefined {
+/** A delay converted to milliseconds, or undefined when unset. */
+export function delayMillis(delay: DelayDTO | undefined): number | undefined {
   if (!delay || delay.value == null) return undefined;
   const unit = (delay.timeUnit ?? 'MILLISECONDS').toUpperCase();
   switch (unit) {

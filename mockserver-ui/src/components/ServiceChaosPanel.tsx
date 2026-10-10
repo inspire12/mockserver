@@ -35,7 +35,7 @@ import {
   registerServiceChaos,
   removeServiceChaos,
   clearServiceChaos,
-  patchServiceChaos,
+  delayMillis,
   summarizeChaosProfile,
   formatTtl,
   buildQuickChaosProfile,
@@ -1169,7 +1169,7 @@ export default function ServiceChaosPanel({ connectionParams }: ServiceChaosPane
       errorStatus: profile.errorStatus != null ? String(profile.errorStatus) : '',
       errorProbability: profile.errorProbability != null ? String(profile.errorProbability) : '',
       dropProbability: profile.dropConnectionProbability != null ? String(profile.dropConnectionProbability) : '',
-      latencyMs: profile.latency?.value != null ? String(profile.latency.value) : '',
+      latencyMs: delayMillis(profile.latency) != null ? String(delayMillis(profile.latency)) : '',
       seed: profile.seed != null ? String(profile.seed) : '',
       succeedFirst: profile.succeedFirst != null ? String(profile.succeedFirst) : '',
       failRequestCount: profile.failRequestCount != null ? String(profile.failRequestCount) : '',
@@ -1177,7 +1177,7 @@ export default function ServiceChaosPanel({ connectionParams }: ServiceChaosPane
       truncateBodyAtFraction: profile.truncateBodyAtFraction != null ? String(profile.truncateBodyAtFraction) : '',
       malformedBody: profile.malformedBody ?? false,
       slowResponseChunkSize: profile.slowResponseChunkSize != null ? String(profile.slowResponseChunkSize) : '',
-      slowResponseChunkDelayMs: profile.slowResponseChunkDelay?.value != null ? String(profile.slowResponseChunkDelay.value) : '',
+      slowResponseChunkDelayMs: delayMillis(profile.slowResponseChunkDelay) != null ? String(delayMillis(profile.slowResponseChunkDelay)) : '',
       quotaName: profile.quotaName ?? '',
       quotaLimit: profile.quotaLimit != null ? String(profile.quotaLimit) : '',
       quotaWindowMillis: profile.quotaWindowMillis != null ? String(profile.quotaWindowMillis) : '',
@@ -1197,70 +1197,30 @@ export default function ServiceChaosPanel({ connectionParams }: ServiceChaosPane
     setEditingHost(null);
   }, []);
 
+  // Apply replaces the whole profile (PUT) rather than PATCHing it: the server's
+  // PATCH merges only non-null fields, so a field the user blanked would survive.
+  // A TTL-bearing registration is re-registered with its remaining TTL.
   const handleApplyEdit = useCallback(() => {
     if (!editingHost) return;
-    const partial: Partial<HttpChaosProfileDTO> = {};
-    const errorStatus = num(editForm.errorStatus);
-    if (errorStatus != null) {
-      partial.errorStatus = errorStatus;
-      const ep = num(editForm.errorProbability);
-      if (ep != null) partial.errorProbability = ep;
-      if (editForm.retryAfter.trim()) partial.retryAfter = editForm.retryAfter.trim();
-    }
-    const dp = num(editForm.dropProbability);
-    if (dp != null) partial.dropConnectionProbability = dp;
-    const lm = num(editForm.latencyMs);
-    if (lm != null) partial.latency = { timeUnit: 'MILLISECONDS', value: lm };
-    const seed = num(editForm.seed);
-    if (seed != null) partial.seed = seed;
-    const succeedFirst = num(editForm.succeedFirst);
-    if (succeedFirst != null) partial.succeedFirst = succeedFirst;
-    const failRequestCount = num(editForm.failRequestCount);
-    if (failRequestCount != null) partial.failRequestCount = failRequestCount;
-    // Body corruption
-    const truncateBodyAtFraction = num(editForm.truncateBodyAtFraction);
-    if (truncateBodyAtFraction != null) partial.truncateBodyAtFraction = truncateBodyAtFraction;
-    if (editForm.malformedBody) partial.malformedBody = true;
-    // Slow response
-    const slowResponseChunkSize = num(editForm.slowResponseChunkSize);
-    if (slowResponseChunkSize != null) {
-      partial.slowResponseChunkSize = slowResponseChunkSize;
-      const slowResponseChunkDelayMs = num(editForm.slowResponseChunkDelayMs);
-      if (slowResponseChunkDelayMs != null) {
-        partial.slowResponseChunkDelay = { timeUnit: 'MILLISECONDS', value: slowResponseChunkDelayMs };
-      }
-    }
-    // Quota
-    const quotaName = editForm.quotaName.trim();
-    if (quotaName) partial.quotaName = quotaName;
-    const quotaLimit = num(editForm.quotaLimit);
-    if (quotaLimit != null) partial.quotaLimit = quotaLimit;
-    const quotaWindowMillis = num(editForm.quotaWindowMillis);
-    if (quotaWindowMillis != null) partial.quotaWindowMillis = quotaWindowMillis;
-    const quotaErrorStatus = num(editForm.quotaErrorStatus);
-    if (quotaErrorStatus != null) partial.quotaErrorStatus = quotaErrorStatus;
-    // Degradation ramp
-    const degradationRampMillis = num(editForm.degradationRampMillis);
-    if (degradationRampMillis != null) partial.degradationRampMillis = degradationRampMillis;
-    // Outage window
-    const outageAfterMillis = num(editForm.outageAfterMillis);
-    if (outageAfterMillis != null) partial.outageAfterMillis = outageAfterMillis;
-    const outageDurationMillis = num(editForm.outageDurationMillis);
-    if (outageDurationMillis != null) partial.outageDurationMillis = outageDurationMillis;
-    // GraphQL
-    if (editForm.graphqlErrors) {
-      partial.graphqlErrors = true;
-      if (editForm.graphqlErrorMessage.trim()) partial.graphqlErrorMessage = editForm.graphqlErrorMessage.trim();
-      if (editForm.graphqlErrorCode.trim()) partial.graphqlErrorCode = editForm.graphqlErrorCode.trim();
-      if (editForm.graphqlNullifyData) partial.graphqlNullifyData = true;
-    }
-
     const host = editingHost;
+    const asForm: FormState = { ...editForm, host, ttlMs: '' };
+    const profile = buildChaosProfile(asForm);
+    if (summarizeChaosProfile(profile).length === 0) {
+      setActionError({ message: 'Set at least one fault, or use Remove to delete the chaos for this host' });
+      return;
+    }
+    const validationError = validateForm(asForm);
+    if (validationError !== null) {
+      setActionError({ message: validationError });
+      return;
+    }
+    const ttlAtPoll = data.ttlRemainingMillis?.[host];
+    const ttl = ttlAtPoll != null ? Math.max(1, Math.round(ttlAtPoll - (Date.now() - polledAt))) : undefined;
     void runAction(async () => {
-      await patchServiceChaos(connectionParams, host, partial);
+      await registerServiceChaos(connectionParams, host, profile, ttl);
       setEditingHost(null);
     });
-  }, [connectionParams, editingHost, editForm, runAction]);
+  }, [connectionParams, data.ttlRemainingMillis, editingHost, editForm, polledAt, runAction]);
 
   const setEditField = (field: keyof EditFormState) => (e: ChangeEvent<HTMLInputElement>) =>
     setEditForm((prev) => ({ ...prev, [field]: e.target.value }));
@@ -1894,7 +1854,7 @@ export default function ServiceChaosPanel({ connectionParams }: ServiceChaosPane
                         </Tooltip>
                       </Box>
                       {isEditing && (
-                        <Box sx={{ py: 0.75, pl: 2, bgcolor: 'action.hover', borderBottom: '1px solid', borderColor: 'divider' }}>
+                        <Box role="group" aria-label={`Edit chaos profile for ${host}`} sx={{ py: 0.75, pl: 2, bgcolor: 'action.hover', borderBottom: '1px solid', borderColor: 'divider' }}>
                           {/* Edit row 1: core fault fields */}
                           <Box sx={CHAOS_GRID}>
                             <TextField size="small" label="Error status" value={editForm.errorStatus} onChange={setEditField('errorStatus')} fullWidth />
