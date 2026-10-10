@@ -39,4 +39,13 @@ public class WebSocketClientRegistryResetTest {
             channel.finishAndReleaseAll();
         }
     }
+
+    @Test
+    public void shouldUnregisterANullClientIdWithoutFailing() {
+        WebSocketClientRegistry registry = new WebSocketClientRegistry(Configuration.configuration(), new MockServerLogger());
+
+        registry.unregisterClient(null);
+
+        assertThat(registry.size(), is(0));
+    }
 }

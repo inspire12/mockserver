@@ -195,7 +195,10 @@ public class WebSocketClientRegistry {
 
     public void unregisterClient(String clientId) {
         LocalCallbackRegistry.unregisterCallback(clientId);
-        breakpointReleasedClients.remove(clientId);
+        // An object-callback expectation with no client id unregisters null; a concurrent key set rejects it.
+        if (clientId != null) {
+            breakpointReleasedClients.remove(clientId);
+        }
         Channel removeChannel = clientRegistry.remove(clientId);
         if (removeChannel != null && removeChannel.isOpen()) {
             removeChannel.close();
